@@ -2,7 +2,8 @@ package dev.ferrite.server;
 
 public class FerriteServer extends ServerStubs {
     public record Settings(String motd, int maxPlayers, int port, int viewDistance, boolean whitelist, boolean onlineMode, boolean allowFlight, boolean allowNether, boolean allowEnd, boolean generateStructures, int maxWorldSize, int simulationDistance, int spawnRadius, int idleTimeout, int pauseWhenEmptyTime, int connectionThrottle) {
-        public Settings(String motd, int maxPlayers, int port, int viewDistance, boolean whitelist, boolean onlineMode) { this(motd, maxPlayers, port, viewDistance, whitelist, onlineMode, false, true, true, true, 29999984, 10, 10, 0, -1, -1); }
+        /** The host has one distance setting and sends it as both view and simulation distance. */
+        public Settings(String motd, int maxPlayers, int port, int viewDistance, boolean whitelist, boolean onlineMode) { this(motd, maxPlayers, port, viewDistance, whitelist, onlineMode, false, true, true, true, 29999984, viewDistance, 10, 0, -1, -1); }
     }
     private final Settings settings;
     private volatile String motd;
