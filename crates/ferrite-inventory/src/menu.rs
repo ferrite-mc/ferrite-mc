@@ -472,7 +472,8 @@ enum Rule {
     BrewingIngredient,
     /// A brewing stand's fuel slot (vanilla `BrewingStandMenu.FuelSlot`): blaze powder only.
     BrewingFuel,
-    /// A beacon's payment slot (vanilla `BeaconMenu.PaymentSlot`): one of the five payment items.
+    /// A beacon's payment slot (vanilla `BeaconMenu.PaymentSlot`): one of the five payment items,
+    /// one per slot.
     BeaconPayment,
 }
 
@@ -1628,10 +1629,10 @@ impl Menu {
         self.may_pickup(p, slot) && self.may_place(slot, self.slot(p.inventory, slot))
     }
 
-    /// `Slot.getMaxStackSize(stack)`: armor slots hold one item.
+    /// `Slot.getMaxStackSize(stack)`: armor, potion and beacon payment slots hold one item.
     fn slot_max(&self, slot: usize, stack: &ItemStack) -> i32 {
         match self.slots[slot].rule {
-            Rule::Armor(_) | Rule::Potion => 1.min(max_in_slot(stack)),
+            Rule::Armor(_) | Rule::Potion | Rule::BeaconPayment => 1.min(max_in_slot(stack)),
             _ => max_in_slot(stack),
         }
     }
