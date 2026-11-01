@@ -43,6 +43,21 @@ const NOTE: [&str; 25] = [
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
     "17", "18", "19", "20", "21", "22", "23", "24",
 ];
+/// Vanilla `PistonBaseBlock` schedules its move two game ticks after the signal changes.
+const PISTON_DELAY: u64 = 2;
+/// Vanilla `PistonStructureResolver.MAX_PUSH_DEPTH`: one move carries at most 12 blocks.
+const PISTON_PUSH_LIMIT: usize = 12;
+
+/// What this tick's piston moves changed outside the redstone network: blocks that must break
+/// into item drops, and positions whose neighbours need a shape update
+/// (`Level.markAndNotifyBlock`).
+#[derive(Debug, Default)]
+pub struct PistonActivity {
+    /// Blocks a piston destroyed (`PushReaction::Destroy`); the region drops their loot.
+    pub destroyed: Vec<([i32; 3], u16)>,
+    /// Every block position a piston wrote.
+    pub changes: Vec<[i32; 3]>,
+}
 
 /// Block access for the engine. `block` returns `None` for chunks this region does not own,
 /// so a signal never leaks into another region's territory (Folia ownership).
@@ -55,6 +70,12 @@ pub trait RedstoneWorld {
     /// which a comparator compares instead of the block's weak power.
     fn container_signal(&self, _pos: [i32; 3]) -> Option<u8> {
         None
+    }
+
+    /// Whether a block position holds a block entity (`Level.getBlockEntity(pos) != null`).
+    /// Vanilla `PistonBaseBlock.isPushable` refuses to move those.
+    fn has_block_entity(&self, _pos: [i32; 3]) -> bool {
+        false
     }
 }
 
@@ -82,6 +103,10 @@ impl RedstoneWorld for RegionFluidWorld<'_> {
         let size = super::block_container::inventory_slots(name)?;
         let items = super::block_container::load_slots(self.source, pos, size);
         Some(super::hopper::comparator_signal(&items))
+    }
+
+    fn has_block_entity(&self, pos: [i32; 3]) -> bool {
+        self.owns(pos[0], pos[2]) && self.source.block_entity(pos[0], pos[1], pos[2]).is_some()
     }
 }
 
@@ -205,6 +230,8 @@ fn is_component(name: &str) -> bool {
             | "powered_rail"
             | "piston"
             | "sticky_piston"
+            | "piston_head"
+            | "moving_piston"
     ) || name.ends_with("_button")
         || name.ends_with("_pressure_plate")
         || name.ends_with("_door")
@@ -496,6 +523,8 @@ enum Kind {
     ObserverPulse,
     ObserverOff,
     Daylight,
+    /// `PistonBaseBlock.tick` after the 2-tick `PISTON_DELAY`.
+    Piston,
 }
 
 /// One region's redstone state: scheduled ticks, dirty blocks and the wire work list.
@@ -512,6 +541,8 @@ pub struct Redstone {
     plates: HashSet<[i32; 3]>,
     daylights: HashSet<[i32; 3]>,
     primed: Vec<([i32; 3], i32)>,
+    /// Piston moves of this tick, drained by the region.
+    piston: PistonActivity,
 }
 
 impl Redstone {
@@ -532,6 +563,12 @@ impl Redstone {
 
     pub fn take_primed(&mut self) -> Vec<([i32; 3], i32)> {
         std::mem::take(&mut self.primed)
+    }
+
+    /// Piston changes since the last call: broken blocks (for loot drops) and written positions
+    /// (for `Block.updateNeighbourShapes`).
+    pub fn take_piston_activity(&mut self) -> PistonActivity {
+        std::mem::take(&mut self.piston)
     }
 
     /// The redstone power arriving at a block (`Level.getSignal`), including comparator
@@ -592,6 +629,7 @@ impl Redstone {
                 Kind::ObserverPulse => self.pulse_observer(world, pos),
                 Kind::ObserverOff => self.unpulse_observer(world, pos),
                 Kind::Daylight => self.update_daylight(world, pos),
+                Kind::Piston => self.tick_piston(world, pos),
             }
         }
     }
@@ -760,6 +798,7 @@ impl Redstone {
                 self.schedule(pos, Kind::Daylight, 20);
                 self.update_daylight(world, pos);
             }
+            "piston" | "sticky_piston" => self.update_piston(world, pos, state),
             _ if name.ends_with("_button") => {
                 self.plates.remove(&pos);
                 if property_bool(state, "powered") {
@@ -1145,8 +1184,311 @@ impl Redstone {
         self.plates.extend(other.plates);
         self.daylights.extend(other.daylights);
         self.primed.extend(other.primed);
+        self.piston.destroyed.extend(other.piston.destroyed);
+        self.piston.changes.extend(other.piston.changes);
         for (pos, mut toggles) in other.toggles {
             self.toggles.entry(pos).or_default().append(&mut toggles);
+        }
+    }
+}
+
+/// Behaviour of one state under a piston (`PushReaction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushReaction {
+    /// Moves with the piston.
+    Normal,
+    /// Breaks into an item when the piston reaches it (torches, rails, redstone parts).
+    Destroy,
+    /// Refuses the whole move (obsidian, block entities, extended pistons, ...).
+    Block,
+}
+
+/// Sticky families: vanilla slime blocks do not stick to honey blocks and vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sticky {
+    Slime,
+    Honey,
+}
+
+/// The same block state with a boolean property replaced.
+fn set_bool(state: u16, key: &str, value: bool) -> Option<u16> {
+    with_properties(state, &[(key, if value { "true" } else { "false" })])
+}
+
+fn air_state() -> u16 {
+    blocks::default_state("air").expect("vanilla air")
+}
+
+fn direction_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Down => "down",
+        Direction::Up => "up",
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::West => "west",
+        Direction::East => "east",
+    }
+}
+
+/// `minecraft:piston_head` for a base facing `direction`.
+fn piston_head(direction: Direction, sticky: bool) -> Option<u16> {
+    blocks::state_id(
+        "piston_head",
+        &[
+            ("facing", direction_name(direction)),
+            ("type", if sticky { "sticky" } else { "normal" }),
+            ("short", "false"),
+        ],
+    )
+}
+
+/// Vanilla `PistonBaseBlock.isPushable`: block entities and the hard-coded immovables.
+fn is_unmovable(world: &impl RedstoneWorld, pos: [i32; 3], state: u16) -> bool {
+    if world.has_block_entity(pos) {
+        return true;
+    }
+    let Some(name) = name(state) else {
+        return true;
+    };
+    matches!(
+        name,
+        "obsidian"
+            | "crying_obsidian"
+            | "bedrock"
+            | "barrier"
+            | "light"
+            | "command_block"
+            | "chain_command_block"
+            | "repeating_command_block"
+            | "jigsaw"
+            | "structure_block"
+            | "structure_void"
+            | "end_portal"
+            | "end_portal_frame"
+            | "end_gateway"
+            | "respawn_anchor"
+            | "enchanting_table"
+            | "reinforced_deepslate"
+            | "moving_piston"
+            | "piston_head"
+    ) || (matches!(name, "piston" | "sticky_piston") && property_bool(state, "extended"))
+}
+
+/// Vanilla `PushReaction` of a state: torches, rails, redstone parts and loose plants break.
+fn push_reaction(state: u16) -> PushReaction {
+    let Some(name) = name(state) else {
+        return PushReaction::Block;
+    };
+    if name.ends_with("torch")
+        || matches!(
+            name,
+            "redstone_wire"
+                | "lever"
+                | "repeater"
+                | "comparator"
+                | "tripwire"
+                | "tripwire_hook"
+                | "lily_pad"
+                | "sugar_cane"
+                | "vine"
+                | "glow_lichen"
+                | "fire"
+                | "soul_fire"
+        )
+        || name.ends_with("_button")
+        || name.ends_with("_pressure_plate")
+        || ferrite_data::tags::contains("block", "rails", name)
+        || ferrite_data::tags::contains("block", "small_flowers", name)
+        || ferrite_data::tags::contains("block", "saplings", name)
+        || ferrite_data::tags::contains("block", "crops", name)
+    {
+        PushReaction::Destroy
+    } else {
+        PushReaction::Normal
+    }
+}
+
+/// Vanilla `Level.isEmptyBlock`: air, a replaceable state or a fluid; a move may enter it.
+fn is_free(state: u16) -> bool {
+    let props = ferrite_data::block_props::get(state);
+    props.is_air || props.replaceable || props.fluid.is_some()
+}
+
+fn sticky_kind(state: u16) -> Option<Sticky> {
+    match name(state) {
+        Some("slime_block") => Some(Sticky::Slime),
+        Some("honey_block") => Some(Sticky::Honey),
+        _ => None,
+    }
+}
+
+/// The four directions perpendicular to a push axis (`Direction.Plane` minus the axis).
+fn perpendicular_directions(direction: Direction) -> [Direction; 4] {
+    match direction {
+        Direction::Up | Direction::Down => [
+            Direction::North,
+            Direction::East,
+            Direction::South,
+            Direction::West,
+        ],
+        Direction::North | Direction::South => [
+            Direction::Up,
+            Direction::Down,
+            Direction::East,
+            Direction::West,
+        ],
+        Direction::East | Direction::West => [
+            Direction::Up,
+            Direction::Down,
+            Direction::North,
+            Direction::South,
+        ],
+    }
+}
+
+/// The blocks one extension moves, collected front-first like `PistonStructureResolver`.
+#[derive(Debug, Default)]
+struct PushPlan {
+    /// Blocks that move one step: their source position and state.
+    blocks: Vec<([i32; 3], u16)>,
+    /// Blocks with `PushReaction::Destroy` the head reaches.
+    destroyed: Vec<([i32; 3], u16)>,
+}
+
+/// Vanilla `PistonStructureResolver.resolve` for an extension starting at `front` (the block in
+/// front of the piston base, where the head appears). Returns `None` when the piston must refuse.
+fn plan_push(
+    world: &impl RedstoneWorld,
+    front: [i32; 3],
+    direction: Direction,
+) -> Option<PushPlan> {
+    let mut plan = PushPlan::default();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([front]);
+    while let Some(pos) = queue.pop_front() {
+        if !seen.insert(pos) {
+            continue;
+        }
+        let state = world.block(pos)?;
+        if is_free(state) {
+            continue;
+        }
+        if is_unmovable(world, pos, state) {
+            return None;
+        }
+        match push_reaction(state) {
+            PushReaction::Block => return None,
+            PushReaction::Destroy => {
+                // The head reaches this block and breaks it; nothing moves into its place, so
+                // the line behind it stays put.
+                plan.destroyed.push((pos, state));
+                continue;
+            }
+            PushReaction::Normal => {}
+        }
+        if plan.blocks.len() >= PISTON_PUSH_LIMIT {
+            return None;
+        }
+        plan.blocks.push((pos, state));
+        // Everything the moved block meets in front must move too, or the move is refused.
+        queue.push_back(offset(pos, direction));
+        // Slime and honey drag the perpendicular group; the two families never mix.
+        if let Some(kind) = sticky_kind(state) {
+            for side in perpendicular_directions(direction) {
+                let side_pos = offset(pos, side);
+                let side_state = world.block(side_pos)?;
+                if is_free(side_state) {
+                    continue;
+                }
+                if sticky_kind(side_state).is_some_and(|other| other != kind) {
+                    continue;
+                }
+                queue.push_back(side_pos);
+            }
+        }
+    }
+    Some(plan)
+}
+
+impl Redstone {
+    /// `PistonBaseBlock.neighborChanged`: a changed power level schedules the 2-tick move.
+    fn update_piston(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
+        let powered = input_power(world, pos, &self.analog) > 0;
+        if powered != property_bool(state, "extended") {
+            self.schedule(pos, Kind::Piston, PISTON_DELAY);
+        }
+    }
+
+    /// `PistonBaseBlock.tick`: re-read the signal so a pulse shorter than the delay is ignored.
+    fn tick_piston(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
+        let Some(state) = world.block(pos) else {
+            return;
+        };
+        if !matches!(name(state), Some("piston" | "sticky_piston")) {
+            return;
+        }
+        let powered = input_power(world, pos, &self.analog) > 0;
+        let extended = property_bool(state, "extended");
+        if powered == extended {
+            return;
+        }
+        if powered {
+            self.extend_piston(world, pos, state);
+        } else {
+            self.retract_piston(world, pos, state);
+        }
+    }
+
+    /// Moves the pushed structure one block, then places the head and the extended base state.
+    /// A refused structure changes nothing (`PistonBaseBlock` never moves partially).
+    fn extend_piston(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
+        let Some(direction) = facing(state) else {
+            return;
+        };
+        let front = offset(pos, direction);
+        let Some(plan) = plan_push(world, front, direction) else {
+            return;
+        };
+        let Some(head) = piston_head(direction, name(state) == Some("sticky_piston")) else {
+            return;
+        };
+        // `PistonMovingBlockEntity.finalTick` puts every block in place in one step here.
+        for &(block_pos, _) in &plan.blocks {
+            self.write(world, block_pos, air_state());
+            self.piston.changes.push(block_pos);
+        }
+        for &(block_pos, block_state) in &plan.destroyed {
+            self.write(world, block_pos, air_state());
+            self.piston.changes.push(block_pos);
+            self.piston.destroyed.push((block_pos, block_state));
+        }
+        for &(block_pos, block_state) in &plan.blocks {
+            let dest = offset(block_pos, direction);
+            self.write(world, dest, block_state);
+            self.piston.changes.push(dest);
+        }
+        self.write(world, front, head);
+        self.piston.changes.push(front);
+        if let Some(extended) = set_bool(state, "extended", true) {
+            self.write(world, pos, extended);
+        }
+    }
+
+    /// Removes the head (`PistonBaseBlock` retraction). The sticky/slime pull is added below.
+    fn retract_piston(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
+        let Some(direction) = facing(state) else {
+            return;
+        };
+        let front = offset(pos, direction);
+        if world
+            .block(front)
+            .is_some_and(|head| name(head) == Some("piston_head"))
+        {
+            self.write(world, front, air_state());
+            self.piston.changes.push(front);
+        }
+        if let Some(retracted) = set_bool(state, "extended", false) {
+            self.write(world, pos, retracted);
         }
     }
 }
@@ -1178,6 +1520,7 @@ mod tests {
 
     struct Grid {
         blocks: HashMap<[i32; 3], u16>,
+        block_entities: HashSet<[i32; 3]>,
         brightness: u8,
     }
 
@@ -1185,6 +1528,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 blocks: HashMap::new(),
+                block_entities: HashSet::new(),
                 brightness: 15,
             }
         }
@@ -1209,6 +1553,10 @@ mod tests {
 
         fn brightness(&self, _pos: [i32; 3]) -> u8 {
             self.brightness
+        }
+
+        fn has_block_entity(&self, pos: [i32; 3]) -> bool {
+            self.block_entities.contains(&pos)
         }
     }
 
@@ -1241,6 +1589,137 @@ mod tests {
 
     fn lamp() -> u16 {
         make("redstone_lamp", &[("lit", "false")])
+    }
+
+    fn piston(facing: &str, extended: bool) -> u16 {
+        make(
+            "piston",
+            &[
+                ("facing", facing),
+                ("extended", if extended { "true" } else { "false" }),
+            ],
+        )
+    }
+
+    #[test]
+    fn lever_extends_a_piston_after_two_ticks_and_pushes_three_stone_blocks() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        for x in 2..=4 {
+            grid.add([x, 64, 0], make("stone", &[]));
+        }
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        // `PistonBaseBlock` schedules the move two game ticks after the rising edge.
+        tick(&mut redstone, &mut grid, 1);
+        assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("stone"));
+
+        tick(&mut redstone, &mut grid, 1);
+        assert!(property_bool(grid.state([1, 64, 0]), "extended"));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        assert_eq!(property(grid.state([2, 64, 0]), "facing"), Some("east"));
+        assert_eq!(property(grid.state([2, 64, 0]), "type"), Some("normal"));
+        for x in 3..=5 {
+            assert_eq!(name(grid.state([x, 64, 0])), Some("stone"), "stone at {x}");
+        }
+        assert_eq!(name(grid.state([6, 64, 0])), Some("air"));
+    }
+
+    #[test]
+    fn piston_retraction_removes_the_head_after_two_ticks() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        let on = use_block(source).unwrap();
+        grid.add([0, 64, 0], on);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+        assert!(property_bool(grid.state([1, 64, 0]), "extended"));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
+
+        grid.add([0, 64, 0], use_block(on).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(property_bool(grid.state([1, 64, 0]), "extended"));
+        tick(&mut redstone, &mut grid, 1);
+        assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("air"));
+        // A plain piston leaves the block it pushed behind.
+        assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
+    }
+
+    #[test]
+    fn a_thirteen_block_row_refuses_to_move() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        for x in 2..=14 {
+            grid.add([x, 64, 0], make("stone", &[]));
+        }
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 4);
+        assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
+        for x in 2..=14 {
+            assert_eq!(name(grid.state([x, 64, 0])), Some("stone"), "stone at {x}");
+        }
+        assert_eq!(name(grid.state([15, 64, 0])), Some("air"));
+    }
+
+    #[test]
+    fn a_chest_in_the_row_refuses_the_whole_move() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], make("stone", &[]));
+        grid.add([3, 64, 0], make("chest", &[]));
+        grid.block_entities.insert([3, 64, 0]);
+        grid.add([4, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 4);
+        assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
+        for x in [2, 4] {
+            assert_eq!(name(grid.state([x, 64, 0])), Some("stone"));
+        }
+        assert_eq!(name(grid.state([3, 64, 0])), Some("chest"));
+    }
+
+    #[test]
+    fn a_torch_in_front_breaks_and_is_reported_for_its_drop() {
+        let mut grid = Grid::new();
+        let source = lever();
+        let torch = make("torch", &[]);
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], torch);
+        grid.add([3, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+        let activity = redstone.take_piston_activity();
+        assert!(activity.destroyed.contains(&([2, 64, 0], torch)));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        // Nothing moves into the head position, so the block behind the torch stays.
+        assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
     }
 
     #[test]

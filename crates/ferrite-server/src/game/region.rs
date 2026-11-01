@@ -2937,10 +2937,29 @@ impl Region {
             return;
         };
         let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
-        let mut world =
-            super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
-        self.redstone.blocks_changed(&mut world, changed);
-        self.redstone.tick(&mut world, &players);
+        {
+            let mut world =
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+            self.redstone.blocks_changed(&mut world, changed);
+            self.redstone.tick(&mut world, &players);
+        }
+        // Piston moves bypass the ordinary block-change queue (`PistonMovingBlockEntity`),
+        // so their positions get the same shape updates and loot-table drops here.
+        let activity = self.redstone.take_piston_activity();
+        if !activity.changes.is_empty() {
+            for pos in &activity.changes {
+                self.updates.block_changed(*pos);
+            }
+            let mut broken = Vec::new();
+            self.apply_neighbor_updates(source, ctx, &mut broken);
+            for (pos, state) in broken {
+                self.spawn_block_drops(pos, state);
+            }
+            self.schedule_gravity(source, &activity.changes);
+        }
+        for (pos, state) in activity.destroyed {
+            self.spawn_block_drops(pos, state);
+        }
         for (pos, fuse) in self.redstone.take_primed() {
             self.spawn_tnt(pos, fuse);
         }
