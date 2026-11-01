@@ -2838,6 +2838,9 @@ impl Region {
             }
         }
     }
+    pub fn has_chunk_hold(&self, chunk: ChunkPos) -> bool {
+        self.held_chunks.contains_key(&chunk)
+    }
     /// Removes and returns every entity standing in `chunk`, so the world loop can persist the
     /// chunk's entities when it unloads. Entities in chunks that stay loaded are untouched.
     pub fn take_chunk_entities(&mut self, chunk: ChunkPos) -> Vec<EntityRecord> {

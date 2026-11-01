@@ -300,8 +300,10 @@ async fn nether_bed_explodes_for_tracking_bot() {
     let source = AnvilChunkSource::new_memory();
     // Beds only explode where `bedWorks` is false, and each dimension owns its own chunk
     // source now, so the bed must live in the nether source and the player must spawn on it.
-    let mut dimensions =
-        super::dimension::DimensionRegistry::with_overworld(std::sync::Arc::clone(&source), [1, 65, 1]);
+    let mut dimensions = super::dimension::DimensionRegistry::with_overworld(
+        std::sync::Arc::clone(&source),
+        [1, 65, 1],
+    );
     std::sync::Arc::get_mut(&mut dimensions)
         .unwrap()
         .set_spawn(super::Dimension::Nether, [1, 65, 1]);

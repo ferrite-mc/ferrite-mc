@@ -339,10 +339,15 @@ fn apply_game_rule(
     };
     Ok(format!("{name} = {}", result.text()))
 }
+type TransientEntities =
+    Arc<Mutex<HashMap<(Dimension, ChunkPos), Vec<ferrite_entity::EntityRecord>>>>;
+
 /// One region scheduler per dimension: Folia's regionizer is per world, so chunks from two
 /// dimensions never share ownership.
 struct Worlds {
     schedulers: HashMap<Dimension, Scheduler<Region, GlobalRegion>>,
+    transient_entities: Option<TransientEntities>,
+    tracking: region::Tracking,
 }
 
 impl Worlds {
@@ -564,7 +569,13 @@ async fn run(
             ),
         );
     }
-    let worlds = Worlds { schedulers };
+    let worlds = Worlds {
+        schedulers,
+        transient_entities: entity_world
+            .is_none()
+            .then(|| Arc::new(Mutex::new(HashMap::new()))),
+        tracking: tracking.clone(),
+    };
     let mut mailboxes: HashMap<Uuid, (u64, Mailbox, OutboundSender)> = HashMap::new();
     let mut pending: HashMap<Uuid, GameMessage> = HashMap::new();
     let mut permissions: HashMap<Uuid, u8> = HashMap::new();
@@ -861,7 +872,7 @@ async fn run(
              }
          },
          signal=signals.recv()=>{let Some(signal)=signal else {break}; match signal {
-          Signal::Hold{dimension,chunk,add}=>if add{let first={let count=holds.entry((dimension,chunk)).or_default();*count += 1;*count == 1};worlds.add_chunk(dimension,chunk);let dir=entity_world.clone();worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);if first && let Some(dir)=dir{r.add_entities(entity_save::load(&dimension.storage_root(&dir), (chunk.0, chunk.1)));}});}else{release_hold(&worlds, &mut holds, &signal_tx, dimension, chunk);},
+          Signal::Hold{dimension,chunk,add}=>if add{let first={let count=holds.entry((dimension,chunk)).or_default();*count += 1;*count == 1};worlds.add_chunk(dimension,chunk);let dir=entity_world.clone();let transient=worlds.transient_entities.clone();worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);if let Some(transient)=transient {if let Some(entities)=transient.lock().unwrap().remove(&(dimension,chunk)){r.add_entities(entities);}} else if first && let Some(dir)=dir{r.add_entities(entity_save::load(&dimension.storage_root(&dir), (chunk.0, chunk.1)));}});}else{release_hold(&worlds, &mut holds, &signal_tx, dimension, chunk);},
           Signal::SaveEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world { let dir=dimension.storage_root(dir); if let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}}},
           Signal::FinishRelease{dimension,chunk,flush}=>{worlds.remove_chunk(dimension,chunk);if flush {let source=dimensions.source(dimension).clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
           Signal::FluidChange{dimension,x,y,z}=>{
@@ -1047,16 +1058,38 @@ fn defer_release(
     flush: bool,
 ) {
     let signals = signals.clone();
+    let transient = worlds.transient_entities.clone();
+    let tracking = worlds.tracking.clone();
     worlds.schedule_at_chunk(dimension, chunk, move |region| {
         region.release_chunk(chunk);
         // Entities leave the store before the chunk data is flushed, so a reload reads exactly
         // what was held when the last viewer left.
-        let entities = region.take_chunk_entities(chunk);
-        let _ = signals.send(Signal::SaveEntities {
-            dimension,
-            chunk,
-            entities,
-        });
+        if !region.has_chunk_hold(chunk) {
+            let mut entities = region.take_chunk_entities(chunk);
+            for entity in &mut entities {
+                let packet = game::packet(&ferrite_protocol::packets::play::RemoveEntities {
+                    ids: vec![VarInt(entity.data.id)],
+                });
+                for (uuid, _) in entity.data.tracker.viewers() {
+                    if let Some((_, outbound)) = tracking.lock().unwrap().get(&uuid) {
+                        let _ = outbound.send(packet.clone());
+                    }
+                }
+                entity.data.tracker = Default::default();
+            }
+            if let Some(transient) = transient {
+                transient
+                    .lock()
+                    .unwrap()
+                    .insert((dimension, chunk), entities);
+            } else {
+                let _ = signals.send(Signal::SaveEntities {
+                    dimension,
+                    chunk,
+                    entities,
+                });
+            }
+        }
         let _ = signals.send(Signal::FinishRelease {
             dimension,
             chunk,
