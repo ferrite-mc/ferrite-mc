@@ -349,17 +349,25 @@ async fn crossing_region_boundary_keeps_chat_and_movement_routed() {
         })
         .await;
         bot.chat("walking").await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let expected_chunk = (x as i32).div_euclid(16);
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let body = bot.until(96).await;
+                let mut body = body.as_slice();
+                let chunk_x = VarInt::decode(&mut body).unwrap().0;
+                let chunk_z = VarInt::decode(&mut body).unwrap().0;
+                if chunk_x == expected_chunk && chunk_z == 0 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("movement did not reach the expected chunk");
     }
     bot.chat("across").await;
-    let mut reached = false;
     let mut chatted = false;
-    while !(reached && chatted) {
+    while !chatted {
         let (id, body) = bot.next_play().await;
-        if id == 96 {
-            let mut body = body.as_slice();
-            reached |= VarInt::decode(&mut body).unwrap().0 == 18;
-        }
         if id == ClientboundPlayerChat::ID {
             let message = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
             chatted |= message.body.content == "across";
