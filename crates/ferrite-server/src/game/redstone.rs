@@ -57,6 +57,12 @@ pub struct PistonActivity {
     pub destroyed: Vec<([i32; 3], u16)>,
     /// Every block position a piston wrote.
     pub changes: Vec<[i32; 3]>,
+    /// Blocks that moved one step: source and destination, for entity displacement.
+    pub moved: Vec<([i32; 3], [i32; 3])>,
+    /// Piston bases that extended this tick (`block.piston.extend`).
+    pub extended: Vec<[i32; 3]>,
+    /// Piston bases that retracted this tick (`block.piston.contract`).
+    pub retracted: Vec<[i32; 3]>,
 }
 
 /// Block access for the engine. `block` returns `None` for chunks this region does not own,
@@ -1186,6 +1192,9 @@ impl Redstone {
         self.primed.extend(other.primed);
         self.piston.destroyed.extend(other.piston.destroyed);
         self.piston.changes.extend(other.piston.changes);
+        self.piston.moved.extend(other.piston.moved);
+        self.piston.extended.extend(other.piston.extended);
+        self.piston.retracted.extend(other.piston.retracted);
         for (pos, mut toggles) in other.toggles {
             self.toggles.entry(pos).or_default().append(&mut toggles);
         }
@@ -1410,6 +1419,60 @@ fn plan_push(
     Some(plan)
 }
 
+/// Blocks a sticky retraction pulls, collected front-first. An immovable block refuses the whole
+/// pull (`PistonStructureResolver.resolve` returns false); the head still retracts.
+fn plan_pull(
+    world: &impl RedstoneWorld,
+    front: [i32; 3],
+    direction: Direction,
+) -> Vec<([i32; 3], u16)> {
+    let first = offset(front, direction);
+    let Some(state) = world.block(first) else {
+        return Vec::new();
+    };
+    if is_free(state) {
+        return Vec::new();
+    }
+    let mut blocks = Vec::new();
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([first]);
+    while let Some(pos) = queue.pop_front() {
+        if !seen.insert(pos) {
+            continue;
+        }
+        let Some(state) = world.block(pos) else {
+            return Vec::new();
+        };
+        if is_free(state) {
+            continue;
+        }
+        if is_unmovable(world, pos, state) || push_reaction(state) != PushReaction::Normal {
+            return Vec::new();
+        }
+        if blocks.len() >= PISTON_PUSH_LIMIT {
+            return Vec::new();
+        }
+        blocks.push((pos, state));
+        // A pulled slime/honey block drags the perpendicular group of its own family.
+        if let Some(kind) = sticky_kind(state) {
+            for side in perpendicular_directions(direction) {
+                let side_pos = offset(pos, side);
+                let Some(side_state) = world.block(side_pos) else {
+                    return Vec::new();
+                };
+                if is_free(side_state) {
+                    continue;
+                }
+                if sticky_kind(side_state).is_some_and(|other| other != kind) {
+                    continue;
+                }
+                queue.push_back(side_pos);
+            }
+        }
+    }
+    blocks
+}
+
 impl Redstone {
     /// `PistonBaseBlock.neighborChanged`: a changed power level schedules the 2-tick move.
     fn update_piston(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
@@ -1466,30 +1529,54 @@ impl Redstone {
             let dest = offset(block_pos, direction);
             self.write(world, dest, block_state);
             self.piston.changes.push(dest);
+            self.piston.moved.push((block_pos, dest));
         }
         self.write(world, front, head);
         self.piston.changes.push(front);
+        // The head itself moves into `front`, so an entity standing there is pushed even when no
+        // block moved into the space (`PistonMovingBlockEntity.moveCollidedEntities`).
+        self.piston.moved.push((front, offset(front, direction)));
         if let Some(extended) = set_bool(state, "extended", true) {
             self.write(world, pos, extended);
         }
+        self.piston.extended.push(pos);
     }
 
-    /// Removes the head (`PistonBaseBlock` retraction). The sticky/slime pull is added below.
+    /// `PistonBaseBlock` retraction: remove the head, then a sticky piston pulls the block in
+    /// front of it (`PistonMovingBlockEntity`), dragging its slime/honey group when there is one.
     fn retract_piston(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
         let Some(direction) = facing(state) else {
             return;
         };
         let front = offset(pos, direction);
-        if world
+        let head = world
             .block(front)
-            .is_some_and(|head| name(head) == Some("piston_head"))
-        {
+            .filter(|head| name(*head) == Some("piston_head"));
+        let pull = if head.is_some() && name(state) == Some("sticky_piston") {
+            plan_pull(world, front, direction)
+        } else {
+            Vec::new()
+        };
+        // Clear every source before writing destinations, so a pulled block never overwrites one
+        // that is still waiting to move (and `front` is free before the head is removed).
+        for &(source, _) in &pull {
+            self.write(world, source, air_state());
+            self.piston.changes.push(source);
+        }
+        if head.is_some() {
             self.write(world, front, air_state());
             self.piston.changes.push(front);
+        }
+        for &(source, block_state) in &pull {
+            let dest = offset(source, direction.opposite());
+            self.write(world, dest, block_state);
+            self.piston.changes.push(dest);
+            self.piston.moved.push((source, dest));
         }
         if let Some(retracted) = set_bool(state, "extended", false) {
             self.write(world, pos, retracted);
         }
+        self.piston.retracted.push(pos);
     }
 }
 
@@ -1656,6 +1743,99 @@ mod tests {
         assert_eq!(name(grid.state([2, 64, 0])), Some("air"));
         // A plain piston leaves the block it pushed behind.
         assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
+    }
+
+    fn sticky_piston(facing: &str, extended: bool) -> u16 {
+        make(
+            "sticky_piston",
+            &[
+                ("facing", facing),
+                ("extended", if extended { "true" } else { "false" }),
+            ],
+        )
+    }
+
+    #[test]
+    fn sticky_piston_pulls_the_block_back_on_retraction() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], sticky_piston("east", false));
+        grid.add([3, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        let on = use_block(source).unwrap();
+        grid.add([0, 64, 0], on);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
+
+        let off = use_block(on).unwrap();
+        grid.add([0, 64, 0], off);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+        assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("stone"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+    }
+
+    #[test]
+    fn a_retracting_slime_block_drags_its_side_group() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], sticky_piston("east", false));
+        grid.add([2, 64, 0], make("slime_block", &[]));
+        grid.add([2, 65, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        let on = use_block(source).unwrap();
+        grid.add([0, 64, 0], on);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([3, 65, 0])), Some("stone"));
+
+        let off = use_block(on).unwrap();
+        grid.add([0, 64, 0], off);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+        assert_eq!(name(grid.state([2, 64, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([2, 65, 0])), Some("stone"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+        assert_eq!(name(grid.state([3, 65, 0])), Some("air"));
+    }
+
+    #[test]
+    fn a_hundred_extend_retract_cycles_do_not_duplicate_blocks() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], sticky_piston("east", false));
+        grid.add([2, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        let mut lever_state = source;
+        for cycle in 0..100 {
+            lever_state = use_block(lever_state).unwrap();
+            grid.add([0, 64, 0], lever_state);
+            redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+            tick(&mut redstone, &mut grid, 2);
+            if cycle % 2 == 0 {
+                assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+                assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
+                assert_eq!(name(grid.state([4, 64, 0])), Some("air"));
+            } else {
+                assert_eq!(name(grid.state([2, 64, 0])), Some("stone"));
+                assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+            }
+        }
+        let stones = (0..8)
+            .filter(|x| name(grid.state([*x, 64, 0])) == Some("stone"))
+            .count();
+        assert_eq!(stones, 1, "the stone must not be duplicated");
     }
 
     #[test]

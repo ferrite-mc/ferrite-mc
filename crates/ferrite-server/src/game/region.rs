@@ -2957,11 +2957,114 @@ impl Region {
             }
             self.schedule_gravity(source, &activity.changes);
         }
-        for (pos, state) in activity.destroyed {
+        for &(pos, state) in &activity.destroyed {
             self.spawn_block_drops(pos, state);
         }
+        self.push_piston_entities(&activity);
+        self.play_piston_sounds(&activity);
         for (pos, fuse) in self.redstone.take_primed() {
             self.spawn_tnt(pos, fuse);
+        }
+    }
+
+    /// Vanilla `PistonMovingBlockEntity.moveCollidedEntities`: an entity standing where a piston
+    /// moves a block travels with it instead of being left inside the new block.
+    fn push_piston_entities(&mut self, activity: &super::redstone::PistonActivity) {
+        if activity.moved.is_empty() {
+            return;
+        }
+        let mut seen = HashSet::new();
+        let mut player_moves: HashMap<Uuid, [f64; 3]> = HashMap::new();
+        for &(from, to) in &activity.moved {
+            let delta = [
+                f64::from(to[0] - from[0]),
+                f64::from(to[1] - from[1]),
+                f64::from(to[2] - from[2]),
+            ];
+            let block = ferrite_math::AABB::new(
+                f64::from(from[0]),
+                f64::from(from[1]),
+                f64::from(from[2]),
+                f64::from(from[0] + 1),
+                f64::from(from[1] + 1),
+                f64::from(from[2] + 1),
+            );
+            for key in self.entities.query_vec(block) {
+                if !seen.insert(key) {
+                    continue;
+                }
+                let Some(pos) = self.entities.pos(key) else {
+                    continue;
+                };
+                self.entities.set_pos(
+                    key,
+                    ferrite_math::Vec3::new(pos.x + delta[0], pos.y + delta[1], pos.z + delta[2]),
+                );
+                if let Some(flags) = self.entities.flags_mut(key) {
+                    flags.set(ferrite_entity::Flags::TELEPORTED, true);
+                    flags.set(ferrite_entity::Flags::NEEDS_SYNC, true);
+                }
+            }
+            for p in self.players.values() {
+                if p.gamemode == 3 {
+                    continue;
+                }
+                let body = ferrite_math::AABB::new(
+                    p.pos[0] - 0.3,
+                    p.pos[1],
+                    p.pos[2] - 0.3,
+                    p.pos[0] + 0.3,
+                    p.pos[1] + 1.8,
+                    p.pos[2] + 0.3,
+                );
+                if body.intersects(block) {
+                    player_moves.entry(p.uuid).or_insert(delta);
+                }
+            }
+        }
+        for (uuid, delta) in player_moves {
+            let Some(p) = self.players.get_mut(&uuid) else {
+                continue;
+            };
+            p.pos = [
+                p.pos[0] + delta[0],
+                p.pos[1] + delta[1],
+                p.pos[2] + delta[2],
+            ];
+            p.teleport();
+            p.positions.lock().unwrap().insert(uuid, p.pos);
+        }
+    }
+
+    /// `PistonBaseBlock` plays `block.piston.extend` / `block.piston.contract` to nearby players.
+    fn play_piston_sounds(&self, activity: &super::redstone::PistonActivity) {
+        for (positions, name) in [
+            (&activity.extended, "minecraft:block.piston.extend"),
+            (&activity.retracted, "minecraft:block.piston.contract"),
+        ] {
+            let Some(id) = ferrite_data::registries::id("minecraft:sound_event", name) else {
+                continue;
+            };
+            for &pos in positions {
+                let packet = ferrite_protocol::packets::play::SoundEffect {
+                    sound: ferrite_protocol::VarInt(id),
+                    source: ferrite_protocol::VarInt(4),
+                    x: pos[0] * 8,
+                    y: pos[1] * 8,
+                    z: pos[2] * 8,
+                    volume: 0.5,
+                    pitch: 0.6,
+                    seed: 0,
+                };
+                for p in self.players.values() {
+                    let dx = p.pos[0] - f64::from(pos[0]);
+                    let dy = p.pos[1] - f64::from(pos[1]);
+                    let dz = p.pos[2] - f64::from(pos[2]);
+                    if dx * dx + dy * dy + dz * dz <= 256.0 {
+                        send(p, &packet);
+                    }
+                }
+            }
         }
     }
     /// Fires droppers and dispensers whose redstone input rose this tick (vanilla
