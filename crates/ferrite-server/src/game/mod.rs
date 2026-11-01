@@ -670,7 +670,7 @@ async fn run(
                if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
            }
            if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_joined(uuid, &name) { tracing::warn!(%error, "player join event failed"); }
-           let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; g.join(player)});tracing::info!(%uuid,"player joined");
+           let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; g.join(player)});tracing::info!(%uuid,"player joined");
           },
           GameMessage::Input{session,uuid,packet:ServerboundPlay::Chat(chat)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) && chat.message.chars().count()<=256 {
               let mut chat = chat;
@@ -880,6 +880,7 @@ async fn run(
             defer_release(&worlds,&signal_tx,from_dimension,from,false);
             if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
             command_state.lock().unwrap().set_dimension(id,dimension);
+            worlds.schedule_global(move |g| g.set_dimension(id, dimension));
           },
           Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
             let name = names.remove(&uuid).unwrap_or_default();
