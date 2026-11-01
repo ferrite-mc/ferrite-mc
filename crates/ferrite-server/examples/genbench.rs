@@ -7,6 +7,7 @@
 //! whole pipeline. `FERRITE_WORLDGEN_THREADS` selects both the worker pool size and the
 //! number of concurrent requesters, so the benchmark measures the pool the server runs.
 
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -45,7 +46,7 @@ fn main() {
 
     let terrain = Arc::new(ferrite_server::game::VanillaTerrain::spawn(seed).unwrap());
     let started = Instant::now();
-    let (generate_total, encode_total, stages) = std::thread::scope(|scope| {
+    let (generate_total, encode_total, stages, hashes) = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(requesters);
         for requester in 0..requesters {
             let terrain = Arc::clone(&terrain);
@@ -53,6 +54,7 @@ fn main() {
                 let mut generate = 0.0_f64;
                 let mut encode = 0.0_f64;
                 let mut stages = [0.0_f64; STAGES];
+                let mut hashes = Vec::new();
                 for index in (requester..count).step_by(requesters) {
                     let cx = start_x + (index % 10) as i32;
                     let cz = start_z + (index / 10) as i32;
@@ -72,18 +74,20 @@ fn main() {
                     .unwrap();
                     encode += mark.elapsed().as_secs_f64() * 1000.0;
                     std::hint::black_box(packet.len());
+                    hashes.push((index, Sha256::digest(&packet)));
                 }
-                (generate, encode, stages)
+                (generate, encode, stages, hashes)
             }));
         }
-        let mut totals = (0.0_f64, 0.0_f64, [0.0_f64; STAGES]);
+        let mut totals = (0.0_f64, 0.0_f64, [0.0_f64; STAGES], Vec::new());
         for handle in handles {
-            let (generate, encode, stages) = handle.join().unwrap();
+            let (generate, encode, stages, hashes) = handle.join().unwrap();
             totals.0 += generate;
             totals.1 += encode;
             for (total, value) in totals.2.iter_mut().zip(stages) {
                 *total += value;
             }
+            totals.3.extend(hashes);
         }
         totals
     });
@@ -99,4 +103,11 @@ fn main() {
     }
     println!("pipeline wall:  {:8.2} ms/chunk", wall * 1000.0 / n);
     println!("chunks/second:  {:8.2}", count as f64 / wall);
+    let mut hashes = hashes;
+    hashes.sort_unstable_by_key(|(index, _)| *index);
+    let mut digest = Sha256::new();
+    for (_, hash) in hashes {
+        digest.update(hash);
+    }
+    println!("packet SHA-256: {:x}", digest.finalize());
 }

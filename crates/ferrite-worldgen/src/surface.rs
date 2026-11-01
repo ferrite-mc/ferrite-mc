@@ -10,6 +10,39 @@ use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::HashMap};
 use thiserror::Error;
 
+#[derive(Default)]
+struct ColumnNoiseCache(RefCell<HashMap<ResourceId, f64>>);
+impl ColumnNoiseCache {
+    fn get_or_sample(&self, id: &ResourceId, sample: impl FnOnce() -> f64) -> f64 {
+        if let Some(value) = self.0.borrow().get(id) {
+            return *value;
+        }
+        let value = sample();
+        self.0.borrow_mut().insert(id.clone(), value);
+        value
+    }
+}
+
+#[cfg(test)]
+mod column_noise_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn column_noise_samples_each_id_once() {
+        let cache = ColumnNoiseCache::default();
+        let id = ResourceId::parse("minecraft:test").unwrap();
+        let calls = Cell::new(0);
+        let sample = || {
+            calls.set(calls.get() + 1);
+            0.5
+        };
+        assert_eq!(cache.get_or_sample(&id, sample), 0.5);
+        assert_eq!(cache.get_or_sample(&id, sample), 0.5);
+        assert_eq!(calls.get(), 1);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SurfaceError {
     #[error("missing overworld noise settings")]
@@ -43,6 +76,7 @@ pub struct SurfaceGenerator<'a> {
     biomes: MultiNoiseBiomeSource,
     biome_seed: i64,
     biome_cache: RefCell<BiomeCache>,
+    column_noise: ColumnNoiseCache,
     bands: Vec<ResourceId>,
     frozen_temperature: [SimplexNoise; 3],
     biome_info: SimplexNoise,
@@ -246,6 +280,7 @@ impl<'a> SurfaceGenerator<'a> {
             biomes: MultiNoiseBiomeSource::from_worldgen(data, "minecraft:overworld")?,
             biome_seed,
             biome_cache: RefCell::new(BiomeCache::empty()),
+            column_noise: ColumnNoiseCache::default(),
             bands,
             surface_noise: ResourceId::parse("surface").expect("known id"),
             secondary_noise: ResourceId::parse("surface_secondary").expect("known id"),
@@ -579,12 +614,12 @@ impl<'a> SurfaceGenerator<'a> {
                     max_threshold,
                     is_3d,
                 } => {
-                    let value = self.noise_value(
-                        noise,
-                        p.x,
-                        if is_3d.unwrap_or(false) { p.y } else { 0 },
-                        p.z,
-                    );
+                    let value = if is_3d.unwrap_or(false) {
+                        self.noise_value(noise, p.x, p.y, p.z)
+                    } else {
+                        self.column_noise
+                            .get_or_sample(noise, || self.noise_value(noise, p.x, 0, p.z))
+                    };
                     value >= *min_threshold && value <= *max_threshold
                 }
                 MaterialConditionNode::Not { invert } => !self.condition(invert, p, nesting + 1)?,
@@ -747,6 +782,7 @@ impl<'a> SurfaceGenerator<'a> {
         let mut states = HashMap::<&ResourceId, u32>::new();
         for x in 0_u8..16 {
             for z in 0_u8..16 {
+                self.column_noise.0.borrow_mut().clear();
                 let wx = x0 + i32::from(x);
                 let wz = z0 + i32::from(z);
                 let starting_height = min_y
