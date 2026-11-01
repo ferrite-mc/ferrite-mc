@@ -211,10 +211,9 @@ impl World {
     ) -> Self {
         let flat = source.as_ref().is_none_or(|source| source.is_flat());
         let source = source.unwrap_or_else(anvil::AnvilChunkSource::new_memory);
-        let dimensions = settings
-            .dimensions
-            .clone()
-            .unwrap_or_else(|| DimensionRegistry::with_overworld(Arc::clone(&source), spawn));
+        let dimensions = settings.dimensions.clone().unwrap_or_else(|| {
+            DimensionRegistry::with_source(settings.dimension, Arc::clone(&source), spawn)
+        });
         let (sender, rx) = mpsc::unbounded_channel();
         let (signals, signal_rx) = mpsc::unbounded_channel();
         drops::preload();
