@@ -38,8 +38,26 @@ fn repo_root() -> PathBuf {
 /// Gradle builds share one daemon and project directory; serialize the test helpers that invoke it.
 static GRADLE_LOCK: Mutex<()> = Mutex::new(());
 
+fn snapshot_bridge(source: &Path, directory: &Path) -> PathBuf {
+    let target = directory.join(source.file_name().expect("jar filename"));
+    fs::copy(source, &target).expect("copy jar into isolated test directory");
+    target
+}
+
+#[test]
+fn bridge_snapshot_survives_a_later_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let build = dir.path().join("build.jar");
+    let runtime = dir.path().join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::write(&build, b"first build").unwrap();
+    let snapshot = snapshot_bridge(&build, &runtime);
+    fs::write(&build, b"second build").unwrap();
+    assert_eq!(fs::read(snapshot).unwrap(), b"first build");
+}
+
 /// Build the Java bridge, the test plugin and its dependency with the Gradle wrapper.
-fn build_jars(repo: &Path, java_home: &Path) -> (PathBuf, PathBuf, PathBuf) {
+fn build_jars(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
     let mut command = if cfg!(windows) {
@@ -81,7 +99,11 @@ fn build_jars(repo: &Path, java_home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     for jar in [&plugin, &dependency, &bridge] {
         assert!(jar.exists(), "missing built jar: {}", jar.display());
     }
-    (plugin, dependency, bridge)
+    (
+        snapshot_bridge(&plugin, runtime),
+        snapshot_bridge(&dependency, runtime),
+        snapshot_bridge(&bridge, runtime),
+    )
 }
 
 fn toml_path(path: &Path) -> String {
@@ -461,8 +483,8 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
         }
     };
     let repo = repo_root();
-    let (plugin_jar, dependency_jar, bridge_jar) = build_jars(&repo, &java_home);
     let dir = tempfile::tempdir().unwrap();
+    let (plugin_jar, dependency_jar, bridge_jar) = build_jars(&repo, &java_home, dir.path());
     let plugins = dir.path().join("plugins");
     fs::create_dir(&plugins).unwrap();
     fs::copy(plugin_jar, plugins.join("test-plugin.jar")).unwrap();
@@ -667,7 +689,7 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
 }
 
 /// Build the typical-plugin fixture together with the shaded bridge.
-fn build_typical_jar(repo: &Path, java_home: &Path) -> PathBuf {
+fn build_typical_jar(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf) {
     let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
     let mut command = if cfg!(windows) {
@@ -698,7 +720,11 @@ fn build_typical_jar(repo: &Path, java_home: &Path) -> PathBuf {
     );
     let jar = repo.join("java/test-plugin-typical/build/libs/test-plugin-typical.jar");
     assert!(jar.exists(), "missing built jar: {}", jar.display());
-    jar
+    let bridge = project.join("build/libs/ferrite-api-impl-all.jar");
+    (
+        snapshot_bridge(&jar, runtime),
+        snapshot_bridge(&bridge, runtime),
+    )
 }
 
 /// A plugin shaped like a real one: config.yml, a command with tab completion, a join listener
@@ -713,9 +739,8 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         }
     };
     let repo = repo_root();
-    let plugin_jar = build_typical_jar(&repo, &java_home);
-    let bridge_jar = repo.join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar");
     let dir = tempfile::tempdir().unwrap();
+    let (plugin_jar, bridge_jar) = build_typical_jar(&repo, &java_home, dir.path());
     let plugins = dir.path().join("plugins");
     fs::create_dir(&plugins).unwrap();
     fs::copy(plugin_jar, plugins.join("typical-plugin.jar")).unwrap();
