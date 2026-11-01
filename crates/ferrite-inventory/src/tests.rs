@@ -1217,3 +1217,29 @@ fn brewing_stand_rejects_items_in_the_wrong_slots() {
     f.click(4, 0, Pickup);
     assert_eq!(f.slot(4).count, 2);
 }
+
+#[test]
+fn beacon_payment_slot_holds_one_item_and_rejects_other_items() {
+    let mut f = Fixture::new(Menu::beacon(3));
+    // Vanilla `BeaconMenu.PaymentSlot.getMaxStackSize` is one, not the item's stack size.
+    f.menu.set_carried(item("diamond", 4));
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0).count, 1);
+    assert_eq!(f.carried().count, 3);
+
+    // A non-payment item never enters the slot.
+    f.menu.set_carried(item("stone", 1));
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0).count, 1);
+    assert_eq!(f.carried().count, 1);
+
+    // Confirming an effect spends the single payment item.
+    f.menu.set_beacon_state(crate::BeaconState {
+        levels: 1,
+        primary: Some(1),
+        secondary: None,
+    });
+    assert!(f.menu.confirm_beacon(Some(1), None));
+    assert!(f.slot(0).is_empty());
+    assert_eq!(f.menu.beacon_state().unwrap().primary, Some(1));
+}
