@@ -830,6 +830,29 @@ impl Player {
         }
     }
 
+    /// Sends a `block_update` for `location` to every player that has its chunk loaded. A
+    /// command block editor can change the block state itself (mode or `conditional`), and a
+    /// plain chunk edit does not reach clients on its own.
+    fn broadcast_block_update(&self, location: i64) {
+        let Some(source) = &self.source else {
+            return;
+        };
+        let pos = ferrite_protocol::types::BlockPos::unpack(location);
+        let Some(state) = source.block(pos.x, pos.y, pos.z) else {
+            return;
+        };
+        let chunk = (pos.x.div_euclid(16), pos.z.div_euclid(16));
+        let update = packet(&BlockUpdate {
+            location,
+            block_state: VarInt(state as i32),
+        });
+        for (loaded, outbound) in self.tracking.lock().unwrap().values() {
+            if loaded.contains(&chunk) {
+                let _ = outbound.send(update.clone());
+            }
+        }
+    }
+
     /// `ServerboundSetCommandBlockPacket`: an operator's editor writes the block entity
     /// (vanilla `CommandBlockEntity` setters), including a mode change of the block itself.
     fn edit_command_block(&mut self, packet: &SetCommandBlock) {
@@ -841,7 +864,10 @@ impl Player {
         };
         let pos = ferrite_protocol::types::BlockPos::unpack(packet.location);
         let pos = [pos.x, pos.y, pos.z];
-        if super::command_block::edit(source, pos, packet) {
+        if let Some(state_changed) = super::command_block::edit(source, pos, packet) {
+            if state_changed {
+                self.broadcast_block_update(packet.location);
+            }
             self.sync_block_entity(pos);
         }
     }

@@ -333,33 +333,28 @@ pub fn place_with(source: &AnvilChunkSource, pos: [i32; 3], block: &str, data: &
 
 /// Applies a `SetCommandBlock` editor packet (vanilla `CommandBlockEntity` setters). The mode
 /// is stored in the block, the conditional flag in the block state, the rest in the NBT.
+///
+/// `Some(true)` means the block state changed and the caller must broadcast a `block_update`;
+/// `Some(false)` means only the block entity changed; `None` means the edit was rejected.
 pub fn edit(
     source: &AnvilChunkSource,
     pos: [i32; 3],
     packet: &ferrite_protocol::packets::play::SetCommandBlock,
-) -> bool {
+) -> Option<bool> {
     let [x, y, z] = pos;
-    let Some((block, props)) = block_at(source, pos) else {
-        return false;
-    };
-    let Some(mode) = Mode::of_block(block) else {
-        return false;
-    };
-    let Some(new_mode) = Mode::from_id(packet.mode.0) else {
-        return false;
-    };
+    let (block, props) = block_at(source, pos)?;
+    let mode = Mode::of_block(block)?;
+    let new_mode = Mode::from_id(packet.mode.0)?;
     let facing = property(props, "facing").unwrap_or("north");
     let conditional_value = if packet.conditional { "true" } else { "false" };
+    let mut state_changed = false;
     if new_mode != mode || conditional(props) != packet.conditional {
-        let Some(state) = blocks::state_id(
+        let state = blocks::state_id(
             new_mode.block(),
             &[("facing", facing), ("conditional", conditional_value)],
-        ) else {
-            return false;
-        };
-        if source.set_block(x, y, z, u32::from(state)).is_err() {
-            return false;
-        }
+        )?;
+        source.set_block(x, y, z, u32::from(state)).ok()?;
+        state_changed = true;
     }
     let mut state = source.block_entity(x, y, z).map_or_else(
         || State::new(new_mode),
@@ -372,7 +367,7 @@ pub fn edit(
     // Editing a block clears the safety latch, so a fixed command can run again.
     state.disabled = false;
     state.failure_count = 0;
-    place(source, pos, new_mode.block(), &state)
+    place(source, pos, new_mode.block(), &state).then_some(state_changed)
 }
 
 /// The command source a command block runs with (implemented by the region).
@@ -767,6 +762,48 @@ mod tests {
         assert!(state.auto);
         // Keys that are not command block fields are kept by the new block entity.
         assert_eq!(entity.data.get("Custom"), Some(&Tag::Int(3)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editing_updates_the_block_state_and_reports_it() {
+        let source = source().await;
+        let pos = [11, 70, 0];
+        place(&source, pos, BLOCKS[0], "east");
+        let packet = ferrite_protocol::packets::play::SetCommandBlock {
+            location: ferrite_protocol::types::BlockPos::new(11, 70, 0).pack(),
+            command: "say edited".into(),
+            mode: ferrite_protocol::VarInt(Mode::Repeat.id()),
+            track_output: false,
+            conditional: true,
+            automatic: true,
+        };
+        // Changing the mode and conditional flag rewrites the block state, which the caller
+        // must relay to clients as a `block_update`.
+        assert_eq!(edit(&source, pos, &packet), Some(true));
+        let (block, props) = block_at(&source, pos).expect("command block");
+        assert_eq!(block, BLOCKS[2]);
+        assert_eq!(property(props, "facing"), Some("east"));
+        assert_eq!(property(props, "conditional"), Some("true"));
+        let entity = source.block_entity(11, 70, 0).unwrap();
+        let state = State::load(Mode::Repeat, &entity.data);
+        assert_eq!(state.command, "say edited");
+        assert!(state.auto);
+        assert!(!state.track_output);
+        // Only the command and the toggles change now, so no block update is needed.
+        let packet = ferrite_protocol::packets::play::SetCommandBlock {
+            command: "say again".into(),
+            automatic: false,
+            ..packet
+        };
+        assert_eq!(edit(&source, pos, &packet), Some(false));
+        let entity = source.block_entity(11, 70, 0).unwrap();
+        let state = State::load(Mode::Repeat, &entity.data);
+        assert_eq!(state.command, "say again");
+        assert!(!state.auto, "the editor's new automatic flag is applied");
+        // Editing a block that is not a command block is rejected.
+        let stone = ferrite_data::blocks::default_state("minecraft:stone").unwrap();
+        source.set_block(12, 70, 0, u32::from(stone)).unwrap();
+        assert_eq!(edit(&source, [12, 70, 0], &packet), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
