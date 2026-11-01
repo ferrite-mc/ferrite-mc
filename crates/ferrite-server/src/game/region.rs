@@ -3405,11 +3405,6 @@ impl Region {
     /// Awards the experience orbs each player touches (`ExperienceOrb.playerTouch`) and syncs
     /// the bar. The take animation packets go out after every player was processed.
     fn pick_up_experience(&mut self, ctx: &TickContext) {
-        eprintln!(
-            "DBG pickup players={} entities={}",
-            self.players.len(),
-            self.entities.len()
-        );
         let mut sent = Vec::new();
         for p in self.players.values_mut() {
             if p.gamemode == 3 || p.survival.dead {
