@@ -410,7 +410,9 @@ fn in_branch(execute: NodeId) -> NodeBuilder<Source> {
                     "No such dimension: {dimension}"
                 )));
             }
-            Ok(ctx.source().clone())
+            let mut source = ctx.source().clone();
+            source.dimension = super::Dimension::from_key(dimension).unwrap_or_default();
+            Ok(source)
         }),
     )
 }
@@ -814,6 +816,7 @@ mod tests {
                 uuid: Some(Uuid::nil()),
                 name: Some("Alice".into()),
                 anchor: EntityAnchor::Feet,
+                dimension: crate::game::Dimension::Overworld,
                 world: None,
                 tree: None,
                 function_depth: 0,

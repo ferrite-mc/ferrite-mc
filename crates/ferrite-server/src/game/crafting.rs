@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ferrite_inventory::{CookingOutput, Crafter, FurnaceKind, NoCrafting};
-use ferrite_item::ItemStack;
+use ferrite_item::{Component, ItemStack, PotionContents, component_ids};
 use ferrite_recipe::{CookingKind, RecipeBook, RecipeKind};
 
 /// Vanilla `CraftingMenu.slotChangedCraftingGrid`: the grid's result from the recipe book.
@@ -58,6 +58,38 @@ impl Crafter for RecipeCrafter {
 
     fn cook(&self, kind: FurnaceKind, input: &ItemStack) -> Option<CookingOutput> {
         self.cooking(kind, input)
+    }
+
+    fn brew(&self, ingredient: &ItemStack, bottle: &ItemStack) -> Option<ItemStack> {
+        if ingredient.is_empty() || bottle.is_empty() {
+            return None;
+        }
+        let contents = match bottle.effective_component(component_ids::POTION_CONTENTS) {
+            Some(Component::PotionContents(contents)) => contents,
+            _ => return None,
+        };
+        let brewed = ferrite_recipe::brewing::mix(
+            ingredient.name()?,
+            bottle.name()?,
+            contents.potion.as_deref(),
+        )?;
+        let mut out = bottle.clone();
+        if let Some(item) = brewed.item {
+            out.item = ItemStack::from_name(item)?.item;
+        }
+        let potion = brewed
+            .potion
+            .map_or_else(|| contents.potion.clone(), |potion| Some(potion.to_owned()));
+        out.components.insert(
+            component_ids::POTION_CONTENTS,
+            Component::PotionContents(PotionContents { potion, ..contents }),
+        );
+        Some(out)
+    }
+
+    fn is_brewing_ingredient(&self, item: &ItemStack) -> bool {
+        item.name()
+            .is_some_and(ferrite_recipe::brewing::is_ingredient)
     }
 
     fn burn_time(&self, item: &ItemStack) -> i32 {

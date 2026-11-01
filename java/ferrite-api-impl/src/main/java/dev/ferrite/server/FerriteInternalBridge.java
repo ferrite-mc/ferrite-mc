@@ -33,7 +33,7 @@ public org.bukkit.damage.DamageSource.Builder createDamageSourceBuilder(org.bukk
         }
     };
 }
-public org.bukkit.inventory.ItemStack createEmptyStack() { throw new UnsupportedOperationException("Ferrite: not implemented: Server#createEmptyStack"); }
+public org.bukkit.inventory.ItemStack createEmptyStack() { return new FerriteItemStack(org.bukkit.Material.AIR, 0); }
 public io.papermc.paper.entity.poi.PoiType.Occupancy createOccupancy(java.lang.String a0) { throw new UnsupportedOperationException("Ferrite: not implemented: Server#createOccupancy"); }
 public <C> io.papermc.paper.persistence.PersistentDataKey<C> createPersistentDataKey(net.kyori.adventure.key.Key a0, org.bukkit.persistence.PersistentDataType<?, C> a1) { throw new UnsupportedOperationException("Ferrite: not implemented: Server#createPersistentDataKey"); }
 public io.papermc.paper.plugin.lifecycle.event.LifecycleEventManager<org.bukkit.plugin.Plugin> createPluginLifecycleEventManager(org.bukkit.plugin.java.JavaPlugin a0, java.util.function.BooleanSupplier a1) { return config -> { throw new UnsupportedOperationException("Ferrite: lifecycle handlers are not implemented"); }; }

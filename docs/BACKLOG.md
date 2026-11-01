@@ -102,6 +102,10 @@ still stubs that answer "Command not implemented".
   attribution outside regions.
 - Regionizer: move deferred mutations into per-region queues (a shared queue is still scanned).
 - MSPT under real worldgen (blocked on W2/W3).
+- **Optional, not started:** OpenCL GPU acceleration for chunk rendering — mesh building, light
+  propagation or chunk-packet encoding on the GPU, with a CPU fallback and a per-driver benchmark.
+  Evaluate only after the worldgen throughput work lands; it is the last roadmap item, not a
+  prerequisite.
 
 ## Quality and release
 

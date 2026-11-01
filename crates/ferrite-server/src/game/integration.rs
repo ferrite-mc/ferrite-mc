@@ -1473,7 +1473,7 @@ fn in_region<T: Send + 'static>(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         while let Ok(signal) = signals.try_recv() {
-            if let super::Signal::EntityTransfer { to, entity } = signal {
+            if let super::Signal::EntityTransfer { to, entity, .. } = signal {
                 super::hand_off(scheduler, to, entity);
             }
         }
@@ -1502,6 +1502,8 @@ fn entities_follow_region_merges_splits_and_hand_offs() {
         rules: Default::default(),
         spawn: [0.0, 65.0, 0.0],
         command_entities: Default::default(),
+        state: Default::default(),
+        tree: None,
     };
     let scheduler = Scheduler::new(
         Regionizer::<super::Region>::default(),
@@ -1640,6 +1642,7 @@ async fn tracker_spawns_and_removes_entities_by_range() {
     world
         .signals
         .send(super::Signal::EntityTransfer {
+            dimension: super::Dimension::Overworld,
             to: ferrite_region::ChunkPos(0, 0),
             entity: Box::new(record),
         })

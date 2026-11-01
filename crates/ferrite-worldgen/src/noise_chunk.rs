@@ -32,6 +32,8 @@ pub struct NoiseChunkGenerator {
     default_fluid: String,
     seed: i64,
     aquifer: Option<crate::aquifer::AquiferSpec>,
+    /// The `worldgen/noise_settings` id this generator was built from.
+    settings: ResourceId,
 }
 
 /// The trilinear corner grid of one `minecraft:interpolated` density node for one chunk.
@@ -231,9 +233,20 @@ impl FunctionContext for ChunkContext<'_> {
 }
 
 impl NoiseChunkGenerator {
+    /// The overworld generator (`minecraft:overworld` noise settings).
     pub fn new(data: &WorldgenData, seed: i64) -> Result<Self, NoiseChunkError> {
+        Self::with_settings(data, seed, "minecraft:overworld")
+    }
+
+    /// A generator for one dimension's `worldgen/noise_settings` entry, so the nether can be
+    /// filled with netherrack and lava instead of overworld stone and water.
+    pub fn with_settings(
+        data: &WorldgenData,
+        seed: i64,
+        settings_id: &str,
+    ) -> Result<Self, NoiseChunkError> {
         let settings = data
-            .noise_settings("minecraft:overworld")
+            .noise_settings(settings_id)
             .ok_or(NoiseChunkError::MissingSettings)?;
         Ok(Self {
             density: settings
@@ -252,7 +265,13 @@ impl NoiseChunkGenerator {
                 .as_ref()
                 .map(|value| crate::aquifer::AquiferSpec::new(value, data))
                 .transpose()?,
+            settings: ResourceId::parse(settings_id).expect("settings id"),
         })
+    }
+
+    /// The noise settings this generator fills, for the surface pass and biome selection.
+    pub fn settings_id(&self) -> &ResourceId {
+        &self.settings
     }
 
     /// Lowest block y of the generated column.

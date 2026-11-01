@@ -58,11 +58,13 @@ pub struct StageTimings {
 
 enum Job {
     Chunk {
+        dimension: super::Dimension,
         x: i32,
         z: i32,
         reply: Sender<Result<Generated, String>>,
     },
     Height {
+        dimension: super::Dimension,
         x: i32,
         z: i32,
         reply: Sender<Result<i32, String>>,
@@ -119,11 +121,28 @@ impl VanillaTerrain {
         Ok(Self { jobs })
     }
 
-    /// Generates a full column (noise, surface rules and carvers) off the region threads.
+    /// Generates a full overworld column (noise, surface rules and carvers) off the region
+    /// threads.
     pub fn generate(&self, x: i32, z: i32) -> anyhow::Result<Generated> {
+        self.generate_dimension(super::Dimension::Overworld, x, z)
+    }
+
+    /// Generates a full column for one dimension. The nether uses its own noise settings,
+    /// material rule and biome preset; the end has no generator yet.
+    pub fn generate_dimension(
+        &self,
+        dimension: super::Dimension,
+        x: i32,
+        z: i32,
+    ) -> anyhow::Result<Generated> {
         let (reply, result) = bounded(1);
         self.jobs
-            .send(Job::Chunk { x, z, reply })
+            .send(Job::Chunk {
+                dimension,
+                x,
+                z,
+                reply,
+            })
             .map_err(|_| anyhow::anyhow!("worldgen thread stopped"))?;
         result
             .recv()
@@ -131,11 +150,26 @@ impl VanillaTerrain {
             .map_err(anyhow::Error::msg)
     }
 
-    /// The first free block above the generated surface at `(x, z)`.
+    /// The first free block above the generated overworld surface at `(x, z)`.
     pub fn spawn_height(&self, x: i32, z: i32) -> anyhow::Result<i32> {
+        self.spawn_height_dimension(super::Dimension::Overworld, x, z)
+    }
+
+    /// The first free block above `dimension`'s generated surface at `(x, z)`.
+    pub fn spawn_height_dimension(
+        &self,
+        dimension: super::Dimension,
+        x: i32,
+        z: i32,
+    ) -> anyhow::Result<i32> {
         let (reply, result) = bounded(1);
         self.jobs
-            .send(Job::Height { x, z, reply })
+            .send(Job::Height {
+                dimension,
+                x,
+                z,
+                reply,
+            })
             .map_err(|_| anyhow::anyhow!("worldgen thread stopped"))?;
         result
             .recv()
@@ -201,6 +235,22 @@ fn worker(data: Arc<WorldgenData>, registry: Arc<RuntimeRegistry>, seed: i64, jo
         }
     };
     let mut features = FeatureGenerator::new(&data, seed, noise.min_y(), noise.height());
+    // The nether has its own noise settings, material rule and biome preset. It is optional
+    // so a data set without the nether settings still serves the overworld; a nether chunk
+    // request then fails with the construction error instead of silently generating stone.
+    let nether_noise = NoiseChunkGenerator::with_settings(&data, seed, "minecraft:nether")
+        .map_err(|error| error.to_string());
+    let nether_surface = nether_noise.as_ref().ok().and_then(|noise| {
+        SurfaceGenerator::with_biome_preset(&data, noise, seed, "minecraft:nether")
+            .map_err(|error| {
+                tracing::error!(%error, "creating the nether biome source failed");
+            })
+            .ok()
+    });
+    let mut nether_features = nether_noise
+        .as_ref()
+        .ok()
+        .map(|noise| FeatureGenerator::new(&data, seed, noise.min_y(), noise.height()));
     for job in jobs {
         match job {
             Job::LocateBiome {
@@ -216,17 +266,73 @@ fn worker(data: Arc<WorldgenData>, registry: Arc<RuntimeRegistry>, seed: i64, jo
                 };
                 let _ = reply.send(result);
             }
-            Job::Chunk { x, z, reply } => {
-                let result = match &surface {
-                    Some(source) => generate(&data, &registry, &noise, source, &mut features, x, z),
-                    None => Err("the overworld surface generator is unavailable".into()),
+            Job::Chunk {
+                dimension,
+                x,
+                z,
+                reply,
+            } => {
+                let result = match dimension {
+                    super::Dimension::Overworld => match &surface {
+                        Some(source) => generate(
+                            &data,
+                            &registry,
+                            &noise,
+                            source,
+                            &mut features,
+                            dimension,
+                            x,
+                            z,
+                        ),
+                        None => Err("the overworld surface generator is unavailable".into()),
+                    },
+                    super::Dimension::Nether => {
+                        match (&nether_noise, &nether_surface, nether_features.as_mut()) {
+                            (Ok(noise), Some(surface), Some(features)) => generate(
+                                &data, &registry, noise, surface, features, dimension, x, z,
+                            ),
+                            (Err(error), _, _) => {
+                                Err(format!("creating the nether generator: {error}"))
+                            }
+                            _ => Err("the nether surface generator is unavailable".into()),
+                        }
+                    }
+                    super::Dimension::End => Err("the end generator is not implemented yet".into()),
                 };
                 let _ = reply.send(result);
             }
-            Job::Height { x, z, reply } => {
-                let result = match &surface {
-                    Some(source) => generate(&data, &registry, &noise, source, &mut features, x, z),
-                    None => Err("the overworld surface generator is unavailable".into()),
+            Job::Height {
+                dimension,
+                x,
+                z,
+                reply,
+            } => {
+                let result = match dimension {
+                    super::Dimension::Overworld => match &surface {
+                        Some(source) => generate(
+                            &data,
+                            &registry,
+                            &noise,
+                            source,
+                            &mut features,
+                            dimension,
+                            x,
+                            z,
+                        ),
+                        None => Err("the overworld surface generator is unavailable".into()),
+                    },
+                    super::Dimension::Nether => {
+                        match (&nether_noise, &nether_surface, nether_features.as_mut()) {
+                            (Ok(noise), Some(surface), Some(features)) => generate(
+                                &data, &registry, noise, surface, features, dimension, x, z,
+                            ),
+                            (Err(error), _, _) => {
+                                Err(format!("creating the nether generator: {error}"))
+                            }
+                            _ => Err("the nether surface generator is unavailable".into()),
+                        }
+                    }
+                    super::Dimension::End => Err("the end generator is not implemented yet".into()),
                 }
                 .map(|column| {
                     let local_x = x.rem_euclid(16) as u8;
@@ -284,12 +390,14 @@ fn locate_biome_on_worker(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate(
     data: &WorldgenData,
     registry: &RuntimeRegistry,
     noise: &NoiseChunkGenerator,
     surface: &SurfaceGenerator<'_>,
     features: &mut FeatureGenerator,
+    dimension: super::Dimension,
     x: i32,
     z: i32,
 ) -> Result<Generated, String> {
@@ -325,14 +433,84 @@ fn generate(
         )
         .map_err(|error| format!("features for chunk {x},{z}: {error}"))?;
     timings.features_ms = mark.elapsed().as_secs_f64() * 1000.0;
+    // The nether noise settings fill only y=0..128, but the dimension is 256 blocks tall.
+    // Pad the column to the dimension's declared range, as a vanilla 26.3 chunk is saved.
+    let chunk = fit_vertical(chunk, dimension, registry)?;
     let mark = std::time::Instant::now();
-    let light = sky_light(&chunk, registry);
+    let light = if dimension.has_skylight() {
+        sky_light(&chunk, registry)
+    } else {
+        // A sky without skylight (the nether) has no sky-light data at all.
+        let count = chunk.sections().len() + 2;
+        LightData {
+            sky: vec![LightSection::Empty; count],
+            block: vec![LightSection::Empty; count],
+        }
+    };
     timings.light_ms = mark.elapsed().as_secs_f64() * 1000.0;
     Ok(Generated {
         chunk,
         light,
         timings,
     })
+}
+
+/// Resizes a generated column to the dimension's vertical range, keeping every block and
+/// biome the generator produced.
+fn fit_vertical(
+    chunk: Chunk,
+    dimension: super::Dimension,
+    registry: &RuntimeRegistry,
+) -> Result<Chunk, String> {
+    let min_y = dimension.min_y();
+    let height = dimension.height() as u32;
+    if chunk.min_y() == min_y && chunk.height_blocks() == height {
+        return Ok(chunk);
+    }
+    let air = registry
+        .block_id("minecraft:air", &Default::default())
+        .ok_or_else(|| "missing air".to_string())?;
+    let biome = chunk
+        .sections()
+        .first()
+        .and_then(|section| section.biomes().get(0))
+        .unwrap_or(0);
+    let mut out = Chunk::new(
+        min_y,
+        height,
+        air,
+        biome,
+        registry.block_bits(),
+        registry.biome_bits(),
+    )
+    .map_err(|error| format!("resizing the chunk: {error}"))?;
+    for y in chunk.min_y()..chunk.min_y() + chunk.height_blocks() as i32 {
+        for z in 0..16u8 {
+            for x in 0..16u8 {
+                let Some(state) = chunk.block(x, y, z) else {
+                    continue;
+                };
+                if state != air {
+                    out.set_block(x, y, z, state, registry)
+                        .map_err(|error| format!("copying the chunk: {error}"))?;
+                }
+            }
+        }
+    }
+    for (index, section) in chunk.sections().iter().enumerate() {
+        if index >= out.sections().len() {
+            break;
+        }
+        for cell in 0..64 {
+            if let Some(value) = section.biomes().get(cell) {
+                out.sections_mut()[index]
+                    .set_biome(cell, value)
+                    .map_err(|error| format!("copying the biome cells: {error}"))?;
+            }
+        }
+    }
+    out.recompute_heightmaps(registry);
+    Ok(out)
 }
 
 /// Writes vanilla `MultiNoiseBiomeSource` selections into the chunk's 4x4x4 biome cells.

@@ -298,6 +298,23 @@ async fn sign_and_bucket_interactions_reach_tracking_bot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nether_bed_explodes_for_tracking_bot() {
     let source = AnvilChunkSource::new_memory();
+    // Beds only explode where `bedWorks` is false, and each dimension owns its own chunk
+    // source now, so the bed must live in the nether source and the player must spawn on it.
+    let mut dimensions =
+        super::dimension::DimensionRegistry::with_overworld(std::sync::Arc::clone(&source), [1, 65, 1]);
+    std::sync::Arc::get_mut(&mut dimensions)
+        .unwrap()
+        .set_spawn(super::Dimension::Nether, [1, 65, 1]);
+    let world = World::start_configured(
+        Some(source.clone()),
+        [1, 65, 1],
+        super::WorldSettings {
+            dimension: super::Dimension::Nether,
+            dimensions: Some(dimensions),
+            ..Default::default()
+        },
+    );
+    let source = world.dimensions().source(super::Dimension::Nether).clone();
     loop {
         if let Some(result) = source.get(0, 0, 0) {
             result.unwrap();
@@ -330,14 +347,6 @@ async fn nether_bed_explodes_for_tracking_bot() {
             block("red_bed", &[("part", "head"), ("facing", "north")]),
         )
         .unwrap();
-    let world = World::start_configured(
-        Some(source.clone()),
-        [1, 65, 1],
-        super::WorldSettings {
-            dimension: super::Dimension::Nether,
-            ..Default::default()
-        },
-    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(serve(
