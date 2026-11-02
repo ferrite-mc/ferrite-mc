@@ -163,6 +163,32 @@ public class FerriteServer extends ServerStubs {
             throw new UnsupportedOperationException("Ferrite: not implemented: ConsoleCommandSender#" + method.getName());
         });
     }
+    /** A command sender whose chat feedback is delivered to the supplied listener. */
+    @Override public org.bukkit.command.CommandSender createCommandSender(java.util.function.Consumer<? super net.kyori.adventure.text.Component> feedback) {
+        java.util.Objects.requireNonNull(feedback, "feedback");
+        return (org.bukkit.command.CommandSender) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.command.CommandSender.class}, (proxy, method, args) -> switch (method.getName()) {
+            case "sendMessage", "sendRawMessage" -> { if (args != null) for (Object arg : args) deliverFeedback(feedback, arg); yield null; }
+            case "getServer" -> this;
+            case "getName" -> "CommandSender";
+            case "isOp", "hasPermission", "isPermissionSet", "isConversing" -> false;
+            case "getEffectivePermissions" -> java.util.Set.of();
+            case "recalculatePermissions" -> null;
+            case "equals" -> proxy == args[0];
+            case "hashCode" -> System.identityHashCode(proxy);
+            case "toString" -> "CommandSender";
+            default -> throw new UnsupportedOperationException("Ferrite: not implemented: CommandSender#" + method.getName());
+        });
+    }
+    private static void deliverFeedback(java.util.function.Consumer<? super net.kyori.adventure.text.Component> feedback, Object value) {
+        if (value instanceof net.kyori.adventure.text.Component component) feedback.accept(component);
+        else if (value instanceof net.kyori.adventure.text.Component[] components) { for (var component : components) feedback.accept(component); }
+        else if (value instanceof net.kyori.adventure.text.ComponentLike like) feedback.accept(like.asComponent());
+        else if (value instanceof net.kyori.adventure.text.ComponentLike[] likes) { for (var like : likes) feedback.accept(like.asComponent()); }
+        else if (value instanceof String message) feedback.accept(net.kyori.adventure.text.Component.text(message));
+        else if (value instanceof String[] messages) { for (var message : messages) feedback.accept(net.kyori.adventure.text.Component.text(message)); }
+        else if (value instanceof java.util.UUID || value instanceof net.kyori.adventure.identity.Identity) { }
+        else throw new UnsupportedOperationException("Ferrite: unsupported command feedback: " + value);
+    }
     final FerriteEntitySchedulers entitySchedulers = new FerriteEntitySchedulers();
     public io.papermc.paper.threadedregions.scheduler.EntityScheduler entityScheduler(java.util.UUID id, java.util.function.BooleanSupplier alive) { return entitySchedulers.forEntity(id, alive); }
     final FerriteAsyncScheduler asyncScheduler = new FerriteAsyncScheduler();

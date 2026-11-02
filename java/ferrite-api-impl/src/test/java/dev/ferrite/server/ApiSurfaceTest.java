@@ -183,4 +183,26 @@ class ApiSurfaceTest {
         for (var audience : audiences) if (audience == expected) return true;
         return false;
     }
+
+    @Test void commandSenderRedirectsFeedbackToTheConsumer() {
+        var feedback = new java.util.ArrayList<net.kyori.adventure.text.Component>();
+        var sender = server.createCommandSender(feedback::add);
+        sender.sendMessage(net.kyori.adventure.text.Component.text("hello"));
+        sender.sendMessage("plain");
+        sender.sendMessage(net.kyori.adventure.text.Component.text("first"));
+        sender.sendMessage(net.kyori.adventure.text.Component.text("second"));
+        assertEquals(4, feedback.size());
+        assertEquals("hello", plain(feedback.get(0)));
+        assertEquals("plain", plain(feedback.get(1)));
+        assertEquals("first", plain(feedback.get(2)));
+        assertEquals("second", plain(feedback.get(3)));
+        assertSame(server, sender.getServer());
+        assertFalse(sender.isOp());
+        assertFalse(sender.hasPermission("ferrite.test"));
+        assertTrue(sender.getEffectivePermissions().isEmpty());
+    }
+
+    private static String plain(net.kyori.adventure.text.Component component) {
+        return net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(component);
+    }
 }
