@@ -10,6 +10,8 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 | `online-mode` | 불리언 (`bool`) | `true` | `true`면 Mojang 세션 서버로 인증하고(암호화 + `hasJoined` 검증) 정품 계정만 접속할 수 있습니다. `false`면 오프라인 모드로 아무 이름이나 접속할 수 있습니다. |
 | `enforce-secure-profile` | 불리언 (`bool`) | `true` | 정품 서버에서 서명된 채팅(프로필 키)을 요구합니다. 오프라인 모드에서는 무시됩니다. |
 | `motd` | 문자열 (`String`) | `"A Ferrite server"` | 서버 목록(멀티플레이 화면)에 표시되는 서버 설명 문구입니다. |
+| `chat-spam-threshold-seconds` | 정수 (`i32`) | `10` | 미통합(pending) 설정. 비OP 플레이어의 반복 채팅 허용 시간(초)입니다. 기본값 10초에서는 연속 9개 메시지까지 허용되고 10번째에 `Kicked for spamming`으로 접속이 끊깁니다. OP는 면제되며, `0` 이하이면 제한이 비활성화됩니다. |
+| `command-spam-threshold-seconds` | 정수 (`i32`) | `10` | 미통합(pending) 설정. 비OP 플레이어의 반복 명령 허용 시간(초)으로, 명령 실행 후 검사됩니다. 기본값 10초를 넘기면 `Kicked for spamming`으로 끊깁니다. OP는 면제되며, `0` 이하이면 제한이 비활성화됩니다. |
 | `server-icon` | 문자열 경로 (`PathBuf`) | `"server-icon.png"` | 서버 목록 아이콘(64x64 PNG). 파일이 없거나 잘못되면 경고만 남기고 아이콘 없이 시작합니다. |
 | `max-players` | 정수 (`u32`) | `20` | 최대 동시 접속자 수. 상태 응답에 표시되고 접속 제한에 사용됩니다. |
 | `view-distance` | 정수 (`u8`) | `10` | 플레이어에게 전송하는 청크 반경(단위: 청크). 실제 적용 시 2~32 범위로 제한됩니다. |
@@ -28,6 +30,10 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 
 참고: `compression-threshold`와 `max-players`는 프로토콜이 `i32`로 표현할 수 있는 범위를
 넘으면 서버가 시작 단계에서 오류로 종료됩니다.
+
+`chat-spam-threshold-seconds`와 `command-spam-threshold-seconds`는 아직 `main`에 통합되지 않은
+`yxshadxw/freebuff2-command-blocks` 브랜치에서 추가된 설정입니다. 해당 브랜치가 통합되기 전까지
+`main` 빌드는 이 키를 인식하지 않으므로(무시) 설정해도 동작이 바뀌지 않습니다.
 
 ## 실행 방법
 
