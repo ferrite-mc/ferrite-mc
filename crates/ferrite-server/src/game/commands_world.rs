@@ -12,6 +12,7 @@ use ferrite_command::{
     arguments::{BlockStateValue, Coordinates},
     literal,
 };
+use ferrite_nbt::Tag;
 use ferrite_net::game::packet;
 use ferrite_protocol::{
     VarInt,
@@ -78,6 +79,8 @@ pub enum WorldCommand {
         pos: Coordinates,
         block: u16,
         mode: SetMode,
+        /// The `{...}` block entity tag of `/setblock ... {Command:...}`.
+        nbt: Option<Tag>,
     },
     Fill {
         from: Coordinates,
@@ -120,6 +123,11 @@ pub struct Outcome {
 pub trait WorldBlocks {
     fn block(&self, x: i32, y: i32, z: i32) -> Option<u32>;
     fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool;
+    /// Creates the block entity a freshly placed block needs. Only command blocks are
+    /// supported; `nbt` is the `/setblock` tag, which wins over the defaults.
+    fn place_block_entity(&self, _pos: [i32; 3], _state: u32, _nbt: Option<&Tag>) -> bool {
+        false
+    }
 }
 
 impl WorldBlocks for super::anvil::AnvilChunkSource {
@@ -128,6 +136,21 @@ impl WorldBlocks for super::anvil::AnvilChunkSource {
     }
     fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool {
         super::anvil::AnvilChunkSource::set_block(self, x, y, z, state).is_ok()
+    }
+    fn place_block_entity(&self, pos: [i32; 3], state: u32, nbt: Option<&Tag>) -> bool {
+        let Some((name, _)) = u16::try_from(state)
+            .ok()
+            .and_then(ferrite_data::blocks::state)
+        else {
+            return false;
+        };
+        if super::command_block::Mode::of_block(name).is_none() {
+            return false;
+        }
+        match nbt {
+            Some(Tag::Compound(data)) => super::command_block::place_with(self, pos, name, data),
+            _ => super::command_block::ensure(self, pos, name).is_some(),
+        }
     }
 }
 
@@ -163,6 +186,19 @@ fn block_argument(ctx: &CommandContext<Source>, name: &str) -> Result<u16, Comma
     }
 }
 
+/// The `{...}` block entity tag of a block argument (`/setblock ... {Command:...}`).
+fn nbt_argument(ctx: &CommandContext<Source>) -> Result<Option<Tag>, CommandError> {
+    match ctx.argument("block") {
+        Some(ferrite_command::ArgumentValue::BlockState(value)) => match &value.nbt {
+            Some(text) => ferrite_nbt::snbt::parse(text)
+                .map(Some)
+                .map_err(|error| CommandError::failed(error.to_string())),
+            None => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
 fn filter_argument(ctx: &CommandContext<Source>) -> Result<BlockFilter, CommandError> {
     match ctx.argument("filter") {
         Some(ferrite_command::ArgumentValue::BlockState(value)) => resolve_filter(value),
@@ -190,7 +226,16 @@ fn setblock_execute(
     move |ctx| {
         let pos = position(ctx, "pos")?;
         let block = block_argument(ctx, "block")?;
-        dispatch(ctx.source(), WorldCommand::SetBlock { pos, block, mode })
+        let nbt = nbt_argument(ctx)?;
+        dispatch(
+            ctx.source(),
+            WorldCommand::SetBlock {
+                pos,
+                block,
+                mode,
+                nbt,
+            },
+        )
     }
 }
 
@@ -386,9 +431,12 @@ pub fn execute(
     world: &dyn WorldBlocks,
 ) -> Result<Outcome, String> {
     match command {
-        WorldCommand::SetBlock { pos, block, mode } => {
-            set_block(resolve(pos, origin), *block, *mode, world)
-        }
+        WorldCommand::SetBlock {
+            pos,
+            block,
+            mode,
+            nbt,
+        } => set_block(resolve(pos, origin), *block, *mode, nbt.as_ref(), world),
         WorldCommand::Fill {
             from,
             to,
@@ -468,11 +516,23 @@ pub fn apply_world(
     world: &dyn WorldBlocks,
     tracking: &Tracking,
 ) {
-    let Ok(outcome) = execute(command, origin, world) else {
-        return;
-    };
+    let _ = apply_world_result(command, origin, world, tracking);
+}
+
+/// [`apply_world`], returning the feedback line (or the error) so a command block can store it.
+pub fn apply_world_result(
+    command: &WorldCommand,
+    origin: &Origin,
+    world: &dyn WorldBlocks,
+    tracking: &Tracking,
+) -> Result<Outcome, String> {
+    let outcome = execute(command, origin, world)?;
+    for change in &outcome.changes {
+        let pos = BlockPos::unpack(change.location);
+        world.place_block_entity([pos.x, pos.y, pos.z], change.state, None);
+    }
     let tracking = tracking.lock().unwrap();
-    for change in outcome.changes {
+    for change in &outcome.changes {
         let pos = BlockPos::unpack(change.location);
         let chunk = (pos.x.div_euclid(16), pos.z.div_euclid(16));
         let update = packet(&BlockUpdate {
@@ -485,6 +545,7 @@ pub fn apply_world(
             }
         }
     }
+    Ok(outcome)
 }
 
 fn bounds(a: [i32; 3], b: [i32; 3]) -> ([i32; 3], [i32; 3]) {
@@ -519,6 +580,7 @@ fn set_block(
     pos: [i32; 3],
     block: u16,
     mode: SetMode,
+    nbt: Option<&Tag>,
     world: &dyn WorldBlocks,
 ) -> Result<Outcome, String> {
     let [x, y, z] = pos;
@@ -534,8 +596,17 @@ fn set_block(
             block_name(old)
         ));
     }
+    if nbt.is_some()
+        && !ferrite_data::blocks::state(block)
+            .is_some_and(|(name, _)| super::command_block::Mode::of_block(name).is_some())
+    {
+        return Err("The target block is not a block entity".into());
+    }
     if !world.set_block(x, y, z, u32::from(block)) {
         return Err("Chunk not loaded".into());
+    }
+    if nbt.is_some() && !world.place_block_entity(pos, u32::from(block), nbt) {
+        return Err("The target block is not a block entity".into());
     }
     Ok(Outcome {
         changes: vec![Change {
@@ -707,6 +778,7 @@ mod tests {
             )),
             actions,
             anchor: ferrite_command::EntityAnchor::Feet,
+            dimension: crate::game::Dimension::Overworld,
             world: None,
             tree: None,
             function_depth: 0,
@@ -773,6 +845,7 @@ mod tests {
                 pos: pos(1.0, 64.0, 2.0),
                 block: stone(),
                 mode: SetMode::Replace,
+                nbt: None,
             },
             &origin(),
             &world,
@@ -788,6 +861,7 @@ mod tests {
                 pos: pos(1.0, 64.0, 2.0),
                 block: block("minecraft:dirt"),
                 mode: SetMode::Keep,
+                nbt: None,
             },
             &origin(),
             &world,
@@ -801,6 +875,7 @@ mod tests {
                 pos: pos(1.0, 65.0, 2.0),
                 block: block("minecraft:dirt"),
                 mode: SetMode::Keep,
+                nbt: None,
             },
             &origin(),
             &world,
@@ -1068,5 +1143,44 @@ mod tests {
             tree.execute("setblock 1 2 3 minecraft:not_a_block", guest)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn setblock_carries_its_block_entity_tag() {
+        let tree = super::super::commands::dispatcher();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let operator = source(2, tx);
+        tree.execute(
+            "setblock 1 2 3 minecraft:command_block{Command:\"say hi\"}",
+            operator.clone(),
+        )
+        .unwrap();
+        match rx.try_recv().unwrap() {
+            Action::World(WorldCommand::SetBlock { nbt, .. }) => {
+                let ferrite_nbt::Tag::Compound(map) =
+                    nbt.expect("the tag is carried by the command")
+                else {
+                    panic!("compound tag");
+                };
+                assert_eq!(
+                    map.get("Command"),
+                    Some(&ferrite_nbt::Tag::String("say hi".into()))
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+        // A tag on a block without a block entity is rejected before anything changes.
+        let error = execute(
+            &WorldCommand::SetBlock {
+                pos: pos(1.0, 64.0, 2.0),
+                block: stone(),
+                mode: SetMode::Replace,
+                nbt: Some(ferrite_nbt::snbt::parse("{Command:\"x\"}").unwrap()),
+            },
+            &origin(),
+            &TestWorld::new(),
+        )
+        .unwrap_err();
+        assert!(error.contains("not a block entity"), "{error}");
     }
 }

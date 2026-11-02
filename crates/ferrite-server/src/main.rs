@@ -296,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
                 .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
         ),
         plugin_commands: Some(plugin_commands),
+        dimensions: None,
     };
     let world = game::World::start_configured(Some(source), spawn, settings);
     let mut server = tokio::spawn(ferrite_net::serve(

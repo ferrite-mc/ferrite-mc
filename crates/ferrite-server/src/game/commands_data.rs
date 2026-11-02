@@ -731,6 +731,7 @@ mod tests {
                 uuid: Some(uuid::Uuid::nil()),
                 name: Some("Alice".into()),
                 anchor: ferrite_command::EntityAnchor::Feet,
+                dimension: crate::game::Dimension::Overworld,
                 world: None,
                 tree: None,
                 function_depth: 0,

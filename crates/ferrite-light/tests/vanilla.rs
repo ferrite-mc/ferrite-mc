@@ -293,5 +293,9 @@ fn compare_fixture_light_when_available() {
         total_compared[0] > 0 && total_compared[1] > 0,
         "fixture has no stored light arrays"
     );
-    assert_eq!(total_mismatch, [0, 0], "vanilla light mismatch");
+    assert_eq!(
+        total_mismatch,
+        [0, 0],
+        "vanilla light mismatch; rerun tools/make_fixture_world.py to regenerate the fixture"
+    );
 }

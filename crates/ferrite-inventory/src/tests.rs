@@ -1100,3 +1100,120 @@ fn closing_a_merchant_menu_returns_its_inputs() {
     );
     assert!(f.menu.container().iter().all(ItemStack::is_empty));
 }
+
+fn brewing_potion(name: &str) -> ItemStack {
+    let mut stack = item("potion", 1);
+    stack.components.insert(
+        component_ids::POTION_CONTENTS,
+        Component::PotionContents(ferrite_item::PotionContents {
+            potion: Some(name.into()),
+            ..Default::default()
+        }),
+    );
+    stack
+}
+
+fn brewing_potion_id(stack: &ItemStack) -> Option<String> {
+    match stack.effective_component(component_ids::POTION_CONTENTS) {
+        Some(Component::PotionContents(contents)) => contents.potion,
+        _ => None,
+    }
+}
+
+/// Water + nether wart -> awkward, awkward + sugar -> swiftness.
+struct BrewingCrafter;
+
+impl Crafter for BrewingCrafter {
+    fn craft(&self, _: &[ItemStack], _: usize) -> ItemStack {
+        empty()
+    }
+
+    fn brew(&self, ingredient: &ItemStack, bottle: &ItemStack) -> Option<ItemStack> {
+        if ingredient.is_empty() || bottle.is_empty() {
+            return None;
+        }
+        let current = brewing_potion_id(bottle)?;
+        let next = match (ingredient.name()?, current.as_str()) {
+            ("minecraft:nether_wart", "minecraft:water") => "minecraft:awkward",
+            ("minecraft:sugar", "minecraft:awkward") => "minecraft:swiftness",
+            _ => return None,
+        };
+        let mut out = bottle.clone();
+        out.components.insert(
+            component_ids::POTION_CONTENTS,
+            Component::PotionContents(ferrite_item::PotionContents {
+                potion: Some(next.into()),
+                ..Default::default()
+            }),
+        );
+        Some(out)
+    }
+
+    fn is_brewing_ingredient(&self, item: &ItemStack) -> bool {
+        matches!(
+            item.name(),
+            Some("minecraft:nether_wart" | "minecraft:sugar" | "minecraft:gunpowder")
+        )
+    }
+}
+
+#[test]
+fn brewing_stand_brews_after_four_hundred_ticks_and_spends_fuel() {
+    let mut f = Fixture::new(Menu::brewing_stand(9));
+    f.set(0, brewing_potion("minecraft:water"));
+    f.set(3, item("nether_wart", 2));
+    f.set(4, item("blaze_powder", 1));
+
+    f.menu.tick(&BrewingCrafter);
+    assert_eq!(f.menu.brewing_state().unwrap().fuel, 19);
+    assert_eq!(f.menu.data_value(crate::BREWING_BREW_TIME), 400);
+    assert_eq!(f.menu.data_value(crate::BREWING_FUEL), 19);
+
+    for _ in 0..399 {
+        f.menu.tick(&BrewingCrafter);
+    }
+    assert_eq!(
+        brewing_potion_id(&f.slot(0)).as_deref(),
+        Some("minecraft:water")
+    );
+    assert_eq!(f.menu.data_value(crate::BREWING_BREW_TIME), 1);
+
+    f.menu.tick(&BrewingCrafter);
+    assert_eq!(
+        brewing_potion_id(&f.slot(0)).as_deref(),
+        Some("minecraft:awkward")
+    );
+    assert_eq!(f.slot(3).count, 1);
+    assert_eq!(f.menu.data_value(crate::BREWING_BREW_TIME), 0);
+    assert_eq!(f.menu.data_value(crate::BREWING_FUEL), 19);
+    assert_eq!(f.menu.brewing_state().unwrap().fuel, 19);
+}
+
+#[test]
+fn brewing_stand_rejects_items_in_the_wrong_slots() {
+    let mut f = Fixture::new(Menu::brewing_stand(5));
+    f.menu.set_carried(item("stone", 1));
+    f.click(0, 0, Pickup);
+    assert!(f.slot(0).is_empty(), "a bottle slot takes no stone");
+    assert_eq!(f.carried().count, 1);
+
+    f.menu.set_carried(brewing_potion("minecraft:water"));
+    f.click(0, 0, Pickup);
+    assert_eq!(
+        brewing_potion_id(&f.slot(0)).as_deref(),
+        Some("minecraft:water")
+    );
+    assert!(f.carried().is_empty());
+
+    f.menu.set_carried(item("stone", 1));
+    f.click(4, 0, Pickup);
+    assert!(
+        f.slot(4).is_empty(),
+        "the fuel slot takes blaze powder only"
+    );
+    assert_eq!(f.carried().count, 1);
+
+    f.menu.set_carried(item("blaze_powder", 2));
+    f.click(4, 0, Pickup);
+    assert_eq!(f.slot(4).count, 2);
+}

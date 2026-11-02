@@ -90,6 +90,24 @@ pub const FURNACE_BURN_TOTAL: usize = 4;
 /// Number of container data slots of a furnace family menu.
 pub const FURNACE_DATA_SLOTS: usize = 5;
 
+/// Vanilla `BrewingStandBlockEntity.BREW_TIME`: ticks one brew takes.
+pub const BREW_TIME: i32 = 400;
+/// Blaze powder charges a brewing stand holds (vanilla `BrewingStandBlockEntity.FUEL_PER_BREWING`).
+pub const FUEL_PER_BLAZE_POWDER: i32 = 20;
+
+/// Vanilla `BrewingStandMenu` container data: brew time left, then fuel left.
+pub const BREWING_BREW_TIME: usize = 0;
+pub const BREWING_FUEL: usize = 1;
+/// Number of container data slots of a brewing stand menu.
+pub const BREWING_DATA_SLOTS: usize = 2;
+
+/// Vanilla `BeaconMenu` container data: pyramid level, primary effect id + 1, secondary id + 1.
+pub const BEACON_LEVELS: usize = 0;
+pub const BEACON_PRIMARY: usize = 1;
+pub const BEACON_SECONDARY: usize = 2;
+/// Number of container data slots of a beacon menu.
+pub const BEACON_DATA_SLOTS: usize = 3;
+
 /// One furnace-family recipe result, as [`Crafter::cook`] reports it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CookingOutput {
@@ -120,6 +138,26 @@ impl FurnaceState {
     }
 }
 
+/// Brewing stand timers (vanilla `BrewingStandBlockEntity.brewTime` and `fuel`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BrewingState {
+    /// Ticks left of the current brew; [`BREW_TIME`] when it starts.
+    pub brew_time: i32,
+    /// Blaze powder charges left; one is spent when a brew starts.
+    pub fuel: i32,
+}
+
+/// A beacon's pyramid level and chosen effects (vanilla `BeaconBlockEntity`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BeaconState {
+    /// Pyramid levels, 0 to 4.
+    pub levels: i32,
+    /// `minecraft:mob_effect` protocol id of the primary effect.
+    pub primary: Option<i32>,
+    /// The second effect a level-4 beacon can grant.
+    pub secondary: Option<i32>,
+}
+
 /// The menus this crate implements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuKind {
@@ -143,6 +181,10 @@ pub enum MenuKind {
     Smithing,
     /// A loom (vanilla `LoomMenu`).
     Loom,
+    /// A brewing stand (vanilla `BrewingStandMenu`).
+    BrewingStand,
+    /// A beacon (vanilla `BeaconMenu`).
+    Beacon,
     /// A villager's merchant screen (vanilla `MerchantMenu`).
     Merchant,
 }
@@ -161,6 +203,8 @@ impl MenuKind {
             Self::Stonecutter => Some("minecraft:stonecutter".into()),
             Self::Smithing => Some("minecraft:smithing".into()),
             Self::Loom => Some("minecraft:loom".into()),
+            Self::BrewingStand => Some("minecraft:brewing_stand".into()),
+            Self::Beacon => Some("minecraft:beacon".into()),
             Self::Merchant => Some("minecraft:merchant".into()),
         }
     }
@@ -268,6 +312,18 @@ pub trait Crafter {
     /// Burn ticks of a fuel item (vanilla `FuelValues.burnDuration`), or 0 when it is no fuel.
     fn burn_time(&self, _item: &ItemStack) -> i32 {
         0
+    }
+
+    /// The result of brewing `ingredient` into the potion in `bottle` (vanilla
+    /// `PotionBrewing.mix`), or `None` when the two do not brew.
+    fn brew(&self, _ingredient: &ItemStack, _bottle: &ItemStack) -> Option<ItemStack> {
+        None
+    }
+
+    /// Whether an item is an ingredient of any brewing mix (vanilla
+    /// `PotionBrewing.isIngredient`).
+    fn is_brewing_ingredient(&self, _item: &ItemStack) -> bool {
+        false
     }
 
     /// The stonecutter results for `input` (vanilla `StonecutterMenu.getResults`).
@@ -409,6 +465,15 @@ enum Rule {
     TradeInput,
     /// A merchant's output slot (`MerchantResultSlot`).
     TradeOutput,
+    /// A brewing stand's bottle slot (vanilla `BrewingStandMenu.PotionSlot`): potions and empty
+    /// glass bottles, one per slot.
+    Potion,
+    /// A brewing stand's ingredient slot.
+    BrewingIngredient,
+    /// A brewing stand's fuel slot (vanilla `BrewingStandMenu.FuelSlot`): blaze powder only.
+    BrewingFuel,
+    /// A beacon's payment slot (vanilla `BeaconMenu.PaymentSlot`): one of the five payment items.
+    BeaconPayment,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -473,6 +538,10 @@ pub struct Menu {
     data: Vec<i32>,
     remote_data: Vec<i32>,
     furnace: Option<FurnaceState>,
+    /// Brewing stand timers while a brewing menu is open.
+    brewing: Option<BrewingState>,
+    /// Beacon levels and chosen effects while a beacon menu is open.
+    beacon: Option<BeaconState>,
     /// Vanilla `AnvilMenu.itemName`: the name the player typed.
     rename: String,
     /// Vanilla `AnvilMenu.cost`: experience levels taking the result costs.
@@ -520,6 +589,8 @@ impl Menu {
             | MenuKind::Stonecutter
             | MenuKind::Smithing
             | MenuKind::Loom
+            | MenuKind::BrewingStand
+            | MenuKind::Beacon
             | MenuKind::Merchant => 0,
         };
         let container = match kind {
@@ -530,6 +601,8 @@ impl Menu {
             MenuKind::Grindstone => vec![ItemStack::empty(); 2],
             MenuKind::Stonecutter => vec![ItemStack::empty(); 1],
             MenuKind::Smithing | MenuKind::Loom => vec![ItemStack::empty(); 3],
+            MenuKind::BrewingStand => vec![ItemStack::empty(); 5],
+            MenuKind::Beacon => vec![ItemStack::empty(); 1],
             MenuKind::Merchant => vec![ItemStack::empty(); 3],
             _ => Vec::new(),
         };
@@ -538,6 +611,8 @@ impl Menu {
             MenuKind::Anvil => 1,
             MenuKind::Enchanting => 4,
             MenuKind::Stonecutter | MenuKind::Loom => 1,
+            MenuKind::BrewingStand => BREWING_DATA_SLOTS,
+            MenuKind::Beacon => BEACON_DATA_SLOTS,
             _ => 0,
         };
         let remote = vec![Remote::empty(); slots.len()];
@@ -552,6 +627,8 @@ impl Menu {
             data: vec![0; data_len],
             remote_data: vec![i32::MIN; data_len],
             furnace: matches!(kind, MenuKind::Furnace(_)).then(FurnaceState::default),
+            brewing: matches!(kind, MenuKind::BrewingStand).then(BrewingState::default),
+            beacon: matches!(kind, MenuKind::Beacon).then(BeaconState::default),
             rename: String::new(),
             anvil_cost: 0,
             stonecutting: Vec::new(),
@@ -766,6 +843,45 @@ impl Menu {
         Self::with_slots(container_id, MenuKind::Loom, slots)
     }
 
+    /// A brewing stand (vanilla `BrewingStandMenu`): `0..3` the bottles, `3` the ingredient,
+    /// `4` the fuel and `5..41` the player's inventory.
+    pub fn brewing_stand(container_id: i32) -> Self {
+        let mut slots = vec![
+            SlotDef {
+                store: Store::Container(0),
+                rule: Rule::Potion,
+            },
+            SlotDef {
+                store: Store::Container(1),
+                rule: Rule::Potion,
+            },
+            SlotDef {
+                store: Store::Container(2),
+                rule: Rule::Potion,
+            },
+            SlotDef {
+                store: Store::Container(3),
+                rule: Rule::BrewingIngredient,
+            },
+            SlotDef {
+                store: Store::Container(4),
+                rule: Rule::BrewingFuel,
+            },
+        ];
+        standard_inventory_slots(&mut slots);
+        Self::with_slots(container_id, MenuKind::BrewingStand, slots)
+    }
+
+    /// A beacon (vanilla `BeaconMenu`): `0` the payment item, `1..37` the player's inventory.
+    pub fn beacon(container_id: i32) -> Self {
+        let mut slots = vec![SlotDef {
+            store: Store::Container(0),
+            rule: Rule::BeaconPayment,
+        }];
+        standard_inventory_slots(&mut slots);
+        Self::with_slots(container_id, MenuKind::Beacon, slots)
+    }
+
     /// A villager merchant screen (vanilla `MerchantMenu`): offers `0` and `1` are the inputs,
     /// `2` the result and `3..39` the player's inventory.
     pub fn merchant(container_id: i32, trades: Vec<Trade>) -> Self {
@@ -787,6 +903,11 @@ impl Menu {
         let mut menu = Self::with_slots(container_id, MenuKind::Merchant, slots);
         menu.trades = trades;
         menu
+    }
+
+    /// The payment item shown in a beacon menu's slot (vanilla `BeaconMenu`'s container id).
+    pub fn beacon_payment(&self) -> &ItemStack {
+        self.container.first().unwrap_or(&self.result)
     }
 
     /// The merchant menu's offers.
@@ -913,6 +1034,53 @@ impl Menu {
         self.sync_data();
     }
 
+    /// The brewing stand timers, for a brewing menu.
+    pub fn brewing_state(&self) -> Option<&BrewingState> {
+        self.brewing.as_ref()
+    }
+
+    /// Restores the brewing stand timers when the menu is opened from a block entity.
+    pub fn set_brewing_state(&mut self, state: BrewingState) {
+        self.brewing = Some(state);
+        self.sync_data();
+    }
+
+    /// The beacon's pyramid level and chosen effects, for a beacon menu.
+    pub fn beacon_state(&self) -> Option<&BeaconState> {
+        self.beacon.as_ref()
+    }
+
+    /// Restores a beacon's saved state when the menu is opened from a block entity.
+    pub fn set_beacon_state(&mut self, state: BeaconState) {
+        self.beacon = Some(state);
+        self.sync_data();
+    }
+
+    /// Vanilla `BeaconMenu.updateEffects`: stores the chosen effects and spends one payment item.
+    /// The server checks the effects the beacon's level allows before calling this.
+    pub fn confirm_beacon(&mut self, primary: Option<i32>, secondary: Option<i32>) -> bool {
+        if self.kind != MenuKind::Beacon {
+            return false;
+        }
+        let levels = self.beacon.as_ref().map_or(0, |state| state.levels);
+        if levels <= 0 || (primary.is_none() && secondary.is_none()) {
+            return false;
+        }
+        let mut payment = self.container[0].clone();
+        if !is_beacon_payment(&payment) {
+            return false;
+        }
+        payment.count -= 1;
+        self.container[0] = normalize(payment);
+        self.beacon = Some(BeaconState {
+            levels,
+            primary,
+            secondary,
+        });
+        self.sync_data();
+        true
+    }
+
     /// Copies the menu's properties into its container data slots (vanilla
     /// `AbstractContainerMenu.broadcastChanges` calling `setData`).
     fn sync_data(&mut self) {
@@ -964,6 +1132,25 @@ impl Menu {
                     self.remote_data.resize(1, i32::MIN);
                 }
                 self.data[0] = self.loom_pattern as i32;
+            }
+            MenuKind::BrewingStand => {
+                if self.data.len() < BREWING_DATA_SLOTS {
+                    self.data.resize(BREWING_DATA_SLOTS, 0);
+                    self.remote_data.resize(BREWING_DATA_SLOTS, i32::MIN);
+                }
+                let state = self.brewing.clone().unwrap_or_default();
+                self.data[BREWING_BREW_TIME] = state.brew_time;
+                self.data[BREWING_FUEL] = state.fuel;
+            }
+            MenuKind::Beacon => {
+                if self.data.len() < BEACON_DATA_SLOTS {
+                    self.data.resize(BEACON_DATA_SLOTS, 0);
+                    self.remote_data.resize(BEACON_DATA_SLOTS, i32::MIN);
+                }
+                let state = self.beacon.clone().unwrap_or_default();
+                self.data[BEACON_LEVELS] = state.levels;
+                self.data[BEACON_PRIMARY] = state.primary.map_or(0, |id| id + 1);
+                self.data[BEACON_SECONDARY] = state.secondary.map_or(0, |id| id + 1);
             }
             _ => {}
         }
@@ -1203,8 +1390,10 @@ impl Menu {
     /// Advances the furnace timers by one tick (vanilla `AbstractFurnaceBlockEntity.serverTick`),
     /// then refreshes the container data. Other menus do nothing.
     pub fn tick(&mut self, crafter: &dyn Crafter) {
-        if let MenuKind::Furnace(kind) = self.kind {
-            self.tick_furnace(kind, crafter);
+        match self.kind {
+            MenuKind::Furnace(kind) => self.tick_furnace(kind, crafter),
+            MenuKind::BrewingStand => self.tick_brewing(crafter),
+            _ => {}
         }
         self.sync_data();
     }
@@ -1265,6 +1454,58 @@ impl Menu {
             state.cook_total = 0;
         }
         self.furnace = Some(state);
+    }
+
+    /// Advances a brewing stand by one tick (vanilla `BrewingStandBlockEntity.serverTick`).
+    fn tick_brewing(&mut self, crafter: &dyn Crafter) {
+        let mut state = self.brewing.clone().unwrap_or_default();
+        // A blaze powder in the fuel slot tops the stand up to twenty brews.
+        if state.fuel <= 0 && self.container[4].name() == Some("minecraft:blaze_powder") {
+            state.fuel = FUEL_PER_BLAZE_POWDER;
+            let mut fuel = self.container[4].clone();
+            fuel.count -= 1;
+            self.container[4] = normalize(fuel);
+        }
+        let brewable = self.is_brewable(crafter);
+        if state.brew_time > 0 {
+            state.brew_time -= 1;
+            if state.brew_time == 0 {
+                if brewable {
+                    self.do_brew(crafter);
+                }
+            } else if !brewable {
+                state.brew_time = 0;
+            }
+        } else if brewable && state.fuel > 0 {
+            state.fuel -= 1;
+            state.brew_time = BREW_TIME;
+        }
+        self.brewing = Some(state);
+    }
+
+    /// Vanilla `BrewingStandBlockEntity.isBrewable`: the ingredient mixes with at least one of
+    /// the three bottle slots.
+    fn is_brewable(&self, crafter: &dyn Crafter) -> bool {
+        let ingredient = &self.container[3];
+        if ingredient.is_empty() {
+            return false;
+        }
+        (0..3).any(|slot| crafter.brew(ingredient, &self.container[slot]).is_some())
+    }
+
+    /// Vanilla `BrewingStandBlockEntity.doBrew`: every bottle that mixes changes, then the
+    /// ingredient is used up.
+    fn do_brew(&mut self, crafter: &dyn Crafter) {
+        let ingredient = self.container[3].clone();
+        for slot in 0..3 {
+            let bottle = self.container[slot].clone();
+            if let Some(result) = crafter.brew(&ingredient, &bottle) {
+                self.container[slot] = normalize(result);
+            }
+        }
+        let mut left = ingredient;
+        left.count -= 1;
+        self.container[3] = normalize(left);
     }
 
     /// The stack in a menu slot.
@@ -1364,6 +1605,10 @@ impl Menu {
             // result slot shows. The result slot itself only ever gives items out.
             Rule::TradeInput => true,
             Rule::TradeOutput => false,
+            Rule::Potion => is_potion(stack) || stack.name() == Some("minecraft:glass_bottle"),
+            Rule::BrewingIngredient => true,
+            Rule::BrewingFuel => stack.name() == Some("minecraft:blaze_powder"),
+            Rule::BeaconPayment => is_beacon_payment(stack),
         }
     }
 
@@ -1386,7 +1631,7 @@ impl Menu {
     /// `Slot.getMaxStackSize(stack)`: armor slots hold one item.
     fn slot_max(&self, slot: usize, stack: &ItemStack) -> i32 {
         match self.slots[slot].rule {
-            Rule::Armor(_) => 1.min(max_in_slot(stack)),
+            Rule::Armor(_) | Rule::Potion => 1.min(max_in_slot(stack)),
             _ => max_in_slot(stack),
         }
     }
@@ -2012,6 +2257,26 @@ impl Menu {
                     self.move_item_stack_to(p, &mut stack, 3, 39, false)
                 }
             }
+            MenuKind::BrewingStand => {
+                if i < 5 {
+                    self.move_item_stack_to(p, &mut stack, 5, 41, false)
+                } else if is_potion(&original) {
+                    self.move_item_stack_to(p, &mut stack, 0, 3, false)
+                } else if p.crafter.is_brewing_ingredient(&original) {
+                    self.move_item_stack_to(p, &mut stack, 3, 4, false)
+                } else if original.name() == Some("minecraft:blaze_powder") {
+                    self.move_item_stack_to(p, &mut stack, 4, 5, false)
+                } else {
+                    false
+                }
+            }
+            MenuKind::Beacon => {
+                if i == 0 {
+                    self.move_item_stack_to(p, &mut stack, 1, 37, true)
+                } else {
+                    self.move_item_stack_to(p, &mut stack, 0, 1, false)
+                }
+            }
             MenuKind::Furnace(kind) => {
                 if i == 2 {
                     self.move_item_stack_to(p, &mut stack, 3, 39, true)
@@ -2059,6 +2324,13 @@ impl Menu {
                 if let Some(rest) = p.inventory.place_back(stack) {
                     p.drop(rest);
                 }
+            }
+        }
+        // Vanilla `BeaconMenu.removed` returns the payment item to the player.
+        if self.kind == MenuKind::Beacon {
+            let stack = std::mem::take(&mut self.container[0]);
+            if let Some(rest) = p.inventory.place_back(stack) {
+                p.drop(rest);
             }
         }
         // Vanilla `MerchantMenu.removed` returns both input stacks to the player.
@@ -2299,6 +2571,29 @@ fn repairs_with(item: &ItemStack, material: &ItemStack) -> bool {
         _ => return false,
     };
     material_name == wanted
+}
+
+/// The bottle items a brewing stand's potion slots accept (vanilla
+/// `BrewingStandMenu.PotionSlot`).
+fn is_potion(stack: &ItemStack) -> bool {
+    matches!(
+        stack.name(),
+        Some("minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion")
+    )
+}
+
+/// The five items a beacon accepts as payment (vanilla `BeaconBlockEntity.PAYMENT_ITEMS`).
+fn is_beacon_payment(stack: &ItemStack) -> bool {
+    matches!(
+        stack.name(),
+        Some(
+            "minecraft:iron_ingot"
+                | "minecraft:gold_ingot"
+                | "minecraft:emerald"
+                | "minecraft:diamond"
+                | "minecraft:netherite_ingot"
+        )
+    )
 }
 
 fn normalize(stack: ItemStack) -> ItemStack {

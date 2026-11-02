@@ -405,6 +405,53 @@ impl Packet for SetEntityData {
 packet!(PlayerAction,41,Serverbound,{status:VarInt,location:i64,face:i8,sequence:VarInt});
 packet!(UseItemOn,66,Serverbound,{hand:VarInt,location:i64,face:VarInt,cursor_x:f32,cursor_y:f32,cursor_z:f32,inside:bool,world_border_hit:bool,sequence:VarInt});
 packet!(BlockUpdate,8,Clientbound,{location:i64,block_state:VarInt});
+/// Vanilla `ClientboundBlockEntityDataPacket`: the block position, the block entity type's
+/// registry id and the block entity's NBT. The tag is the last field and is sent without the
+/// chunk-local `x`/`y`/`z` keys the save format stores.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockEntityData {
+    pub location: i64,
+    pub block_type: VarInt,
+    pub nbt: ferrite_nbt::Compound,
+}
+impl Encode for BlockEntityData {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.location.encode(out);
+        self.block_type.encode(out);
+        let tag = ferrite_nbt::Tag::Compound(self.nbt.clone());
+        match ferrite_nbt::binary::write_network(&tag) {
+            Ok(bytes) => out.extend_from_slice(&bytes),
+            // `write_network` only fails on a tag deeper or larger than its bounds, which a
+            // block entity never is; TAG_End keeps the packet structurally decodable.
+            Err(_) => out.push(0),
+        }
+    }
+}
+impl Decode for BlockEntityData {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        let location = i64::decode(buf)?;
+        let block_type = VarInt::decode(buf)?;
+        let tag = ferrite_nbt::binary::read_network(buf)
+            .map_err(|error| DecodeError::Nbt(error.to_string()))?;
+        *buf = &[];
+        match tag {
+            ferrite_nbt::Tag::Compound(nbt) => Ok(Self {
+                location,
+                block_type,
+                nbt,
+            }),
+            _ => Err(DecodeError::Invalid("block entity nbt")),
+        }
+    }
+}
+impl Packet for BlockEntityData {
+    const ID: i32 = 6;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
+// Vanilla `ServerboundSetCommandBlockPacket`: the command, the command block mode
+// (0 = impulse, 1 = chain, 2 = repeat) and the three editor toggles.
+packet!(SetCommandBlock,55,Serverbound,{location:i64,command:String,mode:VarInt,track_output:bool,conditional:bool,automatic:bool});
 packet!(AcknowledgeBlockChange,4,Clientbound,{sequence:VarInt});
 packet!(SetHeldItem,54,Serverbound,{slot:i16});
 // Vanilla `ServerboundAttackPacket`: left-click on an entity, by network id.
@@ -446,6 +493,9 @@ item_packet!(SetCursorItem<I = ItemStack>,98,Clientbound,{item:I});
 item_packet!(SetPlayerInventory<I = ItemStack>,110,Clientbound,{slot:VarInt,item:I});
 packet!(ServerboundContainerClose,19,Serverbound,{window:VarInt});
 packet!(ClientboundContainerClose,17,Clientbound,{window:VarInt});
+// Vanilla `ClientboundBlockEventPacket`: a block entity's `triggerEvent` (a beacon's beam
+// height, a chest lid). `block` is the block registry id, then the two event bytes.
+packet!(BlockEvent,7,Clientbound,{pos:crate::types::BlockPos,block:VarInt,param_a:u8,param_b:u8});
 packet!(SetHeldSlot,107,Clientbound,{slot:VarInt});
 packet!(OpenScreen,60,Clientbound,{window:VarInt,menu:VarInt,title:crate::types::Translatable});
 // Vanilla `ClientboundContainerSetDataPacket`: one menu property (furnace lit/progress, anvil
@@ -453,6 +503,8 @@ packet!(OpenScreen,60,Clientbound,{window:VarInt,menu:VarInt,title:crate::types:
 packet!(ContainerSetData,19,Clientbound,{window:VarInt,id:i16,value:i16});
 // Vanilla `ServerboundContainerButtonClickPacket`: enchant choice, stonecutter recipe, ...
 packet!(ContainerButtonClick,17,Serverbound,{window:VarInt,button:VarInt});
+// Vanilla `ServerboundSetBeaconPacket`: the two effects the player picked (empty = none).
+packet!(SetBeacon,53,Serverbound,{primary:Option<VarInt>,secondary:Option<VarInt>});
 // Vanilla `ServerboundRenameItemPacket` (anvil): the name field is capped at 50 by the server.
 packet!(RenameItem,49,Serverbound,{name:String});
 
@@ -1309,6 +1361,20 @@ mod interaction_tests {
         });
         roundtrip(RenameItem {
             name: "Excalibur".into(),
+        });
+        roundtrip(SetBeacon {
+            primary: Some(VarInt(1)),
+            secondary: None,
+        });
+        roundtrip(SetBeacon {
+            primary: Some(VarInt(1)),
+            secondary: Some(VarInt(10)),
+        });
+        roundtrip(BlockEvent {
+            pos: crate::types::BlockPos::new(4, 70, 4),
+            block: VarInt(7),
+            param_a: 1,
+            param_b: 4,
         });
         // More than 128 changed slots is rejected like vanilla.
         let mut bytes = Vec::new();
@@ -2220,5 +2286,34 @@ mod command_feedback_tests {
                 action,
             });
         }
+    }
+
+    #[test]
+    fn block_entity_packets_roundtrip() {
+        let mut nbt = ferrite_nbt::Compound::new();
+        nbt.insert(
+            "id".into(),
+            ferrite_nbt::Tag::String("minecraft:command_block".into()),
+        );
+        nbt.insert("Command".into(), ferrite_nbt::Tag::String("say hi".into()));
+        nbt.insert("auto".into(), ferrite_nbt::Tag::Byte(1));
+        nbt.insert("LastExecution".into(), ferrite_nbt::Tag::Long(-7));
+        nbt.insert(
+            "LastOutput".into(),
+            ferrite_nbt::Tag::String("{\"text\":\"hi\"}".into()),
+        );
+        rt(BlockEntityData {
+            location: crate::types::BlockPos::new(3, 64, -8).pack(),
+            block_type: VarInt(23),
+            nbt,
+        });
+        rt(SetCommandBlock {
+            location: crate::types::BlockPos::new(3, 64, -8).pack(),
+            command: "setblock ~ ~ ~ stone".into(),
+            mode: VarInt(2),
+            track_output: true,
+            conditional: false,
+            automatic: true,
+        });
     }
 }

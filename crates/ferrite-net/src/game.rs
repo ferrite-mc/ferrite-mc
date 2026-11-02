@@ -23,6 +23,8 @@ pub enum ServerboundPlay {
     ContainerButtonClick(ContainerButtonClick),
     /// Vanilla `ServerboundRenameItemPacket` (anvil).
     RenameItem(RenameItem),
+    /// Vanilla `ServerboundSetBeaconPacket`: the two effects chosen in a beacon screen.
+    SetBeacon(SetBeacon),
     Position(MovePosition),
     PositionRotation(MovePositionRotation),
     Rotation(MoveRotation),
@@ -45,6 +47,8 @@ pub enum ServerboundPlay {
     Attack(ferrite_protocol::packets::play::ServerboundAttack),
     /// Vanilla `ServerboundInteractPacket`: use or attack an entity at a point in its box.
     Interact(ferrite_protocol::packets::play::ServerboundInteract),
+    /// Vanilla `ServerboundSetCommandBlockPacket`: a command block editor's changes.
+    SetCommandBlock(ferrite_protocol::packets::play::SetCommandBlock),
 }
 #[derive(Debug)]
 pub enum GameMessage {
@@ -287,12 +291,16 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
             ferrite_protocol::packets::play::ServerboundInteract::decode(&mut b)?,
         )),
         49 => Some(ServerboundPlay::RenameItem(RenameItem::decode(&mut b)?)),
+        53 => Some(ServerboundPlay::SetBeacon(SetBeacon::decode(&mut b)?)),
         41 => Some(ServerboundPlay::PlayerAction(PlayerAction::decode(&mut b)?)),
         42 => Some(ServerboundPlay::PlayerCommand(
             ServerboundPlayerCommand::decode(&mut b)?,
         )),
         62 => Some(ServerboundPlay::SignUpdate(SignUpdate::decode(&mut b)?)),
         54 => Some(ServerboundPlay::SetHeldItem(SetHeldItem::decode(&mut b)?)),
+        55 => Some(ServerboundPlay::SetCommandBlock(
+            ferrite_protocol::packets::play::SetCommandBlock::decode(&mut b)?,
+        )),
         57 => Some(ServerboundPlay::CreativeSlot(CreativeSlot::decode(&mut b)?)),
         66 => Some(ServerboundPlay::UseItemOn(UseItemOn::decode(&mut b)?)),
         67 => Some(ServerboundPlay::UseItem(Box::new(

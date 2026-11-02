@@ -211,6 +211,39 @@ fn set_held(player: &mut Player, item: &str) {
     }
 }
 
+/// Vanilla `BottleItem` and the water `CauldronInteraction`: a glass bottle fills from a water
+/// cauldron, which drops one level and empties at the last one.
+fn fill_bottle(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
+    if player.inventory.selected_item().name() != Some("minecraft:glass_bottle") {
+        return false;
+    }
+    if name(state) != Some("minecraft:water_cauldron") {
+        return false;
+    }
+    let next = match property(state, "level").unwrap_or("1") {
+        "1" => blocks::default_state("cauldron"),
+        "2" => blocks::state_id("water_cauldron", &[("level", "1")]),
+        _ => blocks::state_id("water_cauldron", &[("level", "2")]),
+    };
+    let Some(next) = next else {
+        return false;
+    };
+    if !change(player, pos, next) {
+        return false;
+    }
+    let mut bottle = ItemStack::from_name("minecraft:potion").expect("vanilla potion");
+    bottle.components.insert(
+        ferrite_item::component_ids::POTION_CONTENTS,
+        ferrite_item::Component::PotionContents(ferrite_item::PotionContents {
+            potion: Some("minecraft:water".into()),
+            ..Default::default()
+        }),
+    );
+    let slot = player.inventory.selected_slot();
+    player.inventory.set(slot, bottle);
+    true
+}
+
 /// Vanilla `BucketItem.useOn` and the `CauldronInteraction` water/lava maps.
 fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     let held = player.inventory.selected_item().clone();
@@ -328,6 +361,9 @@ pub fn use_block(player: &mut Player, location: i64) -> bool {
     }
     if is_sign(state) {
         return use_sign(player, pos, state);
+    }
+    if fill_bottle(player, pos, state) {
+        return true;
     }
     if use_bucket(player, pos, state) {
         return true;
