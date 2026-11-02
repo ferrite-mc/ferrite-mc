@@ -51,6 +51,8 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 ## 현재 상태 한눈에
 
 | 구분 | 내용 |
+| ?? **?? 1??** | ??? ?? ???? ???? ??? ??. Folia?Starlight?Lithium?C2ME?C2ME OpenCL ?? ? ?? ?????? ?? UI? ??? Rust Minecraft ??? ?? ??? ??? ?? |
+| ?? **??? ?? ??** | [WiseHosting ??? ??](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [Server Optimization ???](https://modrinth.com/modpack/server-optimizationn), [YouHaveTrouble ??? ???](https://github.com/YouHaveTrouble/minecraft-optimization) |
 |---|---|
 | ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 명령 블록, 양조·비컨, 네더 차원·포탈, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화, 바닐라 지형 생성 |
 | 🔧 **진행 중** | 월드젠 처리량(1스레드 4.6→6.2, 8스레드 23.5→38.9 chunks/s, 10x 목표 미달), 나무·구조물, 피스톤 |
@@ -194,8 +196,8 @@ cargo fmt --all --check
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
-| 1 | **기반** — 워크스페이스, 프로토콜 코덱, NBT, 네트워킹/로그인, 리전화 뼈대 | 완료 |
-| 2 | 월드 IO/청크/이동/블록/채팅 — 접속해 플레이 가능한 최소 서버 | 완료 (봇 검증) |
+| 1 | ??? ?? ??? ? ??? ?? ?? ? ?? | **???** |
+| 1 | ???? ??? ? Paper/Bukkit API? NMS ???, ?? ?????? ?? UI | **???** |
 | 3 | 리전라이저 + 벤치마크 — Paper/Folia 대비 성능 측정 | 진행 중 |
 | 4 | 플러그인 브리지 — 내장 JVM에서 Bukkit 이벤트/커맨드/스케줄러 실행 | 진행 중 |
 | 5 | 게임플레이 — 인벤토리, 엔티티, 전투, 크래프팅, 컨테이너 | 진행 중 |
