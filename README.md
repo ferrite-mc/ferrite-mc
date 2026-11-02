@@ -242,5 +242,4 @@ GPLv3로 바꿨습니다. 포팅한 코드의 출처는 [`NOTICE.md`](NOTICE.md)
 
 ## 해야 할 일
 
-- **공동 1순위:** 월드젠 속도 최적화와 플러그인 브리지 완성. Folia·Starlight·Lithium·C2ME·C2ME OpenCL 가속, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증
-- **참고 자료:** [WiseHosting](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [Server Optimization](https://modrinth.com/modpack/server-optimizationn), [YouHaveTrouble](https://github.com/YouHaveTrouble/minecraft-optimization)
+- **공동 1순위:** 월드젠 속도 최적화와 플러그인 브리지 완성. Folia·Starlight·Lithium·C2ME·C2ME OpenCL 가속, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증. 최적화 참고 자료: [최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [서버 최적화 모드팩](https://modrinth.com/modpack/server-optimizationn), [마인크래프트 최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization).
