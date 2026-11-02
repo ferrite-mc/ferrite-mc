@@ -748,7 +748,7 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
     fs::write(
         dir.path().join("ferrite.toml"),
         format!(
-            "bind-address = \"127.0.0.1:{port}\"\nonline-mode = false\nmax-players = 42\nview-distance = 2\ngenerator = \"superflat\"\nmotd = \"Typical plugin\"\nplugins-dir = \"plugins\"\nplugin-bridge = \"{}\"\n",
+            "bind-address = \"127.0.0.1:{port}\"\nonline-mode = false\nmax-players = 42\nview-distance = 1\ngenerator = \"superflat\"\nmotd = \"Typical plugin\"\nplugins-dir = \"plugins\"\nplugin-bridge = \"{}\"\n",
             toml_path(&bridge_jar)
         ),
     )
@@ -809,6 +809,8 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
     // tables loaded from the generated data pack, and the boss-bar registry.
     bot.raw(7, "typical surface");
     let dir_name = dir.path().file_name().unwrap().to_string_lossy();
+    // The config asks for a view distance below the client minimum, so the plugin must see the
+    // same effective distance (2) the host sends to clients.
     wait_for_line(
         &events,
         &format!("ip 127.0.0.1 {port} 2 2 42"),
