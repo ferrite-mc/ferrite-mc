@@ -455,6 +455,104 @@ async fn command_spam_exempts_ops_under_the_same_threshold() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spam_limiter_follows_live_operator_changes() {
+    use ferrite_admin::AdminLists;
+    use ferrite_protocol::packets::play::{PlayDisconnect, ServerboundChatCommand};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lists = std::sync::Arc::new(AdminLists::load(dir.path()).unwrap());
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            // A single chat or command is over budget for a non-op.
+            chat_spam_threshold_seconds: 1,
+            command_spam_threshold_seconds: 1,
+            admin: Some(lists),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut chatter = Bot::join(addr, "Chatter").await;
+    let mut commander = Bot::join(addr, "Commander").await;
+
+    // Both players joined as non-ops. The live console command must update the connected
+    // permission state before the bursts, or the first message would kick them.
+    for name in ["Chatter", "Commander"] {
+        world.console_command(format!("op {name}")).await.unwrap();
+    }
+
+    for _ in 0..10 {
+        chatter.chat("burst").await;
+    }
+    chatter.chat("chatter alive").await;
+    let mut alive = false;
+    for _ in 0..64 {
+        let body = chatter.until(ClientboundPlayerChat::ID).await;
+        let message = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
+        if message.body.content == "chatter alive" {
+            alive = true;
+            break;
+        }
+    }
+    assert!(alive, "a live /op must exempt the chat burst");
+
+    for _ in 0..10 {
+        commander
+            .send(&ServerboundChatCommand {
+                command: "list".into(),
+            })
+            .await;
+    }
+    commander.chat("commander alive").await;
+    let mut alive = false;
+    for _ in 0..64 {
+        let body = commander.until(ClientboundPlayerChat::ID).await;
+        let message = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
+        if message.body.content == "commander alive" {
+            alive = true;
+            break;
+        }
+    }
+    assert!(alive, "a live /op must exempt the command burst");
+
+    // The reverse direction: removing the permission must remove the exemption for the
+    // already-connected players, so one more message each is over budget.
+    for name in ["Chatter", "Commander"] {
+        world.console_command(format!("deop {name}")).await.unwrap();
+    }
+
+    chatter.chat("over budget").await;
+    let body = chatter.until(PlayDisconnect::ID).await;
+    let reason = PlayDisconnect::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(reason.reason.0, "Kicked for spamming");
+
+    commander
+        .send(&ServerboundChatCommand {
+            command: "list".into(),
+        })
+        .await;
+    let body = commander.until(PlayDisconnect::ID).await;
+    let reason = PlayDisconnect::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(reason.reason.0, "Kicked for spamming");
+
+    drop(chatter);
+    drop(commander);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_login_kicks_old_session_and_keeps_new_session() {
     let world = World::start();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
