@@ -57,7 +57,10 @@ public final class TestPlugin extends JavaPlugin implements Listener {
     @EventHandler public void onRespawn(org.bukkit.event.player.PlayerRespawnEvent event) { appendEvent("respawn " + event.getRespawnLocation().getBlockY()); }
     @EventHandler public void onLevel(org.bukkit.event.player.PlayerLevelChangeEvent event) { appendEvent("level " + event.getOldLevel() + " " + event.getNewLevel()); }
     @EventHandler public void onExp(org.bukkit.event.player.PlayerExpChangeEvent event) { appendEvent("exp " + event.getAmount()); }
-    @EventHandler public void onInventoryClick(org.bukkit.event.inventory.InventoryClickEvent event) { appendEvent("click " + event.getSlot()); }
+    @EventHandler public void onInventoryClick(org.bukkit.event.inventory.InventoryClickEvent event) {
+        appendEvent("click " + event.getWhoClicked().getName() + " " + event.getSlot() + " " + event.getClick() + " " + event.getAction());
+        if (event.getSlot() == 9) { appendEvent("click-cancel 9"); event.setCancelled(true); }
+    }
     @EventHandler public void onInventoryClose(org.bukkit.event.inventory.InventoryCloseEvent event) { appendEvent("close " + event.getPlayer().getName()); }
     @EventHandler public void onLegacyChat(org.bukkit.event.player.AsyncPlayerChatEvent event) {
         appendEvent("legacy-chat " + event.getMessage());

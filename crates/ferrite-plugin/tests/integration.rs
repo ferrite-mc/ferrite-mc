@@ -1,7 +1,8 @@
 use ferrite_plugin::{
-    BlockPosition, BlockSnapshot, ColumnHeight, CommandSender, EntityTask, GameMode, ItemSnapshot,
-    OfflinePlayerSnapshot, PlayerCommand, PlayerLocation, PlayerSnapshot, PluginConfig, PluginHost,
-    RegionContext, RegionTask, ServerCommand, ServerSnapshot, WorldCommand, WorldSnapshot,
+    BlockPosition, BlockSnapshot, ColumnHeight, CommandSender, EntityTask, GameMode,
+    INVENTORY_CLICK_EVENT, ItemSnapshot, OfflinePlayerSnapshot, PlayerCommand, PlayerLocation,
+    PlayerSnapshot, PluginConfig, PluginHost, RegionContext, RegionTask, ServerCommand,
+    ServerSnapshot, WorldCommand, WorldSnapshot,
 };
 
 #[derive(Default)]
@@ -177,6 +178,29 @@ fn plugin_lifecycle() {
         },
     })
     .unwrap();
+    // A non-player event from the backlog's inventory family: the listener must see the
+    // click data the host sent, and its cancellation must come back to the host.
+    assert!(host.listens_for(INVENTORY_CLICK_EVENT));
+    assert!(
+        host.fire_inventory_click(player_id, "ProbePlayer", 5, "LEFT", "PICKUP_ALL")
+            .unwrap()
+    );
+    assert!(
+        !host
+            .fire_inventory_click(player_id, "ProbePlayer", 9, "RIGHT", "PLACE_ALL")
+            .unwrap()
+    );
+    let events = std::fs::read_to_string(dir.path().join("TestPlugin/events.txt")).unwrap();
+    for expected in [
+        "click ProbePlayer 5 LEFT PICKUP_ALL",
+        "click ProbePlayer 9 RIGHT PLACE_ALL",
+        "click-cancel 9",
+    ] {
+        assert!(
+            events.lines().any(|line| line == expected),
+            "missing {expected:?} in listener events:\n{events}"
+        );
+    }
     assert!(
         host.dispatch_command(CommandSender::Player(player_id), "ferrite-test hello")
             .unwrap()
