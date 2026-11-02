@@ -1317,10 +1317,16 @@ fn push_reaction(state: u16) -> PushReaction {
     }
 }
 
-/// Vanilla `Level.isEmptyBlock`: air, a replaceable state or a fluid; a move may enter it.
+/// Vanilla `Level.isEmptyBlock` for a piston move: air, a replaceable state or a fluid block.
+/// A waterlogged container also reports a source fluid (`SimpleWaterloggedBlock.getFluidState`)
+/// and the extracted props mark it as water, but it is a solid block that
+/// `PistonStructureResolver` pushes whole: only air and fluids are empty to a piston, so the
+/// `waterlogged` property must not make a block count as free space.
 fn is_free(state: u16) -> bool {
     let props = ferrite_data::block_props::get(state);
-    props.is_air || props.replaceable || props.fluid.is_some()
+    props.is_air
+        || props.replaceable
+        || (props.fluid.is_some() && !property_bool(state, "waterlogged"))
 }
 
 fn sticky_kind(state: u16) -> Option<Sticky> {
@@ -2110,6 +2116,75 @@ mod tests {
         assert!(activity.destroyed.contains(&([2, 64, 0], torch)));
         assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
         // Nothing moves into the head position, so the block behind the torch stays.
+        assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
+    }
+
+    fn waterlogged_slab() -> u16 {
+        make("stone_slab", &[("type", "bottom"), ("waterlogged", "true")])
+    }
+
+    #[test]
+    fn a_piston_pushes_a_waterlogged_block_whole_instead_of_overwriting_it() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], waterlogged_slab());
+        grid.add([3, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        // A waterlogged container reports a source fluid (`SimpleWaterloggedBlock`), but it is a
+        // solid block: `PistonStructureResolver` pushes it whole and it keeps its water.
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        let moved = grid.state([3, 64, 0]);
+        assert_eq!(name(moved), Some("stone_slab"));
+        assert_eq!(property(moved, "waterlogged"), Some("true"));
+        assert_eq!(name(grid.state([4, 64, 0])), Some("stone"));
+        assert!(
+            redstone.take_piston_activity().destroyed.is_empty(),
+            "a waterlogged block is pushed, not destroyed"
+        );
+    }
+
+    #[test]
+    fn a_retracting_sticky_piston_pulls_a_waterlogged_block_with_its_water() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], lever());
+        grid.add([1, 64, 0], sticky_piston("east", true));
+        grid.add([2, 64, 0], sticky_head("east"));
+        grid.add([3, 64, 0], waterlogged_slab());
+        let mut redstone = Redstone::default();
+
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        // The waterlogged slab is a pullable block, not empty space in front of the head.
+        let pulled = grid.state([2, 64, 0]);
+        assert_eq!(name(pulled), Some("stone_slab"));
+        assert_eq!(property(pulled, "waterlogged"), Some("true"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+    }
+
+    #[test]
+    fn a_piston_still_extends_into_plain_water() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], make("water", &[("level", "0")]));
+        grid.add([3, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        // A standalone fluid block does not move; the head takes its place.
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
         assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
     }
 
