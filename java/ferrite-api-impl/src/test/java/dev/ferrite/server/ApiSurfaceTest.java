@@ -20,6 +20,7 @@ class ApiSurfaceTest {
 
     @BeforeAll static void start() {
         System.setProperty("ferrite.native", "false");
+        Bootstrap.configureDataDir(System.getProperty("test.vanilla.data"));
         // Reuse a server another test class already installed; Bukkit forbids a second one.
         Bootstrap.startServer();
         server = (FerriteServer) org.bukkit.Bukkit.getServer();
@@ -149,5 +150,19 @@ class ApiSurfaceTest {
         assertEquals(Material.STONE, block.getType());
         block.setType(Material.DIRT);
         assertEquals(Material.DIRT, world.getBlockAt(1, 64, 2).getType());
+    }
+
+    @Test void serverTagsResolveFromTheDataPack() {
+        var coals = server.getTag(org.bukkit.Tag.REGISTRY_ITEMS, org.bukkit.NamespacedKey.minecraft("coals"), Material.class);
+        assertNotNull(coals);
+        assertEquals(org.bukkit.NamespacedKey.minecraft("coals"), coals.getKey());
+        assertTrue(coals.isTagged(Material.COAL));
+        assertTrue(coals.isTagged(Material.CHARCOAL));
+        assertFalse(coals.isTagged(Material.DIAMOND));
+        var logs = server.getTag(org.bukkit.Tag.REGISTRY_BLOCKS, org.bukkit.NamespacedKey.minecraft("logs"), Material.class);
+        assertNotNull(logs);
+        assertTrue(logs.isTagged(Material.OAK_LOG));
+        assertNull(server.getTag(org.bukkit.Tag.REGISTRY_ITEMS, org.bukkit.NamespacedKey.minecraft("ferrite_missing"), Material.class));
+        assertThrows(UnsupportedOperationException.class, () -> server.getTag("entity_types", org.bukkit.NamespacedKey.minecraft("skeletons"), org.bukkit.entity.EntityType.class));
     }
 }
