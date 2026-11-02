@@ -196,6 +196,9 @@ fn fixture_vegetation_on_land() {
     let mut expected_total = 0usize;
     let mut actual_total = 0usize;
     let mut matched = 0usize;
+    let mut expected_spruce_bases = 0usize;
+    let mut actual_spruce_bases = 0usize;
+    let mut matched_spruce_bases = 0usize;
     let mut counts = BTreeMap::<String, (usize, usize)>::new();
     for (cx, cz) in [(13, 18), (20, 14), (22, 14), (20, 15)] {
         let Some((expected, clear)) = fixture_chunk(cx, cz, &registry) else {
@@ -228,6 +231,18 @@ fn fixture_vegetation_on_land() {
                     let actual_name = registry
                         .block_state(actual_id)
                         .map_or("", |state| state.name.as_str());
+                    let is_spruce_base = |chunk: &Chunk, name: &str| {
+                        name == "minecraft:spruce_log"
+                            && chunk
+                                .block(x, y - 1, z)
+                                .and_then(|id| registry.block_state(id))
+                                .is_none_or(|state| state.name != "minecraft:spruce_log")
+                    };
+                    let expected_base = is_spruce_base(&expected, expected_name);
+                    let actual_base = is_spruce_base(&actual, actual_name);
+                    expected_spruce_bases += usize::from(expected_base);
+                    actual_spruce_bases += usize::from(actual_base);
+                    matched_spruce_bases += usize::from(expected_base && actual_base);
                     if is_ground_vegetation(expected_name) {
                         expected_total += 1;
                         counts.entry(expected_name.to_owned()).or_default().0 += 1;
@@ -251,13 +266,16 @@ fn fixture_vegetation_on_land() {
         "vegetation totals: actual {actual_total}, expected {expected_total}, ratio {ratio:.3}, \
          exact match {matched}/{expected_total}"
     );
+    println!(
+        "spruce stem bases: matched {matched_spruce_bases}/{expected_spruce_bases} ({:.2}%), actual {actual_spruce_bases}; multi-trunk trees count per column",
+        100.0 * matched_spruce_bases as f64 / expected_spruce_bases.max(1) as f64
+    );
     assert!(
         expected_total > 50,
         "fixture land chunks have no vegetation"
     );
-    // These old-growth taiga chunks also contain spruce trees (non-blob
-    // foliage placer, out of scope for the simple-tree subset) and lush-cave
-    // moss patches (`vegetation_patch`, also out of scope). The statistical
+    // These old-growth taiga chunks also contain large spruce trees and lush-cave
+    // moss patches (`vegetation_patch`), which are still out of scope. The statistical
     // contract therefore covers the implemented ground cover: it must be the
     // same order of magnitude as the Java fixture, not vanish.
     assert!(

@@ -11,8 +11,8 @@
 //!
 //! Only the feature types that the overworld needs for terrain decoration are
 //! implemented: `minecraft:ore`, `minecraft:simple_block`,
-//! `minecraft:random_selector` and `minecraft:tree` (straight trunks with blob
-//! foliage). Other configured features are skipped, which is why the fixture
+//! `minecraft:random_selector` and `minecraft:tree` (straight trunks with blob,
+//! spruce or pine foliage). Other configured features are skipped, which is why the fixture
 //! differential reports rates instead of demanding an exact whole-chunk match.
 //!
 //! Feature placement is clipped to the target chunk: vanilla's `WorldGenRegion`
@@ -629,7 +629,7 @@ enum CompiledFeature {
         default: ResourceId,
         choices: Vec<(f32, ResourceId)>,
     },
-    Tree(TreeConfig),
+    Tree(Box<TreeConfig>),
     Unsupported,
 }
 
@@ -699,12 +699,30 @@ struct TreeConfig {
     base_height: i32,
     height_rand_a: i32,
     height_rand_b: i32,
-    foliage_height: i32,
-    foliage_radius: i32,
-    foliage_offset: i32,
+    foliage_placer: TreeFoliage,
     limit: i32,
     lower_size: i32,
     upper_size: i32,
+    min_clipped_height: Option<i32>,
+}
+
+#[derive(Clone, Debug)]
+enum TreeFoliage {
+    Blob {
+        height: i32,
+        radius: i32,
+        offset: i32,
+    },
+    Spruce {
+        trunk_height: IntProvider,
+        radius: IntProvider,
+        offset: IntProvider,
+    },
+    Pine {
+        height: IntProvider,
+        radius: IntProvider,
+        offset: IntProvider,
+    },
 }
 
 /// Data-driven feature decorator for one world seed.
@@ -1267,7 +1285,9 @@ impl<'a> FeatureGenerator<'a> {
             }
             "minecraft:tree" => self
                 .compile_tree(config)
-                .map_or(CompiledFeature::Unsupported, CompiledFeature::Tree),
+                .map_or(CompiledFeature::Unsupported, |tree| {
+                    CompiledFeature::Tree(Box::new(tree))
+                }),
             _ => CompiledFeature::Unsupported,
         })
     }
@@ -1287,9 +1307,24 @@ impl<'a> FeatureGenerator<'a> {
             return None;
         }
         let foliage_placer = config.get("foliage_placer")?;
-        if foliage_placer.get("type")?.as_str()? != "minecraft:blob_foliage_placer" {
-            return None;
-        }
+        let foliage_placer = match foliage_placer.get("type")?.as_str()? {
+            "minecraft:blob_foliage_placer" => TreeFoliage::Blob {
+                height: i32::try_from(foliage_placer.get("height")?.as_i64()?).ok()?,
+                radius: i32::try_from(foliage_placer.get("radius")?.as_i64()?).ok()?,
+                offset: i32::try_from(foliage_placer.get("offset")?.as_i64()?).ok()?,
+            },
+            "minecraft:spruce_foliage_placer" => TreeFoliage::Spruce {
+                trunk_height: IntProvider::from_value(foliage_placer.get("trunk_height")?)?,
+                radius: IntProvider::from_value(foliage_placer.get("radius")?)?,
+                offset: IntProvider::from_value(foliage_placer.get("offset")?)?,
+            },
+            "minecraft:pine_foliage_placer" => TreeFoliage::Pine {
+                height: IntProvider::from_value(foliage_placer.get("height")?)?,
+                radius: IntProvider::from_value(foliage_placer.get("radius")?)?,
+                offset: IntProvider::from_value(foliage_placer.get("offset")?)?,
+            },
+            _ => return None,
+        };
         let size = config.get("minimum_size")?;
         let number = |value: &Value, name: &str, default: i64| {
             value
@@ -1306,12 +1341,16 @@ impl<'a> FeatureGenerator<'a> {
             base_height: i32::try_from(trunk_placer.get("base_height")?.as_i64()?).ok()?,
             height_rand_a: i32::try_from(trunk_placer.get("height_rand_a")?.as_i64()?).ok()?,
             height_rand_b: i32::try_from(trunk_placer.get("height_rand_b")?.as_i64()?).ok()?,
-            foliage_height: i32::try_from(foliage_placer.get("height")?.as_i64()?).ok()?,
-            foliage_radius: i32::try_from(foliage_placer.get("radius")?.as_i64()?).ok()?,
-            foliage_offset: i32::try_from(foliage_placer.get("offset")?.as_i64()?).ok()?,
+            foliage_placer,
             limit: number(size, "limit", 1)?,
             lower_size: number(size, "lower_size", 0)?,
             upper_size: number(size, "upper_size", 1)?,
+            min_clipped_height: size
+                .get("min_clipped_height")
+                .and_then(Value::as_i64)
+                .map(i32::try_from)
+                .transpose()
+                .ok()?,
         })
     }
 
@@ -1600,11 +1639,37 @@ impl<'a> FeatureGenerator<'a> {
         let height = tree.base_height
             + random.next_int_bound(tree.height_rand_a + 1)
             + random.next_int_bound(tree.height_rand_b + 1);
+        // Vanilla samples foliage height and radius before checking the tree's free space.
+        let (foliage_height, foliage_radius) = match &tree.foliage_placer {
+            TreeFoliage::Blob { height, radius, .. } => (*height, *radius),
+            TreeFoliage::Spruce {
+                trunk_height,
+                radius,
+                ..
+            } => (
+                (height - trunk_height.sample(random)).max(4),
+                radius.sample(random),
+            ),
+            TreeFoliage::Pine {
+                height: foliage_height,
+                radius,
+                ..
+            } => {
+                let foliage_height = foliage_height.sample(random);
+                let radius = radius.sample(random)
+                    + random.next_int_bound((height - foliage_height + 1).max(1));
+                (foliage_height, radius)
+            }
+        };
         let free = self.max_free_tree_height(chunk, origin, height, tree, registry);
-        let height = height.min(free);
-        if height < 0 {
+        if free < height
+            && !tree
+                .min_clipped_height
+                .is_some_and(|minimum| free >= minimum)
+        {
             return;
         }
+        let height = height.min(free);
         if let Some(below) = &tree.below_trunk
             && let Some(state) =
                 self.provider_state(below, origin.offset(0, -1, 0), random, registry)
@@ -1621,25 +1686,83 @@ impl<'a> FeatureGenerator<'a> {
                 let _ = self.set_state(chunk, position, &trunk, registry);
             }
         }
+        let foliage_offset = match &tree.foliage_placer {
+            TreeFoliage::Blob { offset, .. } => *offset,
+            TreeFoliage::Spruce { offset, .. } | TreeFoliage::Pine { offset, .. } => {
+                offset.sample(random)
+            }
+        };
         let Some(foliage) = self.provider_state(&tree.foliage, origin, random, registry) else {
             return;
         };
-        let top = height + tree.foliage_offset;
-        for y in (top - tree.foliage_height..=top).rev() {
-            let offset = top - y;
-            let radius = (tree.foliage_radius - 1 - offset / 2).max(0);
-            for dx in -radius..=radius {
-                for dz in -radius..=radius {
-                    if dx.abs() == radius
-                        && dz.abs() == radius
-                        && (random.next_int_bound(2) == 0 || y == top)
-                    {
-                        continue;
+        match &tree.foliage_placer {
+            TreeFoliage::Blob { .. } => {
+                let top = height + foliage_offset;
+                for y in (top - foliage_height..=top).rev() {
+                    let offset = top - y;
+                    let radius = (foliage_radius - 1 - offset / 2).max(0);
+                    for dx in -radius..=radius {
+                        for dz in -radius..=radius {
+                            if dx.abs() == radius
+                                && dz.abs() == radius
+                                && (random.next_int_bound(2) == 0 || y == top)
+                            {
+                                continue;
+                            }
+                            let position = origin.offset(dx, y, dz);
+                            if self.valid_tree_pos(chunk, position, registry) {
+                                let _ = self.set_state(chunk, position, &foliage, registry);
+                            }
+                        }
                     }
-                    let position = origin.offset(dx, y, dz);
-                    if self.valid_tree_pos(chunk, position, registry) {
-                        let _ = self.set_state(chunk, position, &foliage, registry);
+                }
+            }
+            TreeFoliage::Spruce { .. } => {
+                let mut radius = random.next_int_bound(2);
+                let (mut max_radius, mut min_radius) = (1, 0);
+                for y in (-foliage_height..=foliage_offset).rev() {
+                    self.place_conifer_row(chunk, origin, height + y, radius, &foliage, registry);
+                    if radius >= max_radius {
+                        radius = min_radius;
+                        min_radius = 1;
+                        max_radius = (max_radius + 1).min(foliage_radius);
+                    } else {
+                        radius += 1;
                     }
+                }
+            }
+            TreeFoliage::Pine { .. } => {
+                let mut radius = 0;
+                let bottom = foliage_offset - foliage_height;
+                for y in (bottom..=foliage_offset).rev() {
+                    self.place_conifer_row(chunk, origin, height + y, radius, &foliage, registry);
+                    if radius >= 1 && y == bottom + 1 {
+                        radius -= 1;
+                    } else if radius < foliage_radius {
+                        radius += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_conifer_row(
+        &self,
+        chunk: &mut Chunk,
+        origin: BlockPos,
+        y: i32,
+        radius: i32,
+        foliage: &StateSpec,
+        registry: &impl BlockStateRegistry,
+    ) {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if radius > 0 && dx.abs() == radius && dz.abs() == radius {
+                    continue;
+                }
+                let position = origin.offset(dx, y, dz);
+                if self.valid_tree_pos(chunk, position, registry) {
+                    let _ = self.set_state(chunk, position, foliage, registry);
                 }
             }
         }
@@ -1888,7 +2011,12 @@ fn is_double_plant(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{decoration_seed, feature_seed};
+    use super::{
+        BlockPos, FeatureGenerator, ResourceId, WorldgenData, decoration_seed, feature_seed,
+    };
+    use ferrite_noise::XoroshiroRandomSource;
+    use ferrite_world::{BlockStateRegistry, Chunk, RuntimeRegistry};
+    use std::path::PathBuf;
 
     #[test]
     fn feature_seed_uses_the_vanilla_offsets() {
@@ -1902,5 +2030,102 @@ mod tests {
         assert_eq!(decoration_seed(0, 0, 0), 0);
         assert_eq!(decoration_seed(42, 16, -32), decoration_seed(42, 16, -32));
         assert_ne!(decoration_seed(42, 16, -32), decoration_seed(42, 16, 32));
+    }
+
+    #[test]
+    fn vanilla_spruce_and_pine_features_place_trunks_and_conifer_canopies() {
+        let generated =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        let data = WorldgenData::load(&generated).unwrap();
+        let registry = RuntimeRegistry::load(&generated).unwrap();
+        let generator = FeatureGenerator::new(&data, 0, 0, 128);
+        let air = registry
+            .block_id("minecraft:air", &Default::default())
+            .unwrap();
+        let biome = registry.biome_id("minecraft:plains").unwrap();
+
+        for name in ["spruce", "pine"] {
+            let id = ResourceId::parse(name).unwrap();
+            let config = &data.configured_features.get(&id).unwrap().config;
+            let tree = generator
+                .compile_tree(config)
+                .expect("vanilla conifer config");
+            let mut chunk = Chunk::new(
+                0,
+                128,
+                air,
+                biome,
+                registry.block_bits(),
+                registry.biome_bits(),
+            )
+            .unwrap();
+            let mut random = XoroshiroRandomSource::new(42);
+            generator.place_tree(
+                &mut chunk,
+                BlockPos { x: 8, y: 32, z: 8 },
+                &mut random,
+                &tree,
+                &registry,
+            );
+            let mut logs = 0;
+            let mut leaves = 0;
+            let mut wide_leaves = 0;
+            for y in 32..48 {
+                for z in 3..14 {
+                    for x in 3..14 {
+                        let state = chunk.block(x, y, z).unwrap();
+                        let name = &registry.block_state(state).unwrap().name;
+                        if name == "minecraft:spruce_log" {
+                            logs += 1;
+                        }
+                        if name == "minecraft:spruce_leaves" {
+                            leaves += 1;
+                            if (i32::from(x) - 8).abs().max((i32::from(z) - 8).abs()) >= 2 {
+                                wide_leaves += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!((5..=10).contains(&logs), "{name} logs: {logs}");
+            assert!(
+                leaves > 10 && wide_leaves > 0,
+                "{name} leaves: {leaves}, wide: {wide_leaves}"
+            );
+
+            let stone = registry
+                .block_id("minecraft:stone", &Default::default())
+                .unwrap();
+            let mut blocked = Chunk::new(
+                0,
+                128,
+                air,
+                biome,
+                registry.block_bits(),
+                registry.biome_bits(),
+            )
+            .unwrap();
+            blocked.set_block(8, 35, 8, stone, &registry).unwrap();
+            let mut random = XoroshiroRandomSource::new(42);
+            generator.place_tree(
+                &mut blocked,
+                BlockPos { x: 8, y: 32, z: 8 },
+                &mut random,
+                &tree,
+                &registry,
+            );
+            for y in 32..48 {
+                for z in 3..14 {
+                    for x in 3..14 {
+                        let state = blocked.block(x, y, z).unwrap();
+                        let block = &registry.block_state(state).unwrap().name;
+                        assert!(
+                            block != "minecraft:spruce_log" && block != "minecraft:spruce_leaves",
+                            "{name} created a partial tree at {x},{y},{z}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
