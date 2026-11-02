@@ -869,6 +869,7 @@ dependencies = [
  "ferrite-inventory",
  "ferrite-item",
  "ferrite-jvm",
+ "ferrite-light",
  "ferrite-loot",
  "ferrite-math",
  "ferrite-nbt",

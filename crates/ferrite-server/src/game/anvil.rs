@@ -1,9 +1,10 @@
 use super::{Dimension, terrain::VanillaTerrain};
 use ferrite_command::gamerule::GameRules;
+use ferrite_light::{LightBlockView, LightEngine, LightKind, NibbleArray};
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
     BlockStateRegistry, Chunk, LightData, LightSection, RegionFile, RuntimeRegistry,
-    chunk_from_nbt, encode_chunk_packet,
+    apply_light_to_nbt, chunk_from_nbt, encode_chunk_packet, light_from_nbt,
 };
 use std::path::Path;
 
@@ -37,38 +38,11 @@ fn read_column(
     };
     let (_, tag) = binary::read_named(&data)?;
     let chunk = chunk_from_nbt(&tag, dimension.min_y(), dimension.height() as u32, registry)?;
-    let sections = dimension.light_sections();
-    let min_section = dimension.min_y().div_euclid(16);
-    let mut light = LightData {
-        sky: vec![LightSection::Unknown; sections],
-        block: vec![LightSection::Unknown; sections],
-    };
-    if let Tag::Compound(root) = &tag
-        && let Some(Tag::List(List::Compound(sections))) = root.get("sections")
-    {
-        for section in sections {
-            let Some(Tag::Byte(y)) = section.get("Y") else {
-                continue;
-            };
-            let idx = i32::from(*y) - min_section + 1;
-            if !(0..light.sky.len() as i32).contains(&idx) {
-                continue;
-            }
-            for (name, target) in [
-                ("SkyLight", &mut light.sky),
-                ("BlockLight", &mut light.block),
-            ] {
-                if let Some(Tag::ByteArray(bytes)) = section.get(name) {
-                    anyhow::ensure!(bytes.len() == 2048, "invalid {name} length");
-                    let mut array = Box::new([0; 2048]);
-                    for (dst, src) in array.iter_mut().zip(bytes) {
-                        *dst = *src as u8;
-                    }
-                    target[idx as usize] = LightSection::Data(array);
-                }
-            }
-        }
-    }
+    let light = light_from_nbt(
+        &tag,
+        dimension.min_y().div_euclid(16),
+        dimension.light_sections(),
+    )?;
     Ok(Some((chunk, light)))
 }
 
@@ -143,6 +117,8 @@ struct Dirty {
     light: LightData,
     packet: Arc<[u8]>,
     version: u64,
+    /// Whether the light in `light` predates a block edit and must be rebuilt on flush.
+    relight: bool,
 }
 
 /// What a cache lookup found.
@@ -465,6 +441,7 @@ impl AnvilChunkSource {
         if !changed {
             return Ok(result);
         }
+        let relight = cache.dirty.get(&key).is_some_and(|dirty| dirty.relight);
         anyhow::ensure!(
             self.path.is_none()
                 || cache.dirty.contains_key(&key)
@@ -486,6 +463,7 @@ impl AnvilChunkSource {
                 light,
                 packet,
                 version,
+                relight,
             },
         );
         Ok(result)
@@ -554,6 +532,7 @@ impl AnvilChunkSource {
                 light,
                 packet,
                 version,
+                relight: true,
             },
         );
         Ok(())
@@ -586,6 +565,7 @@ impl AnvilChunkSource {
                 light: light.clone(),
                 packet,
                 version,
+                relight: false,
             },
         );
         Ok(())
@@ -600,13 +580,28 @@ impl AnvilChunkSource {
             cache
                 .dirty
                 .get(&(x, z))
-                .map(|d| (d.chunk.clone(), d.light.clone(), d.version))
+                .map(|d| (d.chunk.clone(), d.light.clone(), d.version, d.relight))
         };
-        let Some((chunk, light, version)) = item else {
+        let Some((chunk, stored_light, version, relight)) = item else {
             return Ok(());
         };
         let source = Arc::clone(self);
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let light = if relight {
+                match source.relight_light(x, z, &chunk) {
+                    Some(light) => light,
+                    None => {
+                        tracing::debug!(
+                            x,
+                            z,
+                            "keeping stored light: an adjacent chunk is not loaded"
+                        );
+                        stored_light
+                    }
+                }
+            } else {
+                stored_light
+            };
             let dir = source
                 .path
                 .as_ref()
@@ -630,7 +625,7 @@ impl AnvilChunkSource {
                     }
                 }
             }
-            apply_light(&mut tag, &light, source.dimension)?;
+            apply_light_to_nbt(&mut tag, &light, source.dimension.min_y().div_euclid(16))?;
             let bytes = binary::write_named("", &tag)?;
             region.write_chunk(x, z, &bytes, ferrite_world::RegionCompression::Zlib)?;
             Ok(())
@@ -655,6 +650,77 @@ impl AnvilChunkSource {
             let Some((x, z)) = next else { return Ok(()) };
             self.flush_chunk(x, z).await?;
         }
+    }
+    /// Rebuilds a column's light from its blocks and the loaded 3x3 neighbourhood.
+    ///
+    /// `None` means a neighbour is missing: light at the column edge cannot be resolved
+    /// until every neighbour loads, so the caller keeps the stored light instead of writing
+    /// a permanently dark edge.
+    fn relight_light(&self, x: i32, z: i32, chunk: &Chunk) -> Option<LightData> {
+        let mut chunks = Vec::with_capacity(9);
+        {
+            let cache = self.cache.lock().unwrap();
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let key = (x + dx, z + dz);
+                    let column = if key == (x, z) {
+                        Some(chunk.clone())
+                    } else {
+                        cache
+                            .dirty
+                            .get(&key)
+                            .map(|dirty| dirty.chunk.clone())
+                            .or_else(|| {
+                                cache
+                                    .entries
+                                    .iter()
+                                    .find_map(|(&(cx, cz, _), entry)| match entry {
+                                        Entry::Ready(Ok(column), _) if (cx, cz) == key => {
+                                            Some(column.chunk.clone())
+                                        }
+                                        _ => None,
+                                    })
+                            })
+                    };
+                    chunks.push(column);
+                }
+            }
+        }
+        if chunks.iter().any(Option::is_none) {
+            return None;
+        }
+        let min_section = self.dimension.min_y().div_euclid(16);
+        let max_section = min_section + i32::try_from(chunk.sections().len()).ok()? - 1;
+        let mut engine = LightEngine::new(
+            x,
+            z,
+            min_section,
+            max_section,
+            self.dimension.has_skylight(),
+        );
+        engine.relight(&Neighbourhood {
+            center_x: x,
+            center_z: z,
+            chunks: &chunks,
+        });
+        let mut light = LightData::default();
+        for kind in [LightKind::Sky, LightKind::Block] {
+            let mut arrays = Vec::with_capacity(chunk.sections().len() + 2);
+            for section_y in min_section - 1..=max_section + 1 {
+                let array = engine.section(kind, x, section_y, z)?;
+                arrays.push(match array {
+                    NibbleArray::Null => LightSection::Unknown,
+                    NibbleArray::Zero => LightSection::Empty,
+                    NibbleArray::Full => LightSection::Data(Box::new([0xff; 2048])),
+                    NibbleArray::Data(bytes) => LightSection::Data(bytes.clone()),
+                });
+            }
+            match kind {
+                LightKind::Sky => light.sky = arrays,
+                LightKind::Block => light.block = arrays,
+            }
+        }
+        Some(light)
     }
     /// Encoded `level_chunk_with_light` body for `(x, z)`, starting a
     /// background load on first use. `None` means the chunk is still loading.
@@ -835,37 +901,32 @@ pub fn read_spawn(world: &Path) -> anyhow::Result<[i32; 3]> {
     Ok([pos[0], pos[1], pos[2]])
 }
 
-fn apply_light(tag: &mut Tag, light: &LightData, dimension: Dimension) -> anyhow::Result<()> {
-    let Tag::Compound(root) = tag else {
-        anyhow::bail!("invalid chunk root")
-    };
-    let Some(Tag::List(List::Compound(sections))) = root.get_mut("sections") else {
-        anyhow::bail!("missing sections")
-    };
-    for (name, values) in [("SkyLight", &light.sky), ("BlockLight", &light.block)] {
-        for (idx, value) in values.iter().enumerate() {
-            let data = match value {
-                LightSection::Unknown => continue,
-                LightSection::Empty => vec![0; 2048],
-                LightSection::Data(bytes) => bytes.iter().map(|b| *b as i8).collect(),
-            };
-            let y = i8::try_from(idx as i32 - 1 + dimension.min_y().div_euclid(16))?;
-            let section_index = match sections
-                .iter()
-                .position(|s| s.get("Y") == Some(&Tag::Byte(y)))
-            {
-                Some(i) => i,
-                None => {
-                    let mut section = ferrite_nbt::Compound::new();
-                    section.insert("Y".into(), Tag::Byte(y));
-                    sections.push(section);
-                    sections.len() - 1
-                }
-            };
-            sections[section_index].insert(name.into(), Tag::ByteArray(data));
+/// The loaded 3x3 columns handed to [`LightEngine`], row-major by chunk `(z, x)`.
+struct Neighbourhood<'a> {
+    center_x: i32,
+    center_z: i32,
+    chunks: &'a [Option<Chunk>],
+}
+impl Neighbourhood<'_> {
+    fn chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<&Chunk> {
+        let dx = chunk_x - (self.center_x - 1);
+        let dz = chunk_z - (self.center_z - 1);
+        if !(0..3).contains(&dx) || !(0..3).contains(&dz) {
+            return None;
         }
+        self.chunks[(dz * 3 + dx) as usize].as_ref()
     }
-    Ok(())
+}
+impl LightBlockView for Neighbourhood<'_> {
+    fn state(&self, x: i32, y: i32, z: i32) -> u16 {
+        self.chunk(x.div_euclid(16), z.div_euclid(16))
+            .and_then(|chunk| chunk.block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8))
+            .and_then(|state| u16::try_from(state).ok())
+            .unwrap_or(0)
+    }
+    fn is_chunk_loaded(&self, chunk_x: i32, chunk_z: i32) -> bool {
+        self.chunk(chunk_x, chunk_z).is_some()
+    }
 }
 
 fn flat_chunk(
@@ -1022,5 +1083,70 @@ mod tests {
             &*before, &*after,
             "a light change must re-encode the chunk packet"
         );
+    }
+
+    fn vanilla_root() -> Option<std::path::PathBuf> {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        root.join("reports/blocks.json").exists().then_some(root)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modified_chunk_persists_relit_light_after_flush() {
+        let Some(root) = vanilla_root() else {
+            eprintln!("SKIP relight persistence test: vanilla/26.3/generated is absent");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-relight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let registry = RuntimeRegistry::load(root).unwrap();
+        let source = AnvilChunkSource::new(dir.clone(), registry);
+        // A dirty column is only relit when its whole 3x3 neighbourhood is loaded.
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                ready(&source, dx, dz, 0).await;
+            }
+        }
+        let glowstone = source
+            .registry
+            .block_id("minecraft:glowstone", &Default::default())
+            .unwrap();
+        source.set_block(8, 100, 8, glowstone).unwrap();
+        source.flush_chunk(0, 0).await.unwrap();
+
+        let (_, stored) = read_column(&dir, &source.registry, Dimension::Overworld, 0, 0)
+            .unwrap()
+            .expect("the flushed column is on disk");
+        let section = usize::try_from(
+            100_i32.div_euclid(16) - Dimension::Overworld.min_y().div_euclid(16) + 1,
+        )
+        .unwrap();
+        let index = 100u32.rem_euclid(16) as usize * 256 + 8 * 16 + 8;
+        let nibble = |data: &[u8]| (data[index / 2] >> ((index % 2) * 4)) & 15;
+        match &stored.block[section] {
+            LightSection::Data(data) => {
+                assert_eq!(
+                    nibble(&data[..]),
+                    15,
+                    "the glowstone's block light was saved"
+                )
+            }
+            other => panic!("expected stored block light, got {other:?}"),
+        }
+        assert!(
+            stored
+                .sky
+                .iter()
+                .any(|value| matches!(value, LightSection::Data(_))),
+            "a relit overworld column stores sky light"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

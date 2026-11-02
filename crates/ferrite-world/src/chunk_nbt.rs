@@ -1,6 +1,6 @@
 use crate::{
-    BlockEntity, BlockStateRegistry, Chunk, ChunkError, ChunkSection, HeightmapKind, PaletteKind,
-    PalettedContainer,
+    BlockEntity, BlockStateRegistry, Chunk, ChunkError, ChunkSection, HeightmapKind, LightData,
+    LightSection, PaletteKind, PalettedContainer,
 };
 use ferrite_nbt::{Compound, List, Tag};
 use std::collections::BTreeMap;
@@ -441,4 +441,112 @@ pub fn chunk_to_nbt(
         .collect::<Vec<_>>();
     root.insert("block_entities".into(), Tag::List(List::Compound(entities)));
     Ok(Tag::Compound(root))
+}
+
+/// Reads the stored `SkyLight` and `BlockLight` nibble arrays of a chunk root.
+///
+/// `min_section` is the chunk's lowest section Y and `sections` is the number of light
+/// entries the caller expects: one per chunk section plus the sentinel sections below and
+/// above. A section without a stored array decodes as [`LightSection::Unknown`], an
+/// all-zero array as [`LightSection::Empty`], and any other array as
+/// [`LightSection::Data`].
+pub fn light_from_nbt(
+    tag: &Tag,
+    min_section: i32,
+    sections: usize,
+) -> Result<LightData, ChunkNbtError> {
+    let mut light = LightData {
+        sky: vec![LightSection::Unknown; sections],
+        block: vec![LightSection::Unknown; sections],
+    };
+    let root = compound(tag)?;
+    let Some(Tag::List(List::Compound(stored))) = root.get("sections") else {
+        return Ok(light);
+    };
+    for section in stored {
+        let Some(Tag::Byte(y)) = section.get("Y") else {
+            continue;
+        };
+        let index = i32::from(*y) - min_section + 1;
+        if !(0..sections as i32).contains(&index) {
+            continue;
+        }
+        for (name, target) in [
+            ("SkyLight", &mut light.sky),
+            ("BlockLight", &mut light.block),
+        ] {
+            let Some(Tag::ByteArray(bytes)) = section.get(name) else {
+                continue;
+            };
+            if bytes.len() != 2048 {
+                return Err(ChunkNbtError::Invalid("invalid light array length"));
+            }
+            let mut data = Box::new([0u8; 2048]);
+            for (dst, src) in data.iter_mut().zip(bytes) {
+                *dst = *src as u8;
+            }
+            target[index as usize] = if data.iter().all(|value| *value == 0) {
+                LightSection::Empty
+            } else {
+                LightSection::Data(data)
+            };
+        }
+    }
+    Ok(light)
+}
+
+/// Writes `SkyLight` and `BlockLight` arrays into a chunk root, creating the sentinel
+/// sections when needed. [`LightSection::Unknown`] removes a stale array instead of leaving
+/// the previous save's data in place.
+pub fn apply_light_to_nbt(
+    tag: &mut Tag,
+    light: &LightData,
+    min_section: i32,
+) -> Result<(), ChunkNbtError> {
+    if light.sky.len() != light.block.len() {
+        return Err(ChunkNbtError::Invalid("light layer length mismatch"));
+    }
+    let Tag::Compound(root) = tag else {
+        return Err(ChunkNbtError::Invalid("expected compound"));
+    };
+    if root.get("sections").is_none() {
+        root.insert("sections".into(), Tag::List(List::Compound(Vec::new())));
+    }
+    let Some(Tag::List(List::Compound(sections))) = root.get_mut("sections") else {
+        return Err(ChunkNbtError::Invalid("missing sections"));
+    };
+    for (name, values) in [("SkyLight", &light.sky), ("BlockLight", &light.block)] {
+        for (index, value) in values.iter().enumerate() {
+            let y = i8::try_from(index as i64 - 1 + i64::from(min_section))
+                .map_err(|_| ChunkNbtError::Invalid("light section Y out of range"))?;
+            let existing = sections
+                .iter()
+                .position(|section| section.get("Y") == Some(&Tag::Byte(y)));
+            match value {
+                LightSection::Unknown => {
+                    if let Some(existing) = existing {
+                        sections[existing].shift_remove(name);
+                    }
+                }
+                LightSection::Empty | LightSection::Data(_) => {
+                    let existing = match existing {
+                        Some(existing) => existing,
+                        None => {
+                            let mut section = Compound::new();
+                            section.insert("Y".into(), Tag::Byte(y));
+                            sections.push(section);
+                            sections.len() - 1
+                        }
+                    };
+                    let data = match value {
+                        LightSection::Empty => vec![0; 2048],
+                        LightSection::Data(bytes) => bytes.iter().map(|byte| *byte as i8).collect(),
+                        LightSection::Unknown => unreachable!(),
+                    };
+                    sections[existing].insert(name.into(), Tag::ByteArray(data));
+                }
+            }
+        }
+    }
+    Ok(())
 }

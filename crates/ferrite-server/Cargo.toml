@@ -32,6 +32,7 @@ ferrite-math = { path = "../ferrite-math" }
 ferrite-plugin = { path = "../ferrite-plugin" }
 ferrite-profiler = { path = "../ferrite-profiler" }
 ferrite-fluid = { path = "../ferrite-fluid" }
+ferrite-light = { path = "../ferrite-light" }
 ferrite-noise = { path = "../ferrite-noise" }
 ferrite-worldgen = { path = "../ferrite-worldgen" }
 

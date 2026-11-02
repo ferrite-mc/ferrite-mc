@@ -89,7 +89,6 @@ still stubs that answer "Command not implemented".
 `ferrite-world`, `ferrite-light`.
 
 - Entity and block-entity persistence beyond chests; region-file compaction; dimension directories.
-- Lighting persistence for chunks modified in memory.
 - Light differential: the fixture must be regenerated with `python tools/make_fixture_world.py`
   (stable double flush, 120 s+) before `compare_fixture_light_when_available` compares 256 chunks;
   the checked-in fixture used on 2026-10-30 only has 196 comparable chunks.

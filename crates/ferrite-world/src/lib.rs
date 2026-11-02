@@ -266,7 +266,9 @@ impl PalettedContainer {
     }
 }
 mod chunk_nbt;
-pub use chunk_nbt::{ChunkNbtError, DATA_VERSION, chunk_from_nbt, chunk_to_nbt};
+pub use chunk_nbt::{
+    ChunkNbtError, DATA_VERSION, apply_light_to_nbt, chunk_from_nbt, chunk_to_nbt, light_from_nbt,
+};
 
 #[cfg(test)]
 mod frequency_tests {

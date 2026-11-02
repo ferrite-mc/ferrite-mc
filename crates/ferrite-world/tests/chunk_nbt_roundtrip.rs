@@ -1,7 +1,7 @@
 use ferrite_nbt::{Compound, List, Tag, binary};
 use ferrite_world::{
-    BlockEntity, BlockInfo, BlockStateRegistry, RegionFile, RuntimeRegistry, chunk_from_nbt,
-    chunk_to_nbt,
+    BlockEntity, BlockInfo, BlockStateRegistry, LightData, LightSection, RegionFile,
+    RuntimeRegistry, apply_light_to_nbt, chunk_from_nbt, chunk_to_nbt, light_from_nbt,
 };
 
 /// The fixture world is generated locally and gitignored, so CI skips these tests.
@@ -120,6 +120,110 @@ fn full_chunk_preserves_entities_biomes_light_and_unknown_metadata() {
         assert_eq!(b.randomly_ticking_block_count(), random_blocks);
         assert_eq!(b.randomly_ticking_fluid_count(), random_fluids);
     }
+}
+
+fn light_pattern(section: usize) -> LightSection {
+    match section % 4 {
+        0 => LightSection::Unknown,
+        1 => LightSection::Empty,
+        _ => {
+            let mut data = Box::new([0u8; 2048]);
+            for (index, byte) in data.iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_mul(37).wrapping_add(section as u8);
+            }
+            LightSection::Data(data)
+        }
+    }
+}
+
+#[test]
+fn light_arrays_roundtrip_through_chunk_nbt() {
+    const SECTIONS: usize = 26;
+    const MIN_SECTION: i32 = -4;
+    let mut root = Compound::new();
+    root.insert("DataVersion".into(), Tag::Int(ferrite_world::DATA_VERSION));
+    // A stored section the writer has to merge into instead of appending a duplicate.
+    let mut existing = Compound::new();
+    existing.insert("Y".into(), Tag::Byte(0));
+    existing.insert("SkyLight".into(), Tag::ByteArray(vec![99; 2048]));
+    existing.insert("BlockLight".into(), Tag::ByteArray(vec![-99; 2048]));
+    root.insert("sections".into(), Tag::List(List::Compound(vec![existing])));
+    let mut tag = Tag::Compound(root);
+
+    let light = LightData {
+        sky: (0..SECTIONS).map(light_pattern).collect(),
+        block: (0..SECTIONS)
+            .map(|index| light_pattern(index + 2))
+            .collect(),
+    };
+    apply_light_to_nbt(&mut tag, &light, MIN_SECTION).unwrap();
+
+    // Go through the real binary codec, not just the in-memory tag.
+    let bytes = binary::write_named("", &tag).unwrap();
+    let (_, decoded) = binary::read_named(&bytes).unwrap();
+    let restored = light_from_nbt(&decoded, MIN_SECTION, SECTIONS).unwrap();
+    assert_eq!(restored.sky, light.sky);
+    assert_eq!(restored.block, light.block);
+
+    // The sentinel sections below and above the column exist only because light needs them.
+    let Tag::Compound(root) = &decoded else {
+        panic!("chunk root")
+    };
+    let Tag::List(List::Compound(sections)) = root.get("sections").unwrap() else {
+        panic!("sections")
+    };
+    for y in [
+        MIN_SECTION - 1,
+        MIN_SECTION,
+        MIN_SECTION + SECTIONS as i32 - 2,
+    ] {
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.get("Y") == Some(&Tag::Byte(y as i8))),
+            "missing light section at Y {y}"
+        );
+    }
+}
+
+#[test]
+fn unknown_light_removes_stale_stored_arrays() {
+    let mut root = Compound::new();
+    let mut section = Compound::new();
+    section.insert("Y".into(), Tag::Byte(2));
+    section.insert("SkyLight".into(), Tag::ByteArray(vec![1; 2048]));
+    section.insert("BlockLight".into(), Tag::ByteArray(vec![2; 2048]));
+    root.insert("sections".into(), Tag::List(List::Compound(vec![section])));
+    let mut tag = Tag::Compound(root);
+
+    // Y=2 is index 7 when the column starts at section -4; the other slots are unknown.
+    let light = LightData {
+        sky: vec![LightSection::Unknown; 8],
+        block: vec![LightSection::Unknown; 8],
+    };
+    apply_light_to_nbt(&mut tag, &light, -4).unwrap();
+    let Tag::Compound(root) = &tag else {
+        panic!("chunk root")
+    };
+    let Tag::List(List::Compound(sections)) = root.get("sections").unwrap() else {
+        panic!("sections")
+    };
+    let stored = sections
+        .iter()
+        .find(|section| section.get("Y") == Some(&Tag::Byte(2)))
+        .unwrap();
+    assert!(stored.get("SkyLight").is_none());
+    assert!(stored.get("BlockLight").is_none());
+}
+
+#[test]
+fn stored_light_arrays_must_be_2048_bytes() {
+    let mut section = Compound::new();
+    section.insert("Y".into(), Tag::Byte(0));
+    section.insert("SkyLight".into(), Tag::ByteArray(vec![1; 7]));
+    let mut root = Compound::new();
+    root.insert("sections".into(), Tag::List(List::Compound(vec![section])));
+    assert!(light_from_nbt(&Tag::Compound(root), -4, 26).is_err());
 }
 
 #[test]
