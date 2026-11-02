@@ -553,6 +553,11 @@ impl Player {
                 "container.upgrade",
                 "minecraft:smithing_table",
             )),
+            Some("minecraft:cartography_table") => Some((
+                Menu::cartography as fn(i32) -> Menu,
+                "container.cartography_table",
+                "minecraft:cartography_table",
+            )),
             Some("minecraft:loom") => Some((
                 Menu::loom as fn(i32) -> Menu,
                 "container.loom",

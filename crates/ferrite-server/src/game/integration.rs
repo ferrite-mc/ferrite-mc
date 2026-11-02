@@ -2841,6 +2841,61 @@ async fn crafting_planks_and_sticks_in_the_grid_and_on_a_table() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cartography_table_opens_its_menu() {
+    use ferrite_protocol::{
+        packets::play::{ContainerContent, ItemStack, MoveRotation, OpenScreen, UseItemOn},
+        types::BlockPos,
+    };
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    let (world, addr, server) = op_world(Some(source.clone()), 1, &[]).await;
+    let mut bot = join_with_inventory(addr, "Mapper").await;
+    // The spawn chunk must be loaded before the table can be placed in it.
+    bot.until(46).await;
+    let table = u32::from(ferrite_data::blocks::default_state("cartography_table").unwrap());
+    source.set_block(0, 64, 0, table).unwrap();
+    bot.send(&MoveRotation {
+        yaw: 0.0,
+        pitch: 90.0,
+        flags: 1,
+    })
+    .await;
+    bot.send(&UseItemOn {
+        hand: VarInt(0),
+        location: BlockPos::new(0, 64, 0).pack(),
+        face: VarInt(1),
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside: false,
+        world_border_hit: false,
+        sequence: VarInt(1),
+    })
+    .await;
+    let body = bot.until(OpenScreen::ID).await;
+    let screen = OpenScreen::decode(&mut body.as_slice()).unwrap();
+    let cartography =
+        ferrite_data::registries::id("minecraft:menu", "minecraft:cartography_table").unwrap();
+    assert_eq!((screen.window.0, screen.menu.0), (1, cartography));
+    assert_eq!(screen.title.0, "container.cartography_table");
+    let body = bot.until(18).await;
+    let content = ContainerContent::<ItemStack>::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(content.window.0, 1);
+    assert_eq!(
+        content.slots.len(),
+        39,
+        "the map, the additional slot, the result and 36 inventory slots"
+    );
+    assert_eq!(
+        source.block(0, 65, 0),
+        Some(0),
+        "using the table opened it instead of placing the held item"
+    );
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
 /// Saved player state belongs to one world's save directory. Worlds never share it, and a world
 /// without one keeps nothing. A single process-wide directory used to hand a bot the gamemode,
 /// position and inventory a same-named bot from another test world had saved, which is what made
