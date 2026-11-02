@@ -190,6 +190,13 @@ public class FerriteServer extends ServerStubs {
     @Override public String getMinecraftVersion() { return "26.3"; }
     @Override public java.util.logging.Logger getLogger() { return java.util.logging.Logger.getLogger("Ferrite"); }
     @Override public java.util.Collection<? extends org.bukkit.entity.Player> getOnlinePlayers() { return java.util.List.copyOf(players.values()); }
+    /** The console and every online player, the audiences a server-wide message reaches. */
+    @Override public java.lang.Iterable<? extends net.kyori.adventure.audience.Audience> audiences() {
+        var audiences = new java.util.ArrayList<net.kyori.adventure.audience.Audience>(players.size() + 1);
+        audiences.add(console);
+        audiences.addAll(players.values());
+        return java.util.List.copyOf(audiences);
+    }
     @Override public org.bukkit.GameMode getDefaultGameMode() { return defaultGameMode; }
     @Override public void setDefaultGameMode(org.bukkit.GameMode mode) { defaultGameMode = java.util.Objects.requireNonNull(mode, "mode"); }
     @Override public boolean getAllowFlight() { return settings.allowFlight(); }
