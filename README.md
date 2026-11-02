@@ -21,6 +21,16 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 > protocol translation layer. **It has not yet been tested with a real 26.3 client.** No Mojang
 > code or assets are distributed here; vanilla data is generated locally from the official jar.
 
+## 진행 현황 (2026-11-02)
+
+- **CI**: 지역 병합과 느린 연결 테스트의 동기화를 보강했습니다. 바닐라 테스트 월드의 오래된
+  조명 배열을 제거한 뒤 다시 계산하도록 수정했으며, 수정된 GitHub Actions 결과는 확인 중입니다.
+- **청크 로딩 측정**: i5-14600KF, 통합 브랜치에서 `cargo bench -p ferrite-world --bench chunk_load`의
+  NBT → 청크 변환 중앙 추정치는 1.6107ms/청크(구간 1.6036~1.6193ms, 100 표본)였습니다.
+  디스크 읽기와 네트워크 전송은 포함하지 않습니다.
+- **진행 중**: 차원 간 블록 갱신 격리와 청크 조명 갱신, 지도 제작대의 월드 데이터 처리,
+  피스톤 검토, 나무와 구조물 생성. 작업 브랜치의 변경은 검증 후 통합합니다.
+
 ## 현재 상태 한눈에
 
 | 구분 | 내용 |

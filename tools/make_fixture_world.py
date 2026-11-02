@@ -6,8 +6,8 @@ Starts the official server jar twice with a fixed seed:
 
 1. force-loads chunks (-3..18, -3..18) and saves repeatedly until the region files stop
    changing;
-2. clears the `isLightOn` flag of every saved chunk and force-loads the area again, so
-   vanilla recomputes light from the stored blocks and writes a self-consistent world.
+2. clears `isLightOn` and the saved section light arrays, then force-loads the area again,
+   so vanilla recomputes light from the stored blocks and writes a self-consistent world.
 
 Output (gitignored):
   vanilla/<version>/fixture-world/world/...   (level.dat, region files)
@@ -73,9 +73,7 @@ SECTOR = 4096
 # fixture leaves them untouched.
 FORCED_MIN = -3
 FORCED_MAX = 18
-# `isLightOn: 1b` as serialized in a chunk root: a byte tag named isLightOn. A byte tag
-# keeps its value in the last byte, so flipping it marks the chunk as unlit without
-# touching the rest of the chunk tree.
+# Serialized flags used by fixture verification and unit tests.
 LIGHT_ON = b"\x01\x00\x09isLightOn\x01"
 LIGHT_OFF = LIGHT_ON[:-1] + b"\x00"
 
@@ -144,8 +142,71 @@ def region_chunks(path):
         yield rx * 32 + index % 32, rz * 32 + index // 32, timestamp, raw
 
 
+def invalidate_chunk_light(raw: bytes) -> bytes:
+    """Clear light certification and remove only section light arrays from NBT."""
+    found_flag = 0
+    def take(pos, size):
+        if size < 0 or pos + size > len(raw):
+            raise ValueError("truncated or invalid chunk NBT")
+        return raw[pos : pos + size], pos + size
+
+    def payload(kind, pos, path):
+        nonlocal found_flag
+        if kind in (1, 2, 3, 4, 5, 6):
+            return take(pos, {1: 1, 2: 2, 3: 4, 4: 8, 5: 4, 6: 8}[kind])
+        if kind in (7, 11, 12):
+            header, end = take(pos, 4)
+            count = struct.unpack('>i', header)[0]
+            data, end = take(end, count * {7: 1, 11: 4, 12: 8}[kind])
+            return header + data, end
+        if kind == 8:
+            header, end = take(pos, 2)
+            data, end = take(end, int.from_bytes(header, 'big'))
+            return header + data, end
+        if kind == 9:
+            header, end = take(pos, 5)
+            item_type, count = header[0], struct.unpack('>i', header[1:])[0]
+            if count < 0 or (item_type == 0 and count):
+                raise ValueError('invalid NBT list')
+            items = []
+            for _ in range(count):
+                item, end = payload(item_type, end, path + (b'[]',))
+                items.append(item)
+            return header + b''.join(items), end
+        if kind == 10:
+            result = bytearray()
+            while True:
+                tag, pos = take(pos, 1)
+                if tag == b'\x00':
+                    result.extend(tag)
+                    return bytes(result), pos
+                length, pos = take(pos, 2)
+                name, pos = take(pos, int.from_bytes(length, 'big'))
+                value, pos = payload(tag[0], pos, path + (name,))
+                if path == (b'sections', b'[]') and name in (b'SkyLight', b'BlockLight'):
+                    if tag[0] != 7:
+                        raise ValueError('invalid section light type')
+                    continue
+                if not path and name == b'isLightOn':
+                    found_flag += 1
+                    if tag[0] != 1 or value != b'\x01':
+                        raise ValueError('chunk is not marked lit')
+                    value = b'\x00'
+                result.extend(tag + length + name + value)
+        raise ValueError(f'unsupported NBT tag {kind}')
+
+    if raw[:1] != b'\x0a':
+        raise ValueError('chunk root must be a compound')
+    name_size = int.from_bytes(raw[1:3], 'big')
+    root, start = take(0, 3 + name_size)
+    data, end = payload(10, start, ())
+    if end != len(raw) or found_flag != 1:
+        raise ValueError('invalid chunk root or isLightOn flag')
+    return root + data
+
+
 def mark_chunks_unlit(out) -> int:
-    """Clear `isLightOn` in the forced chunks so vanilla relights them on the next load."""
+    """Remove saved light in forced chunks so vanilla relights them on the next load."""
     marked = 0
     for path in sorted((out / REGION_DIR).glob("*.mca")):
         chunks = read_region(path)
@@ -155,10 +216,10 @@ def mark_chunks_unlit(out) -> int:
             z = rz * 32 + index // 32
             if not (FORCED_MIN <= x <= FORCED_MAX and FORCED_MIN <= z <= FORCED_MAX):
                 continue
-            found = raw.count(LIGHT_ON)
-            if found != 1:
-                sys.exit(f"{path}: forced chunk {x},{z} has {found} isLightOn flags")
-            chunks[index] = (timestamp, raw.replace(LIGHT_ON, LIGHT_OFF))
+            try:
+                chunks[index] = (timestamp, invalidate_chunk_light(raw))
+            except ValueError as error:
+                sys.exit(f"{path}: invalid forced chunk {x},{z}: {error}")
             marked += 1
         write_region(path, chunks)
     return marked
