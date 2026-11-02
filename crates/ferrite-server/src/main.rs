@@ -13,6 +13,10 @@ struct Config {
     online_mode: bool,
     enforce_secure_profile: bool,
     motd: String,
+    /// Vanilla `chat-spam-threshold-seconds`; 0 disables the limit.
+    chat_spam_threshold_seconds: i32,
+    /// Vanilla `command-spam-threshold-seconds`; 0 disables the limit.
+    command_spam_threshold_seconds: i32,
     /// 64x64 PNG shown in the server list. Missing or malformed files are only a warning.
     server_icon: Option<std::path::PathBuf>,
     max_players: u32,
@@ -139,6 +143,8 @@ impl Default for Config {
             online_mode: true,
             enforce_secure_profile: true,
             motd: "A Ferrite server".into(),
+            chat_spam_threshold_seconds: 10,
+            command_spam_threshold_seconds: 10,
             server_icon: Some("server-icon.png".into()),
             max_players: 20,
             view_distance: 10,
@@ -279,6 +285,8 @@ async fn main() -> anyhow::Result<()> {
             GameMode::Creative => 1,
         },
         max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
+        chat_spam_threshold_seconds: config.chat_spam_threshold_seconds,
+        command_spam_threshold_seconds: config.command_spam_threshold_seconds,
         ops,
         plugins: plugin_bridge
             .as_ref()

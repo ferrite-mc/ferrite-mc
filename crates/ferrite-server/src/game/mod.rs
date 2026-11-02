@@ -85,10 +85,12 @@ mod redstone;
 mod region;
 mod selectors;
 mod survival;
+mod throttle;
 
 use self::{
     global::{GlobalPlayer, GlobalRegion},
     region::{Command, Mailbox, Player, Region, Signal, TickContext},
+    throttle::TickThrottler,
 };
 use ferrite_admin::AdminLists;
 use ferrite_net::game::{self, GameMessage, Outbound, OutboundSender, ServerboundPlay};
@@ -124,6 +126,11 @@ pub struct WorldSettings {
     pub dimension: Dimension,
     /// Whether it is currently raining, for fire and cauldron rules.
     pub raining: bool,
+    /// Vanilla `chat-spam-threshold-seconds`: how many seconds of repeated chat a non-op may
+    /// send before being kicked; 0 disables the limit.
+    pub chat_spam_threshold_seconds: i32,
+    /// Vanilla `command-spam-threshold-seconds`: the same budget for commands.
+    pub command_spam_threshold_seconds: i32,
     pub max_players: i32,
     pub ops: Vec<Operator>,
     /// Plugin event and command hooks; `None` when the server runs without plugins.
@@ -158,6 +165,8 @@ impl Default for WorldSettings {
             gamemode: 1,
             dimension: Dimension::Overworld,
             raining: false,
+            chat_spam_threshold_seconds: 10,
+            command_spam_threshold_seconds: 10,
             max_players: 20,
             ops: Vec::new(),
             plugins: None,
@@ -578,6 +587,7 @@ async fn run(
     let mut mailboxes: HashMap<Uuid, (u64, Mailbox, OutboundSender)> = HashMap::new();
     let mut pending: HashMap<Uuid, GameMessage> = HashMap::new();
     let mut permissions: HashMap<Uuid, u8> = HashMap::new();
+    let mut command_spam: HashMap<Uuid, TickThrottler> = HashMap::new();
     let mut names: HashMap<Uuid, String> = HashMap::new();
     let mut plugin_commands = settings.plugin_commands.take();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
@@ -662,6 +672,7 @@ async fn run(
            let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seed,flat,respawn_requested:false,attacks:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
            worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
            names.insert(uuid, name.clone());
+           command_spam.insert(uuid, TickThrottler::from_seconds(settings.command_spam_threshold_seconds));
            if let Some(plugins) = &settings.plugins {
                let snapshot = ferrite_plugin::PlayerSnapshot {
                    id: uuid,
@@ -688,7 +699,17 @@ async fn run(
                if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
            }
            if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_joined(uuid, &name) { tracing::warn!(%error, "player join event failed"); }
-           let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; g.join(player)});tracing::info!(%uuid,"player joined");
+           let mode = start_mode;
+           let chat_spam_threshold_seconds = settings.chat_spam_threshold_seconds;
+           worlds.schedule_global(move |g|{
+               let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility);
+               player.pos = start_pos;
+               player.game_mode = mode;
+               player.dimension = start_dimension;
+               player.set_chat_spam_threshold_seconds(chat_spam_threshold_seconds);
+               g.join(player)
+           });
+           tracing::info!(%uuid,"player joined");
           },
           GameMessage::Input{session,uuid,packet:ServerboundPlay::Chat(chat)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) && chat.message.chars().count()<=256 {
               let mut chat = chat;
@@ -704,7 +725,10 @@ async fn run(
                       Err(error) => tracing::warn!(%error, "chat event failed"),
                   }
               }
-              if deliver { worlds.schedule_global(move |g|g.chat(uuid,&chat)); }
+              if deliver {
+                  let is_op = permissions.get(&uuid).copied().unwrap_or(0) > 0;
+                  worlds.schedule_global(move |g|g.chat(uuid,&chat,is_op));
+              }
           }},
           GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatAck(ack)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_ack(uuid,ack.offset.0));}},
           GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatSessionUpdate(update)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_session(uuid,update.chat_session));}},
@@ -789,6 +813,16 @@ async fn run(
                   commands::Action::Enchant { targets, enchantment, level } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Enchant { target, target_name, enchantment: enchantment.clone(), level, feedback: Some(outbound.clone()) }); } } },
                   other => { runtime.apply(other).await; }
               }}
+              drop(runtime);
+              // Vanilla `detectCommandRateSpam` runs after the command has executed.
+              let is_op = permissions.get(&uuid).copied().unwrap_or(0) > 0;
+              let throttler = command_spam
+                  .entry(uuid)
+                  .or_insert_with(|| TickThrottler::from_seconds(settings.command_spam_threshold_seconds));
+              throttler.increment();
+              if !throttler.is_under_threshold() && !is_op {
+                  let _ = outbound.send(Outbound::Disconnect("Kicked for spamming".into()));
+              }
           }},
           GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
           GameMessage::Left{session,uuid}=>{if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
@@ -900,7 +934,7 @@ async fn run(
             command_state.lock().unwrap().set_dimension(id,dimension);
             worlds.schedule_global(move |g| g.set_dimension(id, dimension));
           },
-          Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
+          Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);command_spam.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
             let name = names.remove(&uuid).unwrap_or_default();
             if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
             worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
@@ -913,6 +947,9 @@ async fn run(
              }
          },
          _tick = clock.tick() => {
+             for throttler in command_spam.values_mut() {
+                 throttler.tick();
+             }
              let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
              let due = command_state.lock().unwrap().tick(advance_time);
              for function in due {
