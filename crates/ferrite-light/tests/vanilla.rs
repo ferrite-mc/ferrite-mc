@@ -270,6 +270,18 @@ fn compare_fixture_light_when_available() {
                                 ferrite_data::blocks::state(world.state(x, y, z))
                             );
                         }
+                        if actual != expected && slot == 1 && total_mismatch[1] + mismatch[1] == 0 {
+                            for above_y in y..=(y + 48).min(319) {
+                                let state = world.state(x, above_y, z);
+                                if state != 0 {
+                                    eprintln!(
+                                        "sky column {x} {above_y} {z}: {:?}, calculated {:?}",
+                                        ferrite_data::blocks::state(state),
+                                        engine.get(LightKind::Sky, x, above_y, z)
+                                    );
+                                }
+                            }
+                        }
                         mismatch[slot] += usize::from(actual != expected);
                     }
                 }
