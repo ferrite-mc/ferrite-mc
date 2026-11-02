@@ -158,6 +158,14 @@ impl Default for Config {
     }
 }
 
+/// Clients accept 2..=32 chunks. Clamp once so the wire, chunk streaming and the server
+/// snapshot plugins read all see the same effective distance.
+const MIN_VIEW_DISTANCE: u8 = 2;
+const MAX_VIEW_DISTANCE: u8 = 32;
+fn effective_view_distance(configured: u8) -> u8 {
+    configured.clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -171,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
         Err(error) => return Err(error).context("reading ferrite.toml"),
     };
+    let view_distance = effective_view_distance(config.view_distance);
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
     let favicon = config.server_icon.as_deref().and_then(load_favicon);
@@ -189,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.bind_address)
         .await
         .context("binding server listener")?;
-    tracing::info!(address = %listener.local_addr()?, online_mode = config.online_mode, view_distance = config.view_distance, "Ferrite listener started");
+    tracing::info!(address = %listener.local_addr()?, online_mode = config.online_mode, view_distance = view_distance, "Ferrite listener started");
 
     let spawn = if let Some(path) = &config.world {
         game::load_spawn(path).context("reading world spawn")?
@@ -239,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
             motd: config.motd.clone(),
             max_players: u16::try_from(config.max_players).unwrap_or(u16::MAX),
             port: listener.local_addr()?.port(),
-            view_distance: config.view_distance,
+            view_distance,
             online_mode: config.online_mode,
             whitelist: false,
             world: ferrite_plugin::WorldSnapshot {
@@ -298,7 +307,7 @@ async fn main() -> anyhow::Result<()> {
             encrypt_offline: false,
             enforce_secure_profile: config.enforce_secure_profile,
             compression_threshold: config.compression_threshold,
-            view_distance: config.view_distance,
+            view_distance,
             supported_versions: match config.supported_versions {
                 SupportedVersionsMode::All => ferrite_net::SupportedVersions::All,
                 SupportedVersionsMode::Native => ferrite_net::SupportedVersions::Native,
@@ -452,6 +461,17 @@ mod tests {
     #[test]
     fn missing_icon_is_only_a_warning() {
         assert!(load_favicon(std::path::Path::new("missing-server-icon.png")).is_none());
+    }
+
+    #[test]
+    fn view_distance_clamps_to_the_client_range() {
+        assert_eq!(effective_view_distance(0), 2);
+        assert_eq!(effective_view_distance(1), 2);
+        assert_eq!(effective_view_distance(2), 2);
+        assert_eq!(effective_view_distance(16), 16);
+        assert_eq!(effective_view_distance(32), 32);
+        assert_eq!(effective_view_distance(33), 32);
+        assert_eq!(effective_view_distance(u8::MAX), 32);
     }
 
     #[test]
