@@ -16,7 +16,7 @@ use ferrite_protocol::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
 };
 pub(super) struct Bot {
     stream: TcpStream,
@@ -121,7 +121,22 @@ impl Bot {
     }
     /// Completes login and configuration but stops before the play position packet.
     async fn begin_join(addr: std::net::SocketAddr, name: &str) -> Self {
-        let stream = TcpStream::connect(addr).await.unwrap();
+        Self::begin_join_with_receive_buffer(addr, name, None).await
+    }
+    /// Like [`Self::begin_join`], with an optional cap on the connection's TCP receive buffer.
+    async fn begin_join_with_receive_buffer(
+        addr: std::net::SocketAddr,
+        name: &str,
+        receive_buffer: Option<u32>,
+    ) -> Self {
+        let stream = match receive_buffer {
+            Some(bytes) => {
+                let socket = TcpSocket::new_v4().unwrap();
+                socket.set_recv_buffer_size(bytes).unwrap();
+                socket.connect(addr).await.unwrap()
+            }
+            None => TcpStream::connect(addr).await.unwrap(),
+        };
         let mut b = Self {
             stream,
             encoder: FrameEncoder::default(),
@@ -170,7 +185,18 @@ impl Bot {
     /// Joins with a specific chunk-batch rate, so a test can keep the per-connection queue
     /// small without a normal reader overflowing it during the initial chunk burst.
     async fn join_with_rate(addr: std::net::SocketAddr, name: &str, chunks_per_tick: f32) -> Self {
-        let mut b = Self::begin_join(addr, name).await;
+        Self::join_with_rate_and_receive_buffer(addr, name, chunks_per_tick, None).await
+    }
+    /// Joins with a fixed TCP receive buffer. Combined with the server's send-buffer cap, the
+    /// kernel can hold only tens of KiB, so a client that stops reading definitely blocks the
+    /// writer instead of letting an autotuned receive buffer absorb a whole chunk batch.
+    async fn join_with_rate_and_receive_buffer(
+        addr: std::net::SocketAddr,
+        name: &str,
+        chunks_per_tick: f32,
+        receive_buffer: Option<u32>,
+    ) -> Self {
+        let mut b = Self::begin_join_with_receive_buffer(addr, name, receive_buffer).await;
         b.chunks_per_tick = chunks_per_tick;
         b.until(73).await;
         b
@@ -3445,11 +3471,18 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
             online_mode: false,
             view_distance: 24,
             send_queue_bytes: 128 * 1024,
+            // A small kernel send buffer caps what the writer can push outside the app
+            // queue, so the client stopping its reads blocks the writer after a few KiB.
+            socket_send_buffer_bytes: Some(16 * 1024),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
     ));
-    let mut slow = Bot::join_with_rate(addr, "Slow", 1.0).await;
+    // Both kernel buffers are capped (16 KiB server send, 8 KiB client receive), so the
+    // 64-chunk batch (~391 KiB) deterministically overflows the 128 KiB queue once the bot
+    // stops reading. The OS defaults are not portable: Linux autotunes loopback buffers into
+    // the megabytes, which absorbed the whole batch and let the queue drain instead.
+    let mut slow = Bot::join_with_rate_and_receive_buffer(addr, "Slow", 1.0, Some(8 * 1024)).await;
     let mut fast = Bot::join_with_rate(addr, "Fast", 1.0).await;
     let before = world.tick_samples.lock().unwrap().len();
     // One acknowledgement makes the next tick queue a full 64-chunk batch; the bot never reads
