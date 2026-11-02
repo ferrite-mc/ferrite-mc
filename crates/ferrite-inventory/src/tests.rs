@@ -1,4 +1,6 @@
-use ferrite_item::{Component, Enchantments, HashedSlot, ItemStack, component_ids};
+use ferrite_item::{
+    Component, Enchantments, HashedSlot, ItemStack, MapPostProcessing, component_ids,
+};
 
 use crate::{
     ClickInput::{self, *},
@@ -1222,13 +1224,13 @@ fn cartography_map(map_id: i32) -> ItemStack {
     let mut stack = item("filled_map", 1);
     stack
         .components
-        .insert_opaque(component_ids::MAP_ID, ferrite_nbt::Tag::Int(map_id));
+        .insert(component_ids::MAP_ID, Component::MapId(map_id));
     stack
 }
 
-fn map_post_processing(stack: &ItemStack) -> Option<i32> {
+fn map_post_processing(stack: &ItemStack) -> Option<MapPostProcessing> {
     match stack.effective_component(component_ids::MAP_POST_PROCESSING) {
-        Some(Component::Opaque(ferrite_nbt::Tag::Int(id))) => Some(id),
+        Some(Component::MapPostProcessing(processing)) => Some(processing),
         _ => None,
     }
 }
@@ -1292,13 +1294,62 @@ fn cartography_table_copies_zooms_and_locks_maps() {
     // Paper zooms out one step (vanilla `MapPostProcessing.SCALE`).
     f.set(1, item("paper", 1));
     assert_eq!(f.slot(2).count, 1);
-    assert_eq!(map_post_processing(&f.slot(2)), Some(1));
+    assert_eq!(
+        map_post_processing(&f.slot(2)),
+        Some(MapPostProcessing::Scale)
+    );
     // A glass pane locks the map (vanilla `MapPostProcessing.LOCK`).
     f.set(1, item("glass_pane", 1));
-    assert_eq!(map_post_processing(&f.slot(2)), Some(0));
+    assert_eq!(
+        map_post_processing(&f.slot(2)),
+        Some(MapPostProcessing::Lock)
+    );
     // Anything else in the second slot produces no result.
     f.set(1, item("dirt", 1));
     assert!(f.slot(2).is_empty());
+}
+
+#[test]
+fn cartography_paper_and_glass_results_round_trip_on_the_wire_and_in_saves() {
+    // Paper and glass results carry a map id and a post-processing step. Both used to be
+    // opaque NBT, which the network slot codec cannot write, so the result slot was unsendable.
+    for (additional, expected) in [
+        ("paper", MapPostProcessing::Scale),
+        ("glass_pane", MapPostProcessing::Lock),
+    ] {
+        let mut f = Fixture::new(Menu::cartography(9));
+        f.set(0, cartography_map(12));
+        f.set(1, item(additional, 1));
+        let result = f.slot(2);
+        assert_eq!(
+            result.effective_component(component_ids::MAP_POST_PROCESSING),
+            Some(Component::MapPostProcessing(expected)),
+            "{additional} result carries its post-processing step"
+        );
+
+        let wire = result.encode_network().expect("result slot encodes");
+        assert_eq!(
+            ItemStack::decode_network(&wire).expect("result slot decodes"),
+            result,
+            "{additional} result round-trips on the wire"
+        );
+
+        let save = result.to_nbt().expect("result slot saves");
+        let components = match save.get("components") {
+            Some(ferrite_nbt::Tag::Compound(components)) => components.clone(),
+            _ => panic!("{additional} result has no components"),
+        };
+        assert_eq!(
+            components.get("minecraft:map_post_processing"),
+            Some(&ferrite_nbt::Tag::String(expected.name().to_owned())),
+            "{additional} result saves vanilla's name, not a network id"
+        );
+        assert_eq!(
+            ItemStack::from_nbt(&save).expect("result slot loads"),
+            result,
+            "{additional} result round-trips in the save format"
+        );
+    }
 }
 
 #[test]
@@ -1328,9 +1379,10 @@ fn cartography_table_quick_move_routes_maps_paper_and_other_items() {
     assert_eq!((f.slot(11), f.slot(1)), (empty(), item("paper", 3)));
     // Shift-clicking the result moves it to the hotbar end first and consumes both inputs.
     let mut zoomed = cartography_map(4);
-    zoomed
-        .components
-        .insert_opaque(component_ids::MAP_POST_PROCESSING, ferrite_nbt::Tag::Int(1));
+    zoomed.components.insert(
+        component_ids::MAP_POST_PROCESSING,
+        Component::MapPostProcessing(MapPostProcessing::Scale),
+    );
     f.click(2, 0, QuickMove);
     assert_eq!(f.slot(38), zoomed);
     assert!(f.slot(0).is_empty());

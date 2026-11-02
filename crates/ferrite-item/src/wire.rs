@@ -41,7 +41,7 @@ use ferrite_text::Component as Text;
 
 use crate::component::{
     AttributeModifier, AttributeOperation, Component, ComponentPatch, CustomModelData,
-    Enchantments, EquipmentSlot, Food, Rarity, Tool, ToolRule,
+    Enchantments, EquipmentSlot, Food, MapPostProcessing, Rarity, Tool, ToolRule,
 };
 use crate::component_ids as ids;
 use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count};
@@ -338,6 +338,7 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
         ids::ITEM_NAME => Component::ItemName(reader.text().ok()?),
         ids::LORE => Component::Lore(reader.text_list(MAX_LIST).ok()?),
         ids::DAMAGE => Component::Damage(reader.varint().ok()?),
+        ids::MAP_ID => Component::MapId(reader.varint().ok()?),
         ids::MAX_DAMAGE => Component::MaxDamage(reader.varint().ok()?),
         ids::MAX_STACK_SIZE => Component::MaxStackSize(reader.varint().ok()?),
         ids::UNBREAKABLE => Component::Unbreakable,
@@ -356,6 +357,9 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
         ids::DYED_COLOR => Component::DyedColor(reader.i32().ok()?),
         ids::RARITY => {
             Component::Rarity(*Rarity::ALL.get(usize::try_from(reader.varint().ok()?).ok()?)?)
+        }
+        ids::MAP_POST_PROCESSING => {
+            Component::MapPostProcessing(MapPostProcessing::from_id(reader.varint().ok()?)?)
         }
         ids::REPAIR_COST => Component::RepairCost(reader.varint().ok()?),
         ids::CUSTOM_DATA => match reader.nbt_tag().ok()? {
@@ -497,7 +501,8 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
         Component::Damage(value)
         | Component::MaxDamage(value)
         | Component::MaxStackSize(value)
-        | Component::RepairCost(value) => write_varint(*value, &mut out),
+        | Component::RepairCost(value)
+        | Component::MapId(value) => write_varint(*value, &mut out),
         Component::Unbreakable => {}
         Component::Enchantments(enchantments) | Component::StoredEnchantments(enchantments) => {
             write_count(enchantments.levels.len(), &mut out)?;
@@ -531,6 +536,7 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
             }
         }
         Component::DyedColor(value) => out.extend_from_slice(&value.to_be_bytes()),
+        Component::MapPostProcessing(processing) => write_varint(processing.id(), &mut out),
         Component::Rarity(rarity) => {
             let id = Rarity::ALL
                 .iter()

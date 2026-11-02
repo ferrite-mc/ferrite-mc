@@ -93,6 +93,52 @@ impl Rarity {
     }
 }
 
+/// Vanilla `MapPostProcessing`, the change a cartography table applies to a map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MapPostProcessing {
+    Lock,
+    Scale,
+}
+
+impl MapPostProcessing {
+    /// Every step, in vanilla's network id order.
+    pub const ALL: [Self; 2] = [Self::Lock, Self::Scale];
+
+    /// The name vanilla uses, e.g. `"scale"`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
+            Self::Scale => "scale",
+        }
+    }
+
+    /// The network id, which is the enum ordinal.
+    pub const fn id(self) -> i32 {
+        match self {
+            Self::Lock => 0,
+            Self::Scale => 1,
+        }
+    }
+
+    /// Parses a step name, with or without the `minecraft:` prefix.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match key(name) {
+            "lock" => Some(Self::Lock),
+            "scale" => Some(Self::Scale),
+            _ => None,
+        }
+    }
+
+    /// Parses a network id.
+    pub fn from_id(id: i32) -> Option<Self> {
+        match id {
+            0 => Some(Self::Lock),
+            1 => Some(Self::Scale),
+            _ => None,
+        }
+    }
+}
+
 /// How an attribute modifier applies its amount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AttributeOperation {
@@ -694,6 +740,8 @@ pub enum Component {
     Lore(Vec<Text>),
     /// `minecraft:damage`, durability already used.
     Damage(i32),
+    /// `minecraft:map_id`, the id of the saved map data a filled map shows.
+    MapId(i32),
     /// `minecraft:max_damage`, total durability.
     MaxDamage(i32),
     /// `minecraft:max_stack_size`, the stack limit of this stack.
@@ -710,6 +758,8 @@ pub enum Component {
     DyedColor(i32),
     /// `minecraft:rarity`.
     Rarity(Rarity),
+    /// `minecraft:map_post_processing`, a cartography table's pending map change.
+    MapPostProcessing(MapPostProcessing),
     /// `minecraft:repair_cost`.
     RepairCost(i32),
     /// `minecraft:custom_data`, opaque to the server.
@@ -740,6 +790,7 @@ impl Component {
             Self::ItemName(_) => ids::ITEM_NAME,
             Self::Lore(_) => ids::LORE,
             Self::Damage(_) => ids::DAMAGE,
+            Self::MapId(_) => ids::MAP_ID,
             Self::MaxDamage(_) => ids::MAX_DAMAGE,
             Self::MaxStackSize(_) => ids::MAX_STACK_SIZE,
             Self::Unbreakable => ids::UNBREAKABLE,
@@ -748,6 +799,7 @@ impl Component {
             Self::CustomModelData(_) => ids::CUSTOM_MODEL_DATA,
             Self::DyedColor(_) => ids::DYED_COLOR,
             Self::Rarity(_) => ids::RARITY,
+            Self::MapPostProcessing(_) => ids::MAP_POST_PROCESSING,
             Self::RepairCost(_) => ids::REPAIR_COST,
             Self::CustomData(_) => ids::CUSTOM_DATA,
             Self::AttributeModifiers(_) => ids::ATTRIBUTE_MODIFIERS,
@@ -765,6 +817,7 @@ impl Component {
             Self::ItemName(_) => "item_name",
             Self::Lore(_) => "lore",
             Self::Damage(_) => "damage",
+            Self::MapId(_) => "map_id",
             Self::MaxDamage(_) => "max_damage",
             Self::MaxStackSize(_) => "max_stack_size",
             Self::Unbreakable => "unbreakable",
@@ -773,6 +826,7 @@ impl Component {
             Self::CustomModelData(_) => "custom_model_data",
             Self::DyedColor(_) => "dyed_color",
             Self::Rarity(_) => "rarity",
+            Self::MapPostProcessing(_) => "map_post_processing",
             Self::RepairCost(_) => "repair_cost",
             Self::CustomData(_) => "custom_data",
             Self::AttributeModifiers(_) => "attribute_modifiers",
@@ -797,13 +851,15 @@ impl Component {
             | Self::MaxDamage(value)
             | Self::MaxStackSize(value)
             | Self::RepairCost(value)
-            | Self::DyedColor(value) => Tag::Int(*value),
+            | Self::DyedColor(value)
+            | Self::MapId(value) => Tag::Int(*value),
             Self::Unbreakable => Tag::Compound(Compound::new()),
             Self::Enchantments(enchantments) | Self::StoredEnchantments(enchantments) => {
                 enchantments.to_tag()
             }
             Self::CustomModelData(data) => data.to_tag(),
             Self::Rarity(rarity) => Tag::String(rarity.name().to_owned()),
+            Self::MapPostProcessing(processing) => Tag::String(processing.name().to_owned()),
             Self::CustomData(data) => Tag::Compound(data.clone()),
             Self::AttributeModifiers(modifiers) => Tag::List(if modifiers.is_empty() {
                 List::End
@@ -833,6 +889,7 @@ impl Component {
             ids::ITEM_NAME => Text::from_nbt(tag).ok().map(Self::ItemName),
             ids::LORE => decode_text_list(tag).map(Self::Lore),
             ids::DAMAGE => as_int(tag).map(Self::Damage),
+            ids::MAP_ID => as_int(tag).map(Self::MapId),
             ids::MAX_DAMAGE => as_int(tag).map(Self::MaxDamage),
             ids::MAX_STACK_SIZE => as_int(tag).map(Self::MaxStackSize),
             ids::UNBREAKABLE => match tag {
@@ -844,6 +901,15 @@ impl Component {
             ids::CUSTOM_MODEL_DATA => CustomModelData::from_tag(tag).map(Self::CustomModelData),
             ids::DYED_COLOR => as_int(tag).map(Self::DyedColor),
             ids::RARITY => as_str(tag).and_then(Rarity::from_name).map(Self::Rarity),
+            ids::MAP_POST_PROCESSING => match tag {
+                Tag::String(name) => {
+                    MapPostProcessing::from_name(name).map(Self::MapPostProcessing)
+                }
+                // Older saves wrote the network id; accept it alongside vanilla's name.
+                _ => as_int(tag)
+                    .and_then(MapPostProcessing::from_id)
+                    .map(Self::MapPostProcessing),
+            },
             ids::REPAIR_COST => as_int(tag).map(Self::RepairCost),
             ids::CUSTOM_DATA => match tag {
                 Tag::Compound(compound) => Some(Self::CustomData(compound.clone())),
@@ -1219,6 +1285,7 @@ mod tests {
                 ]),
             ),
             (ids::DAMAGE, Component::Damage(7)),
+            (ids::MAP_ID, Component::MapId(7)),
             (ids::MAX_DAMAGE, Component::MaxDamage(1561)),
             (ids::MAX_STACK_SIZE, Component::MaxStackSize(16)),
             (ids::UNBREAKABLE, Component::Unbreakable),
@@ -1236,6 +1303,10 @@ mod tests {
             ),
             (ids::DYED_COLOR, Component::DyedColor(0x0012_3456)),
             (ids::RARITY, Component::Rarity(Rarity::Epic)),
+            (
+                ids::MAP_POST_PROCESSING,
+                Component::MapPostProcessing(MapPostProcessing::Scale),
+            ),
             (ids::REPAIR_COST, Component::RepairCost(4)),
             (ids::CUSTOM_DATA, Component::CustomData(custom_data)),
             (

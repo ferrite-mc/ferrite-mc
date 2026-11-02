@@ -1,6 +1,8 @@
 //! Container menus and `container_click` semantics (vanilla `AbstractContainerMenu`).
 
-use ferrite_item::{Component, Enchantments, HashedSlot, ItemStack, component_ids as ids};
+use ferrite_item::{
+    Component, Enchantments, HashedSlot, ItemStack, MapPostProcessing, component_ids as ids,
+};
 use ferrite_nbt::Tag;
 
 use crate::inventory::{
@@ -1281,9 +1283,9 @@ impl Menu {
         if is_cartography_map(map) && !additional.is_empty() {
             self.result = match additional.name() {
                 Some("minecraft:paper") if map.name() == Some("minecraft:filled_map") => {
-                    cartography_result(map, MAP_POST_SCALE)
+                    cartography_result(map, MapPostProcessing::Scale)
                 }
-                Some("minecraft:glass_pane") => cartography_result(map, MAP_POST_LOCK),
+                Some("minecraft:glass_pane") => cartography_result(map, MapPostProcessing::Lock),
                 Some("minecraft:map") => map.copy_with_count(2),
                 _ => ItemStack::empty(),
             };
@@ -2687,17 +2689,13 @@ fn is_cartography_additional(stack: &ItemStack) -> bool {
     )
 }
 
-/// Vanilla `MapPostProcessing.LOCK` network id.
-const MAP_POST_LOCK: i32 = 0;
-/// Vanilla `MapPostProcessing.SCALE` network id.
-const MAP_POST_SCALE: i32 = 1;
-
 /// A cartography result: one copy of the map with a pending post-processing step.
-fn cartography_result(map: &ItemStack, post_processing: i32) -> ItemStack {
+fn cartography_result(map: &ItemStack, post_processing: MapPostProcessing) -> ItemStack {
     let mut result = map.copy_with_count(1);
-    result
-        .components
-        .insert_opaque(ids::MAP_POST_PROCESSING, Tag::Int(post_processing));
+    result.components.insert(
+        ids::MAP_POST_PROCESSING,
+        Component::MapPostProcessing(post_processing),
+    );
     result
 }
 

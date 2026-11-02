@@ -7,7 +7,7 @@ use ferrite_text::Component as Text;
 use super::*;
 use crate::component::{
     AttributeModifier, AttributeOperation, Component, CustomModelData, Enchantments, EquipmentSlot,
-    Food, Rarity, Tool, ToolRule,
+    Food, MapPostProcessing, Rarity, Tool, ToolRule,
 };
 use crate::component_ids as ids;
 
@@ -412,6 +412,12 @@ fn typed_components_decode_from_their_network_payloads() {
             Component::DyedColor(0x00ff_00ff),
         ),
         (ids::RARITY, vi(3), Component::Rarity(Rarity::Epic)),
+        (ids::MAP_ID, vi(7), Component::MapId(7)),
+        (
+            ids::MAP_POST_PROCESSING,
+            vi(1),
+            Component::MapPostProcessing(MapPostProcessing::Scale),
+        ),
         (ids::REPAIR_COST, vi(3), Component::RepairCost(3)),
         (
             ids::CUSTOM_DATA,
