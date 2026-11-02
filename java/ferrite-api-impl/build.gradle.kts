@@ -19,6 +19,7 @@ tasks.test { dependsOn(":test-plugin:legacyJar"); inputs.file(project(":test-plu
 val registryOutput = layout.buildDirectory.dir("generated/registry-resources")
 val generateRegistryKeys by tasks.registering(Exec::class) {
     val vanilla = rootProject.projectDir.resolve("../../vanilla/26.3/generated")
+    inputs.file(projectDir.resolve("tools/generate_registry_keys.py"))
     inputs.file(vanilla.resolve("reports/registries.json"))
     inputs.dir(vanilla.resolve("data/minecraft/enchantment"))
     inputs.dir(vanilla.resolve("data/minecraft/worldgen/biome"))

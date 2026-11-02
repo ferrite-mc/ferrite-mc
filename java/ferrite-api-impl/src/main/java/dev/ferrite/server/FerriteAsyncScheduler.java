@@ -22,10 +22,7 @@ final class FerriteAsyncScheduler implements AsyncScheduler {
             return running ? (repeating ? CancelledState.NEXT_RUNS_CANCELLED : CancelledState.RUNNING) : CancelledState.CANCELLED_BY_CALLER;
         }
         public ExecutionState getExecutionState() { return state; }
-        public void run() {
-            if (((FerriteServer) org.bukkit.Bukkit.getServer()).plugins.isLegacy(plugin)) { synchronized (Bootstrap.LEGACY_LOCK) { execute(); } }
-            else execute();
-        }
+        public void run() { execute(); }
         private void execute() {
             synchronized (this) { if (state != ExecutionState.IDLE || !plugin.isEnabled()) { tasks.remove(this); return; } state = ExecutionState.RUNNING; }
             try { action.accept(this); }

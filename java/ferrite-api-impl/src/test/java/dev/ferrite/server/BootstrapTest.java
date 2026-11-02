@@ -252,6 +252,23 @@ class BootstrapTest {
         var asyncRan = new java.util.concurrent.CountDownLatch(1);
         Bukkit.getAsyncScheduler().runNow(Bukkit.getPluginManager().getPlugin("FerriteTest"), task -> asyncRan.countDown());
         try { assertTrue(asyncRan.await(5, java.util.concurrent.TimeUnit.SECONDS)); } catch (InterruptedException e) { throw new AssertionError(e); }
+        var asyncStarted = new java.util.concurrent.CountDownLatch(1);
+        var asyncRelease = new java.util.concurrent.CountDownLatch(1);
+        var commandFinished = new java.util.concurrent.CountDownLatch(1);
+        var asyncIsPrimary = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Bukkit.getScheduler().runTaskAsynchronously(Bukkit.getPluginManager().getPlugin("FerriteDependency"), () -> {
+            asyncIsPrimary.set(Bukkit.isPrimaryThread());
+            asyncStarted.countDown();
+            try { asyncRelease.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        });
+        Thread command = new Thread(() -> { try { Bootstrap.dispatchCommand("console", "help"); } finally { commandFinished.countDown(); } });
+        try {
+            assertTrue(asyncStarted.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            command.start();
+            assertTrue(commandFinished.await(2, java.util.concurrent.TimeUnit.SECONDS), "An async plugin task must not block command dispatch");
+            assertFalse(asyncIsPrimary.get(), "Async tasks must not appear to run on the primary thread");
+        } catch (InterruptedException e) { throw new AssertionError(e); }
+        finally { asyncRelease.countDown(); try { command.join(5000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
         assertTrue(log.contains("FerriteTest event"));
         UUID snapshotId = UUID.randomUUID();
         Bootstrap.registerPlayer(snapshotId.toString(), "snapshot", true);

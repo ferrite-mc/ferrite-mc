@@ -117,6 +117,29 @@ public class FerriteServer extends ServerStubs {
     private final org.bukkit.plugin.ServicesManager services = new org.bukkit.plugin.SimpleServicesManager();
     @Override public org.bukkit.plugin.ServicesManager getServicesManager() { return services; }
     @Override public net.kyori.adventure.text.Component permissionMessage() { return net.kyori.adventure.text.Component.text("You do not have permission to use this command."); }
+    @Override public String getPermissionMessage() { return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(permissionMessage()); }
+    @Override public org.bukkit.util.CachedServerIcon loadServerIcon(java.io.File file) {
+        if (file == null) throw new IllegalArgumentException("file must not be null");
+        try {
+            var image = javax.imageio.ImageIO.read(file);
+            if (image == null) throw new IllegalArgumentException("unsupported server icon image");
+            return loadServerIcon(image);
+        } catch (java.io.IOException error) {
+            throw new IllegalArgumentException("cannot read server icon", error);
+        }
+    }
+    @Override public org.bukkit.util.CachedServerIcon loadServerIcon(java.awt.image.BufferedImage image) {
+        if (image == null || image.getWidth() != 64 || image.getHeight() != 64)
+            throw new IllegalArgumentException("server icon must be a 64x64 image");
+        try {
+            var bytes = new java.io.ByteArrayOutputStream();
+            if (!javax.imageio.ImageIO.write(image, "png", bytes)) throw new IllegalArgumentException("PNG encoder unavailable");
+            String data = "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
+            return () -> data;
+        } catch (java.io.IOException error) {
+            throw new IllegalArgumentException("cannot encode server icon", error);
+        }
+    }
     @Override public boolean isPrimaryThread() { return Thread.currentThread() == primaryThread || Thread.holdsLock(Bootstrap.LEGACY_LOCK); }
     private final java.util.Map<String, org.bukkit.command.Command> commands = new java.util.HashMap<>();
     private final org.bukkit.command.SimpleCommandMap commandMap = new org.bukkit.command.SimpleCommandMap(this, commands);
@@ -162,6 +185,37 @@ public class FerriteServer extends ServerStubs {
             if (method.getName().equals("isOp") || method.getName().equals("hasPermission")) return true;
             throw new UnsupportedOperationException("Ferrite: not implemented: ConsoleCommandSender#" + method.getName());
         });
+    }
+    @Override public org.bukkit.command.CommandSender createCommandSender(java.util.function.Consumer<? super net.kyori.adventure.text.Component> feedback) {
+        java.util.Objects.requireNonNull(feedback, "feedback");
+        return (org.bukkit.command.CommandSender) java.lang.reflect.Proxy.newProxyInstance(
+            getClass().getClassLoader(), new Class<?>[]{org.bukkit.command.CommandSender.class},
+            (proxy, method, args) -> {
+                switch (method.getName()) {
+                    case "sendMessage", "sendRawMessage" -> {
+                        if (args != null) for (var arg : args) redirectFeedback(feedback, arg);
+                        return null;
+                    }
+                    case "equals" -> { return proxy == args[0]; }
+                    case "hashCode" -> { return System.identityHashCode(proxy); }
+                    case "toString" -> { return "RedirectedCommandSender"; }
+                    default -> {
+                        try { return method.invoke(console, args); }
+                        catch (java.lang.reflect.InvocationTargetException error) { throw error.getCause(); }
+                    }
+                }
+            });
+    }
+    private static void redirectFeedback(java.util.function.Consumer<? super net.kyori.adventure.text.Component> feedback, Object value) {
+        if (value instanceof net.kyori.adventure.text.Component component) feedback.accept(component);
+        else if (value instanceof net.kyori.adventure.text.ComponentLike like) feedback.accept(like.asComponent());
+        else if (value instanceof net.kyori.adventure.chat.SignedMessage message) feedback.accept(message.unsignedContent() != null ? message.unsignedContent() : net.kyori.adventure.text.Component.text(message.message()));
+        else if (value instanceof net.md_5.bungee.api.chat.BaseComponent[] components) feedback.accept(net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().deserialize(net.md_5.bungee.chat.ComponentSerializer.toString(components)));
+        else if (value instanceof net.md_5.bungee.api.chat.BaseComponent component) feedback.accept(net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().deserialize(net.md_5.bungee.chat.ComponentSerializer.toString(component)));
+        else if (value instanceof String text) feedback.accept(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(text));
+        else if (value instanceof Object[] values) for (var item : values) redirectFeedback(feedback, item);
+        else if (!(value instanceof java.util.UUID) && !(value instanceof net.kyori.adventure.identity.Identity) && !(value instanceof net.kyori.adventure.chat.ChatType.Bound))
+            throw new IllegalArgumentException("Unsupported command feedback: " + value);
     }
     final FerriteEntitySchedulers entitySchedulers = new FerriteEntitySchedulers();
     public io.papermc.paper.threadedregions.scheduler.EntityScheduler entityScheduler(java.util.UUID id, java.util.function.BooleanSupplier alive) { return entitySchedulers.forEntity(id, alive); }
@@ -304,16 +358,14 @@ public class FerriteServer extends ServerStubs {
         java.util.Objects.requireNonNull(registry, "registry");
         java.util.Objects.requireNonNull(tag, "tag");
         java.util.Objects.requireNonNull(type, "type");
-        if (type != org.bukkit.Material.class) throw new UnsupportedOperationException("Ferrite: getTag is backed only for Material, not " + type.getName());
-        for (var candidate : FerriteTags.tags(registry)) if (candidate.getKey().equals(tag)) return (org.bukkit.Tag<T>) candidate;
+        for (var candidate : FerriteTags.tags(registry, type)) if (candidate.getKey().equals(tag)) return candidate;
         return null;
     }
     @SuppressWarnings("unchecked")
     @Override public <T extends org.bukkit.Keyed> java.lang.Iterable<org.bukkit.Tag<T>> getTags(String registry, Class<T> type) {
         java.util.Objects.requireNonNull(registry, "registry");
         java.util.Objects.requireNonNull(type, "type");
-        if (type != org.bukkit.Material.class) throw new UnsupportedOperationException("Ferrite: getTags is backed only for Material, not " + type.getName());
-        return (java.lang.Iterable<org.bukkit.Tag<T>>) (java.lang.Iterable<?>) FerriteTags.tags(registry);
+        return FerriteTags.tags(registry, type);
     }
     private final FerriteRegistryAccess registries = new FerriteRegistryAccess();
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) { return registries.getRegistry(type); }
