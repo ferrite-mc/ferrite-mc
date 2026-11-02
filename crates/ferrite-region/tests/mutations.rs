@@ -201,22 +201,29 @@ fn merge_of_ticking_and_idle_region_applies_right_after_the_tick() {
 
 #[test]
 fn pending_merge_chain_across_three_regions_applies_in_order() {
-    // A ticks while the two bridges join B and C into one transient region.
-    // Removing the first bridge remains ordered after its addition.
+    // All three regions tick while the bridges are added. Removing the first
+    // bridge remains ordered after its addition, even with both merges deferred.
     let mut topology = Regionizer::<Data>::new(0, 1);
     for x in [0, 2, 4] {
         topology.add_chunk(ChunkPos(x, 0));
     }
     let scheduler = Scheduler::new(topology, (), 3, |_| {}, |_| {});
     let release = block_region(&scheduler, ChunkPos(0, 0));
+    let release_b = block_region(&scheduler, ChunkPos(2, 0));
+    let release_c = block_region(&scheduler, ChunkPos(4, 0));
     scheduler.add_chunk(ChunkPos(1, 0));
     scheduler.add_chunk(ChunkPos(3, 0));
     scheduler.remove_chunk(ChunkPos(1, 0));
-    assert_eq!(scheduler.region_count(), 2);
+    assert_eq!(scheduler.region_count(), 5);
     scheduler.check_invariants().unwrap();
     release.send(()).unwrap();
+    release_b.send(()).unwrap();
+    release_c.send(()).unwrap();
     let start = Instant::now();
-    while scheduler.owner(ChunkPos(1, 0)).is_some() {
+    while scheduler.owner(ChunkPos(1, 0)).is_some()
+        || scheduler.owner(ChunkPos(2, 0)) != scheduler.owner(ChunkPos(4, 0))
+        || scheduler.region_count() != 2
+    {
         assert!(start.elapsed() < Duration::from_secs(2));
         thread::yield_now();
     }
