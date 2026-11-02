@@ -287,13 +287,24 @@ fn bridge_task_queued_during_tick_survives_deferred_merge() {
         release_rx.recv().unwrap();
     });
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (other_entered_tx, other_entered_rx) = mpsc::channel();
+    let (other_release_tx, other_release_rx) = mpsc::channel();
+    scheduler.schedule_at_chunk(ChunkPos(2, 0), move |_| {
+        other_entered_tx.send(()).unwrap();
+        other_release_rx.recv().unwrap();
+    });
+    other_entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
     scheduler.add_chunk(ChunkPos(1, 0));
     let (tx, rx) = mpsc::channel();
     scheduler.schedule_at_chunk(ChunkPos(1, 0), move |_| {
         tx.send(()).unwrap();
     });
-    assert_eq!(scheduler.region_count(), 2);
+    // Both neighbours are ticking, so the bridge is temporarily a third region.
+    assert_eq!(scheduler.region_count(), 3);
     release_tx.send(()).unwrap();
+    other_release_tx.send(()).unwrap();
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(scheduler.region_count(), 1);
     assert!(rx.try_recv().is_err());
