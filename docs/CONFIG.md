@@ -8,11 +8,23 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 |---|---|---|---|
 | `bind-address` | 문자열 (`String`) | `"0.0.0.0:25565"` | 서버가 접속을 받을 주소. `IP:포트` 형식이며, 모든 인터페이스에서 받으려면 `0.0.0.0:<포트>`를 사용합니다. |
 | `online-mode` | 불리언 (`bool`) | `true` | `true`면 Mojang 세션 서버로 인증하고(암호화 + `hasJoined` 검증) 정품 계정만 접속할 수 있습니다. `false`면 오프라인 모드로 아무 이름이나 접속할 수 있습니다. |
+| `enforce-secure-profile` | 불리언 (`bool`) | `true` | 정품 서버에서 서명된 채팅(프로필 키)을 요구합니다. 오프라인 모드에서는 무시됩니다. |
 | `motd` | 문자열 (`String`) | `"A Ferrite server"` | 서버 목록(멀티플레이 화면)에 표시되는 서버 설명 문구입니다. |
+| `server-icon` | 문자열 경로 (`PathBuf`) | `"server-icon.png"` | 서버 목록 아이콘(64x64 PNG). 파일이 없거나 잘못되면 경고만 남기고 아이콘 없이 시작합니다. |
 | `max-players` | 정수 (`u32`) | `20` | 최대 동시 접속자 수. 상태 응답에 표시되고 접속 제한에 사용됩니다. |
 | `view-distance` | 정수 (`u8`) | `10` | 플레이어에게 전송하는 청크 반경(단위: 청크). 실제 적용 시 2~32 범위로 제한됩니다. |
 | `supported-versions` | 문자열 (`all` 또는 `native`) | `all` | `all`은 26.3(프로토콜 777)과 번역 가능한 이전 버전(26.2/776)의 접속을 허용하고, `native`는 26.3 클라이언트만 허용합니다. 허용되지 않는 버전은 로그인 단계에서 "Outdated client"로 끊기며, 서버 목록 상태 응답은 항상 코어 버전을 알립니다. |
 | `compression-threshold` | 정수 (`usize`) | `256` | 이 크기(바이트) 이상인 패킷을 압축합니다. 값이 작을수록 더 많은 패킷을 압축합니다. |
+| `forwarding` | 문자열 (`none`, `velocity`, `bungee`) | `none` | 프록시 플레이어 전달 방식. `velocity`/`bungee`를 쓰면 `online-mode`는 무시되고 인증은 프록시가 담당합니다. |
+| `forwarding-secret` | 문자열 (`String`) | `""` | Velocity 모던 포워딩의 비밀 값. `forwarding = "velocity"`이면 필수이며 프록시 설정과 같아야 합니다. |
+| `world` | 문자열 경로 (`PathBuf`, 선택) | `None` | Anvil 월드 디렉터리. 설정하지 않으면 메모리 월드를 사용합니다. |
+| `generator` | 문자열 (`vanilla` 또는 `superflat`) | `vanilla` | 새 청크 생성기. `superflat`은 테스트용 평지 월드입니다. |
+| `gamemode` | 문자열 (`survival` 또는 `creative`) | `creative` | 새 플레이어의 기본 게임 모드입니다. |
+| `ops` | 배열 | `[]` | 운영자 UUID 목록. 각 항목은 UUID 문자열 또는 `{ uuid, level }`(레벨 0~4, 기본 4)입니다. |
+| `plugins-dir` | 문자열 경로 (`PathBuf`) | `"plugins"` | 플러그인 jar를 읽을 디렉터리입니다. |
+| `plugin-bridge` | 문자열 경로 (`PathBuf`, 선택) | `None` (→ `java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar`) | 내장 JVM 브리지 jar 경로입니다. |
+| `whitelist` | 불리언 (`bool`) | `false` | `whitelist.json`에 있는 플레이어만 접속하도록 합니다. |
+| `plugins.on-event-error` | 문자열 (`allow` 또는 `deny`) | `allow` | 플러그인 이벤트 처리 중 오류 정책. `allow`는 동작을 계속하고, `deny`는 동작을 막습니다. |
 
 참고: `compression-threshold`와 `max-players`는 프로토콜이 `i32`로 표현할 수 있는 범위를
 넘으면 서버가 시작 단계에서 오류로 종료됩니다.
