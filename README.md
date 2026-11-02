@@ -51,8 +51,8 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 ## 현재 상태 한눈에
 
 | 구분 | 내용 |
-| ?? **?? 1??** | ??? ?? ???? ???? ??? ??. Folia?Starlight?Lithium?C2ME?C2ME OpenCL ?? ? ?? ?????? ?? UI? ??? Rust Minecraft ??? ?? ??? ??? ?? |
-| ?? **??? ?? ??** | [WiseHosting ??? ??](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [Server Optimization ???](https://modrinth.com/modpack/server-optimizationn), [YouHaveTrouble ??? ???](https://github.com/YouHaveTrouble/minecraft-optimization) |
+| ?? **?? 1??** | 월드젠 속도 최적화와 플러그인 브리지 완성. Folia·Starlight·Lithium·C2ME·C2ME OpenCL 가속, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증 |
+| ?? **??? ?? ??** | [WiseHosting](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [Server Optimization](https://modrinth.com/modpack/server-optimizationn), [YouHaveTrouble](https://github.com/YouHaveTrouble/minecraft-optimization) |
 |---|---|
 | ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 명령 블록, 양조·비컨, 네더 차원·포탈, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화, 바닐라 지형 생성 |
 | 🔧 **진행 중** | 월드젠 처리량(1스레드 4.6→6.2, 8스레드 23.5→38.9 chunks/s, 10x 목표 미달), 나무·구조물, 피스톤 |
@@ -198,6 +198,8 @@ cargo fmt --all --check
 |---|---|---|
 | 1 | ??? ?? ??? ? ??? ?? ?? ? ?? | **???** |
 | 1 | ???? ??? ? Paper/Bukkit API? NMS ???, ?? ?????? ?? UI | **???** |
+| 1 | 월드젠 속도 최적화 — 처리량 병목 분석 및 개선 | **최우선** |
+| 1 | 플러그인 브리지 — Paper/Bukkit API와 NMS 호환성, 서버 스타터·원격 콘솔 UI | **최우선** |
 | 3 | 리전라이저 + 벤치마크 — Paper/Folia 대비 성능 측정 | 진행 중 |
 | 4 | 플러그인 브리지 — 내장 JVM에서 Bukkit 이벤트/커맨드/스케줄러 실행 | 진행 중 |
 | 5 | 게임플레이 — 인벤토리, 엔티티, 전투, 크래프팅, 컨테이너 | 진행 중 |
