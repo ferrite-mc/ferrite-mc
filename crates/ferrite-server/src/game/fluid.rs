@@ -1,5 +1,5 @@
 //! Region-bounded fluid access to loaded chunk columns.
-use super::{anvil::AnvilChunkSource, region::Tracking};
+use super::{Dimension, anvil::AnvilChunkSource, region::Tracking};
 use ferrite_fluid::FluidWorld;
 use ferrite_region::ChunkPos;
 use std::collections::HashMap;
@@ -67,8 +67,12 @@ impl FluidWorld for RegionFluidWorld<'_> {
             }
         }
     }
+    /// Vanilla's ultrawarm dimension property, spelled
+    /// `minecraft:gameplay/fast_lava` in the 26.3 `dimension_type` data: only
+    /// the nether gets the faster lava ticks, wider lava spread and shorter
+    /// lava drop-off.
     fn ultrawarm(&self) -> bool {
-        false
+        self.source.dimension() == Dimension::Nether
     }
 }
 
@@ -80,6 +84,21 @@ mod tests {
         collections::HashMap,
         sync::{Arc, Mutex},
     };
+
+    async fn loaded_source(dimension: Dimension) -> Arc<AnvilChunkSource> {
+        let source = AnvilChunkSource::new_memory_dimension(None, dimension);
+        for _ in 0..2_000 {
+            match source.get(0, 0, 0) {
+                Some(result) => {
+                    result.expect("chunk load");
+                    return source;
+                }
+                None => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
+        panic!("chunk never loaded for {}", dimension.key());
+    }
+
     #[tokio::test]
     async fn missing_and_unowned_chunks_are_solid_and_not_loaded() {
         let source = super::super::anvil::AnvilChunkSource::new_memory();
@@ -132,5 +151,67 @@ mod tests {
         ticks.run_until(&mut world, 20);
         assert_eq!(source.block(16, 65, 0), None);
         assert_eq!(world.block(16, 65, 0), stone);
+    }
+
+    #[tokio::test]
+    async fn ultrawarm_follows_the_nether_and_changes_lava_behavior() {
+        let held = HashMap::from([(ChunkPos(0, 0), 1)]);
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let air = u32::from(ferrite_data::blocks::default_state("air").unwrap());
+        let lava = u32::from(ferrite_data::blocks::default_state("lava").unwrap());
+        let water = u32::from(ferrite_data::blocks::default_state("water").unwrap());
+        for (dimension, ultrawarm) in [(Dimension::Overworld, false), (Dimension::Nether, true)] {
+            let source = loaded_source(dimension).await;
+            // Two isolated fluids: lava at y=64 and water at y=70, each with an
+            // empty cell to flow into.
+            for (y, state) in [(64, lava), (70, water)] {
+                source.set_block(0, y, 0, state).unwrap();
+                source.set_block(1, y, 0, air).unwrap();
+                source.set_block(1, y + 1, 0, air).unwrap();
+            }
+            let world = RegionFluidWorld::new(&source, &held, &tracking);
+            assert_eq!(
+                world.ultrawarm(),
+                ultrawarm,
+                "{} must report vanilla fast_lava",
+                dimension.key()
+            );
+            assert_eq!(
+                ferrite_fluid::tick_delay(ferrite_fluid::FluidKind::Lava, world.ultrawarm()),
+                if ultrawarm { 10 } else { 30 },
+                "lava ticks faster in the nether"
+            );
+            assert_eq!(
+                ferrite_fluid::get_new_liquid(
+                    &world,
+                    1,
+                    64,
+                    0,
+                    ferrite_fluid::FluidKind::Lava,
+                    false,
+                )
+                .amount,
+                if ultrawarm { 7 } else { 6 },
+                "nether lava keeps two levels, overworld lava drops three"
+            );
+            // Water is not ultrawarm-sensitive in either dimension.
+            assert_eq!(
+                ferrite_fluid::tick_delay(ferrite_fluid::FluidKind::Water, world.ultrawarm()),
+                5
+            );
+            assert_eq!(
+                ferrite_fluid::get_new_liquid(
+                    &world,
+                    1,
+                    70,
+                    0,
+                    ferrite_fluid::FluidKind::Water,
+                    false,
+                )
+                .amount,
+                7,
+                "water ignores the dimension's ultrawarm property"
+            );
+        }
     }
 }
