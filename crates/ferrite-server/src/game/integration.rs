@@ -331,6 +331,130 @@ async fn command_spam_disconnects_a_non_op() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_spam_exempts_ops_under_the_same_threshold() {
+    use ferrite_protocol::packets::play::PlayDisconnect;
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            // One chat reaches the 20-tick budget for a one-second threshold.
+            chat_spam_threshold_seconds: 1,
+            ops: vec![super::Operator {
+                uuid: ferrite_net::offline_uuid("Admin"),
+                level: 4,
+            }],
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut admin = Bot::join(addr, "Admin").await;
+    let mut player = Bot::join(addr, "Spammer").await;
+
+    // The non-op is kicked by the first message under this budget, so the operator only
+    // reaches the marker chat if every burst message was exempt.
+    for _ in 0..10 {
+        admin.chat("burst").await;
+    }
+    admin.chat("still here").await;
+    let mut alive = false;
+    for _ in 0..64 {
+        let body = admin.until(ClientboundPlayerChat::ID).await;
+        let message = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
+        if message.body.content == "still here" {
+            alive = true;
+            break;
+        }
+    }
+    assert!(alive, "the operator must survive the chat burst");
+
+    player.chat("over budget").await;
+    let body = player.until(PlayDisconnect::ID).await;
+    let reason = PlayDisconnect::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(reason.reason.0, "Kicked for spamming");
+
+    drop(admin);
+    drop(player);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_spam_exempts_ops_under_the_same_threshold() {
+    use ferrite_protocol::packets::play::{PlayDisconnect, ServerboundChatCommand};
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            // One command reaches the 20-tick budget for a one-second threshold.
+            command_spam_threshold_seconds: 1,
+            ops: vec![super::Operator {
+                uuid: ferrite_net::offline_uuid("Admin"),
+                level: 4,
+            }],
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut admin = Bot::join(addr, "Admin").await;
+    let mut player = Bot::join(addr, "Spammer").await;
+
+    // `/list` is permission-free and answers with one system chat, so the burst also proves
+    // the operator's command path stays usable instead of only staying connected.
+    for _ in 0..10 {
+        admin
+            .send(&ServerboundChatCommand {
+                command: "list".into(),
+            })
+            .await;
+    }
+    admin.chat("still here").await;
+    let mut alive = false;
+    for _ in 0..64 {
+        let body = admin.until(ClientboundPlayerChat::ID).await;
+        let message = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
+        if message.body.content == "still here" {
+            alive = true;
+            break;
+        }
+    }
+    assert!(alive, "the operator must survive the command burst");
+
+    player
+        .send(&ServerboundChatCommand {
+            command: "list".into(),
+        })
+        .await;
+    let body = player.until(PlayDisconnect::ID).await;
+    let reason = PlayDisconnect::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(reason.reason.0, "Kicked for spamming");
+
+    drop(admin);
+    drop(player);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_login_kicks_old_session_and_keeps_new_session() {
     let world = World::start();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
