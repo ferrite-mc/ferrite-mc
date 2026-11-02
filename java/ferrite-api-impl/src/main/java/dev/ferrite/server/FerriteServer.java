@@ -291,6 +291,16 @@ public class FerriteServer extends ServerStubs {
         for (var entry : FerriteRecipes.entries()) if (entry.result().getType() == result.getType()) matches.add(entry);
         return java.util.List.copyOf(matches);
     }
+    /** Resolves one tag from the same generated block/item tables {@link #getTags} exposes. */
+    @SuppressWarnings("unchecked")
+    @Override public <T extends org.bukkit.Keyed> org.bukkit.Tag<T> getTag(String registry, org.bukkit.NamespacedKey tag, Class<T> type) {
+        java.util.Objects.requireNonNull(registry, "registry");
+        java.util.Objects.requireNonNull(tag, "tag");
+        java.util.Objects.requireNonNull(type, "type");
+        if (type != org.bukkit.Material.class) throw new UnsupportedOperationException("Ferrite: getTag is backed only for Material, not " + type.getName());
+        for (var candidate : FerriteTags.tags(registry)) if (candidate.getKey().equals(tag)) return (org.bukkit.Tag<T>) candidate;
+        return null;
+    }
     @SuppressWarnings("unchecked")
     @Override public <T extends org.bukkit.Keyed> java.lang.Iterable<org.bukkit.Tag<T>> getTags(String registry, Class<T> type) {
         java.util.Objects.requireNonNull(registry, "registry");
