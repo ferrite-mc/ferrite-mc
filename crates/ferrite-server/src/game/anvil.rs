@@ -4,7 +4,8 @@ use ferrite_light::{LightBlockView, LightEngine, LightKind, NibbleArray};
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
     BlockStateRegistry, Chunk, LightData, LightSection, RegionFile, RuntimeRegistry,
-    apply_light_to_nbt, chunk_from_nbt, encode_chunk_packet, light_from_nbt,
+    apply_light_to_nbt, chunk_from_nbt, clear_light_from_nbt, encode_chunk_packet, light_from_nbt,
+    light_is_on,
 };
 use std::path::Path;
 
@@ -16,8 +17,16 @@ pub fn read_chunk(
     z: i32,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     Ok(read_column(world, registry, Dimension::Overworld, x, z)?
-        .map(|(chunk, light)| encode_chunk_packet(x, z, &chunk, &light))
+        .map(|stored| encode_chunk_packet(x, z, &stored.chunk, &stored.light))
         .transpose()?)
+}
+/// A column as stored on disk, with the certification of its light (`isLightOn`).
+struct StoredColumn {
+    chunk: Chunk,
+    light: LightData,
+    /// Whether the stored arrays were built for the stored blocks. When false the light is
+    /// all [`LightSection::Unknown`] and must be rebuilt before it is saved again.
+    light_valid: bool,
 }
 fn read_column(
     world: &Path,
@@ -25,7 +34,7 @@ fn read_column(
     dimension: Dimension,
     x: i32,
     z: i32,
-) -> anyhow::Result<Option<(Chunk, LightData)>> {
+) -> anyhow::Result<Option<StoredColumn>> {
     let rx = x.div_euclid(32);
     let rz = z.div_euclid(32);
     let dir = world.join(dimension.region_dir());
@@ -43,12 +52,16 @@ fn read_column(
         dimension.min_y().div_euclid(16),
         dimension.light_sections(),
     )?;
-    Ok(Some((chunk, light)))
+    Ok(Some(StoredColumn {
+        chunk,
+        light,
+        light_valid: light_is_on(&tag),
+    }))
 }
 
 use ferrite_protocol::{Encode, Packet, VarInt, packets::play::ChunkData};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
@@ -111,6 +124,9 @@ struct Cache {
     entries: HashMap<(i32, i32, i32), Entry>,
     clock: u64,
     dirty: HashMap<(i32, i32), Dirty>,
+    /// Loaded columns whose stored light is not certified and could not be rebuilt yet.
+    /// They are rebuilt once their whole 3x3 neighbourhood is loaded.
+    pending_light: HashSet<(i32, i32)>,
 }
 struct Dirty {
     chunk: ferrite_world::Chunk,
@@ -167,6 +183,7 @@ impl AnvilChunkSource {
                 entries: HashMap::new(),
                 clock: 0,
                 dirty: HashMap::new(),
+                pending_light: HashSet::new(),
             }),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
@@ -207,6 +224,7 @@ impl AnvilChunkSource {
                 entries: HashMap::new(),
                 clock: 0,
                 dirty: HashMap::new(),
+                pending_light: HashSet::new(),
             }),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
@@ -544,7 +562,10 @@ impl AnvilChunkSource {
         if !changed {
             return Ok(result);
         }
-        let relight = cache.dirty.get(&key).is_some_and(|dirty| dirty.relight);
+        // A column loaded with unlit light must be rebuilt too instead of being saved as
+        // if its light were valid.
+        let relight = cache.dirty.get(&key).is_some_and(|dirty| dirty.relight)
+            || cache.pending_light.contains(&key);
         anyhow::ensure!(
             self.path.is_none()
                 || cache.dirty.contains_key(&key)
@@ -559,6 +580,7 @@ impl AnvilChunkSource {
         cache.clock += 1;
         let version = cache.clock;
         invalidate(&mut cache, &self.stats, key.0, key.1);
+        cache.pending_light.remove(&key);
         cache.dirty.insert(
             key,
             Dirty {
@@ -628,6 +650,7 @@ impl AnvilChunkSource {
         cache.clock += 1;
         let version = cache.clock;
         invalidate(&mut cache, &self.stats, key.0, key.1);
+        cache.pending_light.remove(&key);
         cache.dirty.insert(
             key,
             Dirty {
@@ -661,6 +684,7 @@ impl AnvilChunkSource {
         cache.clock += 1;
         let version = cache.clock;
         invalidate(&mut cache, &self.stats, x, z);
+        cache.pending_light.remove(&(x, z));
         cache.dirty.insert(
             (x, z),
             Dirty {
@@ -673,11 +697,22 @@ impl AnvilChunkSource {
         );
         Ok(())
     }
+    /// Writes a dirty column, or a loaded column whose stored light is still uncertified.
+    ///
+    /// The save contract is vanilla's `isLightOn`: light arrays are only written when they
+    /// were rebuilt from the blocks being saved and the loaded 3x3 neighbourhood. When a
+    /// neighbour is missing the blocks are still saved, but the chunk is written with no
+    /// light arrays and `isLightOn` cleared, so a reload relights it instead of silently
+    /// accepting light that predates the edit.
     pub async fn flush_chunk(self: &Arc<Self>, x: i32, z: i32) -> anyhow::Result<()> {
         if self.path.is_none() {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
+        if !self.cache.lock().unwrap().dirty.contains_key(&(x, z)) {
+            // An unlit column may have become rebuildable since it was loaded or saved.
+            self.resolve_pending_light(x, z).await;
+        }
         let item = {
             let cache = self.cache.lock().unwrap();
             cache
@@ -692,18 +727,18 @@ impl AnvilChunkSource {
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let light = if relight {
                 match source.relight_light(x, z, &chunk) {
-                    Some(light) => light,
+                    Some(light) => Some(light),
                     None => {
                         tracing::debug!(
                             x,
                             z,
-                            "keeping stored light: an adjacent chunk is not loaded"
+                            "saving blocks without light: an adjacent chunk is not loaded"
                         );
-                        stored_light
+                        None
                     }
                 }
             } else {
-                stored_light
+                Some(stored_light)
             };
             let dir = source
                 .path
@@ -728,7 +763,12 @@ impl AnvilChunkSource {
                     }
                 }
             }
-            apply_light_to_nbt(&mut tag, &light, source.dimension.min_y().div_euclid(16))?;
+            match &light {
+                Some(light) => {
+                    apply_light_to_nbt(&mut tag, light, source.dimension.min_y().div_euclid(16))?
+                }
+                None => clear_light_from_nbt(&mut tag)?,
+            }
             let bytes = binary::write_named("", &tag)?;
             region.write_chunk(x, z, &bytes, ferrite_world::RegionCompression::Zlib)?;
             Ok(())
@@ -750,15 +790,103 @@ impl AnvilChunkSource {
         }
         loop {
             let next = { self.cache.lock().unwrap().dirty.keys().next().copied() };
-            let Some((x, z)) = next else { return Ok(()) };
-            self.flush_chunk(x, z).await?;
+            if let Some((x, z)) = next {
+                self.flush_chunk(x, z).await?;
+                continue;
+            }
+            let pending: Vec<(i32, i32)> = {
+                self.cache
+                    .lock()
+                    .unwrap()
+                    .pending_light
+                    .iter()
+                    .copied()
+                    .collect()
+            };
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let mut progressed = false;
+            for (x, z) in pending {
+                progressed |= self.resolve_pending_light(x, z).await;
+            }
+            if !progressed {
+                return Ok(());
+            }
         }
+    }
+    /// Rebuilds the light of an unlit loaded column and queues it for the next save.
+    ///
+    /// Returns `true` when the light was rebuilt; the rebuilt packet replaces the unlit one
+    /// and `flush_all` or the next unload persists it with `isLightOn` set.
+    async fn resolve_pending_light(self: &Arc<Self>, x: i32, z: i32) -> bool {
+        let source = Arc::clone(self);
+        tokio::task::spawn_blocking(move || source.resolve_pending_light_blocking(x, z))
+            .await
+            .unwrap_or(false)
+    }
+    fn resolve_pending_light_blocking(&self, x: i32, z: i32) -> bool {
+        let chunk = {
+            let cache = self.cache.lock().unwrap();
+            if !cache.pending_light.contains(&(x, z)) {
+                return false;
+            }
+            cache
+                .entries
+                .iter()
+                .find_map(|(&(cx, cz, _), entry)| match entry {
+                    Entry::Ready(Ok(column), _) if (cx, cz) == (x, z) => Some(column.chunk.clone()),
+                    _ => None,
+                })
+        };
+        let Some(chunk) = chunk else {
+            // The column is no longer cached; loading it again re-establishes the marker.
+            self.cache.lock().unwrap().pending_light.remove(&(x, z));
+            return false;
+        };
+        let Some(light) = self.relight_light(x, z, &chunk) else {
+            return false;
+        };
+        let mut cache = self.cache.lock().unwrap();
+        // A block edit while the light was rebuilt owns the light now; never overwrite it.
+        if cache.dirty.contains_key(&(x, z)) || !cache.pending_light.remove(&(x, z)) {
+            return false;
+        }
+        if self.path.is_some() && cache.dirty.len() >= CACHE_LIMIT {
+            cache.pending_light.insert((x, z));
+            return false;
+        }
+        if !cache.entries.keys().any(|&(cx, cz, _)| (cx, cz) == (x, z)) {
+            return false;
+        }
+        let packet = match encode_column_packet(x, z, &chunk, &light) {
+            Ok(packet) => packet,
+            Err(error) => {
+                tracing::warn!(%error, x, z, "failed to encode a relit chunk");
+                cache.pending_light.insert((x, z));
+                return false;
+            }
+        };
+        self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+        cache.clock += 1;
+        let version = cache.clock;
+        invalidate(&mut cache, &self.stats, x, z);
+        cache.dirty.insert(
+            (x, z),
+            Dirty {
+                chunk,
+                light,
+                packet,
+                version,
+                relight: false,
+            },
+        );
+        true
     }
     /// Rebuilds a column's light from its blocks and the loaded 3x3 neighbourhood.
     ///
     /// `None` means a neighbour is missing: light at the column edge cannot be resolved
-    /// until every neighbour loads, so the caller keeps the stored light instead of writing
-    /// a permanently dark edge.
+    /// until every neighbour loads, so the caller must not save light at all.
     fn relight_light(&self, x: i32, z: i32, chunk: &Chunk) -> Option<LightData> {
         let mut chunks = Vec::with_capacity(9);
         {
@@ -767,29 +895,26 @@ impl AnvilChunkSource {
                 for dx in -1..=1 {
                     let key = (x + dx, z + dz);
                     let column = if key == (x, z) {
-                        Some(chunk.clone())
+                        Some(chunk)
+                    } else if let Some(dirty) = cache.dirty.get(&key) {
+                        Some(&dirty.chunk)
                     } else {
                         cache
-                            .dirty
-                            .get(&key)
-                            .map(|dirty| dirty.chunk.clone())
-                            .or_else(|| {
-                                cache
-                                    .entries
-                                    .iter()
-                                    .find_map(|(&(cx, cz, _), entry)| match entry {
-                                        Entry::Ready(Ok(column), _) if (cx, cz) == key => {
-                                            Some(column.chunk.clone())
-                                        }
-                                        _ => None,
-                                    })
+                            .entries
+                            .iter()
+                            .find_map(|(&(cx, cz, _), entry)| match entry {
+                                Entry::Ready(Ok(column), _) if (cx, cz) == key => {
+                                    Some(&column.chunk)
+                                }
+                                _ => None,
                             })
                     };
-                    chunks.push(column);
+                    let column = column?;
+                    chunks.push(column.clone());
                 }
             }
         }
-        if chunks.iter().any(Option::is_none) {
+        if chunks.len() != 9 {
             return None;
         }
         let min_section = self.dimension.min_y().div_euclid(16);
@@ -900,29 +1025,36 @@ impl AnvilChunkSource {
                 return Lookup::Loading;
             };
             cache.entries.remove(&oldest);
+            if !cache
+                .entries
+                .keys()
+                .any(|&(cx, cz, _)| (cx, cz) == (oldest.0, oldest.1))
+            {
+                cache.pending_light.remove(&(oldest.0, oldest.1));
+            }
         }
         cache.entries.insert(key, Entry::Pending(now));
         drop(cache);
         let source = Arc::clone(self);
         let request = now;
         self.runtime.spawn_blocking(move || {
-            let result = (|| -> anyhow::Result<Column> {
+            let outcome = (|| -> anyhow::Result<(Column, bool)> {
                 let loaded = match &source.path {
                     Some(path) => {
                         read_column(path, &source.registry, source.dimension, x, z)?
                     }
                     None => None,
                 };
-                let (chunk, light) = match loaded {
-                    Some(column) => column,
+                let (chunk, light, light_valid) = match loaded {
+                    Some(stored) => (stored.chunk, stored.light, stored.light_valid),
                     None => {
                         if let Some(terrain) = &source.terrain {
                             let generated = terrain.generate_dimension(source.dimension, x, z)?;
-                            (generated.chunk, generated.light)
+                            (generated.chunk, generated.light, true)
                         } else {
                             let mut flat = source.flat.lock().unwrap();
                             if let Some(column) = flat.get(&biome) {
-                                column.clone()
+                                (column.0.clone(), column.1.clone(), true)
                             } else {
                                 let column = (
                                     flat_chunk(&source.registry, biome, source.dimension)?,                                            LightData {
@@ -937,26 +1069,44 @@ impl AnvilChunkSource {
                                     },
                                 );
                                 flat.insert(biome, column.clone());
-                                column
+                                (column.0, column.1, true)
                             }
                         }
                     }
                 };
                 source.stats.encodes.fetch_add(1, Ordering::Relaxed);
                 let packet = encode_column_packet(x, z, &chunk, &light)?;
-                Ok(Column {
+                Ok((Column {
                     chunk,
                     light,
                     packet,
-                })
-            })()
-            .map_err(|e| format!("{e:#}"));
-            let mut cache = source.cache.lock().unwrap();
-            cache.clock += 1;
-            let now = cache.clock;
-            if matches!(cache.entries.get(&key), Some(Entry::Pending(version)) if *version == request)
-            {
-                cache.entries.insert(key, Entry::Ready(result.map(Box::new), now));
+                }, light_valid))
+            })();
+            let (result, light_valid) = match outcome {
+                Ok((column, light_valid)) => (Ok(column), light_valid),
+                Err(error) => (Err(format!("{error:#}")), false),
+            };
+            let needs_relight = {
+                let mut cache = source.cache.lock().unwrap();
+                cache.clock += 1;
+                let now = cache.clock;
+                if matches!(cache.entries.get(&key), Some(Entry::Pending(version)) if *version == request)
+                {
+                    let mark_pending = !light_valid && result.is_ok();
+                    cache.entries.insert(key, Entry::Ready(result.map(Box::new), now));
+                    if mark_pending {
+                        cache.pending_light.insert((x, z));
+                    } else if light_valid {
+                        cache.pending_light.remove(&(x, z));
+                    }
+                    mark_pending
+                } else {
+                    false
+                }
+            };
+            if needs_relight {
+                // The neighbourhood may already be loaded, so retry right away.
+                source.resolve_pending_light_blocking(x, z);
             }
         });
         Lookup::Loading
@@ -1008,7 +1158,7 @@ pub fn read_spawn(world: &Path) -> anyhow::Result<[i32; 3]> {
 struct Neighbourhood<'a> {
     center_x: i32,
     center_z: i32,
-    chunks: &'a [Option<Chunk>],
+    chunks: &'a [Chunk],
 }
 impl Neighbourhood<'_> {
     fn chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<&Chunk> {
@@ -1017,7 +1167,7 @@ impl Neighbourhood<'_> {
         if !(0..3).contains(&dx) || !(0..3).contains(&dz) {
             return None;
         }
-        self.chunks[(dz * 3 + dx) as usize].as_ref()
+        self.chunks.get((dz * 3 + dx) as usize)
     }
 }
 impl LightBlockView for Neighbourhood<'_> {
@@ -1224,7 +1374,7 @@ mod tests {
         source.set_block(8, 100, 8, glowstone).unwrap();
         source.flush_chunk(0, 0).await.unwrap();
 
-        let (_, stored) = read_column(&dir, &source.registry, Dimension::Overworld, 0, 0)
+        let stored = read_column(&dir, &source.registry, Dimension::Overworld, 0, 0)
             .unwrap()
             .expect("the flushed column is on disk");
         let section = usize::try_from(
@@ -1233,7 +1383,7 @@ mod tests {
         .unwrap();
         let index = 100u32.rem_euclid(16) as usize * 256 + 8 * 16 + 8;
         let nibble = |data: &[u8]| (data[index / 2] >> ((index % 2) * 4)) & 15;
-        match &stored.block[section] {
+        match &stored.light.block[section] {
             LightSection::Data(data) => {
                 assert_eq!(
                     nibble(&data[..]),
@@ -1245,10 +1395,144 @@ mod tests {
         }
         assert!(
             stored
+                .light
                 .sky
                 .iter()
                 .any(|value| matches!(value, LightSection::Data(_))),
             "a relit overworld column stores sky light"
+        );
+        assert!(stored.light_valid, "rebuilt light is certified on disk");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn stored_tag(dir: &std::path::Path, x: i32, z: i32) -> Tag {
+        let region = RegionFile::open(
+            dir.join(Dimension::Overworld.region_dir())
+                .join("r.0.0.mca"),
+            0,
+            0,
+        )
+        .unwrap();
+        let bytes = region.read_chunk(x, z).unwrap().expect("chunk on disk");
+        binary::read_named(&bytes).unwrap().1
+    }
+
+    /// A flush whose 3x3 neighbourhood is incomplete must save the blocks but never the
+    /// light that predates the edit; a reload must not accept stale light as valid.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_neighbour_flush_keeps_blocks_and_never_certifies_stale_light() {
+        let Some(root) = vanilla_root() else {
+            eprintln!("SKIP unlit persistence test: vanilla/26.3/generated is absent");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-unlit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let registry = RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(dir.clone(), registry);
+        // Only the centre column is loaded, so its light cannot be rebuilt.
+        ready(&source, 0, 0, 0).await;
+        let glowstone = source
+            .registry
+            .block_id("minecraft:glowstone", &Default::default())
+            .unwrap();
+        source.set_block(8, 100, 8, glowstone).unwrap();
+        source.flush_chunk(0, 0).await.unwrap();
+
+        let tag = stored_tag(&dir, 0, 0);
+        assert!(
+            !light_is_on(&tag),
+            "an incomplete neighbourhood must not certify the saved light"
+        );
+        let chunk = chunk_from_nbt(&tag, -64, 384, &*source.registry).unwrap();
+        assert_eq!(
+            chunk.block(8, 100, 8),
+            Some(glowstone),
+            "the edit must still be saved"
+        );
+        let Tag::Compound(chunk_root) = &tag else {
+            panic!("chunk root")
+        };
+        let Tag::List(List::Compound(sections)) = chunk_root.get("sections").unwrap() else {
+            panic!("sections")
+        };
+        for section in sections {
+            assert!(
+                section.get("SkyLight").is_none(),
+                "stale sky light must not be left behind"
+            );
+            assert!(
+                section.get("BlockLight").is_none(),
+                "stale block light must not be left behind"
+            );
+        }
+        let stored = read_column(&dir, &source.registry, Dimension::Overworld, 0, 0)
+            .unwrap()
+            .expect("the flushed column is on disk");
+        assert!(!stored.light_valid);
+        assert!(
+            stored
+                .light
+                .sky
+                .iter()
+                .chain(&stored.light.block)
+                .all(|value| matches!(value, LightSection::Unknown)),
+            "uncertified light must decode as unknown"
+        );
+
+        // Reload exactly like a restart: the stale light must not come back as valid.
+        drop(source);
+        let registry = RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(dir.clone(), registry);
+        ready(&source, 0, 0, 0).await;
+        assert_eq!(
+            source.block(8, 100, 8),
+            Some(glowstone),
+            "the edit survives a reload"
+        );
+        assert_eq!(
+            source.brightness(8, 100, 8),
+            Some(0),
+            "an uncertified column must not serve light"
+        );
+
+        // Once the neighbourhood is loaded, a flush rebuilds and certifies the light.
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if (dx, dz) != (0, 0) {
+                    ready(&source, dx, dz, 0).await;
+                }
+            }
+        }
+        source.flush_chunk(0, 0).await.unwrap();
+        let tag = stored_tag(&dir, 0, 0);
+        assert!(light_is_on(&tag), "rebuilt light must be certified");
+        let stored = read_column(&dir, &source.registry, Dimension::Overworld, 0, 0)
+            .unwrap()
+            .expect("the relit column is on disk");
+        assert!(stored.light_valid);
+        let section = usize::try_from(
+            100_i32.div_euclid(16) - Dimension::Overworld.min_y().div_euclid(16) + 1,
+        )
+        .unwrap();
+        let index = 100u32.rem_euclid(16) as usize * 256 + 8 * 16 + 8;
+        match &stored.light.block[section] {
+            LightSection::Data(data) => {
+                assert_eq!((data[index / 2] >> ((index % 2) * 4)) & 15, 15)
+            }
+            other => panic!("expected rebuilt block light, got {other:?}"),
+        }
+        let chunk = chunk_from_nbt(&tag, -64, 384, &*source.registry).unwrap();
+        assert_eq!(
+            chunk.block(8, 100, 8),
+            Some(glowstone),
+            "relighting must preserve the edited blocks"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

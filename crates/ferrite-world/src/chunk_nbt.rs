@@ -443,6 +443,18 @@ pub fn chunk_to_nbt(
     Ok(Tag::Compound(root))
 }
 
+/// Whether the chunk root certifies its stored light as built for its stored blocks.
+///
+/// Vanilla writes `isLightOn` (a byte) from `ChunkAccess.isLightCorrect()`. A chunk saved
+/// while its light could not be rebuilt has no light arrays and the flag cleared; a chunk
+/// without the flag (written before Ferrite tracked it) is not trusted either.
+pub fn light_is_on(tag: &Tag) -> bool {
+    match tag {
+        Tag::Compound(root) => matches!(root.get("isLightOn"), Some(Tag::Byte(1))),
+        _ => false,
+    }
+}
+
 /// Reads the stored `SkyLight` and `BlockLight` nibble arrays of a chunk root.
 ///
 /// `min_section` is the chunk's lowest section Y and `sections` is the number of light
@@ -450,6 +462,11 @@ pub fn chunk_to_nbt(
 /// above. A section without a stored array decodes as [`LightSection::Unknown`], an
 /// all-zero array as [`LightSection::Empty`], and any other array as
 /// [`LightSection::Data`].
+///
+/// Stored arrays are only returned when [`light_is_on`] holds. Otherwise the arrays may
+/// predate the stored blocks (an edit flushed before its neighbourhood was complete), so
+/// every section decodes as [`LightSection::Unknown`] rather than silently becoming valid
+/// light.
 pub fn light_from_nbt(
     tag: &Tag,
     min_section: i32,
@@ -492,12 +509,22 @@ pub fn light_from_nbt(
             };
         }
     }
+    if !light_is_on(tag) {
+        return Ok(LightData {
+            sky: vec![LightSection::Unknown; sections],
+            block: vec![LightSection::Unknown; sections],
+        });
+    }
     Ok(light)
 }
 
 /// Writes `SkyLight` and `BlockLight` arrays into a chunk root, creating the sentinel
-/// sections when needed. [`LightSection::Unknown`] removes a stale array instead of leaving
-/// the previous save's data in place.
+/// sections when needed, and sets `isLightOn` so the arrays are read back as valid light.
+/// [`LightSection::Unknown`] removes a stale array instead of leaving the previous save's
+/// data in place.
+///
+/// Only pass light that was rebuilt from the blocks being saved; use
+/// [`clear_light_from_nbt`] when that was not possible.
 pub fn apply_light_to_nbt(
     tag: &mut Tag,
     light: &LightData,
@@ -548,5 +575,24 @@ pub fn apply_light_to_nbt(
             }
         }
     }
+    root.insert("isLightOn".into(), Tag::Byte(1));
+    Ok(())
+}
+
+/// Marks a chunk's stored light as not valid for its stored blocks: every `SkyLight` and
+/// `BlockLight` array is removed (including arrays on out-of-range sections) and
+/// `isLightOn` is cleared. A reload relights the chunk instead of trusting arrays that may
+/// predate an edit, and a tool that ignores the flag cannot read the stale arrays either.
+pub fn clear_light_from_nbt(tag: &mut Tag) -> Result<(), ChunkNbtError> {
+    let Tag::Compound(root) = tag else {
+        return Err(ChunkNbtError::Invalid("expected compound"));
+    };
+    if let Some(Tag::List(List::Compound(sections))) = root.get_mut("sections") {
+        for section in sections {
+            section.shift_remove("SkyLight");
+            section.shift_remove("BlockLight");
+        }
+    }
+    root.insert("isLightOn".into(), Tag::Byte(0));
     Ok(())
 }

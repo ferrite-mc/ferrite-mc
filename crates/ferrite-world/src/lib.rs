@@ -267,7 +267,8 @@ impl PalettedContainer {
 }
 mod chunk_nbt;
 pub use chunk_nbt::{
-    ChunkNbtError, DATA_VERSION, apply_light_to_nbt, chunk_from_nbt, chunk_to_nbt, light_from_nbt,
+    ChunkNbtError, DATA_VERSION, apply_light_to_nbt, chunk_from_nbt, chunk_to_nbt,
+    clear_light_from_nbt, light_from_nbt, light_is_on,
 };
 
 #[cfg(test)]

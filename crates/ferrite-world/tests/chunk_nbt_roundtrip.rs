@@ -1,7 +1,8 @@
 use ferrite_nbt::{Compound, List, Tag, binary};
 use ferrite_world::{
     BlockEntity, BlockInfo, BlockStateRegistry, LightData, LightSection, RegionFile,
-    RuntimeRegistry, apply_light_to_nbt, chunk_from_nbt, chunk_to_nbt, light_from_nbt,
+    RuntimeRegistry, apply_light_to_nbt, chunk_from_nbt, chunk_to_nbt, clear_light_from_nbt,
+    light_from_nbt, light_is_on,
 };
 
 /// The fixture world is generated locally and gitignored, so CI skips these tests.
@@ -222,8 +223,76 @@ fn stored_light_arrays_must_be_2048_bytes() {
     section.insert("Y".into(), Tag::Byte(0));
     section.insert("SkyLight".into(), Tag::ByteArray(vec![1; 7]));
     let mut root = Compound::new();
+    root.insert("isLightOn".into(), Tag::Byte(1));
     root.insert("sections".into(), Tag::List(List::Compound(vec![section])));
     assert!(light_from_nbt(&Tag::Compound(root), -4, 26).is_err());
+}
+
+#[test]
+fn unlit_chunks_never_expose_stored_light() {
+    let stored = |flag: Option<Tag>| {
+        let mut section = Compound::new();
+        section.insert("Y".into(), Tag::Byte(0));
+        section.insert("SkyLight".into(), Tag::ByteArray(vec![1; 2048]));
+        section.insert("BlockLight".into(), Tag::ByteArray(vec![2; 2048]));
+        let mut root = Compound::new();
+        if let Some(flag) = flag {
+            root.insert("isLightOn".into(), flag);
+        }
+        root.insert("sections".into(), Tag::List(List::Compound(vec![section])));
+        Tag::Compound(root)
+    };
+    for tag in [stored(Some(Tag::Byte(0))), stored(None)] {
+        let light = light_from_nbt(&tag, -4, 26).unwrap();
+        assert!(!light_is_on(&tag));
+        assert!(
+            light
+                .sky
+                .iter()
+                .chain(&light.block)
+                .all(|value| matches!(value, LightSection::Unknown)),
+            "arrays of an unlit chunk must not be read as light"
+        );
+    }
+}
+
+#[test]
+fn applying_light_certifies_it_and_clearing_it_removes_every_array() {
+    let mut section = Compound::new();
+    section.insert("Y".into(), Tag::Byte(0));
+    section.insert("SkyLight".into(), Tag::ByteArray(vec![9; 2048]));
+    let mut root = Compound::new();
+    root.insert("sections".into(), Tag::List(List::Compound(vec![section])));
+    let mut tag = Tag::Compound(root);
+
+    let light = LightData {
+        sky: vec![LightSection::Empty; 8],
+        block: vec![LightSection::Empty; 8],
+    };
+    // `apply_light_to_nbt` only removes arrays it owns; the flag is what certifies them.
+    apply_light_to_nbt(&mut tag, &light, -4).unwrap();
+    assert!(light_is_on(&tag));
+
+    clear_light_from_nbt(&mut tag).unwrap();
+    assert!(!light_is_on(&tag));
+    let Tag::Compound(root) = &tag else {
+        panic!("chunk root")
+    };
+    let Tag::List(List::Compound(sections)) = root.get("sections").unwrap() else {
+        panic!("sections")
+    };
+    for section in sections {
+        assert!(section.get("SkyLight").is_none());
+        assert!(section.get("BlockLight").is_none());
+    }
+    let restored = light_from_nbt(&tag, -4, 8).unwrap();
+    assert!(
+        restored
+            .sky
+            .iter()
+            .chain(&restored.block)
+            .all(|value| matches!(value, LightSection::Unknown))
+    );
 }
 
 #[test]
