@@ -1218,6 +1218,164 @@ fn brewing_stand_rejects_items_in_the_wrong_slots() {
     assert_eq!(f.slot(4).count, 2);
 }
 
+fn cartography_map(map_id: i32) -> ItemStack {
+    let mut stack = item("filled_map", 1);
+    stack
+        .components
+        .insert_opaque(component_ids::MAP_ID, ferrite_nbt::Tag::Int(map_id));
+    stack
+}
+
+fn map_post_processing(stack: &ItemStack) -> Option<i32> {
+    match stack.effective_component(component_ids::MAP_POST_PROCESSING) {
+        Some(Component::Opaque(ferrite_nbt::Tag::Int(id))) => Some(id),
+        _ => None,
+    }
+}
+
+#[test]
+fn cartography_table_layout_maps_slots_and_validates_items() {
+    let mut f = Fixture::new(Menu::cartography(4));
+    assert_eq!(f.menu.len(), 39);
+    assert_eq!(f.menu.kind(), crate::MenuKind::Cartography);
+    assert_eq!(
+        f.menu.kind().menu_type(),
+        Some("minecraft:cartography_table".into())
+    );
+    // Slots 3..30 are the main inventory (inventory 9..36) and 30..39 the hotbar (0..9).
+    assert_eq!(f.menu.menu_slot_of(9), Some(3));
+    assert_eq!(f.menu.menu_slot_of(35), Some(29));
+    assert_eq!(f.menu.menu_slot_of(0), Some(30));
+    assert_eq!(f.menu.menu_slot_of(8), Some(38));
+    assert_eq!(f.menu.menu_slot_of(crate::OFFHAND), None);
+
+    // The map slot takes a stack with a map id, not stone or paper.
+    f.menu.set_carried(item("stone", 1));
+    f.click(0, 0, Pickup);
+    assert_eq!((f.carried(), f.slot(0)), (item("stone", 1), empty()));
+    f.menu.set_carried(item("paper", 1));
+    f.click(0, 0, Pickup);
+    assert_eq!((f.carried(), f.slot(0)), (item("paper", 1), empty()));
+    f.menu.set_carried(cartography_map(1));
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0), cartography_map(1));
+    assert!(f.carried().is_empty());
+
+    // The additional slot takes paper, an empty map or a glass pane.
+    f.menu.set_carried(item("paper", 2));
+    f.click(1, 0, Pickup);
+    assert_eq!(f.slot(1), item("paper", 2));
+    f.menu.set_carried(item("stone", 1));
+    f.click(1, 0, Pickup);
+    assert_eq!(
+        (f.carried(), f.slot(1)),
+        (item("stone", 1), item("paper", 2))
+    );
+
+    // With both inputs empty, the result slot still accepts nothing.
+    f.set(0, empty());
+    f.set(1, empty());
+    f.menu.set_carried(item("dirt", 1));
+    f.click(2, 0, Pickup);
+    assert_eq!((f.carried(), f.slot(2)), (item("dirt", 1), empty()));
+}
+
+#[test]
+fn cartography_table_copies_zooms_and_locks_maps() {
+    let mut f = Fixture::new(Menu::cartography(2));
+    // Both inputs are required; a lone map has no result.
+    f.set(0, cartography_map(3));
+    assert!(f.slot(2).is_empty());
+    // An empty map makes two copies.
+    f.set(1, item("map", 1));
+    assert_eq!(f.slot(2), cartography_map(3).copy_with_count(2));
+    // Paper zooms out one step (vanilla `MapPostProcessing.SCALE`).
+    f.set(1, item("paper", 1));
+    assert_eq!(f.slot(2).count, 1);
+    assert_eq!(map_post_processing(&f.slot(2)), Some(1));
+    // A glass pane locks the map (vanilla `MapPostProcessing.LOCK`).
+    f.set(1, item("glass_pane", 1));
+    assert_eq!(map_post_processing(&f.slot(2)), Some(0));
+    // Anything else in the second slot produces no result.
+    f.set(1, item("dirt", 1));
+    assert!(f.slot(2).is_empty());
+}
+
+#[test]
+fn cartography_table_taking_the_result_consumes_both_inputs() {
+    let mut f = Fixture::new(Menu::cartography(5));
+    f.set(0, cartography_map(1).copy_with_count(2));
+    f.set(1, item("map", 2));
+    assert_eq!(f.slot(2), cartography_map(1).copy_with_count(2));
+    f.click(2, 0, Pickup);
+    assert_eq!(f.carried(), cartography_map(1).copy_with_count(2));
+    assert_eq!(f.slot(0), cartography_map(1));
+    assert_eq!(f.slot(1), item("map", 1));
+    // The remaining inputs immediately make another result.
+    assert_eq!(f.slot(2), cartography_map(1).copy_with_count(2));
+}
+
+#[test]
+fn cartography_table_quick_move_routes_maps_paper_and_other_items() {
+    let mut f = Fixture::new(Menu::cartography(6));
+    // A map with a map id goes from the inventory to the map slot.
+    f.set(10, cartography_map(4));
+    f.click(10, 0, QuickMove);
+    assert_eq!((f.slot(10), f.slot(0)), (empty(), cartography_map(4)));
+    // Paper goes to the additional slot.
+    f.set(11, item("paper", 3));
+    f.click(11, 0, QuickMove);
+    assert_eq!((f.slot(11), f.slot(1)), (empty(), item("paper", 3)));
+    // Shift-clicking the result moves it to the hotbar end first and consumes both inputs.
+    let mut zoomed = cartography_map(4);
+    zoomed
+        .components
+        .insert_opaque(component_ids::MAP_POST_PROCESSING, ferrite_nbt::Tag::Int(1));
+    f.click(2, 0, QuickMove);
+    assert_eq!(f.slot(38), zoomed);
+    assert!(f.slot(0).is_empty());
+    assert_eq!(f.slot(1), item("paper", 2));
+
+    // A second map with another map id cannot displace the first.
+    f.set(0, cartography_map(1));
+    f.set(12, cartography_map(2));
+    f.click(12, 0, QuickMove);
+    assert_eq!(f.slot(12), cartography_map(2));
+
+    // Other items swap between the main inventory and the hotbar.
+    f.set(13, item("dirt", 5));
+    f.click(13, 0, QuickMove);
+    assert_eq!((f.slot(13), f.slot(30)), (empty(), item("dirt", 5)));
+    f.click(30, 0, QuickMove);
+    assert_eq!((f.slot(30), f.slot(3)), (empty(), item("dirt", 5)));
+}
+
+#[test]
+fn cartography_table_quick_move_returns_inputs_to_the_inventory() {
+    let mut f = Fixture::new(Menu::cartography(7));
+    f.set(0, cartography_map(5));
+    f.set(1, item("paper", 2));
+    f.click(0, 0, QuickMove);
+    assert_eq!((f.slot(0), f.slot(3)), (empty(), cartography_map(5)));
+    f.click(1, 0, QuickMove);
+    assert_eq!((f.slot(1), f.slot(4)), (empty(), item("paper", 2)));
+}
+
+#[test]
+fn closing_cartography_returns_both_inputs() {
+    let mut f = Fixture::new(Menu::cartography(8));
+    f.set(0, cartography_map(8));
+    f.set(1, item("paper", 1));
+    assert!(!f.slot(2).is_empty());
+    let mut p = Clicker::new(&mut f.inv, false, &TestCrafter);
+    f.menu.close(&mut p);
+    assert!(p.drops.is_empty());
+    assert!(f.menu.container().iter().all(ItemStack::is_empty));
+    assert!(f.menu.result().is_empty());
+    assert_eq!(f.inv.get(0).clone(), cartography_map(8));
+    assert_eq!(f.inv.get(1).clone(), item("paper", 1));
+}
+
 #[test]
 fn beacon_payment_slot_holds_one_item_and_rejects_other_items() {
     let mut f = Fixture::new(Menu::beacon(3));

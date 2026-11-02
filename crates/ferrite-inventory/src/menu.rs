@@ -179,6 +179,8 @@ pub enum MenuKind {
     Stonecutter,
     /// A smithing table (vanilla `SmithingMenu`).
     Smithing,
+    /// A cartography table (vanilla `CartographyTableMenu`).
+    Cartography,
     /// A loom (vanilla `LoomMenu`).
     Loom,
     /// A brewing stand (vanilla `BrewingStandMenu`).
@@ -202,6 +204,7 @@ impl MenuKind {
             Self::Grindstone => Some("minecraft:grindstone".into()),
             Self::Stonecutter => Some("minecraft:stonecutter".into()),
             Self::Smithing => Some("minecraft:smithing".into()),
+            Self::Cartography => Some("minecraft:cartography_table".into()),
             Self::Loom => Some("minecraft:loom".into()),
             Self::BrewingStand => Some("minecraft:brewing_stand".into()),
             Self::Beacon => Some("minecraft:beacon".into()),
@@ -461,6 +464,11 @@ enum Rule {
     Dye,
     /// A loom banner-pattern slot.
     BannerPattern,
+    /// A cartography table's map slot (vanilla `CartographyTableMenu` slot 0): any stack with a
+    /// `minecraft:map_id` component.
+    MapInput,
+    /// A cartography table's additional slot: paper, an empty map or a glass pane.
+    MapAdditional,
     /// A merchant's first or second input slot.
     TradeInput,
     /// A merchant's output slot (`MerchantResultSlot`).
@@ -589,6 +597,7 @@ impl Menu {
             | MenuKind::Grindstone
             | MenuKind::Stonecutter
             | MenuKind::Smithing
+            | MenuKind::Cartography
             | MenuKind::Loom
             | MenuKind::BrewingStand
             | MenuKind::Beacon
@@ -602,6 +611,7 @@ impl Menu {
             MenuKind::Grindstone => vec![ItemStack::empty(); 2],
             MenuKind::Stonecutter => vec![ItemStack::empty(); 1],
             MenuKind::Smithing | MenuKind::Loom => vec![ItemStack::empty(); 3],
+            MenuKind::Cartography => vec![ItemStack::empty(); 2],
             MenuKind::BrewingStand => vec![ItemStack::empty(); 5],
             MenuKind::Beacon => vec![ItemStack::empty(); 1],
             MenuKind::Merchant => vec![ItemStack::empty(); 3],
@@ -818,6 +828,27 @@ impl Menu {
         });
         standard_inventory_slots(&mut slots);
         Self::with_slots(container_id, MenuKind::Smithing, slots)
+    }
+
+    /// A cartography table (vanilla `CartographyTableMenu`): `0` the map, `1` the paper, empty
+    /// map or glass pane, `2` the result and `3..39` the player's inventory.
+    pub fn cartography(container_id: i32) -> Self {
+        let mut slots = vec![
+            SlotDef {
+                store: Store::Container(0),
+                rule: Rule::MapInput,
+            },
+            SlotDef {
+                store: Store::Container(1),
+                rule: Rule::MapAdditional,
+            },
+            SlotDef {
+                store: Store::Result,
+                rule: Rule::Output,
+            },
+        ];
+        standard_inventory_slots(&mut slots);
+        Self::with_slots(container_id, MenuKind::Cartography, slots)
     }
 
     /// A loom (vanilla `LoomMenu`): 0 banner, 1 dye, 2 pattern, 3 result, 4..40 inventory.
@@ -1191,6 +1222,7 @@ impl Menu {
                 self.sync_data();
             }
             MenuKind::Loom => self.update_loom(),
+            MenuKind::Cartography => self.update_cartography(),
             MenuKind::Merchant => self.update_merchant(),
             _ => {}
         }
@@ -1235,6 +1267,27 @@ impl Menu {
         out.count = 1;
         self.station_xp = xp;
         self.result = out;
+        self.sync_data();
+    }
+
+    /// Vanilla `CartographyTableMenu.setupResultSlot`: a filled map with paper zooms out, with a
+    /// glass pane locks, and with an empty map makes two copies. Both inputs are required. The
+    /// map's saved data (its scale and locked flag) is not modelled here; a server with maps must
+    /// check it before offering the paper and glass-pane results.
+    fn update_cartography(&mut self) {
+        self.result = ItemStack::empty();
+        let map = &self.container[0];
+        let additional = &self.container[1];
+        if is_cartography_map(map) && !additional.is_empty() {
+            self.result = match additional.name() {
+                Some("minecraft:paper") if map.name() == Some("minecraft:filled_map") => {
+                    cartography_result(map, MAP_POST_SCALE)
+                }
+                Some("minecraft:glass_pane") => cartography_result(map, MAP_POST_LOCK),
+                Some("minecraft:map") => map.copy_with_count(2),
+                _ => ItemStack::empty(),
+            };
+        }
         self.sync_data();
     }
 
@@ -1602,6 +1655,8 @@ impl Menu {
             Rule::BannerPattern => stack
                 .name()
                 .is_some_and(|name| name.ends_with("_banner_pattern")),
+            Rule::MapInput => is_cartography_map(stack),
+            Rule::MapAdditional => is_cartography_additional(stack),
             // Vanilla merchant input slots take any stack; the selected offer decides what the
             // result slot shows. The result slot itself only ever gives items out.
             Rule::TradeInput => true,
@@ -1764,6 +1819,15 @@ impl Menu {
                         self.container[cell] = normalize(left);
                     }
                     self.result = ItemStack::empty();
+                }
+                MenuKind::Cartography => {
+                    // Vanilla `CartographyTableMenu`'s result slot takes one of each input.
+                    for cell in 0..2 {
+                        let mut left = self.container[cell].clone();
+                        left.count -= 1;
+                        self.container[cell] = normalize(left);
+                    }
+                    self.update_cartography();
                 }
                 MenuKind::Merchant => {
                     let Some(trade) = self.trades.get_mut(self.trade) else {
@@ -2245,6 +2309,23 @@ impl Menu {
                         || self.move_item_stack_to(p, &mut stack, 2, 3, false)
                 }
             }
+            MenuKind::Cartography => {
+                if i == 2 {
+                    self.move_item_stack_to(p, &mut stack, 3, 39, true)
+                } else if i < 2 {
+                    self.move_item_stack_to(p, &mut stack, 3, 39, false)
+                } else if is_cartography_map(&original) {
+                    self.move_item_stack_to(p, &mut stack, 0, 1, false)
+                } else if is_cartography_additional(&original) {
+                    self.move_item_stack_to(p, &mut stack, 1, 2, false)
+                } else if (3..30).contains(&i) {
+                    self.move_item_stack_to(p, &mut stack, 30, 39, false)
+                } else if (30..39).contains(&i) {
+                    self.move_item_stack_to(p, &mut stack, 3, 30, false)
+                } else {
+                    false
+                }
+            }
             MenuKind::Merchant => {
                 if i == 2 {
                     self.move_item_stack_to(p, &mut stack, 3, 39, true)
@@ -2336,6 +2417,16 @@ impl Menu {
         }
         // Vanilla `MerchantMenu.removed` returns both input stacks to the player.
         if self.kind == MenuKind::Merchant {
+            self.result = ItemStack::empty();
+            for cell in 0..2 {
+                let stack = std::mem::take(&mut self.container[cell]);
+                if let Some(rest) = p.inventory.place_back(stack) {
+                    p.drop(rest);
+                }
+            }
+        }
+        // Vanilla `CartographyTableMenu.removed` clears the result and returns both inputs.
+        if self.kind == MenuKind::Cartography {
             self.result = ItemStack::empty();
             for cell in 0..2 {
                 let stack = std::mem::take(&mut self.container[cell]);
@@ -2581,6 +2672,33 @@ fn is_potion(stack: &ItemStack) -> bool {
         stack.name(),
         Some("minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion")
     )
+}
+
+/// Vanilla `CartographyTableMenu`'s map slot: any stack with a `minecraft:map_id` component.
+fn is_cartography_map(stack: &ItemStack) -> bool {
+    stack.effective_component(ids::MAP_ID).is_some()
+}
+
+/// Vanilla `CartographyTableMenu`'s additional slot: paper, an empty map or a glass pane.
+fn is_cartography_additional(stack: &ItemStack) -> bool {
+    matches!(
+        stack.name(),
+        Some("minecraft:paper" | "minecraft:map" | "minecraft:glass_pane")
+    )
+}
+
+/// Vanilla `MapPostProcessing.LOCK` network id.
+const MAP_POST_LOCK: i32 = 0;
+/// Vanilla `MapPostProcessing.SCALE` network id.
+const MAP_POST_SCALE: i32 = 1;
+
+/// A cartography result: one copy of the map with a pending post-processing step.
+fn cartography_result(map: &ItemStack, post_processing: i32) -> ItemStack {
+    let mut result = map.copy_with_count(1);
+    result
+        .components
+        .insert_opaque(ids::MAP_POST_PROCESSING, Tag::Int(post_processing));
+    result
 }
 
 /// The five items a beacon accepts as payment (vanilla `BeaconBlockEntity.PAYMENT_ITEMS`).
