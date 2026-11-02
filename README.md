@@ -17,7 +17,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 > hoppers and dispensers, survival, redstone, command blocks, brewing stands and beacons, the nether
 > dimension and portals, mobs (passive and hostile) with combat,
 > ~70 commands, plugin events, a live Bukkit `Server` surface and a
-> Folia-style scheduler, vanilla world generation on a dedicated thread, and a 26.3 → 26.2
+> Folia-style scheduler, vanilla world generation on a bounded worker pool, and a 26.3 → 26.2
 > protocol translation layer. **It has not yet been tested with a real 26.3 client.** No Mojang
 > code or assets are distributed here; vanilla data is generated locally from the official jar.
 
@@ -79,7 +79,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   `particle`, `spawnpoint`
 - 월드: `setblock`, `fill`, `clone`, `worldborder`
 - 스코어보드: `scoreboard`, `bossbar`, `tag`, `team`
-- 서버: `locate`(생물군계·POI, 구조물은 문서화된 스텁), `datapack`(list/enable/disable),
+- 서버: `locate`(생물군계; 구조물·POI는 문서화된 스텁), `datapack`(list/enable/disable),
   `help`, `schedule`, `trigger`, `reload`, `op`, `ban`, `whitelist`, `stop`, `function`
 - 고급: `execute`(as/at/if/unless/store/run 등), `data`(get/merge/modify/remove),
   데이터팩 `.mcfunction`(load/tick 태그, 매크로, `return`)
@@ -99,7 +99,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 
 ### 월드 생성
 - 밀도 함수, 노이즈 청크, aquifer, 표면 규칙, 동굴·협곡 카버가 바닐라 Java 참조와 일치
-- 서버는 전용 스레드에서 바닐라 지형을 생성합니다(`generator = vanilla | superflat`,
+- 서버는 제한된 크기의 워커 풀에서 바닐라 지형을 생성합니다(`generator = vanilla | superflat`,
   기본값 `vanilla`)
 - 광물과 지면 식생 장식 포함
 
@@ -115,8 +115,9 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 - 나무·구조물 생성과 피스톤은 진행 중입니다.
 - 엔드 차원은 아직 없습니다(네더는 포탈까지 동작).
 - 플러그인 API는 Paper `Server`의 일부만 구현했습니다. EssentialsX 같은 대형 플러그인의 모든
-  호출 경로는 동작하지 않고, NMS 타입에 의존하는 메서드는 `UnsupportedOperationException`을
-  던집니다.
+  호출 경로는 동작하지 않습니다. 남은 `Server` 스텁은 `UnsupportedOperationException`을 던지고,
+  NMS 타입에 의존하는 CraftBukkit 메서드(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle` 등)는
+  클래스는 로드되지만 호출 시 `NoSuchMethodError`가 납니다.
 
 ## 빌드와 실행
 
@@ -124,7 +125,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 
 - **Rust stable** — `rust-toolchain.toml`이 Windows MSVC 채널을 고정합니다. Linux/macOS는
   `RUSTUP_TOOLCHAIN=stable`로 덮어쓰세요(CI가 그렇게 합니다).
-- **Java 25** — 바닐라 데이터 생성기와 내장 JVM/플러그인 브리지용
+- **JDK 25** — 바닐라 데이터 생성기(추출기 컴파일에 `javac` 필요)와 내장 JVM/플러그인 브리지용
 - **Python 3** — `tools/fetch_vanilla.py` 실행용
 
 ```sh
@@ -138,9 +139,12 @@ python tools/fetch_vanilla.py 26.2       # 다중 버전 변환용(선택)
 # 2) 선택: 픽스처 월드 (fixture-world를 읽는 테스트용)
 python tools/make_fixture_world.py
 
-# 3) 실행 (오프라인 모드 로컬 서버)
+# 3) 실행 (기본값은 online-mode = true)
 cargo run --release -p ferrite-server
 ```
+
+로컬에서 오프라인 모드로 실행하려면 `cp ferrite.toml.example ferrite.toml` 후
+`online-mode = false`로 설정하세요.
 
 `vanilla/`는 git에 포함되지 않습니다. 패킷 ID·블록·레지스트리 같은 수치는 추측하지 말고
 `vanilla/<버전>/generated/`의 리포트에서 읽어야 합니다. `fixture-world`가 없으면 픽스처를
