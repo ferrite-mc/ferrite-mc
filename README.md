@@ -14,8 +14,9 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 > protocol 777) with Folia-style regionized multithreading and an embedded JVM for
 > Bukkit/Paper plugins. It currently runs a bot-verified survival server: login/encryption,
 > signed chat, server-list ping, blocks and items, inventory/crafting/chests/furnaces/anvils, villagers and trading,
-> hoppers and dispensers, survival, redstone, mobs (passive and hostile) with combat, ~70 commands,
-> plugin events and a
+> hoppers and dispensers, survival, redstone, command blocks, brewing stands and beacons, the nether
+> dimension and portals, mobs (passive and hostile) with combat,
+> ~70 commands, plugin events, a live Bukkit `Server` surface and a
 > Folia-style scheduler, vanilla world generation on a dedicated thread, and a 26.3 → 26.2
 > protocol translation layer. **It has not yet been tested with a real 26.3 client.** No Mojang
 > code or assets are distributed here; vanilla data is generated locally from the official jar.
@@ -24,9 +25,9 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 
 | 구분 | 내용 |
 |---|---|
-| ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화, 바닐라 지형 생성 |
-| 🔧 **진행 중** | 월드젠 처리량(1스레드 4.6→6.2, 8스레드 23.5→38.9 chunks/s, 10x 목표 미달), 나무·구조물, 피스톤, 양조·비컨, 플러그인 API 확장 |
-| ⛔ **아직 없음** | 실제 클라이언트 검증, 네더·엔드 차원, 구조물, 명령 블록 |
+| ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 명령 블록, 양조·비컨, 네더 차원·포탈, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화, 바닐라 지형 생성 |
+| 🔧 **진행 중** | 월드젠 처리량(1스레드 4.6→6.2, 8스레드 23.5→38.9 chunks/s, 10x 목표 미달), 나무·구조물, 피스톤 |
+| ⛔ **아직 없음** | 실제 클라이언트 검증, 엔드 차원, 구조물 |
 | 🔬 **검증 수준** | 전체 테스트 105개 바이너리 통과, `clippy -D warnings`·`fmt --check` 클린, 월드젠은 바닐라 Java와 대조 |
 
 ## 무엇이 되나
@@ -64,6 +65,12 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 - 바닐라 폭발 알고리즘(TNT, 크리퍼), 문·레버·침대·표지판 상호작용, 양동이·가마솥
 - 와이어 신호 감쇠, 레버·버튼·압력판·횃불(번아웃)·관찰자·반복기·비교기, 램프·문·트랩도어·
   펜스 게이트·노트 블록
+- **양조·비컨**: 양조 스탠드(5슬롯, 블레이즈 파우더 연료 20회, 400틱, 바닐라 포션 조합·물병·
+  발효 거미 눈·화약·드래곤 브레스), 비컨(피라미드 4단계 판정, 빔, 효과 선택·범위, 재생/주효과)
+- **차원**: 오버월드·네더 레지스트리(차원별 저장 경로·스폰·리전 스케줄러), 네더 지형은 자체
+  노이즈·바이옴 프리셋으로 생성, `ChangeDimension`/`Respawn` 전환, 8:1 좌표 포탈·포탈 생성·복귀
+- **명령 블록**: 임펄스·체인·반복 모드, 조건·자동 실행, 바닐라 NBT(`Command`, `LastExecution` 등)와
+  `/data`·청크 저장 왕복, `SetCommandBlock`/`BlockEntityData` 동기화, 재귀 깊이 제한
 
 ### 명령 (약 70개)
 - 기본: `gamemode`, `tp`, `teleport`, `time`, `weather`, `difficulty`, `gamerule`, `seed`,
@@ -85,7 +92,8 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   엔티티 피해/사망, 청크 로드/언로드, 날씨·월드 로드, 레벨/경험치(취소 가능한 이벤트는 취소 반영), 오류 정책
   `plugins.on-event-error = allow | deny`
 - Bukkit `Server`/`Player`/`World`/`Inventory`/`Scheduler`/`ConfigurationSection`의 자주 쓰는
-  표면(확장 중)과 최소 `org.bukkit.craftbukkit` shim
+  표면: 레시피·태그·보스바·월드/블록 조회가 실제 서버 데이터를 반환하고, 체력·음식·경험치·
+  텔레포트 쓰기는 소유 리전으로 라우팅됩니다. 최소 `org.bukkit.craftbukkit` shim 포함
 - Bukkit 스케줄러는 Folia 규칙대로 리전/글로벌/async 스케줄러로 라우팅
 - 월드·플레이어 위치/모드/OP 스냅샷, `Native.playerInventory`(인벤토리 쓰기 → 패킷·메뉴 재동기화)
 
@@ -104,8 +112,8 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   대조 하네스로만 검증했습니다.
 - 월드젠 처리량은 1스레드 6.2 chunks/s, 8스레드 38.9 chunks/s까지 개선됐지만 10x 목표에는
   못 미칩니다(청크 출력은 바이너리와 동일).
-- 나무·구조물 생성, 피스톤, 양조·비컨 메뉴는 진행 중입니다.
-- 네더·엔드 차원이 없고 차원은 오버월드로 고정되어 있습니다.
+- 나무·구조물 생성과 피스톤은 진행 중입니다.
+- 엔드 차원은 아직 없습니다(네더는 포탈까지 동작).
 - 플러그인 API는 Paper `Server`의 일부만 구현했습니다. EssentialsX 같은 대형 플러그인의 모든
   호출 경로는 동작하지 않고, NMS 타입에 의존하는 메서드는 `UnsupportedOperationException`을
   던집니다.
@@ -168,6 +176,7 @@ cargo fmt --all --check
 | 7 | 다중 버전 지원 — 하나의 바이너리로 여러 프로토콜 버전 | 진행 중 |
 | 8 | Paper 기능 동등성 — Paper API/설정/최적화 정렬 | 예정 |
 | 9 | 호환성 확장 — 플러그인 생태계 커버리지 확대 | 예정 |
+| 10 | **선택** — 청크 렌더링 OpenCL GPU 가속(메시 빌드·조명·인코딩을 GPU로) | 미착수 (선택) |
 
 ## 크레이트 구성
 

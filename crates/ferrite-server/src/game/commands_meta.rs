@@ -2099,6 +2099,7 @@ mod tests {
                 state: std::sync::Arc::new(std::sync::Mutex::new(state)),
                 actions,
                 anchor: ferrite_command::EntityAnchor::Feet,
+                dimension: crate::game::Dimension::Overworld,
                 world: None,
                 tree: None,
                 function_depth: 0,

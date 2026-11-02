@@ -57,6 +57,8 @@ pub struct PlayerEntry {
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// The dimension the player is in, for `/execute in` and dimension-aware selectors.
+    pub dimension: super::Dimension,
     /// Experience level, matched by the `level=` selector option.
     pub xp_level: i32,
 }
@@ -214,6 +216,7 @@ impl GameState {
             pos: [0.0, 64.0, 0.0],
             yaw: 0.0,
             pitch: 0.0,
+            dimension: super::Dimension::default(),
             xp_level: 0,
         });
         self.max_players = max_players;
@@ -225,6 +228,13 @@ impl GameState {
             player.pos = pos;
             player.yaw = yaw;
             player.pitch = pitch;
+        }
+    }
+
+    /// Records the dimension a player is in after a transfer or respawn.
+    pub fn set_dimension(&mut self, uuid: Uuid, dimension: super::Dimension) {
+        if let Some(player) = self.players.iter_mut().find(|player| player.uuid == uuid) {
+            player.dimension = dimension;
         }
     }
 
@@ -422,6 +432,8 @@ pub enum Action {
     Teleport {
         targets: EntityTarget,
         destination: TeleportDestination,
+        /// Dimension the destination coordinates belong to (`/execute in`).
+        dimension: super::Dimension,
     },
     Message {
         targets: EntityTarget,
@@ -579,6 +591,8 @@ pub struct Source {
     pub name: Option<String>,
     /// `execute anchored`: `eyes` lifts the source position by the eye height.
     pub anchor: EntityAnchor,
+    /// Dimension positions and selectors resolve in (`/execute in`).
+    pub dimension: super::Dimension,
     /// Chunk source when the command runs inside a world (block tests, `/data block`).
     pub world: Option<Arc<super::anvil::AnvilChunkSource>>,
     pub state: Arc<Mutex<GameState>>,
@@ -616,6 +630,7 @@ pub struct OnlinePlayer {
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    pub dimension: super::Dimension,
 }
 
 pub(crate) fn send(source: &Source, action: Action) -> Result<i32, CommandError> {
@@ -742,6 +757,7 @@ fn location(ctx: &CommandContext<Source>, targets: bool) -> Result<Action, Comma
     );
     Ok(Action::Teleport {
         targets: target_or_self(ctx, targets)?,
+        dimension: ctx.source().dimension,
         destination: TeleportDestination::Location {
             pos,
             yaw: None,
@@ -763,6 +779,7 @@ fn location_rotation(ctx: &CommandContext<Source>, targets: bool) -> Result<Acti
     );
     Ok(Action::Teleport {
         targets: target_or_self(ctx, targets)?,
+        dimension: ctx.source().dimension,
         destination: TeleportDestination::Location {
             pos,
             yaw: Some(yaw),
@@ -778,6 +795,7 @@ fn location_facing_location(
     let source = ctx.source();
     Ok(Action::Teleport {
         targets: target_or_self(ctx, targets)?,
+        dimension: ctx.source().dimension,
         destination: TeleportDestination::FacingLocation {
             pos: coordinates(ctx, "location")?.resolve(source.origin, source.yaw, source.pitch),
             target: coordinates(ctx, "facingLocation")?.resolve(
@@ -797,6 +815,7 @@ fn location_facing_entity(
     let source = ctx.source();
     Ok(Action::Teleport {
         targets: target_or_self(ctx, targets)?,
+        dimension: ctx.source().dimension,
         destination: TeleportDestination::FacingEntity {
             pos: coordinates(ctx, "location")?.resolve(source.origin, source.yaw, source.pitch),
             entity: entity(ctx, "facingEntity")?,
@@ -812,6 +831,7 @@ fn location_facing_entity(
 fn entity_destination(ctx: &CommandContext<Source>, targets: bool) -> Result<Action, CommandError> {
     Ok(Action::Teleport {
         targets: target_or_self(ctx, targets)?,
+        dimension: ctx.source().dimension,
         destination: TeleportDestination::Entity(entity(ctx, "destination")?),
     })
 }
@@ -2246,6 +2266,7 @@ mod tests {
             state: Arc::new(Mutex::new(GameState::default())),
             actions,
             anchor: ferrite_command::EntityAnchor::Feet,
+            dimension: crate::game::Dimension::Overworld,
             world: None,
             tree: None,
             function_depth: 0,
@@ -2583,6 +2604,7 @@ mod tests {
             only("tp 10 70 20", 2),
             Action::Teleport {
                 targets: self_target(),
+                dimension: crate::game::Dimension::Overworld,
                 destination: TeleportDestination::Location {
                     pos: [10.5, 70.0, 20.5],
                     yaw: None,
@@ -2602,12 +2624,14 @@ mod tests {
                     yaw: None,
                     pitch: None,
                 },
+                dimension: crate::game::Dimension::Overworld,
             }
         );
         assert_eq!(
             only("tp @s ^1 ^2 ^3", 2),
             Action::Teleport {
                 targets: self_target(),
+                dimension: crate::game::Dimension::Overworld,
                 destination: TeleportDestination::Location {
                     pos: [1.0, 66.0, 3.0],
                     yaw: None,
@@ -2619,6 +2643,7 @@ mod tests {
             only("tp @s 10 70 20 facing 0 64 0", 2),
             Action::Teleport {
                 targets: self_target(),
+                dimension: crate::game::Dimension::Overworld,
                 destination: TeleportDestination::FacingLocation {
                     pos: [10.5, 70.0, 20.5],
                     target: [0.5, 64.0, 0.5],
@@ -2629,6 +2654,7 @@ mod tests {
             only("tp @s 10 70 20 facing entity Alice eyes", 2),
             Action::Teleport {
                 targets: self_target(),
+                dimension: crate::game::Dimension::Overworld,
                 destination: TeleportDestination::FacingEntity {
                     pos: [10.5, 70.0, 20.5],
                     entity: EntityTarget::Name("Alice".into()),
@@ -2640,6 +2666,7 @@ mod tests {
             only("tp @s 10 70 20 rotation ~90 ~-10", 2),
             Action::Teleport {
                 targets: self_target(),
+                dimension: crate::game::Dimension::Overworld,
                 destination: TeleportDestination::Location {
                     pos: [10.5, 70.0, 20.5],
                     yaw: Some(90.0),
@@ -2651,6 +2678,7 @@ mod tests {
             only("tp Alice", 2),
             Action::Teleport {
                 targets: self_target(),
+                dimension: crate::game::Dimension::Overworld,
                 destination: TeleportDestination::Entity(EntityTarget::Name("Alice".into())),
             }
         );
@@ -2938,6 +2966,7 @@ mod tests {
                     pos,
                     yaw: 0.0,
                     pitch: 0.0,
+                    dimension: crate::game::Dimension::Overworld,
                 },
             );
         }
@@ -3159,6 +3188,7 @@ mod tests {
                 state,
                 actions,
                 anchor: ferrite_command::EntityAnchor::Feet,
+                dimension: crate::game::Dimension::Overworld,
                 world: None,
                 tree: None,
                 function_depth: 0,
@@ -3503,6 +3533,7 @@ mod tests {
             uuid: None,
             name: None,
             anchor: EntityAnchor::Feet,
+            dimension: crate::game::Dimension::Overworld,
             world: None,
             state: Arc::new(Mutex::new(GameState::default())),
             actions: tx,
@@ -3573,6 +3604,7 @@ mod tests {
                 state: Arc::new(Mutex::new(state)),
                 actions,
                 anchor: ferrite_command::EntityAnchor::Feet,
+                dimension: crate::game::Dimension::Overworld,
                 world: None,
                 tree: None,
                 function_depth: 0,

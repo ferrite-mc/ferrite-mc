@@ -36,8 +36,12 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private org.bukkit.Location location(Pos pos) { return new org.bukkit.Location(proxy, pos.x(), pos.y(), pos.z()); }
     private org.bukkit.Material typeAt(Pos pos) {
         var material = blocks.get(pos);
-        if (material == null) throw new UnsupportedOperationException("Ferrite: no block snapshot at " + pos);
-        return material;
+        if (material != null) return material;
+        var key = Native.blockType(id.toString(), pos.x(), pos.y(), pos.z());
+        if (key == null) throw new UnsupportedOperationException("Ferrite: no block data at " + pos);
+        var resolved = org.bukkit.Material.matchMaterial(key);
+        if (resolved == null) throw new IllegalStateException("Unknown block material " + key);
+        return resolved;
     }
     private void setType(Pos pos, org.bukkit.Material material) {
         if (!Native.worldSetBlock(id.toString(), pos.x(), pos.y(), pos.z(), material.getKey().toString())) throw new IllegalStateException("No world command handler");
@@ -60,6 +64,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getLocation" -> location(pos);
             case "getChunk" -> chunk(pos.x() >> 4, pos.z() >> 4);
             case "getType" -> typeAt(pos);
+            case "getLightFromSky" -> { int level = Native.skyLight(id.toString(), pos.x(), pos.y(), pos.z()); if (level < 0) throw new UnsupportedOperationException("Ferrite: no light data at " + pos); yield (byte) level; }
             case "setType" -> { setType(pos, java.util.Objects.requireNonNull((org.bukkit.Material) args[0])); yield null; }
             case "getBlockData" -> FerriteBlockData.create(typeAt(pos));
             case "setBlockData" -> { setType(pos, ((org.bukkit.block.data.BlockData) args[0]).getMaterial()); yield null; }
@@ -86,7 +91,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         return switch (method.getName()) {
             case "getUID" -> id; case "getName" -> name; case "getTime", "getFullTime" -> time;
             case "getSpawnLocation" -> location(spawn);
-            case "getHighestBlockYAt" -> { if (args.length > 2 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) throw new UnsupportedOperationException("Ferrite: heightmap-specific snapshots are not implemented"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) throw new UnsupportedOperationException("Ferrite: no height snapshot at " + x + "," + z); yield height; }
+            case "getHighestBlockYAt" -> { if (args.length > 2 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) throw new UnsupportedOperationException("Ferrite: heightmap-specific queries are not implemented"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) { int value = Native.highestBlockY(id.toString(), x, z); if (value == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + x + "," + z); height = value; heights.put(new Column(x, z), height); } yield height; }
+            case "getBiome" -> { int x, y, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = (int) args[1]; z = (int) args[2]; } var key = Native.biomeAt(id.toString(), x, y, z); if (key == null) throw new UnsupportedOperationException("Ferrite: no biome data at " + x + "," + y + "," + z); var biome = org.bukkit.Registry.BIOME.get(org.bukkit.NamespacedKey.fromString(key)); if (biome == null) throw new IllegalStateException("Unknown biome " + key); yield biome; }
             case "getBlockAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield block(new Pos(l.getBlockX(), l.getBlockY(), l.getBlockZ())); yield block(new Pos((int) args[0], (int) args[1], (int) args[2])); }
             case "getChunkAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield chunk(l.getBlockX() >> 4, l.getBlockZ() >> 4); yield chunk((int) args[0], (int) args[1]); }
             case "getPlayers", "getEntities", "getLivingEntities" -> server.getOnlinePlayers().stream().filter(p -> { try { return p.getWorld() == proxy; } catch (UnsupportedOperationException | IllegalStateException e) { return false; } }).toList();

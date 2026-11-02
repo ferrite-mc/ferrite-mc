@@ -9,6 +9,14 @@ public final class Bootstrap {
         settings = new FerriteServer.Settings(motd, maxPlayers, port, viewDistance, whitelist, onlineMode);
     }
     public static void configureIpBan(String ip) { initialIpBans.add(ip); }
+    private static volatile String address = "";
+    private static volatile String dataDirectory;
+    /** The host part of the listener bind address, for {@code Server#getIp}. */
+    public static void configureAddress(String value) { address = value == null ? "" : value; }
+    /** The extracted vanilla data pack the recipe and tag tables are read from. */
+    public static void configureDataDir(String value) { dataDirectory = value == null || value.isEmpty() ? null : value; }
+    static String serverAddress() { return address; }
+    static java.io.File dataFile(String child) { var dir = dataDirectory; return dir == null ? null : new java.io.File(dir, child); }
     private Bootstrap() {}
     public static void start(String[] paths) { start(paths, null); }
     public static void start(String[] paths, boolean[] regionAware) { startServer(); enablePlugins(paths, regionAware); }

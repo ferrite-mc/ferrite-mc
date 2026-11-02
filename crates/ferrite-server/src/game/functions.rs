@@ -537,6 +537,7 @@ mod tests {
                 uuid: None,
                 name: None,
                 anchor: ferrite_command::EntityAnchor::Feet,
+                dimension: crate::game::Dimension::Overworld,
                 world: None,
                 state: Arc::new(Mutex::new(state)),
                 actions,

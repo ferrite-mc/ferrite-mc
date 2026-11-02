@@ -114,7 +114,10 @@ fn plugin_lifecycle() {
             whitelist: true,
             online_mode: false,
             banned_ips: vec!["192.0.2.7".parse().unwrap()],
+            bind_address: "127.0.0.1".into(),
         },
+        data_dir: project.join("../../vanilla/26.3/generated"),
+        world_view: None,
         world: None,
         command_handler: Some(std::sync::Arc::new(move |_, line| {
             captured.lock().unwrap().push(line.to_owned());

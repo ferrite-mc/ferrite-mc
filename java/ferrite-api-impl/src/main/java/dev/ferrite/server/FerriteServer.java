@@ -240,8 +240,7 @@ public class FerriteServer extends ServerStubs {
     /** Only players are bridged; other entity kinds are not tracked by the host yet. */
     @Override public org.bukkit.entity.Entity getEntity(java.util.UUID id) { return players.get(java.util.Objects.requireNonNull(id, "id")); }
     @Override public java.io.File getPluginsFolder() { return new java.io.File(pluginsFolder == null ? "plugins" : pluginsFolder); }
-    /** The host does not expose a bind address, matching the empty server-ip default. */
-    @Override public String getIp() { return ""; }
+    @Override public String getIp() { return Bootstrap.serverAddress(); }
     /** Hardcore is not a host setting yet. */
     @Override public boolean isHardcore() { return false; }
     @Override public boolean isLoggingIPs() { return true; }
@@ -251,7 +250,7 @@ public class FerriteServer extends ServerStubs {
     @Override public boolean getHideOnlinePlayers() { return false; }
     /** Every join is forced onto the default game mode by the host's login packet. */
     @Override public boolean forcesDefaultGameMode() { return false; }
-    @Override public java.io.File getWorldContainer() { return new java.io.File(".").getAbsoluteFile(); }
+    @Override public java.io.File getWorldContainer() { return new java.io.File(".").getAbsoluteFile().toPath().normalize().toFile(); }
     @Override public java.nio.file.Path getLevelDirectory() { return getWorldContainer().toPath(); }
     @Override public String getUpdateFolder() { return "update"; }
     @Override public java.io.File getUpdateFolderFile() { return new java.io.File(getWorldContainer(), getUpdateFolder()); }
@@ -269,9 +268,35 @@ public class FerriteServer extends ServerStubs {
     @Override public String getResourcePackPrompt() { return null; }
     @Override public boolean isResourcePackRequired() { return false; }
     @Override public org.bukkit.packs.ResourcePack getServerResourcePack() { return null; }
-    @Override public java.util.Iterator<org.bukkit.boss.KeyedBossBar> getBossBars() { return java.util.Collections.emptyIterator(); }
-    @Override public org.bukkit.boss.KeyedBossBar getBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return null; }
-    @Override public boolean removeBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return false; }
+    private final java.util.concurrent.ConcurrentMap<org.bukkit.NamespacedKey, org.bukkit.boss.KeyedBossBar> bossBars = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong nextBossBar = new java.util.concurrent.atomic.AtomicLong(1);
+    @Override public org.bukkit.boss.BossBar createBossBar(String title, org.bukkit.boss.BarColor color, org.bukkit.boss.BarStyle style, org.bukkit.boss.BarFlag... flags) { return createBossBar(new org.bukkit.NamespacedKey("ferrite", "bossbar_" + nextBossBar.getAndIncrement()), title, color, style, flags); }
+    @Override public org.bukkit.boss.KeyedBossBar createBossBar(org.bukkit.NamespacedKey key, String title, org.bukkit.boss.BarColor color, org.bukkit.boss.BarStyle style, org.bukkit.boss.BarFlag... flags) {
+        java.util.Objects.requireNonNull(key, "key");
+        var bar = new FerriteBossBar(key, title, color, style, flags);
+        if (bossBars.putIfAbsent(key, bar) != null) throw new IllegalArgumentException("Boss bar already exists: " + key);
+        return bar;
+    }
+    @Override public java.util.Iterator<org.bukkit.boss.KeyedBossBar> getBossBars() { return java.util.List.copyOf(bossBars.values()).iterator(); }
+    @Override public org.bukkit.boss.KeyedBossBar getBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return bossBars.get(key); }
+    @Override public boolean removeBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return bossBars.remove(key) != null; }
+    @Override public java.util.Iterator<org.bukkit.inventory.Recipe> recipeIterator() { return FerriteRecipes.entries().stream().map(recipe -> (org.bukkit.inventory.Recipe) recipe).toList().iterator(); }
+    @Override public org.bukkit.inventory.Recipe getRecipe(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); for (var entry : FerriteRecipes.entries()) if (entry.key().equals(key)) return entry; return null; }
+    @Override public boolean hasRecipe(org.bukkit.NamespacedKey key) { return getRecipe(key) != null; }
+    @Override public java.util.List<org.bukkit.inventory.Recipe> getRecipesFor(org.bukkit.inventory.ItemStack result) {
+        java.util.Objects.requireNonNull(result, "result");
+        if (result.getType() == org.bukkit.Material.AIR) return java.util.List.of();
+        var matches = new java.util.ArrayList<org.bukkit.inventory.Recipe>();
+        for (var entry : FerriteRecipes.entries()) if (entry.result().getType() == result.getType()) matches.add(entry);
+        return java.util.List.copyOf(matches);
+    }
+    @SuppressWarnings("unchecked")
+    @Override public <T extends org.bukkit.Keyed> java.lang.Iterable<org.bukkit.Tag<T>> getTags(String registry, Class<T> type) {
+        java.util.Objects.requireNonNull(registry, "registry");
+        java.util.Objects.requireNonNull(type, "type");
+        if (type != org.bukkit.Material.class) throw new UnsupportedOperationException("Ferrite: getTags is backed only for Material, not " + type.getName());
+        return (java.lang.Iterable<org.bukkit.Tag<T>>) (java.lang.Iterable<?>) FerriteTags.tags(registry);
+    }
     private final FerriteRegistryAccess registries = new FerriteRegistryAccess();
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) { return registries.getRegistry(type); }
     private final org.bukkit.inventory.ItemFactory itemFactory = new FerriteItemFactory();
