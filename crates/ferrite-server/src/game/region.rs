@@ -112,7 +112,21 @@ pub enum Command {
     },
 }
 pub type Mailbox = Arc<Mutex<VecDeque<Command>>>;
-pub type Tracking = Arc<Mutex<HashMap<Uuid, (HashSet<(i32, i32)>, OutboundSender)>>>;
+pub type ChunkObservers = HashMap<Uuid, (super::Dimension, HashSet<(i32, i32)>, OutboundSender)>;
+pub type Tracking = Arc<Mutex<ChunkObservers>>;
+
+pub(super) fn broadcast_tracked_chunk(
+    players: &ChunkObservers,
+    dimension: super::Dimension,
+    chunk: (i32, i32),
+    update: &Outbound,
+) {
+    for (player_dimension, loaded, outbound) in players.values() {
+        if *player_dimension == dimension && loaded.contains(&chunk) {
+            let _ = outbound.send(update.clone());
+        }
+    }
+}
 pub enum Signal {
     Transfer {
         dimension: super::Dimension,
@@ -648,7 +662,7 @@ impl Player {
             if let Some(plugins) = self.plugins.clone() {
                 let _ = plugins.chunk_unloaded(ferrite_plugin::default_world_id(), x, z);
             }
-            if let Some((loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
+            if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
                 loaded.remove(&(x, z));
             }
             let _ = self.signals.send(Signal::Hold {
@@ -732,7 +746,7 @@ impl Player {
             if let Some(plugins) = self.plugins.clone() {
                 let _ = plugins.chunk_loaded(ferrite_plugin::default_world_id(), x, z, true);
             }
-            if let Some((loaded, _)) = tracking.get_mut(&self.uuid) {
+            if let Some((_, loaded, _)) = tracking.get_mut(&self.uuid) {
                 loaded.insert((x, z));
             }
             let _ = self.signals.send(Signal::Hold {
@@ -873,11 +887,12 @@ impl Player {
             block_type: VarInt(i32::try_from(type_id).unwrap_or(0)),
             nbt: data,
         });
-        for (loaded, outbound) in self.tracking.lock().unwrap().values() {
-            if loaded.contains(&chunk) {
-                let _ = outbound.send(update.clone());
-            }
-        }
+        broadcast_tracked_chunk(
+            &self.tracking.lock().unwrap(),
+            self.dimension,
+            chunk,
+            &update,
+        );
     }
 
     /// `ServerboundSetCommandBlockPacket`: an operator's editor writes the block entity
@@ -912,11 +927,7 @@ impl Player {
                 location,
                 block_state: VarInt(state as i32),
             });
-            for (loaded, outbound) in tracking.values() {
-                if loaded.contains(&chunk) {
-                    let _ = outbound.send(update.clone());
-                }
-            }
+            broadcast_tracked_chunk(&tracking, self.dimension, chunk, &update);
             let _ = self.signals.send(Signal::FluidChange {
                 dimension: self.dimension,
                 x: pos.x,
@@ -2041,7 +2052,7 @@ impl Player {
                 add: false,
             });
         }
-        if let Some((loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
+        if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
             loaded.clear();
         }
         self.clear_effects();
@@ -2152,8 +2163,11 @@ impl Player {
                 add: false,
             });
         }
-        if let Some((loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
+        if let Some((tracked_dimension, loaded, _)) =
+            self.tracking.lock().unwrap().get_mut(&self.uuid)
+        {
             loaded.clear();
+            *tracked_dimension = dimension;
         }
         self.dimension = dimension;
         self.source = Some(self.dimensions.source(dimension).clone());
@@ -2820,7 +2834,7 @@ fn deliver(
         }
         Some(_) => {}
         None => {
-            if let Some((_, outbound)) = ctx.tracking.lock().unwrap().get(&uuid) {
+            if let Some((_, _, outbound)) = ctx.tracking.lock().unwrap().get(&uuid) {
                 let _ = outbound.send(packet.clone());
             }
         }
@@ -3469,11 +3483,7 @@ impl Region {
                 block_type: VarInt(i32::try_from(type_id).unwrap_or(0)),
                 nbt: data,
             });
-            for (loaded, outbound) in tracking.values() {
-                if loaded.contains(&chunk) {
-                    let _ = outbound.send(update.clone());
-                }
-            }
+            broadcast_tracked_chunk(&tracking, ctx.dimension, chunk, &update);
         }
     }
 
@@ -3839,7 +3849,7 @@ impl Region {
                 content: ferrite_protocol::types::PlainText(message),
                 overlay: false,
             });
-            for (_, outbound) in ctx.tracking.lock().unwrap().values() {
+            for (_, _, outbound) in ctx.tracking.lock().unwrap().values() {
                 let _ = outbound.send(update.clone());
             }
         }
@@ -4169,6 +4179,40 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chunk_updates_only_reach_the_matching_dimension() {
+        let (overworld, mut overworld_rx) = OutboundSender::channel(1024);
+        let (nether, mut nether_rx) = OutboundSender::channel(1024);
+        let mut players = HashMap::new();
+        players.insert(
+            Uuid::from_u128(1),
+            (
+                super::super::Dimension::Overworld,
+                HashSet::from([(0, 0)]),
+                overworld,
+            ),
+        );
+        players.insert(
+            Uuid::from_u128(2),
+            (
+                super::super::Dimension::Nether,
+                HashSet::from([(0, 0)]),
+                nether,
+            ),
+        );
+        let update = Outbound::Packet(vec![42].into());
+        broadcast_tracked_chunk(
+            &players,
+            super::super::Dimension::Overworld,
+            (0, 0),
+            &update,
+        );
+        assert!(overworld_rx.try_recv().is_some());
+        assert!(nether_rx.try_recv().is_none());
+        broadcast_tracked_chunk(&players, super::super::Dimension::Nether, (0, 0), &update);
+        assert!(nether_rx.try_recv().is_some());
+        assert!(overworld_rx.try_recv().is_none());
+    }
     #[test]
     fn experience_curve_matches_vanilla_levels() {
         assert_eq!(total_for_level(0), 0);
