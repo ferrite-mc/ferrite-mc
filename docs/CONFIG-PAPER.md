@@ -22,7 +22,7 @@ win, everything else falls back to `config/paper-world-defaults.yml`. The per-wo
 `<server dir>/<world name>/paper-world.yml`.
 
 Unknown keys are preserved on rewrite (the raw YAML/properties document is kept alongside the
-typed model), and generated files carry a comment above every typed key.
+typed model), and generated files carry comments above the documented keys.
 
 ## `server.properties`
 
@@ -158,7 +158,7 @@ they are still preserved as unknown keys when a file is loaded and saved.
   errors; `world_settings(name)` falls back to the defaults on error.
 - **Comments**: `FerriteConfig::to_yaml_with_comments(file)` and
   `FerriteConfig::world_to_yaml_with_comments(world)` emit Paper-style YAML with a header,
-  a comment per known key, and an `UNVERIFIED` marker where applicable.
+  comments above the documented keys, and an `UNVERIFIED` marker where applicable.
 - **Overrides**: `ConfigOverrides` accepts CLI `--set section.path=value` and environment
   vars. `FERRITE_SERVER_<KEY>` overrides `server.properties`; `FERRITE_CONFIG_OVERRIDES` is a
   semicolon-separated list of `section.path=value` assignments. Sections are `server`,
