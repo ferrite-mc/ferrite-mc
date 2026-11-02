@@ -350,6 +350,16 @@ class BootstrapTest {
         assertTrue(log.contains("FerriteTest entity"));
         assertEquals(6, log.stream().filter("FerriteTest tick"::equals).count());
         assertEquals(6, log.stream().filter("FerriteTest global"::equals).count());
+        // Plugin disable cancels the plugin's async tasks too.
+        var asyncAfterDisable = new java.util.concurrent.atomic.AtomicInteger();
+        var asyncOwner = Bukkit.getPluginManager().getPlugin("FerriteDependency");
+        Bukkit.getScheduler().runTaskTimerAsynchronously(asyncOwner, asyncAfterDisable::incrementAndGet, 1, 1);
+        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        Bootstrap.shutdown();
+        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        int settledAsync = asyncAfterDisable.get();
+        try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        assertEquals(settledAsync, asyncAfterDisable.get(), "an async task ran after plugin disable");
         Bootstrap.shutdown();
         assertTrue(Bukkit.getServer().isStopping());
         assertFalse(Bukkit.getServer().isTickingWorlds());

@@ -21,7 +21,7 @@ use ferrite_protocol::{
         play::{
             BlockUpdate, ChunkBatchReceived, ClientboundPlayerChat, ConfirmTeleport, CreativeSlot,
             ItemStack, LastSeenUpdate, MovePosition, MoveRotation, PlayerAction, PositionSync,
-            ServerboundChat, SystemChat, UseItemOn,
+            ServerboundChat, SetExperience, SetHealth, SystemChat, UseItemOn,
         },
     },
     types::BlockPos,
@@ -38,8 +38,26 @@ fn repo_root() -> PathBuf {
 /// Gradle builds share one daemon and project directory; serialize the test helpers that invoke it.
 static GRADLE_LOCK: Mutex<()> = Mutex::new(());
 
+fn snapshot_bridge(source: &Path, directory: &Path) -> PathBuf {
+    let target = directory.join(source.file_name().expect("jar filename"));
+    fs::copy(source, &target).expect("copy jar into isolated test directory");
+    target
+}
+
+#[test]
+fn bridge_snapshot_survives_a_later_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let build = dir.path().join("build.jar");
+    let runtime = dir.path().join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::write(&build, b"first build").unwrap();
+    let snapshot = snapshot_bridge(&build, &runtime);
+    fs::write(&build, b"second build").unwrap();
+    assert_eq!(fs::read(snapshot).unwrap(), b"first build");
+}
+
 /// Build the Java bridge, the test plugin and its dependency with the Gradle wrapper.
-fn build_jars(repo: &Path, java_home: &Path) -> (PathBuf, PathBuf, PathBuf) {
+fn build_jars(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
     let mut command = if cfg!(windows) {
@@ -81,7 +99,11 @@ fn build_jars(repo: &Path, java_home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     for jar in [&plugin, &dependency, &bridge] {
         assert!(jar.exists(), "missing built jar: {}", jar.display());
     }
-    (plugin, dependency, bridge)
+    (
+        snapshot_bridge(&plugin, runtime),
+        snapshot_bridge(&dependency, runtime),
+        snapshot_bridge(&bridge, runtime),
+    )
 }
 
 fn toml_path(path: &Path) -> String {
@@ -461,8 +483,8 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
         }
     };
     let repo = repo_root();
-    let (plugin_jar, dependency_jar, bridge_jar) = build_jars(&repo, &java_home);
     let dir = tempfile::tempdir().unwrap();
+    let (plugin_jar, dependency_jar, bridge_jar) = build_jars(&repo, &java_home, dir.path());
     let plugins = dir.path().join("plugins");
     fs::create_dir(&plugins).unwrap();
     fs::copy(plugin_jar, plugins.join("test-plugin.jar")).unwrap();
@@ -667,7 +689,7 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
 }
 
 /// Build the typical-plugin fixture together with the shaded bridge.
-fn build_typical_jar(repo: &Path, java_home: &Path) -> PathBuf {
+fn build_typical_jar(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf) {
     let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
     let mut command = if cfg!(windows) {
@@ -698,7 +720,11 @@ fn build_typical_jar(repo: &Path, java_home: &Path) -> PathBuf {
     );
     let jar = repo.join("java/test-plugin-typical/build/libs/test-plugin-typical.jar");
     assert!(jar.exists(), "missing built jar: {}", jar.display());
-    jar
+    let bridge = project.join("build/libs/ferrite-api-impl-all.jar");
+    (
+        snapshot_bridge(&jar, runtime),
+        snapshot_bridge(&bridge, runtime),
+    )
 }
 
 /// A plugin shaped like a real one: config.yml, a command with tab completion, a join listener
@@ -713,9 +739,8 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         }
     };
     let repo = repo_root();
-    let plugin_jar = build_typical_jar(&repo, &java_home);
-    let bridge_jar = repo.join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar");
     let dir = tempfile::tempdir().unwrap();
+    let (plugin_jar, bridge_jar) = build_typical_jar(&repo, &java_home, dir.path());
     let plugins = dir.path().join("plugins");
     fs::create_dir(&plugins).unwrap();
     fs::copy(plugin_jar, plugins.join("typical-plugin.jar")).unwrap();
@@ -723,7 +748,7 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
     fs::write(
         dir.path().join("ferrite.toml"),
         format!(
-            "bind-address = \"127.0.0.1:{port}\"\nonline-mode = false\nview-distance = 2\nmotd = \"Typical plugin\"\nplugins-dir = \"plugins\"\nplugin-bridge = \"{}\"\n",
+            "bind-address = \"127.0.0.1:{port}\"\nonline-mode = false\nview-distance = 2\ngenerator = \"superflat\"\nmotd = \"Typical plugin\"\nplugins-dir = \"plugins\"\nplugin-bridge = \"{}\"\n",
             toml_path(&bridge_jar)
         ),
     )
@@ -780,6 +805,83 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         "the plugin.yml default permission was not granted: {joined}"
     );
     wait_for_line(&events, "tab [ping, where, info, give]", &stdout, &stderr);
+    // Server surface: the host's real bind address and settings, the vanilla recipe and tag
+    // tables loaded from the generated data pack, and the boss-bar registry.
+    bot.raw(7, "typical surface");
+    let dir_name = dir.path().file_name().unwrap().to_string_lossy();
+    wait_for_line(
+        &events,
+        &format!("ip 127.0.0.1 {port} 2 10 20"),
+        &stdout,
+        &stderr,
+    );
+    wait_for_line(
+        &events,
+        &format!("container {dir_name} update update"),
+        &stdout,
+        &stderr,
+    );
+    wait_for_line(&events, "recipes 1763 stick STICK 4 true", &stdout, &stderr);
+    wait_for_line(&events, "for-stick 2 true", &stdout, &stderr);
+    wait_for_line(
+        &events,
+        "tags coals true diamond false logs true",
+        &stdout,
+        &stderr,
+    );
+    wait_for_line(&events, "boss true 0.25 Boss true true", &stdout, &stderr);
+    // On-demand world reads: the superflat test world has grass at y=64 over dirt and air
+    // above it, full sky light in the open column, and the plains biome.
+    bot.raw(7, "typical world");
+    wait_for_line(&events, "block GRASS_BLOCK", &stdout, &stderr);
+    wait_for_line(&events, "air AIR sky 15 dark 0", &stdout, &stderr);
+    wait_for_line(
+        &events,
+        "highest 64 biome minecraft:plains",
+        &stdout,
+        &stderr,
+    );
+    // Health, food and experience writes reach the region player and are sent to the client.
+    bot.raw(7, "typical state");
+    wait_for_line(&events, "state 7.5 11 12 0.25 123", &stdout, &stderr);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let packet = SetHealth::decode(&mut bot.until(106).as_slice()).unwrap();
+        if (packet.health - 7.5).abs() < 1e-6 && packet.food.0 == 11 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no health packet with the plugin's value"
+        );
+    }
+    loop {
+        let packet = SetExperience::decode(&mut bot.until(105).as_slice()).unwrap();
+        if packet.level.0 == 12 && packet.total.0 == 123 && (packet.progress - 0.25).abs() < 1e-6 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no experience packet with the plugin's value"
+        );
+    }
+    bot.raw(7, "typical tp");
+    wait_for_line(&events, "tp true 2.5 70.0 2.5", &stdout, &stderr);
+    loop {
+        let packet = PositionSync::decode(&mut bot.until(73).as_slice()).unwrap();
+        if (packet.x - 2.5).abs() < 1e-9 && (packet.z - 2.5).abs() < 1e-9 {
+            assert!(
+                (packet.y - 70.0).abs() < 1e-9,
+                "teleported to y={}",
+                packet.y
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no teleport to the plugin's location"
+        );
+    }
     // Published before onEnable, so the fixture can target it with Paper's region scheduler.
     wait_for_line(&events, "region task false", &stdout, &stderr);
     // The Bukkit scheduler runs immediate, delayed and asynchronous tasks.
@@ -788,6 +890,16 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
     wait_for_line(&events, "async task", &stdout, &stderr);
     wait_for_line(&events, "later async task", &stdout, &stderr);
     wait_for_line(&events, "timer async task", &stdout, &stderr);
+    // A repeating async task cancelled from the sync thread must stop running.
+    wait_for_line(&events, "async cancelled", &stdout, &stderr);
+    std::thread::sleep(Duration::from_millis(300));
+    let settled = fs::read_to_string(&events).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&events).unwrap(),
+        settled,
+        "an async timer kept running after it was cancelled"
+    );
     wait_for_line(&events, "task 1", &stdout, &stderr);
     wait_for_line(&events, "task 3", &stdout, &stderr);
     assert!(

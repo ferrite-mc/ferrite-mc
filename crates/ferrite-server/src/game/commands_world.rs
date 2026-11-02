@@ -778,6 +778,7 @@ mod tests {
             )),
             actions,
             anchor: ferrite_command::EntityAnchor::Feet,
+            dimension: crate::game::Dimension::Overworld,
             world: None,
             tree: None,
             function_depth: 0,

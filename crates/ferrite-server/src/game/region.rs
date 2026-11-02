@@ -36,6 +36,13 @@ pub enum Command {
         yaw: Option<f32>,
         pitch: Option<f32>,
     },
+    /// Move to another dimension with the `Respawn` + position sequence.
+    ChangeDimension {
+        dimension: super::Dimension,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    },
     World(super::commands_world::WorldCommand),
     Clear {
         target: Uuid,
@@ -66,6 +73,20 @@ pub enum Command {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
     },
+    /// A plugin's `Player#setHealth`, applied on the owning region thread.
+    SetHealth {
+        health: f32,
+    },
+    /// A plugin's `Player#setFoodLevel`, applied on the owning region thread.
+    SetFood {
+        food: u8,
+    },
+    /// A plugin's experience setters, applied on the owning region thread.
+    SetExperience {
+        level: Option<i32>,
+        progress: Option<f32>,
+        total: Option<i32>,
+    },
     /// `/kill`: `damageSources().genericKill()` applied on the owning region thread.
     Kill,
     /// `/effect give`: apply a mob effect on the owning region thread.
@@ -94,22 +115,33 @@ pub type Mailbox = Arc<Mutex<VecDeque<Command>>>;
 pub type Tracking = Arc<Mutex<HashMap<Uuid, (HashSet<(i32, i32)>, OutboundSender)>>>;
 pub enum Signal {
     Transfer {
+        dimension: super::Dimension,
         from: ChunkPos,
         to: ChunkPos,
         player: Box<Player>,
     },
     Hold {
+        dimension: super::Dimension,
         chunk: ChunkPos,
         add: bool,
     },
     FluidChange {
+        dimension: super::Dimension,
         x: i32,
         y: i32,
         z: i32,
     },
     FinishRelease {
+        dimension: super::Dimension,
         chunk: ChunkPos,
         flush: bool,
+    },
+    /// The player left its old region for another dimension; the world loop inserts it into
+    /// the target dimension's region scheduler.
+    ChangeDimension {
+        from_dimension: super::Dimension,
+        from: ChunkPos,
+        player: Box<Player>,
     },
     Update {
         uuid: Uuid,
@@ -119,6 +151,7 @@ pub enum Signal {
         ground: bool,
     },
     Leave {
+        dimension: super::Dimension,
         uuid: Uuid,
         chunk: ChunkPos,
         held: Vec<ChunkPos>,
@@ -126,12 +159,14 @@ pub enum Signal {
     /// The entities a chunk held when its last holder released it, for the world loop to write
     /// to the chunk's sidecar before the chunk is unloaded.
     SaveEntities {
+        dimension: super::Dimension,
         chunk: ChunkPos,
         entities: Vec<EntityRecord>,
     },
     /// An entity walked into another region section; the main loop hands it to the region
     /// owning `to` through that region's task queue (Folia: only the owner touches it).
     EntityTransfer {
+        dimension: super::Dimension,
         to: ChunkPos,
         entity: Box<EntityRecord>,
     },
@@ -168,6 +203,7 @@ struct BlockCommands<'a> {
     source: &'a Arc<super::anvil::AnvilChunkSource>,
     tracking: &'a Tracking,
     state: &'a Arc<Mutex<super::commands::GameState>>,
+    dimension: super::dimension::Dimension,
     tree: &'a Arc<ferrite_command::CommandDispatcher<super::commands::Source>>,
 }
 
@@ -191,6 +227,7 @@ impl super::command_block::Runner for BlockCommands<'_> {
             uuid: None,
             name: None,
             anchor: ferrite_command::EntityAnchor::Feet,
+            dimension: self.dimension,
             world: Some(Arc::clone(self.source)),
             state: Arc::clone(self.state),
             actions,
@@ -383,6 +420,14 @@ pub struct Player {
     pub using_bow: bool,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
+    /// The dimension registry, used to swap the chunk source on a dimension change.
+    pub dimensions: Arc<super::DimensionRegistry>,
+    /// Ticks spent standing in a nether portal.
+    pub portal_ticks: u32,
+    /// Ticks before a portal may move this player again.
+    pub portal_cooldown: u32,
+    /// A portal trip waiting for its destination chunk to load.
+    pub portal_pending: Option<(super::Dimension, [f64; 3])>,
 }
 #[derive(Default)]
 pub struct Region {
@@ -407,6 +452,8 @@ pub struct Region {
     /// Scope tree attached by the game loop; `None` until the first tick.
     pub timings: Option<Arc<Timings>>,
     rng: Rng,
+    /// Ticks this region has run, for the beacon's 80-tick effect refresh.
+    beacon_clock: u32,
     /// UUIDs this region last published into `TickContext::command_entities`.
     published_entities: HashSet<Uuid>,
 }
@@ -441,6 +488,7 @@ impl RegionData for Region {
         let mut result = Self {
             players: HashMap::new(),
             rng: Rng::default(),
+            beacon_clock: 0,
             entities: self
                 .entities
                 .split(|(x, z)| sections.contains(&SectionPos(x >> 4, z >> 4))),
@@ -604,6 +652,7 @@ impl Player {
                 loaded.remove(&(x, z));
             }
             let _ = self.signals.send(Signal::Hold {
+                dimension: self.dimension,
                 chunk: ChunkPos(x, z),
                 add: false,
             });
@@ -687,6 +736,7 @@ impl Player {
                 loaded.insert((x, z));
             }
             let _ = self.signals.send(Signal::Hold {
+                dimension: self.dimension,
                 chunk: ChunkPos(x, z),
                 add: true,
             });
@@ -894,6 +944,7 @@ impl Player {
                 }
             }
             let _ = self.signals.send(Signal::FluidChange {
+                dimension: self.dimension,
                 x: pos.x,
                 y: pos.y,
                 z: pos.z,
@@ -924,6 +975,16 @@ impl Player {
                 for stack in super::furnace::take_contents(source, pos) {
                     self.menus.spilled.push((pos, stack));
                 }
+            }
+            if name == Some("minecraft:brewing_stand") {
+                for stack in super::brewing::take_contents(source, pos) {
+                    self.menus.spilled.push((pos, stack));
+                }
+            }
+            if name == Some("minecraft:beacon") {
+                let _ = source.update_block_entity(pos[0], pos[1], pos[2], |entity| {
+                    (entity.take().is_some(), ())
+                });
             }
         }
         true
@@ -1013,6 +1074,18 @@ impl Player {
             else {
                 return;
             };
+            // Vanilla `FlintAndSteelItem.useOn` lights an obsidian frame before fire.
+            if let Some(blocks) =
+                super::portal::frame_blocks(source.as_ref(), [target.x, target.y, target.z])
+            {
+                for (at, state) in blocks {
+                    let location = ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]);
+                    if self.change_block(location.pack(), None, u32::from(state)) {
+                        self.changed_blocks.push(at);
+                    }
+                }
+                return;
+            }
             // Vanilla `BaseFireBlock.getState`: soul fire over soul sand or soul soil.
             if let Some(state) =
                 super::fire::placement_state(source.as_ref(), [target.x, target.y, target.z])
@@ -1115,6 +1188,21 @@ impl Player {
         drop(positions);
         if placed {
             self.changed_blocks.push([target.x, target.y, target.z]);
+            // Block entities are created with the block, so the menu, /data and the chunk save
+            // all find the state they expect.
+            match ferrite_data::blocks::state(state).map(|(name, _)| name) {
+                Some("minecraft:brewing_stand") => {
+                    if let Some(source) = self.source.clone() {
+                        super::brewing::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                Some("minecraft:beacon") => {
+                    if let Some(source) = self.source.clone() {
+                        super::beacon::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                _ => {}
+            }
         }
         // Survival uses the item up (vanilla `BlockItem.place`: `shrink(1)` unless the player
         // has infinite materials); the client gets the slot with the tick's `broadcastChanges`.
@@ -1880,6 +1968,88 @@ impl Player {
         self.survival.eating = None;
     }
 
+    /// Vanilla `Entity.handleNetherPortal`/`ServerPlayer.changeDimension`: after four seconds
+    /// in a portal block, find the paired dimension's portal (searching 128 blocks, creating
+    /// a frame when none exists) and travel there.
+    fn tick_portal(&mut self) {
+        self.portal_cooldown = self.portal_cooldown.saturating_sub(1);
+        if self.survival.dead {
+            self.portal_ticks = 0;
+            return;
+        }
+        let Some(target) = super::portal::counterpart(self.dimension) else {
+            return;
+        };
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let feet = [
+            self.pos[0].floor() as i32,
+            self.pos[1].floor() as i32,
+            self.pos[2].floor() as i32,
+        ];
+        let in_portal = source
+            .block(feet[0], feet[1], feet[2])
+            .and_then(|state| u16::try_from(state).ok())
+            .is_some_and(super::portal::is_portal);
+        if !in_portal {
+            self.portal_ticks = 0;
+            self.portal_pending = None;
+            return;
+        }
+        if self.portal_cooldown > 0 {
+            return;
+        }
+        if self.portal_pending.is_none() {
+            self.portal_ticks += 1;
+            if self.portal_ticks < super::portal::WAIT_TICKS {
+                return;
+            }
+            self.portal_ticks = 0;
+            let scaled = super::portal::scale(self.dimension, target, self.pos);
+            self.portal_pending = Some((target, scaled));
+        }
+        let Some((target, scaled)) = self.portal_pending else {
+            return;
+        };
+        let target_source = self.dimensions.source(target).clone();
+        target_source.prefetch(
+            (scaled[0].floor() as i32).div_euclid(16),
+            (scaled[2].floor() as i32).div_euclid(16),
+            self.biome,
+        );
+        let destination = super::portal::find_portal(
+            target_source.as_ref(),
+            scaled,
+            super::portal::SEARCH_RADIUS,
+        )
+        .or_else(|| super::portal::create_portal(target_source.as_ref(), scaled));
+        let Some(destination) = destination else {
+            // The destination chunk is still loading; retry on the next tick.
+            return;
+        };
+        self.portal_pending = None;
+        self.portal_ticks = 0;
+        self.change_dimension(target, destination, self.yaw, self.pitch);
+        self.portal_cooldown = super::portal::COOLDOWN_TICKS;
+        let sound =
+            ferrite_data::registries::id("minecraft:sound_event", "minecraft:block.portal.travel")
+                .unwrap_or(0);
+        send(
+            self,
+            &SoundEffect {
+                sound: VarInt(sound),
+                source: VarInt(0),
+                x: (destination[0] * 8.0) as i32,
+                y: (destination[1] * 8.0) as i32,
+                z: (destination[2] * 8.0) as i32,
+                volume: 0.5,
+                pitch: 1.0,
+                seed: 0,
+            },
+        );
+    }
+
     /// Vanilla `ServerPlayer.respawn`: a fresh survival state at the world spawn. The client
     /// discards every chunk on `respawn`, so the loaded set is released and re-queued.
     pub(crate) fn respawn(&mut self, spawn: [f64; 3]) {
@@ -1892,6 +2062,7 @@ impl Player {
         let old_loaded = std::mem::take(&mut self.loaded);
         for (x, z) in old_loaded {
             let _ = self.signals.send(Signal::Hold {
+                dimension: self.dimension,
                 chunk: ChunkPos(x, z),
                 add: false,
             });
@@ -1904,6 +2075,8 @@ impl Player {
         self.survival.last_pos = spawn;
         self.respawn_requested = false;
         self.breaking = None;
+        self.portal_pending = None;
+        self.portal_ticks = 0;
         self.pos = spawn;
         self.yaw = 0.0;
         self.pitch = 0.0;
@@ -1917,16 +2090,16 @@ impl Player {
         send(
             self,
             &Respawn {
-                dimension_type: VarInt(self.dimension_type),
-                dimension: "minecraft:overworld".into(),
+                dimension_type: VarInt(self.dimension.dimension_type_id()),
+                dimension: self.dimension.key().into(),
                 seed: self.seed,
                 game_mode: VarInt(self.gamemode),
                 previous_game_mode: VarInt(0),
                 debug: false,
                 flat: self.flat,
                 death_location: None,
-                portal_cooldown: VarInt(0),
-                sea_level: VarInt(63),
+                portal_cooldown: VarInt(self.portal_cooldown.min(i32::MAX as u32) as i32),
+                sea_level: VarInt(self.dimension.sea_level()),
                 data_to_keep: 3,
             },
         );
@@ -1986,6 +2159,107 @@ impl Player {
         });
     }
 
+    /// Vanilla dimension travel: a `respawn`-style client reset followed by the target
+    /// position. The region hands the player to the target dimension after `update` sees
+    /// that `self.dimension` no longer matches its own.
+    pub(crate) fn change_dimension(
+        &mut self,
+        dimension: super::Dimension,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    ) {
+        let old = self.dimension;
+        let old_loaded = std::mem::take(&mut self.loaded);
+        for (x, z) in old_loaded {
+            let _ = self.signals.send(Signal::Hold {
+                dimension: old,
+                chunk: ChunkPos(x, z),
+                add: false,
+            });
+        }
+        if let Some((loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
+            loaded.clear();
+        }
+        self.dimension = dimension;
+        self.source = Some(self.dimensions.source(dimension).clone());
+        self.dimension_type = dimension.dimension_type_id();
+        self.pos = pos;
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.ground = true;
+        self.chunk = ChunkPos(
+            (pos[0].floor() as i32).div_euclid(16),
+            (pos[2].floor() as i32).div_euclid(16),
+        );
+        self.loaded.clear();
+        self.queue.clear();
+        self.awaiting_batch = false;
+        self.portal_ticks = 0;
+        self.portal_cooldown = 200;
+        self.survival.last_pos = pos;
+        send(
+            self,
+            &Respawn {
+                dimension_type: VarInt(dimension.dimension_type_id()),
+                dimension: dimension.key().into(),
+                seed: self.seed,
+                game_mode: VarInt(self.gamemode),
+                previous_game_mode: VarInt(0),
+                debug: false,
+                flat: self.flat,
+                death_location: None,
+                portal_cooldown: VarInt(200),
+                sea_level: VarInt(dimension.sea_level()),
+                data_to_keep: 3,
+            },
+        );
+        send(
+            self,
+            &SetHealth {
+                health: MAX_HEALTH,
+                food: VarInt(MAX_FOOD),
+                saturation: 5.0,
+            },
+        );
+        send(
+            self,
+            &SetExperience {
+                progress: self.experience_progress,
+                level: VarInt(self.experience_level),
+                total: VarInt(self.experience_total),
+            },
+        );
+        self.init_inventory_menu();
+        let id = self.next_teleport;
+        self.next_teleport += 1;
+        self.pending_teleport = Some(id);
+        send(
+            self,
+            &PositionSync {
+                teleport_id: VarInt(id),
+                x: pos[0],
+                y: pos[1],
+                z: pos[2],
+                velocity_x: 0.0,
+                velocity_y: 0.0,
+                velocity_z: 0.0,
+                yaw,
+                pitch,
+                flags: 0,
+            },
+        );
+        self.refresh_chunks();
+        self.positions.lock().unwrap().insert(self.uuid, pos);
+        let _ = self.signals.send(Signal::Update {
+            uuid: self.uuid,
+            pos,
+            yaw,
+            pitch,
+            ground: true,
+        });
+    }
+
     fn update(&mut self) -> bool {
         if let Some((_, _, elapsed)) = &mut self.breaking {
             *elapsed = elapsed.saturating_add(1);
@@ -2027,6 +2301,7 @@ impl Player {
                                 self.yaw,
                                 self.pitch,
                                 self.gamemode,
+                                self.dimension,
                                 &self.inventory,
                             ),
                         )
@@ -2046,6 +2321,59 @@ impl Player {
                     );
                     continue;
                 }
+                Command::SetHealth { health } => {
+                    self.survival.health = health.clamp(0.0, self.survival.max_health);
+                    send(
+                        self,
+                        &SetHealth {
+                            health: self.survival.health,
+                            food: VarInt(self.survival.food.food),
+                            saturation: self.survival.food.saturation,
+                        },
+                    );
+                    continue;
+                }
+                Command::SetFood { food } => {
+                    self.survival.food.food = i32::from(food.min(20));
+                    self.survival.food.saturation = self
+                        .survival
+                        .food
+                        .saturation
+                        .min(self.survival.food.food as f32);
+                    send(
+                        self,
+                        &SetHealth {
+                            health: self.survival.health,
+                            food: VarInt(self.survival.food.food),
+                            saturation: self.survival.food.saturation,
+                        },
+                    );
+                    continue;
+                }
+                Command::SetExperience {
+                    level,
+                    progress,
+                    total,
+                } => {
+                    if let Some(level) = level {
+                        self.experience_level = level.max(0);
+                    }
+                    if let Some(progress) = progress {
+                        self.experience_progress = progress.clamp(0.0, 1.0);
+                    }
+                    if let Some(total) = total {
+                        self.experience_total = total.max(0);
+                    }
+                    send(
+                        self,
+                        &SetExperience {
+                            progress: self.experience_progress,
+                            level: VarInt(self.experience_level),
+                            total: VarInt(self.experience_total),
+                        },
+                    );
+                    continue;
+                }
                 Command::Teleport { pos, yaw, pitch } => {
                     if pos.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0) {
                         self.pos = pos;
@@ -2056,6 +2384,20 @@ impl Player {
                             self.pitch = pitch;
                         }
                         self.teleport();
+                        changed = true;
+                    }
+                    continue;
+                }
+                Command::ChangeDimension {
+                    dimension,
+                    pos,
+                    yaw,
+                    pitch,
+                } => {
+                    if dimension != self.dimension
+                        && pos.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
+                    {
+                        self.change_dimension(dimension, pos, yaw, pitch);
                         changed = true;
                     }
                     continue;
@@ -2203,6 +2545,7 @@ impl Player {
                 }
                 ServerboundPlay::ContainerClick(p) => self.handle_container_click(p),
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
+                ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
                 ServerboundPlay::RenameItem(p) => self.rename_item(p.name),
                 ServerboundPlay::ContainerClose(_) => self.close_container(),
                 ServerboundPlay::PlayerAction(p) => {
@@ -2520,6 +2863,9 @@ impl Region {
                 self.held_chunks.remove(&chunk);
             }
         }
+    }
+    pub fn has_chunk_hold(&self, chunk: ChunkPos) -> bool {
+        self.held_chunks.contains_key(&chunk)
     }
     /// Removes and returns every entity standing in `chunk`, so the world loop can persist the
     /// chunk's entities when it unloads. Entities in chunks that stay loaded are untouched.
@@ -3130,6 +3476,7 @@ impl Region {
             source,
             tracking: &ctx.tracking,
             state: &ctx.state,
+            dimension: ctx.dimension,
             tree: &tree,
         };
         let updated = command_blocks.tick(source, &power, &mut runner, *tick_clock);
@@ -3546,6 +3893,9 @@ impl Region {
                 None => p.update(),
             };
             if updated {
+                p.tick_portal();
+            }
+            if updated {
                 p.survival_tick(&blocks, &rules);
                 if p.survival.dead {
                     self.process_death(&mut p, ctx, &rules);
@@ -3567,9 +3917,22 @@ impl Region {
             if !updated {
                 let held = p.loaded.iter().map(|(x, z)| ChunkPos(*x, *z)).collect();
                 let _ = p.signals.send(Signal::Leave {
+                    dimension: p.dimension,
                     uuid: p.uuid,
                     chunk: p.chunk,
                     held,
+                });
+                continue;
+            }
+            if p.dimension != ctx.dimension {
+                // The command/portal moved this player to another dimension; the source region
+                // family owns the player only until the world loop hands it to the target one.
+                let signals = p.signals.clone();
+                let from = p.chunk;
+                let _ = signals.send(Signal::ChangeDimension {
+                    from_dimension: ctx.dimension,
+                    from,
+                    player: Box::new(p),
                 });
                 continue;
             }
@@ -3583,6 +3946,7 @@ impl Region {
                 p.refresh_chunks();
                 let tx = p.signals.clone();
                 let _ = tx.send(Signal::Transfer {
+                    dimension: p.dimension,
                     from,
                     to: next,
                     player: Box::new(p),
@@ -3700,6 +4064,7 @@ impl Region {
         self.pick_up_items(ctx);
         self.tick_falling(ctx);
         self.tick_tnt(ctx);
+        self.tick_beacons(ctx);
         for p in self.players.values_mut() {
             p.tick_containers();
         }
@@ -3708,11 +4073,71 @@ impl Region {
         for entity in self.entities.take_crossing() {
             let (x, z) = entity.chunk();
             let _ = ctx.signals.send(Signal::EntityTransfer {
+                dimension: ctx.dimension,
                 to: ChunkPos(x, z),
                 entity: Box::new(entity),
             });
         }
         self.publish_command_entities(&ctx.command_entities);
+    }
+
+    /// Vanilla `BeaconBlockEntity`'s 80-tick timer: recompute each beacon's pyramid, resend the
+    /// beam height and refresh the effects of the players inside the range.
+    fn tick_beacons(&mut self, ctx: &TickContext) {
+        self.beacon_clock = self.beacon_clock.wrapping_add(1);
+        if !self
+            .beacon_clock
+            .is_multiple_of(super::beacon::EFFECT_INTERVAL)
+        {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let Some(block) = ferrite_data::registries::id("minecraft:block", "minecraft:beacon")
+        else {
+            return;
+        };
+        let beacons: Vec<[i32; 3]> = source
+            .block_entities()
+            .into_iter()
+            .filter(|(pos, entity)| {
+                self.held_chunks
+                    .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                    && entity.data.get("id")
+                        == Some(&ferrite_nbt::Tag::String("minecraft:beacon".into()))
+            })
+            .map(|(pos, _)| pos)
+            .collect();
+        for pos in beacons {
+            let mut data = super::beacon::load(source, pos);
+            let levels = super::beacon::scan_levels(source, pos);
+            if data.levels != levels {
+                data.levels = levels;
+                super::beacon::store(source, pos, &data);
+            }
+            if levels <= 0 {
+                continue;
+            }
+            // Vanilla `BeaconBlockEntity.triggerEvent`: event 1 sets the client's beam height.
+            let event = ferrite_protocol::packets::play::BlockEvent {
+                pos: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]),
+                block: VarInt(block),
+                param_a: 1,
+                param_b: u8::try_from(levels).unwrap_or(0),
+            };
+            for player in self.players.values() {
+                send(player, &event);
+            }
+            let effects = super::beacon::effects(&data);
+            for player in self.players.values_mut() {
+                if super::beacon::in_range(pos, levels, player.pos) {
+                    for effect in &effects {
+                        player.apply_effect(*effect);
+                    }
+                }
+            }
+        }
     }
 
     /// Publishes this region's entities for command selectors. Folia keeps the store region

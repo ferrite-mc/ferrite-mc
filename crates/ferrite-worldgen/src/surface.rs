@@ -216,13 +216,26 @@ impl Point {
 }
 
 impl<'a> SurfaceGenerator<'a> {
+    /// The overworld surface pass (material rule `minecraft:overworld`, biome preset
+    /// `minecraft:overworld`).
     pub fn new(
         data: &'a WorldgenData,
         noise: &'a NoiseChunkGenerator,
         seed: i64,
     ) -> Result<Self, SurfaceError> {
+        Self::with_biome_preset(data, noise, seed, "minecraft:overworld")
+    }
+
+    /// A surface pass for the dimension `noise` fills. The noise settings come from the
+    /// generator, so the nether uses its own material rule instead of overworld grass.
+    pub fn with_biome_preset(
+        data: &'a WorldgenData,
+        noise: &'a NoiseChunkGenerator,
+        seed: i64,
+        biome_preset: &str,
+    ) -> Result<Self, SurfaceError> {
         let settings = data
-            .noise_settings("overworld")
+            .noise_settings(&noise.settings_id().to_string())
             .ok_or(SurfaceError::MissingSettings)?;
         let root = data
             .material_rules
@@ -243,7 +256,7 @@ impl<'a> SurfaceGenerator<'a> {
             noise,
             root: flatten_rule(data, root, 0)?,
             router: settings.noise_router.resolve_references(data)?,
-            biomes: MultiNoiseBiomeSource::from_worldgen(data, "minecraft:overworld")?,
+            biomes: MultiNoiseBiomeSource::from_worldgen(data, biome_preset)?,
             biome_seed,
             biome_cache: RefCell::new(BiomeCache::empty()),
             bands,
@@ -368,7 +381,10 @@ impl<'a> SurfaceGenerator<'a> {
         if height > top {
             return Ok(());
         }
-        let settings = self.data.noise_settings("overworld").expect("settings");
+        let settings = self
+            .data
+            .noise_settings(&self.noise.settings_id().to_string())
+            .expect("settings");
         let stone = registry
             .block_id(&settings.default_block.to_string(), &Default::default())
             .ok_or_else(|| SurfaceError::MissingBlock(settings.default_block.clone()))?;

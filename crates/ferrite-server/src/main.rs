@@ -202,16 +202,46 @@ async fn main() -> anyhow::Result<()> {
     } else {
         [0, 65, 0]
     };
+    let bind_host = config
+        .bind_address
+        .rsplit_once(':')
+        .map_or_else(|| config.bind_address.clone(), |(host, _)| host.to_owned());
+    let vanilla_data = std::env::var_os("FERRITE_VANILLA_ROOT").map_or_else(
+        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated"),
+        std::path::PathBuf::from,
+    );
     // Plugins call the Bukkit API from their own threads; the game loop owns the world, so
     // player mutations (inventory, teleport, gamemode, ...) arrive through this channel and are
     // routed to the region that owns the player.
     let (plugin_command_tx, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let terrain = match config.generator {
+        WorldGenerator::Vanilla => Some(std::sync::Arc::new(
+            game::VanillaTerrain::spawn(0).context("starting the vanilla world generator")?,
+        )),
+        WorldGenerator::Superflat => None,
+    };
+    let source = if let Some(path) = &config.world {
+        let registry = ferrite_world::RuntimeRegistry::load("vanilla/26.3/generated")
+            .context("loading vanilla registry")?;
+        game::new_anvil_source_with(path.clone(), registry, terrain)
+    } else {
+        game::new_memory_source(terrain)
+    };
+    // Vanilla terrain chooses a spawn above the generated surface; the flat world keeps the
+    // fixed `[0, 65, 0]` the existing tests rely on.
+    let spawn = if source.is_flat() || config.world.is_some() {
+        spawn
+    } else {
+        [0, source.spawn_height(0, 0).unwrap_or(100), 0]
+    };
     let plugin_bridge =
         ferrite_server::plugins::PluginBridge::start(ferrite_server::plugins::Settings {
             directory: config.plugins_dir.unwrap_or_else(|| "plugins".into()),
             bridge_jar: config.plugin_bridge.unwrap_or_else(|| {
                 "java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar".into()
             }),
+            data_dir: vanilla_data,
+            bind_address: bind_host,
             motd: config.motd.clone(),
             max_players: u16::try_from(config.max_players).unwrap_or(u16::MAX),
             port: listener.local_addr()?.port(),
@@ -233,6 +263,9 @@ async fn main() -> anyhow::Result<()> {
             player_handler: Some(std::sync::Arc::new(move |command| {
                 let _ = plugin_command_tx.send(command);
             })),
+            world_view: Some(ferrite_server::plugins::world_view(std::sync::Arc::clone(
+                &source,
+            ))),
         })
         .context("starting plugins")?;
     let settings = game::WorldSettings {
@@ -262,27 +295,9 @@ async fn main() -> anyhow::Result<()> {
                 .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
         ),
         plugin_commands: Some(plugin_commands),
+        dimensions: None,
     };
-    let terrain = match config.generator {
-        WorldGenerator::Vanilla => Some(std::sync::Arc::new(
-            game::VanillaTerrain::spawn(0).context("starting the vanilla world generator")?,
-        )),
-        WorldGenerator::Superflat => None,
-    };
-    let world = if let Some(path) = config.world {
-        let registry = ferrite_world::RuntimeRegistry::load("vanilla/26.3/generated")
-            .context("loading vanilla registry")?;
-        let source = game::new_anvil_source_with(path, registry, terrain);
-        game::World::start_configured(Some(source), spawn, settings)
-    } else {
-        let source = game::new_memory_source(terrain);
-        let spawn = if source.is_flat() {
-            [0, 65, 0]
-        } else {
-            [0, source.spawn_height(0, 0).unwrap_or(100), 0]
-        };
-        game::World::start_configured(Some(source), spawn, settings)
-    };
+    let world = game::World::start_configured(Some(source), spawn, settings);
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
         ferrite_net::ServerConfig {

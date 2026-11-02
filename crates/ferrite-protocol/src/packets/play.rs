@@ -493,6 +493,9 @@ item_packet!(SetCursorItem<I = ItemStack>,98,Clientbound,{item:I});
 item_packet!(SetPlayerInventory<I = ItemStack>,110,Clientbound,{slot:VarInt,item:I});
 packet!(ServerboundContainerClose,19,Serverbound,{window:VarInt});
 packet!(ClientboundContainerClose,17,Clientbound,{window:VarInt});
+// Vanilla `ClientboundBlockEventPacket`: a block entity's `triggerEvent` (a beacon's beam
+// height, a chest lid). `block` is the block registry id, then the two event bytes.
+packet!(BlockEvent,7,Clientbound,{pos:crate::types::BlockPos,block:VarInt,param_a:u8,param_b:u8});
 packet!(SetHeldSlot,107,Clientbound,{slot:VarInt});
 packet!(OpenScreen,60,Clientbound,{window:VarInt,menu:VarInt,title:crate::types::Translatable});
 // Vanilla `ClientboundContainerSetDataPacket`: one menu property (furnace lit/progress, anvil
@@ -500,6 +503,8 @@ packet!(OpenScreen,60,Clientbound,{window:VarInt,menu:VarInt,title:crate::types:
 packet!(ContainerSetData,19,Clientbound,{window:VarInt,id:i16,value:i16});
 // Vanilla `ServerboundContainerButtonClickPacket`: enchant choice, stonecutter recipe, ...
 packet!(ContainerButtonClick,17,Serverbound,{window:VarInt,button:VarInt});
+// Vanilla `ServerboundSetBeaconPacket`: the two effects the player picked (empty = none).
+packet!(SetBeacon,53,Serverbound,{primary:Option<VarInt>,secondary:Option<VarInt>});
 // Vanilla `ServerboundRenameItemPacket` (anvil): the name field is capped at 50 by the server.
 packet!(RenameItem,49,Serverbound,{name:String});
 
@@ -1356,6 +1361,20 @@ mod interaction_tests {
         });
         roundtrip(RenameItem {
             name: "Excalibur".into(),
+        });
+        roundtrip(SetBeacon {
+            primary: Some(VarInt(1)),
+            secondary: None,
+        });
+        roundtrip(SetBeacon {
+            primary: Some(VarInt(1)),
+            secondary: Some(VarInt(10)),
+        });
+        roundtrip(BlockEvent {
+            pos: crate::types::BlockPos::new(4, 70, 4),
+            block: VarInt(7),
+            param_a: 1,
+            param_b: 4,
         });
         // More than 128 changed slots is rejected like vanilla.
         let mut bytes = Vec::new();

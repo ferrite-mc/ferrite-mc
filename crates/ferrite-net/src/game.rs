@@ -23,6 +23,8 @@ pub enum ServerboundPlay {
     ContainerButtonClick(ContainerButtonClick),
     /// Vanilla `ServerboundRenameItemPacket` (anvil).
     RenameItem(RenameItem),
+    /// Vanilla `ServerboundSetBeaconPacket`: the two effects chosen in a beacon screen.
+    SetBeacon(SetBeacon),
     Position(MovePosition),
     PositionRotation(MovePositionRotation),
     Rotation(MoveRotation),
@@ -289,6 +291,7 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
             ferrite_protocol::packets::play::ServerboundInteract::decode(&mut b)?,
         )),
         49 => Some(ServerboundPlay::RenameItem(RenameItem::decode(&mut b)?)),
+        53 => Some(ServerboundPlay::SetBeacon(SetBeacon::decode(&mut b)?)),
         41 => Some(ServerboundPlay::PlayerAction(PlayerAction::decode(&mut b)?)),
         42 => Some(ServerboundPlay::PlayerCommand(
             ServerboundPlayerCommand::decode(&mut b)?,

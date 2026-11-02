@@ -3,7 +3,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrite_worldgen::{DensityFunction, NoiseSettings, WorldgenData};
+use ferrite_world::{BlockInfo, BlockStateRegistry, RuntimeRegistry};
+use ferrite_worldgen::{
+    DensityFunction, NoiseChunkGenerator, NoiseSettings, SurfaceGenerator, WorldgenData,
+};
 
 fn generated_root() -> PathBuf {
     if let Some(root) = std::env::var_os("FERRITE_VANILLA_ROOT") {
@@ -179,6 +182,90 @@ fn resolves_every_overworld_router_density_function() {
         "final density must be inlined"
     );
     assert_eq!(nodes, 9_242);
+}
+
+#[test]
+fn generates_nether_terrain_with_nether_biomes() {
+    let root = generated_root();
+    let data = WorldgenData::load(&root).expect("worldgen data");
+    let registry = RuntimeRegistry::load(&root).expect("block registry");
+    let noise =
+        NoiseChunkGenerator::with_settings(&data, 0, "minecraft:nether").expect("nether generator");
+    assert_eq!(noise.min_y(), 0);
+    assert_eq!(noise.height(), 128);
+    let surface = SurfaceGenerator::with_biome_preset(&data, &noise, 0, "minecraft:nether")
+        .expect("nether surface pass");
+    let mut chunk = noise
+        .fill_noise_chunk(0, 0, &registry)
+        .expect("nether fill");
+    surface
+        .apply(&mut chunk, 0, 0, &registry)
+        .expect("nether surface");
+    noise
+        .carve_chunk(&mut chunk, 0, 0, &registry)
+        .expect("nether carve");
+    let min_y = chunk.min_y();
+    for (section_index, section) in chunk.sections_mut().iter_mut().enumerate() {
+        for qy in 0..4 {
+            let y = min_y + section_index as i32 * 16 + qy * 4 + 2;
+            for qz in 0..4 {
+                for qx in 0..4 {
+                    let name = surface.biome_at(qx * 4 + 2, y, qz * 4 + 2);
+                    let id = registry.biome_id(&name.to_string()).expect("biome id");
+                    section
+                        .set_biome((qy * 16 + qz * 4 + qx) as usize, id)
+                        .expect("set biome");
+                }
+            }
+        }
+    }
+
+    let netherrack = registry
+        .block_id("minecraft:netherrack", &Default::default())
+        .expect("netherrack");
+    let mut netherrack_blocks = 0;
+    for y in 0..128 {
+        for z in 0..16 {
+            for x in 0..16 {
+                if chunk.block(x, y, z) == Some(netherrack) {
+                    netherrack_blocks += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        netherrack_blocks > 1000,
+        "nether column is not netherrack: {netherrack_blocks} blocks"
+    );
+
+    let mut biomes = Vec::new();
+    for section in chunk.sections() {
+        for index in 0..64 {
+            if let Some(id) = section.biomes().get(index)
+                && let Some(name) = registry.biome_name(id)
+            {
+                biomes.push(name.to_owned());
+            }
+        }
+    }
+    const NETHER: [&str; 5] = [
+        "minecraft:nether_wastes",
+        "minecraft:soul_sand_valley",
+        "minecraft:crimson_forest",
+        "minecraft:warped_forest",
+        "minecraft:basalt_deltas",
+    ];
+    assert!(
+        biomes.iter().all(|name| NETHER.contains(&name.as_str())),
+        "overworld biome in a nether chunk: {:?}",
+        biomes.iter().collect::<std::collections::BTreeSet<_>>()
+    );
+    // Lava below the nether sea level comes from the nether fluid, not water.
+    let lava = registry
+        .block_id("minecraft:lava", &Default::default())
+        .expect("lava");
+    assert!((0..32).any(|y| chunk.block(8, y, 8) == Some(lava)));
+    assert!(!registry.flags(lava).motion_blocking);
 }
 
 #[test]
