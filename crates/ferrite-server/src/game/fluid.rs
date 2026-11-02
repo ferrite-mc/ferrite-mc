@@ -61,11 +61,12 @@ impl FluidWorld for RegionFluidWorld<'_> {
             block_state: ferrite_protocol::VarInt(state as i32),
         };
         let chunk = (x.div_euclid(16), z.div_euclid(16));
-        for (loaded, tx) in self.tracking.lock().unwrap().values() {
-            if loaded.contains(&chunk) {
-                let _ = tx.send(ferrite_net::game::packet(&packet));
-            }
-        }
+        super::region::broadcast_tracked_chunk(
+            &self.tracking.lock().unwrap(),
+            self.source.dimension(),
+            chunk,
+            &ferrite_net::game::packet(&packet),
+        );
     }
     fn ultrawarm(&self) -> bool {
         false

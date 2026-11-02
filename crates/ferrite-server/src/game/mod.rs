@@ -668,7 +668,7 @@ async fn run(
            let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
            online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension });
            positions.lock().unwrap().insert(uuid, start_pos);
-           tracking.lock().unwrap().insert(uuid, (HashSet::new(), outbound.clone()));
+           tracking.lock().unwrap().insert(uuid, (start_dimension, HashSet::new(), outbound.clone()));
            let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seed,flat,respawn_requested:false,attacks:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
            worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
            names.insert(uuid, name.clone());
@@ -1108,7 +1108,7 @@ fn defer_release(
                     ids: vec![VarInt(entity.data.id)],
                 });
                 for (uuid, _) in entity.data.tracker.viewers() {
-                    if let Some((_, outbound)) = tracking.lock().unwrap().get(&uuid) {
+                    if let Some((_, _, outbound)) = tracking.lock().unwrap().get(&uuid) {
                         let _ = outbound.send(packet.clone());
                     }
                 }
