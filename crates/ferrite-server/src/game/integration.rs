@@ -295,6 +295,42 @@ async fn offline_chat_broadcasts_unsigned_player_chat_to_others() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_spam_disconnects_a_non_op() {
+    use ferrite_protocol::packets::play::{PlayDisconnect, ServerboundChatCommand};
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            // One command reaches the 20-tick budget for a one-second threshold.
+            command_spam_threshold_seconds: 1,
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Spammer").await;
+    bot.send(&ServerboundChatCommand {
+        command: "help".into(),
+    })
+    .await;
+    let body = bot.until(PlayDisconnect::ID).await;
+    let reason = PlayDisconnect::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(reason.reason.0, "Kicked for spamming");
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_login_kicks_old_session_and_keeps_new_session() {
     let world = World::start();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

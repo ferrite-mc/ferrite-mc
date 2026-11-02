@@ -1,4 +1,5 @@
 use super::chat::PlayerChatState;
+use super::throttle::TickThrottler;
 use ferrite_net::game::{Outbound, OutboundSender, packet};
 use ferrite_profiler::Timings;
 use ferrite_protocol::{
@@ -26,6 +27,8 @@ pub struct GlobalPlayer {
     /// Registry id of `minecraft:chat` used to decorate broadcast messages.
     pub chat_type: i32,
     pub chat: PlayerChatState,
+    /// Vanilla `chatSpamThrottler`: incremented per broadcast chat and decayed every tick.
+    chat_spam: TickThrottler,
 }
 impl GlobalPlayer {
     #[allow(clippy::too_many_arguments)]
@@ -53,7 +56,12 @@ impl GlobalPlayer {
             chat_visibility,
             chat_type,
             chat: PlayerChatState::new(secure_chat),
+            chat_spam: TickThrottler::from_seconds(10),
         }
+    }
+    /// Applies `chat-spam-threshold-seconds` to this connection.
+    pub fn set_chat_spam_threshold_seconds(&mut self, seconds: i32) {
+        self.chat_spam = TickThrottler::from_seconds(seconds);
     }
     fn info(&self) -> PlayerInfo {
         PlayerInfo {
@@ -176,7 +184,7 @@ impl GlobalRegion {
         }
     }
     /// Validates a `serverbound_chat` message and broadcasts it as `player_chat`.
-    pub fn chat(&mut self, id: Uuid, packet: &ServerboundChat) {
+    pub fn chat(&mut self, id: Uuid, packet: &ServerboundChat, is_op: bool) {
         let Some(player) = self.players.get_mut(&id) else {
             return;
         };
@@ -240,6 +248,15 @@ impl GlobalRegion {
                 recipient.chat.add_pending(signature);
             }
         }
+        // Vanilla `detectChatRateSpam` runs after the broadcast. Operators are exempt from the
+        // kick (Ferrite has no singleplayer owner to exempt).
+        let Some(sender) = self.players.get_mut(&id) else {
+            return;
+        };
+        sender.chat_spam.increment();
+        if !sender.chat_spam.is_under_threshold() && !is_op {
+            kick(sender, "Kicked for spamming");
+        }
     }
     fn broadcast(&self, text: &str) {
         // One encoding, shared by every recipient.
@@ -276,6 +293,9 @@ impl GlobalRegion {
         }
     }
     pub fn tick(&mut self) {
+        for player in self.players.values_mut() {
+            player.chat_spam.tick();
+        }
         let timings = self.timings.clone();
         let _tick = timings.as_ref().map(|t| t.scope("global-tick"));
         let _tracking = timings.as_ref().map(|t| t.scope("entity-tracking"));
@@ -471,6 +491,7 @@ mod tests {
                 signature: None,
                 last_seen: LastSeenUpdate::new(0, &[], 0),
             },
+            false,
         );
         assert!(
             std::iter::from_fn(|| br.try_recv())
@@ -482,5 +503,67 @@ mod tests {
                 .any(|p| matches!(p,Outbound::Packet(ref b) if b[0]==78))
         );
         let _ = &mut ar;
+    }
+
+    #[test]
+    fn chat_spam_kicks_after_the_threshold_and_ops_are_exempt() {
+        fn chat(message: &str) -> ServerboundChat {
+            ServerboundChat {
+                message: message.into(),
+                timestamp: 0,
+                salt: 0,
+                signature: None,
+                last_seen: LastSeenUpdate::new(0, &[], 0),
+            }
+        }
+        let mut g = GlobalRegion::default();
+        let (spammer_tx, mut spammer_rx) = OutboundSender::channel(1 << 20);
+        let (admin_tx, mut admin_rx) = OutboundSender::channel(1 << 20);
+        let spammer = uuid::Uuid::from_u128(1);
+        let admin = uuid::Uuid::from_u128(2);
+        g.join(GlobalPlayer::new(
+            spammer,
+            1,
+            "Spammer".into(),
+            vec![],
+            spammer_tx,
+            false,
+            1,
+            0,
+        ));
+        g.join(GlobalPlayer::new(
+            admin,
+            2,
+            "Admin".into(),
+            vec![],
+            admin_tx,
+            false,
+            1,
+            0,
+        ));
+
+        for _ in 0..9 {
+            g.chat(spammer, &chat("spam"), false);
+        }
+        assert!(
+            !std::iter::from_fn(|| spammer_rx.try_recv())
+                .any(|message| matches!(message, Outbound::Disconnect(_))),
+            "nine messages stay under the default ten-second limit"
+        );
+        g.chat(spammer, &chat("spam"), false);
+        assert!(
+            std::iter::from_fn(|| spammer_rx.try_recv())
+                .any(|message| matches!(message, Outbound::Disconnect(_))),
+            "the tenth message reaches the limit"
+        );
+
+        for _ in 0..20 {
+            g.chat(admin, &chat("spam"), true);
+        }
+        assert!(
+            !std::iter::from_fn(|| admin_rx.try_recv())
+                .any(|message| matches!(message, Outbound::Disconnect(_))),
+            "ops are exempt from the chat spam kick"
+        );
     }
 }
