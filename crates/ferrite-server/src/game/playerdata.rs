@@ -20,6 +20,10 @@ pub struct Saved {
     pub yaw: f32,
     pub pitch: f32,
     pub gamemode: i32,
+    /// The dimension the player logged out in, as a dimension key. Older saves default to
+    /// the overworld.
+    #[serde(default = "default_dimension")]
+    pub dimension: String,
     /// `(inventory slot, network slot bytes as hex)` for non-empty slots, in vanilla `Inventory`
     /// numbering. The network form keeps every component, including ones the NBT save format
     /// cannot re-encode for the network.
@@ -61,12 +65,17 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+fn default_dimension() -> String {
+    super::Dimension::Overworld.key().to_owned()
+}
+
 impl Saved {
     pub fn capture(
         pos: [f64; 3],
         yaw: f32,
         pitch: f32,
         gamemode: i32,
+        dimension: super::Dimension,
         inventory: &PlayerInventory,
     ) -> Self {
         let items = inventory
@@ -87,10 +96,16 @@ impl Saved {
             yaw,
             pitch,
             gamemode,
+            dimension: dimension.key().to_owned(),
             items,
             selected: inventory.selected_slot() as u8,
             inventory: Vec::new(),
         }
+    }
+
+    /// The saved dimension, or the overworld when an older save has none.
+    pub fn dimension(&self) -> super::Dimension {
+        super::Dimension::from_key(&self.dimension).unwrap_or_default()
     }
 
     /// Rebuilds the inventory, ignoring unknown slots and unreadable stacks.
@@ -168,7 +183,14 @@ mod tests {
             ferrite_item::Component::Damage(12),
         );
         inventory.set(ferrite_inventory::OFFHAND, sword.clone());
-        let saved = Saved::capture([12.5, 70.0, -3.25], 90.0, -15.0, 1, &inventory);
+        let saved = Saved::capture(
+            [12.5, 70.0, -3.25],
+            90.0,
+            -15.0,
+            1,
+            crate::game::Dimension::Nether,
+            &inventory,
+        );
         save_to(&dir, &uuid, &saved).unwrap();
         let loaded = load_from(&dir, &uuid).unwrap();
         assert_eq!(loaded, saved);

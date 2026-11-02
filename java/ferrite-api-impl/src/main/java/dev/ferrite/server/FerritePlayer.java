@@ -12,6 +12,9 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftHumanEntity
     private org.bukkit.Location location;
     private double health = 20.0;
     private int food = 20;
+    private int experienceLevel;
+    private float experienceProgress;
+    private int totalExperience;
     private org.bukkit.GameMode mode = org.bukkit.GameMode.SURVIVAL;
     private FerritePlayer(FerriteServer server, java.util.UUID id, String name, boolean operator, double health, int food, int mode, org.bukkit.Location location) {
         this.server = server; this.id = id; this.name = name; this.operator = operator; this.health = health; this.food = food; this.mode = java.util.Objects.requireNonNull(org.bukkit.GameMode.getByValue(mode)); this.location = location;
@@ -66,6 +69,12 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftHumanEntity
     @Override public void setHealth(double value) { if (!Double.isFinite(value) || value < 0) throw new IllegalArgumentException("health"); health = value; Native.playerState(id.toString(), 0, value); }
     @Override public int getFoodLevel() { return food; }
     @Override public void setFoodLevel(int value) { if (value < 0 || value > 20) throw new IllegalArgumentException("food"); food = value; Native.playerState(id.toString(), 1, value); }
+    @Override public int getLevel() { return experienceLevel; }
+    @Override public void setLevel(int value) { if (value < 0) throw new IllegalArgumentException("level"); experienceLevel = value; Native.playerState(id.toString(), 3, value); }
+    @Override public float getExp() { return experienceProgress; }
+    @Override public void setExp(float value) { if (!(value >= 0.0f && value <= 1.0f)) throw new IllegalArgumentException("exp"); experienceProgress = value; Native.playerState(id.toString(), 4, value); }
+    @Override public int getTotalExperience() { return totalExperience; }
+    @Override public void setTotalExperience(int value) { if (value < 0) throw new IllegalArgumentException("total experience"); totalExperience = value; Native.playerState(id.toString(), 5, value); }
     @Override public org.bukkit.GameMode getGameMode() { return mode; }
     @Override public void setGameMode(org.bukkit.GameMode value) { mode = java.util.Objects.requireNonNull(value); Native.playerState(id.toString(), 2, value.getValue()); }
     @Override public void sendMessage(String message) { Native.playerMessage(id.toString(), message, false); }

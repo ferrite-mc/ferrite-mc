@@ -1,4 +1,4 @@
-use super::terrain::VanillaTerrain;
+use super::{Dimension, terrain::VanillaTerrain};
 use ferrite_command::gamerule::GameRules;
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
@@ -14,19 +14,20 @@ pub fn read_chunk(
     x: i32,
     z: i32,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    Ok(read_column(world, registry, x, z)?
+    Ok(read_column(world, registry, Dimension::Overworld, x, z)?
         .map(|(chunk, light)| encode_chunk_packet(x, z, &chunk, &light))
         .transpose()?)
 }
 fn read_column(
     world: &Path,
     registry: &RuntimeRegistry,
+    dimension: Dimension,
     x: i32,
     z: i32,
 ) -> anyhow::Result<Option<(Chunk, LightData)>> {
     let rx = x.div_euclid(32);
     let rz = z.div_euclid(32);
-    let dir = world.join("dimensions/minecraft/overworld/region");
+    let dir = world.join(dimension.region_dir());
     if !dir.exists() {
         return Ok(None);
     }
@@ -35,10 +36,12 @@ fn read_column(
         return Ok(None);
     };
     let (_, tag) = binary::read_named(&data)?;
-    let chunk = chunk_from_nbt(&tag, -64, 384, registry)?;
+    let chunk = chunk_from_nbt(&tag, dimension.min_y(), dimension.height() as u32, registry)?;
+    let sections = dimension.light_sections();
+    let min_section = dimension.min_y().div_euclid(16);
     let mut light = LightData {
-        sky: vec![LightSection::Unknown; 26],
-        block: vec![LightSection::Unknown; 26],
+        sky: vec![LightSection::Unknown; sections],
+        block: vec![LightSection::Unknown; sections],
     };
     if let Tag::Compound(root) = &tag
         && let Some(Tag::List(List::Compound(sections))) = root.get("sections")
@@ -47,8 +50,8 @@ fn read_column(
             let Some(Tag::Byte(y)) = section.get("Y") else {
                 continue;
             };
-            let idx = i32::from(*y) + 5;
-            if !(0..26).contains(&idx) {
+            let idx = i32::from(*y) - min_section + 1;
+            if !(0..light.sky.len() as i32).contains(&idx) {
                 continue;
             }
             for (name, target) in [
@@ -157,9 +160,10 @@ pub struct AnvilChunkSource {
     runtime: tokio::runtime::Handle,
     flush_lock: tokio::sync::Mutex<()>,
     flat: Mutex<HashMap<i32, (Chunk, LightData)>>,
-    /// Vanilla overworld generation for chunks missing from disk; `None` is the
-    /// flat test world.
+    /// Vanilla generation for chunks missing from disk; `None` is the flat test world.
     terrain: Option<Arc<VanillaTerrain>>,
+    /// Which dimension this source reads, writes and generates.
+    dimension: Dimension,
 }
 impl AnvilChunkSource {
     pub fn new(path: PathBuf, registry: RuntimeRegistry) -> Arc<Self> {
@@ -170,9 +174,19 @@ impl AnvilChunkSource {
         registry: RuntimeRegistry,
         terrain: Option<Arc<VanillaTerrain>>,
     ) -> Arc<Self> {
+        Self::with_dimension(path, Arc::new(registry), terrain, Dimension::Overworld)
+    }
+    /// A disk-backed source for one dimension. `path` is the world root; the dimension's
+    /// vanilla storage tree (`DIM-1`, `DIM1`, ...) is appended.
+    pub fn with_dimension(
+        path: PathBuf,
+        registry: Arc<RuntimeRegistry>,
+        terrain: Option<Arc<VanillaTerrain>>,
+        dimension: Dimension,
+    ) -> Arc<Self> {
         Arc::new(Self {
             path: Some(path),
-            registry: Arc::new(registry),
+            registry,
             cache: Mutex::new(Cache {
                 entries: HashMap::new(),
                 clock: 0,
@@ -183,12 +197,21 @@ impl AnvilChunkSource {
             flush_lock: tokio::sync::Mutex::new(()),
             flat: Mutex::new(HashMap::new()),
             terrain,
+            dimension,
         })
     }
     pub fn new_memory() -> Arc<Self> {
         Self::new_memory_with_terrain(None)
     }
     pub fn new_memory_with_terrain(terrain: Option<Arc<VanillaTerrain>>) -> Arc<Self> {
+        Self::new_memory_dimension(terrain, Dimension::Overworld)
+    }
+    /// An in-memory source for one dimension, used by tests and by worlds without a
+    /// directory.
+    pub fn new_memory_dimension(
+        terrain: Option<Arc<VanillaTerrain>>,
+        dimension: Dimension,
+    ) -> Arc<Self> {
         static REGISTRY: OnceLock<Arc<RuntimeRegistry>> = OnceLock::new();
         let registry = REGISTRY
             .get_or_init(|| {
@@ -214,7 +237,17 @@ impl AnvilChunkSource {
             flush_lock: tokio::sync::Mutex::new(()),
             flat: Mutex::new(HashMap::new()),
             terrain,
+            dimension,
         })
+    }
+    pub fn dimension(&self) -> Dimension {
+        self.dimension
+    }
+    pub(super) fn registry(&self) -> Arc<RuntimeRegistry> {
+        Arc::clone(&self.registry)
+    }
+    pub(super) fn terrain(&self) -> Option<Arc<VanillaTerrain>> {
+        self.terrain.clone()
     }
     /// Whether missing chunks use the flat test world instead of vanilla terrain.
     pub fn is_flat(&self) -> bool {
@@ -226,7 +259,10 @@ impl AnvilChunkSource {
     }
     /// The first free block above the generated surface, when vanilla generation is enabled.
     pub fn spawn_height(&self, x: i32, z: i32) -> Option<i32> {
-        self.terrain.as_ref()?.spawn_height(x, z).ok()
+        self.terrain
+            .as_ref()?
+            .spawn_height_dimension(self.dimension, x, z)
+            .ok()
     }
 
     /// The nearest position with the given surface biome, when vanilla generation is enabled.
@@ -352,7 +388,8 @@ impl AnvilChunkSource {
                 })?
                 .light
         };
-        let section = usize::try_from(y.div_euclid(16) + 5).ok()?;
+        let section =
+            usize::try_from(y.div_euclid(16) - self.dimension.min_y().div_euclid(16) + 1).ok()?;
         let index = (y.rem_euclid(16) as usize * 256)
             + (z.rem_euclid(16) as usize * 16)
             + x.rem_euclid(16) as usize;
@@ -389,6 +426,78 @@ impl AnvilChunkSource {
         column
             .chunk
             .block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8)
+    }
+    /// Stored sky light at a block. A chunk without light data (the flat test world) falls back
+    /// to an open-sky scan, so daylight still matches what a client sees.
+    pub fn sky_light(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        let stored = {
+            let cache = self.cache.lock().unwrap();
+            let key = (x.div_euclid(16), z.div_euclid(16));
+            let light = if let Some(dirty) = cache.dirty.get(&key) {
+                &dirty.light
+            } else {
+                &cache
+                    .entries
+                    .iter()
+                    .find_map(|(&(cx, cz, _), entry)| {
+                        if (cx, cz) == key
+                            && let Entry::Ready(Ok(column), _) = entry
+                        {
+                            return Some(column);
+                        }
+                        None
+                    })?
+                    .light
+            };
+            let section = usize::try_from(y.div_euclid(16) + 5).ok()?;
+            let index = (y.rem_euclid(16) as usize * 256)
+                + (z.rem_euclid(16) as usize * 16)
+                + x.rem_euclid(16) as usize;
+            match light.sky.get(section) {
+                Some(LightSection::Data(data)) => Some((data[index / 2] >> ((index % 2) * 4)) & 15),
+                _ => None,
+            }
+        };
+        if let Some(value) = stored {
+            return Some(value);
+        }
+        for scan in y.clamp(-64, 319)..=319 {
+            let state = self.block(x, scan, z)?;
+            if !ferrite_data::block_props::get(u16::try_from(state).ok()?).is_air {
+                return Some(0);
+            }
+        }
+        Some(15)
+    }
+    /// The biome name at a block, from the chunk's biome cells. The flat test world has no
+    /// biome source and reports its generated plains column.
+    pub fn biome_name(&self, x: i32, y: i32, z: i32) -> Option<String> {
+        let biome = self
+            .with_loaded_chunk(x.div_euclid(16), z.div_euclid(16), |chunk| {
+                let section = usize::try_from(y.div_euclid(16) + 5).ok()?;
+                let index = (((y.rem_euclid(16) as usize) >> 2) << 4)
+                    | (((z.rem_euclid(16) as usize) >> 2) << 2)
+                    | ((x.rem_euclid(16) as usize) >> 2);
+                chunk.sections().get(section)?.biomes().get(index)
+            })
+            .flatten();
+        if let Some(id) = biome
+            && let Some(name) = self.registry.biome_name(id)
+        {
+            return Some(name.to_owned());
+        }
+        self.is_flat().then(|| "minecraft:plains".to_owned())
+    }
+    /// The highest non-air block in a loaded column.
+    pub fn highest_block_y(&self, x: i32, z: i32) -> Option<i32> {
+        self.block(x, 0, z)?;
+        for y in (-64..=319).rev() {
+            let state = self.block(x, y, z)?;
+            if !ferrite_data::block_props::get(u16::try_from(state).ok()?).is_air {
+                return Some(y);
+            }
+        }
+        Some(-64)
     }
     /// The block entity at a block, when its chunk is loaded and has one.
     pub fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<ferrite_world::BlockEntity> {
@@ -605,7 +714,7 @@ impl AnvilChunkSource {
                 .path
                 .as_ref()
                 .unwrap()
-                .join("dimensions/minecraft/overworld/region");
+                .join(source.dimension.region_dir());
             std::fs::create_dir_all(&dir)?;
             let rx = x.div_euclid(32);
             let rz = z.div_euclid(32);
@@ -624,7 +733,7 @@ impl AnvilChunkSource {
                     }
                 }
             }
-            apply_light(&mut tag, &light)?;
+            apply_light(&mut tag, &light, source.dimension)?;
             let bytes = binary::write_named("", &tag)?;
             region.write_chunk(x, z, &bytes, ferrite_world::RegionCompression::Zlib)?;
             Ok(())
@@ -733,14 +842,16 @@ impl AnvilChunkSource {
         self.runtime.spawn_blocking(move || {
             let result = (|| -> anyhow::Result<Column> {
                 let loaded = match &source.path {
-                    Some(path) => read_column(path, &source.registry, x, z)?,
+                    Some(path) => {
+                        read_column(path, &source.registry, source.dimension, x, z)?
+                    }
                     None => None,
                 };
                 let (chunk, light) = match loaded {
                     Some(column) => column,
                     None => {
                         if let Some(terrain) = &source.terrain {
-                            let generated = terrain.generate(x, z)?;
+                            let generated = terrain.generate_dimension(source.dimension, x, z)?;
                             (generated.chunk, generated.light)
                         } else {
                             let mut flat = source.flat.lock().unwrap();
@@ -748,10 +859,15 @@ impl AnvilChunkSource {
                                 column.clone()
                             } else {
                                 let column = (
-                                    flat_chunk(&source.registry, biome)?,
-                                    LightData {
-                                        sky: vec![LightSection::Empty; 26],
-                                        block: vec![LightSection::Empty; 26],
+                                    flat_chunk(&source.registry, biome, source.dimension)?,                                            LightData {
+                                        sky: vec![
+                                            LightSection::Empty;
+                                            source.dimension.light_sections()
+                                        ],
+                                        block: vec![
+                                            LightSection::Empty;
+                                            source.dimension.light_sections()
+                                        ],
                                     },
                                 );
                                 flat.insert(biome, column.clone());
@@ -822,7 +938,7 @@ pub fn read_spawn(world: &Path) -> anyhow::Result<[i32; 3]> {
     Ok([pos[0], pos[1], pos[2]])
 }
 
-fn apply_light(tag: &mut Tag, light: &LightData) -> anyhow::Result<()> {
+fn apply_light(tag: &mut Tag, light: &LightData, dimension: Dimension) -> anyhow::Result<()> {
     let Tag::Compound(root) = tag else {
         anyhow::bail!("invalid chunk root")
     };
@@ -836,7 +952,7 @@ fn apply_light(tag: &mut Tag, light: &LightData) -> anyhow::Result<()> {
                 LightSection::Empty => vec![0; 2048],
                 LightSection::Data(bytes) => bytes.iter().map(|b| *b as i8).collect(),
             };
-            let y = i8::try_from(idx as i32 - 5)?;
+            let y = i8::try_from(idx as i32 - 1 + dimension.min_y().div_euclid(16))?;
             let section_index = match sections
                 .iter()
                 .position(|s| s.get("Y") == Some(&Tag::Byte(y)))
@@ -855,35 +971,53 @@ fn apply_light(tag: &mut Tag, light: &LightData) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn flat_chunk(registry: &RuntimeRegistry, biome: i32) -> anyhow::Result<Chunk> {
-    let air = registry
-        .block_id("minecraft:air", &Default::default())
-        .ok_or_else(|| anyhow::anyhow!("missing air"))?;
-    let bedrock = registry
-        .block_id("minecraft:bedrock", &Default::default())
-        .ok_or_else(|| anyhow::anyhow!("missing bedrock"))?;
-    let dirt = registry
-        .block_id("minecraft:dirt", &Default::default())
-        .ok_or_else(|| anyhow::anyhow!("missing dirt"))?;
-    let grass = registry
-        .block_id("minecraft:grass_block", &Default::default())
-        .ok_or_else(|| anyhow::anyhow!("missing grass"))?;
+fn flat_chunk(
+    registry: &RuntimeRegistry,
+    biome: i32,
+    dimension: Dimension,
+) -> anyhow::Result<Chunk> {
+    let state = |name: &str| {
+        registry
+            .block_id(name, &Default::default())
+            .ok_or_else(|| anyhow::anyhow!("missing {name}"))
+    };
+    let air = state("minecraft:air")?;
+    let bedrock = state("minecraft:bedrock")?;
     let mut chunk = Chunk::new(
-        -64,
-        384,
+        dimension.min_y(),
+        dimension.height() as u32,
         air,
         biome as u32,
         registry.block_bits(),
         registry.biome_bits(),
     )?;
-    for (section, layer, state) in [
-        (7, 13, bedrock),
-        (7, 14, dirt),
-        (7, 15, dirt),
-        (8, 0, grass),
-    ] {
-        for index in layer * 256..(layer + 1) * 256 {
-            chunk.sections_mut()[section].set_block(index, state, registry)?;
+    if dimension == Dimension::Overworld {
+        let dirt = state("minecraft:dirt")?;
+        let grass = state("minecraft:grass_block")?;
+        for (section, layer, state) in [
+            (7, 13, bedrock),
+            (7, 14, dirt),
+            (7, 15, dirt),
+            (8, 0, grass),
+        ] {
+            for index in layer * 256..(layer + 1) * 256 {
+                chunk.sections_mut()[section].set_block(index, state, registry)?;
+            }
+        }
+    } else {
+        // A small solid platform for the nether/end fallback, one block of bedrock at the
+        // bottom. Real generation replaces it whenever the vanilla data is available.
+        let top = state(match dimension {
+            Dimension::Nether => "minecraft:netherrack",
+            _ => "minecraft:end_stone",
+        })?;
+        for y in dimension.min_y()..=63 {
+            let block = if y == dimension.min_y() { bedrock } else { top };
+            for z in 0..16u8 {
+                for x in 0..16u8 {
+                    chunk.set_block(x, y, z, block, registry)?;
+                }
+            }
         }
     }
     chunk.recompute_heightmaps(registry);
@@ -907,7 +1041,7 @@ mod tests {
 
     /// What a caller that skipped the cache would build for a flat chunk.
     fn encode_uncached(source: &AnvilChunkSource, x: i32, z: i32, biome: i32) -> Vec<u8> {
-        let chunk = flat_chunk(&source.registry, biome).unwrap();
+        let chunk = flat_chunk(&source.registry, biome, source.dimension).unwrap();
         let light = LightData {
             sky: vec![LightSection::Empty; 26],
             block: vec![LightSection::Empty; 26],
@@ -980,7 +1114,7 @@ mod tests {
             block: vec![LightSection::Empty; 26],
         };
         light.sky[8] = LightSection::Data(Box::new([0x5a; 2048]));
-        let chunk = flat_chunk(&source.registry, 0).unwrap();
+        let chunk = flat_chunk(&source.registry, 0, source.dimension).unwrap();
         source.mark_modified(3, 3, chunk, &light).unwrap();
 
         let stats = source.cache_stats();

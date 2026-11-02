@@ -47,6 +47,8 @@ pub enum ServerboundPlay {
     Attack(ferrite_protocol::packets::play::ServerboundAttack),
     /// Vanilla `ServerboundInteractPacket`: use or attack an entity at a point in its box.
     Interact(ferrite_protocol::packets::play::ServerboundInteract),
+    /// Vanilla `ServerboundSetCommandBlockPacket`: a command block editor's changes.
+    SetCommandBlock(ferrite_protocol::packets::play::SetCommandBlock),
 }
 #[derive(Debug)]
 pub enum GameMessage {
@@ -296,6 +298,9 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         )),
         62 => Some(ServerboundPlay::SignUpdate(SignUpdate::decode(&mut b)?)),
         54 => Some(ServerboundPlay::SetHeldItem(SetHeldItem::decode(&mut b)?)),
+        55 => Some(ServerboundPlay::SetCommandBlock(
+            ferrite_protocol::packets::play::SetCommandBlock::decode(&mut b)?,
+        )),
         57 => Some(ServerboundPlay::CreativeSlot(CreativeSlot::decode(&mut b)?)),
         66 => Some(ServerboundPlay::UseItemOn(UseItemOn::decode(&mut b)?)),
         67 => Some(ServerboundPlay::UseItem(Box::new(
