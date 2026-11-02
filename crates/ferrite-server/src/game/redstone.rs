@@ -1331,6 +1331,28 @@ fn sticky_kind(state: u16) -> Option<Sticky> {
     }
 }
 
+/// One step of the sticky chain in `PistonStructureResolver.addBlockLine`: a sticky block also
+/// carries the pushable block on the far side of the push axis, which may itself be sticky. A
+/// block the chain cannot move ends the chain instead of refusing the move (the resolver calls
+/// `isPushable` with `destroyBlocks = false` there).
+fn continues_sticky_chain(
+    world: &impl RedstoneWorld,
+    pos: [i32; 3],
+    base: [i32; 3],
+    kind: Sticky,
+) -> bool {
+    if pos == base {
+        return false;
+    }
+    let Some(state) = world.block(pos) else {
+        return false;
+    };
+    if is_free(state) || sticky_kind(state).is_some_and(|other| other != kind) {
+        return false;
+    }
+    !is_unmovable(world, pos, state) && push_reaction(state) == PushReaction::Normal
+}
+
 /// The four directions perpendicular to a push axis (`Direction.Plane` minus the axis).
 fn perpendicular_directions(direction: Direction) -> [Direction; 4] {
     match direction {
@@ -1373,6 +1395,7 @@ fn plan_push(
 ) -> Option<PushPlan> {
     let mut plan = PushPlan::default();
     let mut seen = HashSet::new();
+    let base = offset(front, direction.opposite());
     let mut queue = VecDeque::from([front]);
     while let Some(pos) = queue.pop_front() {
         if !seen.insert(pos) {
@@ -1403,6 +1426,12 @@ fn plan_push(
         queue.push_back(offset(pos, direction));
         // Slime and honey drag the perpendicular group; the two families never mix.
         if let Some(kind) = sticky_kind(state) {
+            // `addBlockLine` also walks the sticky chain away from the push, towards the base,
+            // so a side slime carries the block behind it.
+            let behind = offset(pos, direction.opposite());
+            if continues_sticky_chain(world, behind, base, kind) {
+                queue.push_back(behind);
+            }
             for side in perpendicular_directions(direction) {
                 let side_pos = offset(pos, side);
                 let side_state = world.block(side_pos)?;
@@ -1435,6 +1464,7 @@ fn plan_pull(
     }
     let mut blocks = Vec::new();
     let mut seen = HashSet::new();
+    let base = offset(front, direction.opposite());
     let mut queue = VecDeque::from([first]);
     while let Some(pos) = queue.pop_front() {
         if !seen.insert(pos) {
@@ -1453,8 +1483,13 @@ fn plan_pull(
             return Vec::new();
         }
         blocks.push((pos, state));
-        // A pulled slime/honey block drags the perpendicular group of its own family.
+        // A pulled slime/honey block drags the perpendicular group of its own family, and the
+        // sticky chain on its far side (away from the piston).
         if let Some(kind) = sticky_kind(state) {
+            let beyond = offset(pos, direction);
+            if continues_sticky_chain(world, beyond, base, kind) {
+                queue.push_back(beyond);
+            }
             for side in perpendicular_directions(direction) {
                 let side_pos = offset(pos, side);
                 let Some(side_state) = world.block(side_pos) else {
@@ -1778,6 +1813,182 @@ mod tests {
         assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
         assert_eq!(name(grid.state([2, 64, 0])), Some("stone"));
         assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+    }
+
+    fn sticky_head(facing: &str) -> u16 {
+        make(
+            "piston_head",
+            &[("facing", facing), ("type", "sticky"), ("short", "false")],
+        )
+    }
+
+    #[test]
+    fn a_retracting_sticky_piston_carries_the_block_on_the_far_side_of_its_slime() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], lever());
+        grid.add([1, 64, 0], sticky_piston("east", true));
+        grid.add([2, 64, 0], sticky_head("east"));
+        grid.add([3, 64, 0], make("slime_block", &[]));
+        grid.add([4, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("slime_block"));
+        // The stone stuck to the far side of the slime is part of the sticky chain.
+        assert_eq!(name(grid.state([3, 64, 0])), Some("stone"));
+        assert_eq!(name(grid.state([4, 64, 0])), Some("air"));
+    }
+
+    #[test]
+    fn an_extending_piston_carries_the_block_stuck_behind_a_side_slime() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], make("slime_block", &[]));
+        grid.add([2, 65, 0], make("slime_block", &[]));
+        grid.add([1, 65, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([3, 65, 0])), Some("slime_block"));
+        // The stone behind the side slime is part of the sticky chain.
+        assert_eq!(name(grid.state([2, 65, 0])), Some("stone"));
+        assert_eq!(name(grid.state([1, 65, 0])), Some("air"));
+    }
+
+    #[test]
+    fn an_immovable_block_behind_a_side_slime_ends_the_chain_but_not_the_move() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], make("slime_block", &[]));
+        grid.add([2, 65, 0], make("slime_block", &[]));
+        grid.add([1, 65, 0], make("obsidian", &[]));
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert_eq!(name(grid.state([2, 64, 0])), Some("piston_head"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("slime_block"));
+        // The side slime still moves; the obsidian behind it only ends the chain.
+        assert_eq!(name(grid.state([3, 65, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([2, 65, 0])), Some("air"));
+        assert_eq!(name(grid.state([1, 65, 0])), Some("obsidian"));
+    }
+
+    #[test]
+    fn a_retracting_sticky_piston_stops_the_pull_chain_at_an_immovable_block() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], lever());
+        grid.add([1, 64, 0], sticky_piston("east", true));
+        grid.add([2, 64, 0], sticky_head("east"));
+        grid.add([3, 64, 0], make("slime_block", &[]));
+        grid.add([4, 64, 0], make("obsidian", &[]));
+        let mut redstone = Redstone::default();
+
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert!(!property_bool(grid.state([1, 64, 0]), "extended"));
+        assert_eq!(name(grid.state([2, 64, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+        // The obsidian is not pushable, so the chain ends in front of it.
+        assert_eq!(name(grid.state([4, 64, 0])), Some("obsidian"));
+    }
+
+    #[test]
+    fn a_retracting_sticky_piston_pulls_a_two_slime_chain_and_the_block_behind_it() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], lever());
+        grid.add([1, 64, 0], sticky_piston("east", true));
+        grid.add([2, 64, 0], sticky_head("east"));
+        grid.add([3, 64, 0], make("slime_block", &[]));
+        grid.add([4, 64, 0], make("slime_block", &[]));
+        grid.add([5, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert_eq!(name(grid.state([2, 64, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("slime_block"));
+        // The chain walks through both slimes and carries the stone behind the second one.
+        assert_eq!(name(grid.state([4, 64, 0])), Some("stone"));
+        assert_eq!(name(grid.state([5, 64, 0])), Some("air"));
+    }
+
+    #[test]
+    fn a_retracting_sticky_piston_pulls_the_chain_behind_a_side_slime() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], lever());
+        grid.add([1, 64, 0], sticky_piston("east", true));
+        grid.add([2, 64, 0], sticky_head("east"));
+        grid.add([3, 64, 0], make("slime_block", &[]));
+        grid.add([3, 65, 0], make("slime_block", &[]));
+        grid.add([4, 65, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert_eq!(name(grid.state([2, 64, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([2, 65, 0])), Some("slime_block"));
+        assert_eq!(name(grid.state([3, 65, 0])), Some("stone"));
+        assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+        assert_eq!(name(grid.state([4, 65, 0])), Some("air"));
+    }
+
+    #[test]
+    fn slime_and_honey_chains_do_not_drag_each_other() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([0, 64, 0], source);
+        grid.add([1, 64, 0], piston("east", false));
+        grid.add([2, 64, 0], make("slime_block", &[]));
+        grid.add([2, 65, 0], make("honey_block", &[]));
+        grid.add([2, 66, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+
+        grid.add([0, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert_eq!(name(grid.state([3, 64, 0])), Some("slime_block"));
+        // Honey never sticks to slime, so the honey and its stone stay behind.
+        assert_eq!(name(grid.state([2, 65, 0])), Some("honey_block"));
+        assert_eq!(name(grid.state([2, 66, 0])), Some("stone"));
+        assert_eq!(name(grid.state([3, 65, 0])), Some("air"));
+    }
+
+    #[test]
+    fn a_retracting_sticky_piston_does_not_pull_honey_through_its_slime() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], lever());
+        grid.add([1, 64, 0], sticky_piston("east", true));
+        grid.add([2, 64, 0], sticky_head("east"));
+        grid.add([3, 64, 0], make("slime_block", &[]));
+        grid.add([4, 64, 0], make("honey_block", &[]));
+        let mut redstone = Redstone::default();
+
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+
+        assert_eq!(name(grid.state([2, 64, 0])), Some("slime_block"));
+        // Honey never sticks to slime, so the honey is not part of the pulled chain.
+        assert_eq!(name(grid.state([3, 64, 0])), Some("air"));
+        assert_eq!(name(grid.state([4, 64, 0])), Some("honey_block"));
     }
 
     #[test]
