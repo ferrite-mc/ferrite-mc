@@ -7,11 +7,13 @@ use ferrite_item::{HashedSlot, ItemStack};
 use ferrite_protocol::VarInt;
 use ferrite_protocol::packets::play::{
     ClientboundContainerClose, ContainerButtonClick, ContainerClick, ContainerContent,
-    ContainerSetData, ContainerSlot, CreativeSlot, OpenScreen, SetCursorItem,
+    ContainerSetData, ContainerSlot, CreativeSlot, OpenScreen, SetBeacon, SetCursorItem,
 };
 
 use super::anvil::AnvilChunkSource;
+use super::beacon;
 use super::block_container::{self, Opened};
+use super::brewing;
 use super::furnace;
 use super::region::{Player, send};
 
@@ -41,6 +43,10 @@ pub enum OpenAt {
     Inventory(Opened),
     /// A furnace, blast furnace or smoker, whose items and timers live in its block entity.
     Furnace([i32; 3]),
+    /// A brewing stand, whose items and timers live in its block entity.
+    BrewingStand([i32; 3]),
+    /// A beacon, whose pyramid level and effects live in its block entity.
+    Beacon([i32; 3]),
     /// An anvil, which has no block entity.
     Anvil([i32; 3]),
     /// Any other station block: the position and the block name it must still be.
@@ -189,6 +195,14 @@ impl Player {
                 block_name(source, [*x, *y, *z])
                     .and_then(furnace::kind)
                     .is_some()
+                    && self.within_reach([*x, *y, *z])
+            }
+            Some(OpenAt::BrewingStand([x, y, z])) => {
+                block_name(source, [*x, *y, *z]) == Some("minecraft:brewing_stand")
+                    && self.within_reach([*x, *y, *z])
+            }
+            Some(OpenAt::Beacon([x, y, z])) => {
+                block_name(source, [*x, *y, *z]) == Some("minecraft:beacon")
                     && self.within_reach([*x, *y, *z])
             }
             Some(OpenAt::Anvil([x, y, z])) => {
@@ -349,6 +363,46 @@ impl Player {
         }
     }
 
+    /// Vanilla `ServerGamePacketListenerImpl.handleSetBeacon`: validates the chosen effects
+    /// against the pyramid, spends one payment item and saves the choice in the block entity.
+    pub fn handle_set_beacon(&mut self, p: SetBeacon) {
+        let Some(menu) = self
+            .menus
+            .open
+            .as_mut()
+            .filter(|menu| menu.kind() == ferrite_inventory::MenuKind::Beacon)
+        else {
+            return;
+        };
+        let levels = menu.beacon_state().map_or(0, |state| state.levels);
+        let primary = p.primary.map(|effect| effect.0);
+        let secondary = p.secondary.map(|effect| effect.0);
+        if primary.is_some_and(|effect| !beacon::valid_primary(levels, effect))
+            || secondary.is_some_and(|effect| !beacon::valid_secondary(levels, effect))
+        {
+            return;
+        }
+        if !menu.confirm_beacon(primary, secondary) {
+            return;
+        }
+        if let (Some(OpenAt::Beacon(pos)), Some(source)) =
+            (self.menus.open_at.clone(), self.source.as_ref())
+        {
+            let mut data = beacon::load(source, pos);
+            data.levels = levels;
+            data.primary_effect = primary.and_then(beacon::effect_name).map(str::to_owned);
+            data.secondary_effect = secondary.and_then(beacon::effect_name).map(str::to_owned);
+            beacon::store(source, pos, &data);
+        }
+        let out = self
+            .menus
+            .open
+            .as_mut()
+            .map(|menu| menu.broadcast_changes(&self.inventory))
+            .unwrap_or_default();
+        emit(self, out);
+    }
+
     /// Writes an open station menu's items and timers back to its block entity.
     fn save_station(&mut self) {
         let Some(at) = self.menus.open_at.clone() else {
@@ -357,14 +411,38 @@ impl Player {
         let (Some(menu), Some(source)) = (self.menus.open.as_ref(), self.source.as_ref()) else {
             return;
         };
-        if let OpenAt::Furnace(pos) = at
-            && let Some(kind) = block_name(source, pos).and_then(furnace::kind)
+        if let OpenAt::Furnace(pos) = &at
+            && let Some(kind) = block_name(source, *pos).and_then(furnace::kind)
         {
             let data = furnace::FurnaceData {
                 items: menu.container().to_vec(),
                 state: menu.furnace_state().cloned().unwrap_or_default(),
             };
-            furnace::store(source, pos, kind, &data);
+            furnace::store(source, *pos, kind, &data);
+        }
+        if let OpenAt::BrewingStand(pos) = &at
+            && block_name(source, *pos) == Some("minecraft:brewing_stand")
+        {
+            let data = brewing::BrewingData {
+                items: menu.container().to_vec(),
+                state: menu.brewing_state().cloned().unwrap_or_default(),
+            };
+            brewing::store(source, *pos, &data);
+        }
+        if let OpenAt::Beacon(pos) = &at
+            && let Some(state) = menu.beacon_state()
+        {
+            let mut data = beacon::load(source, *pos);
+            data.levels = state.levels;
+            data.primary_effect = state
+                .primary
+                .and_then(beacon::effect_name)
+                .map(str::to_owned);
+            data.secondary_effect = state
+                .secondary
+                .and_then(beacon::effect_name)
+                .map(str::to_owned);
+            beacon::store(source, *pos, &data);
         }
     }
 
@@ -510,6 +588,44 @@ impl Player {
                 },
                 kind.title(),
                 Some(OpenAt::Furnace([pos.x, pos.y, pos.z])),
+            );
+            return true;
+        }
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:beacon") {
+            let levels = beacon::scan_levels(&source, [pos.x, pos.y, pos.z]);
+            let mut data = beacon::load(&source, [pos.x, pos.y, pos.z]);
+            if data.levels != levels {
+                data.levels = levels;
+                beacon::store(&source, [pos.x, pos.y, pos.z], &data);
+            }
+            let state = ferrite_inventory::BeaconState {
+                levels,
+                primary: data.primary_effect.as_deref().and_then(beacon::effect_id),
+                secondary: data.secondary_effect.as_deref().and_then(beacon::effect_id),
+            };
+            self.open_menu(
+                |id| {
+                    let mut menu = Menu::beacon(id);
+                    menu.set_beacon_state(state);
+                    menu
+                },
+                "container.beacon",
+                Some(OpenAt::Beacon([pos.x, pos.y, pos.z])),
+            );
+            return true;
+        }
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:brewing_stand") {
+            let brewing::BrewingData { items, state } =
+                brewing::load(&source, [pos.x, pos.y, pos.z]);
+            self.open_menu(
+                |id| {
+                    let mut menu = Menu::brewing_stand(id);
+                    menu.container_mut().clone_from_slice(&items);
+                    menu.set_brewing_state(state);
+                    menu
+                },
+                "container.brewing",
+                Some(OpenAt::BrewingStand([pos.x, pos.y, pos.z])),
             );
             return true;
         }

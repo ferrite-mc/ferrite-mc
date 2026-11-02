@@ -27,6 +27,7 @@
 //! ```
 
 mod book;
+pub mod brewing;
 mod files;
 mod matching;
 mod recipe;

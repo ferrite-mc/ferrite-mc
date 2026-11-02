@@ -403,6 +403,78 @@ impl AnvilChunkSource {
             .chunk
             .block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8)
     }
+    /// Stored sky light at a block. A chunk without light data (the flat test world) falls back
+    /// to an open-sky scan, so daylight still matches what a client sees.
+    pub fn sky_light(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        let stored = {
+            let cache = self.cache.lock().unwrap();
+            let key = (x.div_euclid(16), z.div_euclid(16));
+            let light = if let Some(dirty) = cache.dirty.get(&key) {
+                &dirty.light
+            } else {
+                &cache
+                    .entries
+                    .iter()
+                    .find_map(|(&(cx, cz, _), entry)| {
+                        if (cx, cz) == key
+                            && let Entry::Ready(Ok(column), _) = entry
+                        {
+                            return Some(column);
+                        }
+                        None
+                    })?
+                    .light
+            };
+            let section = usize::try_from(y.div_euclid(16) + 5).ok()?;
+            let index = (y.rem_euclid(16) as usize * 256)
+                + (z.rem_euclid(16) as usize * 16)
+                + x.rem_euclid(16) as usize;
+            match light.sky.get(section) {
+                Some(LightSection::Data(data)) => Some((data[index / 2] >> ((index % 2) * 4)) & 15),
+                _ => None,
+            }
+        };
+        if let Some(value) = stored {
+            return Some(value);
+        }
+        for scan in y.clamp(-64, 319)..=319 {
+            let state = self.block(x, scan, z)?;
+            if !ferrite_data::block_props::get(u16::try_from(state).ok()?).is_air {
+                return Some(0);
+            }
+        }
+        Some(15)
+    }
+    /// The biome name at a block, from the chunk's biome cells. The flat test world has no
+    /// biome source and reports its generated plains column.
+    pub fn biome_name(&self, x: i32, y: i32, z: i32) -> Option<String> {
+        let biome = self
+            .with_loaded_chunk(x.div_euclid(16), z.div_euclid(16), |chunk| {
+                let section = usize::try_from(y.div_euclid(16) + 5).ok()?;
+                let index = (((y.rem_euclid(16) as usize) >> 2) << 4)
+                    | (((z.rem_euclid(16) as usize) >> 2) << 2)
+                    | ((x.rem_euclid(16) as usize) >> 2);
+                chunk.sections().get(section)?.biomes().get(index)
+            })
+            .flatten();
+        if let Some(id) = biome
+            && let Some(name) = self.registry.biome_name(id)
+        {
+            return Some(name.to_owned());
+        }
+        self.is_flat().then(|| "minecraft:plains".to_owned())
+    }
+    /// The highest non-air block in a loaded column.
+    pub fn highest_block_y(&self, x: i32, z: i32) -> Option<i32> {
+        self.block(x, 0, z)?;
+        for y in (-64..=319).rev() {
+            let state = self.block(x, y, z)?;
+            if !ferrite_data::block_props::get(u16::try_from(state).ok()?).is_air {
+                return Some(y);
+            }
+        }
+        Some(-64)
+    }
     /// The block entity at a block, when its chunk is loaded and has one.
     pub fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<ferrite_world::BlockEntity> {
         let local = (x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8);
@@ -411,6 +483,37 @@ impl AnvilChunkSource {
         })
         .flatten()
     }
+    /// Every block entity in the loaded chunks, with its world position. Used by the beacon
+    /// scan, which has to find block entities no player has opened.
+    pub fn block_entities(&self) -> Vec<([i32; 3], ferrite_world::BlockEntity)> {
+        let cache = self.cache.lock().unwrap();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (&(cx, cz), dirty) in &cache.dirty {
+            seen.insert((cx, cz));
+            for (&(x, y, z), entity) in &dirty.chunk.block_entities {
+                out.push((
+                    [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)],
+                    entity.clone(),
+                ));
+            }
+        }
+        for (&(cx, cz, _), entry) in &cache.entries {
+            if !seen.insert((cx, cz)) {
+                continue;
+            }
+            if let Entry::Ready(Ok(column), _) = entry {
+                for (&(x, y, z), entity) in &column.chunk.block_entities {
+                    out.push((
+                        [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)],
+                        entity.clone(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// Edits the block entity at a block (`None` when there is none) in a loaded chunk; the
     /// chunk is marked modified when `f` reports a change, so it is resent and saved.
     pub fn update_block_entity<R>(

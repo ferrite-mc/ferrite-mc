@@ -17,6 +17,7 @@ static MODES: OnceLock<HashMap<String, bool>> = OnceLock::new();
 static REGION_CONTEXT: OnceLock<Option<std::sync::Arc<dyn RegionContext>>> = OnceLock::new();
 static SERVER_HANDLER: OnceLock<Option<ServerHandler>> = OnceLock::new();
 static WORLD_HANDLER: OnceLock<Option<WorldHandler>> = OnceLock::new();
+static WORLD_VIEW: OnceLock<Option<std::sync::Arc<dyn WorldView>>> = OnceLock::new();
 static PLAYER_HANDLER: OnceLock<Option<PlayerHandler>> = OnceLock::new();
 static COMMAND_HANDLER: OnceLock<Option<CommandHandler>> = OnceLock::new();
 thread_local! { static REGION: std::cell::RefCell<Option<(String, i32, i32)>> = const { std::cell::RefCell::new(None) }; }
@@ -51,6 +52,8 @@ static LISTENED_EVENTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 #[derive(Default)]
 pub struct PluginConfig {
     pub bridge_jar: PathBuf,
+    /// The extracted vanilla data pack, so the bridge can read recipe and tag tables.
+    pub data_dir: PathBuf,
     pub java_home: Option<PathBuf>,
     pub command_handler: Option<CommandHandler>,
     pub region_context: Option<std::sync::Arc<dyn RegionContext>>,
@@ -59,6 +62,8 @@ pub struct PluginConfig {
     pub world: Option<WorldSnapshot>,
     pub player_handler: Option<PlayerHandler>,
     pub world_handler: Option<WorldHandler>,
+    /// Read-only block and biome access for Bukkit's block queries.
+    pub world_view: Option<std::sync::Arc<dyn WorldView>>,
     pub server_handler: Option<ServerHandler>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -114,6 +119,21 @@ pub enum WorldCommand {
     },
 }
 pub type WorldHandler = std::sync::Arc<dyn Fn(WorldCommand) + Send + Sync>;
+/// Read-only world access for `World#getBlockAt`, `Block#getLightFromSky`, `World#getBiome`
+/// and `World#getHighestBlockYAt`.
+///
+/// Queries may arrive from any plugin thread, so implementations must be thread-safe and
+/// return `None` rather than inventing data for an unloaded chunk or an unknown world.
+pub trait WorldView: Send + Sync {
+    /// The namespaced material key at a position, for example `minecraft:grass_block`.
+    fn block(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String>;
+    /// Stored sky light at a position (0..=15).
+    fn sky_light(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<u8>;
+    /// The highest non-air block in a column.
+    fn highest_block(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<i32>;
+    /// The biome key at a position, for example `minecraft:plains`.
+    fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String>;
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerLocation {
     pub world: uuid::Uuid,
@@ -210,6 +230,12 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         mode: GameMode,
     },
+    SetExperience {
+        player: uuid::Uuid,
+        level: Option<i32>,
+        progress: Option<f32>,
+        total: Option<i32>,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundCategory {
@@ -266,6 +292,8 @@ pub struct ServerSnapshot {
     pub whitelist: bool,
     pub online_mode: bool,
     pub banned_ips: Vec<std::net::IpAddr>,
+    /// Host part of the bind address, so `Server#getIp` matches the listener.
+    pub bind_address: String,
 }
 impl Default for ServerSnapshot {
     fn default() -> Self {
@@ -277,6 +305,7 @@ impl Default for ServerSnapshot {
             whitelist: false,
             online_mode: true,
             banned_ips: Vec::new(),
+            bind_address: String::new(),
         }
     }
 }
@@ -630,6 +659,81 @@ extern "system" fn world_set_block(
         .is_ok(),
     )
 }
+fn world_uuid(env: &mut JNIEnv, world: &JString) -> Option<uuid::Uuid> {
+    let value: String = env.get_string(world).ok()?.into();
+    uuid::Uuid::parse_str(&value).ok()
+}
+fn view_string<'local>(env: &mut JNIEnv<'local>, value: Option<String>) -> JString<'local> {
+    match value.and_then(|value| env.new_string(value).ok()) {
+        Some(value) => value,
+        None => JString::from(JObject::null()),
+    }
+}
+extern "system" fn block_type<'local>(
+    mut env: JNIEnv<'local>,
+    _: JClass<'local>,
+    world: JString<'local>,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> JString<'local> {
+    let value = world_uuid(&mut env, &world).and_then(|world| {
+        WORLD_VIEW
+            .get()
+            .and_then(Option::as_ref)
+            .and_then(|view| view.block(world, x, y, z))
+    });
+    view_string(&mut env, value)
+}
+extern "system" fn sky_light(
+    mut env: JNIEnv,
+    _: JClass,
+    world: JString,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> i32 {
+    world_uuid(&mut env, &world)
+        .and_then(|world| {
+            WORLD_VIEW
+                .get()
+                .and_then(Option::as_ref)
+                .and_then(|view| view.sky_light(world, x, y, z))
+        })
+        .map_or(-1, i32::from)
+}
+extern "system" fn highest_block_y(
+    mut env: JNIEnv,
+    _: JClass,
+    world: JString,
+    x: i32,
+    z: i32,
+) -> i32 {
+    world_uuid(&mut env, &world)
+        .and_then(|world| {
+            WORLD_VIEW
+                .get()
+                .and_then(Option::as_ref)
+                .and_then(|view| view.highest_block(world, x, z))
+        })
+        .unwrap_or(i32::MIN)
+}
+extern "system" fn biome_at<'local>(
+    mut env: JNIEnv<'local>,
+    _: JClass<'local>,
+    world: JString<'local>,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> JString<'local> {
+    let value = world_uuid(&mut env, &world).and_then(|world| {
+        WORLD_VIEW
+            .get()
+            .and_then(Option::as_ref)
+            .and_then(|view| view.biome(world, x, y, z))
+    });
+    view_string(&mut env, value)
+}
 extern "system" fn player_message(
     mut env: JNIEnv,
     _: JClass,
@@ -958,6 +1062,36 @@ extern "system" fn player_state(
                 _ => return,
             };
             PlayerCommand::SetGameMode { player, mode }
+        }
+        3 if value.is_finite()
+            && value >= 0.0
+            && value <= f64::from(i32::MAX)
+            && value.fract() == 0.0 =>
+        {
+            PlayerCommand::SetExperience {
+                player,
+                level: Some(value as i32),
+                progress: None,
+                total: None,
+            }
+        }
+        4 if value.is_finite() && (0.0..=1.0).contains(&value) => PlayerCommand::SetExperience {
+            player,
+            level: None,
+            progress: Some(value as f32),
+            total: None,
+        },
+        5 if value.is_finite()
+            && value >= 0.0
+            && value <= f64::from(i32::MAX)
+            && value.fract() == 0.0 =>
+        {
+            PlayerCommand::SetExperience {
+                player,
+                level: None,
+                progress: None,
+                total: Some(value as i32),
+            }
         }
         _ => return,
     };
@@ -1382,6 +1516,7 @@ impl PluginHost {
         let _ = COMMAND_HANDLER.set(cfg.command_handler);
         let _ = PLAYER_HANDLER.set(cfg.player_handler);
         let _ = WORLD_HANDLER.set(cfg.world_handler);
+        let _ = WORLD_VIEW.set(cfg.world_view);
         let _ = SERVER_HANDLER.set(cfg.server_handler);
         let _ = REGION_CONTEXT.set(cfg.region_context.clone());
         jvm.register_natives(
@@ -1404,6 +1539,26 @@ impl PluginHost {
                     "worldSetBlock",
                     "(Ljava/lang/String;IIILjava/lang/String;)Z",
                     world_set_block as *mut _,
+                ),
+                NativeMethod::new(
+                    "blockType",
+                    "(Ljava/lang/String;III)Ljava/lang/String;",
+                    block_type as *mut _,
+                ),
+                NativeMethod::new(
+                    "skyLight",
+                    "(Ljava/lang/String;III)I",
+                    sky_light as *mut _,
+                ),
+                NativeMethod::new(
+                    "highestBlockY",
+                    "(Ljava/lang/String;II)I",
+                    highest_block_y as *mut _,
+                ),
+                NativeMethod::new(
+                    "biomeAt",
+                    "(Ljava/lang/String;III)Ljava/lang/String;",
+                    biome_at as *mut _,
                 ),
                 NativeMethod::new(
                     "playerSound",
@@ -1511,6 +1666,24 @@ impl PluginHost {
                     "configureIpBan",
                     "(Ljava/lang/String;)V",
                     &[JValue::Object(address.as_ref())],
+                )?;
+            }
+            if !cfg.server_snapshot.bind_address.is_empty() {
+                let address = env.new_string(&cfg.server_snapshot.bind_address)?;
+                env.call_static_method(
+                    BOOTSTRAP,
+                    "configureAddress",
+                    "(Ljava/lang/String;)V",
+                    &[JValue::Object(address.as_ref())],
+                )?;
+            }
+            if !cfg.data_dir.as_os_str().is_empty() {
+                let dir = env.new_string(cfg.data_dir.to_string_lossy())?;
+                env.call_static_method(
+                    BOOTSTRAP,
+                    "configureDataDir",
+                    "(Ljava/lang/String;)V",
+                    &[JValue::Object(dir.as_ref())],
                 )?;
             }
             Ok(())
