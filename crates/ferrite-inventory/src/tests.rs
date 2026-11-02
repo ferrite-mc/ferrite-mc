@@ -1310,9 +1310,11 @@ fn cartography_table_copies_zooms_and_locks_maps() {
 }
 
 #[test]
-fn cartography_paper_and_glass_results_round_trip_on_the_wire_and_in_saves() {
-    // Paper and glass results carry a map id and a post-processing step. Both used to be
-    // opaque NBT, which the network slot codec cannot write, so the result slot was unsendable.
+fn cartography_results_keep_map_post_processing_on_the_wire_but_not_in_saves() {
+    // Paper and glass results carry a map id and a post-processing step. Both used to be opaque
+    // NBT, which the network slot codec cannot write, so the result slot was unsendable. The
+    // component stays on the wire, but 26.3 registers it with a stream codec only: a save must
+    // not write it and a reload must not resurrect it.
     for (additional, expected) in [
         ("paper", MapPostProcessing::Scale),
         ("glass_pane", MapPostProcessing::Lock),
@@ -1339,15 +1341,14 @@ fn cartography_paper_and_glass_results_round_trip_on_the_wire_and_in_saves() {
             Some(ferrite_nbt::Tag::Compound(components)) => components.clone(),
             _ => panic!("{additional} result has no components"),
         };
-        assert_eq!(
-            components.get("minecraft:map_post_processing"),
-            Some(&ferrite_nbt::Tag::String(expected.name().to_owned())),
-            "{additional} result saves vanilla's name, not a network id"
+        assert!(
+            components.get("minecraft:map_post_processing").is_none(),
+            "{additional} result must not save the transient component"
         );
         assert_eq!(
             ItemStack::from_nbt(&save).expect("result slot loads"),
-            result,
-            "{additional} result round-trips in the save format"
+            cartography_map(12),
+            "{additional} result reloads without the transient component"
         );
     }
 }

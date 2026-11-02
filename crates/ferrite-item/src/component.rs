@@ -93,7 +93,11 @@ impl Rarity {
     }
 }
 
-/// Vanilla `MapPostProcessing`, the change a cartography table applies to a map.
+/// Vanilla `MapPostProcessing`, a transient change to a map's saved data.
+///
+/// A cartography result or a map-extending recipe carries it until `MapItem.onCraftedPostProcess`
+/// applies it. The component is network-only in 26.3: it has a stream codec but no persistent
+/// codec, so it never appears in item saves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MapPostProcessing {
     Lock,
@@ -758,7 +762,8 @@ pub enum Component {
     DyedColor(i32),
     /// `minecraft:rarity`.
     Rarity(Rarity),
-    /// `minecraft:map_post_processing`, a cartography table's pending map change.
+    /// `minecraft:map_post_processing`, a cartography result's pending map change. This
+    /// component is network-only and has no NBT save form.
     MapPostProcessing(MapPostProcessing),
     /// `minecraft:repair_cost`.
     RepairCost(i32),
@@ -842,7 +847,9 @@ impl Component {
     ///
     /// # Errors
     ///
-    /// [`Component::Raw`] only exists in the network form, so it cannot be saved as NBT.
+    /// [`Component::Raw`] only exists in the network form, and
+    /// [`Component::MapPostProcessing`] is network-only because vanilla gives its component type
+    /// no persistent codec. Neither can be saved as NBT.
     pub fn to_nbt(&self) -> Result<Tag, Error> {
         Ok(match self {
             Self::CustomName(text) | Self::ItemName(text) => text.to_nbt(),
@@ -859,7 +866,7 @@ impl Component {
             }
             Self::CustomModelData(data) => data.to_tag(),
             Self::Rarity(rarity) => Tag::String(rarity.name().to_owned()),
-            Self::MapPostProcessing(processing) => Tag::String(processing.name().to_owned()),
+            Self::MapPostProcessing(_) => return Err(Error::NoNbtForm("map_post_processing")),
             Self::CustomData(data) => Tag::Compound(data.clone()),
             Self::AttributeModifiers(modifiers) => Tag::List(if modifiers.is_empty() {
                 List::End
@@ -901,15 +908,6 @@ impl Component {
             ids::CUSTOM_MODEL_DATA => CustomModelData::from_tag(tag).map(Self::CustomModelData),
             ids::DYED_COLOR => as_int(tag).map(Self::DyedColor),
             ids::RARITY => as_str(tag).and_then(Rarity::from_name).map(Self::Rarity),
-            ids::MAP_POST_PROCESSING => match tag {
-                Tag::String(name) => {
-                    MapPostProcessing::from_name(name).map(Self::MapPostProcessing)
-                }
-                // Older saves wrote the network id; accept it alongside vanilla's name.
-                _ => as_int(tag)
-                    .and_then(MapPostProcessing::from_id)
-                    .map(Self::MapPostProcessing),
-            },
             ids::REPAIR_COST => as_int(tag).map(Self::RepairCost),
             ids::CUSTOM_DATA => match tag {
                 Tag::Compound(compound) => Some(Self::CustomData(compound.clone())),
@@ -931,6 +929,15 @@ impl Component {
         };
         typed.unwrap_or_else(|| Self::Opaque(tag.clone()))
     }
+}
+
+/// Whether a component type has a persistent codec in 26.3 and therefore appears in item saves.
+///
+/// `minecraft:map_post_processing` is registered with `networkSynchronized` only: it marks a
+/// freshly crafted map until `MapItem.onCraftedPostProcess` applies it, and vanilla never writes
+/// it to NBT.
+fn is_persistent(id: u16) -> bool {
+    id != ids::MAP_POST_PROCESSING
 }
 
 /// A stack's changes to an item's default components.
@@ -1015,9 +1022,14 @@ impl ComponentPatch {
 
     /// Encodes the patch as the `components` compound of the item save format: added components
     /// under their name, removed ones under a `!`-prefixed name and an empty compound.
+    ///
+    /// Component types without a persistent codec are omitted, as vanilla omits them.
     pub fn to_nbt(&self) -> Result<Compound, Error> {
         let mut out = Compound::new();
         for (id, value) in &self.values {
+            if !is_persistent(*id) {
+                continue;
+            }
             let name = component_name(*id).ok_or(Error::UnknownComponentId(*id))?;
             match value {
                 Some(component) => {
@@ -1042,7 +1054,8 @@ impl ComponentPatch {
     /// Decodes the `components` compound of the item save format.
     ///
     /// `!`-prefixed keys mark removed components; every other key decodes with
-    /// [`Component::from_nbt`].
+    /// [`Component::from_nbt`]. Component types without a persistent codec are ignored, so a save
+    /// written by an older version cannot resurrect a transient component.
     pub fn from_nbt(components: &Compound) -> Result<Self, Error> {
         let mut patch = Self::new();
         for (raw_name, value) in components {
@@ -1051,6 +1064,9 @@ impl ComponentPatch {
                 None => (raw_name.as_str(), false),
             };
             let id = component_id(name).ok_or_else(|| Error::UnknownComponent(name.to_owned()))?;
+            if !is_persistent(id) {
+                continue;
+            }
             if removed {
                 patch.values.insert(id, None);
             } else {
@@ -1303,10 +1319,6 @@ mod tests {
             ),
             (ids::DYED_COLOR, Component::DyedColor(0x0012_3456)),
             (ids::RARITY, Component::Rarity(Rarity::Epic)),
-            (
-                ids::MAP_POST_PROCESSING,
-                Component::MapPostProcessing(MapPostProcessing::Scale),
-            ),
             (ids::REPAIR_COST, Component::RepairCost(4)),
             (ids::CUSTOM_DATA, Component::CustomData(custom_data)),
             (
@@ -1341,6 +1353,32 @@ mod tests {
                 "{tag:?} did not round-trip"
             );
         }
+    }
+
+    #[test]
+    fn map_post_processing_is_transient_and_never_saved() {
+        let scale = Component::MapPostProcessing(MapPostProcessing::Scale);
+        assert!(matches!(
+            scale.to_nbt(),
+            Err(Error::NoNbtForm("map_post_processing"))
+        ));
+
+        // A patch holding only the cartography preview has no save form either.
+        let mut patch = ComponentPatch::new();
+        patch.insert(ids::MAP_POST_PROCESSING, scale);
+        assert!(patch.to_nbt().expect("patch encodes").is_empty());
+
+        // Removal markers for a non-persistent type are meaningless as well.
+        patch.remove(ids::MAP_POST_PROCESSING);
+        assert!(patch.to_nbt().expect("patch encodes").is_empty());
+
+        // A save written by an older Ferrite version must not resurrect it.
+        let mut components = Compound::new();
+        components.insert(
+            "minecraft:map_post_processing".to_owned(),
+            Tag::String("scale".to_owned()),
+        );
+        assert!(ComponentPatch::from_nbt(&components).unwrap().is_empty());
     }
 
     #[test]

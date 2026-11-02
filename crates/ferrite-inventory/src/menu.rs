@@ -1273,9 +1273,12 @@ impl Menu {
     }
 
     /// Vanilla `CartographyTableMenu.setupResultSlot`: a filled map with paper zooms out, with a
-    /// glass pane locks, and with an empty map makes two copies. Both inputs are required. The
-    /// map's saved data (its scale and locked flag) is not modelled here; a server with maps must
-    /// check it before offering the paper and glass-pane results.
+    /// glass pane locks, and with an empty map makes two copies. Both inputs are required.
+    ///
+    /// Vanilla gates paper on saved data that is unlocked and below scale 4, glass panes on
+    /// unlocked saved data, and applies the pending step when the result is crafted. Ferrite has
+    /// no map saved data, so those gates and the world-map change are not modelled; the result's
+    /// component is a preview only and is network-only (see [`MapPostProcessing`]).
     fn update_cartography(&mut self) {
         self.result = ItemStack::empty();
         let map = &self.container[0];
