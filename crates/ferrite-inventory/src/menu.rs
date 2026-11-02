@@ -2388,7 +2388,7 @@ impl Menu {
             return ItemStack::empty();
         }
         self.on_take(p, i);
-        if self.is_result(i) {
+        if self.is_result(i) || (matches!(self.kind, MenuKind::Cartography) && i == 2) {
             // Vanilla drops the part of a crafted stack that did not fit.
             p.drop(normalize(stack));
         }

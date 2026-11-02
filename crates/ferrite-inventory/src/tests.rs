@@ -163,6 +163,22 @@ fn furnace_menu_cooks_consumes_fuel_and_syncs_container_data() {
 }
 
 #[test]
+fn furnace_shift_click_keeps_unmoved_output_without_dropping_a_copy() {
+    let mut f = Fixture::new(Menu::furnace(7, FurnaceKind::Furnace));
+    for slot in 0..36 {
+        f.inv.set(slot, item("stone", 64));
+    }
+    f.inv.set(9, item("gold_ingot", 63));
+    f.set(2, item("gold_ingot", 2));
+    let drops = f.click(2, 0, QuickMove);
+    assert_eq!(f.slot(2), item("gold_ingot", 1));
+    assert!(
+        drops.is_empty(),
+        "the remaining furnace output must not be duplicated"
+    );
+}
+
+#[test]
 fn anvil_repairs_renames_and_charges_levels() {
     let mut f = Fixture::new(Menu::anvil(9));
     let mut first = item("iron_sword", 1);
@@ -1401,6 +1417,37 @@ fn cartography_table_quick_move_routes_maps_paper_and_other_items() {
     assert_eq!((f.slot(13), f.slot(30)), (empty(), item("dirt", 5)));
     f.click(30, 0, QuickMove);
     assert_eq!((f.slot(30), f.slot(3)), (empty(), item("dirt", 5)));
+}
+
+#[test]
+fn cartography_table_shift_click_drops_the_copy_that_does_not_fit() {
+    // The copy recipe makes two maps at once. Shift-clicking merges them into an existing map
+    // stack; the copy that did not fit used to vanish because the cartography result slot is
+    // `Rule::Output`, which the leftover drop in `quick_move_stack` did not treat as a result
+    // slot, and the recomputed preview then overwrote the leftover.
+    let mut f = Fixture::new(Menu::cartography(10));
+    for slot in 0..36 {
+        f.inv.set(slot, item("stone", 64));
+    }
+    f.inv.set(9, cartography_map(7).copy_with_count(63));
+    f.set(0, cartography_map(7));
+    f.set(1, item("map", 1));
+    assert_eq!(f.slot(2), cartography_map(7).copy_with_count(2));
+
+    let drops = f.click(2, 0, QuickMove);
+    assert_eq!(
+        f.slot(3),
+        cartography_map(7).copy_with_count(64),
+        "the copy that fit is stored"
+    );
+    assert_eq!(
+        drops,
+        vec![cartography_map(7)],
+        "the copy that did not fit is dropped, not deleted"
+    );
+    assert!(f.slot(0).is_empty());
+    assert!(f.slot(1).is_empty());
+    assert!(f.slot(2).is_empty());
 }
 
 #[test]
