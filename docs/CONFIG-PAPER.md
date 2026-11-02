@@ -15,11 +15,11 @@ migration step.
 | `config/paper-world-defaults.yml` | `WorldSettings` |
 | `<world>/paper-world.yml` | per-world overlay on `WorldSettings` |
 
-`FerriteConfig::load(dir)` loads all files (missing files fall back to compiled-in defaults),
-`FerriteConfig::save()` writes them back with comments, and
-`FerriteConfig::world_settings(name)` resolves a world: values from `<world>/paper-world.yml`
-win, everything else falls back to `config/paper-world-defaults.yml`. The per-world path is
-`<server dir>/<world name>/paper-world.yml`.
+`FerriteConfig::load(dir)` loads the five server-level files (missing files fall back to
+compiled-in defaults), `FerriteConfig::save()` writes those back with comments, and
+`FerriteConfig::world_settings(name)` resolves a world: `<world>/paper-world.yml` is read on
+demand and its values win, everything else falls back to `config/paper-world-defaults.yml`.
+The per-world path is `<server dir>/<world name>/paper-world.yml`.
 
 Unknown keys are preserved on rewrite (the raw YAML/properties document is kept alongside the
 typed model), and generated files carry comments above the documented keys.
@@ -126,7 +126,8 @@ Defaults were checked against the PaperMC configuration reference (retrieved 202
 
 Keys that were **not** confirmed against the current Paper reference are marked with an
 `UNVERIFIED` doc comment in the Rust source and in generated YAML comments. They are kept for
-compatibility with older configs.
+compatibility with older configs. The `_version_` row records version semantics rather than
+an `UNVERIFIED` marker.
 
 | File | Key | Why unverified |
 |---|---|---|
