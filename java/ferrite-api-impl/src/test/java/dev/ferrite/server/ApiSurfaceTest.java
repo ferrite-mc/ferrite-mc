@@ -165,4 +165,22 @@ class ApiSurfaceTest {
         assertNull(server.getTag(org.bukkit.Tag.REGISTRY_ITEMS, org.bukkit.NamespacedKey.minecraft("ferrite_missing"), Material.class));
         assertThrows(UnsupportedOperationException.class, () -> server.getTag("entity_types", org.bukkit.NamespacedKey.minecraft("skeletons"), org.bukkit.entity.EntityType.class));
     }
+
+    @Test void audiencesIncludeTheConsoleAndOnlinePlayers() {
+        assertTrue(containsIdentity(server.audiences(), server.getConsoleSender()));
+        assertTrue(containsIdentity(server.audiences(), player));
+        server.unregisterPlayer(PLAYER_ID);
+        try {
+            assertTrue(containsIdentity(server.audiences(), server.getConsoleSender()));
+            assertFalse(containsIdentity(server.audiences(), player));
+        } finally {
+            server.registerPlayer(player);
+        }
+        assertTrue(containsIdentity(server.audiences(), player));
+    }
+
+    private static boolean containsIdentity(java.lang.Iterable<? extends net.kyori.adventure.audience.Audience> audiences, Object expected) {
+        for (var audience : audiences) if (audience == expected) return true;
+        return false;
+    }
 }
