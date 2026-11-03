@@ -103,8 +103,11 @@ final class FerritePluginManager extends PluginManagerStubs {
         if (!(plugin instanceof JavaPlugin javaPlugin) || !plugins.contains(javaPlugin)) throw new IllegalArgumentException("Plugin is not loaded: " + plugin.getName());
         if (!plugin.isEnabled()) return;
         callEvent(new org.bukkit.event.server.PluginDisableEvent(plugin));
-        javaPlugin.setEnabled(false);
-        server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);
+        try { javaPlugin.setEnabled(false); }
+        finally {
+            synchronized (this) { handlers.removeIf(handler -> handler.owner() == plugin); }
+            server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);
+        }
     }
     @Override public void clearPlugins() { disablePlugins(); }
     @Override public boolean useTimings() { return false; }

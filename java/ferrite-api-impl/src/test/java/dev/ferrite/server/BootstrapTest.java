@@ -24,6 +24,8 @@ class BootstrapTest {
     }
     static final class ChildListener extends ParentListener {}
     @Test void paperOnlyLoadsAndFailureRollsBack() throws Exception {
+        System.setProperty("ferrite.native", "false");
+        Bootstrap.startServer();
         var jar = java.nio.file.Files.createTempFile("ferrite-paper", ".jar");
         try (var input = new java.util.jar.JarFile(System.getProperty("test.dependency.jar")); var output = new java.util.jar.JarOutputStream(java.nio.file.Files.newOutputStream(jar))) {
             var entries = input.entries();
@@ -201,6 +203,8 @@ class BootstrapTest {
         var lifecycle = new ArrayList<String>();
         var lifecycleOwner = Bukkit.getPluginManager().getPlugin("FerriteTest");
         org.bukkit.event.Listener lifecycleListener = new org.bukkit.event.Listener() {};
+        var staleListenerCalls = new java.util.concurrent.atomic.AtomicInteger();
+        Bukkit.getPluginManager().registerEvent(ProbeEvent.class, lifecycleListener, org.bukkit.event.EventPriority.NORMAL, (listener, event) -> staleListenerCalls.incrementAndGet(), dependency);
         Bukkit.getPluginManager().registerEvent(org.bukkit.event.server.PluginDisableEvent.class, lifecycleListener, org.bukkit.event.EventPriority.NORMAL, (listener, event) -> {
             var changed = ((org.bukkit.event.server.PluginDisableEvent) event).getPlugin();
             if (changed == dependency) lifecycle.add("disable:" + changed.isEnabled());
@@ -214,6 +218,8 @@ class BootstrapTest {
         Bukkit.getPluginManager().enablePlugin(dependency);
         assertTrue(dependency.isEnabled());
         Bukkit.getPluginManager().enablePlugin(dependency);
+        Bukkit.getPluginManager().callEvent(new ProbeEvent());
+        assertEquals(0, staleListenerCalls.get(), "disabled plugin listeners must not survive re-enable");
         assertEquals(List.of("disable:true", "enable:true"), lifecycle);
         var ghost = (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.plugin.Plugin.class}, (proxy, method, args) -> switch (method.getName()) {
             case "getName" -> "Ghost";
