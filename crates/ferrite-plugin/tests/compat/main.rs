@@ -17,6 +17,34 @@ fn root() -> PathBuf {
         .to_owned()
 }
 
+/// Directory holding `<Plugin>.jar` fixtures; defaults to `<repo>/plugins-test`.
+const FIXTURES_ENV: &str = "FERRITE_COMPAT_FIXTURES";
+/// Bridge jar loaded into the embedded JVM; defaults to the Gradle build output.
+const BRIDGE_JAR_ENV: &str = "FERRITE_COMPAT_BRIDGE_JAR";
+
+/// Uses an explicit override unless it is absent or empty, which fall back to `default`.
+fn resolve_path(default: impl FnOnce() -> PathBuf, override_path: Option<&OsStr>) -> PathBuf {
+    match override_path {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => default(),
+    }
+}
+
+fn fixtures_dir(repo_root: &Path, override_dir: Option<&OsStr>) -> PathBuf {
+    resolve_path(|| repo_root.join("plugins-test"), override_dir)
+}
+
+fn bridge_jar(repo_root: &Path, override_jar: Option<&OsStr>) -> PathBuf {
+    resolve_path(
+        || repo_root.join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar"),
+        override_jar,
+    )
+}
+
+fn fixtures_dir_from_env() -> PathBuf {
+    fixtures_dir(&root(), std::env::var_os(FIXTURES_ENV).as_deref())
+}
+
 /// Generated vanilla data root, resolved like the server binary: `FERRITE_VANILLA_ROOT`
 /// wins, otherwise `<crate>/../../vanilla/26.3/generated`.
 fn resolve_vanilla_data(manifest_dir: &Path, override_root: Option<&OsStr>) -> PathBuf {
@@ -33,17 +61,22 @@ fn vanilla_data_dir() -> PathBuf {
     )
 }
 
-fn probe_config() -> PluginConfig {
+fn probe_config_for(repo_root: &Path, bridge_override: Option<&OsStr>) -> PluginConfig {
     PluginConfig {
-        bridge_jar: root().join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar"),
+        bridge_jar: bridge_jar(repo_root, bridge_override),
         data_dir: vanilla_data_dir(),
         ..Default::default()
     }
 }
 
+fn probe_config() -> PluginConfig {
+    probe_config_for(&root(), std::env::var_os(BRIDGE_JAR_ENV).as_deref())
+}
+
 #[test]
 fn compat_probe() {
     let Some(jar) = std::env::var_os("FERRITE_COMPAT_PROBE") else {
+        println!("FERRITE_SKIP compat_probe: FERRITE_COMPAT_PROBE is not set");
         return;
     };
     let jar = PathBuf::from(jar);
@@ -94,12 +127,16 @@ fn compat_probe() {
 #[test]
 fn compatibility_report() {
     let root = root();
-    let fixtures = root.join("plugins-test");
+    let fixtures = fixtures_dir_from_env();
     // Keep the checked-in report when no fixture is available to probe.
     if !["Vault", "LuckPerms", "EssentialsX", "PlaceholderAPI"]
         .iter()
         .any(|name| fixtures.join(format!("{name}.jar")).exists())
     {
+        println!(
+            "FERRITE_SKIP compatibility_report: no plugin jars in {}",
+            fixtures.display()
+        );
         return;
     }
     let mut report = String::from(
@@ -172,4 +209,50 @@ fn probe_configures_generated_vanilla_data() {
         resolve_vanilla_data(Path::new("/repo"), None),
         Path::new("/repo").join("../../vanilla/26.3/generated")
     );
+}
+
+/// Other worktrees can point the report at fixtures without copying them into this checkout.
+#[test]
+fn compat_paths_default_to_the_repo_layout() {
+    let repo = Path::new("/repo");
+    assert_eq!(fixtures_dir(repo, None), repo.join("plugins-test"));
+    assert_eq!(
+        bridge_jar(repo, None),
+        repo.join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar")
+    );
+}
+
+#[test]
+fn compat_paths_honor_explicit_overrides() {
+    let repo = Path::new("/repo");
+    assert_eq!(
+        fixtures_dir(repo, Some(OsStr::new("D:/shared/plugins-test"))),
+        PathBuf::from("D:/shared/plugins-test")
+    );
+    assert_eq!(
+        bridge_jar(repo, Some(OsStr::new("D:/shared/ferrite-api-impl-all.jar"))),
+        PathBuf::from("D:/shared/ferrite-api-impl-all.jar")
+    );
+    // An empty override counts as unset, like an absent variable.
+    assert_eq!(
+        fixtures_dir(repo, Some(OsStr::new(""))),
+        repo.join("plugins-test")
+    );
+    assert_eq!(
+        bridge_jar(repo, Some(OsStr::new(""))),
+        repo.join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar")
+    );
+}
+
+#[test]
+fn probe_config_uses_the_bridge_jar_override() {
+    let config = probe_config_for(
+        Path::new("/repo"),
+        Some(OsStr::new("D:/shared/ferrite-api-impl-all.jar")),
+    );
+    assert_eq!(
+        config.bridge_jar,
+        PathBuf::from("D:/shared/ferrite-api-impl-all.jar")
+    );
+    assert!(!config.data_dir.as_os_str().is_empty());
 }
