@@ -2023,7 +2023,7 @@ impl Player {
         send(
             self,
             &SoundEffect {
-                sound: VarInt(sound),
+                sound: super::commands_extras::sound_holder(sound),
                 source: VarInt(0),
                 x: (destination[0] * 8.0) as i32,
                 y: (destination[1] * 8.0) as i32,
