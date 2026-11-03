@@ -12,7 +12,7 @@
 //! Only the feature types that the overworld needs for terrain decoration are
 //! implemented: `minecraft:ore`, `minecraft:simple_block`,
 //! `minecraft:random_selector` and `minecraft:tree` (straight trunks with blob
-//! or spruce foliage). Other configured features are skipped, which is why the fixture
+//! or spruce/pine foliage). Other configured features are skipped, which is why the fixture
 //! differential reports rates instead of demanding an exact whole-chunk match.
 //!
 //! Feature placement is clipped to the target chunk: vanilla's `WorldGenRegion`
@@ -705,6 +705,7 @@ struct TreeConfig {
     foliage_radius: i32,
     foliage_offset: i32,
     spruce: Option<Box<(IntProvider, IntProvider, IntProvider)>>,
+    pine: bool,
     limit: i32,
     lower_size: i32,
     upper_size: i32,
@@ -1280,13 +1281,14 @@ impl<'a> FeatureGenerator<'a> {
             return None;
         }
         let foliage_placer = config.get("foliage_placer")?;
-        let (foliage_height, foliage_radius, foliage_offset, spruce) =
+        let (foliage_height, foliage_radius, foliage_offset, spruce, pine) =
             match foliage_placer.get("type")?.as_str()? {
                 "minecraft:blob_foliage_placer" => (
                     i32::try_from(foliage_placer.get("height")?.as_i64()?).ok()?,
                     i32::try_from(foliage_placer.get("radius")?.as_i64()?).ok()?,
                     i32::try_from(foliage_placer.get("offset")?.as_i64()?).ok()?,
                     None,
+                    false,
                 ),
                 "minecraft:spruce_foliage_placer" => (
                     0,
@@ -1297,6 +1299,18 @@ impl<'a> FeatureGenerator<'a> {
                         IntProvider::from_value(foliage_placer.get("radius")?)?,
                         IntProvider::from_value(foliage_placer.get("offset")?)?,
                     ))),
+                    false,
+                ),
+                "minecraft:pine_foliage_placer" => (
+                    0,
+                    0,
+                    0,
+                    Some(Box::new((
+                        IntProvider::from_value(foliage_placer.get("height")?)?,
+                        IntProvider::from_value(foliage_placer.get("radius")?)?,
+                        IntProvider::from_value(foliage_placer.get("offset")?)?,
+                    ))),
+                    true,
                 ),
                 _ => return None,
             };
@@ -1320,6 +1334,7 @@ impl<'a> FeatureGenerator<'a> {
             foliage_radius,
             foliage_offset,
             spruce,
+            pine,
             limit: number(size, "limit", 1)?,
             lower_size: number(size, "lower_size", 0)?,
             upper_size: number(size, "upper_size", 1)?,
@@ -1615,8 +1630,17 @@ impl<'a> FeatureGenerator<'a> {
             .spruce
             .as_deref()
             .map(|(trunk_height, radius, offset)| {
-                let foliage_height = (height - trunk_height.sample(random)).max(4);
-                (foliage_height, radius.sample(random), offset)
+                let sampled_height = trunk_height.sample(random);
+                let foliage_height = if tree.pine {
+                    sampled_height
+                } else {
+                    (height - sampled_height).max(4)
+                };
+                let mut max_radius = radius.sample(random);
+                if tree.pine {
+                    max_radius += random.next_int_bound((height - foliage_height + 1).max(1));
+                }
+                (foliage_height, max_radius, offset)
             });
         let free = self.max_free_tree_height(chunk, origin, height, tree, registry);
         let height = height.min(free);
@@ -1644,10 +1668,19 @@ impl<'a> FeatureGenerator<'a> {
         };
         if let Some((foliage_height, max_radius, offset)) = spruce_shape {
             let offset = offset.sample(random);
-            let mut radius = random.next_int_bound(2);
+            let mut radius = if tree.pine {
+                0
+            } else {
+                random.next_int_bound(2)
+            };
             let mut limit = 1;
             let mut reset = 0;
-            for y in (-foliage_height..=offset).rev() {
+            let bottom = if tree.pine {
+                offset - foliage_height
+            } else {
+                -foliage_height
+            };
+            for y in (bottom..=offset).rev() {
                 for dx in -radius..=radius {
                     for dz in -radius..=radius {
                         if radius > 0 && dx.abs() == radius && dz.abs() == radius {
@@ -1659,7 +1692,13 @@ impl<'a> FeatureGenerator<'a> {
                         }
                     }
                 }
-                if radius >= limit {
+                if tree.pine {
+                    if radius >= 1 && y == bottom + 1 {
+                        radius -= 1;
+                    } else if radius < max_radius {
+                        radius += 1;
+                    }
+                } else if radius >= limit {
                     radius = reset;
                     reset = 1;
                     limit = (limit + 1).min(max_radius);
@@ -1950,40 +1989,52 @@ mod tests {
     }
 
     #[test]
-    fn spruce_tree_places_trunk_and_foliage() {
+    fn vanilla_pine_configuration_is_supported() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        let data = WorldgenData::load(path).unwrap();
+        let generator = FeatureGenerator::new(&data, 0, -64, 384);
+        let pine = data
+            .configured_feature(&"minecraft:pine".parse().unwrap())
+            .unwrap();
+        assert!(generator.compile_tree(&pine.config).is_some());
+    }
+
+    #[test]
+    fn conifer_trees_place_trunk_and_foliage() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
         let data = WorldgenData::load(&path).unwrap();
         let registry = RuntimeRegistry::load(&path).unwrap();
         let generator = FeatureGenerator::new(&data, 0, -64, 384);
-        let spruce = data
-            .configured_feature(&"minecraft:spruce".parse().unwrap())
-            .unwrap();
-        let tree = generator.compile_tree(&spruce.config).unwrap();
         let air = registry
             .block_id("minecraft:air", &Default::default())
             .unwrap();
-        let mut chunk = Chunk::new(-64, 384, air, 0, 15, 6).unwrap();
-        generator.place_tree(
-            &mut chunk,
-            BlockPos::new(8, 0, 8),
-            &mut WorldgenRandom::new(42),
-            &tree,
-            &registry,
-        );
-        let mut logs = 0;
-        let mut leaves = 0;
-        for y in 0..20 {
-            for z in 0..16 {
-                for x in 0..16 {
-                    let state = registry.block_state(chunk.block(x, y, z).unwrap()).unwrap();
-                    logs += usize::from(state.name == "minecraft:spruce_log");
-                    leaves += usize::from(state.name == "minecraft:spruce_leaves");
+        for name in ["minecraft:spruce", "minecraft:pine"] {
+            let feature = data.configured_feature(&name.parse().unwrap()).unwrap();
+            let tree = generator.compile_tree(&feature.config).unwrap();
+            let mut chunk = Chunk::new(-64, 384, air, 0, 15, 6).unwrap();
+            generator.place_tree(
+                &mut chunk,
+                BlockPos::new(8, 0, 8),
+                &mut WorldgenRandom::new(42),
+                &tree,
+                &registry,
+            );
+            let mut logs = 0;
+            let mut leaves = 0;
+            for y in 0..20 {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let state = registry.block_state(chunk.block(x, y, z).unwrap()).unwrap();
+                        logs += usize::from(state.name == "minecraft:spruce_log");
+                        leaves += usize::from(state.name == "minecraft:spruce_leaves");
+                    }
                 }
             }
+            assert!(logs >= 5, "{name}: expected a trunk, got {logs} logs");
+            assert!(leaves > 0, "{name}: expected foliage");
         }
-        assert!(logs >= 5, "expected a spruce trunk, got {logs} logs");
-        assert!(leaves > 0, "expected spruce foliage");
     }
 
     #[test]
