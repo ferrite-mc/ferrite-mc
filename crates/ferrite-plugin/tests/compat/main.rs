@@ -1,8 +1,9 @@
 //! Opt-in real-plugin compatibility probe; each fixture runs in a fresh process and directory.
 use ferrite_plugin::{CommandSender, PluginConfig, PluginHost};
 use std::{
+    ffi::OsStr,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -14,6 +15,30 @@ fn root() -> PathBuf {
         .parent()
         .unwrap()
         .to_owned()
+}
+
+/// Generated vanilla data root, resolved like the server binary: `FERRITE_VANILLA_ROOT`
+/// wins, otherwise `<crate>/../../vanilla/26.3/generated`.
+fn resolve_vanilla_data(manifest_dir: &Path, override_root: Option<&OsStr>) -> PathBuf {
+    override_root.map_or_else(
+        || manifest_dir.join("../../vanilla/26.3/generated"),
+        PathBuf::from,
+    )
+}
+
+fn vanilla_data_dir() -> PathBuf {
+    resolve_vanilla_data(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        std::env::var_os("FERRITE_VANILLA_ROOT").as_deref(),
+    )
+}
+
+fn probe_config() -> PluginConfig {
+    PluginConfig {
+        bridge_jar: root().join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar"),
+        data_dir: vanilla_data_dir(),
+        ..Default::default()
+    }
 }
 
 #[test]
@@ -32,10 +57,7 @@ fn compat_probe() {
             return;
         }
     };
-    let config = PluginConfig {
-        bridge_jar: root().join("java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar"),
-        ..Default::default()
-    };
+    let config = probe_config();
     match PluginHost::start(plugins.path(), config) {
         Ok(host) => {
             println!(
@@ -124,4 +146,30 @@ fn compatibility_report() {
         ));
     }
     fs::write(root.join("compat-report.md"), report).unwrap();
+}
+
+/// The probe used to inherit `PluginConfig::default()`, leaving `data_dir` empty and skipping
+/// `Bootstrap.configureDataDir`, unlike the production server.
+#[test]
+fn probe_configures_generated_vanilla_data() {
+    let config = probe_config();
+    assert!(
+        !config.data_dir.as_os_str().is_empty(),
+        "the compat probe must not leave PluginConfig::data_dir unset"
+    );
+    assert_eq!(
+        config.data_dir,
+        resolve_vanilla_data(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            std::env::var_os("FERRITE_VANILLA_ROOT").as_deref(),
+        )
+    );
+    assert_eq!(
+        resolve_vanilla_data(Path::new("/repo"), Some(OsStr::new("/generated"))),
+        PathBuf::from("/generated")
+    );
+    assert_eq!(
+        resolve_vanilla_data(Path::new("/repo"), None),
+        Path::new("/repo").join("../../vanilla/26.3/generated")
+    );
 }
