@@ -9,6 +9,7 @@ import java.util.function.LongSupplier;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.levelgen.RandomSupport;
@@ -37,6 +38,56 @@ public final class NoiseReference {
     private static final int SAMPLES = 10_000;
     private static final long LEGACY_SEED = 0x123456789ABCDEFL;
     private static final long XOROSHIRO_SEED = 0x0FEDCBA987654321L;
+
+    /**
+     * Negative, lattice and wrap-window coordinates checked without a fixture by
+     * {@code tests/sampling.rs}. Kept in sync with {@code REGRESSION_COORDS} there.
+     */
+    /**
+     * Positional-factory regression rows: negative and extreme coordinates, plus one
+     * distinct name and seed per row. Checked by {@code tests/random_regression.rs}.
+     */
+    private static final int[] REG_X = {-1_000, -17, 0, 1, 12_345, Integer.MIN_VALUE};
+    private static final int[] REG_Y = {-64, -1, 0, 5, 319, Integer.MAX_VALUE};
+    private static final int[] REG_Z = {-1_500, -33, 0, 7, 98_765, -1};
+    private static final String[] REG_NAMES = {
+        "minecraft:aquifer",
+        "minecraft:terrain",
+        "minecraft:feature_a",
+        "ferrite:test",
+        "octave_-8",
+        "minecraft:overworld",
+    };
+    private static final long[] REG_SEEDS = {
+        -1L, 0L, 1L, 123_456_789L, Long.MIN_VALUE, Long.MAX_VALUE,
+    };
+
+    private interface IndexDouble {
+        double get(int index);
+    }
+
+    private interface IndexInt {
+        int get(int index);
+    }
+
+    private interface IndexLong {
+        long get(int index);
+    }
+
+    private static final double[][] REGRESSION_COORDS = {
+        {0.0, 0.0, 0.0},
+        {-1.0, -1.0, -1.0},
+        {-17.0, -64.0, -33.0},
+        {-1_000_000.0, 0.0, 1_000_000.0},
+        {-16_777_216.0, 5.0, -16_777_216.0},
+        {16_777_215.5, 0.0, -16_777_215.5},
+        {16_777_216.0, 1.25, -16_777_216.0},
+        {16_777_216.5, -0.5, 33_554_432.0},
+        {-33_554_432.5, 0.0, 25_165_824.0},
+        {0.5, -0.5, 0.5},
+        {100.25, -30.75, -400.125},
+        {25_165_825.5, -25_165_826.5, -12.0},
+    };
 
     private interface FloatSupplier {
         float getAsFloat();
@@ -155,6 +206,47 @@ public final class NoiseReference {
         DensitySampler blendedSampler = blended.compileSampler(new XoroshiroRandomSource(2468L));
         section(out, firstSection, "blended_noise",
                 blendedField(blendedSampler));
+
+        // A small coordinate table (negative, lattice and wrap-window points) that
+        // the Rust tests hardcode, so boundary behaviour is checked without Java.
+        section(out, firstSection, "sampling_regressions",
+                noise3dAtField("perlin", perlin, REGRESSION_COORDS),
+                noise3dAtField("smeared_perlin", smeared, REGRESSION_COORDS),
+                noise2dAtField("simplex_2d", simplex, REGRESSION_COORDS),
+                noise3dAtField("simplex_3d", simplex, REGRESSION_COORDS),
+                noise3dAtField("normal_noise", normalNoise, REGRESSION_COORDS),
+                noise3dAtField("legacy_normal_noise", legacyNormalNoise, REGRESSION_COORDS),
+                blendedAtField("blended_noise", blendedSampler));
+
+        // Positional random factories: negative coordinates, distinct named factories,
+        // repeatability and interleaving. tests/random_regression.rs hardcodes these.
+        section(out, firstSection, "random_regression_legacy",
+                doublesAt("at_double", i -> legacyFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextDouble()),
+                doublesAt("at_double_repeat", i -> legacyFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextDouble()),
+                intsAt("at_int", i -> legacyFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextInt()),
+                longsAt("at_long", i -> legacyFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextLong()),
+                doublesAt("at_gaussian", i -> legacyFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextGaussian()),
+                doublesAt("named_double", i -> legacyFactory.fromHashOf(REG_NAMES[i]).nextDouble()),
+                doublesAt("named_double_repeat", i -> legacyFactory.fromHashOf(REG_NAMES[i]).nextDouble()),
+                intsAt("named_int", i -> legacyFactory.fromHashOf(REG_NAMES[i]).nextInt()),
+                doublesAt("seed_double", i -> legacyFactory.fromSeed(REG_SEEDS[i]).nextDouble()),
+                interleavedDoubles("interleaved_double", legacyFactory),
+                interleavedInts("interleaved_int", legacyFactory),
+                interleavedLongs("interleaved_long", legacyFactory));
+
+        section(out, firstSection, "random_regression_xoroshiro",
+                doublesAt("at_double", i -> xoroFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextDouble()),
+                doublesAt("at_double_repeat", i -> xoroFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextDouble()),
+                intsAt("at_int", i -> xoroFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextInt()),
+                longsAt("at_long", i -> xoroFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextLong()),
+                doublesAt("at_gaussian", i -> xoroFactory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextGaussian()),
+                doublesAt("named_double", i -> xoroFactory.fromHashOf(REG_NAMES[i]).nextDouble()),
+                doublesAt("named_double_repeat", i -> xoroFactory.fromHashOf(REG_NAMES[i]).nextDouble()),
+                intsAt("named_int", i -> xoroFactory.fromHashOf(REG_NAMES[i]).nextInt()),
+                doublesAt("seed_double", i -> xoroFactory.fromSeed(REG_SEEDS[i]).nextDouble()),
+                interleavedDoubles("interleaved_double", xoroFactory),
+                interleavedInts("interleaved_int", xoroFactory),
+                interleavedLongs("interleaved_long", xoroFactory));
 
         section(out, firstSection, "random_support",
                 longsField("upgrade_unmixed_lo", () -> RandomSupport.upgradeSeedTo128bitUnmixed(LEGACY_SEED).seedLo(), 1),
@@ -316,6 +408,59 @@ public final class NoiseReference {
         return out.append(']').toString();
     }
 
+    private static String noise3dAtField(String key, Noise noise, double[][] points) {
+        StringBuilder out = new StringBuilder(points.length * 22 + 32);
+        out.append('"').append(key).append("\":[");
+        for (int i = 0; i < points.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            double value = noise.get(points[i][0], points[i][1], points[i][2]);
+            out.append('"').append(hex(Double.doubleToRawLongBits(value))).append('"');
+        }
+        return out.append(']').toString();
+    }
+
+    private static String noise2dAtField(String key, Noise noise, double[][] points) {
+        StringBuilder out = new StringBuilder(points.length * 22 + 32);
+        out.append('"').append(key).append("\":[");
+        for (int i = 0; i < points.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            double value = noise.get(points[i][0], points[i][2]);
+            out.append('"').append(hex(Double.doubleToRawLongBits(value))).append('"');
+        }
+        return out.append(']').toString();
+    }
+
+    private static String blendedAtField(String key, DensitySampler sampler) {
+        int[][] points = {
+            {0, 0, 0},
+            {-1, -1, -1},
+            {-17, -64, -33},
+            {-1_000_000, 0, 1_000_000},
+            {-16_777_216, 5, -16_777_216},
+            {16_777_215, 0, -16_777_215},
+            {16_777_216, 1, -16_777_216},
+            {16_777_216, -1, 33_554_432},
+            {-33_554_432, 0, 25_165_824},
+            {1, -1, 1},
+            {100, -30, -400},
+            {25_165_825, -25_165_826, -12},
+        };
+        StringBuilder out = new StringBuilder(points.length * 14 + 32);
+        out.append('"').append(key).append("\":[");
+        for (int i = 0; i < points.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            float value = sampler.sampleValue(null, points[i][0], points[i][1], points[i][2]);
+            out.append('"').append(hexInt(Float.floatToRawIntBits(value))).append('"');
+        }
+        return out.append(']').toString();
+    }
+
     private static String blendedField(DensitySampler sampler) {
         StringBuilder out = new StringBuilder(SAMPLES * 22 + 32);
         out.append("\"samples\":[");
@@ -325,6 +470,117 @@ public final class NoiseReference {
             }
             float value = sampler.sampleValue(null, blendedX(i), blendedY(i), blendedZ(i));
             out.append('"').append(hexInt(Float.floatToRawIntBits(value))).append('"');
+        }
+        return out.append(']').toString();
+    }
+
+    // ---- positional-factory regression helpers ----------------------------
+
+    private static String doublesAt(String key, IndexDouble supplier) {
+        StringBuilder out = new StringBuilder(REG_X.length * 22 + 32);
+        out.append('"').append(key).append("\":[");
+        for (int i = 0; i < REG_X.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            double value = supplier.get(i);
+            out.append('"').append(hex(Double.doubleToRawLongBits(value))).append('"');
+        }
+        return out.append(']').toString();
+    }
+
+    private static String intsAt(String key, IndexInt supplier) {
+        StringBuilder out = new StringBuilder(REG_X.length * 12 + 32);
+        out.append('"').append(key).append("\":[");
+        for (int i = 0; i < REG_X.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            out.append(supplier.get(i));
+        }
+        return out.append(']').toString();
+    }
+
+    private static String longsAt(String key, IndexLong supplier) {
+        StringBuilder out = new StringBuilder(REG_X.length * 20 + 32);
+        out.append('"').append(key).append("\":[");
+        for (int i = 0; i < REG_X.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            out.append('"').append(hex(supplier.get(i))).append('"');
+        }
+        return out.append(']').toString();
+    }
+
+    private static String interleavedDoubles(String key, PositionalRandomFactory factory) {
+        int count = REG_X.length * 5;
+        StringBuilder out = new StringBuilder(count * 22 + 32);
+        out.append('"').append(key).append("\":[");
+        boolean first = true;
+        for (int i = 0; i < REG_X.length; i++) {
+            double[] values = {
+                factory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextDouble(),
+                factory.fromHashOf(REG_NAMES[i]).nextDouble(),
+                factory.fromSeed(REG_SEEDS[i]).nextDouble(),
+                factory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextDouble(),
+                factory.fromHashOf(REG_NAMES[i]).nextDouble(),
+            };
+            for (double value : values) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append('"').append(hex(Double.doubleToRawLongBits(value))).append('"');
+            }
+        }
+        return out.append(']').toString();
+    }
+
+    private static String interleavedInts(String key, PositionalRandomFactory factory) {
+        int count = REG_X.length * 5;
+        StringBuilder out = new StringBuilder(count * 12 + 32);
+        out.append('"').append(key).append("\":[");
+        boolean first = true;
+        for (int i = 0; i < REG_X.length; i++) {
+            int[] values = {
+                factory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextInt(),
+                factory.fromHashOf(REG_NAMES[i]).nextInt(),
+                factory.fromSeed(REG_SEEDS[i]).nextInt(),
+                factory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextInt(),
+                factory.fromHashOf(REG_NAMES[i]).nextInt(),
+            };
+            for (int value : values) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append(value);
+            }
+        }
+        return out.append(']').toString();
+    }
+
+    private static String interleavedLongs(String key, PositionalRandomFactory factory) {
+        int count = REG_X.length * 5;
+        StringBuilder out = new StringBuilder(count * 20 + 32);
+        out.append('"').append(key).append("\":[");
+        boolean first = true;
+        for (int i = 0; i < REG_X.length; i++) {
+            long[] values = {
+                factory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextLong(),
+                factory.fromHashOf(REG_NAMES[i]).nextLong(),
+                factory.fromSeed(REG_SEEDS[i]).nextLong(),
+                factory.at(REG_X[i], REG_Y[i], REG_Z[i]).nextLong(),
+                factory.fromHashOf(REG_NAMES[i]).nextLong(),
+            };
+            for (long value : values) {
+                if (!first) {
+                    out.append(',');
+                }
+                first = false;
+                out.append('"').append(hex(value)).append('"');
+            }
         }
         return out.append(']').toString();
     }
