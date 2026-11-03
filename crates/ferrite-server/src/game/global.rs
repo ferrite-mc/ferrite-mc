@@ -1,4 +1,4 @@
-use super::chat::PlayerChatState;
+use super::{Dimension, chat::PlayerChatState};
 use ferrite_net::game::{Outbound, OutboundSender, packet};
 use ferrite_profiler::Timings;
 use ferrite_protocol::{
@@ -21,6 +21,8 @@ pub struct GlobalPlayer {
     pub yaw: f32,
     pub pitch: f32,
     pub ground: bool,
+    /// The dimension the player is in; entity tracking never crosses dimensions.
+    pub dimension: Dimension,
     /// Client `chat_mode`: 0 shown, 1 commands only, 2 hidden.
     pub chat_visibility: u8,
     /// Registry id of `minecraft:chat` used to decorate broadcast messages.
@@ -50,6 +52,7 @@ impl GlobalPlayer {
             yaw: 0.0,
             pitch: 0.0,
             ground: true,
+            dimension: Dimension::Overworld,
             chat_visibility,
             chat_type,
             chat: PlayerChatState::new(secure_chat),
@@ -110,6 +113,13 @@ impl GlobalRegion {
         send(&p, &p.info());
         self.broadcast(&format!("{} joined the game", p.name));
         self.players.insert(p.uuid, p);
+    }
+    /// Moves a player between dimensions. The next tick removes its entity from observers in
+    /// the old dimension and adds it for observers in the new one.
+    pub fn set_dimension(&mut self, id: Uuid, dimension: Dimension) {
+        if let Some(player) = self.players.get_mut(&id) {
+            player.dimension = dimension;
+        }
     }
     pub fn update(&mut self, id: Uuid, pos: [f64; 3], yaw: f32, pitch: f32, ground: bool) {
         if let Some(p) = self.players.get_mut(&id) {
@@ -292,7 +302,8 @@ impl GlobalRegion {
                     .zip(target.pos)
                     .map(|(a, b)| (a - b) * (a - b))
                     .sum::<f64>();
-                let inside = distance <= 48.0 * 48.0;
+                // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
+                let inside = observer.dimension == target.dimension && distance <= 48.0 * 48.0;
                 match (self.visible.get(&key), inside) {
                     (None, true) => {
                         send(
@@ -408,6 +419,51 @@ impl GlobalRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrite_protocol::Packet;
+
+    fn tracked(ar: &mut ferrite_net::game::OutboundReceiver, id: i32) -> bool {
+        std::iter::from_fn(|| ar.try_recv())
+            .any(|p| matches!(p, Outbound::Packet(ref b) if b[0] == id as u8))
+    }
+
+    #[test]
+    fn entity_tracking_does_not_cross_dimensions() {
+        let mut g = GlobalRegion::default();
+        let (a, mut ar) = OutboundSender::channel(1 << 20);
+        let (b, _br) = OutboundSender::channel(1 << 20);
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        let mut pa = GlobalPlayer::new(alice, 1, "A".into(), vec![], a, false, 1, 0);
+        pa.pos = [0.5, 64.0, 0.5];
+        let mut pb = GlobalPlayer::new(bob, 2, "B".into(), vec![], b, false, 1, 0);
+        pb.pos = [1.5, 64.0, 0.5];
+        pb.dimension = Dimension::Nether;
+        g.join(pa);
+        g.join(pb);
+        // Drop the join packets so only the tracking sends remain.
+        while ar.try_recv().is_some() {}
+
+        g.tick();
+        assert!(
+            !tracked(&mut ar, AddEntity::ID),
+            "a nether player must not be spawned in the overworld"
+        );
+
+        g.set_dimension(bob, Dimension::Overworld);
+        g.tick();
+        assert!(
+            tracked(&mut ar, AddEntity::ID),
+            "the entity is re-added when the player enters the observer's dimension"
+        );
+
+        g.set_dimension(bob, Dimension::Nether);
+        g.tick();
+        assert!(
+            tracked(&mut ar, RemoveEntities::ID),
+            "the entity is removed when the player leaves the observer's dimension"
+        );
+    }
+
     #[test]
     fn tick_records_global_and_tracking_scopes_when_timings_are_attached() {
         let mut g = GlobalRegion::default();

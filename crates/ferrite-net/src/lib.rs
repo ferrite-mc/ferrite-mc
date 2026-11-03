@@ -134,6 +134,10 @@ pub struct ServerConfig {
     /// Maximum queued, still-uncompressed packet bytes per connection. Exceeding it
     /// disconnects the client as timed out instead of blocking or growing without bound.
     pub send_queue_bytes: usize,
+    /// Optional kernel send-buffer size for accepted connections. `None` keeps the operating
+    /// system's default and autotuning; a small value makes a client that stops reading block
+    /// the writer after a known number of bytes.
+    pub socket_send_buffer_bytes: Option<usize>,
     /// How long one writer batch may block before the connection is dropped.
     pub write_timeout: std::time::Duration,
     pub forwarding: forwarding::Forwarding,
@@ -158,6 +162,7 @@ impl Default for ServerConfig {
             view_distance: 10,
             supported_versions: SupportedVersions::All,
             send_queue_bytes: 2 * 1024 * 1024,
+            socket_send_buffer_bytes: None,
             write_timeout: std::time::Duration::from_secs(30),
             forwarding: forwarding::Forwarding::None,
             favicon: None,
@@ -185,6 +190,11 @@ pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         stream.set_nodelay(true)?;
+        if let Some(bytes) = config.socket_send_buffer_bytes {
+            socket2::SockRef::from(&stream)
+                .set_send_buffer_size(bytes)
+                .context("setting the accepted socket's send buffer")?;
+        }
         let key = key.clone();
         let config = config.clone();
         tokio::spawn(async move {
@@ -845,8 +855,8 @@ async fn play(
     status.leave(session);
     result
 }
-async fn write_loop(
-    mut writer: wire::WireWriter,
+async fn write_loop<W: wire::BatchWriter>(
+    mut writer: W,
     encoder: FrameEncoder,
     mut queue: game::OutboundReceiver,
     write_timeout: std::time::Duration,
@@ -988,12 +998,12 @@ fn queue_raw(
         None => encoder.encode(&packet.to_frame(), batch),
     }
 }
-async fn write_batch(
-    writer: &mut wire::WireWriter,
+async fn write_batch<W: wire::BatchWriter>(
+    writer: &mut W,
     batch: &mut [u8],
     write_timeout: std::time::Duration,
 ) -> Result<()> {
-    match tokio::time::timeout(write_timeout, writer.write_batch(batch)).await {
+    match tokio::time::timeout(write_timeout, wire::BatchWriter::write_batch(writer, batch)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(error.into()),
         Err(_) => bail!("client timed out while writing"),
@@ -1126,6 +1136,85 @@ mod tests {
         },
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A writer that blocks inside its first batch until the test releases it, then records
+    /// every byte. This stalls the connection without relying on a socket's buffer sizes.
+    struct StalledWriter {
+        entered: std::sync::Arc<tokio::sync::Barrier>,
+        release: Option<tokio::sync::oneshot::Receiver<()>>,
+        stalled: bool,
+        written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl crate::wire::BatchWriter for StalledWriter {
+        async fn write_batch(&mut self, batch: &mut [u8]) -> std::io::Result<()> {
+            if !self.stalled {
+                self.stalled = true;
+                self.entered.wait().await;
+                if let Some(release) = self.release.take() {
+                    let _ = release.await;
+                }
+            }
+            self.written
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_from_slice(batch);
+            Ok(())
+        }
+    }
+
+    /// The byte budget, not a kernel socket buffer, decides when a connection is too slow:
+    /// while one batch write is stalled, further packets exhaust the queue budget, and the
+    /// writer must discard the backlog and emit the exact `"Timed out"` play disconnect.
+    #[tokio::test]
+    async fn stalled_writer_overflows_budget_and_sends_timed_out_disconnect() {
+        use ferrite_protocol::packets::play::PlayDisconnect;
+
+        let (tx, rx) = game::OutboundSender::channel(16);
+        let entered = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = StalledWriter {
+            entered: std::sync::Arc::clone(&entered),
+            release: Some(release_rx),
+            stalled: false,
+            written: std::sync::Arc::clone(&written),
+        };
+        let task = tokio::spawn(write_loop(
+            writer,
+            FrameEncoder::default(),
+            rx,
+            Duration::from_secs(5),
+            None,
+        ));
+
+        // The first packet makes the writer enter its blocked batch write.
+        let packet = || game::Outbound::Packet(vec![0u8; 8].into());
+        tx.send(packet()).unwrap();
+        entered.wait().await;
+
+        // Nothing can be drained, so two packets fill the queue and a third exceeds the
+        // 16-byte budget; the overflow latches and drops the packet.
+        let queued = || game::Outbound::Packet(vec![1u8; 8].into());
+        tx.send(queued()).unwrap();
+        tx.send(queued()).unwrap();
+        assert_eq!(tx.send(queued()).unwrap_err(), game::SendError::Full);
+        assert!(tx.is_overflowed());
+
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+
+        let bytes = written.lock().unwrap().clone();
+        let mut decoder = FrameDecoder::default();
+        decoder.feed(&bytes);
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| decoder.next_frame().unwrap()).collect();
+        let mut last = frames.last().expect("writer sent no packets").as_slice();
+        assert_eq!(VarInt::decode(&mut last).unwrap().0, PlayDisconnect::ID);
+        assert_eq!(
+            PlayDisconnect::decode(&mut last).unwrap().reason.0,
+            "Timed out"
+        );
+    }
 
     #[tokio::test]
     async fn status_ping_over_tcp() {

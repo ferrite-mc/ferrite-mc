@@ -59,6 +59,22 @@ pub struct WireWriter {
     stream: OwnedWriteHalf,
     cipher: Option<Cfb8>,
 }
+/// The write half used by the connection writer. `write_loop` is generic over this trait so
+/// tests can stall a batch write and exercise queue overflow without real socket buffers.
+pub(crate) trait BatchWriter {
+    fn write_batch<'a>(
+        &'a mut self,
+        batch: &'a mut [u8],
+    ) -> impl std::future::Future<Output = std::io::Result<()>> + 'a;
+}
+impl BatchWriter for WireWriter {
+    fn write_batch<'a>(
+        &'a mut self,
+        batch: &'a mut [u8],
+    ) -> impl std::future::Future<Output = std::io::Result<()>> + 'a {
+        WireWriter::write_batch(self, batch)
+    }
+}
 impl WireWriter {
     /// Encrypt `batch` in place (single CFB8 pass) and write it as one unit.
     pub async fn write_batch(&mut self, batch: &mut [u8]) -> std::io::Result<()> {

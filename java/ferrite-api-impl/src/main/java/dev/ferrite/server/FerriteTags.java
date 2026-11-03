@@ -13,26 +13,33 @@ import java.util.TreeMap;
 final class FerriteTags {
     private FerriteTags() {}
 
-    static final class MaterialTag implements org.bukkit.Tag<org.bukkit.Material> {
+    static final class DataTag<T extends org.bukkit.Keyed> implements org.bukkit.Tag<T> {
         private final org.bukkit.NamespacedKey key;
-        private final Set<org.bukkit.Material> values;
+        private final Set<T> values;
 
-        MaterialTag(org.bukkit.NamespacedKey key, Set<org.bukkit.Material> values) {
+        DataTag(org.bukkit.NamespacedKey key, Set<T> values) {
             this.key = key;
             this.values = Set.copyOf(values);
         }
 
         @Override public org.bukkit.NamespacedKey getKey() { return key; }
-        @Override public boolean isTagged(org.bukkit.Material material) { return material != null && values.contains(material); }
-        @Override public Set<org.bukkit.Material> getValues() { return values; }
+        @Override public boolean isTagged(T value) { return value != null && values.contains(value); }
+        @Override public Set<T> getValues() { return values; }
         @Override public String toString() { return "#" + key; }
     }
 
-    private static final java.util.concurrent.ConcurrentMap<String, List<MaterialTag>> CACHE =
+    private static final java.util.concurrent.ConcurrentMap<String, List<? extends org.bukkit.Tag<?>>> CACHE =
             new java.util.concurrent.ConcurrentHashMap<>();
 
-    static List<MaterialTag> tags(String registry) {
-        return CACHE.computeIfAbsent(folder(registry), FerriteTags::load);
+    @SuppressWarnings("unchecked")
+    static <T extends org.bukkit.Keyed> List<org.bukkit.Tag<T>> tags(String registry, Class<T> type) {
+        String folder = folder(registry);
+        boolean supported = (type == org.bukkit.Material.class && (folder.equals("block") || folder.equals("item")))
+                || (type == org.bukkit.Fluid.class && folder.equals("fluid"))
+                || (type == org.bukkit.entity.EntityType.class && folder.equals("entity_type"))
+                || (type == org.bukkit.GameEvent.class && folder.equals("game_event"));
+        if (!supported) throw new UnsupportedOperationException("Ferrite: unsupported tag registry/type: " + registry + "/" + type.getName());
+        return (List<org.bukkit.Tag<T>>) (List<?>) CACHE.computeIfAbsent(folder, ignored -> load(folder, type));
     }
 
     /** Bukkit accepts the plural registry names; map both spellings to the data-pack folder. */
@@ -40,17 +47,20 @@ final class FerriteTags {
         return switch (registry) {
             case "blocks", "block", "minecraft:block" -> "block";
             case "items", "item", "minecraft:item" -> "item";
+            case "fluids", "fluid", "minecraft:fluid" -> "fluid";
+            case "entity_types", "entity_type", "minecraft:entity_type" -> "entity_type";
+            case "game_events", "game_event", "minecraft:game_event" -> "game_event";
             default -> registry;
         };
     }
 
-    private static List<MaterialTag> load(String folder) {
+    private static <T extends org.bukkit.Keyed> List<DataTag<T>> load(String folder, Class<T> type) {
         var dir = Bootstrap.dataFile("data/minecraft/tags/" + folder);
         if (dir == null || !dir.isDirectory()) return List.of();
         Map<String, JsonArray> raw = new TreeMap<>();
-        try (var files = java.nio.file.Files.list(dir.toPath())) {
+        try (var files = java.nio.file.Files.walk(dir.toPath())) {
             for (var path : files.sorted().toList()) {
-                var name = path.getFileName().toString();
+                var name = dir.toPath().relativize(path).toString().replace('\\', '/');
                 if (!name.endsWith(".json")) continue;
                 var json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(path)).getAsJsonObject();
                 var values = json.getAsJsonArray("values");
@@ -59,16 +69,16 @@ final class FerriteTags {
         } catch (java.io.IOException e) {
             throw new java.io.UncheckedIOException(e);
         }
-        var tags = new ArrayList<MaterialTag>();
+        var tags = new ArrayList<DataTag<T>>();
         for (var name : raw.keySet()) {
-            tags.add(new MaterialTag(org.bukkit.NamespacedKey.fromString(name), resolve(name, raw, new HashSet<>())));
+            tags.add(new DataTag<>(org.bukkit.NamespacedKey.fromString(name), resolve(name, raw, new HashSet<>(), type)));
         }
         return List.copyOf(tags);
     }
 
     /** Resolves a tag and every `#tag` it references; cycles and unknown tags contribute nothing. */
-    private static Set<org.bukkit.Material> resolve(String name, Map<String, JsonArray> raw, Set<String> visiting) {
-        var values = new HashSet<org.bukkit.Material>();
+    private static <T extends org.bukkit.Keyed> Set<T> resolve(String name, Map<String, JsonArray> raw, Set<String> visiting, Class<T> type) {
+        var values = new HashSet<T>();
         if (!visiting.add(name)) return values;
         var entries = raw.get(name);
         if (entries == null) return values;
@@ -78,10 +88,21 @@ final class FerriteTags {
                             ? entry.getAsJsonObject().get("id").getAsString()
                             : null;
             if (id == null) continue;
-            if (id.startsWith("#")) values.addAll(resolve(normalize(id.substring(1)), raw, visiting));
+            if (id.startsWith("#")) values.addAll(resolve(normalize(id.substring(1)), raw, visiting, type));
             else {
-                var material = org.bukkit.Material.matchMaterial(id);
-                if (material != null) values.add(material);
+                org.bukkit.Keyed value = null;
+                if (type == org.bukkit.Material.class) value = org.bukkit.Material.matchMaterial(id);
+                else if (type == org.bukkit.entity.EntityType.class) {
+                    var key = org.bukkit.NamespacedKey.fromString(id);
+                    if (key != null) value = org.bukkit.Bukkit.getRegistry(org.bukkit.entity.EntityType.class).get(key);
+                } else if (type == org.bukkit.Fluid.class) {
+                    var key = org.bukkit.NamespacedKey.fromString(id);
+                    if (key != null) value = org.bukkit.Bukkit.getRegistry(org.bukkit.Fluid.class).get(key);
+                } else if (type == org.bukkit.GameEvent.class) {
+                    var key = org.bukkit.NamespacedKey.fromString(id);
+                    if (key != null) value = org.bukkit.Bukkit.getRegistry(org.bukkit.GameEvent.class).get(key);
+                }
+                if (value != null) values.add(type.cast(value));
             }
         }
         visiting.remove(name);

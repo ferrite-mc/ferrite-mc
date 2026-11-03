@@ -121,6 +121,7 @@ pub struct Outcome {
 
 /// The world state a command needs. Implemented for the chunk source and by tests.
 pub trait WorldBlocks {
+    fn dimension(&self) -> super::Dimension;
     fn block(&self, x: i32, y: i32, z: i32) -> Option<u32>;
     fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool;
     /// Creates the block entity a freshly placed block needs. Only command blocks are
@@ -131,6 +132,9 @@ pub trait WorldBlocks {
 }
 
 impl WorldBlocks for super::anvil::AnvilChunkSource {
+    fn dimension(&self) -> super::Dimension {
+        super::anvil::AnvilChunkSource::dimension(self)
+    }
     fn block(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         super::anvil::AnvilChunkSource::block(self, x, y, z)
     }
@@ -539,11 +543,7 @@ pub fn apply_world_result(
             location: change.location,
             block_state: VarInt(change.state as i32),
         });
-        for (loaded, outbound) in tracking.values() {
-            if loaded.contains(&chunk) {
-                let _ = outbound.send(update.clone());
-            }
-        }
+        super::region::broadcast_tracked_chunk(&tracking, world.dimension(), chunk, &update);
     }
     Ok(outcome)
 }
@@ -804,6 +804,9 @@ mod tests {
     }
 
     impl WorldBlocks for TestWorld {
+        fn dimension(&self) -> super::super::Dimension {
+            super::super::Dimension::Overworld
+        }
         fn block(&self, x: i32, y: i32, z: i32) -> Option<u32> {
             Some(self.get(x, y, z))
         }
@@ -835,6 +838,42 @@ mod tests {
 
     fn stone() -> u16 {
         block("minecraft:stone")
+    }
+
+    #[test]
+    fn setblock_updates_only_the_command_world() {
+        let (overworld, mut overworld_rx) = ferrite_net::game::OutboundSender::channel(1024);
+        let (nether, mut nether_rx) = ferrite_net::game::OutboundSender::channel(1024);
+        let tracking = Tracking::default();
+        {
+            let mut players = tracking.lock().unwrap();
+            players.insert(
+                uuid::Uuid::from_u128(1),
+                (
+                    super::super::Dimension::Overworld,
+                    [(0, 0)].into(),
+                    overworld,
+                ),
+            );
+            players.insert(
+                uuid::Uuid::from_u128(2),
+                (super::super::Dimension::Nether, [(0, 0)].into(), nether),
+            );
+        }
+        apply_world_result(
+            &WorldCommand::SetBlock {
+                pos: pos(1.0, 64.0, 2.0),
+                block: stone(),
+                mode: SetMode::Replace,
+                nbt: None,
+            },
+            &origin(),
+            &TestWorld::new(),
+            &tracking,
+        )
+        .unwrap();
+        assert!(overworld_rx.try_recv().is_some());
+        assert!(nether_rx.try_recv().is_none());
     }
 
     #[test]

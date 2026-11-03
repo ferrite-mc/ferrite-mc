@@ -3,6 +3,7 @@ repositories { mavenCentral(); maven("https://repo.papermc.io/repository/maven-p
 dependencies { implementation("io.papermc.paper:paper-api:26.3.build.227-stable"); testImplementation("org.junit.jupiter:junit-jupiter:5.13.4"); testRuntimeOnly("org.junit.platform:junit-platform-launcher") }
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 tasks.test { useJUnitPlatform() }
+tasks.test { systemProperty("test.vanilla.data", rootProject.projectDir.resolve("../../vanilla/26.3/generated").absolutePath) }
 tasks.test { dependsOn(":test-plugin:jar"); systemProperty("test.plugin.jar", project(":test-plugin").layout.buildDirectory.file("libs/test-plugin.jar").get().asFile.absolutePath) }
 tasks.test { inputs.file(project(":test-plugin").layout.buildDirectory.file("libs/test-plugin.jar")) }
 tasks.register<Jar>("shadedJar") {
@@ -18,6 +19,7 @@ tasks.test { dependsOn(":test-plugin:legacyJar"); inputs.file(project(":test-plu
 val registryOutput = layout.buildDirectory.dir("generated/registry-resources")
 val generateRegistryKeys by tasks.registering(Exec::class) {
     val vanilla = rootProject.projectDir.resolve("../../vanilla/26.3/generated")
+    inputs.file(projectDir.resolve("tools/generate_registry_keys.py"))
     inputs.file(vanilla.resolve("reports/registries.json"))
     inputs.dir(vanilla.resolve("data/minecraft/enchantment"))
     inputs.dir(vanilla.resolve("data/minecraft/worldgen/biome"))

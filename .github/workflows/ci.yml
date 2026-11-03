@@ -55,6 +55,12 @@ jobs:
       - name: Fetch vanilla data
         run: ${{ matrix.python }} tools/fetch_vanilla.py
 
+      - name: Test fixture generation helpers
+        run: ${{ matrix.python }} -m unittest discover -s tools -p test_make_fixture_world.py
+
+      - name: Generate fixture world
+        run: ${{ matrix.python }} tools/make_fixture_world.py
+
       # The vanilla/ tree is generated locally and must never be committed; only code that
       # reads it is tracked.
       - name: No Mojang data tracked

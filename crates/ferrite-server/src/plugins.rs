@@ -16,6 +16,7 @@ pub struct Settings {
     pub motd: String,
     pub max_players: u16,
     pub port: u16,
+    /// Effective view distance, already clamped to the client's 2..=32 range.
     pub view_distance: u8,
     pub online_mode: bool,
     pub whitelist: bool,
