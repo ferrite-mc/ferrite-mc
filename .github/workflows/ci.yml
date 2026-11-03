@@ -58,6 +58,7 @@ jobs:
       # The vanilla/ tree is generated locally and must never be committed; only code that
       # reads it is tracked.
       - name: No Mojang data tracked
+        shell: bash
         run: |
           if git ls-files | grep -E '^vanilla/'; then
             echo "vanilla/ is gitignored and must never be committed" >&2
