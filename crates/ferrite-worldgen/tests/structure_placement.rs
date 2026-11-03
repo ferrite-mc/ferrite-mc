@@ -19,6 +19,27 @@ fn loads_vanilla_structure_sets() {
 }
 
 #[test]
+fn pillager_outpost_excludes_nearby_village_candidates() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+    let data = WorldgenData::load(path).unwrap();
+    let outpost = "minecraft:pillager_outposts".parse().unwrap();
+    let villages = "minecraft:villages".parse().unwrap();
+    assert_eq!(
+        data.structure_set_exclusion_allows(&outpost, 123456789, -22, -22),
+        Some(false)
+    );
+    assert_eq!(
+        data.structure_set_exclusion_allows(&villages, 123456789, -22, -22),
+        Some(true)
+    );
+    assert_eq!(
+        data.structure_set_exclusion_allows(&outpost, 123456789, 0, 0),
+        Some(true)
+    );
+}
+
+#[test]
 fn village_candidate_matches_java_random_for_positive_and_negative_regions() {
     for (input, expected) in [
         ((0, 0), (21, 23)),

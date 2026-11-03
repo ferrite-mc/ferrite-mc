@@ -4,6 +4,57 @@ use crate::{ResourceId, WorldgenData};
 use ferrite_noise::{LegacyRandomSource, RandomSource};
 
 impl WorldgenData {
+    /// Applies placement-based exclusion for loaded random-spread sets.
+    /// Callers must separately account for which sets are enabled in the dimension.
+    pub fn structure_set_exclusion_allows(
+        &self,
+        id: &ResourceId,
+        seed: i64,
+        x: i32,
+        z: i32,
+    ) -> Option<bool> {
+        self.exclusion_allows_inner(id, seed, x, z, &mut std::collections::BTreeSet::new())
+    }
+
+    fn exclusion_allows_inner(
+        &self,
+        id: &ResourceId,
+        seed: i64,
+        x: i32,
+        z: i32,
+        visiting: &mut std::collections::BTreeSet<ResourceId>,
+    ) -> Option<bool> {
+        if !visiting.insert(id.clone()) {
+            return None;
+        }
+        let result = (|| {
+            let placement = self.structure_sets.get(id)?.get("placement")?;
+            let Some(zone) = placement.get("exclusion_zone") else {
+                return Some(true);
+            };
+            let other: ResourceId = zone.get("other_set")?.as_str()?.parse().ok()?;
+            let radius = i32::try_from(zone.get("chunk_count")?.as_i64()?).ok()?;
+            if !(1..=16).contains(&radius) {
+                return None;
+            }
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    let cx = x.checked_add(dx)?;
+                    let cz = z.checked_add(dz)?;
+                    if self.structure_set_candidate(&other, seed, cx, cz)? == (cx, cz)
+                        && self.structure_set_frequency_allows(&other, seed, cx, cz)?
+                        && self.exclusion_allows_inner(&other, seed, cx, cz, visiting)?
+                    {
+                        return Some(false);
+                    }
+                }
+            }
+            Some(true)
+        })();
+        visiting.remove(id);
+        result
+    }
+
     /// Applies only the structure set's frequency reduction. Other placement checks are separate.
     pub fn structure_set_frequency_allows(
         &self,
