@@ -53,3 +53,27 @@ fn random_spread_rejects_invalid_spacing() {
     assert_eq!(random_spread_candidate(0, 0, 0, 0, 0, 0, false), None);
     assert_eq!(random_spread_candidate(0, 0, 0, 8, 8, 0, false), None);
 }
+
+#[test]
+fn frequency_reducers_match_java_random_vectors() {
+    let mut data = WorldgenData::default();
+    let id: ferrite_worldgen::ResourceId = "minecraft:test".parse().unwrap();
+    for (method, expected) in [
+        ("default", [false, false, true, true]),
+        ("legacy_type_1", [true, true, false, false]),
+        ("legacy_type_2", [false, false, true, true]),
+        ("legacy_type_3", [false, true, false, false]),
+    ] {
+        data.structure_sets.insert(id.clone(), serde_json::json!({"placement": {"frequency": 0.2, "frequency_reduction_method": method, "salt": 10387312}}));
+        for ((x, z), result) in [(0, 0), (123, -77), (-100, 45), (300, 400)]
+            .into_iter()
+            .zip(expected)
+        {
+            assert_eq!(
+                data.structure_set_frequency_allows(&id, 123456789, x, z),
+                Some(result),
+                "{method} at ({x},{z})"
+            );
+        }
+    }
+}
