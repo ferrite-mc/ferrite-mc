@@ -108,6 +108,8 @@ pub struct WorldgenData {
     pub structure_sets: BTreeMap<ResourceId, serde_json::Value>,
     /// Raw structure definitions; individual structure generators are not yet implemented.
     pub structures: BTreeMap<ResourceId, serde_json::Value>,
+    /// Biome tags used by structure definitions.
+    pub biome_tags: BTreeMap<ResourceId, serde_json::Value>,
     pub block_state_providers: BTreeMap<ResourceId, BlockStateProvider>,
     pub block_tags: BTreeMap<ResourceId, BlockTag>,
     pub dimension_types: BTreeMap<ResourceId, DimensionType>,

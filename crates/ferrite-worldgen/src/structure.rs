@@ -4,6 +4,88 @@ use crate::{ResourceId, WorldgenData};
 use ferrite_noise::{LegacyRandomSource, RandomSource};
 
 impl WorldgenData {
+    /// Checks a structure's declared biome selector. Terrain and placement checks remain separate.
+    pub fn structure_biome_matches(
+        &self,
+        structure: &ResourceId,
+        biome: &ResourceId,
+    ) -> Option<bool> {
+        let selector = self.structures.get(structure)?.get("biomes")?;
+        if let Some(value) = selector.as_str() {
+            return self.biome_selector_matches(
+                value,
+                biome,
+                &mut std::collections::BTreeSet::new(),
+            );
+        }
+        for value in selector.as_array()? {
+            if self.biome_selector_matches(
+                value.as_str()?,
+                biome,
+                &mut std::collections::BTreeSet::new(),
+            )? {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
+    fn biome_selector_matches(
+        &self,
+        selector: &str,
+        biome: &ResourceId,
+        visiting: &mut std::collections::BTreeSet<ResourceId>,
+    ) -> Option<bool> {
+        let Some(tag_name) = selector.strip_prefix('#') else {
+            return Some(selector.parse::<ResourceId>().ok()? == *biome);
+        };
+        let id: ResourceId = tag_name.parse().ok()?;
+        if !visiting.insert(id.clone()) {
+            return None;
+        }
+        let result = (|| {
+            for entry in self.biome_tags.get(&id)?.get("values")?.as_array()? {
+                let (name, required) = if let Some(name) = entry.as_str() {
+                    (name, true)
+                } else {
+                    (
+                        entry.get("id")?.as_str()?,
+                        entry
+                            .get("required")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true),
+                    )
+                };
+                match self.biome_selector_matches(name, biome, visiting) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None if !required => {}
+                    None => return None,
+                }
+            }
+            Some(false)
+        })();
+        visiting.remove(&id);
+        result
+    }
+
+    /// Tests random-spread placement rules; dimension, biome and terrain eligibility are separate.
+    pub fn structure_set_placement_allows(
+        &self,
+        id: &ResourceId,
+        seed: i64,
+        x: i32,
+        z: i32,
+    ) -> Option<bool> {
+        if self.structure_set_candidate(id, seed, x, z)? != (x, z) {
+            return Some(false);
+        }
+        if !self.structure_set_frequency_allows(id, seed, x, z)? {
+            return Some(false);
+        }
+        self.structure_set_exclusion_allows(id, seed, x, z)
+    }
+
     /// Applies placement-based exclusion for loaded random-spread sets.
     /// Callers must separately account for which sets are enabled in the dimension.
     pub fn structure_set_exclusion_allows(
