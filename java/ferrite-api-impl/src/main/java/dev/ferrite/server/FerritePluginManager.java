@@ -111,6 +111,63 @@ final class FerritePluginManager extends PluginManagerStubs {
     }
     @Override public void clearPlugins() { disablePlugins(); }
     @Override public boolean useTimings() { return false; }
+    @Override public synchronized Plugin loadPlugin(File file) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
+        Objects.requireNonNull(file, "file");
+        var description = new FerriteLoaderService().getPluginDescription(file);
+        if (getPlugin(description.getName()) != null) throw new InvalidPluginException("Plugin already loaded: " + description.getName());
+        for (String dependency : description.getPluginDependencies()) {
+            if (getPlugin(dependency) == null) throw new UnknownDependencyException(dependency);
+        }
+        List<String> dependencies = new ArrayList<>();
+        for (String dependency : description.getPluginDependencies()) dependencies.add(dependency.toLowerCase(Locale.ROOT));
+        for (String dependency : description.getPluginSoftDependencies()) dependencies.add(dependency.toLowerCase(Locale.ROOT));
+        boolean aware;
+        try (JarFile jar = new JarFile(file)) {
+            var entry = jar.getJarEntry("paper-plugin.yml");
+            boolean paper = entry != null;
+            if (entry == null) entry = jar.getJarEntry("plugin.yml");
+            try (InputStream input = jar.getInputStream(entry)) {
+                Object data = new org.yaml.snakeyaml.Yaml(new org.yaml.snakeyaml.constructor.SafeConstructor(new org.yaml.snakeyaml.LoaderOptions())).load(input);
+                if (!(data instanceof Map<?, ?> map)) throw new InvalidDescriptionException("Invalid descriptor: " + file);
+                aware = Boolean.TRUE.equals(map.get("folia-supported"));
+                if (paper && map.get("dependencies") instanceof Map<?, ?> sections && sections.get("server") instanceof Map<?, ?> serverDependencies) {
+                    for (var dependency : serverDependencies.entrySet()) {
+                        if (!(dependency.getKey() instanceof String name) || !(dependency.getValue() instanceof Map<?, ?> options)) throw new InvalidDescriptionException("Invalid Paper dependency: " + dependency);
+                        if (!Boolean.FALSE.equals(options.get("required")) && getPlugin(name) == null) throw new UnknownDependencyException(name);
+                        if (!Boolean.FALSE.equals(options.get("join-classpath"))) dependencies.add(name.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+        } catch (IOException e) { throw new InvalidPluginException(e); }
+        FerriteClassLoader loader = null;
+        JavaPlugin plugin = null;
+        List<org.bukkit.permissions.Permission> declared = new ArrayList<>();
+        try {
+            loader = new FerriteClassLoader(server, file, description, dependencies, loaders);
+            loaders.put(description.getName().toLowerCase(Locale.ROOT), loader);
+            for (String alias : description.getProvidedPlugins()) loaders.putIfAbsent(alias.toLowerCase(Locale.ROOT), loader);
+            plugin = Class.forName(description.getMain(), true, loader).asSubclass(JavaPlugin.class).getDeclaredConstructor().newInstance();
+            plugins.add(plugin);
+            regionAware.put(plugin, aware);
+            server.registerCommands(plugin);
+            for (org.bukkit.permissions.Permission permission : description.getPermissions()) {
+                if (getPermission(permission.getName()) != null) continue;
+                addPermission(permission);
+                declared.add(permission);
+            }
+            declaredPermissions.put(plugin, declared);
+            return plugin;
+        } catch (Throwable failure) {
+            for (var permission : declared) removePermission(permission.getName());
+            if (plugin != null) { server.unregisterCommands(plugin); plugins.remove(plugin); regionAware.remove(plugin); declaredPermissions.remove(plugin); }
+            if (loader != null) {
+                final var failedLoader = loader;
+                loaders.values().removeIf(value -> value == failedLoader);
+                try { loader.close(); } catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
+            }
+            throw new InvalidPluginException(failure);
+        }
+    }
     void loadOrdered(String[] files, boolean[] modes) {
         if (modes != null && modes.length != files.length) throw new IllegalArgumentException("Plugin mode count mismatch");
         if (server.pluginsFolder == null && files.length > 0) server.pluginsFolder = new File(files[0]).getAbsoluteFile().getParent();

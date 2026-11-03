@@ -19,7 +19,7 @@ public org.bukkit.plugin.Plugin[] getPlugins() { throw new UnsupportedOperationE
 public boolean isPluginEnabled(java.lang.String a0) { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#isPluginEnabled"); }
 public boolean isPluginEnabled(org.bukkit.plugin.Plugin a0) { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#isPluginEnabled"); }
 public boolean isTransitiveDependency(io.papermc.paper.plugin.configuration.PluginMeta a0, io.papermc.paper.plugin.configuration.PluginMeta a1) { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#isTransitiveDependency"); }
-public org.bukkit.plugin.Plugin loadPlugin(java.io.File a0) { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#loadPlugin"); }
+public org.bukkit.plugin.Plugin loadPlugin(java.io.File a0) throws org.bukkit.plugin.InvalidPluginException, org.bukkit.plugin.InvalidDescriptionException, org.bukkit.plugin.UnknownDependencyException { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#loadPlugin"); }
 public org.bukkit.plugin.Plugin[] loadPlugins(java.io.File[] a0) { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#loadPlugins"); }
 public org.bukkit.plugin.Plugin[] loadPlugins(java.io.File a0) { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#loadPlugins"); }
 public void overridePermissionManager(org.bukkit.plugin.Plugin a0, io.papermc.paper.plugin.PermissionManager a1) { throw new UnsupportedOperationException("Ferrite: not implemented: PluginManager#overridePermissionManager"); }

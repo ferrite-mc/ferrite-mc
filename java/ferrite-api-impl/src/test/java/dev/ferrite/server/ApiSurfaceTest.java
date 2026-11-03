@@ -160,6 +160,41 @@ class ApiSurfaceTest {
         assertTrue(damage.isCancelled());
     }
 
+    @Test void damageSourceRetainsContextAndBuilderSnapshots() {
+        var key = net.kyori.adventure.pointer.Pointer.pointer(String.class, net.kyori.adventure.key.Key.key("ferrite", "test"));
+        var firstLocation = new org.bukkit.Location(world, 1, 2, 3);
+        var secondLocation = new org.bukkit.Location(world, 4, 5, 6);
+        var builder = org.bukkit.damage.DamageSource.builder(org.bukkit.damage.DamageType.GENERIC_KILL)
+                .withDamageLocation(firstLocation)
+                .withDamageContext(context -> context.withStatic(key, "first"));
+        var first = builder.build();
+        var second = builder.withDamageLocation(secondLocation)
+                .withDamageContext(context -> context.withStatic(key, "second"))
+                .build();
+        assertEquals("first", first.getDamageContext().get(key).orElseThrow());
+        assertEquals("second", second.getDamageContext().get(key).orElseThrow());
+        assertEquals(firstLocation, first.getDamageLocation());
+        assertEquals(secondLocation, second.getDamageLocation());
+    }
+
+    @Test void skinPartsExposeFlagsAndIndependentCopies() {
+        var parts = com.destroystokyo.paper.SkinParts.allParts();
+        assertEquals(0x7f, parts.getRaw());
+        assertTrue(parts.hasCapeEnabled());
+        assertTrue(parts.hasHatsEnabled());
+        var immutable = parts.immutableCopy();
+        var copy = parts.mutableCopy();
+        parts.setCapeEnabled(false);
+        parts.setLeftSleeveEnabled(false);
+        parts.setHatsEnabled(false);
+        assertEquals(0x3a, parts.getRaw());
+        assertEquals(0x7f, immutable.getRaw());
+        assertEquals(0x7f, copy.getRaw());
+        copy.setRightPantsEnabled(false);
+        assertFalse(copy.hasRightPantsEnabled());
+        assertTrue(immutable.hasRightPantsEnabled());
+    }
+
     @Test void deathAndRespawnEventsCarryTheirPositions() {
         var source = org.bukkit.damage.DamageSource.builder(org.bukkit.damage.DamageType.GENERIC_KILL).build();
         var drops = new ArrayList<org.bukkit.inventory.ItemStack>();
