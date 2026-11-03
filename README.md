@@ -21,7 +21,13 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 > protocol translation layer. **It has not yet been tested with a real 26.3 client.** No Mojang
 > code or assets are distributed here; vanilla data is generated locally from the official jar.
 
-## 진행 현황 (2026-11-02)
+## 진행 현황 (2026-11-03)
+
+- **월드젠 표면 계산**: 청크별로 표면 높이 보간점을 재사용합니다. 시드 0, 100청크, 8스레드의
+  교차 측정 6회 중앙값은 37.33 → 46.30청크/초였습니다. 공유 PC의 부하로 개별 결과가 크게
+  흔들렸으므로 추가 측정이 필요합니다. 기존 계산과의 비트 단위 비교 및 Java 대조 테스트는 통과했습니다.
+- **플러그인 호환성 검사**: 테스트 프로브에 바닐라 데이터 경로를 연결했습니다. EssentialsX 활성화와
+  `help` 명령은 확인했지만, 종료 시 예외와 NMS 호환성은 해결해야 합니다.
 
 - **CI**: 지역 병합과 느린 연결 테스트의 동기화를 보강했습니다. 바닐라 테스트 월드의 오래된
   조명 배열을 제거한 뒤 다시 계산하도록 수정했습니다. 같은 조명 수정의 통합 브랜치는 Linux·Windows CI가

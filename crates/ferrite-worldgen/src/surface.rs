@@ -10,6 +10,135 @@ use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::HashMap};
 use thiserror::Error;
 
+// Per-apply scope keeps node addresses and seeded noise valid for every cached corner.
+type SurfaceCornerCache = RefCell<HashMap<(usize, i32, i32, i32), f32>>;
+
+struct SurfaceInterpolationContext<'a> {
+    parent: &'a dyn FunctionContext,
+    cache: &'a SurfaceCornerCache,
+}
+
+impl FunctionContext for SurfaceInterpolationContext<'_> {
+    fn block_x(&self) -> i32 {
+        self.parent.block_x()
+    }
+    fn block_y(&self) -> i32 {
+        self.parent.block_y()
+    }
+    fn block_z(&self) -> i32 {
+        self.parent.block_z()
+    }
+    fn sample_noise(&self, id: &ResourceId, x: f64, y: f64, z: f64) -> f32 {
+        self.parent.sample_noise(id, x, y, z)
+    }
+    fn sample_blended(&self, settings: [f64; 5], x: i32, y: i32, z: i32) -> f32 {
+        self.parent.sample_blended(settings, x, y, z)
+    }
+    fn cached_cell(&self, node: usize, x: i32, y: i32, z: i32) -> Option<f32> {
+        self.cache.borrow().get(&(node, x, y, z)).copied()
+    }
+    fn store_cell(&self, node: usize, x: i32, y: i32, z: i32, value: f32) {
+        self.cache.borrow_mut().insert((node, x, y, z), value);
+    }
+}
+
+#[cfg(test)]
+mod interpolation_cache_tests {
+    use super::*;
+    use crate::{DensityNode, FunctionContext};
+    use std::cell::Cell;
+
+    struct CountingContext<'a> {
+        x: i32,
+        z: i32,
+        count: &'a Cell<usize>,
+    }
+    impl FunctionContext for CountingContext<'_> {
+        fn block_x(&self) -> i32 {
+            self.x
+        }
+        fn block_y(&self) -> i32 {
+            0
+        }
+        fn block_z(&self) -> i32 {
+            self.z
+        }
+        fn sample_noise(&self, _: &ResourceId, x: f64, y: f64, z: f64) -> f32 {
+            self.count.set(self.count.get() + 1);
+            (x * x + y + z * 3.0) as f32
+        }
+    }
+
+    #[test]
+    fn cached_interpolation_matches_uncached_across_negative_and_positive_cells() {
+        let function = DensityFunction::Node(DensityNode::Interpolated {
+            input: Box::new(DensityFunction::Node(DensityNode::Noise {
+                noise: ResourceId::parse("test").unwrap(),
+                xz_scale: 1.0,
+                y_scale: 1.0,
+                shift_x: None,
+                shift_z: None,
+            })),
+            cell_size_xz: 16,
+            cell_size_y: 1,
+        });
+        let cache = RefCell::new(HashMap::new());
+        let uncached_count = Cell::new(0);
+        let cached_count = Cell::new(0);
+        for x in -17..=17 {
+            for z in -17..=17 {
+                let direct = CountingContext {
+                    x,
+                    z,
+                    count: &uncached_count,
+                };
+                let parent = CountingContext {
+                    x,
+                    z,
+                    count: &cached_count,
+                };
+                let cached = SurfaceInterpolationContext {
+                    parent: &parent,
+                    cache: &cache,
+                };
+                assert_eq!(
+                    function.compute(&direct).to_bits(),
+                    function.compute(&cached).to_bits(),
+                    "{x},{z}"
+                );
+            }
+        }
+        assert!(cached_count.get() < uncached_count.get() / 2);
+    }
+
+    #[test]
+    fn cached_surface_level_matches_real_router_across_chunk_boundaries() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        let data = WorldgenData::load(&path).unwrap();
+        for seed in [0, -540_760_265] {
+            let noise = NoiseChunkGenerator::new(&data, seed).unwrap();
+            let settings = data.noise_settings("minecraft:overworld").unwrap();
+            let router = settings.noise_router.resolve_references(&data).unwrap();
+            let cache = SurfaceCornerCache::default();
+            for x in [-17, -16, -15, -1, 0, 1, 15, 16, 17] {
+                for z in [-17, -16, -15, -1, 0, 1, 15, 16, 17] {
+                    let position = noise.noise.at(x, 0, z);
+                    let context = SurfaceInterpolationContext {
+                        parent: &position,
+                        cache: &cache,
+                    };
+                    assert_eq!(
+                        router.chunk_surface_level.compute(&position).to_bits(),
+                        router.chunk_surface_level.compute(&context).to_bits(),
+                        "seed={seed} x={x} z={z}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SurfaceError {
     #[error("missing overworld noise settings")]
@@ -761,6 +890,7 @@ impl<'a> SurfaceGenerator<'a> {
             .borrow_mut()
             .reset(chunk_x, chunk_z, min_y, chunk.height_blocks() as i32);
         let mut states = HashMap::<&ResourceId, u32>::new();
+        let surface_corners = SurfaceCornerCache::default();
         for x in 0_u8..16 {
             for z in 0_u8..16 {
                 let wx = x0 + i32::from(x);
@@ -794,11 +924,12 @@ impl<'a> SurfaceGenerator<'a> {
                     + 3.0
                     + random.next_double() * 0.25) as i32;
                 let secondary = self.noise_value(&self.secondary_noise, wx, 0, wz);
-                let min_surface = self
-                    .router
-                    .chunk_surface_level
-                    .compute(&self.noise.noise.at(wx, 0, wz))
-                    .floor() as i32
+                let position = self.noise.noise.at(wx, 0, wz);
+                let context = SurfaceInterpolationContext {
+                    parent: &position,
+                    cache: &surface_corners,
+                };
+                let min_surface = self.router.chunk_surface_level.compute(&context).floor() as i32
                     + surface_depth
                     - 8;
                 let (mut above, mut water, mut next_ceiling) = (0, i32::MIN, i32::MAX);

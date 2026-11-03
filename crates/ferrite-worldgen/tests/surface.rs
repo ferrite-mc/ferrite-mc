@@ -1,4 +1,4 @@
-use ferrite_world::{BlockStateRegistry, RuntimeRegistry};
+use ferrite_world::{BlockStateRegistry, Chunk, HeightmapKind, RuntimeRegistry};
 use ferrite_worldgen::{
     DensityFunction, MaterialRule, MaterialRuleNode, NoiseChunkGenerator, ResourceId,
     SurfaceGenerator, WorldgenData,
@@ -8,6 +8,141 @@ use std::path::PathBuf;
 fn generated() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated")
 }
+
+/// Compares every block, heightmap, section counter and sampled biome of two surface passes.
+///
+/// A `SurfaceGenerator` memoizes biome selections and positional random factories between
+/// chunks. A freshly constructed generator is the reference for those caches: both must
+/// produce the same chunk for the same seed and coordinates.
+fn assert_same_chunk(
+    reused: &Chunk,
+    fresh: &Chunk,
+    reused_surface: &SurfaceGenerator<'_>,
+    fresh_surface: &SurfaceGenerator<'_>,
+    cx: i32,
+    cz: i32,
+) {
+    assert_eq!(reused.min_y(), fresh.min_y(), "chunk ({cx}, {cz}) min_y");
+    assert_eq!(
+        reused.height_blocks(),
+        fresh.height_blocks(),
+        "chunk ({cx}, {cz}) height"
+    );
+    let min_y = reused.min_y();
+    for z in 0_u8..16 {
+        for x in 0_u8..16 {
+            for y in min_y..min_y + reused.height_blocks() as i32 {
+                let reused_block = reused.block(x, y, z);
+                let fresh_block = fresh.block(x, y, z);
+                assert_eq!(
+                    reused_block, fresh_block,
+                    "chunk ({cx}, {cz}) block ({x}, {y}, {z})"
+                );
+            }
+        }
+    }
+    for kind in HeightmapKind::ALL {
+        assert_eq!(
+            reused.heights(kind),
+            fresh.heights(kind),
+            "chunk ({cx}, {cz}) heightmap {kind:?}"
+        );
+    }
+    assert_eq!(
+        reused.block_entities, fresh.block_entities,
+        "chunk ({cx}, {cz}) block entities"
+    );
+    assert_eq!(
+        reused.sections().len(),
+        fresh.sections().len(),
+        "chunk ({cx}, {cz}) section count"
+    );
+    for (index, (reused_section, fresh_section)) in
+        reused.sections().iter().zip(fresh.sections()).enumerate()
+    {
+        assert_eq!(
+            reused_section.block_count(),
+            fresh_section.block_count(),
+            "chunk ({cx}, {cz}) section {index} block count"
+        );
+        assert_eq!(
+            reused_section.fluid_count(),
+            fresh_section.fluid_count(),
+            "chunk ({cx}, {cz}) section {index} fluid count"
+        );
+        assert_eq!(
+            reused_section.randomly_ticking_block_count(),
+            fresh_section.randomly_ticking_block_count(),
+            "chunk ({cx}, {cz}) section {index} random block count"
+        );
+        assert_eq!(
+            reused_section.randomly_ticking_fluid_count(),
+            fresh_section.randomly_ticking_fluid_count(),
+            "chunk ({cx}, {cz}) section {index} random fluid count"
+        );
+    }
+    for qy in 0..reused.height_blocks() / 4 {
+        for qz in 0_i32..4 {
+            for qx in 0_i32..4 {
+                let x = cx * 16 + qx * 4 + 2;
+                let y = min_y + qy as i32 * 4 + 2;
+                let z = cz * 16 + qz * 4 + 2;
+                assert_eq!(
+                    reused_surface.biome_at(x, y, z),
+                    fresh_surface.biome_at(x, y, z),
+                    "chunk ({cx}, {cz}) biome at ({x}, {y}, {z})"
+                );
+            }
+        }
+    }
+}
+
+/// Runs `chunks` through one reused generator and one freshly constructed generator per
+/// chunk, asserting that generator reuse cannot change the surface output.
+fn assert_reuse_matches_fresh(
+    data: &WorldgenData,
+    registry: &RuntimeRegistry,
+    seed: i64,
+    chunks: &[(i32, i32)],
+) {
+    let noise = NoiseChunkGenerator::new(data, seed).expect("noise generator");
+    let reused_surface = SurfaceGenerator::new(data, &noise, seed).expect("reused surface");
+    for &(cx, cz) in chunks {
+        let fresh_surface = SurfaceGenerator::new(data, &noise, seed).expect("fresh surface");
+
+        let mut reused = noise
+            .fill_noise_chunk(cx, cz, registry)
+            .expect("reused noise fill");
+        reused_surface
+            .apply(&mut reused, cx, cz, registry)
+            .expect("reused surface apply");
+
+        let mut fresh = noise
+            .fill_noise_chunk(cx, cz, registry)
+            .expect("fresh noise fill");
+        fresh_surface
+            .apply(&mut fresh, cx, cz, registry)
+            .expect("fresh surface apply");
+
+        assert_same_chunk(&reused, &fresh, &reused_surface, &fresh_surface, cx, cz);
+    }
+}
+
+/// Chunk locations that stress the generator's per-chunk caches: a repeated chunk, negative
+/// coordinates and both sides of the 32-chunk region boundary.
+const REUSE_CHUNKS: &[(i32, i32)] = &[
+    (0, 0),
+    (0, 0),
+    (-1, -1),
+    (-1, 0),
+    (0, -1),
+    (31, 31),
+    (32, 32),
+    (-32, -32),
+    (-33, -33),
+    (31, -32),
+    (-32, 31),
+];
 
 #[test]
 fn block_rule_changes_filled_stone() {
@@ -308,4 +443,35 @@ fn fixture_top_blocks_match_vanilla_surface() {
         terrain_total > 0 && terrain_rate >= 0.98,
         "surface match below 98%: {terrain_rate}"
     );
+}
+
+/// Reusing one `SurfaceGenerator` across chunks must be indistinguishable from constructing a
+/// new generator for every chunk, including when the same chunk is visited twice and when the
+/// chunk coordinates are negative or on a region boundary. The height is reduced to 16 so the
+/// test can cover many locations; the full-height test below covers the real column.
+#[test]
+fn reused_surface_generator_matches_fresh_across_repeated_negative_and_boundary_chunks() {
+    let path = generated();
+    let mut data = WorldgenData::load(&path).expect("worldgen data");
+    let settings = data
+        .noise_settings
+        .get_mut(&ResourceId::parse("overworld").unwrap())
+        .expect("overworld noise settings");
+    settings.noise.min_y = 0;
+    settings.noise.height = 16;
+    settings.aquifers = None;
+    settings.noise_router.final_density = DensityFunction::Constant(1.0);
+    let registry = RuntimeRegistry::load(&path).expect("block registry");
+    assert_reuse_matches_fresh(&data, &registry, 42, REUSE_CHUNKS);
+}
+
+/// The same reuse comparison against the real 384-block overworld column, at a negative chunk
+/// and at a region boundary. This exercises the biome cache's full vertical extent and the
+/// heightmap lookups the surface pass performs at every column.
+#[test]
+fn reused_surface_generator_matches_fresh_on_full_height_negative_and_region_boundary_chunks() {
+    let path = generated();
+    let data = WorldgenData::load(&path).expect("worldgen data");
+    let registry = RuntimeRegistry::load(&path).expect("block registry");
+    assert_reuse_matches_fresh(&data, &registry, 42, &[(0, 0), (-1, -1), (31, -32)]);
 }
