@@ -47,6 +47,7 @@ mod noise_settings;
 mod resolve;
 mod seeded_noise;
 mod strict;
+mod structure;
 mod surface;
 
 use std::collections::BTreeMap;
@@ -80,6 +81,7 @@ pub use multi_noise::{
 };
 pub use noise::NoiseParameters;
 pub use noise_chunk::{NoiseChunkError, NoiseChunkGenerator};
+pub use structure::random_spread_candidate;
 
 pub use noise_settings::{
     AquiferSettings, DebugFunction, NoiseRouter, NoiseSamplingSettings, NoiseSettings,
@@ -102,6 +104,10 @@ pub struct WorldgenData {
     pub material_rules: BTreeMap<ResourceId, MaterialRule>,
     pub configured_features: BTreeMap<ResourceId, ConfiguredFeature>,
     pub placed_features: BTreeMap<ResourceId, PlacedFeature>,
+    /// Raw structure-set definitions, including placement and weighted entries.
+    pub structure_sets: BTreeMap<ResourceId, serde_json::Value>,
+    /// Raw structure definitions; individual structure generators are not yet implemented.
+    pub structures: BTreeMap<ResourceId, serde_json::Value>,
     pub block_state_providers: BTreeMap<ResourceId, BlockStateProvider>,
     pub block_tags: BTreeMap<ResourceId, BlockTag>,
     pub dimension_types: BTreeMap<ResourceId, DimensionType>,

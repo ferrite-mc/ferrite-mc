@@ -12,3 +12,20 @@ generation and lighting; they do not measure disk reads or multiplayer performan
 For the retained change, unit tests compare cached and uncached density results bit for bit
 across positive and negative cell boundaries, including the real overworld router at two
 seeds. The full `ferrite-worldgen` test suite and Java differential tests passed locally.
+
+After integrating the corner cache with the separate column-noise cache on `oc6gpt`,
+and before changing feature-placement RNG ordering,
+one release run of `genbench 0 100 0 0` with `FERRITE_WORLDGEN_THREADS=8` measured
+51.07 chunks/s. Per-chunk stage times were 74.25 ms noise, 42.82 ms surface,
+4.27 ms carvers, 9.27 ms biomes, 13.45 ms features and 0.57 ms light; these are
+summed worker times, not wall-clock latency. The packet SHA-256 was
+`68702d397903f4fa3849025c425631d96f4bc0958148a0d0ce39f811fd5ace4d`.
+This single run is not a controlled before/after comparison.
+
+After the feature-placement and conifer changes, another single run with the same
+arguments measured 26.43 chunks/s (noise 143.19 ms, surface 90.01 ms, carvers
+8.16 ms, biomes 17.36 ms, features 25.72 ms and light 1.06 ms per chunk of
+summed worker time). Its packet hash was
+`cae55beb976c4f6f700a128b266e0fdd82b4933e7c073880b65b84f66a64a384`.
+The user reported a game running during this period; machine load was uncontrolled,
+and the changed generation output also makes this unsuitable as a performance comparison.
