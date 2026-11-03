@@ -473,12 +473,24 @@ fn bridge_absorbs_idle_neighbor_while_other_region_ticks() {
     topology.add_chunk(ChunkPos(2, 0));
     let scheduler = Scheduler::new(topology, (), 2, |_| {}, |_| {});
     let release = block_region(&scheduler, ChunkPos(0, 0));
+    // Occupy the other worker as well, so the neighboring region cannot start
+    // a tick between checking its state and adding the bridge.
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_global_tx, release_global_rx) = mpsc::channel();
+    scheduler.schedule_global(move |_| {
+        entered_tx.send(()).unwrap();
+        release_global_rx.recv().unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let neighbor = scheduler.owner(ChunkPos(2, 0)).unwrap();
+    assert_eq!(scheduler.region_state(neighbor), Some(RegionState::Ready));
     scheduler.add_chunk(ChunkPos(1, 0));
     let bridge = scheduler
         .owner(ChunkPos(1, 0))
         .expect("bridge is owned immediately");
     assert_eq!(scheduler.region_state(bridge), Some(RegionState::Transient));
     assert_eq!(scheduler.owner(ChunkPos(2, 0)), Some(bridge));
+    release_global_tx.send(()).unwrap();
     release.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     while scheduler.owner(ChunkPos(0, 0)) != scheduler.owner(ChunkPos(2, 0)) {
