@@ -192,7 +192,9 @@ pub fn decoration_seed(seed: i64, x: i32, z: i32) -> i64 {
 
 /// `WorldgenRandom.setFeatureSeed`: the seed for one placed feature.
 pub fn feature_seed(decoration_seed: i64, index: i32, step: i32) -> i64 {
-    decoration_seed + i64::from(index) + 10_000 * i64::from(step)
+    decoration_seed
+        .wrapping_add(i64::from(index))
+        .wrapping_add(i64::from(10_000_i32.wrapping_mul(step)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -839,40 +841,34 @@ impl<'a> FeatureGenerator<'a> {
         {
             return Ok(());
         }
-        let mut positions = Vec::new();
         self.apply_modifier(
             chunk,
             &modifiers,
             0,
             origin,
             random,
-            &mut positions,
+            &placed.feature,
             biome_at,
             registry,
             placed_id,
-        );
-        for position in positions {
-            self.place_feature(chunk, &placed.feature, position, random, registry, biome_at)?;
-        }
-        Ok(())
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn apply_modifier(
         &self,
-        chunk: &Chunk,
+        chunk: &mut Chunk,
         modifiers: &[Modifier],
         index: usize,
         position: BlockPos,
         random: &mut dyn RandomSource,
-        output: &mut Vec<BlockPos>,
+        feature: &ResourceId,
         biome_at: &dyn Fn(i32, i32, i32) -> ResourceId,
         registry: &impl BlockStateRegistry,
         placed_id: &ResourceId,
-    ) {
+    ) -> Result<(), FeatureError> {
         if index == modifiers.len() {
-            output.push(position);
-            return;
+            return self.place_feature(chunk, feature, position, random, registry, biome_at);
         }
         let mut produced = Vec::new();
         match &modifiers[index] {
@@ -948,12 +944,13 @@ impl<'a> FeatureGenerator<'a> {
                 index + 1,
                 position,
                 random,
-                output,
+                feature,
                 biome_at,
                 registry,
                 placed_id,
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn biome_has_feature(&self, biome: ResourceId, placed: &ResourceId) -> bool {
@@ -1177,22 +1174,17 @@ impl<'a> FeatureGenerator<'a> {
         {
             return Ok(());
         }
-        let mut positions = Vec::new();
         self.apply_modifier(
             chunk,
             &modifiers,
             0,
             origin,
             random,
-            &mut positions,
+            &placed.feature,
             biome_at,
             registry,
             id,
-        );
-        for position in positions {
-            self.place_feature(chunk, &placed.feature, position, random, registry, biome_at)?;
-        }
-        Ok(())
+        )
     }
 
     fn compile(&self, configured: &ConfiguredFeature) -> Result<CompiledFeature, FeatureError> {
@@ -1895,6 +1887,13 @@ mod tests {
         let decoration = decoration_seed(42, 16, -32);
         assert_eq!(feature_seed(decoration, 0, 0), decoration);
         assert_eq!(feature_seed(decoration, 3, 2), decoration + 3 + 20_000);
+    }
+
+    #[test]
+    fn feature_seed_wraps_at_long_boundary() {
+        assert_eq!(feature_seed(i64::MAX, 1, 0), i64::MIN);
+        assert_eq!(feature_seed(i64::MAX - 5, 0, 1), i64::MIN + 9_994);
+        assert_eq!(feature_seed(0, 0, i32::MAX), -10_000);
     }
 
     #[test]

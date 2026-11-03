@@ -409,6 +409,11 @@ fn fixture_features_match_vanilla() {
     }
 
     assert!(ore_expected > 0, "fixture has no ore blocks");
+    // Placement must consume the shared RNG between candidates, as vanilla does.
+    assert!(
+        ore_rate >= 0.15,
+        "ore position match too low: {ore_rate:.3}"
+    );
     // Exact positions depend on the large andesite/diorite/granite/tuff blobs
     // whose ore shapes shift which base block an ore replaces. The statistical
     // contract is the total ore volume and the presence of every common type.
