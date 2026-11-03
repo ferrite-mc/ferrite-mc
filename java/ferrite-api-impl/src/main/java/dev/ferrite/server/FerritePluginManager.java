@@ -93,12 +93,16 @@ final class FerritePluginManager extends PluginManagerStubs {
     @Override public void enablePlugin(Plugin plugin) {
         java.util.Objects.requireNonNull(plugin, "plugin");
         if (!(plugin instanceof JavaPlugin javaPlugin) || !plugins.contains(javaPlugin)) throw new IllegalArgumentException("Plugin is not loaded: " + plugin.getName());
-        if (!plugin.isEnabled()) javaPlugin.setEnabled(true);
+        if (!plugin.isEnabled()) {
+            javaPlugin.setEnabled(true);
+            callEvent(new org.bukkit.event.server.PluginEnableEvent(plugin));
+        }
     }
     @Override public void disablePlugin(Plugin plugin) {
         java.util.Objects.requireNonNull(plugin, "plugin");
         if (!(plugin instanceof JavaPlugin javaPlugin) || !plugins.contains(javaPlugin)) throw new IllegalArgumentException("Plugin is not loaded: " + plugin.getName());
         if (!plugin.isEnabled()) return;
+        callEvent(new org.bukkit.event.server.PluginDisableEvent(plugin));
         javaPlugin.setEnabled(false);
         server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);
     }
@@ -158,7 +162,7 @@ final class FerritePluginManager extends PluginManagerStubs {
                 }
                 declaredPermissions.put(plugin, declared);
             }
-            for (JavaPlugin plugin : plugins) plugin.setEnabled(true);
+            for (JavaPlugin plugin : plugins) enablePlugin(plugin);
         } catch (Throwable e) { disablePlugins(); throw new IllegalStateException("Failed to load plugin", e); }
     }
     public Plugin getPlugin(String name) { Plugin direct = plugins.stream().filter(p -> p.getName().equalsIgnoreCase(name)).findFirst().orElse(null); return direct != null ? direct : plugins.stream().filter(p -> p.getDescription().getProvidedPlugins().stream().anyMatch(alias -> alias.equalsIgnoreCase(name))).findFirst().orElse(null); }
@@ -168,7 +172,7 @@ final class FerritePluginManager extends PluginManagerStubs {
     public void disablePlugins() {
         for (int i = plugins.size() - 1; i >= 0; i--) {
             JavaPlugin plugin = plugins.get(i);
-            try { plugin.setEnabled(false); }
+            try { disablePlugin(plugin); }
             catch (Throwable e) { plugin.getLogger().log(java.util.logging.Level.SEVERE, "Plugin disable failed", e); }
             finally {
                 server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);

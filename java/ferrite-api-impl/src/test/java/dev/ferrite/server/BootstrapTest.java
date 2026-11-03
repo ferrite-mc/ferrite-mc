@@ -198,10 +198,23 @@ class BootstrapTest {
         assertSame(Bukkit.getPluginManager().getPlugin("FerriteDependency"), Bukkit.getPluginManager().getPlugin("FerriteAlias"));
         var dependency = Bukkit.getPluginManager().getPlugin("FerriteDependency");
         assertTrue(dependency.isEnabled());
+        var lifecycle = new ArrayList<String>();
+        var lifecycleOwner = Bukkit.getPluginManager().getPlugin("FerriteTest");
+        org.bukkit.event.Listener lifecycleListener = new org.bukkit.event.Listener() {};
+        Bukkit.getPluginManager().registerEvent(org.bukkit.event.server.PluginDisableEvent.class, lifecycleListener, org.bukkit.event.EventPriority.NORMAL, (listener, event) -> {
+            var changed = ((org.bukkit.event.server.PluginDisableEvent) event).getPlugin();
+            if (changed == dependency) lifecycle.add("disable:" + changed.isEnabled());
+        }, lifecycleOwner);
+        Bukkit.getPluginManager().registerEvent(org.bukkit.event.server.PluginEnableEvent.class, lifecycleListener, org.bukkit.event.EventPriority.NORMAL, (listener, event) -> {
+            var changed = ((org.bukkit.event.server.PluginEnableEvent) event).getPlugin();
+            if (changed == dependency) lifecycle.add("enable:" + changed.isEnabled());
+        }, lifecycleOwner);
         Bukkit.getPluginManager().disablePlugin(dependency);
         assertFalse(dependency.isEnabled());
         Bukkit.getPluginManager().enablePlugin(dependency);
         assertTrue(dependency.isEnabled());
+        Bukkit.getPluginManager().enablePlugin(dependency);
+        assertEquals(List.of("disable:true", "enable:true"), lifecycle);
         var ghost = (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.plugin.Plugin.class}, (proxy, method, args) -> switch (method.getName()) {
             case "getName" -> "Ghost";
             case "isEnabled" -> false;
@@ -373,6 +386,7 @@ class BootstrapTest {
         Bukkit.getScheduler().runTaskTimerAsynchronously(asyncOwner, asyncAfterDisable::incrementAndGet, 1, 1);
         try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         Bootstrap.shutdown();
+        assertEquals(List.of("disable:true", "enable:true", "disable:true"), lifecycle);
         try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         int settledAsync = asyncAfterDisable.get();
         try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
