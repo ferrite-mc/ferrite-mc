@@ -12,7 +12,7 @@
 //! Only the feature types that the overworld needs for terrain decoration are
 //! implemented: `minecraft:ore`, `minecraft:simple_block`,
 //! `minecraft:random_selector` and `minecraft:tree` (straight trunks with blob
-//! foliage). Other configured features are skipped, which is why the fixture
+//! or spruce foliage). Other configured features are skipped, which is why the fixture
 //! differential reports rates instead of demanding an exact whole-chunk match.
 //!
 //! Feature placement is clipped to the target chunk: vanilla's `WorldGenRegion`
@@ -704,6 +704,7 @@ struct TreeConfig {
     foliage_height: i32,
     foliage_radius: i32,
     foliage_offset: i32,
+    spruce: Option<Box<(IntProvider, IntProvider, IntProvider)>>,
     limit: i32,
     lower_size: i32,
     upper_size: i32,
@@ -1279,9 +1280,26 @@ impl<'a> FeatureGenerator<'a> {
             return None;
         }
         let foliage_placer = config.get("foliage_placer")?;
-        if foliage_placer.get("type")?.as_str()? != "minecraft:blob_foliage_placer" {
-            return None;
-        }
+        let (foliage_height, foliage_radius, foliage_offset, spruce) =
+            match foliage_placer.get("type")?.as_str()? {
+                "minecraft:blob_foliage_placer" => (
+                    i32::try_from(foliage_placer.get("height")?.as_i64()?).ok()?,
+                    i32::try_from(foliage_placer.get("radius")?.as_i64()?).ok()?,
+                    i32::try_from(foliage_placer.get("offset")?.as_i64()?).ok()?,
+                    None,
+                ),
+                "minecraft:spruce_foliage_placer" => (
+                    0,
+                    0,
+                    0,
+                    Some(Box::new((
+                        IntProvider::from_value(foliage_placer.get("trunk_height")?)?,
+                        IntProvider::from_value(foliage_placer.get("radius")?)?,
+                        IntProvider::from_value(foliage_placer.get("offset")?)?,
+                    ))),
+                ),
+                _ => return None,
+            };
         let size = config.get("minimum_size")?;
         let number = |value: &Value, name: &str, default: i64| {
             value
@@ -1298,9 +1316,10 @@ impl<'a> FeatureGenerator<'a> {
             base_height: i32::try_from(trunk_placer.get("base_height")?.as_i64()?).ok()?,
             height_rand_a: i32::try_from(trunk_placer.get("height_rand_a")?.as_i64()?).ok()?,
             height_rand_b: i32::try_from(trunk_placer.get("height_rand_b")?.as_i64()?).ok()?,
-            foliage_height: i32::try_from(foliage_placer.get("height")?.as_i64()?).ok()?,
-            foliage_radius: i32::try_from(foliage_placer.get("radius")?.as_i64()?).ok()?,
-            foliage_offset: i32::try_from(foliage_placer.get("offset")?.as_i64()?).ok()?,
+            foliage_height,
+            foliage_radius,
+            foliage_offset,
+            spruce,
             limit: number(size, "limit", 1)?,
             lower_size: number(size, "lower_size", 0)?,
             upper_size: number(size, "upper_size", 1)?,
@@ -1592,6 +1611,13 @@ impl<'a> FeatureGenerator<'a> {
         let height = tree.base_height
             + random.next_int_bound(tree.height_rand_a + 1)
             + random.next_int_bound(tree.height_rand_b + 1);
+        let spruce_shape = tree
+            .spruce
+            .as_deref()
+            .map(|(trunk_height, radius, offset)| {
+                let foliage_height = (height - trunk_height.sample(random)).max(4);
+                (foliage_height, radius.sample(random), offset)
+            });
         let free = self.max_free_tree_height(chunk, origin, height, tree, registry);
         let height = height.min(free);
         if height < 0 {
@@ -1616,6 +1642,33 @@ impl<'a> FeatureGenerator<'a> {
         let Some(foliage) = self.provider_state(&tree.foliage, origin, random, registry) else {
             return;
         };
+        if let Some((foliage_height, max_radius, offset)) = spruce_shape {
+            let offset = offset.sample(random);
+            let mut radius = random.next_int_bound(2);
+            let mut limit = 1;
+            let mut reset = 0;
+            for y in (-foliage_height..=offset).rev() {
+                for dx in -radius..=radius {
+                    for dz in -radius..=radius {
+                        if radius > 0 && dx.abs() == radius && dz.abs() == radius {
+                            continue;
+                        }
+                        let position = origin.offset(dx, height + y, dz);
+                        if self.valid_tree_pos(chunk, position, registry) {
+                            let _ = self.set_state(chunk, position, &foliage, registry);
+                        }
+                    }
+                }
+                if radius >= limit {
+                    radius = reset;
+                    reset = 1;
+                    limit = (limit + 1).min(max_radius);
+                } else {
+                    radius += 1;
+                }
+            }
+            return;
+        }
         let top = height + tree.foliage_offset;
         for y in (top - tree.foliage_height..=top).rev() {
             let offset = top - y;
@@ -1880,7 +1933,58 @@ fn is_double_plant(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{decoration_seed, feature_seed};
+    use super::{BlockPos, FeatureGenerator, WorldgenRandom, decoration_seed, feature_seed};
+    use crate::WorldgenData;
+    use ferrite_world::{BlockStateRegistry, Chunk, RuntimeRegistry};
+
+    #[test]
+    fn vanilla_spruce_configuration_is_supported() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        let data = WorldgenData::load(path).unwrap();
+        let generator = FeatureGenerator::new(&data, 0, -64, 384);
+        let spruce = data
+            .configured_feature(&"minecraft:spruce".parse().unwrap())
+            .unwrap();
+        assert!(generator.compile_tree(&spruce.config).is_some());
+    }
+
+    #[test]
+    fn spruce_tree_places_trunk_and_foliage() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        let data = WorldgenData::load(&path).unwrap();
+        let registry = RuntimeRegistry::load(&path).unwrap();
+        let generator = FeatureGenerator::new(&data, 0, -64, 384);
+        let spruce = data
+            .configured_feature(&"minecraft:spruce".parse().unwrap())
+            .unwrap();
+        let tree = generator.compile_tree(&spruce.config).unwrap();
+        let air = registry
+            .block_id("minecraft:air", &Default::default())
+            .unwrap();
+        let mut chunk = Chunk::new(-64, 384, air, 0, 15, 6).unwrap();
+        generator.place_tree(
+            &mut chunk,
+            BlockPos::new(8, 0, 8),
+            &mut WorldgenRandom::new(42),
+            &tree,
+            &registry,
+        );
+        let mut logs = 0;
+        let mut leaves = 0;
+        for y in 0..20 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let state = registry.block_state(chunk.block(x, y, z).unwrap()).unwrap();
+                    logs += usize::from(state.name == "minecraft:spruce_log");
+                    leaves += usize::from(state.name == "minecraft:spruce_leaves");
+                }
+            }
+        }
+        assert!(logs >= 5, "expected a spruce trunk, got {logs} logs");
+        assert!(leaves > 0, "expected spruce foliage");
+    }
 
     #[test]
     fn feature_seed_uses_the_vanilla_offsets() {
