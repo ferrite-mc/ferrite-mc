@@ -617,6 +617,8 @@ struct State<D: RegionData, G> {
 struct Shared<D: RegionData, G> {
     state: Mutex<State<D, G>>,
     wake: Condvar,
+    /// Tick period in nanoseconds; `/tick rate` changes it while running.
+    period_nanos: std::sync::atomic::AtomicU64,
 }
 enum Work<D, G> {
     Region(RegionId, D, Vec<(ChunkPos, RegionTask<D>)>),
@@ -676,6 +678,7 @@ impl<D: RegionData, G: Send + 'static> Scheduler<D, G> {
                 stopping: false,
             }),
             wake: Condvar::new(),
+            period_nanos: std::sync::atomic::AtomicU64::new(config.period.as_nanos() as u64),
         });
         let tick = Arc::new(tick);
         let global_tick = Arc::new(global_tick);
@@ -701,6 +704,21 @@ impl<D: RegionData, G: Send + 'static> Scheduler<D, G> {
             SchedulerConfig::default(),
             tick,
             global_tick,
+        )
+    }
+    /// Changes the tick period of every region and the global region from the next tick on.
+    pub fn set_period(&self, period: Duration) {
+        let nanos = (period.as_nanos() as u64).max(1);
+        self.shared
+            .period_nanos
+            .store(nanos, std::sync::atomic::Ordering::Relaxed);
+        self.shared.wake.notify_all();
+    }
+    pub fn period(&self) -> Duration {
+        Duration::from_nanos(
+            self.shared
+                .period_nanos
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
     fn mutate(&self, mutation: Mutation) {
@@ -1084,6 +1102,14 @@ fn worker<D: RegionData, G: Send + 'static>(
                     continue;
                 }
                 let now = Instant::now();
+                let config = SchedulerConfig {
+                    period: Duration::from_nanos(
+                        shared
+                            .period_nanos
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    ),
+                    ..config
+                };
                 if deadline > now {
                     shared.wake.wait_for(&mut s, deadline - now);
                     continue;
