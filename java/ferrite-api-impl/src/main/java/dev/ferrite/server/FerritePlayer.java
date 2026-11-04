@@ -16,6 +16,7 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     private float experienceProgress;
     private int totalExperience;
     private org.bukkit.GameMode mode = org.bukkit.GameMode.SURVIVAL;
+    private final org.bukkit.entity.Player.Spigot spigot = new FerritePlayerSpigot(this);
     private FerritePlayer(FerriteServer server, java.util.UUID id, String name, boolean operator, double health, int food, int mode, org.bukkit.Location location) {
         this.server = server; this.id = id; this.name = name; this.operator = operator; this.health = health; this.food = food; this.mode = java.util.Objects.requireNonNull(org.bukkit.GameMode.getByValue(mode)); this.location = location;
         this.perm = new org.bukkit.permissions.PermissibleBase(this);
@@ -65,6 +66,7 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     @Override public void sendTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) { if (!Native.playerVisual(id.toString(), 2, title, subtitle, fadeIn, stay, fadeOut)) throw new IllegalStateException("No player command handler"); }
     @Override public org.bukkit.Server getServer() { return server; }
     @Override public org.bukkit.entity.Player getPlayer() { return this; }
+    @Override public org.bukkit.entity.Player.Spigot spigot() { return spigot; }
     @Override public boolean isOnline() { return server.getPlayer(id) == this; }
     @Override public boolean isOp() { return operator; }
     @Override public void setOp(boolean value) { if (!Native.playerOperator(id.toString(), value)) throw new IllegalStateException("No player command handler"); operator = value; perm.recalculatePermissions(); }

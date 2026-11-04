@@ -93,6 +93,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getGameTime", "hasStorm", "isThundering", "isClearWeather", "getWeatherDuration", "getThunderDuration", "getClearWeatherDuration", "getDifficulty" -> hostValue(method, null);
             case "getMoonPhase" -> moonPhase(method);
             case "getWorldBorder" -> border();
+            case "spigot" -> spigot();
             case "getSeed" -> hostLong("getSeed()", 0L);
             case "isDayTime" -> { long t = hostLong("getTime()", time) % 24_000; yield t < 12_000 || t > 23_960; }
             case "isHardcore" -> false;
@@ -124,6 +125,12 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         var b = worldBorder;
         if (b == null) worldBorder = b = new FerriteHostBorder(proxy, id);
         return b;
+    }
+    private volatile org.bukkit.World.Spigot spigot;
+    private org.bukkit.World.Spigot spigot() {
+        var facade = spigot;
+        if (facade == null) spigot = facade = new FerriteWorldSpigot(proxy);
+        return facade;
     }
     private long hostLong(String method, long fallback) {
         try { return Long.parseLong((String) HostBridge.call("World", id, method, String.class)); }
