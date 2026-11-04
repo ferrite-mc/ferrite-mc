@@ -53,4 +53,15 @@ class FerriteChunkDataTest {
         chunk.setBlock(1, 20, 1, Material.STONE);
         assertEquals(21, chunk.getHeight(HeightMap.WORLD_SURFACE, 1, 1));
     }
+
+    @Test void emptySnapshotIsAllAirAndRangeChecked() {
+        var snap = org.bukkit.Bukkit.getWorld("chunkdata").getEmptyChunkSnapshot(2, -3, false, false);
+        assertEquals(2, snap.getX());
+        assertEquals(-3, snap.getZ());
+        assertEquals("chunkdata", snap.getWorldName());
+        assertEquals(Material.AIR, snap.getBlockType(1, 70, 1));
+        assertTrue(snap.isSectionEmpty(4));
+        assertEquals(-64, snap.getHighestBlockYAt(0, 0));
+        assertThrows(IndexOutOfBoundsException.class, () -> snap.getBlockType(16, 0, 0));
+    }
 }
