@@ -145,6 +145,8 @@ pub enum Command {
     },
     /// `/kill`: `damageSources().genericKill()` applied on the owning region thread.
     Kill,
+    /// `/damage`: hurt the player on the owning region thread.
+    Damage(DamageKind, f32),
     /// A Paper `EntityScheduler` task for this player, run on the region that owns them.
     PluginEntityTask(ferrite_plugin::EntityTask),
     /// `/effect give`: apply a mob effect on the owning region thread.
@@ -2691,6 +2693,10 @@ impl Player {
                     }
                     continue;
                 }
+                Command::Damage(kind, amount) => {
+                    self.hurt(kind, amount);
+                    continue;
+                }
                 Command::Kill => {
                     // Vanilla `/kill` uses `damageSources().genericKill()`: it bypasses
                     // invulnerability and creative mode, but absorption still absorbs first.
@@ -3524,6 +3530,36 @@ impl Region {
         let mut world =
             super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
         self.updates.apply(&mut world, removed);
+    }
+
+    /// `World#spawnEntity` / `spawnFallingBlock`: a falling block, primed TNT or a modelled mob.
+    /// Returns whether something was spawned.
+    pub fn plugin_spawn(&mut self, center: [f64; 3], kind: &str, block: Option<&str>) -> bool {
+        use ferrite_math::Vec3;
+        if !center
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+        {
+            return false;
+        }
+        let pos = Vec3::new(center[0], center[1], center[2]);
+        let record = match kind {
+            "minecraft:falling_block" => {
+                let Some(state) = block.and_then(ferrite_data::blocks::default_state) else {
+                    return false;
+                };
+                ferrite_entity::falling::new_falling(pos, state)
+            }
+            "minecraft:tnt" => ferrite_entity::tnt::new_primed_tnt(pos, 80),
+            other => {
+                let Some(mob) = ferrite_entity::mob::MobKind::from_name(other) else {
+                    return false;
+                };
+                return self.summon(mob, center);
+            }
+        };
+        self.entities.insert(record);
+        true
     }
 
     /// `World#dropItem`: an item entity at `center`; the natural variant scatters it a little

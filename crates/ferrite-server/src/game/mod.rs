@@ -1962,6 +1962,26 @@ fn valid_teleport(pos: [f64; 3]) -> bool {
         .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
 }
 
+/// The closest survival damage kind for a `minecraft:damage_type` key.
+fn damage_kind(key: &str) -> survival::DamageKind {
+    use survival::DamageKind as K;
+    match key.trim_start_matches("minecraft:") {
+        "fall" | "ender_pearl" => K::Fall,
+        "drown" => K::Drown,
+        "lava" => K::Lava,
+        "on_fire" | "in_fire" | "campfire" | "hot_floor" => K::Fire,
+        "out_of_world" => K::Void,
+        "starve" => K::Starve,
+        "magic" | "indirect_magic" => K::Magic,
+        "wither" => K::Wither,
+        "explosion" | "player_explosion" => K::Explosion,
+        "mob_attack" | "mob_attack_no_aggro" => K::Mob,
+        "arrow" => K::Arrow,
+        "generic_kill" => K::GenericKill,
+        _ => K::Generic,
+    }
+}
+
 fn look_angles(from: [f64; 3], to: [f64; 3]) -> (f32, f32) {
     let dx = to[0] - from[0];
     let dy = to[1] - from[1];
@@ -2404,6 +2424,38 @@ impl CommandRuntime<'_> {
                         "commands.message.display.outgoing",
                         &[&names, &text],
                     ));
+                }
+                false
+            }
+            Action::Damage {
+                targets,
+                amount,
+                damage_type,
+            } => {
+                let targets = match self.selection(&targets) {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        self.reply.text(&error.to_string());
+                        return false;
+                    }
+                };
+                let kind = damage_kind(&damage_type);
+                let mut hurt = 0;
+                for target in targets.iter().filter(|target| target.player) {
+                    if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
+                        mailbox
+                            .lock()
+                            .unwrap()
+                            .push_back(Command::Damage(kind, amount));
+                        hurt += 1;
+                        self.reply.key(
+                            "commands.damage.success",
+                            &[&format!("{amount}"), &target.name],
+                        );
+                    }
+                }
+                if hurt == 0 {
+                    self.reply.key("commands.damage.invulnerable", &[]);
                 }
                 false
             }

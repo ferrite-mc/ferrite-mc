@@ -22,6 +22,11 @@ class PlayerExtrasTest {
         player = (org.bukkit.entity.Player) ensure.invoke(null, "00000000-0000-0000-0000-0000000000aa", "Extras");
     }
 
+    /** Other test classes share the player and leave it in worlds they unloaded, so bring it home. */
+    @org.junit.jupiter.api.BeforeEach void goHome() {
+        player.teleport(new org.bukkit.Location(org.bukkit.Bukkit.getWorld("extras_world"), 0, 65, 0));
+    }
+
     @org.junit.jupiter.api.AfterAll static void stop() {
         var world = org.bukkit.Bukkit.getWorld("extras_world");
         if (world != null) ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(world.getUID());
@@ -330,5 +335,19 @@ class PlayerExtrasTest {
             assertThrows(IllegalArgumentException.class, () -> player.dropItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR, 1), true, null));
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("dropStack(ItemStack)"), calls);
+    }
+
+    @Test void spawnedEntitiesGoToTheHost() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var at = new org.bukkit.Location(player.getWorld(), 0, 70, 0);
+            var cow = player.getWorld().spawnEntity(at, org.bukkit.entity.EntityType.COW);
+            assertEquals(org.bukkit.entity.EntityType.COW, cow.getType());
+            var sand = player.getWorld().spawnFallingBlock(at, org.bukkit.Material.SAND.createBlockData());
+            assertEquals(org.bukkit.entity.EntityType.FALLING_BLOCK, sand.getType());
+            assertThrows(IllegalArgumentException.class, () -> player.getWorld().spawnFallingBlock(at, org.bukkit.Material.DIAMOND, (byte) 0));
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("spawnEntity(Location,EntityType)", "spawnFallingBlock(Location,Material)"), calls);
     }
 }

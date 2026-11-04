@@ -362,6 +362,14 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         component_json: Option<String>,
     },
+    /// `World#spawnEntity` / `spawnFallingBlock` on the default world.
+    SpawnEntity {
+        center: [f64; 3],
+        /// The `minecraft:` entity type key.
+        kind: String,
+        /// The block of a falling block, as a `minecraft:` block key.
+        block: Option<String>,
+    },
     /// `World#dropItem` / `dropItemNaturally` on the default world.
     DropItem {
         center: [f64; 3],

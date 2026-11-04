@@ -72,6 +72,47 @@ pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
     })
 }
 
+/// `World#spawnEntity` and `spawnFallingBlock`: an entity of a kind the game models.
+pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
+    if call.owner != "World"
+        || Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id()
+    {
+        return None;
+    }
+    let mut parts = call
+        .args
+        .first()?
+        .split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+    parts.next()?;
+    let center = [
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+    ];
+    let (kind, block) = match call.method.as_str() {
+        "spawnEntity(Location,EntityType)" => {
+            let kind = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
+            let modelled = matches!(kind.as_str(), "minecraft:tnt")
+                || ferrite_entity::mob::MobKind::from_name(&kind).is_some();
+            if !modelled {
+                return None;
+            }
+            (kind, None)
+        }
+        "spawnFallingBlock(Location,Material)" => {
+            let block = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
+            ferrite_data::blocks::default_state(&block)?;
+            ("minecraft:falling_block".to_owned(), Some(block))
+        }
+        _ => return None,
+    };
+    Some(PlayerCommand::SpawnEntity {
+        center,
+        kind,
+        block,
+    })
+}
+
 /// `World#dropItem(Location, ItemStack)` and `dropItemNaturally`: an item entity at the spot.
 pub fn drop_command(call: &HostCall) -> Option<PlayerCommand> {
     let natural = match call.method.as_str() {
@@ -112,6 +153,34 @@ pub fn drop_command(call: &HostCall) -> Option<PlayerCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawns_are_limited_to_modelled_entities() {
+        let at = format!(
+            "w{0}1{0}70{0}2{0}0{0}0",
+            ferrite_plugin::HOST_ITEM_SEPARATOR
+        );
+        let spawn = |method: &str, what: &str| spawn_command(&call(method, &[&at, what]));
+        assert_eq!(
+            spawn("spawnEntity(Location,EntityType)", "COW"),
+            Some(PlayerCommand::SpawnEntity {
+                center: [1.0, 70.0, 2.0],
+                kind: "minecraft:cow".into(),
+                block: None
+            })
+        );
+        assert!(spawn("spawnEntity(Location,EntityType)", "TNT").is_some());
+        assert_eq!(spawn("spawnEntity(Location,EntityType)", "GHAST"), None);
+        assert_eq!(
+            spawn("spawnFallingBlock(Location,Material)", "SAND"),
+            Some(PlayerCommand::SpawnEntity {
+                center: [1.0, 70.0, 2.0],
+                kind: "minecraft:falling_block".into(),
+                block: Some("minecraft:sand".into())
+            })
+        );
+        assert_eq!(spawn("spawnFallingBlock(Location,Material)", "NOPE"), None);
+    }
 
     #[test]
     fn dropped_items_become_commands() {
