@@ -477,7 +477,10 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
             let key = arg(0).filter(|key| is_resource_key(key))?;
             console(format!("effect clear {} {key}", player?), "")
         }
-        ("Player", "setBedSpawnLocation(Location,boolean)") => {
+        (
+            "Player",
+            "setBedSpawnLocation(Location,boolean)" | "setRespawnLocation(Location,boolean)",
+        ) => {
             let (world, x, y, z) = location_block(arg(0)?)?;
             (world == ferrite_plugin::default_world_id())
                 .then(|| HostAction::Console {
@@ -486,6 +489,7 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
                 })
                 .filter(|_| player.is_some())
         }
+        ("Player", "saveData()") => console("save-all".into(), ""),
         ("Server", "reload()" | "reloadData()") => console("reload".into(), ""),
         ("World", "setStorm(boolean)") => {
             default_world(&call.subject)?;
@@ -747,6 +751,19 @@ mod tests {
                 &[&bed, "true"]
             )),
             Some(format!("spawnpoint {id} 10 64 -4"))
+        );
+        assert_eq!(
+            line(call(
+                "Player",
+                id,
+                "setRespawnLocation(Location,boolean)",
+                &[&bed, "true"]
+            )),
+            Some(format!("spawnpoint {id} 10 64 -4"))
+        );
+        assert_eq!(
+            line(call("Player", id, "saveData()", &[])),
+            Some("save-all".into())
         );
         assert_eq!(
             line(call("World", &world, "setStorm(boolean)", &["true"])),
