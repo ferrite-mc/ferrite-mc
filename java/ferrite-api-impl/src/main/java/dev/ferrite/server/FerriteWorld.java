@@ -204,6 +204,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 if (values != null) { values.remove((org.bukkit.plugin.Plugin) args[1]); if (values.isEmpty()) metadata.remove((String) args[0]); }
                 return null;
             }
+            case "playEffect" -> {
+                // (Location, Effect, data[, radius]): shown to every player of this world within the radius.
+                var at = (org.bukkit.Location) args[0];
+                var effect = (org.bukkit.Effect) args[1];
+                int radius = args.length > 3 ? (int) args[3] : 64;
+                for (var viewer : server.getOnlinePlayers()) {
+                    var there = viewer.getLocation();
+                    if (there.getWorld() != proxy || there.distanceSquared(at) > (double) radius * radius) continue;
+                    viewer.playEffect(at, effect, args[2]);
+                }
+                return null;
+            }
             case "isChunkLoaded" -> {
                 int cx = args[0] instanceof org.bukkit.Chunk c ? c.getX() : (int) args[0];
                 int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];

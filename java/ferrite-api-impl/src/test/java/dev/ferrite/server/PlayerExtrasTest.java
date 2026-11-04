@@ -15,10 +15,16 @@ class PlayerExtrasTest {
         System.setProperty("ferrite.native", "false");
         Bootstrap.configureDataDir(System.getProperty("test.vanilla.data"));
         Bootstrap.startServer();
+        Bootstrap.registerWorld("00000000-0000-0000-0000-0000000000e1", "extras_world", 0, 0, 64, 0);
         Bootstrap.registerPlayer("00000000-0000-0000-0000-0000000000aa", "Extras", false);
         var ensure = Bootstrap.class.getDeclaredMethod("ensurePlayer", String.class, String.class);
         ensure.setAccessible(true);
         player = (org.bukkit.entity.Player) ensure.invoke(null, "00000000-0000-0000-0000-0000000000aa", "Extras");
+    }
+
+    @org.junit.jupiter.api.AfterAll static void stop() {
+        var world = org.bukkit.Bukkit.getWorld("extras_world");
+        if (world != null) ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(world.getUID());
     }
 
     @Test void attributesApplyModifiersInVanillaOrder() {
@@ -116,5 +122,18 @@ class PlayerExtrasTest {
             assertFalse(player.setWindowProperty(org.bukkit.inventory.InventoryView.Property.BREW_TIME, 70000));
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("setWindowProperty(int,int)|0" + HostBridge.ARG + "400"), calls);
+    }
+
+    @Test void worldEffectsReachOnlyPlayersInRange() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var world = player.getWorld();
+            var here = player.getLocation();
+            world.playEffect(here, org.bukkit.Effect.CLICK2, 0, 10);
+            var far = here.clone().add(500, 0, 0);
+            world.playEffect(far, org.bukkit.Effect.CLICK2, 0, 10);
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("playLevelEvent(Location,int,int)"), calls);
     }
 }
