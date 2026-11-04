@@ -478,6 +478,15 @@ pub enum RotateTo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// `/spreadplayers`: scatter the targets (players and other entities) around a point.
+    Spread {
+        targets: EntityTarget,
+        center: (f64, f64),
+        spread: f64,
+        range: f64,
+        respect_teams: bool,
+        max_height: Option<i32>,
+    },
     /// `/damage`: hurt the targets; `damage_type` is the registry key without namespace.
     Damage {
         targets: EntityTarget,

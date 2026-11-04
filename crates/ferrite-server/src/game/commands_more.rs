@@ -1528,7 +1528,7 @@ fn fetchprofile_tree() -> NodeBuilder<Source> {
 
 /// Places `count` points inside the square `center +- range` so that no two are closer than
 /// `spread`. Random sampling with rejection; `None` when the area is too crowded.
-fn spread_points(
+pub(crate) fn spread_points(
     count: usize,
     center: (f64, f64),
     spread: f64,
@@ -1577,112 +1577,24 @@ fn spreadplayers(ctx: &CommandContext<Source>, under: bool) -> Result<i32, Comma
             .map(f64::from)
             .unwrap_or(0.0)
     };
-    let (spread, range) = (float("spreadDistance"), float("maxRange"));
-    let respect_teams = ctx
-        .argument("respectTeams")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    let max_height = if under {
-        ctx.integer("maxHeight")
-    } else {
-        None
-    };
-    let ids = resolved_targets(ctx, "targets")?;
-    if ids.is_empty() {
-        return Err(failure("argument.entity.notfound.entity", vec![]));
-    }
-    // Units that share a destination: one per player, or one per team with respectTeams.
-    let units: Vec<Vec<uuid::Uuid>> = {
-        let game = source.state.lock().unwrap();
-        let mut teams: BTreeMap<String, Vec<uuid::Uuid>> = BTreeMap::new();
-        let mut singles = Vec::new();
-        for id in &ids {
-            let team = game
-                .players
-                .iter()
-                .find(|player| player.uuid == *id)
-                .and_then(|player| player.team.clone());
-            match team {
-                Some(team) if respect_teams => teams.entry(team).or_default().push(*id),
-                _ => singles.push(vec![*id]),
-            }
-        }
-        singles.into_iter().chain(teams.into_values()).collect()
-    };
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0x9E37_79B9, |d| d.as_nanos() as u64)
-        | 1;
-    let by_team = units.iter().any(|unit| unit.len() > 1) || respect_teams;
-    let Some(points) = spread_points(units.len(), center, spread, range, seed) else {
-        let key = if by_team {
-            "commands.spreadplayers.failed.teams"
-        } else {
-            "commands.spreadplayers.failed.entities"
-        };
-        return Err(failure(
-            key,
-            vec![
-                units.len().to_string(),
-                format!("{}", center.0),
-                format!("{}", center.1),
-                format!("{spread}"),
-            ],
-        ));
-    };
-    for (unit, (x, z)) in units.iter().zip(&points) {
-        let (bx, bz) = (x.floor() as i32, z.floor() as i32);
-        let surface = source
-            .world
-            .as_ref()
-            .and_then(|world| world.spawn_height(bx, bz))
-            .unwrap_or(source.origin[1] as i32);
-        let y = max_height.map_or(surface, |limit| surface.min(limit));
-        for id in unit {
-            send(
-                source,
-                Action::Teleport {
-                    targets: ferrite_command::arguments::EntityTarget::Uuid(id.to_string()),
-                    destination: super::commands::TeleportDestination::Location {
-                        pos: [f64::from(bx) + 0.5, f64::from(y), f64::from(bz) + 0.5],
-                        yaw: None,
-                        pitch: None,
-                    },
-                    dimension: source.dimension,
-                },
-            )?;
-        }
-    }
-    let mut total = 0.0;
-    for (i, a) in points.iter().enumerate() {
-        total += points
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(_, b)| (a.0 - b.0).hypot(a.1 - b.1))
-            .fold(f64::MAX, f64::min)
-            .min(1.0e9);
-    }
-    let average = if points.len() > 1 {
-        total / points.len() as f64
-    } else {
-        0.0
-    };
-    feedback(
-        ctx,
-        if by_team {
-            "commands.spreadplayers.success.teams"
-        } else {
-            "commands.spreadplayers.success.entities"
+    send(
+        source,
+        Action::Spread {
+            targets: entity(ctx, "targets")?,
+            center,
+            spread: float("spreadDistance"),
+            range: float("maxRange"),
+            respect_teams: ctx
+                .argument("respectTeams")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            max_height: if under {
+                ctx.integer("maxHeight")
+            } else {
+                None
+            },
         },
-        vec![
-            units.len().to_string(),
-            format!("{}", center.0),
-            format!("{}", center.1),
-            format!("{average:.2}"),
-        ],
-    )?;
-    Ok(units.len() as i32)
+    )
 }
 
 fn spreadplayers_tree() -> NodeBuilder<Source> {
@@ -2139,35 +2051,28 @@ mod tests {
     }
 
     #[test]
-    fn spreadplayers_teleports_every_player_somewhere_different() {
-        let state = fresh();
-        {
-            let mut game = state.lock().unwrap();
-            game.join(Uuid::from_u128(1), "Alice".into(), 0, 20);
-            game.join(Uuid::from_u128(2), "Bob".into(), 0, 20);
+    fn spreadplayers_forms_produce_a_spread_action() {
+        for (input, height) in [
+            ("spreadplayers 0 0 10 50 false @e", None),
+            ("spreadplayers ~ ~ 10 50 true @a", None),
+            ("spreadplayers 0 0 10 50 under 80 true @a", Some(80)),
+        ] {
+            let (result, actions) = run(input, 2, fresh(), None);
+            assert!(result.is_ok(), "{input}: {result:?}");
+            assert!(
+                matches!(&actions[0], Action::Spread { max_height, .. } if *max_height == height),
+                "{input}: {actions:?}"
+            );
         }
-        let (result, actions) = run("spreadplayers 0 0 10 50 false @a", 2, state.clone(), None);
-        assert_eq!(result.unwrap(), 2);
-        let moved = actions
-            .iter()
-            .filter(|action| matches!(action, Action::Teleport { .. }))
-            .count();
-        assert_eq!(moved, 2);
-        assert_eq!(keys(&actions), ["commands.spreadplayers.success.entities"]);
         assert!(
-            run(
-                "spreadplayers 0 0 10 50 under 80 true @a",
-                2,
-                state.clone(),
-                None
-            )
-            .0
-            .is_ok()
+            run("spreadplayers 0 0 -1 50 false @a", 2, fresh(), None)
+                .0
+                .is_err()
         );
-        let (result, _) = run("spreadplayers 0 0 1000 1 false @a", 2, state, None);
         assert!(
-            result.is_err(),
-            "two players cannot be 1000 apart within 1 block"
+            run("spreadplayers 0 0 10 50 false @a", 1, fresh(), None)
+                .0
+                .is_err()
         );
     }
 
