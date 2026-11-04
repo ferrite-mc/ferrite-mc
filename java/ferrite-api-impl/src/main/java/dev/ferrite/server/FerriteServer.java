@@ -446,4 +446,15 @@ public class FerriteServer extends ServerStubs {
         };
     }
     @Override public int getTicksPerSpawns(org.bukkit.entity.SpawnCategory category) { java.util.Objects.requireNonNull(category, "category"); return 1; }
+    @Override public org.bukkit.WorldBorder createWorldBorder() { return new FerriteWorldBorder(); }
+    @Override public org.bukkit.profile.PlayerProfile createPlayerProfile(String name) { return new FerriteProfile(null, name); }
+    @Override public org.bukkit.profile.PlayerProfile createPlayerProfile(java.util.UUID id) { return new FerriteProfile(id, null); }
+    @Override public org.bukkit.profile.PlayerProfile createPlayerProfile(java.util.UUID id, String name) { return new FerriteProfile(id, name); }
+    @Override public com.destroystokyo.paper.profile.PlayerProfile createProfile(String name) { return new FerriteProfile(null, name); }
+    @Override public com.destroystokyo.paper.profile.PlayerProfile createProfile(java.util.UUID id) { return new FerriteProfile(id, null); }
+    @Override public com.destroystokyo.paper.profile.PlayerProfile createProfile(java.util.UUID id, String name) { return new FerriteProfile(id, name); }
+    @Override public com.destroystokyo.paper.profile.PlayerProfile createProfileExact(java.util.UUID id, String name) { return new FerriteProfile(id, name); }
+    @Override public void sendPluginMessage(org.bukkit.plugin.Plugin source, String channel, byte[] message) {
+        for (var player : players.values()) player.sendPluginMessage(source, channel, message);
+    }
 }
