@@ -570,6 +570,20 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
                 }
             })
         }
+        ("World", "setSpawnLocation(int,int,int,float)") => {
+            default_world(&call.subject)?;
+            let (x, y, z) = (
+                arg(0)?.parse::<i32>().ok()?,
+                arg(1)?.parse::<i32>().ok()?,
+                arg(2)?.parse::<i32>().ok()?,
+            );
+            let angle: f32 = arg(3)?.parse().ok().filter(|a: &f32| a.is_finite())?;
+            console(format!("setworldspawn {x} {y} {z} {angle}"), "true")
+        }
+        ("World", "save(boolean)") => {
+            default_world(&call.subject)?;
+            console("save-all".into(), "")
+        }
         ("World", "setSpawnLocation(int,int,int)") => {
             default_world(&call.subject)?;
             let (x, y, z) = (
@@ -838,6 +852,28 @@ mod tests {
                 &["1", "70", "2"]
             )),
             Some("setworldspawn 1 70 2".into())
+        );
+        assert_eq!(
+            line(call(
+                "World",
+                &world,
+                "setSpawnLocation(int,int,int,float)",
+                &["1", "70", "2", "90.5"]
+            )),
+            Some("setworldspawn 1 70 2 90.5".into())
+        );
+        assert_eq!(
+            line(call("World", &world, "save(boolean)", &["true"])),
+            Some("save-all".into())
+        );
+        assert_eq!(
+            line(call(
+                "World",
+                &world,
+                "setSpawnLocation(int,int,int,float)",
+                &["1", "70", "2", "NaN"]
+            )),
+            None
         );
         // Another world has no console target.
         assert_eq!(

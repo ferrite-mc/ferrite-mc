@@ -88,6 +88,9 @@ pub fn answer(call: &HostCall) -> Option<String> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
+    if call.method == "getClientBrandName()" {
+        return ferrite_net::settings::brand(player);
+    }
     if call.method == "getPing()"
         && let Some(ping) = ferrite_net::settings::ping(player)
     {

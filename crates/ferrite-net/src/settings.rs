@@ -35,6 +35,37 @@ pub fn get(player: Uuid) -> Option<ClientSettings> {
 pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
     pings().lock().unwrap().remove(&player);
+    brands().lock().unwrap().remove(&player);
+}
+
+fn brands() -> &'static Mutex<HashMap<Uuid, String>> {
+    static BRANDS: OnceLock<Mutex<HashMap<Uuid, String>>> = OnceLock::new();
+    BRANDS.get_or_init(Default::default)
+}
+
+/// Records the client brand from the `minecraft:brand` payload (a length-prefixed string).
+pub fn record_brand_payload(player: Uuid, data: &[u8]) {
+    let mut buf = data;
+    let Ok(len) = <ferrite_protocol::VarInt as ferrite_protocol::Decode>::decode(&mut buf) else {
+        return;
+    };
+    let Ok(len) = usize::try_from(len.0) else {
+        return;
+    };
+    if len > 256 || buf.len() < len {
+        return;
+    }
+    if let Ok(text) = std::str::from_utf8(&buf[..len]) {
+        brands()
+            .lock()
+            .unwrap()
+            .insert(player, text.chars().filter(|c| !c.is_control()).collect());
+    }
+}
+
+/// The client brand (`vanilla`, `fabric`, ...), once reported.
+pub fn brand(player: Uuid) -> Option<String> {
+    brands().lock().unwrap().get(&player).cloned()
 }
 
 fn pings() -> &'static Mutex<HashMap<Uuid, i32>> {
@@ -129,6 +160,14 @@ mod tests {
         assert!((20..2000).contains(&first), "{first}");
         forget(player);
         assert_eq!(ping(player), None);
+        record_brand_payload(player, &[6, b'f', b'a', b'b', b'r', b'i', b'c']);
+        assert_eq!(brand(player).as_deref(), Some("fabric"));
+        record_brand_payload(player, &[9, b'x']);
+        assert_eq!(
+            brand(player).as_deref(),
+            Some("fabric"),
+            "a truncated payload is ignored"
+        );
         assert!(is_keepalive_answer(&[28, 0, 0, 0, 0, 0, 0, 0, 1]));
         assert!(!is_keepalive_answer(&[29]));
     }
