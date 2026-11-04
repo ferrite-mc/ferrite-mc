@@ -107,4 +107,14 @@ class PlayerExtrasTest {
         connection.send(new net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket(text));
         connection.send(new net.minecraft.network.protocol.game.ClientboundClearTitlesPacket(true));
     }
+
+    @Test void windowPropertiesGoToTheHostAndOutOfRangeValuesAreRefused() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };
+        try {
+            assertTrue(player.setWindowProperty(org.bukkit.inventory.InventoryView.Property.BREW_TIME, 400));
+            assertFalse(player.setWindowProperty(org.bukkit.inventory.InventoryView.Property.BREW_TIME, 70000));
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("setWindowProperty(int,int)|0" + HostBridge.ARG + "400"), calls);
+    }
 }

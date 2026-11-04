@@ -75,4 +75,23 @@ class FerriteChunkDataTest {
         assertNull(server.getLootTable(org.bukkit.NamespacedKey.minecraft("blocks/no_such_table")));
         assertThrows(UnsupportedOperationException.class, () -> table.populateLoot(new java.util.Random(), null));
     }
+
+    @Test void chunkStateComesFromTheHost() {
+        var world = org.bukkit.Bukkit.getWorld("chunkdata");
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "isChunkLoaded(int,int)" -> args.equals("3" + HostBridge.ARG + "4") ? "true" : "false";
+            case "getLoadedChunkCoordinates()" -> "3,4" + HostBridge.ITEM + "-1,7";
+            default -> null;
+        };
+        try {
+            assertTrue(world.isChunkLoaded(3, 4));
+            assertFalse(world.isChunkLoaded(4, 4));
+            var chunks = world.getLoadedChunks();
+            assertEquals(2, chunks.length);
+            assertEquals(-1, chunks[1].getX());
+            assertEquals(7, chunks[1].getZ());
+            assertTrue(world.getChunkAt(3, 4).isLoaded());
+            assertFalse(world.getChunkAt(0, 0).isLoaded());
+        } finally { HostBridge.transport = null; }
+    }
 }
