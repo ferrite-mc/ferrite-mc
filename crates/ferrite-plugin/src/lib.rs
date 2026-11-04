@@ -259,6 +259,11 @@ pub enum PlayerCommand {
         rows: u8,
         items: Vec<Option<ItemSnapshot>>,
     },
+    /// Opens a crafting station without a block (`Player#openWorkbench`, `openAnvil`, ...).
+    OpenStation {
+        player: uuid::Uuid,
+        station: String,
+    },
     /// Closes whatever menu the player has open (`Player#closeInventory`).
     CloseInventory {
         player: uuid::Uuid,

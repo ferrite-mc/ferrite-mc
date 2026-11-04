@@ -582,6 +582,22 @@ impl Player {
         );
     }
 
+    /// A plugin's `Player#openWorkbench`, `openAnvil`, ...: the vanilla station menu with no
+    /// block behind it, so it stays open until closed. Unknown names are ignored.
+    pub fn open_plugin_station(&mut self, station: &str) {
+        let (make, title): (fn(i32) -> Menu, &str) = match station {
+            "workbench" => (Menu::crafting, "container.crafting"),
+            "anvil" => (Menu::anvil, "container.anvil"),
+            "enchanting" => (Menu::enchanting, "container.enchant"),
+            "grindstone" => (Menu::grindstone, "container.grindstone_title"),
+            "stonecutter" => (Menu::stonecutter, "container.stonecutter"),
+            "smithing" => (Menu::smithing, "container.upgrade"),
+            "loom" => (Menu::loom, "container.loom"),
+            _ => return,
+        };
+        self.open_menu(make, title, None);
+    }
+
     /// A plugin's `Player#closeInventory`; the client gets `container_close` first.
     pub fn close_plugin_inventory(&mut self) {
         self.close_open_container();

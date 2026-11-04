@@ -21,11 +21,25 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
     let player = Uuid::parse_str(&call.subject).ok()?;
     match call.method.as_str() {
         "openInventory(Inventory)" => open(player, call.args.first()?),
+        "openWorkbench(Location,boolean)" => station(player, "workbench"),
+        "openAnvil(Location,boolean)" => station(player, "anvil"),
+        "openEnchanting(Location,boolean)" => station(player, "enchanting"),
+        "openGrindstone(Location,boolean)" => station(player, "grindstone"),
+        "openStonecutter(Location,boolean)" => station(player, "stonecutter"),
+        "openSmithingTable(Location,boolean)" => station(player, "smithing"),
+        "openLoom(Location,boolean)" => station(player, "loom"),
         "closeInventory()" | "closeInventory(Reason)" => {
             Some(PlayerCommand::CloseInventory { player })
         }
         _ => None,
     }
+}
+
+fn station(player: Uuid, station: &str) -> Option<PlayerCommand> {
+    Some(PlayerCommand::OpenStation {
+        player,
+        station: station.to_owned(),
+    })
 }
 
 fn open(player: Uuid, text: &str) -> Option<PlayerCommand> {
@@ -113,6 +127,30 @@ mod tests {
         assert!(
             items[1..].iter().all(Option::is_none),
             "air is an empty slot"
+        );
+    }
+
+    #[test]
+    fn stations_open_for_the_calling_player() {
+        for (method, name) in [
+            ("openWorkbench(Location,boolean)", "workbench"),
+            ("openAnvil(Location,boolean)", "anvil"),
+            ("openEnchanting(Location,boolean)", "enchanting"),
+            ("openGrindstone(Location,boolean)", "grindstone"),
+            ("openStonecutter(Location,boolean)", "stonecutter"),
+            ("openSmithingTable(Location,boolean)", "smithing"),
+            ("openLoom(Location,boolean)", "loom"),
+        ] {
+            let command = inventory_command(&call(method, "null"));
+            assert!(
+                matches!(&command, Some(PlayerCommand::OpenStation { station, .. }) if station == name),
+                "{method}"
+            );
+        }
+        // Cartography tables have no menu yet and stay unimplemented.
+        assert_eq!(
+            inventory_command(&call("openCartographyTable(Location,boolean)", "null")),
+            None
         );
     }
 

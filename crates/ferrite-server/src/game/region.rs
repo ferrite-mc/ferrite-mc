@@ -43,6 +43,10 @@ pub enum Command {
         rows: u8,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
+    /// A plugin's `Player#openWorkbench` and the other block-less crafting stations.
+    PluginOpenStation {
+        station: String,
+    },
     /// A plugin's `Player#closeInventory`.
     PluginCloseInventory,
     /// Generic damage from a plugin.
@@ -2342,6 +2346,10 @@ impl Player {
                 }
                 Command::PluginOpenInventory { title, rows, items } => {
                     self.open_plugin_inventory(&title, rows, &items);
+                    continue;
+                }
+                Command::PluginOpenStation { station } => {
+                    self.open_plugin_station(&station);
                     continue;
                 }
                 Command::PluginCloseInventory => {
