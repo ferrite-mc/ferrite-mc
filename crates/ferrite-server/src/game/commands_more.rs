@@ -13,7 +13,10 @@ use ferrite_command::{
 };
 use ferrite_protocol::{VarInt, packets::play::Transfer};
 
-use super::commands::{Action, Feedback, Source, player_only, resolved_targets, send};
+use super::commands::{
+    Action, Feedback, RotateTo, Source, anchor, entity, player_only, resolved_targets, rotation,
+    send,
+};
 use super::commands_extras::PlayerPacket;
 
 /// State owned by these commands, kept inside [`super::commands::GameState`].
@@ -858,6 +861,72 @@ fn tick_tree() -> NodeBuilder<Source> {
         )
 }
 
+fn rotate_tree() -> NodeBuilder<Source> {
+    fn rotate(ctx: &CommandContext<Source>, to: RotateTo) -> Result<i32, CommandError> {
+        send(
+            ctx.source(),
+            Action::Rotate {
+                targets: entity(ctx, "target")?,
+                to,
+            },
+        )
+    }
+    let single = || argument::<Source>("target", ArgumentType::entity());
+    literal::<Source>("rotate")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(
+            single()
+                .then(
+                    literal::<Source>("facing")
+                        .then(
+                            literal::<Source>("entity").then(
+                                argument::<Source>("facingEntity", ArgumentType::entity())
+                                    .executes(|ctx| {
+                                        rotate(
+                                            ctx,
+                                            RotateTo::FacingEntity {
+                                                entity: entity(ctx, "facingEntity")?,
+                                                anchor: ferrite_command::EntityAnchor::Feet,
+                                            },
+                                        )
+                                    })
+                                    .then(
+                                        argument::<Source>(
+                                            "facingAnchor",
+                                            ArgumentType::EntityAnchor,
+                                        )
+                                        .executes(|ctx| {
+                                            rotate(
+                                                ctx,
+                                                RotateTo::FacingEntity {
+                                                    entity: entity(ctx, "facingEntity")?,
+                                                    anchor: anchor(ctx, "facingAnchor")?,
+                                                },
+                                            )
+                                        }),
+                                    ),
+                            ),
+                        )
+                        .then(
+                            argument::<Source>("facingLocation", ArgumentType::Vec3).executes(
+                                |ctx| {
+                                    let source = ctx.source();
+                                    let point =
+                                        super::commands::coordinates(ctx, "facingLocation")?
+                                            .resolve(source.origin, source.yaw, source.pitch);
+                                    rotate(ctx, RotateTo::FacingLocation(point))
+                                },
+                            ),
+                        ),
+                )
+                .then(
+                    argument::<Source>("rotation", ArgumentType::Rotation)
+                        .executes(|ctx| rotate(ctx, RotateTo::Angles(rotation(ctx, "rotation")?))),
+                ),
+        )
+}
+
 pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(version_tree());
     tree.register(random_tree());
@@ -869,6 +938,7 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(publish_tree());
     tree.register(unpublish_tree());
     tree.register(tick_tree());
+    tree.register(rotate_tree());
 }
 
 #[cfg(test)]
@@ -941,6 +1011,8 @@ mod tests {
             "stopwatch",
             "publish",
             "unpublish",
+            "tick",
+            "rotate",
         ] {
             assert!(
                 roots.iter().any(|root| root == name),
@@ -1132,6 +1204,32 @@ mod tests {
     fn transfer_without_players_needs_a_player_source() {
         let (result, _) = run("transfer play.example.com", 3, fresh(), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rotate_forms_produce_rotate_actions() {
+        use crate::game::commands::RotateTo;
+        for (input, check) in [
+            ("rotate @s 90 -10", 0),
+            ("rotate @s ~10 ~", 0),
+            ("rotate @s facing 1 2 3", 1),
+            ("rotate @s facing entity @p", 2),
+            ("rotate @s facing entity @p eyes", 2),
+        ] {
+            let (result, actions) = run(input, 2, fresh(), None);
+            assert!(result.is_ok(), "{input}: {result:?}");
+            let Some(Action::Rotate { to, .. }) = actions.first() else {
+                panic!("{input}: {actions:?}");
+            };
+            let ok = match check {
+                0 => matches!(to, RotateTo::Angles(_)),
+                1 => matches!(to, RotateTo::FacingLocation(_)),
+                _ => matches!(to, RotateTo::FacingEntity { .. }),
+            };
+            assert!(ok, "{input}: {to:?}");
+        }
+        assert!(run("rotate @s 1 2", 1, fresh(), None).0.is_err());
+        assert!(run("rotate", 2, fresh(), None).0.is_err());
     }
 
     #[test]

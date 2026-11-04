@@ -464,8 +464,24 @@ pub enum XpUnit {
 }
 
 /// A command's effect, applied by the game loop.
+/// Where `/rotate` turns an entity.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RotateTo {
+    /// Absolute or relative angles; relative ones are resolved against the target's own.
+    Angles([WorldCoordinate; 2]),
+    FacingLocation([f64; 3]),
+    FacingEntity {
+        entity: EntityTarget,
+        anchor: EntityAnchor,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    Rotate {
+        targets: EntityTarget,
+        to: RotateTo,
+    },
     Teleport {
         targets: EntityTarget,
         destination: TeleportDestination,
@@ -727,7 +743,10 @@ fn plugin_command_node(literal_name: &str) -> ferrite_command::NodeBuilder<Sourc
 
 /// Reads an entity argument. Selector permissions are not checked here: the dispatcher
 /// rejects `@` selectors while parsing, for every command at once.
-fn entity(ctx: &CommandContext<Source>, name: &str) -> Result<EntityTarget, CommandError> {
+pub(crate) fn entity(
+    ctx: &CommandContext<Source>,
+    name: &str,
+) -> Result<EntityTarget, CommandError> {
     ctx.argument(name)
         .and_then(ArgumentValue::as_entity)
         .cloned()
@@ -744,7 +763,7 @@ pub(crate) fn coordinates(
         .ok_or_else(|| CommandError::failed(format!("missing coordinate argument '{name}'")))
 }
 
-fn rotation(
+pub(crate) fn rotation(
     ctx: &CommandContext<Source>,
     name: &str,
 ) -> Result<[WorldCoordinate; 2], CommandError> {
@@ -756,7 +775,10 @@ fn rotation(
     }
 }
 
-fn anchor(ctx: &CommandContext<Source>, name: &str) -> Result<EntityAnchor, CommandError> {
+pub(crate) fn anchor(
+    ctx: &CommandContext<Source>,
+    name: &str,
+) -> Result<EntityAnchor, CommandError> {
     ctx.argument(name)
         .and_then(ArgumentValue::as_entity_anchor)
         .ok_or_else(|| CommandError::failed(format!("missing anchor argument '{name}'")))

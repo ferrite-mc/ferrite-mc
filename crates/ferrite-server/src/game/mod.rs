@@ -2396,6 +2396,61 @@ impl CommandRuntime<'_> {
                 }
                 false
             }
+            Action::Rotate { targets, to } => {
+                let targets = match self.selection(&targets) {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        self.reply.text(&error.to_string());
+                        return false;
+                    }
+                };
+                let facing = match &to {
+                    commands::RotateTo::FacingEntity { entity, anchor } => {
+                        match self.selection(entity) {
+                            Ok(mut entities) if entities.len() == 1 => {
+                                let found = entities.remove(0);
+                                Some([found.pos[0], found.pos[1] + anchor.offset(), found.pos[2]])
+                            }
+                            Ok(_) => {
+                                self.reply.key("argument.entity.notfound.entity", &[]);
+                                return false;
+                            }
+                            Err(error) => {
+                                self.reply.text(&error.to_string());
+                                return false;
+                            }
+                        }
+                    }
+                    commands::RotateTo::FacingLocation(point) => Some(*point),
+                    commands::RotateTo::Angles(_) => None,
+                };
+                for target in &targets {
+                    let (yaw, pitch) = match (&to, facing) {
+                        (commands::RotateTo::Angles(angles), _) => {
+                            ferrite_command::arguments::coords::resolve_rotation(
+                                *angles,
+                                target.yaw,
+                                target.pitch,
+                            )
+                        }
+                        (_, Some(point)) => {
+                            look_angles([target.pos[0], target.pos[1] + 1.62, target.pos[2]], point)
+                        }
+                        _ => (target.yaw, target.pitch),
+                    };
+                    self.teleport_selection(
+                        std::slice::from_ref(target),
+                        target.pos,
+                        yaw,
+                        pitch,
+                        self.dimension,
+                    );
+                }
+                if let Some(first) = targets.first() {
+                    self.reply.key("commands.rotate.success", &[&first.name]);
+                }
+                false
+            }
             Action::Kill { targets } => {
                 let targets = match self.selection(&targets) {
                     Ok(targets) => targets,
