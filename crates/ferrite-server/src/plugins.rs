@@ -1,4 +1,5 @@
 //! Loading plugins into the embedded JVM at server startup.
+mod appearance;
 mod extra;
 mod inventory;
 mod motion;
@@ -95,7 +96,25 @@ impl PluginBridge {
                             uuid::Uuid,
                             AbilityState,
                         >::new());
+                        let appearances = std::sync::Mutex::new(std::collections::HashMap::<
+                            uuid::Uuid,
+                            appearance::AppearanceState,
+                        >::new());
                         let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
+                            if let (Some(players), Ok(player)) =
+                                (&players, uuid::Uuid::parse_str(&call.subject))
+                            {
+                                let mut all = appearances.lock().unwrap();
+                                let state = all.entry(player).or_default();
+                                let mut next = *state;
+                                if let Some(command) =
+                                    appearance::appearance_command(&mut next, call)
+                                {
+                                    *state = next;
+                                    players(command);
+                                    return Some(String::new());
+                                }
+                            }
                             if let (Some(players), Ok(player)) =
                                 (&players, uuid::Uuid::parse_str(&call.subject))
                             {

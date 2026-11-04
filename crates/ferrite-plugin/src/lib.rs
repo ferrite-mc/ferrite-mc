@@ -259,6 +259,15 @@ pub enum PlayerCommand {
         rows: u8,
         items: Vec<Option<ItemSnapshot>>,
     },
+    /// Entity data the player's own client shows (`setGlowing`, `setInvisible`, `setVisualFire`,
+    /// `setSilent`, `setGravity`, `setFreezeTicks`); `None` leaves a value as it was.
+    EntityData {
+        player: uuid::Uuid,
+        flags: Option<u8>,
+        silent: Option<bool>,
+        no_gravity: Option<bool>,
+        freeze_ticks: Option<i32>,
+    },
     /// Pushes the player (`Player#setVelocity`, `knockback`): the client applies the motion.
     Velocity {
         player: uuid::Uuid,

@@ -1264,6 +1264,25 @@ fn route_plugin_command(
                     .push_back(Command::PluginOpenInventory { title, rows, items });
             }
         }
+        PlayerCommand::EntityData {
+            player,
+            flags,
+            silent,
+            no_gravity,
+            freeze_ticks,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginEntityData {
+                        flags,
+                        silent,
+                        no_gravity,
+                        freeze_ticks,
+                    });
+            }
+        }
         PlayerCommand::Velocity { player, velocity } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox

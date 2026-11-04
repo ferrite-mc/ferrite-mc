@@ -43,6 +43,13 @@ pub enum Command {
         rows: u8,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
+    /// A plugin's glowing, invisibility, fire, silence, gravity or freeze change.
+    PluginEntityData {
+        flags: Option<u8>,
+        silent: Option<bool>,
+        no_gravity: Option<bool>,
+        freeze_ticks: Option<i32>,
+    },
     /// A plugin's `Player#setVelocity` or `knockback`.
     PluginVelocity {
         velocity: [f64; 3],
@@ -2350,6 +2357,48 @@ impl Player {
                 }
                 Command::PluginOpenInventory { title, rows, items } => {
                     self.open_plugin_inventory(&title, rows, &items);
+                    continue;
+                }
+                Command::PluginEntityData {
+                    flags,
+                    silent,
+                    no_gravity,
+                    freeze_ticks,
+                } => {
+                    let mut values = Vec::new();
+                    if let Some(flags) = flags {
+                        values.push(MetaEntry {
+                            index: 0,
+                            value: MetaValue::Byte(flags as i8),
+                        });
+                    }
+                    if let Some(ticks) = freeze_ticks {
+                        values.push(MetaEntry {
+                            index: 7,
+                            value: MetaValue::Int(ticks),
+                        });
+                    }
+                    if let Some(silent) = silent {
+                        values.push(MetaEntry {
+                            index: 4,
+                            value: MetaValue::Boolean(silent),
+                        });
+                    }
+                    if let Some(no_gravity) = no_gravity {
+                        values.push(MetaEntry {
+                            index: 5,
+                            value: MetaValue::Boolean(no_gravity),
+                        });
+                    }
+                    if !values.is_empty() {
+                        send(
+                            self,
+                            &SetEntityData {
+                                id: VarInt(self.entity),
+                                values,
+                            },
+                        );
+                    }
                     continue;
                 }
                 Command::PluginVelocity { velocity } => {
