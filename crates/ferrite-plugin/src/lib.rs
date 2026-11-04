@@ -162,6 +162,17 @@ pub struct PlayerSnapshot {
     pub location: PlayerLocation,
     pub inventory: Vec<Option<ItemSnapshot>>,
 }
+/// One offer of a plugin-defined merchant (Bukkit `MerchantRecipe`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MerchantTrade {
+    pub gives: ItemSnapshot,
+    pub wants: ItemSnapshot,
+    pub second_wants: Option<ItemSnapshot>,
+    pub uses: i32,
+    pub max_uses: i32,
+    pub xp: i32,
+    pub price_multiplier: f32,
+}
 /// A player the server knows but that is not connected.
 #[derive(Clone, Debug)]
 pub struct OfflinePlayerSnapshot {
@@ -209,6 +220,11 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `Player#openMerchant`: a trading screen with the given offers.
+    OpenMerchant {
+        title: String,
+        trades: Vec<MerchantTrade>,
+    },
     /// `Player#openSign`: the sign editor for the sign at `pos`.
     OpenSign {
         pos: [i32; 3],

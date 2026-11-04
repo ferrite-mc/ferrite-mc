@@ -129,6 +129,26 @@ public abstract class PlayerMisc extends PlayerStubs {
         Objects.requireNonNull(side, "side");
         HostBridge.callVoid("Player", getUniqueId(), "openSign(Location,Side)", sign.getLocation(), side);
     }
+    /** Opens a trading screen for the merchant's recipes. Uses are tracked by the open screen only. */
+    @Override public org.bukkit.inventory.InventoryView openMerchant(org.bukkit.inventory.Merchant merchant, boolean force) {
+        Objects.requireNonNull(merchant, "merchant");
+        var item = (char) 0x1c; var offer = (char) 0x1e;
+        var offers = new StringBuilder();
+        for (var recipe : merchant.getRecipes()) {
+            var ingredients = recipe.getIngredients();
+            if (ingredients.isEmpty() || ingredients.size() > 2) continue;
+            if (offers.length() > 0) offers.append(offer);
+            offers.append(HostBridge.encode(recipe.getResult())).append(item)
+                  .append(HostBridge.encode(ingredients.get(0))).append(item)
+                  .append(ingredients.size() > 1 ? HostBridge.encode(ingredients.get(1)) : HostBridge.NULL).append(item)
+                  .append(recipe.getUses()).append(item).append(recipe.getMaxUses()).append(item)
+                  .append(recipe.getVillagerExperience()).append(item).append(recipe.getPriceMultiplier());
+        }
+        if (offers.length() == 0) return null;
+        String title = merchant instanceof FerriteMerchant own && own.getTitle() != null ? own.getTitle() : "Villager";
+        HostBridge.callVoid("Player", getUniqueId(), "openMerchant(String,String)", title, offers.toString());
+        try { return getOpenInventory(); } catch (UnsupportedOperationException | IllegalStateException unavailable) { return null; }
+    }
     @Override public org.bukkit.inventory.ItemStack getItemInHand() { return getInventory().getItemInMainHand(); }
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }

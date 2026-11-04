@@ -156,4 +156,21 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("storeCookie(NamespacedKey,String)|test:session" + HostBridge.ARG + "AQID"), calls);
     }
+
+    @Test void merchantRecipesAreEncodedForTheHost() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };
+        try {
+            var merchant = new FerriteMerchant("Shop");
+            var recipe = new org.bukkit.inventory.MerchantRecipe(new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND), 0, 8, false, 2, 0.05f);
+            recipe.addIngredient(new org.bukkit.inventory.ItemStack(org.bukkit.Material.EMERALD, 3));
+            merchant.setRecipes(java.util.List.of(recipe));
+            try { player.openMerchant(merchant, true); } catch (RuntimeException noView) { /* no open view offline */ }
+            assertNull(player.openMerchant(new FerriteMerchant("Empty"), true));
+        } finally { HostBridge.transport = null; }
+        assertEquals(1, calls.size());
+        var expected = "Shop" + HostBridge.ARG + "DIAMOND" + HostBridge.ITEM + "1" + (char) 0x1c + "EMERALD" + HostBridge.ITEM + "3" + (char) 0x1c
+            + HostBridge.NULL + (char) 0x1c + "0" + (char) 0x1c + "8" + (char) 0x1c + "2" + (char) 0x1c + "0.05";
+        assertEquals("openMerchant(String,String)|" + expected, calls.get(0));
+    }
 }

@@ -192,6 +192,41 @@ fn item_snapshot(text: &str) -> Option<Option<ferrite_plugin::ItemSnapshot>> {
     }))
 }
 
+/// Offers separated by `\u{1e}`, each with its fields separated by `\u{1c}`:
+/// `gives, wants, second wants or null, uses, max uses, xp, price multiplier`.
+fn merchant_trades(text: &str) -> Option<Vec<ferrite_plugin::MerchantTrade>> {
+    const OFFER: char = '\u{1e}';
+    const FIELD: char = '\u{1c}';
+    let mut trades = Vec::new();
+    for offer in text.split(OFFER).filter(|o| !o.is_empty()) {
+        let mut fields = offer.split(FIELD);
+        let gives = item_snapshot(fields.next()?)??;
+        let wants = item_snapshot(fields.next()?)??;
+        let second_wants = item_snapshot(fields.next()?)?;
+        let uses: i32 = fields.next()?.parse().ok().filter(|u| *u >= 0)?;
+        let max_uses: i32 = fields.next()?.parse().ok().filter(|u| *u > 0)?;
+        let xp: i32 = fields.next()?.parse().ok().filter(|x| *x >= 0)?;
+        let price_multiplier: f32 = fields
+            .next()?
+            .parse()
+            .ok()
+            .filter(|m: &f32| m.is_finite() && (0.0..=100.0).contains(m))?;
+        trades.push(ferrite_plugin::MerchantTrade {
+            gives,
+            wants,
+            second_wants,
+            uses,
+            max_uses,
+            xp,
+            price_multiplier,
+        });
+        if trades.len() > 64 {
+            return None;
+        }
+    }
+    (!trades.is_empty()).then_some(trades)
+}
+
 /// The packet command behind `call`, or `None` when it is another call or a value is invalid.
 pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "Player" {
@@ -333,6 +368,14 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
         }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "wakeup(boolean)" => PluginPacket::WakeUp,
+        "openMerchant(String,String)" => PluginPacket::OpenMerchant {
+            title: arg(0)?
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(256)
+                .collect(),
+            trades: merchant_trades(arg(1)?)?,
+        },
         "openSign(Location,Side)" => PluginPacket::OpenSign {
             pos: block_pos(arg(0)?)?,
             front: match arg(1)? {
@@ -810,6 +853,41 @@ mod tests {
             })
         );
         assert_eq!(packet(call("openSign(Location,Side)", &[&at, "TOP"])), None);
+        let offer = |gives: &str, uses: &str| {
+            [
+                format!("{gives}{PART}1"),
+                format!("EMERALD{PART}3"),
+                NULL_ARG.to_owned(),
+                uses.to_owned(),
+                "8".to_owned(),
+                "2".to_owned(),
+                "0.05".to_owned(),
+            ]
+            .join("\u{1c}")
+        };
+        let two = format!("{}\u{1e}{}", offer("DIAMOND", "0"), offer("STICK", "1"));
+        match packet(call("openMerchant(String,String)", &["Shop", &two])) {
+            Some(PluginPacket::OpenMerchant { title, trades }) => {
+                assert_eq!(title, "Shop");
+                assert_eq!(trades.len(), 2);
+                assert_eq!(trades[0].gives.material, "minecraft:diamond");
+                assert_eq!(trades[0].wants.amount, 3);
+                assert_eq!(trades[1].uses, 1);
+                assert_eq!(trades[1].second_wants, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            packet(call("openMerchant(String,String)", &["Shop", ""])),
+            None
+        );
+        assert_eq!(
+            packet(call(
+                "openMerchant(String,String)",
+                &["Shop", &offer("NOT_AN_ITEM", "0")]
+            )),
+            None
+        );
         assert_eq!(packet(call("sendOpLevel(byte)", &["9"])), None);
         assert_eq!(
             packet(call("playEffect(EntityEffect)", &["WOLF_HEARTS"])),

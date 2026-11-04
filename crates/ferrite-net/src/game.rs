@@ -25,6 +25,8 @@ pub enum ServerboundPlay {
     RenameItem(RenameItem),
     /// Vanilla `ServerboundSetBeaconPacket`: the two effects chosen in a beacon screen.
     SetBeacon(SetBeacon),
+    /// Vanilla `ServerboundSelectTradePacket`: the offer picked in a merchant screen.
+    SelectTrade(SelectTrade),
     Position(MovePosition),
     PositionRotation(MovePositionRotation),
     Rotation(MoveRotation),
@@ -292,6 +294,7 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         )),
         49 => Some(ServerboundPlay::RenameItem(RenameItem::decode(&mut b)?)),
         53 => Some(ServerboundPlay::SetBeacon(SetBeacon::decode(&mut b)?)),
+        52 => Some(ServerboundPlay::SelectTrade(SelectTrade::decode(&mut b)?)),
         41 => Some(ServerboundPlay::PlayerAction(PlayerAction::decode(&mut b)?)),
         42 => Some(ServerboundPlay::PlayerCommand(
             ServerboundPlayerCommand::decode(&mut b)?,

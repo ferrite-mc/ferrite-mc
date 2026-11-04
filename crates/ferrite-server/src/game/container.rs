@@ -405,6 +405,93 @@ impl Player {
 
     /// Vanilla `ServerGamePacketListenerImpl.handleSetBeacon`: validates the chosen effects
     /// against the pyramid, spends one payment item and saves the choice in the block entity.
+    /// `Player#openMerchant`: a trading screen for offers a plugin defined. The open menu tracks
+    /// the uses; the plugin's recipes do not see them back.
+    pub fn open_plugin_merchant(&mut self, title: &str, trades: &[ferrite_plugin::MerchantTrade]) {
+        use ferrite_inventory::Trade;
+        let stack = |item: &ferrite_plugin::ItemSnapshot| {
+            ferrite_item::item_id(&item.material)
+                .map(|id| ItemStack::with_count(id, i32::from(item.amount)))
+        };
+        let mut offers = Vec::new();
+        for trade in trades {
+            let (Some(wants), Some(gives)) = (stack(&trade.wants), stack(&trade.gives)) else {
+                continue;
+            };
+            let mut offer = Trade::new(wants, gives, trade.max_uses, trade.xp);
+            offer.second_wants = trade.second_wants.as_ref().and_then(stack);
+            offer.uses = trade.uses.min(trade.max_uses);
+            offer.price_multiplier = trade.price_multiplier;
+            offers.push(offer);
+        }
+        if offers.is_empty() {
+            return;
+        }
+        let menu_offers = offers.clone();
+        self.open_menu(|id| Menu::merchant(id, menu_offers), title, None);
+        let Some(window) = self
+            .menus
+            .open
+            .as_ref()
+            .filter(|menu| menu.kind() == ferrite_inventory::MenuKind::Merchant)
+            .map(Menu::container_id)
+        else {
+            return;
+        };
+        let cost = |stack: &ItemStack, count: i32| ferrite_protocol::packets::play::ItemCost {
+            item: VarInt(i32::from(stack.item)),
+            count: VarInt(count),
+        };
+        send(
+            self,
+            &ferrite_protocol::packets::play::MerchantOffers {
+                window: VarInt(window),
+                offers: offers
+                    .iter()
+                    .map(|offer| ferrite_protocol::packets::play::MerchantOffer {
+                        wants: cost(&offer.wants, offer.price()),
+                        gives: offer.gives.clone(),
+                        second_wants: offer
+                            .second_wants
+                            .as_ref()
+                            .map(|second| cost(second, second.count)),
+                        out_of_stock: offer.is_out_of_stock(),
+                        uses: offer.uses,
+                        max_uses: offer.max_uses,
+                        xp: offer.xp,
+                        special_price: offer.special_price,
+                        price_multiplier: offer.price_multiplier,
+                        demand: offer.demand,
+                    })
+                    .collect(),
+                level: VarInt(1),
+                xp: VarInt(0),
+                show_progress: false,
+                can_restock: false,
+            },
+        );
+    }
+
+    /// The offer picked in a merchant screen (vanilla `MerchantMenu.setSelectionHint`).
+    pub fn handle_select_trade(&mut self, p: ferrite_protocol::packets::play::SelectTrade) {
+        let Some(menu) = self
+            .menus
+            .open
+            .as_mut()
+            .filter(|menu| menu.kind() == ferrite_inventory::MenuKind::Merchant)
+        else {
+            return;
+        };
+        let Ok(index) = usize::try_from(p.slot.0) else {
+            return;
+        };
+        if !menu.select_trade(index) {
+            return;
+        }
+        let out = menu.broadcast_changes(&self.inventory);
+        emit(self, out);
+    }
+
     pub fn handle_set_beacon(&mut self, p: SetBeacon) {
         let Some(menu) = self
             .menus
@@ -675,6 +762,9 @@ impl Player {
             ),
             PluginPacket::OpenSign { pos, front } => {
                 super::blocks::open_sign_editor(self, pos, front);
+            }
+            PluginPacket::OpenMerchant { title, trades } => {
+                self.open_plugin_merchant(&title, &trades)
             }
             PluginPacket::WakeUp => super::blocks::wake(self),
             PluginPacket::ResyncInventory => {

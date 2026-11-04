@@ -2749,6 +2749,7 @@ impl Player {
                 ServerboundPlay::ContainerClick(p) => self.handle_container_click(p),
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
                 ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
+                ServerboundPlay::SelectTrade(p) => self.handle_select_trade(p),
                 ServerboundPlay::RenameItem(p) => self.rename_item(p.name),
                 ServerboundPlay::ContainerClose(_) => self.close_container(),
                 ServerboundPlay::PlayerAction(p) => {
