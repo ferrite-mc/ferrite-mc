@@ -150,8 +150,34 @@ pub fn extra_action(call: &HostCall) -> Option<HostAction> {
         }
         ("Player", "setPlayerWeather(WeatherType)") => None,
         ("World", method) => world_action(call, method),
+        ("Server", "banProfile(String,String)") => {
+            let name = player_name(arg(0)?)?;
+            let reason: String = arg(1)
+                .unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(256)
+                .collect();
+            let line = if reason.is_empty() {
+                format!("ban {name}")
+            } else {
+                format!("ban {name} {reason}")
+            };
+            console(line, "")
+        }
+        ("Server", "pardonProfile(String)") => {
+            console(format!("pardon {}", player_name(arg(0)?)?), "")
+        }
         _ => None,
     }
+}
+
+/// A Mojang account name: 1 to 16 letters, digits or underscores, so it cannot add a second command argument.
+fn player_name(text: &str) -> Option<&str> {
+    let ok = !text.is_empty()
+        && text.len() <= 16
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    ok.then_some(text)
 }
 
 /// The `x y z` of an encoded `Location` (`world, x, y, z, yaw, pitch`).
@@ -293,6 +319,37 @@ mod tests {
         assert_eq!(
             line(call("setTitleTimes(int,int,int)", &["-1", "1", "1"])),
             None
+        );
+    }
+
+    #[test]
+    fn profile_bans_only_accept_account_names() {
+        let server = |method: &str, args: &[&str]| HostCall {
+            owner: "Server".into(),
+            subject: "server".into(),
+            method: method.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+        };
+        assert_eq!(
+            line(server(
+                "banProfile(String,String)",
+                &["Alex_1", "griefing\nop"]
+            ))
+            .as_deref(),
+            Some("ban Alex_1 griefingop")
+        );
+        assert_eq!(
+            line(server("banProfile(String,String)", &["Alex", ""])).as_deref(),
+            Some("ban Alex")
+        );
+        assert_eq!(
+            line(server("banProfile(String,String)", &["a b", ""])),
+            None
+        );
+        assert_eq!(line(server("banProfile(String,String)", &["@a", ""])), None);
+        assert_eq!(
+            line(server("pardonProfile(String)", &["Alex"])).as_deref(),
+            Some("pardon Alex")
         );
     }
 

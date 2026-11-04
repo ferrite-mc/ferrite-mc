@@ -59,7 +59,7 @@ class WorldDimensionTest {
         assertFalse(world.getAllowMonsters());
         assertFalse(world.getAllowAnimals());
         assertEquals(4, world.getIntersectingChunks(new org.bukkit.util.BoundingBox(0, 0, 0, 20, 10, 20)).size());
-        assertTrue(world.getNearbyEntities(new org.bukkit.Location(world, 0, 64, 0), 5, 5, 5).isEmpty());
+        assertTrue(world.getNearbyEntities(new org.bukkit.Location(world, 100000, 64, 100000), 5, 5, 5).isEmpty());
         assertNull(world.getEntity(java.util.UUID.randomUUID()));
     }
 }

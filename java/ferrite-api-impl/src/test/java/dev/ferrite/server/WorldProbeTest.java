@@ -43,6 +43,25 @@ class WorldProbeTest {
             } catch (Throwable ignored) {}
         }
         ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(world.getUID());
+        var serverMissing = new TreeSet<String>();
+        for (var m : org.bukkit.Server.class.getMethods()) {
+            if (Modifier.isStatic(m.getModifiers()) || m.isDefault()) continue;
+            var types = m.getParameterTypes();
+            var args = new Object[types.length];
+            for (int i = 0; i < args.length; i++) args[i] = dflt(types[i]);
+            var params = new StringJoiner(",");
+            for (var p : types) params.add(p.getSimpleName());
+            if (m.getName().equals("shutdown") || m.getName().equals("restart") || m.getName().equals("stop")) continue;
+            try {
+                m.invoke(org.bukkit.Bukkit.getServer(), args);
+            } catch (InvocationTargetException e) {
+                var c = e.getCause();
+                if (c instanceof UnsupportedOperationException u && String.valueOf(u.getMessage()).contains("not implemented"))
+                    serverMissing.add(m.getName() + "(" + params + ")");
+            } catch (Throwable ignored) {}
+        }
+        Files.createDirectories(Path.of("build/catalog"));
+        Files.write(Path.of("build/catalog/server-missing.txt"), serverMissing);
         Path out = Path.of("build/catalog/world-missing.txt");
         Files.createDirectories(out.getParent());
         Files.write(out, missing);

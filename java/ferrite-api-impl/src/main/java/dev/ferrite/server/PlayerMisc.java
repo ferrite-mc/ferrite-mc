@@ -184,4 +184,19 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public Set<String> getListeningPluginChannels() { return Set.of(); }
     @Override public void resetCooldown() { }
     @Override public void resetFlyingTicks() { }
+
+    // ---- bans ----------------------------------------------------------------------------------------------
+    private org.bukkit.BanEntry applyBan(String reason, java.util.Date expires, String source, boolean kick) {
+        var list = (org.bukkit.ban.ProfileBanList) getServer().getBanList(org.bukkit.BanList.Type.PROFILE);
+        var entry = list.addBan((org.bukkit.profile.PlayerProfile) getPlayerProfile(), reason, expires, source);
+        if (kick) kickPlayer(reason);
+        return entry;
+    }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.util.Date expires, String source, boolean kick) { return (E) applyBan(reason, expires, source, kick); }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.util.Date expires, String source) { return (E) applyBan(reason, expires, source, true); }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Instant expires, String source, boolean kick) { return (E) applyBan(reason, expires == null ? null : java.util.Date.from(expires), source, kick); }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Instant expires, String source) { return (E) applyBan(reason, expires == null ? null : java.util.Date.from(expires), source, true); }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source, boolean kick) { return (E) applyBan(reason, duration == null ? null : java.util.Date.from(java.time.Instant.now().plus(duration)), source, kick); }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source) { return (E) applyBan(reason, duration == null ? null : java.util.Date.from(java.time.Instant.now().plus(duration)), source, true); }
+    @Override public boolean isBanned() { return ((org.bukkit.ban.ProfileBanList) getServer().getBanList(org.bukkit.BanList.Type.PROFILE)).isBanned((org.bukkit.profile.PlayerProfile) getPlayerProfile()); }
 }

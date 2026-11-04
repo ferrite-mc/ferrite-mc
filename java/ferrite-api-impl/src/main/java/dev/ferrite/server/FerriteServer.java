@@ -117,9 +117,10 @@ public class FerriteServer extends ServerStubs {
     private final org.bukkit.scoreboard.ScoreboardManager scoreboards = new FerriteScoreboards();
     @Override public org.bukkit.scoreboard.ScoreboardManager getScoreboardManager() { return scoreboards; }
     private final FerriteIpBanList ipBans = new FerriteIpBanList();
+    private final FerriteProfileBanList profileBans = new FerriteProfileBanList();
     void seedIpBan(String ip) { ipBans.seed(ip); }
-    @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.BanList<?>> T getBanList(org.bukkit.BanList.Type type) { if (type != org.bukkit.BanList.Type.IP) throw new UnsupportedOperationException("Ferrite: profile bans not implemented"); return (T) ipBans; }
-    @SuppressWarnings("unchecked") @Override public <B extends org.bukkit.BanList<E>, E> B getBanList(io.papermc.paper.ban.BanListType<B> type) { if (type != io.papermc.paper.ban.BanListType.IP) throw new UnsupportedOperationException("Ferrite: profile bans not implemented"); return (B) ipBans; }
+    @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.BanList<?>> T getBanList(org.bukkit.BanList.Type type) { return (T) (type == org.bukkit.BanList.Type.IP ? (org.bukkit.BanList<?>) ipBans : profileBans); }
+    @SuppressWarnings("unchecked") @Override public <B extends org.bukkit.BanList<E>, E> B getBanList(io.papermc.paper.ban.BanListType<B> type) { return (B) (type == io.papermc.paper.ban.BanListType.IP ? (org.bukkit.BanList<?>) ipBans : profileBans); }
     @Override public void banIP(String address) { ipBans.addBan(address, null, (java.util.Date) null, null); }
     @Override public void banIP(java.net.InetAddress address) { ipBans.addBan(address, null, (java.util.Date) null, null); }
     @Override public void unbanIP(String address) { ipBans.pardon(address); }
