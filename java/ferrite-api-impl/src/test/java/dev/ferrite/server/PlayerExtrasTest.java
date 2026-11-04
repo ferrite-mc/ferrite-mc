@@ -173,4 +173,19 @@ class PlayerExtrasTest {
             + HostBridge.NULL + (char) 0x1c + "0" + (char) 0x1c + "8" + (char) 0x1c + "2" + (char) 0x1c + "0.05";
         assertEquals("openMerchant(String,String)|" + expected, calls.get(0));
     }
+
+    @Test void rememberedSettingsReadBackTheirOwnValuesAndValidateTheScale() {
+        assertNull(player.getCustomName());
+        player.setCustomName("Boss");
+        player.setCustomNameVisible(true);
+        player.setCollidable(false);
+        player.setHealthScale(6.0);
+        assertEquals("Boss", player.getCustomName());
+        assertTrue(player.isCustomNameVisible());
+        assertFalse(player.isCollidable());
+        assertEquals(6.0, player.getHealthScale());
+        assertTrue(player.hasAI());
+        assertThrows(IllegalArgumentException.class, () -> player.setHealthScale(0));
+        assertThrows(IllegalArgumentException.class, () -> player.setHealthScale(Double.NaN));
+    }
 }

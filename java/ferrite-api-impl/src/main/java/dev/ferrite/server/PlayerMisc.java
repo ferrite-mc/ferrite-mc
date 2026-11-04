@@ -38,6 +38,37 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public void addAdditionalChatCompletions(Collection<String> completions) { addCustomChatCompletions(completions); }
     @Override public void removeAdditionalChatCompletions(Collection<String> completions) { removeCustomChatCompletions(completions); }
 
+    // ---- settings the server only remembers -----------------------------------------------------------
+    // These are kept for the plugin that set them and read back; the client is not told and no server
+    // rule consults them (yet), so they have no in-game effect.
+    private String customName;
+    private boolean customNameVisible, sleepingIgnored, healthScaled, affectsSpawning = true, collidable = true, canPickupItems = true, persistent = true, ai = true;
+    private double healthScale = 20.0;
+
+    @Override public synchronized String getCustomName() { return customName; }
+    @Override public synchronized void setCustomName(String name) { customName = name; }
+    @Override public synchronized boolean isCustomNameVisible() { return customNameVisible; }
+    @Override public synchronized void setCustomNameVisible(boolean flag) { customNameVisible = flag; }
+    @Override public synchronized boolean isSleepingIgnored() { return sleepingIgnored; }
+    @Override public synchronized void setSleepingIgnored(boolean isSleeping) { sleepingIgnored = isSleeping; }
+    @Override public synchronized boolean isCollidable() { return collidable; }
+    @Override public synchronized void setCollidable(boolean collidable) { this.collidable = collidable; }
+    @Override public synchronized boolean getAffectsSpawning() { return affectsSpawning; }
+    @Override public synchronized void setAffectsSpawning(boolean affects) { affectsSpawning = affects; }
+    @Override public synchronized boolean getCanPickupItems() { return canPickupItems; }
+    @Override public synchronized void setCanPickupItems(boolean pickup) { canPickupItems = pickup; }
+    @Override public synchronized boolean isPersistent() { return persistent; }
+    @Override public synchronized void setPersistent(boolean persistent) { this.persistent = persistent; }
+    @Override public synchronized boolean hasAI() { return ai; }
+    @Override public synchronized void setAI(boolean ai) { this.ai = ai; }
+    @Override public synchronized boolean isHealthScaled() { return healthScaled; }
+    @Override public synchronized void setHealthScaled(boolean scale) { healthScaled = scale; }
+    @Override public synchronized double getHealthScale() { return healthScale; }
+    @Override public synchronized void setHealthScale(double scale) {
+        if (!(scale > 0) || Double.isInfinite(scale)) throw new IllegalArgumentException("scale must be greater than 0 and finite");
+        healthScale = scale;
+    }
+
     // ---- tab list and visibility ---------------------------------------------------------------
     private final Set<UUID> unlisted = new HashSet<>();
     private final Set<UUID> hidden = new HashSet<>();
