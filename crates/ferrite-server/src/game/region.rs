@@ -3534,7 +3534,13 @@ impl Region {
 
     /// `World#spawnEntity` / `spawnFallingBlock`: a falling block, primed TNT or a modelled mob.
     /// Returns whether something was spawned.
-    pub fn plugin_spawn(&mut self, center: [f64; 3], kind: &str, block: Option<&str>) -> bool {
+    pub fn plugin_spawn(
+        &mut self,
+        center: [f64; 3],
+        kind: &str,
+        block: Option<&str>,
+        velocity: [f64; 3],
+    ) -> bool {
         use ferrite_math::Vec3;
         if !center
             .iter()
@@ -3551,6 +3557,13 @@ impl Region {
                 ferrite_entity::falling::new_falling(pos, state)
             }
             "minecraft:tnt" => ferrite_entity::tnt::new_primed_tnt(pos, 80),
+            "minecraft:arrow" => ferrite_entity::arrow::new_arrow(
+                pos,
+                Vec3::new(velocity[0], velocity[1], velocity[2]),
+                2.0,
+                None,
+                &mut self.rng,
+            ),
             other => {
                 let Some(mob) = ferrite_entity::mob::MobKind::from_name(other) else {
                     return false;

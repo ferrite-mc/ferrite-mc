@@ -1145,6 +1145,71 @@ fn forceload_tree() -> NodeBuilder<Source> {
         )
 }
 
+fn damage_tree() -> NodeBuilder<Source> {
+    fn damage(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+        let amount = ctx
+            .argument("amount")
+            .and_then(|value| value.as_f32())
+            .unwrap_or(0.0);
+        let damage_type = ctx
+            .string("damageType")
+            .unwrap_or("minecraft:generic")
+            .to_owned();
+        send(
+            ctx.source(),
+            Action::Damage {
+                targets: entity(ctx, "target")?,
+                amount,
+                damage_type,
+            },
+        )?;
+        Ok(amount as i32)
+    }
+    let damage_type = || {
+        argument::<Source>(
+            "damageType",
+            ArgumentType::Registry {
+                parser: ferrite_command::arguments::RegistryParser::Resource,
+                registry: "minecraft:damage_type".into(),
+            },
+        )
+        .executes(damage)
+    };
+    literal::<Source>("damage")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(
+            argument::<Source>("target", ArgumentType::entity()).then(
+                argument::<Source>(
+                    "amount",
+                    ArgumentType::Float {
+                        min: 0.0,
+                        max: f32::MAX,
+                    },
+                )
+                .executes(damage)
+                .then(
+                    damage_type()
+                        .then(literal::<Source>("at").then(
+                            argument::<Source>("location", ArgumentType::Vec3).executes(damage),
+                        ))
+                        .then(
+                            literal::<Source>("by").then(
+                                argument::<Source>("entity", ArgumentType::entity())
+                                    .executes(damage)
+                                    .then(
+                                        literal::<Source>("from").then(
+                                            argument::<Source>("cause", ArgumentType::entity())
+                                                .executes(damage),
+                                        ),
+                                    ),
+                            ),
+                        ),
+                ),
+            ),
+        )
+}
+
 pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(version_tree());
     tree.register(random_tree());
@@ -1158,6 +1223,7 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(tick_tree());
     tree.register(rotate_tree());
     tree.register(forceload_tree());
+    tree.register(damage_tree());
 }
 
 #[cfg(test)]
@@ -1233,6 +1299,7 @@ mod tests {
             "tick",
             "rotate",
             "forceload",
+            "damage",
         ] {
             assert!(
                 roots.iter().any(|root| root == name),
@@ -1462,6 +1529,31 @@ mod tests {
             1
         );
         assert!(run("forceload remove all", 1, state, None).0.is_err());
+    }
+
+    #[test]
+    fn damage_forms_parse_and_need_permission() {
+        for input in [
+            "damage @s 4",
+            "damage @s 4 minecraft:fall",
+            "damage @s 4 minecraft:fall at 1 2 3",
+            "damage @s 4 minecraft:arrow by @p",
+            "damage @s 4 minecraft:arrow by @p from @s",
+        ] {
+            let (result, actions) = run(input, 2, fresh(), None);
+            assert!(result.is_ok(), "{input}: {result:?}");
+            assert!(
+                matches!(&actions[0], Action::Damage { amount, .. } if *amount == 4.0),
+                "{input}"
+            );
+        }
+        let (_, actions) = run("damage @s 2.5 fall", 2, fresh(), None);
+        assert!(matches!(
+            &actions[0],
+            Action::Damage { damage_type, .. } if damage_type == "minecraft:fall" || damage_type == "fall"
+        ));
+        assert!(run("damage @s -1", 2, fresh(), None).0.is_err());
+        assert!(run("damage @s 4", 1, fresh(), None).0.is_err());
     }
 
     #[test]

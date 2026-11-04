@@ -478,6 +478,12 @@ pub enum RotateTo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// `/damage`: hurt the targets; `damage_type` is the registry key without namespace.
+    Damage {
+        targets: EntityTarget,
+        amount: f32,
+        damage_type: String,
+    },
     /// `/forceload`: chunks to start or stop holding in a dimension.
     ForceLoad {
         dimension: super::Dimension,

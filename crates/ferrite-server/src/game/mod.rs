@@ -1279,10 +1279,10 @@ async fn run(
                      let name = component_json.as_deref().map(json_text);
                      worlds.schedule_global(move |g| g.set_display_name(player, name));
                  }
-                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { center, kind, block }) => {
+                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { center, kind, block, velocity }) => {
                     let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref()); });
+                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity); });
                     }
                 }
                  Some(ferrite_plugin::PlayerCommand::DropItem { center, item, amount, natural }) => {
