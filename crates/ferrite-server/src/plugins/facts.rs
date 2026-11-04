@@ -140,6 +140,47 @@ pub fn set_pack_status(player: Uuid, action: i32) {
     pack_registry().lock().unwrap().insert(player, action);
 }
 
+type CookieMap = HashMap<(Uuid, String), Option<Vec<u8>>>;
+
+fn cookie_registry() -> &'static Mutex<CookieMap> {
+    static COOKIES: OnceLock<Mutex<CookieMap>> = OnceLock::new();
+    COOKIES.get_or_init(Default::default)
+}
+
+/// Records what the client answered to a cookie request (`None`: it has no such cookie).
+pub fn set_cookie(player: Uuid, key: &str, payload: Option<Vec<u8>>) {
+    cookie_registry()
+        .lock()
+        .unwrap()
+        .insert((player, key.to_owned()), payload);
+}
+
+/// Forgets an earlier answer, so a new request starts pending.
+pub fn clear_cookie(player: Uuid, key: &str) {
+    cookie_registry()
+        .lock()
+        .unwrap()
+        .remove(&(player, key.to_owned()));
+}
+
+/// The reply to `getCookieReply(NamespacedKey)`: `pending` until the client answered, then the
+/// base64 cookie or the null marker when it holds none.
+fn cookie_answer(call: &HostCall) -> Option<String> {
+    use base64::Engine as _;
+    let player = Uuid::parse_str(&call.subject).ok()?;
+    let key = call.args.first()?.to_ascii_lowercase();
+    let stored = cookie_registry()
+        .lock()
+        .unwrap()
+        .get(&(player, key))
+        .cloned();
+    Some(match stored {
+        None => "pending".to_owned(),
+        Some(None) => ferrite_plugin::HOST_NULL.to_owned(),
+        Some(Some(bytes)) => base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
 fn fall_registry() -> &'static Mutex<HashMap<Uuid, f32>> {
     static FALL: OnceLock<Mutex<HashMap<Uuid, f32>>> = OnceLock::new();
     FALL.get_or_init(Default::default)
@@ -192,6 +233,10 @@ pub fn forget(player: Uuid) {
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
     fall_registry().lock().unwrap().remove(&player);
+    cookie_registry()
+        .lock()
+        .unwrap()
+        .retain(|(owner, _), _| *owner != player);
     pack_registry().lock().unwrap().remove(&player);
     controls_registry().lock().unwrap().remove(&player);
     vitals_registry().lock().unwrap().remove(&player);
@@ -249,6 +294,9 @@ fn client_setting(
 
 /// The answer to `call`, or `None` when it is not one of these queries or the player is unknown.
 pub fn answer(call: &HostCall) -> Option<String> {
+    if call.owner == "Player" && call.method == "getCookieReply(NamespacedKey)" {
+        return cookie_answer(call);
+    }
     if call.owner != "Player" || !call.args.is_empty() {
         return None;
     }
@@ -527,6 +575,29 @@ mod tests {
         set_pack_status(player, 99);
         assert_eq!(ask(), None);
         forget(player);
+    }
+
+    #[test]
+    fn cookie_replies_are_pending_until_the_client_answers() {
+        let player = Uuid::from_u128(0xc00c);
+        let ask = || {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: "getCookieReply(NamespacedKey)".into(),
+                args: vec!["My:Key".into()],
+            })
+        };
+        assert_eq!(ask().as_deref(), Some("pending"));
+        set_cookie(player, "my:key", Some(vec![1, 2, 3]));
+        assert_eq!(ask().as_deref(), Some("AQID"));
+        set_cookie(player, "my:key", None);
+        assert_eq!(ask().as_deref(), Some(ferrite_plugin::HOST_NULL));
+        clear_cookie(player, "my:key");
+        assert_eq!(ask().as_deref(), Some("pending"));
+        set_cookie(player, "my:key", None);
+        forget(player);
+        assert_eq!(ask().as_deref(), Some("pending"));
     }
 
     #[test]

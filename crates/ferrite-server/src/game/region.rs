@@ -2939,6 +2939,9 @@ impl Player {
                         },
                     );
                 }
+                ServerboundPlay::CookieResponse(p) => {
+                    crate::plugins::facts::set_cookie(self.uuid, &p.key, p.payload);
+                }
                 ServerboundPlay::ResourcePackResponse(p) => {
                     crate::plugins::facts::set_pack_status(self.uuid, p.action.0);
                 }

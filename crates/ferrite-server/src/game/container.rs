@@ -767,6 +767,13 @@ impl Player {
                 self.open_plugin_merchant(&title, &trades)
             }
             PluginPacket::WakeUp => super::blocks::wake(self),
+            PluginPacket::RetrieveCookie { key } => {
+                crate::plugins::facts::clear_cookie(self.uuid, &key);
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::CookieRequest { key },
+                );
+            }
             PluginPacket::DropSelected { all } => {
                 self.drop_selected(all);
                 // The client did not take the item out itself, so show it the new contents.

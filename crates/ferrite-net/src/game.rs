@@ -18,6 +18,8 @@ pub enum ServerboundPlay {
     PlayerInput(PlayerInput),
     /// Vanilla `ServerboundResourcePackPacket`: how the client is doing with a pushed pack.
     ResourcePackResponse(ResourcePackResponse),
+    /// Vanilla `ServerboundCookieResponsePacket`: the answer to a cookie request.
+    CookieResponse(CookieResponse),
     SignUpdate(SignUpdate),
     SetHeldItem(SetHeldItem),
     CreativeSlot(CreativeSlot<ferrite_item::ItemStack>),
@@ -301,6 +303,9 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         52 => Some(ServerboundPlay::SelectTrade(SelectTrade::decode(&mut b)?)),
         41 => Some(ServerboundPlay::PlayerAction(PlayerAction::decode(&mut b)?)),
         43 => Some(ServerboundPlay::PlayerInput(PlayerInput::decode(&mut b)?)),
+        21 => Some(ServerboundPlay::CookieResponse(CookieResponse::decode(
+            &mut b,
+        )?)),
         50 => Some(ServerboundPlay::ResourcePackResponse(
             ResourcePackResponse::decode(&mut b)?,
         )),

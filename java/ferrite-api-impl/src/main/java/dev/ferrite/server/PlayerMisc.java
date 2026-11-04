@@ -332,6 +332,31 @@ public abstract class PlayerMisc extends PlayerStubs {
         if (value.length > 5120) throw new IllegalArgumentException("Cookie payload too large (" + value.length + " > 5120)");
         HostBridge.callVoid("Player", getUniqueId(), "storeCookie(NamespacedKey,String)", key, java.util.Base64.getEncoder().encodeToString(value));
     }
+    private static final java.util.concurrent.ScheduledExecutorService COOKIE_POLLER = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> { var t = new Thread(task, "ferrite-cookie-poll"); t.setDaemon(true); return t; });
+    /** Asks the client for the cookie; the future completes with it, or null when the client holds none. */
+    @Override public java.util.concurrent.CompletableFuture<byte[]> retrieveCookie(org.bukkit.NamespacedKey key) {
+        Objects.requireNonNull(key, "key");
+        var result = new java.util.concurrent.CompletableFuture<byte[]>();
+        HostBridge.callVoid("Player", getUniqueId(), "retrieveCookie(NamespacedKey)", key);
+        var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        var poll = new Runnable() {
+            @Override public void run() {
+                try {
+                    var reply = (String) HostBridge.call("Player", getUniqueId(), "getCookieReply(NamespacedKey)", String.class, key);
+                    if ("pending".equals(reply)) {
+                        if (System.nanoTime() > deadline) result.completeExceptionally(new java.util.concurrent.TimeoutException("The client did not answer the cookie request"));
+                        else COOKIE_POLLER.schedule(this, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    } else {
+                        result.complete(reply == null ? null : java.util.Base64.getDecoder().decode(reply));
+                    }
+                } catch (RuntimeException failure) {
+                    result.completeExceptionally(failure);
+                }
+            }
+        };
+        COOKIE_POLLER.schedule(poll, 50, java.util.concurrent.TimeUnit.MILLISECONDS);
+        return result;
+    }
     /** Opens the sign editor for the given side; only a sign block in the player's world can be edited. */
     @Override public void openSign(org.bukkit.block.Sign sign, org.bukkit.block.sign.Side side) {
         Objects.requireNonNull(sign, "sign");

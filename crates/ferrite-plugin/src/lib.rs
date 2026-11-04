@@ -278,6 +278,10 @@ pub enum PluginPacket {
     },
     /// `Player#wakeup`: gets the player out of the bed they sleep in, if any.
     WakeUp,
+    /// `Player#retrieveCookie`: asks the client for the cookie under `key`.
+    RetrieveCookie {
+        key: String,
+    },
     /// A boss bar shown to, changed on or removed from this player (`ClientboundBossEventPacket`).
     BossBar(BossBarChange),
     /// One property of the open menu (`Player#setWindowProperty`, `ClientboundContainerSetDataPacket`).

@@ -568,6 +568,10 @@ packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required
 packet!(ResourcePackPop,81,Clientbound,{id:Option<Uuid>});
 // Vanilla `ClientboundStoreCookiePacket`: the client keeps `payload` (at most 5120 bytes) under `key`.
 packet!(StoreCookie,122,Clientbound,{key:String,payload:Vec<u8>});
+// Vanilla `ClientboundCookieRequestPacket`: asks the client for the cookie stored under `key`.
+packet!(CookieRequest,21,Clientbound,{key:String});
+// Vanilla `ServerboundCookieResponsePacket`: the cookie the client holds, if any.
+packet!(CookieResponse,21,Serverbound,{key:String,payload:Option<Vec<u8>>});
 packet!(ItemCooldown,22,Clientbound,{group:String,ticks:VarInt});
 packet!(SetExperience,105,Clientbound,{progress:f32,level:VarInt,total:VarInt});
 // Vanilla `ClientboundPlayerAbilitiesPacket`: flags (1 invulnerable, 2 flying, 4 may fly, 8 instant build),
@@ -1570,6 +1574,17 @@ mod interaction_tests {
             hash: "ab".repeat(20),
             required: true,
             prompt: None,
+        });
+        roundtrip(CookieRequest {
+            key: "my:key".into(),
+        });
+        roundtrip(CookieResponse {
+            key: "my:key".into(),
+            payload: Some(vec![1, 2, 3]),
+        });
+        roundtrip(CookieResponse {
+            key: "my:key".into(),
+            payload: None,
         });
         roundtrip(StoreCookie {
             key: "plugin:session".into(),

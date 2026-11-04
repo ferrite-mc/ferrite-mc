@@ -361,4 +361,16 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("spawnArrow(Location,double,double,double)"), calls);
     }
+
+    @Test void cookiesAreRetrievedFromTheClient() throws Exception {
+        var polls = new java.util.concurrent.atomic.AtomicInteger();
+        HostBridge.transport = (owner, subject, method, args) ->
+            method.equals("getCookieReply(NamespacedKey)") ? (polls.incrementAndGet() < 3 ? "pending" : "AQID") : "";
+        try {
+            var bytes = player.retrieveCookie(new org.bukkit.NamespacedKey("test", "token")).get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertArrayEquals(new byte[]{1, 2, 3}, bytes);
+            HostBridge.transport = (owner, subject, method, args) -> method.equals("getCookieReply(NamespacedKey)") ? HostBridge.NULL : "";
+            assertNull(player.retrieveCookie(new org.bukkit.NamespacedKey("test", "none")).get(5, java.util.concurrent.TimeUnit.SECONDS));
+        } finally { HostBridge.transport = null; }
+    }
 }

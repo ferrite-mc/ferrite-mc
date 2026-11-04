@@ -440,6 +440,18 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
                 _ => return None,
             },
         },
+        "retrieveCookie(NamespacedKey)" => {
+            let key = arg(0)?.to_ascii_lowercase();
+            let valid = !key.is_empty()
+                && key.len() <= 256
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_-./:".contains(c));
+            if !valid {
+                return None;
+            }
+            PluginPacket::RetrieveCookie { key }
+        }
         "storeCookie(NamespacedKey,String)" => {
             use base64::Engine;
             let key = arg(0)?.to_ascii_lowercase();
@@ -925,6 +937,16 @@ mod tests {
             Some(PluginPacket::BossBar(BossBarChange::Remove {
                 id: Uuid::from_u128(9)
             }))
+        );
+        assert_eq!(
+            packet(call("retrieveCookie(NamespacedKey)", &["My:Key"])),
+            Some(PluginPacket::RetrieveCookie {
+                key: "my:key".into()
+            })
+        );
+        assert_eq!(
+            packet(call("retrieveCookie(NamespacedKey)", &["bad key"])),
+            None
         );
         assert_eq!(
             packet(call(
