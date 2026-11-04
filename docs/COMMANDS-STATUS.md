@@ -1,0 +1,47 @@
+# Vanilla command coverage (2026-11-04)
+
+Goal: every vanilla command works like vanilla. The list of root commands comes from the
+dispatcher compared with `vanilla/26.3/generated/reports/commands.json` (94 roots).
+
+## Done on 2026-11-04 (all in `commands_more.rs` unless noted)
+
+version, random, setidletimeout, teammsg/tm, transfer, stopwatch, publish, unpublish, tick,
+rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers.
+
+## Not done: 14 commands are still missing
+
+advancement, attribute, compute, dialog, fillbiome, item, loot, place, posteffect, recipe,
+ride, spectate, swing, waypoint.
+
+Notes for whoever picks these up:
+
+- `swing`: needs a Region method that broadcasts `Animate` (0 = main hand, 3 = off hand) to
+  the viewers of the target. `swing_animation` is not an `ArgumentType` yet (use
+  `ArgumentType::opaque("minecraft:swing_animation")`).
+- `ride`, `spectate`: need passenger/camera plumbing in the region (no vehicle model yet).
+- `item`, `loot`: need slot addressing and loot tables from the extracted vanilla data.
+- `advancement`, `recipe`: need per-player progress state, packets and persistence.
+- `attribute`, `compute`: need an attribute store per entity (only effect-derived attributes
+  exist today).
+- `place`, `fillbiome`: need new requests in the worldgen host protocol (Mojang's code stays
+  in the host process; Ferrite must not carry it).
+- `dialog`, `posteffect`, `waypoint`: need their registries and clientbound packets.
+
+## Partly done (works, but not like vanilla yet)
+
+- `/tick sprint` is missing; `/tick query` has no percentile line. Freeze stops game time,
+  fluid ticks and random ticks, not mob or entity movement.
+- `/forceload` marks are not saved across restarts.
+- `/debug function` always fails; `/test` accepts all syntax but never runs a test (no game
+  test framework); `/jfr` always fails (Ferrite is not a JVM process); `/perf` and `/debug`
+  report time and ticks but write no report file.
+- `/fetchprofile` only knows players who are online (no Mojang API lookup).
+- `/rotate` assumes the target is in the command's dimension.
+- `/damage` maps the damage type to the nearest survival kind; mobs take the plain amount
+  without a hurt animation, and `at`/`by`/`from` are parsed but not used.
+- `/locate biome|structure|poi` still return no result from the vanilla host; the host
+  protocol needs the matching requests.
+
+## Merge state
+
+Nothing was pushed to the remote on 2026-11-04 after the worldgen/README push.
