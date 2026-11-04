@@ -101,12 +101,136 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "toString" -> "World[" + id + "]";
             default -> {
                 Object answer = dimension(method.getName(), args);
+                if (answer == NONE) answer = more(method.getName(), args == null ? new Object[0] : args);
                 yield answer != NONE ? answer : HostBridge.dispatch("World", id, method, args);
             }
         };
     }
 
     private static final Object NONE = new Object();
+    private final java.util.Map<String, java.util.Map<org.bukkit.plugin.Plugin, org.bukkit.metadata.MetadataValue>> metadata = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> spawnLimits = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> ticksPerSpawns = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile boolean allowAnimals = true, allowMonsters = true;
+
+    private java.util.List<org.bukkit.entity.Player> playersHere() {
+        return server.getOnlinePlayers().stream().filter(p -> { try { return p.getWorld() == proxy; } catch (UnsupportedOperationException | IllegalStateException e) { return false; } }).map(p -> (org.bukkit.entity.Player) p).toList();
+    }
+
+    private static boolean inBox(org.bukkit.Location at, double cx, double cy, double cz, double dx, double dy, double dz) {
+        return Math.abs(at.getX() - cx) <= dx && Math.abs(at.getY() - cy) <= dy && Math.abs(at.getZ() - cz) <= dz;
+    }
+
+    private boolean solid(int x, int y, int z) {
+        var type = typeAt(new Pos(x, y, z));
+        return !type.isAir() && type != org.bukkit.Material.WATER && type != org.bukkit.Material.LAVA && type.isSolid();
+    }
+
+    /** World queries answered from Java-side state and the player list. */
+    private Object more(String method, Object[] args) {
+        switch (method) {
+            case "getMetadata" -> {
+                var values = metadata.get((String) args[0]);
+                return values == null ? java.util.List.<org.bukkit.metadata.MetadataValue>of() : java.util.List.copyOf(values.values());
+            }
+            case "hasMetadata" -> { return metadata.containsKey((String) args[0]); }
+            case "setMetadata" -> {
+                var plugin = ((org.bukkit.metadata.MetadataValue) args[1]).getOwningPlugin();
+                if (plugin == null) throw new IllegalArgumentException("Plugin cannot be null");
+                metadata.computeIfAbsent((String) args[0], k -> new java.util.concurrent.ConcurrentHashMap<>()).put(plugin, (org.bukkit.metadata.MetadataValue) args[1]);
+                return null;
+            }
+            case "removeMetadata" -> {
+                var values = metadata.get((String) args[0]);
+                if (values != null) { values.remove((org.bukkit.plugin.Plugin) args[1]); if (values.isEmpty()) metadata.remove((String) args[0]); }
+                return null;
+            }
+            case "getType" -> { if (args.length == 3) return typeAt(new Pos((int) args[0], (int) args[1], (int) args[2])); }
+            case "getBlockData" -> { if (args.length == 3) return FerriteBlockData.create(typeAt(new Pos((int) args[0], (int) args[1], (int) args[2]))); }
+            case "setBlockData" -> {
+                if (args.length == 4) { setType(new Pos((int) args[0], (int) args[1], (int) args[2]), ((org.bukkit.block.data.BlockData) args[3]).getMaterial()); return null; }
+            }
+            case "getWorldType" -> { return org.bukkit.WorldType.NORMAL; }
+            case "setSpawnFlags" -> { allowMonsters = (boolean) args[0]; allowAnimals = (boolean) args[1]; return null; }
+            case "getAllowAnimals" -> { return allowAnimals; }
+            case "getAllowMonsters" -> { return allowMonsters; }
+            case "getSpawnLimit" -> { return spawnLimits.getOrDefault((org.bukkit.entity.SpawnCategory) args[0], -1); }
+            case "setSpawnLimit" -> { spawnLimits.put((org.bukkit.entity.SpawnCategory) args[0], (int) args[1]); return null; }
+            case "getTicksPerSpawns" -> { return ticksPerSpawns.getOrDefault((org.bukkit.entity.SpawnCategory) args[0], 1); }
+            case "setTicksPerSpawns" -> { ticksPerSpawns.put((org.bukkit.entity.SpawnCategory) args[0], (int) args[1]); return null; }
+            case "save" -> { if (args.length == 1) { HostBridge.callVoid("World", id, "save()"); return null; } }
+            case "sendPluginMessage" -> {
+                for (var player : playersHere()) player.sendPluginMessage((org.bukkit.plugin.Plugin) args[0], (String) args[1], (byte[]) args[2]);
+                return null;
+            }
+            case "getEntity" -> { for (var player : playersHere()) if (player.getUniqueId().equals(args[0])) return player; return null; }
+            case "getEntitiesByClass" -> {
+                var types = args.length == 1 && args[0] instanceof Class<?>[] array ? array : new Class<?>[]{(Class<?>) args[0]};
+                var out = new java.util.ArrayList<org.bukkit.entity.Entity>();
+                for (var player : playersHere()) for (var type : types) if (type.isInstance(player)) { out.add(player); break; }
+                return out;
+            }
+            case "getEntitiesByClasses" -> {
+                var out = new java.util.ArrayList<org.bukkit.entity.Entity>();
+                for (var player : playersHere()) for (var type : (Class<?>[]) args[0]) if (type.isInstance(player)) { out.add(player); break; }
+                return out;
+            }
+            case "getNearbyEntities" -> {
+                var out = new java.util.ArrayList<org.bukkit.entity.Entity>();
+                java.util.function.Predicate<org.bukkit.entity.Entity> filter = args[args.length - 1] instanceof java.util.function.Predicate<?> f ? (java.util.function.Predicate<org.bukkit.entity.Entity>) f : e -> true;
+                for (var player : playersHere()) {
+                    var at = player.getLocation();
+                    boolean hit;
+                    if (args[0] instanceof org.bukkit.util.BoundingBox box) hit = box.contains(at.getX(), at.getY(), at.getZ());
+                    else { var c = (org.bukkit.Location) args[0]; hit = inBox(at, c.getX(), c.getY(), c.getZ(), (double) args[1], (double) args[2], (double) args[3]); }
+                    if (hit && filter.test(player)) out.add(player);
+                }
+                return out;
+            }
+            case "getPlayersSeeingChunk" -> {
+                int cx, cz;
+                if (args[0] instanceof org.bukkit.Chunk chunk) { cx = chunk.getX(); cz = chunk.getZ(); } else { cx = (int) args[0]; cz = (int) args[1]; }
+                int range = server.getViewDistance();
+                var out = new java.util.ArrayList<org.bukkit.entity.Player>();
+                for (var player : playersHere()) {
+                    var at = player.getLocation();
+                    if (Math.abs((at.getBlockX() >> 4) - cx) <= range && Math.abs((at.getBlockZ() >> 4) - cz) <= range) out.add(player);
+                }
+                return out;
+            }
+            case "getIntersectingChunks" -> {
+                var box = (org.bukkit.util.BoundingBox) args[0];
+                var out = new java.util.ArrayList<org.bukkit.Chunk>();
+                for (int x = (int) Math.floor(box.getMinX()) >> 4; x <= (int) Math.floor(box.getMaxX()) >> 4; x++)
+                    for (int z = (int) Math.floor(box.getMinZ()) >> 4; z <= (int) Math.floor(box.getMaxZ()) >> 4; z++) out.add(chunk(x, z));
+                return out;
+            }
+            case "hasCollisionsIn" -> {
+                var box = (org.bukkit.util.BoundingBox) args[0];
+                for (int x = (int) Math.floor(box.getMinX()); x < Math.ceil(box.getMaxX()); x++)
+                    for (int y = (int) Math.floor(box.getMinY()); y < Math.ceil(box.getMaxY()); y++)
+                        for (int z = (int) Math.floor(box.getMinZ()); z < Math.ceil(box.getMaxZ()); z++)
+                            if (solid(x, y, z)) return true;
+                return false;
+            }
+            case "lineOfSightExists" -> {
+                var from = (org.bukkit.Location) args[0];
+                var to = (org.bukkit.Location) args[1];
+                var delta = to.toVector().subtract(from.toVector());
+                double length = delta.length();
+                if (length == 0) return true;
+                var step = delta.clone().normalize().multiply(0.25);
+                var at = from.toVector();
+                for (double travelled = 0; travelled < length; travelled += 0.25) {
+                    if (solid(at.getBlockX(), at.getBlockY(), at.getBlockZ()) && typeAt(new Pos(at.getBlockX(), at.getBlockY(), at.getBlockZ())).isOccluding()) return false;
+                    at.add(step);
+                }
+                return true;
+            }
+            default -> { }
+        }
+        return NONE;
+    }
     private final org.bukkit.persistence.PersistentDataContainer data = new FerriteDataContainer();
 
     /** The vanilla dimension a world name stands for: the Nether and End are suffixed, everything else is the overworld. */
@@ -139,8 +263,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "hasBonusChest" -> false;
             case "key" -> net.kyori.adventure.key.Key.key("minecraft", nether ? "the_nether" : end ? "the_end" : "overworld");
             case "getKey" -> new org.bukkit.NamespacedKey("minecraft", nether ? "the_nether" : end ? "the_end" : "overworld");
-            case "getPlayerCount", "getEntityCount" -> (int) server.getOnlinePlayers().stream().filter(p -> p.getWorld() == proxy).count();
-            case "getAllowAnimals", "getAllowMonsters" -> true;
+            case "getPlayerCount", "getEntityCount" -> playersHere().size();
             case "getViewDistance", "getSendViewDistance" -> server.getViewDistance();
             case "getSimulationDistance" -> server.getSimulationDistance();
             case "getPersistentDataContainer" -> data;

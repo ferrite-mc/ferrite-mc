@@ -42,6 +42,7 @@ class WorldProbeTest {
                     missing.add(m.getName() + "(" + params + ")");
             } catch (Throwable ignored) {}
         }
+        ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(world.getUID());
         Path out = Path.of("build/catalog/world-missing.txt");
         Files.createDirectories(out.getParent());
         Files.write(out, missing);

@@ -16,6 +16,13 @@ class WorldDimensionTest {
         Bootstrap.registerWorld("00000000-0000-0000-0000-0000000000d3", "dimtest_the_end", 0, 0, 64, 0);
     }
 
+    @org.junit.jupiter.api.AfterAll static void stop() {
+        for (var name : new String[]{"dimtest", "dimtest_nether", "dimtest_the_end"}) {
+            var world = org.bukkit.Bukkit.getWorld(name);
+            if (world != null) ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(world.getUID());
+        }
+    }
+
     @Test void overworldNetherAndEndKeepTheirVanillaLimits() {
         var overworld = org.bukkit.Bukkit.getWorld("dimtest");
         assertEquals(Environment.NORMAL, overworld.getEnvironment());
@@ -39,5 +46,20 @@ class WorldDimensionTest {
         assertEquals(Environment.THE_END, end.getEnvironment());
         assertEquals("minecraft:the_end", end.key().asString());
         assertSame(overworld.getPersistentDataContainer(), overworld.getPersistentDataContainer());
+    }
+
+    @Test void worldKeepsMetadataSpawnSettingsAndChunksOfABox() {
+        var world = org.bukkit.Bukkit.getWorld("dimtest");
+        assertFalse(world.hasMetadata("flag"));
+        assertTrue(world.getMetadata("flag").isEmpty());
+        assertEquals(-1, world.getSpawnLimit(org.bukkit.entity.SpawnCategory.MONSTER));
+        world.setSpawnLimit(org.bukkit.entity.SpawnCategory.MONSTER, 40);
+        assertEquals(40, world.getSpawnLimit(org.bukkit.entity.SpawnCategory.MONSTER));
+        world.setSpawnFlags(false, false);
+        assertFalse(world.getAllowMonsters());
+        assertFalse(world.getAllowAnimals());
+        assertEquals(4, world.getIntersectingChunks(new org.bukkit.util.BoundingBox(0, 0, 0, 20, 10, 20)).size());
+        assertTrue(world.getNearbyEntities(new org.bukkit.Location(world, 0, 64, 0), 5, 5, 5).isEmpty());
+        assertNull(world.getEntity(java.util.UUID.randomUUID()));
     }
 }
