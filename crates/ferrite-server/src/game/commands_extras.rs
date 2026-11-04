@@ -736,7 +736,13 @@ const SOUND_SOURCES: [(&str, i32); 11] = [
     ("ui", 10),
 ];
 
-fn sound_id(raw: &str) -> Result<i32, CommandError> {
+/// Vanilla writes a sound as `Holder<SoundEvent>` (`ByteBufCodecs.holder`): a registry entry is
+/// sent as its id plus one, because 0 announces an inline sound event.
+pub(crate) fn sound_holder(id: i32) -> ferrite_protocol::VarInt {
+    ferrite_protocol::VarInt(id + 1)
+}
+
+pub(crate) fn sound_id(raw: &str) -> Result<i32, CommandError> {
     let id = namespaced(raw);
     ferrite_data::registries::id("minecraft:sound_event", &id).ok_or_else(|| {
         CommandError::failed(format!(
@@ -816,7 +822,7 @@ fn play_sound(
         ctx,
         targets.clone(),
         PlayerPacket::Sound(SoundEffect {
-            sound: ferrite_protocol::VarInt(id),
+            sound: sound_holder(id),
             source: ferrite_protocol::VarInt(source),
             x: (position[0] * 8.0) as i32,
             y: (position[1] * 8.0) as i32,
@@ -1591,6 +1597,13 @@ mod tests {
         let actions = success("playsound minecraft:entity.player.levelup player @s ~ ~ ~ 1 1");
         match only_packet(&actions) {
             PlayerPacket::Sound(packet) => {
+                let id = ferrite_data::registries::id(
+                    "minecraft:sound_event",
+                    "minecraft:entity.player.levelup",
+                )
+                .unwrap();
+                // Regression: the raw registry id played the previous sound in the registry.
+                assert_eq!(packet.sound.0, id + 1);
                 assert_eq!(packet.source.0, 7);
                 assert_eq!(packet.volume, 1.0);
             }

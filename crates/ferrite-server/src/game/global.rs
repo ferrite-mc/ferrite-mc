@@ -28,6 +28,8 @@ pub struct GlobalPlayer {
     /// Registry id of `minecraft:chat` used to decorate broadcast messages.
     pub chat_type: i32,
     pub chat: PlayerChatState,
+    /// Bukkit `Player#setDisplayName`: the sender name chat is decorated with, if a plugin set one.
+    pub display_name: Option<String>,
 }
 impl GlobalPlayer {
     #[allow(clippy::too_many_arguments)]
@@ -56,6 +58,7 @@ impl GlobalPlayer {
             chat_visibility,
             chat_type,
             chat: PlayerChatState::new(secure_chat),
+            display_name: None,
         }
     }
     fn info(&self) -> PlayerInfo {
@@ -185,6 +188,12 @@ impl GlobalRegion {
             kick(player, "Chat message validation failed");
         }
     }
+    /// Sets (or with `None` resets) the name a player's chat is attributed to.
+    pub fn set_display_name(&mut self, id: Uuid, name: Option<String>) {
+        if let Some(player) = self.players.get_mut(&id) {
+            player.display_name = name;
+        }
+    }
     /// Validates a `serverbound_chat` message and broadcasts it as `player_chat`.
     pub fn chat(&mut self, id: Uuid, packet: &ServerboundChat) {
         let Some(player) = self.players.get_mut(&id) else {
@@ -214,7 +223,10 @@ impl GlobalRegion {
                 return;
             }
         };
-        let name = player.name.clone();
+        let name = player
+            .display_name
+            .clone()
+            .unwrap_or_else(|| player.name.clone());
         let chat_type = player.chat_type;
         let bound = ChatTypeBound {
             chat_type: VarInt(chat_type),
@@ -538,5 +550,54 @@ mod tests {
                 .any(|p| matches!(p,Outbound::Packet(ref b) if b[0]==78))
         );
         let _ = &mut ar;
+    }
+
+    #[test]
+    fn chat_uses_the_plugin_display_name() {
+        use ferrite_protocol::Decode;
+        let mut g = GlobalRegion::default();
+        let (a, mut ar) = OutboundSender::channel(1 << 20);
+        let alice = Uuid::from_u128(1);
+        g.join(GlobalPlayer::new(
+            alice,
+            1,
+            "A".into(),
+            vec![],
+            a,
+            false,
+            1,
+            0,
+        ));
+        let chat = |g: &mut GlobalRegion| {
+            g.chat(
+                alice,
+                &ServerboundChat {
+                    message: "hi".into(),
+                    timestamp: 0,
+                    salt: 0,
+                    signature: None,
+                    last_seen: LastSeenUpdate::new(0, &[], 0),
+                },
+            )
+        };
+        let sender = |ar: &mut ferrite_net::game::OutboundReceiver| {
+            std::iter::from_fn(|| ar.try_recv())
+                .find_map(|p| match p {
+                    Outbound::Packet(b) if b[0] == ClientboundPlayerChat::ID as u8 => {
+                        Some(ClientboundPlayerChat::decode(&mut &b[1..]).unwrap())
+                    }
+                    _ => None,
+                })
+                .expect("player chat")
+                .chat_type
+                .name
+                .0
+        };
+        g.set_display_name(alice, Some("Captain".into()));
+        chat(&mut g);
+        assert_eq!(sender(&mut ar), "Captain");
+        g.set_display_name(alice, None);
+        chat(&mut g);
+        assert_eq!(sender(&mut ar), "A");
     }
 }

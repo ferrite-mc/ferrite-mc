@@ -218,6 +218,22 @@ pub enum PlayerCommand {
         pitch: f32,
         seed: Option<i64>,
     },
+    /// `Player#sendActionBar`, as Adventure JSON.
+    ActionBar {
+        player: uuid::Uuid,
+        component_json: String,
+    },
+    /// `Player#clearTitle` (`reset: false`) or `Player#resetTitle` (`reset: true`).
+    ClearTitle {
+        player: uuid::Uuid,
+        reset: bool,
+    },
+    /// `Player#sendPlayerListHeaderAndFooter`, both as Adventure JSON.
+    ListHeaderFooter {
+        player: uuid::Uuid,
+        header_json: String,
+        footer_json: String,
+    },
     SetHealth {
         player: uuid::Uuid,
         health: f64,
@@ -520,6 +536,15 @@ pub trait ServerHooks: Send + Sync {
     }
     /// Runs one region-scheduler task on the thread that owns its chunk.
     fn run_region_task(&self, _task: RegionTask) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Entity-scheduler tasks that became due this tick; the server routes them to the region
+    /// that owns the entity.
+    fn take_entity_tasks(&self) -> Vec<EntityTask> {
+        Vec::new()
+    }
+    /// Runs one entity-scheduler task on the thread that owns its entity.
+    fn run_entity_task(&self, _task: EntityTask) -> Result<(), Error> {
         Ok(())
     }
     /// Moves the host-side player snapshot with the live player.
@@ -903,6 +928,19 @@ extern "system" fn player_visual(
             fade_in,
             stay,
             fade_out,
+        },
+        3 => PlayerCommand::ActionBar {
+            player,
+            component_json: first.unwrap_or_default(),
+        },
+        4 => PlayerCommand::ClearTitle {
+            player,
+            reset: fade_in != 0,
+        },
+        5 => PlayerCommand::ListHeaderFooter {
+            player,
+            header_json: first.unwrap_or_default(),
+            footer_json: second.unwrap_or_default(),
         },
         _ => return 0,
     };
@@ -1510,6 +1548,9 @@ impl PluginHost {
         let jvm = Jvm::start(JvmConfig {
             java_home: cfg.java_home,
             classpath: vec![cfg.bridge_jar],
+            // The bundled sqlite-jdbc driver loads its native library through `System.load`,
+            // which Java 25 only allows silently for modules granted native access.
+            extra_args: vec!["--enable-native-access=ALL-UNNAMED".into()],
             ..Default::default()
         })?;
         let _ = MODES.set(modes);
@@ -2907,6 +2948,12 @@ impl ServerHooks for PluginHost {
     }
     fn run_region_task(&self, task: RegionTask) -> Result<(), Error> {
         PluginHost::run_region_task(self, task)
+    }
+    fn take_entity_tasks(&self) -> Vec<EntityTask> {
+        PluginHost::take_entity_tasks(self)
+    }
+    fn run_entity_task(&self, task: EntityTask) -> Result<(), Error> {
+        PluginHost::run_entity_task(self, task)
     }
     fn update_player_location(
         &self,

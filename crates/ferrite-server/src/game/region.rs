@@ -89,6 +89,8 @@ pub enum Command {
     },
     /// `/kill`: `damageSources().genericKill()` applied on the owning region thread.
     Kill,
+    /// A Paper `EntityScheduler` task for this player, run on the region that owns them.
+    PluginEntityTask(ferrite_plugin::EntityTask),
     /// `/effect give`: apply a mob effect on the owning region thread.
     ApplyEffect {
         effect: i32,
@@ -2023,7 +2025,7 @@ impl Player {
         send(
             self,
             &SoundEffect {
-                sound: VarInt(sound),
+                sound: super::commands_extras::sound_holder(sound),
                 source: VarInt(0),
                 x: (destination[0] * 8.0) as i32,
                 y: (destination[1] * 8.0) as i32,
@@ -2448,6 +2450,14 @@ impl Player {
                 }
                 Command::SetInventorySlot { slot, item } => {
                     self.set_inventory_slot(slot, item);
+                    continue;
+                }
+                Command::PluginEntityTask(task) => {
+                    if let Some(plugins) = &self.plugins
+                        && let Err(error) = plugins.run_entity_task(task)
+                    {
+                        tracing::warn!(%error, "plugin entity task failed");
+                    }
                     continue;
                 }
                 Command::Kill => {

@@ -63,6 +63,201 @@ mod tests {
         assert!(!valid_move([0.0, 65.0, 0.0], [101.0, 65.0, 0.0]));
         assert!(!valid_move([0.0, 65.0, 0.0], [f64::NAN, 65.0, 0.0]));
     }
+
+    fn routed(command: ferrite_plugin::PlayerCommand, player: Uuid) -> Vec<Outbound> {
+        let (outbound, mut rx) = OutboundSender::channel(1 << 20);
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(player, (1, Mailbox::default(), outbound));
+        route_plugin_command(command, &mailboxes, &mut HashMap::new());
+        std::iter::from_fn(|| rx.try_recv()).collect()
+    }
+
+    #[test]
+    fn plugin_entity_tasks_queue_on_the_owning_player() {
+        let player = Uuid::from_u128(7);
+        let (outbound, _rx) = OutboundSender::channel(1 << 20);
+        let mailbox = Mailbox::default();
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(player, (1, mailbox.clone(), outbound));
+        let task = |entity: String| ferrite_plugin::EntityTask {
+            id: 3,
+            entity,
+            region_aware: true,
+        };
+        route_entity_task(task(player.to_string()), &mailboxes);
+        route_entity_task(task(Uuid::from_u128(8).to_string()), &mailboxes);
+        route_entity_task(task("not-a-uuid".into()), &mailboxes);
+        let queued: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
+        assert!(
+            matches!(queued.as_slice(), [Command::PluginEntityTask(t)] if *t == task(player.to_string())),
+            "only the online player's task is queued"
+        );
+    }
+
+    fn bytes(message: &Outbound) -> Vec<u8> {
+        match message {
+            Outbound::Packet(bytes) => bytes.to_vec(),
+            Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
+        }
+    }
+
+    #[test]
+    fn plugin_action_bar_clear_title_and_tab_list_reach_the_player() {
+        let player = Uuid::from_u128(7);
+        let plain = |text: &str| ferrite_protocol::types::PlainText(text.into());
+        let bar = routed(
+            ferrite_plugin::PlayerCommand::ActionBar {
+                player,
+                component_json: r#"{"text":"Low ","extra":["health"]}"#.into(),
+            },
+            player,
+        );
+        assert_eq!(
+            bar.iter().map(bytes).collect::<Vec<_>>(),
+            [game::packet(&SetActionBarText {
+                text: plain("Low health")
+            })]
+            .iter()
+            .map(bytes)
+            .collect::<Vec<_>>()
+        );
+        for reset in [false, true] {
+            let cleared = routed(
+                ferrite_plugin::PlayerCommand::ClearTitle { player, reset },
+                player,
+            );
+            assert_eq!(
+                cleared.iter().map(bytes).collect::<Vec<_>>(),
+                vec![bytes(&game::packet(&ClearTitles { reset }))]
+            );
+        }
+        let list = routed(
+            ferrite_plugin::PlayerCommand::ListHeaderFooter {
+                player,
+                header_json: r#"{"text":"Ferrite"}"#.into(),
+                footer_json: r#"{"text":""}"#.into(),
+            },
+            player,
+        );
+        assert_eq!(
+            list.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&TabList {
+                header: plain("Ferrite"),
+                footer: plain(""),
+            }))]
+        );
+    }
+
+    #[test]
+    fn plugin_title_sends_times_then_texts() {
+        let player = Uuid::from_u128(7);
+        let sent = routed(
+            ferrite_plugin::PlayerCommand::Title {
+                player,
+                title: Some("Hello".into()),
+                subtitle: Some("World".into()),
+                fade_in: 10,
+                stay: 70,
+                fade_out: 20,
+            },
+            player,
+        );
+        let expected = [
+            game::packet(&SetTitlesAnimation {
+                fade_in: 10,
+                stay: 70,
+                fade_out: 20,
+            }),
+            game::packet(&SetTitleText {
+                text: ferrite_protocol::types::PlainText("Hello".into()),
+            }),
+            game::packet(&SetSubtitleText {
+                text: ferrite_protocol::types::PlainText("World".into()),
+            }),
+        ];
+        assert_eq!(
+            sent.iter().map(bytes).collect::<Vec<_>>(),
+            expected.iter().map(bytes).collect::<Vec<_>>()
+        );
+        // A missing title or subtitle sends only the timings.
+        let sent = routed(
+            ferrite_plugin::PlayerCommand::Title {
+                player,
+                title: None,
+                subtitle: None,
+                fade_in: 1,
+                stay: 2,
+                fade_out: 3,
+            },
+            player,
+        );
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn plugin_kick_disconnects_with_the_reason() {
+        let player = Uuid::from_u128(8);
+        let kick = |component_json: Option<&str>| {
+            let sent = routed(
+                ferrite_plugin::PlayerCommand::Kick {
+                    player,
+                    component_json: component_json.map(str::to_owned),
+                },
+                player,
+            );
+            match sent.as_slice() {
+                [Outbound::Disconnect(reason)] => reason.clone(),
+                other => panic!("expected one disconnect, got {other:?}"),
+            }
+        };
+        assert_eq!(kick(Some(r#"{"text":"Go ","extra":["away"]}"#)), "Go away");
+        assert_eq!(kick(None), "Kicked by an operator");
+    }
+
+    #[test]
+    fn plugin_sound_uses_the_registry_holder_and_category() {
+        let player = Uuid::from_u128(9);
+        let sound = |world: Uuid, name: &str| {
+            routed(
+                ferrite_plugin::PlayerCommand::PlaySound {
+                    player,
+                    world,
+                    sound: name.into(),
+                    category: ferrite_plugin::SoundCategory::Players,
+                    x: 1.5,
+                    y: 64.0,
+                    z: -2.25,
+                    volume: 0.8,
+                    pitch: 1.2,
+                    seed: Some(42),
+                },
+                player,
+            )
+        };
+        let id = ferrite_data::registries::id(
+            "minecraft:sound_event",
+            "minecraft:entity.player.levelup",
+        )
+        .unwrap();
+        let expected = game::packet(&SoundEffect {
+            sound: VarInt(id + 1),
+            source: VarInt(7),
+            x: 12,
+            y: 512,
+            z: -18,
+            volume: 0.8,
+            pitch: 1.2,
+            seed: 42,
+        });
+        let world = ferrite_plugin::default_world_id();
+        let sent = sound(world, "minecraft:entity.player.levelup");
+        assert_eq!(
+            sent.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&expected)]
+        );
+        assert!(sound(world, "example:not_a_sound").is_empty());
+        assert!(sound(Uuid::from_u128(99), "minecraft:entity.player.levelup").is_empty());
+    }
 }
 fn valid_move(from: [f64; 3], to: [f64; 3]) -> bool {
     to.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
@@ -418,11 +613,16 @@ fn json_text(json: &str) -> String {
             _ => {}
         }
     }
-    let mut out = String::new();
-    if let Ok(value) = serde_json::from_str(json) {
-        collect(&value, &mut out);
+    // Only text that is not JSON at all is shown as-is: an empty component such as
+    // Adventure's `Component.empty()` (`{"text":""}`) must stay empty.
+    match serde_json::from_str(json) {
+        Ok(value) => {
+            let mut out = String::new();
+            collect(&value, &mut out);
+            out
+        }
+        Err(_) => json.to_owned(),
     }
-    if out.is_empty() { json.to_owned() } else { out }
 }
 fn chat(tx: &OutboundSender, text: &str) {
     emit(
@@ -907,6 +1107,11 @@ async fn run(
          }},
          command = async { match plugin_commands.as_mut() { Some(commands) => commands.recv().await, None => std::future::pending().await } }, if plugin_commands.is_some() => {
              match command {
+                 // Chat attribution lives on the global region, so display names go there.
+                 Some(ferrite_plugin::PlayerCommand::DisplayName { player, component_json }) => {
+                     let name = component_json.as_deref().map(json_text);
+                     worlds.schedule_global(move |g| g.set_display_name(player, name));
+                 }
                  Some(command) => route_plugin_command(command, &mailboxes, &mut permissions),
                  // The plugin host dropped its sender (no plugins loaded): stop polling.
                  None => plugin_commands = None,
@@ -939,6 +1144,11 @@ async fn run(
                              tracing::warn!(%error, "plugin region task failed");
                          }
                      });
+                 }
+                 // Paper's entity scheduler: the only entities plugins hold are players, whose
+                 // mailbox is drained by whichever region owns them, hand-offs included.
+                 for task in plugins.take_entity_tasks() {
+                     route_entity_task(task, &mailboxes);
                  }
              }
              // Vanilla runs `minecraft:load` once at startup and `minecraft:tick` every
@@ -1045,10 +1255,179 @@ fn route_plugin_command(
                 chat(outbound, &plugin_message_text(&content));
             }
         }
-        // Health, food, titles, display names, sounds and kicks have no host path yet; report
-        // them instead of pretending the plugin's call succeeded.
-        other => tracing::debug!(?other, "plugin player command not routed"),
+        PlayerCommand::Title {
+            player,
+            title,
+            subtitle,
+            fade_in,
+            stay,
+            fade_out,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                for packet in plugin_title_packets(title, subtitle, fade_in, stay, fade_out) {
+                    packet.send_to(outbound);
+                }
+            }
+        }
+        PlayerCommand::Kick {
+            player,
+            component_json,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                let _ = outbound.send(Outbound::Disconnect(plugin_kick_reason(
+                    component_json.as_deref(),
+                )));
+            }
+        }
+        PlayerCommand::PlaySound {
+            player,
+            world,
+            sound,
+            category,
+            x,
+            y,
+            z,
+            volume,
+            pitch,
+            seed,
+        } => {
+            let Some((_, _, outbound)) = mailboxes.get(&player) else {
+                return;
+            };
+            if world != ferrite_plugin::default_world_id() {
+                tracing::debug!(%world, "plugin sound for a world the server does not own");
+                return;
+            }
+            match plugin_sound_packet(&sound, category, [x, y, z], volume, pitch, seed) {
+                Some(packet) => packet.send_to(outbound),
+                // Resource-pack sounds need an inline `SoundEvent` holder, which the packet
+                // codec does not model yet.
+                None => tracing::debug!(%sound, "plugin sound is not in the sound registry"),
+            }
+        }
+        PlayerCommand::ActionBar {
+            player,
+            component_json,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                commands_extras::PlayerPacket::ActionBar(SetActionBarText {
+                    text: ferrite_protocol::types::PlainText(json_text(&component_json)),
+                })
+                .send_to(outbound);
+            }
+        }
+        PlayerCommand::ClearTitle { player, reset } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                commands_extras::PlayerPacket::ClearTitles(ClearTitles { reset }).send_to(outbound);
+            }
+        }
+        PlayerCommand::ListHeaderFooter {
+            player,
+            header_json,
+            footer_json,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                let _ = outbound.send(ferrite_net::game::packet(
+                    &ferrite_protocol::packets::play::TabList {
+                        header: ferrite_protocol::types::PlainText(json_text(&header_json)),
+                        footer: ferrite_protocol::types::PlainText(json_text(&footer_json)),
+                    },
+                ));
+            }
+        }
+        // The game loop sends display names to the global region before calling this.
+        PlayerCommand::DisplayName { .. } => {
+            tracing::debug!("plugin display name reached the player router")
+        }
     }
+}
+/// Queues a Paper entity-scheduler task on the mailbox of the player it belongs to.
+fn route_entity_task(
+    task: ferrite_plugin::EntityTask,
+    mailboxes: &HashMap<Uuid, (u64, Mailbox, OutboundSender)>,
+) {
+    let mailbox = Uuid::parse_str(&task.entity)
+        .ok()
+        .and_then(|id| mailboxes.get(&id));
+    match mailbox {
+        Some((_, mailbox, _)) => mailbox
+            .lock()
+            .unwrap()
+            .push_back(Command::PluginEntityTask(task)),
+        // Paper runs the retired callback instead; the entity is gone, so the task never runs.
+        None => tracing::debug!(entity = %task.entity, "plugin entity task for an absent entity"),
+    }
+}
+/// Paper `CraftPlayer#sendTitle`: the timings always go out, then whichever texts are set.
+fn plugin_title_packets(
+    title: Option<String>,
+    subtitle: Option<String>,
+    fade_in: i32,
+    stay: i32,
+    fade_out: i32,
+) -> Vec<commands_extras::PlayerPacket> {
+    use commands_extras::PlayerPacket;
+    use ferrite_protocol::types::PlainText;
+    let mut packets = vec![PlayerPacket::TitleTimes(SetTitlesAnimation {
+        fade_in,
+        stay,
+        fade_out,
+    })];
+    if let Some(text) = title {
+        packets.push(PlayerPacket::Title(SetTitleText {
+            text: PlainText(text),
+        }));
+    }
+    if let Some(text) = subtitle {
+        packets.push(PlayerPacket::Subtitle(SetSubtitleText {
+            text: PlainText(text),
+        }));
+    }
+    packets
+}
+/// Paper falls back to `multiplayer.disconnect.kicked` when a plugin kicks without a reason.
+fn plugin_kick_reason(component_json: Option<&str>) -> String {
+    component_json.map_or_else(|| "Kicked by an operator".to_owned(), json_text)
+}
+/// Bukkit's `SoundCategory` declares the same constants in the same order as vanilla's
+/// `SoundSource`, so the ordinal is the protocol id.
+fn plugin_sound_packet(
+    sound: &str,
+    category: ferrite_plugin::SoundCategory,
+    [x, y, z]: [f64; 3],
+    volume: f32,
+    pitch: f32,
+    seed: Option<i64>,
+) -> Option<commands_extras::PlayerPacket> {
+    use ferrite_plugin::SoundCategory;
+    let id = commands_extras::sound_id(sound).ok()?;
+    let source = match category {
+        SoundCategory::Master => 0,
+        SoundCategory::Music => 1,
+        SoundCategory::Records => 2,
+        SoundCategory::Weather => 3,
+        SoundCategory::Blocks => 4,
+        SoundCategory::Hostile => 5,
+        SoundCategory::Neutral => 6,
+        SoundCategory::Players => 7,
+        SoundCategory::Ambient => 8,
+        SoundCategory::Voice => 9,
+        SoundCategory::Ui => 10,
+    };
+    Some(commands_extras::PlayerPacket::Sound(SoundEffect {
+        sound: commands_extras::sound_holder(id),
+        source: VarInt(source),
+        x: (x * 8.0) as i32,
+        y: (y * 8.0) as i32,
+        z: (z * 8.0) as i32,
+        volume,
+        pitch,
+        // Paper draws the seed from the player's random; any fresh value will do.
+        seed: seed.unwrap_or_else(|| {
+            use std::hash::BuildHasher;
+            std::collections::hash_map::RandomState::new().hash_one(()) as i64
+        }),
+    }))
 }
 fn defer_release(
     worlds: &Worlds,

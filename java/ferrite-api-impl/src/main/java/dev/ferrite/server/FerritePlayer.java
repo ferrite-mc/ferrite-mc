@@ -82,6 +82,85 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftHumanEntity
     @Override public void sendMessage(java.util.UUID sender, String message) { sendMessage(message); }
     @Override public void sendMessage(java.util.UUID sender, String[] messages) { sendMessage(messages); }
     @Override public void sendMessage(net.kyori.adventure.text.Component component) { Native.playerMessage(id.toString(), net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().serialize(component), true); }
+    // --- Entity state the bridge owns: metadata, scoreboard tags, derived location values. ---
+    private final java.util.Map<String, java.util.Map<org.bukkit.plugin.Plugin, org.bukkit.metadata.MetadataValue>> metadata = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Set<String> scoreboardTags = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    @Override public void setMetadata(String key, org.bukkit.metadata.MetadataValue value) { var owner = java.util.Objects.requireNonNull(value.getOwningPlugin(), "owning plugin"); metadata.computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>()).put(owner, value); }
+    @Override public java.util.List<org.bukkit.metadata.MetadataValue> getMetadata(String key) { var values = metadata.get(key); return values == null ? java.util.List.of() : java.util.List.copyOf(values.values()); }
+    @Override public boolean hasMetadata(String key) { var values = metadata.get(key); return values != null && !values.isEmpty(); }
+    @Override public void removeMetadata(String key, org.bukkit.plugin.Plugin owner) { var values = metadata.get(key); if (values != null) { values.remove(owner); if (values.isEmpty()) metadata.remove(key, values); } }
+    /** Vanilla caps an entity at 1024 tags. */
+    @Override public boolean addScoreboardTag(String tag) { return scoreboardTags.size() < 1024 && scoreboardTags.add(tag); }
+    @Override public boolean removeScoreboardTag(String tag) { return scoreboardTags.remove(tag); }
+    @Override public java.util.Set<String> getScoreboardTags() { return scoreboardTags; }
+    @Override public String getScoreboardEntryName() { return name; }
+    @Override public org.bukkit.entity.EntityType getType() { return org.bukkit.entity.EntityType.PLAYER; }
+    @Override public double getX() { return resolvedLocation().getX(); }
+    @Override public double getY() { return resolvedLocation().getY(); }
+    @Override public double getZ() { return resolvedLocation().getZ(); }
+    @Override public float getYaw() { return resolvedLocation().getYaw(); }
+    @Override public float getPitch() { return resolvedLocation().getPitch(); }
+    @Override public org.bukkit.Location getLocation(org.bukkit.Location target) { if (target == null) return null; var at = resolvedLocation(); target.setWorld(at.getWorld()); target.setX(at.getX()); target.setY(at.getY()); target.setZ(at.getZ()); target.setYaw(at.getYaw()); target.setPitch(at.getPitch()); return target; }
+    /** Vanilla standing eye height; the host does not report sneaking or swimming poses yet. */
+    @Override public double getEyeHeight() { return 1.62; }
+    @Override public double getEyeHeight(boolean ignorePose) { return 1.62; }
+    @Override public org.bukkit.Location getEyeLocation() { return getLocation().add(0, getEyeHeight(), 0); }
+    @Override public boolean isDead() { return health <= 0; }
+    @Override public boolean isValid() { return isOnline() && !isDead(); }
+    @Override public boolean isConnected() { return isOnline(); }
+    @Override public double getMaxHealth() { return 20.0; }
+    @Override public void heal(double amount) { heal(amount, org.bukkit.event.entity.EntityRegainHealthEvent.RegainReason.CUSTOM); }
+    @Override public void heal(double amount, org.bukkit.event.entity.EntityRegainHealthEvent.RegainReason reason) { if (!(amount > 0)) throw new IllegalArgumentException("amount must be positive"); setHealth(Math.min(getMaxHealth(), health + amount)); }
+    /** Vanilla {@code Player#getXpNeededForNextLevel}. */
+    @Override public int getExpToLevel() { return experienceToLevel(experienceLevel); }
+    @Override public int getExperiencePointsNeededForNextLevel() { return getExpToLevel(); }
+    static int experienceToLevel(int level) { return level >= 30 ? 112 + (level - 30) * 9 : level >= 15 ? 37 + (level - 15) * 5 : 7 + level * 2; }
+    /** Points banked in the current level plus every completed level, as Paper computes it. */
+    @Override public int calculateTotalExperiencePoints() { int points = 0; for (int level = 0; level < experienceLevel; level++) points += experienceToLevel(level); return points + Math.round(experienceProgress * getExpToLevel()); }
+    /** Vanilla {@code Player#giveExperiencePoints}: progress carries over into new levels. */
+    @Override public void giveExp(int amount) { giveExp(amount, false); }
+    @Override public void giveExp(int amount, boolean applyMending) {
+        int level = experienceLevel; float progress = experienceProgress + (float) amount / experienceToLevel(level);
+        int total = Math.max(0, Math.min(totalExperience + amount, Integer.MAX_VALUE));
+        while (progress < 0) { if (level == 0) { progress = 0; break; } level--; progress = 1 + progress * experienceToLevel(level + 1) / experienceToLevel(level); }
+        while (progress >= 1) { progress = (progress - 1) * experienceToLevel(level); level++; progress /= experienceToLevel(level); }
+        setTotalExperience(total); if (level != experienceLevel) setLevel(level); setExp(Math.max(0f, Math.min(progress, 1f)));
+    }
+    @Override public void giveExpLevels(int amount) { setLevel(Math.max(0, experienceLevel + amount)); }
+    @Override public boolean performCommand(String command) { return Native.dispatchCommand(this, command); }
+    @Override public org.bukkit.Location getCompassTarget() { return getWorld().getSpawnLocation(); }
+    @Override public boolean canSee(org.bukkit.entity.Player player) { return true; }
+    @Override public boolean canSee(org.bukkit.entity.Entity entity) { return true; }
+    /** Ferrite does not give players a personal border, so they all follow the world's. */
+    @Override public org.bukkit.WorldBorder getWorldBorder() { return null; }
+    // --- Action bar, title clearing and the tab list header/footer (playerVisual kinds 3..5). ---
+    private static String json(net.kyori.adventure.text.Component component) { return net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().serialize(component); }
+    private static net.kyori.adventure.text.Component legacy(String text) { return text == null ? net.kyori.adventure.text.Component.empty() : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(text); }
+    private static net.kyori.adventure.text.Component bungee(net.md_5.bungee.api.chat.BaseComponent... components) { return components == null ? net.kyori.adventure.text.Component.empty() : net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().deserialize(net.md_5.bungee.chat.ComponentSerializer.toString(components)); }
+    private void visual(int kind, String first, String second, int flag) { if (!Native.playerVisual(id.toString(), kind, first, second, flag, 0, 0)) throw new IllegalStateException("No player command handler"); }
+    private net.kyori.adventure.text.Component listHeader = net.kyori.adventure.text.Component.empty();
+    private net.kyori.adventure.text.Component listFooter = net.kyori.adventure.text.Component.empty();
+    @Override public void sendActionBar(net.kyori.adventure.text.Component message) { visual(3, json(message), null, 0); }
+    @Override public void sendActionBar(String message) { sendActionBar(legacy(message)); }
+    @Override public void sendActionBar(char alternateChar, String message) { sendActionBar(message == null ? net.kyori.adventure.text.Component.empty() : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacy(alternateChar).deserialize(message)); }
+    @Override public void sendActionBar(net.md_5.bungee.api.chat.BaseComponent... message) { sendActionBar(bungee(message)); }
+    /** Vanilla {@code ClientboundClearTitlesPacket(false)}: hides the title, keeps its timings. */
+    @Override public void clearTitle() { visual(4, null, null, 0); }
+    /** {@code ClientboundClearTitlesPacket(true)}: also restores the default timings. */
+    @Override public void resetTitle() { visual(4, null, null, 1); }
+    @Override public void sendPlayerListHeaderAndFooter(net.kyori.adventure.text.Component header, net.kyori.adventure.text.Component footer) { visual(5, json(header), json(footer), 0); listHeader = header; listFooter = footer; }
+    @Override public void sendPlayerListHeader(net.kyori.adventure.text.Component header) { sendPlayerListHeaderAndFooter(header, listFooter); }
+    @Override public void sendPlayerListFooter(net.kyori.adventure.text.Component footer) { sendPlayerListHeaderAndFooter(listHeader, footer); }
+    @Override public net.kyori.adventure.text.Component playerListHeader() { return listHeader; }
+    @Override public net.kyori.adventure.text.Component playerListFooter() { return listFooter; }
+    private static String legacyText(net.kyori.adventure.text.Component component) { return component.equals(net.kyori.adventure.text.Component.empty()) ? null : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(component); }
+    @Override public String getPlayerListHeader() { return legacyText(listHeader); }
+    @Override public String getPlayerListFooter() { return legacyText(listFooter); }
+    @Override public void setPlayerListHeader(String header) { sendPlayerListHeader(legacy(header)); }
+    @Override public void setPlayerListFooter(String footer) { sendPlayerListFooter(legacy(footer)); }
+    @Override public void setPlayerListHeaderFooter(String header, String footer) { sendPlayerListHeaderAndFooter(legacy(header), legacy(footer)); }
+    @Override public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent[] header, net.md_5.bungee.api.chat.BaseComponent[] footer) { sendPlayerListHeaderAndFooter(bungee(header), bungee(footer)); }
+    @Override public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent header, net.md_5.bungee.api.chat.BaseComponent footer) { sendPlayerListHeaderAndFooter(header == null ? net.kyori.adventure.text.Component.empty() : bungee(header), footer == null ? net.kyori.adventure.text.Component.empty() : bungee(footer)); }
     @Override public int hashCode() { return id.hashCode(); }
     @Override public boolean equals(Object other) { return other instanceof org.bukkit.entity.Player player && id.equals(player.getUniqueId()); }
     @Override public String toString() { return "Player[" + id + "]"; }

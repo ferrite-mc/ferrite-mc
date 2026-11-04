@@ -1673,6 +1673,8 @@ packet!(SetSubtitleText,114,Clientbound,{text:PlainText});
 packet!(SetActionBarText,89,Clientbound,{text:PlainText});
 packet!(SetTitlesAnimation,117,Clientbound,{fade_in:i32,stay:i32,fade_out:i32});
 packet!(ClearTitles,14,Clientbound,{reset:bool});
+// `minecraft:tab_list`: the player list header and footer; an empty text hides either.
+packet!(TabList,125,Clientbound,{header:PlainText,footer:PlainText});
 // `minecraft:sound`: a registry holder, the source category, fixed-point position, volume,
 // pitch and the random seed used to pick a sound variant.
 packet!(SoundEffect,119,Clientbound,{sound:VarInt,source:VarInt,x:i32,y:i32,z:i32,volume:f32,pitch:f32,seed:i64});
@@ -2145,6 +2147,10 @@ mod command_feedback_tests {
             fade_out: 20,
         });
         rt(ClearTitles { reset: true });
+        rt(TabList {
+            header: PlainText("Head".into()),
+            footer: PlainText(String::new()),
+        });
     }
 
     #[test]

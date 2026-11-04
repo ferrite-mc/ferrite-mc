@@ -260,4 +260,94 @@ class ApiSurfaceTest {
         for (var audience : audiences) if (audience == expected) return true;
         return false;
     }
+
+    private static org.bukkit.plugin.Plugin fakePlugin(String name) {
+        return (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(ApiSurfaceTest.class.getClassLoader(), new Class<?>[] { org.bukkit.plugin.Plugin.class }, (proxy, method, args) -> switch (method.getName()) {
+            case "getName" -> name;
+            case "hashCode" -> System.identityHashCode(proxy);
+            case "equals" -> proxy == args[0];
+            case "toString" -> "Plugin[" + name + "]";
+            default -> null;
+        });
+    }
+
+    @Test void playerEntityStateMetadataAndTags() {
+        var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000bb");
+        var p = FerritePlayer.create(server, id, "Tagged", false, 20.0, 20, 0, new org.bukkit.Location(world, 1.5, 70.0, -2.5, 90f, 10f));
+        server.registerPlayer(p);
+        try {
+            var first = fakePlugin("First"); var second = fakePlugin("Second");
+            assertFalse(p.hasMetadata("rank"));
+            p.setMetadata("rank", new org.bukkit.metadata.FixedMetadataValue(first, "admin"));
+            p.setMetadata("rank", new org.bukkit.metadata.FixedMetadataValue(second, 3));
+            p.setMetadata("rank", new org.bukkit.metadata.FixedMetadataValue(first, "owner"));
+            assertTrue(p.hasMetadata("rank"));
+            assertEquals(2, p.getMetadata("rank").size(), "one value per owning plugin");
+            assertTrue(p.getMetadata("rank").stream().anyMatch(v -> "owner".equals(v.asString())));
+            p.removeMetadata("rank", first); p.removeMetadata("rank", second);
+            assertFalse(p.hasMetadata("rank"));
+            assertTrue(p.getMetadata("rank").isEmpty());
+
+            assertTrue(p.addScoreboardTag("vip"));
+            assertFalse(p.addScoreboardTag("vip"));
+            assertEquals(Set.of("vip"), p.getScoreboardTags());
+            assertTrue(p.removeScoreboardTag("vip"));
+            assertEquals("Tagged", p.getScoreboardEntryName());
+
+            assertEquals(org.bukkit.entity.EntityType.PLAYER, p.getType());
+            assertEquals(1.5, p.getX()); assertEquals(70.0, p.getY()); assertEquals(-2.5, p.getZ());
+            assertEquals(90f, p.getYaw()); assertEquals(10f, p.getPitch());
+            var reused = new org.bukkit.Location(null, 0, 0, 0);
+            assertSame(reused, p.getLocation(reused));
+            assertEquals(p.getLocation(), reused);
+            assertEquals(71.62, p.getEyeLocation().getY(), 1e-9);
+            assertTrue(p.isValid()); assertTrue(p.isConnected()); assertFalse(p.isDead());
+            assertEquals(world.getSpawnLocation(), p.getCompassTarget());
+            assertNull(p.getWorldBorder());
+
+            p.setHealth(15.0); p.heal(3.0); assertEquals(18.0, p.getHealth());
+            p.heal(10.0); assertEquals(20.0, p.getHealth(), "healing stops at max health");
+            assertThrows(IllegalArgumentException.class, () -> p.heal(-1));
+        } finally {
+            server.unregisterPlayer(id);
+        }
+    }
+
+    @Test void playerExperienceFollowsVanillaCurve() {
+        var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000cc");
+        var p = FerritePlayer.create(server, id, "Learner", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));
+        assertEquals(7, p.getExpToLevel());
+        assertEquals(37, FerritePlayer.experienceToLevel(15));
+        assertEquals(112, FerritePlayer.experienceToLevel(30));
+        // 7 points finish level 0 and 3 of level 1's 9 remain as progress.
+        p.giveExp(10);
+        assertEquals(1, p.getLevel());
+        assertEquals(3f / 9f, p.getExp(), 1e-6);
+        assertEquals(10, p.getTotalExperience());
+        assertEquals(10, p.calculateTotalExperiencePoints());
+        p.giveExp(-5);
+        assertEquals(0, p.getLevel());
+        assertEquals(5f / 7f, p.getExp(), 1e-6);
+        p.giveExpLevels(30);
+        assertEquals(30, p.getLevel());
+        assertEquals(112, p.getExperiencePointsNeededForNextLevel());
+        p.giveExpLevels(-100);
+        assertEquals(0, p.getLevel());
+    }
+
+    @Test void playerListHeaderFooterAndActionBarKeepState() {
+        var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000dd");
+        var p = FerritePlayer.create(server, id, "Lister", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));
+        assertNull(p.getPlayerListHeader());
+        assertEquals(net.kyori.adventure.text.Component.empty(), p.playerListFooter());
+        p.setPlayerListHeaderFooter("\u00a7aWelcome", "Footer");
+        assertEquals("\u00a7aWelcome", p.getPlayerListHeader());
+        assertEquals("Footer", p.getPlayerListFooter());
+        p.setPlayerListFooter(null);
+        assertNull(p.getPlayerListFooter(), "a null footer clears it");
+        assertEquals("\u00a7aWelcome", p.getPlayerListHeader(), "setting the footer keeps the header");
+        p.setPlayerListHeaderFooter(new net.md_5.bungee.api.chat.TextComponent("Bungee"), null);
+        assertEquals("Bungee", p.getPlayerListHeader());
+        assertDoesNotThrow(() -> { p.sendActionBar("hi"); p.sendActionBar('&', "&ahi"); p.sendActionBar(net.kyori.adventure.text.Component.text("hi")); p.clearTitle(); p.resetTitle(); });
+    }
 }

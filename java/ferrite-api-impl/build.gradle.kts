@@ -1,6 +1,13 @@
 plugins { java }
 repositories { mavenCentral(); maven("https://repo.papermc.io/repository/maven-public/") }
-dependencies { implementation("io.papermc.paper:paper-api:26.3.build.227-stable"); testImplementation("org.junit.jupiter:junit-jupiter:5.13.4"); testRuntimeOnly("org.junit.platform:junit-platform-launcher") }
+dependencies { implementation("io.papermc.paper:paper-api:26.3.build.227-stable")
+    // JDBC drivers Paper ships on the server classpath; plugins expect them without shading.
+    implementation("org.xerial:sqlite-jdbc:3.50.3.0"); implementation("com.mysql:mysql-connector-j:9.4.0")
+    // Resolves `libraries:` from plugin.yml, as Spigot's LibraryLoader does.
+    implementation("org.apache.maven.resolver:maven-resolver-supplier:1.9.24"); implementation("org.slf4j:slf4j-jdk14:2.0.17")
+    // Bukkit (SimpleCommandMap) and plugins use commons-lang3 from the server classpath.
+    implementation("org.apache.commons:commons-lang3:3.12.0")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4"); testRuntimeOnly("org.junit.platform:junit-platform-launcher") }
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 tasks.test { useJUnitPlatform() }
 tasks.test { systemProperty("test.vanilla.data", rootProject.projectDir.resolve("../../vanilla/26.3/generated").absolutePath) }

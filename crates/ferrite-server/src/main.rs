@@ -217,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
     // player mutations (inventory, teleport, gamemode, ...) arrive through this channel and are
     // routed to the region that owns the player.
     let (plugin_command_tx, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let (plugin_console_tx, plugin_console) = tokio::sync::mpsc::unbounded_channel();
     let terrain = match config.generator {
         WorldGenerator::Vanilla => Some(std::sync::Arc::new(
             game::VanillaTerrain::spawn(0).context("starting the vanilla world generator")?,
@@ -250,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
             port: listener.local_addr()?.port(),
             view_distance,
             online_mode: config.online_mode,
-            whitelist: false,
+            whitelist: config.whitelist,
             world: ferrite_plugin::WorldSnapshot {
                 id: ferrite_plugin::default_world_id(),
                 name: "world".into(),
@@ -269,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
             world_view: Some(ferrite_server::plugins::world_view(std::sync::Arc::clone(
                 &source,
             ))),
+            console: Some(plugin_console_tx),
         })
         .context("starting plugins")?;
     let settings = game::WorldSettings {
@@ -299,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
         dimensions: None,
     };
     let world = game::World::start_configured(Some(source), spawn, settings);
+    ferrite_server::plugins::forward_console(plugin_console, world.sender.clone());
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
         ferrite_net::ServerConfig {
