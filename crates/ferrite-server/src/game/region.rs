@@ -1807,6 +1807,7 @@ impl Player {
             self.gamemode,
             self.survival.sprinting,
         );
+        crate::plugins::facts::set_fall_distance(self.uuid, self.survival.fall_distance as f32);
         for (kind, amount) in damage.into_iter().flatten() {
             if (fire_resistance && matches!(kind, DamageKind::Lava | DamageKind::Fire))
                 || (water_breathing && kind == DamageKind::Drown)

@@ -36,6 +36,16 @@ fn sleeping_registry() -> &'static Mutex<std::collections::HashSet<Uuid>> {
     SLEEPING.get_or_init(Default::default)
 }
 
+fn fall_registry() -> &'static Mutex<HashMap<Uuid, f32>> {
+    static FALL: OnceLock<Mutex<HashMap<Uuid, f32>>> = OnceLock::new();
+    FALL.get_or_init(Default::default)
+}
+
+/// Records how far the player has fallen since last standing on something.
+pub fn set_fall_distance(player: Uuid, distance: f32) {
+    fall_registry().lock().unwrap().insert(player, distance);
+}
+
 /// Records that the player went to bed or got up.
 pub fn set_sleeping(player: Uuid, sleeping: bool) {
     let mut set = sleeping_registry().lock().unwrap();
@@ -64,6 +74,7 @@ pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
+    fall_registry().lock().unwrap().remove(&player);
     ferrite_net::settings::forget(player);
 }
 
@@ -133,6 +144,13 @@ pub fn answer(call: &HostCall) -> Option<String> {
                 .to_string(),
         );
     }
+    if call.method == "getFallDistance()" {
+        return fall_registry()
+            .lock()
+            .unwrap()
+            .get(&player)
+            .map(|distance| distance.to_string());
+    }
     if call.method == "getClientBrandName()" {
         return ferrite_net::settings::brand(player);
     }
@@ -186,6 +204,22 @@ mod tests {
         assert_eq!(answer(&call).as_deref(), Some("true"));
         set_sleeping(player, false);
         assert_eq!(answer(&call).as_deref(), Some("false"));
+        forget(player);
+        assert_eq!(answer(&call), None);
+    }
+
+    #[test]
+    fn fall_distance_is_answered_until_the_player_is_forgotten() {
+        let player = Uuid::from_u128(0xfa11);
+        let call = HostCall {
+            owner: "Player".into(),
+            subject: player.to_string(),
+            method: "getFallDistance()".into(),
+            args: vec![],
+        };
+        assert_eq!(answer(&call), None);
+        set_fall_distance(player, 3.5);
+        assert_eq!(answer(&call).as_deref(), Some("3.5"));
         forget(player);
         assert_eq!(answer(&call), None);
     }
