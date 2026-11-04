@@ -1290,7 +1290,11 @@ fn plugin_sound_packet(
         z: (z * 8.0) as i32,
         volume,
         pitch,
-        seed: seed.unwrap_or_else(rand::random),
+        // Paper draws the seed from the player's random; any fresh value will do.
+        seed: seed.unwrap_or_else(|| {
+            use std::hash::BuildHasher;
+            std::collections::hash_map::RandomState::new().hash_one(()) as i64
+        }),
     }))
 }
 fn defer_release(
