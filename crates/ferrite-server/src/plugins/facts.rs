@@ -237,6 +237,12 @@ fn client_setting(
             "RIGHT"
         }
         .to_owned(),
+        "getClientChatMode()" => settings.chat_mode.to_string(),
+        "getClientChatColors()" => settings.chat_colors.to_string(),
+        "getClientSkinParts()" => settings.skin_parts.to_string(),
+        "getClientTextFiltering()" => settings.text_filtering.to_string(),
+        "isAllowingServerListings()" => settings.server_listing.to_string(),
+        "getClientParticleStatus()" => settings.particle_status.to_string(),
         _ => return None,
     })
 }
@@ -569,10 +575,28 @@ mod tests {
             locale: "ko_kr".into(),
             view_distance: 12,
             left_handed: true,
+            chat_mode: 1,
+            chat_colors: false,
+            skin_parts: 0x41,
+            text_filtering: true,
+            server_listing: false,
+            particle_status: 2,
         };
         assert_eq!(
             client_setting(&settings, "getLocale()").as_deref(),
             Some("ko_kr")
+        );
+        assert_eq!(
+            client_setting(&settings, "getClientChatMode()").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            client_setting(&settings, "getClientSkinParts()").as_deref(),
+            Some("65")
+        );
+        assert_eq!(
+            client_setting(&settings, "isAllowingServerListings()").as_deref(),
+            Some("false")
         );
         assert_eq!(
             client_setting(&settings, "getClientViewDistance()").as_deref(),

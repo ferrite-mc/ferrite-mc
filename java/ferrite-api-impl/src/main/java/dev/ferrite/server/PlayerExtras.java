@@ -320,10 +320,71 @@ public abstract class PlayerExtras extends PlayerSight {
     @Override public org.bukkit.entity.EntityCategory getCategory() { return org.bukkit.entity.EntityCategory.NONE; }
     @Override public org.bukkit.entity.SpawnCategory getSpawnCategory() { return org.bukkit.entity.SpawnCategory.MISC; }
     @Override public org.bukkit.block.PistonMoveReaction getPistonMoveReaction() { return org.bukkit.block.PistonMoveReaction.IGNORE; }
-    @Override public org.bukkit.inventory.MainHand getMainHand() { return org.bukkit.inventory.MainHand.RIGHT; }
+    /** What the client said in its settings; right-handed until it has said anything. */
+    private String clientSetting(String method, String fallback) {
+        try { return HostBridge.call("Player", getUniqueId(), method, String.class) instanceof String text ? text : fallback; }
+        catch (UnsupportedOperationException | IllegalStateException none) { return fallback; }
+    }
+    @Override public org.bukkit.inventory.MainHand getMainHand() { return "LEFT".equals(clientSetting("getMainHand()", "RIGHT")) ? org.bukkit.inventory.MainHand.LEFT : org.bukkit.inventory.MainHand.RIGHT; }
+    @Override public int getClientViewDistance() { try { return Integer.parseInt(clientSetting("getClientViewDistance()", "10")); } catch (NumberFormatException e) { return 10; } }
+    @Override @SuppressWarnings("unchecked")
+    public <T> T getClientOption(com.destroystokyo.paper.ClientOption<T> option) {
+        Objects.requireNonNull(option, "option");
+        if (option == com.destroystokyo.paper.ClientOption.LOCALE) return (T) getLocale();
+        if (option == com.destroystokyo.paper.ClientOption.MAIN_HAND) return (T) getMainHand();
+        if (option == com.destroystokyo.paper.ClientOption.VIEW_DISTANCE) return (T) Integer.valueOf(getClientViewDistance());
+        if (option == com.destroystokyo.paper.ClientOption.CHAT_COLORS_ENABLED) return (T) Boolean.valueOf(clientSetting("getClientChatColors()", "true"));
+        if (option == com.destroystokyo.paper.ClientOption.TEXT_FILTERING_ENABLED) return (T) Boolean.valueOf(clientSetting("getClientTextFiltering()", "false"));
+        if (option == com.destroystokyo.paper.ClientOption.ALLOW_SERVER_LISTINGS) return (T) Boolean.valueOf(isAllowingServerListings());
+        if (option == com.destroystokyo.paper.ClientOption.CHAT_VISIBILITY) {
+            return (T) switch (clientSetting("getClientChatMode()", "0")) {
+                case "0" -> com.destroystokyo.paper.ClientOption.ChatVisibility.FULL;
+                case "1" -> com.destroystokyo.paper.ClientOption.ChatVisibility.SYSTEM;
+                case "2" -> com.destroystokyo.paper.ClientOption.ChatVisibility.HIDDEN;
+                default -> com.destroystokyo.paper.ClientOption.ChatVisibility.UNKNOWN;
+            };
+        }
+        if (option == com.destroystokyo.paper.ClientOption.PARTICLE_VISIBILITY) {
+            return (T) switch (clientSetting("getClientParticleStatus()", "0")) {
+                case "1" -> com.destroystokyo.paper.ClientOption.ParticleVisibility.DECREASED;
+                case "2" -> com.destroystokyo.paper.ClientOption.ParticleVisibility.MINIMAL;
+                default -> com.destroystokyo.paper.ClientOption.ParticleVisibility.ALL;
+            };
+        }
+        if (option == com.destroystokyo.paper.ClientOption.SKIN_PARTS) {
+            int raw;
+            try { raw = Integer.parseInt(clientSetting("getClientSkinParts()", "127")); } catch (NumberFormatException e) { raw = 127; }
+            return (T) new ClientSkinParts(raw);
+        }
+        throw new IllegalArgumentException("Unknown client option " + option);
+    }
+    /** The model parts a client shows, as the raw settings bits. */
+    static final class ClientSkinParts implements com.destroystokyo.paper.SkinParts.Mutable {
+        private int raw;
+        ClientSkinParts(int raw) { this.raw = raw & 0x7f; }
+        private boolean bit(int mask) { return (raw & mask) != 0; }
+        private void bit(int mask, boolean on) { raw = on ? raw | mask : raw & ~mask; }
+        @Override public boolean hasCapeEnabled() { return bit(1); }
+        @Override public boolean hasJacketEnabled() { return bit(2); }
+        @Override public boolean hasLeftSleeveEnabled() { return bit(4); }
+        @Override public boolean hasRightSleeveEnabled() { return bit(8); }
+        @Override public boolean hasLeftPantsEnabled() { return bit(16); }
+        @Override public boolean hasRightPantsEnabled() { return bit(32); }
+        @Override public boolean hasHatsEnabled() { return bit(64); }
+        @Override public int getRaw() { return raw; }
+        @Override public void setCapeEnabled(boolean on) { bit(1, on); }
+        @Override public void setJacketEnabled(boolean on) { bit(2, on); }
+        @Override public void setLeftSleeveEnabled(boolean on) { bit(4, on); }
+        @Override public void setRightSleeveEnabled(boolean on) { bit(8, on); }
+        @Override public void setLeftPantsEnabled(boolean on) { bit(16, on); }
+        @Override public void setRightPantsEnabled(boolean on) { bit(32, on); }
+        @Override public void setHatsEnabled(boolean on) { bit(64, on); }
+        @Override public com.destroystokyo.paper.SkinParts.Mutable mutableCopy() { return new ClientSkinParts(raw); }
+        @Override public com.destroystokyo.paper.SkinParts immutableCopy() { return new ClientSkinParts(raw); }
+    }
     @Override public org.bukkit.SoundCategory getSoundCategory() { return org.bukkit.SoundCategory.PLAYERS; }
-    @Override public String getLocale() { return "en_us"; }
-    @Override public Locale locale() { return Locale.US; }
+    @Override public String getLocale() { return clientSetting("getLocale()", "en_us"); }
+    @Override public Locale locale() { return Locale.forLanguageTag(getLocale().replace('_', '-')); }
     @Override public int getDeathScreenScore() { return getTotalExperience(); }
     @Override public boolean getAffectsSpawning() { return true; }
     @Override public boolean getRemoveWhenFarAway() { return false; }

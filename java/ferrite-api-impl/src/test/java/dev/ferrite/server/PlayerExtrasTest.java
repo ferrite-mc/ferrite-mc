@@ -260,4 +260,29 @@ class PlayerExtrasTest {
         world.removePluginChunkTickets(plugin);
         assertTrue(world.getPluginChunkTickets().isEmpty());
     }
+
+    @Test void clientOptionsComeFromTheClientSettings() {
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "getLocale()" -> "ko_kr";
+            case "getMainHand()" -> "LEFT";
+            case "getClientViewDistance()" -> "12";
+            case "getClientChatMode()" -> "2";
+            case "getClientSkinParts()" -> "65";
+            case "getClientChatColors()" -> "false";
+            default -> null;
+        };
+        try {
+            assertEquals("ko_kr", player.getLocale());
+            assertEquals("ko", player.locale().getLanguage());
+            assertEquals(org.bukkit.inventory.MainHand.LEFT, player.getMainHand());
+            assertEquals(12, player.getClientOption(com.destroystokyo.paper.ClientOption.VIEW_DISTANCE));
+            assertEquals(com.destroystokyo.paper.ClientOption.ChatVisibility.HIDDEN, player.getClientOption(com.destroystokyo.paper.ClientOption.CHAT_VISIBILITY));
+            assertEquals(false, player.getClientOption(com.destroystokyo.paper.ClientOption.CHAT_COLORS_ENABLED));
+            var parts = player.getClientOption(com.destroystokyo.paper.ClientOption.SKIN_PARTS);
+            assertTrue(parts.hasCapeEnabled());
+            assertTrue(parts.hasHatsEnabled());
+            assertFalse(parts.hasJacketEnabled());
+        } finally { HostBridge.transport = null; }
+        assertEquals("en_us", player.getLocale());
+    }
 }

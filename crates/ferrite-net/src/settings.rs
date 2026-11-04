@@ -17,6 +17,15 @@ pub struct ClientSettings {
     pub view_distance: i8,
     /// Whether the client's main hand is the left one.
     pub left_handed: bool,
+    /// `ChatVisiblity` ordinal: 0 full, 1 system, 2 hidden.
+    pub chat_mode: i32,
+    pub chat_colors: bool,
+    /// Bit set of the model parts shown (1 cape, 2 jacket, 4/8 sleeves, 16/32 pants, 64 hat).
+    pub skin_parts: u8,
+    pub text_filtering: bool,
+    pub server_listing: bool,
+    /// `ParticleStatus` ordinal: 0 all, 1 decreased, 2 minimal.
+    pub particle_status: i32,
 }
 
 fn registry() -> &'static Mutex<HashMap<Uuid, ClientSettings>> {
@@ -135,6 +144,12 @@ mod tests {
             locale: "ko_kr".into(),
             view_distance: 12,
             left_handed: true,
+            chat_mode: 0,
+            chat_colors: true,
+            skin_parts: 0x7f,
+            text_filtering: false,
+            server_listing: true,
+            particle_status: 0,
         };
         record(player, settings.clone());
         assert_eq!(get(player), Some(settings));

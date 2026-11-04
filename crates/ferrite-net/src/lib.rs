@@ -690,7 +690,7 @@ async fn read_config_packet(
                 for packet in packets {
                     let mut body = packet.body.as_slice();
                     match packet.id {
-                        0 => { let info = ClientInformation::decode(&mut body)?; if let Some(profile)=profile.as_deref_mut(){settings::record(profile.uuid,settings::ClientSettings{locale:info.locale.clone(),view_distance:info.view_distance,left_handed:info.main_hand.0==0});profile.chat_visibility=match info.chat_mode.0{1=>1,2=>2,_=>0};} },
+                        0 => { let info = ClientInformation::decode(&mut body)?; if let Some(profile)=profile.as_deref_mut(){settings::record(profile.uuid,settings::ClientSettings{locale:info.locale.clone(),view_distance:info.view_distance,left_handed:info.main_hand.0==0,chat_mode:info.chat_mode.0,chat_colors:info.chat_colors,skin_parts:info.skin_parts,text_filtering:info.text_filtering,server_listing:info.server_listing,particle_status:info.particle_status.0});profile.chat_visibility=match info.chat_mode.0{1=>1,2=>2,_=>0};} },
                         2 => { let payload = ServerboundCustomPayload::decode(&mut body)?; if payload.channel == "minecraft:brand" && let Some(profile) = profile.as_deref() { settings::record_brand_payload(profile.uuid, &payload.data.0); } },
                         4 => { ServerboundKeepAlive::decode(&mut body)?; },
                         _ => return Ok(packet.to_frame()),
