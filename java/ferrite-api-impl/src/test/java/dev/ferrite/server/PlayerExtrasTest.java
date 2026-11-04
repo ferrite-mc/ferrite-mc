@@ -208,4 +208,32 @@ class PlayerExtrasTest {
             assertEquals(org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.DECLINED, player.getResourcePackStatus());
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void leftoverPlayerValuesAreReadBack() {
+        var p = player;
+        p.teleport(new org.bukkit.Location(player.getWorld(), 0, 65, 0, 90f, 0f));
+        assertEquals(90f, p.getBodyYaw());
+        p.setBodyYaw(10f);
+        assertEquals(10f, p.getBodyYaw());
+        p.setEnchantmentSeed(1234);
+        assertEquals(1234, p.getEnchantmentSeed());
+        assertTrue(p.getEnderPearls().isEmpty());
+        assertEquals(net.kyori.adventure.util.TriState.NOT_SET, p.getFrictionState());
+        p.setFrictionState(net.kyori.adventure.util.TriState.TRUE);
+        assertEquals(net.kyori.adventure.util.TriState.TRUE, p.getFrictionState());
+        assertNull(p.getLastDeathLocation());
+        p.setLastDeathLocation(new org.bukkit.Location(player.getWorld(), 1, 2, 3));
+        assertEquals(2.0, p.getLastDeathLocation().getY());
+        assertEquals(80, p.getStarvationRate());
+        p.setStarvationRate(40);
+        assertEquals(40, p.getStarvationRate());
+        p.increaseWardenWarningLevel();
+        assertEquals(1, p.getWardenWarningLevel());
+        assertTrue(p.isVisibleByDefault());
+        p.setVisibleByDefault(false);
+        assertFalse(p.isVisibleByDefault());
+        assertEquals("minecraft:default", p.getWaypointStyle().asString());
+        p.setNoPhysics(true);
+        assertTrue(p.hasNoPhysics());
+    }
 }

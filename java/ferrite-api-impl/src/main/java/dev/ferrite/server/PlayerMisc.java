@@ -69,6 +69,51 @@ public abstract class PlayerMisc extends PlayerStubs {
         healthScale = scale;
     }
 
+    // ---- values a plugin sets and reads back; the game does not use them yet --------------------
+    private float bodyYawSet = Float.NaN;
+    private int enchantmentSeed = new java.util.Random().nextInt();
+    private net.kyori.adventure.util.TriState frictionState = net.kyori.adventure.util.TriState.NOT_SET;
+    private net.kyori.adventure.util.TriState flyingFallDamage = net.kyori.adventure.util.TriState.NOT_SET;
+    private float hurtDirection;
+    private org.bukkit.Location lastDeathLocation;
+    private int noActionTicks;
+    private int starvationRate = 80;
+    private int wardenWarningLevel;
+    private boolean noPhysics;
+    private boolean visibleByDefault = true;
+    private org.bukkit.Color waypointColor;
+    private net.kyori.adventure.key.Key waypointStyle = net.kyori.adventure.key.Key.key("minecraft", "default");
+
+    @Override public synchronized float getBodyYaw() { return Float.isNaN(bodyYawSet) ? getLocation().getYaw() : bodyYawSet; }
+    @Override public synchronized void setBodyYaw(float yaw) { bodyYawSet = yaw; }
+    @Override public synchronized int getEnchantmentSeed() { return enchantmentSeed; }
+    @Override public synchronized void setEnchantmentSeed(int seed) { enchantmentSeed = seed; }
+    /** The game has no ender pearl entities yet, so none is ever in flight. */
+    @Override public java.util.Collection<org.bukkit.entity.EnderPearl> getEnderPearls() { return java.util.List.of(); }
+    @Override public synchronized net.kyori.adventure.util.TriState getFrictionState() { return frictionState; }
+    @Override public synchronized void setFrictionState(net.kyori.adventure.util.TriState state) { frictionState = Objects.requireNonNull(state, "state"); }
+    @Override public synchronized net.kyori.adventure.util.TriState hasFlyingFallDamage() { return flyingFallDamage; }
+    @Override public synchronized void setFlyingFallDamage(net.kyori.adventure.util.TriState state) { flyingFallDamage = Objects.requireNonNull(state, "state"); }
+    @Override public synchronized float getHurtDirection() { return hurtDirection; }
+    @Override public synchronized void setHurtDirection(float direction) { hurtDirection = direction; }
+    @Override public synchronized org.bukkit.Location getLastDeathLocation() { return lastDeathLocation == null ? null : lastDeathLocation.clone(); }
+    @Override public synchronized void setLastDeathLocation(org.bukkit.Location location) { lastDeathLocation = location == null ? null : location.clone(); }
+    @Override public synchronized int getNoActionTicks() { return noActionTicks; }
+    @Override public synchronized void setNoActionTicks(int ticks) { noActionTicks = ticks; }
+    @Override public synchronized int getStarvationRate() { return starvationRate; }
+    @Override public synchronized void setStarvationRate(int ticks) { starvationRate = ticks; }
+    @Override public synchronized int getWardenWarningLevel() { return wardenWarningLevel; }
+    @Override public synchronized void setWardenWarningLevel(int level) { wardenWarningLevel = level; }
+    @Override public synchronized void increaseWardenWarningLevel() { wardenWarningLevel++; }
+    @Override public synchronized boolean hasNoPhysics() { return noPhysics; }
+    @Override public synchronized void setNoPhysics(boolean value) { noPhysics = value; }
+    @Override public synchronized boolean isVisibleByDefault() { return visibleByDefault; }
+    @Override public synchronized void setVisibleByDefault(boolean visible) { visibleByDefault = visible; }
+    @Override public synchronized org.bukkit.Color getWaypointColor() { return waypointColor; }
+    @Override public synchronized void setWaypointColor(org.bukkit.Color color) { waypointColor = color; }
+    @Override public synchronized net.kyori.adventure.key.Key getWaypointStyle() { return waypointStyle; }
+    @Override public synchronized void setWaypointStyle(net.kyori.adventure.key.Key style) { waypointStyle = Objects.requireNonNull(style, "style"); }
+
     // ---- tab list and visibility ---------------------------------------------------------------
     private final Set<UUID> unlisted = new HashSet<>();
     private final Set<UUID> hidden = new HashSet<>();
