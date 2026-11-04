@@ -3572,6 +3572,72 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_visual_experience_uses_live_level_without_changing_it() {
+    use ferrite_protocol::packets::play::SetExperience;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let player = ferrite_net::offline_uuid("VisualXp");
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            plugin_commands: Some(rx),
+            ops: vec![super::Operator {
+                uuid: player,
+                level: 4,
+            }],
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = join_with_inventory(addr, "VisualXp").await;
+    bot.raw(7, "xp set @s 12 levels").await;
+    let body = bot.until(SetExperience::ID).await;
+    let actual = SetExperience::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(actual.level.0, 12);
+    tx.send(
+        ferrite_plugin::PlayerCommand::VisualExperienceCurrentLevel {
+            player,
+            progress: 0.25,
+        },
+    )
+    .unwrap();
+    let body = bot.until(SetExperience::ID).await;
+    let visual = SetExperience::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(
+        (visual.progress, visual.level.0, visual.total.0),
+        (0.25, 12, actual.total.0)
+    );
+    tx.send(ferrite_plugin::PlayerCommand::VisualExperience {
+        player,
+        progress: 0.75,
+        level: 5,
+    })
+    .unwrap();
+    let body = bot.until(SetExperience::ID).await;
+    let visual = SetExperience::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(
+        (visual.progress, visual.level.0, visual.total.0),
+        (0.75, 5, actual.total.0)
+    );
+    bot.raw(7, "xp query @s levels").await;
+    bot.chat_containing("VisualXp has 12 experience levels")
+        .await;
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clear_give_and_xp_commands_act_on_a_bot_session() {
     use ferrite_protocol::packets::play::SetExperience;
     let (world, addr, server) = op_world(None, 1, &["Giver"]).await;

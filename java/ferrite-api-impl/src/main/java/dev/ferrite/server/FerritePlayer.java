@@ -86,6 +86,10 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     @Override public void setHealth(double value) { if (!Double.isFinite(value) || value < 0) throw new IllegalArgumentException("health"); health = value; Native.playerState(id.toString(), 0, value); }
     @Override public int getFoodLevel() { return food; }
     @Override public void setFoodLevel(int value) { if (value < 0 || value > 20) throw new IllegalArgumentException("food"); food = value; Native.playerState(id.toString(), 1, value); }
+    private void customChatCompletions(String method, java.util.Collection<String> entries) { java.util.Objects.requireNonNull(entries); HostBridge.callVoid("Player", id, method, new com.google.gson.Gson().toJson(entries)); }
+    @Override public void addCustomChatCompletions(java.util.Collection<String> entries) { customChatCompletions("addCustomChatCompletions(Collection)", entries); }
+    @Override public void removeCustomChatCompletions(java.util.Collection<String> entries) { customChatCompletions("removeCustomChatCompletions(Collection)", entries); }
+    @Override public void setCustomChatCompletions(java.util.Collection<String> entries) { customChatCompletions("setCustomChatCompletions(Collection)", entries); }
     @Override public int getLevel() { return experienceLevel; }
     @Override public void setLevel(int value) { if (value < 0) throw new IllegalArgumentException("level"); experienceLevel = value; Native.playerState(id.toString(), 3, value); }
     @Override public float getExp() { return experienceProgress; }

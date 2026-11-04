@@ -1,12 +1,15 @@
 //! Loading plugins into the embedded JVM at server startup.
 mod appearance;
+mod blocks;
 mod cooldown;
 mod extra;
 pub mod facts;
 mod inventory;
 mod items;
+mod messaging;
 mod motion;
 mod survival;
+mod visual;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -186,13 +189,31 @@ impl PluginBridge {
                                 return Some(String::new());
                             }
                             if let (Some(players), Some(command)) =
+                                (&players, visual::visual_command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
                                 (&players, motion::motion_command(call))
                             {
                                 players(command);
                                 return Some(String::new());
                             }
                             if let (Some(players), Some(command)) =
+                                (&players, blocks::block_command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
                                 (&players, inventory::inventory_command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, messaging::message_command(call))
                             {
                                 players(command);
                                 return Some(String::new());

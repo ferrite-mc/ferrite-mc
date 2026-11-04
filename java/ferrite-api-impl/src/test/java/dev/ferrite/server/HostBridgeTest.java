@@ -64,6 +64,16 @@ class HostBridgeTest {
         assertEquals("World#get(int)", calls.get(0));
     }
 
+    @Test void chat_completions_preserve_collection_boundaries() {
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };
+        System.setProperty("ferrite.native", "false");
+        Bootstrap.configureDataDir(System.getProperty("test.vanilla.data"));
+        Bootstrap.startServer();
+        var player = FerritePlayer.create((FerriteServer) org.bukkit.Bukkit.getServer(), java.util.UUID.fromString("00000000-0000-0000-0000-000000000007"), "Test", false, 20, 20, 0, null);
+        player.addCustomChatCompletions(List.of("", "a\u001db"));
+        assertEquals("addCustomChatCompletions(Collection)|[\"\",\"a\\u001db\"]", calls.get(0));
+    }
+
     @Test void unhandledPropertiesReadBackWhatWasSetAndKnownDefaultsOtherwise() {
         HostBridge.clearLocalProperties();
         HostBridge.transport = (owner, subject, method, args) -> null;

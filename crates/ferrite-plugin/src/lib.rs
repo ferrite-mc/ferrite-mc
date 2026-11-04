@@ -308,6 +308,32 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         amount: f32,
     },
+    VisualExperienceCurrentLevel {
+        player: uuid::Uuid,
+        progress: f32,
+    },
+    VisualExperience {
+        player: uuid::Uuid,
+        progress: f32,
+        level: i32,
+    },
+    VisualBlockDamage {
+        player: uuid::Uuid,
+        position: i64,
+        source: i32,
+        progress: i8,
+    },
+    CustomChatCompletions {
+        player: uuid::Uuid,
+        action: i32,
+        entries: Vec<String>,
+    },
+    VisualHealth {
+        player: uuid::Uuid,
+        health: f32,
+        food: i32,
+        saturation: f32,
+    },
     SetHealth {
         player: uuid::Uuid,
         health: f64,

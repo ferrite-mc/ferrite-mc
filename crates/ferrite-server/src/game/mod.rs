@@ -102,6 +102,95 @@ mod tests {
     }
 
     #[test]
+    fn plugin_visual_experience_reaches_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let mailbox = Mailbox::default();
+        let (outbound, _rx) = OutboundSender::channel(1 << 20);
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(player, (1, mailbox.clone(), outbound));
+        for target in [Uuid::from_u128(8), player] {
+            route_plugin_command(
+                ferrite_plugin::PlayerCommand::VisualExperience {
+                    player: target,
+                    progress: 0.75,
+                    level: 12,
+                },
+                &mailboxes,
+                &mut HashMap::new(),
+            );
+        }
+        let commands: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
+        assert!(
+            matches!(commands.as_slice(), [Command::PluginVisualExperience { progress, level: Some(12) }] if *progress == 0.75)
+        );
+    }
+
+    #[test]
+    fn plugin_completions_reach_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let entries = vec!["hello".into(), "".into()];
+        let command = ferrite_plugin::PlayerCommand::CustomChatCompletions {
+            player,
+            action: 2,
+            entries: entries.clone(),
+        };
+        assert_eq!(
+            routed(command.clone(), player)
+                .iter()
+                .map(bytes)
+                .collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&CustomChatCompletions {
+                action: VarInt(2),
+                entries
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
+    fn plugin_block_damage_reaches_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let position = ferrite_protocol::types::BlockPos::new(1, 64, 2).pack();
+        let command = ferrite_plugin::PlayerCommand::VisualBlockDamage {
+            player,
+            position,
+            source: 99,
+            progress: 5,
+        };
+        let sent = routed(command.clone(), player);
+        assert_eq!(
+            sent.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&BlockDestruction {
+                entity_id: VarInt(99),
+                position,
+                progress: 5
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
+    fn plugin_visual_health_reaches_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let command = ferrite_plugin::PlayerCommand::VisualHealth {
+            player,
+            health: 12.5,
+            food: 9,
+            saturation: 2.5,
+        };
+        let sent = routed(command.clone(), player);
+        assert_eq!(
+            sent.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&SetHealth {
+                health: 12.5,
+                food: VarInt(9),
+                saturation: 2.5
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
     fn plugin_action_bar_clear_title_and_tab_list_reach_the_player() {
         let player = Uuid::from_u128(7);
         let plain = |text: &str| ferrite_protocol::types::PlainText(text.into());
@@ -1339,6 +1428,81 @@ fn route_plugin_command(
                     .lock()
                     .unwrap()
                     .push_back(Command::PluginDamage { amount });
+            }
+        }
+        PlayerCommand::VisualExperienceCurrentLevel { player, progress } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginVisualExperience {
+                        progress,
+                        level: None,
+                    });
+            }
+        }
+        PlayerCommand::VisualExperience {
+            player,
+            progress,
+            level,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginVisualExperience {
+                        progress,
+                        level: Some(level),
+                    });
+            }
+        }
+        PlayerCommand::CustomChatCompletions {
+            player,
+            action,
+            entries,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &CustomChatCompletions {
+                        action: VarInt(action),
+                        entries,
+                    },
+                );
+            }
+        }
+        PlayerCommand::VisualBlockDamage {
+            player,
+            position,
+            source,
+            progress,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &BlockDestruction {
+                        entity_id: VarInt(source),
+                        position,
+                        progress,
+                    },
+                );
+            }
+        }
+        PlayerCommand::VisualHealth {
+            player,
+            health,
+            food,
+            saturation,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &SetHealth {
+                        health,
+                        food: VarInt(food),
+                        saturation,
+                    },
+                );
             }
         }
         PlayerCommand::SetHealth { player, health } => {
