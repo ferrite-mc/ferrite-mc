@@ -85,6 +85,20 @@ The patched jar is cached in `worldgen/` and never leaves the machine.
   stages 14%, terrain noise 12%, surface 8%, chunk parse from disk 4%, block counts 4%.
 - Unmodified hosts differ from each other block by block, so comparisons use a tolerance.
 - `LevelTicks.tick` must stay: scheduled ticks settle leaves and fluids in generated chunks.
+- GC: ParallelGC measured about 8% faster than G1 (51.8-53.9 vs 48.8-49.4 chunks/s, 8 request
+  threads, 1 GB heap); not yet the default. Memory was the same.
+
+### Open problem and dead ends
+
+- With 8 request threads the host sometimes stops answering (about 1 run in 8, unmodified jar;
+  Ferrite then fails the request after its 300 s timeout). Not seen yet with the default 4
+  threads, but that was not measured enough to claim it is fixed. Keep `threads` at 4 or lower.
+- Dead end: replacing the blocking `getChunk` with `getChunkFuture(x, z, FULL, true)` made every
+  request fail with `Unloaded chunk` on 26.3. Reverted.
+- Dead end: emptying `LevelTicks.tick` changes generated blocks (leaf distance). Kept out of the rules.
+- Not taken: C2ME's math/aquifer/density-function modules re-implement Mojang algorithms inside
+  repository files, which the rule "no Mojang logic in this repository" forbids. Only code that
+  wraps or skips calls, or transforms the user's own jar on their machine, is allowed.
 
 Each step is kept only if it beats the baseline for resident memory, CPU and chunks per second
 (see `tools/` benchmark). Baseline: unpatched jar, 512 MB heap, about 280 MB live after load,
