@@ -34,6 +34,8 @@ pub struct MoreState {
     pub tick: std::sync::Arc<TickControl>,
     /// `/forceload`: (dimension key, chunk x, chunk z) of every force-loaded chunk.
     pub forced: std::collections::BTreeSet<(String, i32, i32)>,
+    /// `/debug` and `/perf` runs in progress: wall clock and game time at the start.
+    pub profiling: BTreeMap<&'static str, (std::time::Instant, i64)>,
 }
 
 /// What `/tick` changes: the target rate, the frozen flag and the pending steps. The game loop
@@ -1210,6 +1212,316 @@ fn damage_tree() -> NodeBuilder<Source> {
         )
 }
 
+// ---------------------------------------------------------------------------------------------
+// /debug, /perf, /jfr, /test, /fetchprofile
+// ---------------------------------------------------------------------------------------------
+
+/// Starts or stops a tick profiling run; both `/debug` and `/perf` measure game ticks.
+fn profiling_run(
+    ctx: &CommandContext<Source>,
+    start: bool,
+    perf: bool,
+) -> Result<i32, CommandError> {
+    let (running, already, missing, started, stopped) = if perf {
+        (
+            "perf",
+            "commands.perf.alreadyRunning",
+            "commands.perf.notRunning",
+            "commands.perf.started",
+            "commands.perf.stopped",
+        )
+    } else {
+        (
+            "debug",
+            "commands.debug.alreadyRunning",
+            "commands.debug.notRunning",
+            "commands.debug.started",
+            "commands.debug.stopped",
+        )
+    };
+    let mut game = ctx.source().state.lock().unwrap();
+    let now = game.game_time;
+    let slot = game.more.profiling.get(running).copied();
+    if start {
+        if slot.is_some() {
+            drop(game);
+            return Err(failure(already, vec![]));
+        }
+        game.more
+            .profiling
+            .insert(running, (std::time::Instant::now(), now));
+        drop(game);
+        feedback(ctx, started, vec![])?;
+        return Ok(1);
+    }
+    let Some((began, from)) = slot else {
+        drop(game);
+        return Err(failure(missing, vec![]));
+    };
+    game.more.profiling.remove(running);
+    drop(game);
+    let seconds = began.elapsed().as_secs_f64();
+    let ticks = now - from;
+    let per_second = if seconds > 0.0 {
+        ticks as f64 / seconds
+    } else {
+        0.0
+    };
+    feedback(
+        ctx,
+        stopped,
+        vec![
+            format!("{seconds:.2}"),
+            ticks.to_string(),
+            format!("{per_second:.2}"),
+        ],
+    )?;
+    Ok(ticks as i32)
+}
+
+fn debug_tree() -> NodeBuilder<Source> {
+    literal::<Source>("debug")
+        .requires(admins())
+        .restricted(true)
+        .then(literal::<Source>("start").executes(|ctx| profiling_run(ctx, true, false)))
+        .then(literal::<Source>("stop").executes(|ctx| profiling_run(ctx, false, false)))
+        .then(
+            literal::<Source>("function").then(
+                argument::<Source>("name", ArgumentType::opaque("minecraft:function"))
+                    .executes(|_| Err(failure("commands.debug.function.traceFailed", vec![]))),
+            ),
+        )
+}
+
+fn perf_tree() -> NodeBuilder<Source> {
+    literal::<Source>("perf")
+        .requires(owners())
+        .restricted(true)
+        .then(literal::<Source>("start").executes(|ctx| profiling_run(ctx, true, true)))
+        .then(literal::<Source>("stop").executes(|ctx| profiling_run(ctx, false, true)))
+}
+
+/// Ferrite is not a JVM process, so there is no flight recorder to start; the failure messages
+/// are vanilla's.
+fn jfr_tree() -> NodeBuilder<Source> {
+    literal::<Source>("jfr")
+        .requires(owners())
+        .restricted(true)
+        .then(
+            literal::<Source>("start")
+                .executes(|_| Err(failure("commands.jfr.start.failed", vec![]))),
+        )
+        .then(literal::<Source>("stop").executes(|_| {
+            Err(failure(
+                "commands.jfr.dump.failed",
+                vec!["Ferrite does not run on the JVM".to_owned()],
+            ))
+        }))
+}
+
+type Run = fn(&CommandContext<Source>) -> Result<i32, CommandError>;
+
+/// Adds the argument list under `node` so that every prefix of it is executable.
+fn with_optional_args(
+    node: NodeBuilder<Source>,
+    args: Vec<(&'static str, ArgumentType)>,
+    run: Run,
+) -> NodeBuilder<Source> {
+    let mut tail: Option<NodeBuilder<Source>> = None;
+    for (name, ty) in args.into_iter().rev() {
+        let mut current = argument::<Source>(name, ty).executes(run);
+        if let Some(next) = tail.take() {
+            current = current.then(next);
+        }
+        tail = Some(current);
+    }
+    match tail {
+        Some(tail) => node.then(tail),
+        None => node,
+    }
+}
+
+/// The game-test framework only exists for vanilla's own test builds; with no test
+/// instances loaded every `/test` form reports that there is nothing to do.
+fn no_tests(_: &CommandContext<Source>) -> Result<i32, CommandError> {
+    Err(failure("commands.test.no_tests", vec![]))
+}
+
+fn test_tree() -> NodeBuilder<Source> {
+    let int = |name: &'static str| (name, ArgumentType::integer());
+    let flag = |name: &'static str| (name, ArgumentType::Bool);
+    let selector =
+        || argument::<Source>("tests", ArgumentType::opaque("minecraft:resource_selector"));
+    let mut root = literal::<Source>("test")
+        .requires(gamemasters())
+        .restricted(true);
+    for name in [
+        "clearthat",
+        "clearthese",
+        "resetclosest",
+        "resetthat",
+        "resetthese",
+        "stop",
+    ] {
+        root = root.then(literal::<Source>(name).executes(no_tests));
+    }
+    let with_run = |node: NodeBuilder<Source>| node.executes(no_tests);
+    root = root
+        .then(with_optional_args(
+            with_run(literal::<Source>("clearall")),
+            vec![int("radius")],
+            no_tests,
+        ))
+        .then(
+            literal::<Source>("create").then(
+                argument::<Source>("id", ArgumentType::ResourceLocation)
+                    .executes(no_tests)
+                    .then(
+                        argument::<Source>("width", ArgumentType::integer())
+                            .executes(no_tests)
+                            .then(
+                                argument::<Source>("height", ArgumentType::integer()).then(
+                                    argument::<Source>("depth", ArgumentType::integer())
+                                        .executes(no_tests),
+                                ),
+                            ),
+                    ),
+            ),
+        )
+        .then(literal::<Source>("locate").then(selector().executes(no_tests)))
+        .then(with_optional_args(
+            with_run(literal::<Source>("pos")),
+            vec![("var", ArgumentType::string())],
+            no_tests,
+        ))
+        .then(with_optional_args(
+            with_run(literal::<Source>("runclosest")),
+            vec![int("numberOfTimes"), flag("untilFailed")],
+            no_tests,
+        ))
+        .then(with_optional_args(
+            with_run(literal::<Source>("runthat")),
+            vec![int("numberOfTimes"), flag("untilFailed")],
+            no_tests,
+        ))
+        .then(with_optional_args(
+            with_run(literal::<Source>("runthese")),
+            vec![int("numberOfTimes"), flag("untilFailed")],
+            no_tests,
+        ))
+        .then(literal::<Source>("verify").then(selector().executes(no_tests)))
+        .then(literal::<Source>("runmultiple").then(with_optional_args(
+            selector().executes(no_tests),
+            vec![int("amount")],
+            no_tests,
+        )))
+        .then(literal::<Source>("run").then(with_optional_args(
+            selector().executes(no_tests),
+            vec![
+                int("numberOfTimes"),
+                flag("untilFailed"),
+                int("rotationSteps"),
+                int("testsPerRow"),
+            ],
+            no_tests,
+        )));
+    root.then(with_optional_args(
+        with_run(literal::<Source>("runfailed")),
+        vec![
+            int("numberOfTimes"),
+            flag("untilFailed"),
+            int("rotationSteps"),
+            int("testsPerRow"),
+        ],
+        no_tests,
+    ))
+}
+
+fn profile_text(name: &str, id: uuid::Uuid) -> String {
+    format!("{{id:\"{id}\",name:\"{name}\"}}")
+}
+
+fn fetchprofile_tree() -> NodeBuilder<Source> {
+    literal::<Source>("fetchprofile")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(literal::<Source>("entity").then(
+            argument::<Source>("entity", ArgumentType::entity()).executes(|ctx| {
+                let ids = resolved_targets(ctx, "entity")?;
+                let Some(id) = ids.first().copied() else {
+                    return Err(failure("argument.entity.notfound.player", vec![]));
+                };
+                let name = ctx
+                    .source()
+                    .state
+                    .lock()
+                    .unwrap()
+                    .players
+                    .iter()
+                    .find(|player| player.uuid == id)
+                    .map(|player| player.name.clone())
+                    .unwrap_or_default();
+                feedback(
+                    ctx,
+                    "commands.fetchprofile.entity.success",
+                    vec![name.clone(), profile_text(&name, id)],
+                )?;
+                Ok(1)
+            }),
+        ))
+        .then(literal::<Source>("id").then(
+            argument::<Source>("id", ArgumentType::opaque("minecraft:uuid")).executes(|ctx| {
+                let raw = ctx.string("id").unwrap_or_default().to_owned();
+                let found = raw.parse::<uuid::Uuid>().ok().and_then(|id| {
+                    ctx.source()
+                        .state
+                        .lock()
+                        .unwrap()
+                        .players
+                        .iter()
+                        .find(|player| player.uuid == id)
+                        .map(|player| (player.name.clone(), id))
+                });
+                match found {
+                    Some((name, id)) => {
+                        feedback(
+                            ctx,
+                            "commands.fetchprofile.id.success",
+                            vec![raw, profile_text(&name, id)],
+                        )?;
+                        Ok(1)
+                    }
+                    None => Err(failure("commands.fetchprofile.id.failure", vec![raw])),
+                }
+            }),
+        ))
+        .then(literal::<Source>("name").then(
+            argument::<Source>("name", ArgumentType::string()).executes(|ctx| {
+                let name = ctx.string("name").unwrap_or_default().to_owned();
+                let found = ctx
+                    .source()
+                    .state
+                    .lock()
+                    .unwrap()
+                    .players
+                    .iter()
+                    .find(|player| player.name.eq_ignore_ascii_case(&name))
+                    .map(|player| (player.name.clone(), player.uuid));
+                match found {
+                    Some((exact, id)) => {
+                        feedback(
+                            ctx,
+                            "commands.fetchprofile.name.success",
+                            vec![exact.clone(), profile_text(&exact, id)],
+                        )?;
+                        Ok(1)
+                    }
+                    None => Err(failure("commands.fetchprofile.name.failure", vec![name])),
+                }
+            }),
+        ))
+}
+
 pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(version_tree());
     tree.register(random_tree());
@@ -1224,6 +1536,11 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(rotate_tree());
     tree.register(forceload_tree());
     tree.register(damage_tree());
+    tree.register(debug_tree());
+    tree.register(perf_tree());
+    tree.register(jfr_tree());
+    tree.register(test_tree());
+    tree.register(fetchprofile_tree());
 }
 
 #[cfg(test)]
@@ -1300,6 +1617,11 @@ mod tests {
             "rotate",
             "forceload",
             "damage",
+            "debug",
+            "perf",
+            "jfr",
+            "test",
+            "fetchprofile",
         ] {
             assert!(
                 roots.iter().any(|root| root == name),
@@ -1554,6 +1876,49 @@ mod tests {
         ));
         assert!(run("damage @s -1", 2, fresh(), None).0.is_err());
         assert!(run("damage @s 4", 1, fresh(), None).0.is_err());
+    }
+
+    #[test]
+    fn debug_and_perf_runs_start_once_and_report_ticks() {
+        let state = fresh();
+        assert!(run("debug stop", 3, state.clone(), None).0.is_err());
+        run("debug start", 3, state.clone(), None).0.unwrap();
+        assert!(run("debug start", 3, state.clone(), None).0.is_err());
+        for _ in 0..5 {
+            state.lock().unwrap().tick(true);
+        }
+        let (result, actions) = run("debug stop", 3, state.clone(), None);
+        assert_eq!(result.unwrap(), 5);
+        assert_eq!(keys(&actions), ["commands.debug.stopped"]);
+        run("perf start", 4, state.clone(), None).0.unwrap();
+        assert!(run("perf start", 4, state.clone(), None).0.is_err());
+        assert!(
+            run("perf start", 3, state.clone(), None).0.is_err(),
+            "owner only"
+        );
+        run("perf stop", 4, state.clone(), None).0.unwrap();
+        assert!(run("jfr start", 4, state, None).0.is_err());
+    }
+
+    #[test]
+    fn test_command_syntax_parses_and_reports_no_tests() {
+        for input in [
+            "test run mod:a",
+            "test run mod:a 3 true 1 4",
+            "test runfailed",
+            "test runfailed 2 true",
+            "test create demo:one 4 5 6",
+            "test clearall 10",
+            "test pos",
+            "test pos var",
+            "test stop",
+        ] {
+            let error = run(input, 2, fresh(), None).0.unwrap_err();
+            assert!(
+                !matches!(error, CommandError::Syntax(_)),
+                "{input}: {error:?}"
+            );
+        }
     }
 
     #[test]
