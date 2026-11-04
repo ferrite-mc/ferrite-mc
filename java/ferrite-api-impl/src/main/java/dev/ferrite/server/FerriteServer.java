@@ -121,6 +121,18 @@ public class FerriteServer extends ServerStubs {
     void seedIpBan(String ip) { ipBans.seed(ip); }
     @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.BanList<?>> T getBanList(org.bukkit.BanList.Type type) { return (T) (type == org.bukkit.BanList.Type.IP ? (org.bukkit.BanList<?>) ipBans : profileBans); }
     @SuppressWarnings("unchecked") @Override public <B extends org.bukkit.BanList<E>, E> B getBanList(io.papermc.paper.ban.BanListType<B> type) { return (B) (type == io.papermc.paper.ban.BanListType.IP ? (org.bukkit.BanList<?>) ipBans : profileBans); }
+    private final FerritePotionBrewer potionBrewer = new FerritePotionBrewer();
+    @Override public org.bukkit.potion.PotionBrewer getPotionBrewer() { return potionBrewer; }
+    private final FerriteServerConfig serverConfig = new FerriteServerConfig();
+    @Override public io.papermc.paper.configuration.ServerConfiguration getServerConfig() { return serverConfig; }
+    private final FerriteMobGoals mobGoals = new FerriteMobGoals();
+    @Override public com.destroystokyo.paper.entity.ai.MobGoals getMobGoals() { return mobGoals; }
+    private final FerriteDatapackManager datapackManager = new FerriteDatapackManager();
+    @Override public io.papermc.paper.datapack.DatapackManager getDatapackManager() { return datapackManager; }
+    private final FerriteStructureManager structureManager = new FerriteStructureManager();
+    @Override public org.bukkit.structure.StructureManager getStructureManager() { return structureManager; }
+    private final FerriteEntityFactory entityFactory = new FerriteEntityFactory();
+    @Override public org.bukkit.entity.EntityFactory getEntityFactory() { return entityFactory; }
     @Override public void banIP(String address) { ipBans.addBan(address, null, (java.util.Date) null, null); }
     @Override public void banIP(java.net.InetAddress address) { ipBans.addBan(address, null, (java.util.Date) null, null); }
     @Override public void unbanIP(String address) { ipBans.pardon(address); }
