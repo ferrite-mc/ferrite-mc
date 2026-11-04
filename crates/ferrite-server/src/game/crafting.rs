@@ -242,11 +242,7 @@ pub fn match_for_plugin(
     let book = BOOK.get_or_init(load).as_ref()?;
     let recipe = book.0.match_crafting(names, width, height)?;
     let result = recipe.result()?;
-    Some((
-        recipe.id.clone(),
-        result.item.clone(),
-        u32::try_from(result.count).ok()?,
-    ))
+    Some((recipe.id.clone(), result.item.clone(), result.count))
 }
 
 /// The crafter every menu uses.
