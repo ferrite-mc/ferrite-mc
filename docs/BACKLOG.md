@@ -7,16 +7,10 @@ from. Tick items off in the commit that finishes them.
 
 ## World generation
 
-`ferrite-worldgen` has the 26.3 data model, the density-function evaluator, bit-exact noise and
-the multi-noise biome source. The server still only serves superflat or Anvil chunks.
-
-- W1c: finish the Java differential (`tests/java_differential.rs`, `tests/java/DensityRouterDump.java`)
-  to 1e-9 max error against the 26.3 jar.
-- W2: noise chunk fill — ≥99% solid-mask agreement on the fixture chunks.
-- W3: surface rules — ≥98% top-block agreement.
-- Then: carvers, features/structures, biome blending, spawn placement from worldgen.
-- Wire `ferrite-worldgen` into the server's `ChunkSource` so a world without region files generates.
-- Brief and known API differences: `docs/handoff/worldgen-26-3.md`.
+Not part of this repository. The server only has the `ChunkGenerator` seam
+(`crates/ferrite-server/src/game/generator.rs`) and serves superflat or Anvil chunks. Vanilla
+generation is planned as a separate component that calls the official generator from the user's
+own server jar through the embedded JVM; nothing is re-implemented in Rust.
 
 ## Entities and mobs
 
@@ -101,11 +95,6 @@ still stubs that answer "Command not implemented".
 - Profiler: `/tps` `/mspt` `/profile` exist; add a `/spark`-style sampling view and per-system
   attribution outside regions.
 - Regionizer: move deferred mutations into per-region queues (a shared queue is still scanned).
-- MSPT under real worldgen (blocked on W2/W3).
-- **Optional, not started:** OpenCL GPU acceleration for chunk rendering — mesh building, light
-  propagation or chunk-packet encoding on the GPU, with a CPU fallback and a per-driver benchmark.
-  Evaluate only after the worldgen throughput work lands; it is the last roadmap item, not a
-  prerequisite.
 
 ## Quality and release
 

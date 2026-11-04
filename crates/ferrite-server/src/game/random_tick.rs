@@ -1,8 +1,8 @@
 //! Region-local random ticking. Sampling follows ServerLevel.tickChunk; empty
 //! sections are skipped as in Lithium's chunk-section random-tick counters.
 use super::{anvil::AnvilChunkSource, fluid::RegionFluidWorld, region::Tracking};
+use ferrite_entity::Rng;
 use ferrite_fluid::FluidWorld;
-use ferrite_noise::random::{RandomSource, XoroshiroRandomSource};
 use ferrite_region::ChunkPos;
 use ferrite_world::Chunk;
 use std::{
@@ -30,8 +30,8 @@ impl RandomWorld for RegionFluidWorld<'_> {
         RegionFluidWorld::brightness(self, p.0, p.1, p.2)
     }
 }
-type Handler = fn(&mut dyn RandomWorld, Pos, u32, &mut XoroshiroRandomSource);
-fn no_op(_: &mut dyn RandomWorld, _: Pos, _: u32, _: &mut XoroshiroRandomSource) {}
+type Handler = fn(&mut dyn RandomWorld, Pos, u32, &mut Rng);
+fn no_op(_: &mut dyn RandomWorld, _: Pos, _: u32, _: &mut Rng) {}
 fn state_name(state: u32) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {
     ferrite_data::blocks::state(u16::try_from(state).ok()?)
 }
@@ -64,7 +64,7 @@ impl super::fire::FireWorld for FireView<'_> {
 fn lava_tick(
     world: &mut dyn RandomWorld,
     pos: Pos,
-    rng: &mut XoroshiroRandomSource,
+    rng: &mut Rng,
     fire: &mut super::fire::FireTicks,
 ) {
     let mut view = FireView(world);
@@ -113,7 +113,7 @@ fn can_stay(world: &dyn RandomWorld, p: Pos, grass: u32) -> bool {
     })
 }
 // Vanilla 26.3 SpreadingSnowyBlock.randomTick (older name: SpreadingSnowyDirtBlock).
-fn grass_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut XoroshiroRandomSource) {
+fn grass_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
     if !can_stay(world, p, state) {
         world.set_block(p, default_block("dirt"));
         return;
@@ -123,9 +123,9 @@ fn grass_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Xoroshi
     }
     for _ in 0..4 {
         let target = (
-            p.0 + rng.next_int_bound(3) - 1,
-            p.1 + rng.next_int_bound(5) - 3,
-            p.2 + rng.next_int_bound(3) - 1,
+            p.0 + rng.next_int(3) - 1,
+            p.1 + rng.next_int(5) - 3,
+            p.2 + rng.next_int(3) - 1,
         );
         let above = world.block((target.0, target.1 + 1, target.2));
         let water = matches!(
@@ -149,7 +149,7 @@ fn grass_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Xoroshi
     }
 }
 // LeavesBlock.isRandomlyTicking / randomTick; item drops are not available yet.
-fn leaves_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut XoroshiroRandomSource) {
+fn leaves_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
     if property(state, "distance", "7") && property(state, "persistent", "false") {
         world.set_block(
             p,
@@ -212,15 +212,13 @@ fn sample_positions(
     }
 }
 pub(super) struct RandomTicks {
-    rng: XoroshiroRandomSource,
+    rng: Rng,
 }
 impl Default for RandomTicks {
     fn default() -> Self {
         static SEED: AtomicU64 = AtomicU64::new(0x91e10da5c79e7b1d);
         Self {
-            rng: XoroshiroRandomSource::new(
-                SEED.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed) as i64
-            ),
+            rng: Rng::new(SEED.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed)),
         }
     }
 }
@@ -246,7 +244,7 @@ impl RandomTicks {
                 chunk.0,
                 chunk.1,
                 speed,
-                || rng.borrow_mut().next_int_bound(4096) as usize,
+                || rng.borrow_mut().next_int(4096) as usize,
                 |pos| {
                     let state = FluidWorld::block(&world, pos.0, pos.1, pos.2);
                     let Ok(id) = u16::try_from(state) else {
@@ -348,13 +346,13 @@ mod tests {
         let grass = state("grass_block");
         grid.set_block(p, grass);
         grid.set_block((0, 1, 0), state("stone"));
-        grass_tick(&mut grid, p, grass, &mut XoroshiroRandomSource::new(1));
+        grass_tick(&mut grid, p, grass, &mut Rng::new(1));
         assert_eq!(grid.block(p), state("dirt"));
         grid.set_block(p, grass);
         grid.set_block((0, 1, 0), state("air"));
         grid.set_block(target, state("dirt"));
         grid.light = 0;
-        let mut rng = XoroshiroRandomSource::new(12);
+        let mut rng = Rng::new(12);
         for _ in 0..1000 {
             grass_tick(&mut grid, p, grass, &mut rng);
         }
@@ -378,7 +376,7 @@ mod tests {
                 .unwrap(),
             )
         };
-        let mut rng = XoroshiroRandomSource::new(1);
+        let mut rng = Rng::new(1);
         for state in [leaf("true", "7"), leaf("false", "6")] {
             grid.set_block(p, state);
             leaves_tick(&mut grid, p, state, &mut rng);

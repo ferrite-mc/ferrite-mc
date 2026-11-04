@@ -1,4 +1,4 @@
-use super::{Dimension, terrain::VanillaTerrain};
+use super::{Dimension, generator::ChunkGenerator};
 use ferrite_command::gamerule::GameRules;
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
@@ -161,7 +161,7 @@ pub struct AnvilChunkSource {
     flush_lock: tokio::sync::Mutex<()>,
     flat: Mutex<HashMap<i32, (Chunk, LightData)>>,
     /// Vanilla generation for chunks missing from disk; `None` is the flat test world.
-    terrain: Option<Arc<VanillaTerrain>>,
+    terrain: Option<Arc<dyn ChunkGenerator>>,
     /// Which dimension this source reads, writes and generates.
     dimension: Dimension,
 }
@@ -172,7 +172,7 @@ impl AnvilChunkSource {
     pub fn new_with_terrain(
         path: PathBuf,
         registry: RuntimeRegistry,
-        terrain: Option<Arc<VanillaTerrain>>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
     ) -> Arc<Self> {
         Self::with_dimension(path, Arc::new(registry), terrain, Dimension::Overworld)
     }
@@ -181,7 +181,7 @@ impl AnvilChunkSource {
     pub fn with_dimension(
         path: PathBuf,
         registry: Arc<RuntimeRegistry>,
-        terrain: Option<Arc<VanillaTerrain>>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
         dimension: Dimension,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -203,13 +203,13 @@ impl AnvilChunkSource {
     pub fn new_memory() -> Arc<Self> {
         Self::new_memory_with_terrain(None)
     }
-    pub fn new_memory_with_terrain(terrain: Option<Arc<VanillaTerrain>>) -> Arc<Self> {
+    pub fn new_memory_with_terrain(terrain: Option<Arc<dyn ChunkGenerator>>) -> Arc<Self> {
         Self::new_memory_dimension(terrain, Dimension::Overworld)
     }
     /// An in-memory source for one dimension, used by tests and by worlds without a
     /// directory.
     pub fn new_memory_dimension(
-        terrain: Option<Arc<VanillaTerrain>>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
         dimension: Dimension,
     ) -> Arc<Self> {
         static REGISTRY: OnceLock<Arc<RuntimeRegistry>> = OnceLock::new();
@@ -246,7 +246,7 @@ impl AnvilChunkSource {
     pub(super) fn registry(&self) -> Arc<RuntimeRegistry> {
         Arc::clone(&self.registry)
     }
-    pub(super) fn terrain(&self) -> Option<Arc<VanillaTerrain>> {
+    pub(super) fn terrain(&self) -> Option<Arc<dyn ChunkGenerator>> {
         self.terrain.clone()
     }
     /// Whether missing chunks use the flat test world instead of vanilla terrain.
@@ -261,7 +261,7 @@ impl AnvilChunkSource {
     pub fn spawn_height(&self, x: i32, z: i32) -> Option<i32> {
         self.terrain
             .as_ref()?
-            .spawn_height_dimension(self.dimension, x, z)
+            .spawn_height(self.dimension, x, z)
             .ok()
     }
 
@@ -851,7 +851,7 @@ impl AnvilChunkSource {
                     Some(column) => column,
                     None => {
                         if let Some(terrain) = &source.terrain {
-                            let generated = terrain.generate_dimension(source.dimension, x, z)?;
+                            let generated = terrain.generate(source.dimension, x, z)?;
                             (generated.chunk, generated.light)
                         } else {
                             let mut flat = source.flat.lock().unwrap();

@@ -5,7 +5,7 @@
 //! A dimension also fixes the world height (`min_y`/`height`), whether it has a sky and a
 //! ceiling, and how coordinates scale when a portal crosses it.
 
-use super::{anvil::AnvilChunkSource, terrain::VanillaTerrain};
+use super::{anvil::AnvilChunkSource, generator::ChunkGenerator};
 use ferrite_world::RuntimeRegistry;
 use std::{
     collections::HashMap,
@@ -181,7 +181,7 @@ impl DimensionRegistry {
     pub fn standard(
         world: Option<&Path>,
         registry: Arc<RuntimeRegistry>,
-        terrain: Option<Arc<VanillaTerrain>>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
         spawn: [i32; 3],
     ) -> Arc<Self> {
         let mut sources = HashMap::new();
@@ -275,7 +275,6 @@ impl DimensionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrite_world::BlockStateRegistry;
     use std::path::PathBuf;
 
     fn vanilla_root() -> Option<PathBuf> {
@@ -360,56 +359,6 @@ mod tests {
                 dimension.key()
             );
         }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn nether_source_returns_nether_biomes_and_the_nether_height() {
-        let Some(root) = vanilla_root() else {
-            eprintln!("SKIP nether source test: vanilla/26.3/generated is absent");
-            return;
-        };
-        let registry = Arc::new(RuntimeRegistry::load(&root).unwrap());
-        let terrain = match VanillaTerrain::spawn(0) {
-            Ok(terrain) => Arc::new(terrain),
-            Err(error) => {
-                eprintln!("SKIP nether source test: {error}");
-                return;
-            }
-        };
-        let dimensions =
-            DimensionRegistry::standard(None, Arc::clone(&registry), Some(terrain), [0, 65, 0]);
-        let source = dimensions.source(Dimension::Nether);
-        ready(source, 0, 0).await;
-
-        source
-            .with_loaded_chunk(0, 0, |chunk| {
-                assert_eq!(chunk.min_y(), 0);
-                assert_eq!(chunk.height_blocks(), 256);
-                let mut biomes = Vec::new();
-                for section in chunk.sections() {
-                    for index in 0..64 {
-                        if let Some(id) = section.biomes().get(index)
-                            && let Some(name) = registry.biome_name(id)
-                        {
-                            biomes.push(name.to_owned());
-                        }
-                    }
-                }
-                const NETHER: [&str; 5] = [
-                    "minecraft:nether_wastes",
-                    "minecraft:soul_sand_valley",
-                    "minecraft:crimson_forest",
-                    "minecraft:warped_forest",
-                    "minecraft:basalt_deltas",
-                ];
-                assert!(!biomes.is_empty(), "no biomes in the nether chunk");
-                assert!(
-                    biomes.iter().all(|name| NETHER.contains(&name.as_str())),
-                    "overworld biome in a nether chunk: {:?}",
-                    biomes.iter().collect::<std::collections::BTreeSet<_>>()
-                );
-            })
-            .expect("nether chunk is loaded");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

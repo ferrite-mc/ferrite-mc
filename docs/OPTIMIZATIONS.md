@@ -64,7 +64,6 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 | ModernFix | <https://github.com/embeddedt/ModernFix> | LGPL-3.0-or-later | ⚠️ `26.1` 브랜치까지 | 🟢 |
 | Krypton | <https://github.com/astei/krypton> | LGPL-3.0 | ✅ 26.3 (2026-09-30) | 🟢 |
 | VMP (Very Many Players) | <https://github.com/RelativityMC/VMP-fabric> | MIT | ✅ `ver/26.3.0` 브랜치 | 🟢 |
-| Noisium | <https://github.com/Steveplays28/noisium> | LGPL-3.0 | ❌ 1.21.6까지 (2025-06-24) | 🟡 |
 | Pufferfish | <https://github.com/pufferfish-gg/Pufferfish> | GPL-3.0 (패치), MIT (기타) | ❌ 1.21.10 (2025-12-21) | 🟡 |
 | Purpur | <https://github.com/PurpurMC/Purpur> | MIT (`LICENSE`) | ✅ `apiVersion=26.3` (2026-10-28) | 🟢 |
 | Leaf | <https://github.com/Winds-Studio/Leaf> | MIT 패치(일부 GPL/LGPL/Apache), 바이너리 GPL-3.0-only | ✅ `apiVersion=26.3` (2026-10-25) | 🟢 |
@@ -141,7 +140,6 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 | 청크 틱 목록을 매 초만 갱신(매 틱 순회 제거) | `common/utils/ChunkTickManager.java`, `ChunkManager.java` | `ferrite-world` / `ferrite-region` | 📋 |
 | 동기 청크 로드 축소 (lagspike 방지) | `common/config/OptimizationConfig.java`의 `reduce-sync-loads` | `ferrite-server`(ChunkSource) | 📋 |
 | 커맨드 블록 파싱 캐시 | `common/config/OptimizationConfig.java`의 `optimize-command-blocks` | `ferrite-command` | 📋 |
-| 빠른 바이옴 조회(경계 근사) | `OptimizationConfig`의 `fast-biome-lookups` | `ferrite-worldgen` | 📋 |
 | 중복 유체 랜덤 틱 취소 | `OptimizationConfig`의 `cancel-duplicate-fluid-ticks` | `ferrite-world` | 📋 |
 | 몹캡 강제/브리딩 캡 | `common/config/data/mob_spawning/EnforcedMobcap.java`, `breeding_cap/BreedingCap.java` | `ferrite-server` | 📋 |
 | 엔티티 타입별 필터 리스트 | `common/collections/FilteredList.java` | `ferrite-entity` | 📋 |
@@ -156,7 +154,6 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 
 | 기법 | 원본 구현 | Ferrite 위치 | 상태 |
 |---|---|---|---|
-| 밀도 함수 컴파일(DFC) | `org/dreeam/leaf/config/modules/opt/DensityFunctionCompiler.java` | `ferrite-worldgen::density` | 📋 (인터프리터만 있음 🔧) |
 | 랜덤 틱 시스템 재작성(대상 섹션만 순회) | `org/dreeam/leaf/config/modules/opt/OptimizeRandomTick.java`, `org/dreeam/leaf/world/RandomTickSystem.java` | `ferrite-world` | 📋 |
 | 몹 스폰 스로틀/자연 스폰 청크 맵 | `opt/OptimizeMobSpawning.java`, `ThrottleNaturalMobSpawning.java`, `world/NatureSpawnChunkMap.java` | `ferrite-server` | 📋 |
 | 비동기 길찾기(노드 평가기 캐시 포함) | `org/dreeam/leaf/async/path/AsyncPathProcessor.java`, `NodeEvaluatorCache.java`, `AsyncPath.java` | `ferrite-entity` | 📋 |
@@ -167,7 +164,6 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 | 불필요 패킷 제거(맵 데이터/웨이포인트) | `opt/ReduceUselessPackets.java`, `SkipMapItemDataUpdates.java`, `OptimizeWaypoint.java` | `ferrite-net` / `ferrite-item` | 📋 |
 | 가상 스레드 지원 | `opt/VirtualThreadSupport.java` | `ferrite-region`(IO) | 📋 |
 | 고속 RNG(XorShift) | `opt/FastRNG.java` | `ferrite-math` | 📋 |
-| 전동 레일/구조물 생성 최적화 | `opt/OptimizedPoweredRails.java`, `opt/FasterStructureGenFutureSequencing.java`, `opt/OptimizeEndSurfaceGen.java` | `ferrite-world` / `ferrite-worldgen` | 📋 |
 | 비동기 플레이어 데이터 저장 | `org/dreeam/leaf/async/AsyncPlayerDataSaving.java` | `ferrite-server::game::playerdata` | 📋 |
 
 ### 1.5 Gale — Paper 포크의 미세 최적화 패치 모음
@@ -189,7 +185,6 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 | CubePointRange 나눗셈을 곱셈으로, parts를 size로 | `0093`, `0094` 패치 | `ferrite-math` | 📋 |
 | 빠른 청크 직렬화 | `0096-Faster-chunk-serialization.patch` | `ferrite-world::chunk_nbt` | 📋 |
 | 몹 카운트 배열화, 엔티티 트래커 링크드 맵 | `0104-Store-mob-counts-in-an-array.patch`, `0105-Use-linked-map-for-entity-trackers.patch` | `ferrite-entity` | 📋 |
-| 노이즈 생성 최적화 | `0106-Optimize-noise-generation.patch` | `ferrite-noise` | 📋 (bit-exact 엔진 있음 🔧) |
 | PlayerInfo/keepalive 패킷 묶음 전송 | `0111`~`0114` 패치 | `ferrite-net` | 📋 |
 | VarInt/VarLong 크기 사전 계산 및 쓰기 최적화 | `0136-Pre-compute-VarInt-and-VarLong-sizes.patch`, `0137-Optimize-VarInt-write-and-VarLong-write.patch` | `ferrite-protocol::codec` | 📋 |
 | RandomSource 인스턴스 감소, xor-shift RNG | `0138-Reduce-RandomSource-instances.patch`, `0139-Add-xor-shift-random.patch` | `ferrite-math` | 📋 |
@@ -279,38 +274,20 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 - 라이선스: `LICENSE.md` — **MIT**, 단 `c2me-opts-accel-opencl/`는 **All Rights Reserved**
 - 26.3: ✅ `minecraft_version=26.3`, `mod_version=0.4.2-alpha.0` (2026-10-30)
 - 포팅: 🟢 (OpenCL 모듈 제외)
+- 범위: 월드 생성(밀도 함수·노이즈·바이옴) 관련 기법은 이 저장소의 범위에서 **제외**합니다. 청크 시스템·IO·조명·스케줄링만 다룹니다.
 
 | 기법 | 원본 구현 | Ferrite 위치 | 상태 |
 |---|---|---|---|
-| 밀도 함수 AST → 바이트코드 컴파일 및 최적화 패스 | `c2me-opts-dfc/common/ast/AstTransformer.java`, `gen/jvm/BytecodeGen.java`, `CompiledDensityFunction.java`, `opto/OptoPasses.java` | `ferrite-worldgen::density` | 📋 (인터프리터만) |
 | 청크 시스템 재작성(상태 전이 병렬화) | `c2me-rewrites-chunk-system/` | `ferrite-region` | 📋 |
 | 청크 IO 재작성(리전 파일 병렬 읽기/쓰기) | `c2me-rewrites-chunkio/`, `c2me-opts-chunkio/mixin/hide_sync_disk_writes_behind_flag/MixinRegionBasedStorage.java` | `ferrite-world::region` | 📋 |
 | 청크 직렬화기 재작성 | `c2me-rewrites-chunk-serializer/` | `ferrite-world::chunk_nbt` | 📋 |
 | 조명 스레딩 | `c2me-threading-lighting/` | `ferrite-light` | 📋 |
 | 태스크 스케줄링(작업 훔치기/우선순위) | `c2me-opts-scheduling/`, `FlowSched/` | `ferrite-region` | 📋 |
-| 바이옴 캐시 | `c2me-opts-worldgen-biome-cache/` | `ferrite-worldgen::biome_source` | 📋 |
-| 월드젠 일반 최적화(노이즈 청크/서피스 규칙) | `c2me-opts-worldgen-general/` | `ferrite-worldgen` | 📋 |
-| 객체 풀링(노이즈 샘플러, 머티리얼 컨텍스트) | `c2me-opts-allocs/mixin/object_pooling_caching/MixinChunkNoiseSampler.java`, `ObjectCachingUtils.java` | `ferrite-worldgen` | 📋 |
-| 수학/네이티브 수학 | `c2me-opts-math/`, `c2me-opts-natives-math/` | `ferrite-math` / `ferrite-noise` | 📋 |
 | 스레딩 버그 수정(청크 IO/월드젠/일반) | `c2me-fixes-*-threading-issues/` | `ferrite-region` | 📋 |
 
 > C2ME의 `c2me-opts-accel-opencl`은 **ARR**이므로 절대 참조/복사하지 않습니다.
 
-### 2.3 Noisium — 월드젠 블록/바이옴 쓰기
-
-- 저장소: <https://github.com/Steveplays28/noisium>
-- 라이선스: `LICENSE` = **LGPL-3.0**
-- 26.3: ❌ 기본 1.20.1, 브랜치 최대 1.21.6 (2025-06-24)
-- 포팅: 🟡 (구버전 코드 → 26.3 기법만 참고)
-
-| 기법 | 원본 구현 | Ferrite 위치 | 상태 |
-|---|---|---|---|
-| 월드젠 중 블록 소스 체인 캐시(ChainedBlockSource) | `mixin/ChainedBlockSourceMixin.java` | `ferrite-worldgen` | 📋 |
-| 청크 섹션 블록/바이옴 쓰기 최적화 | `mixin/ChunkSectionMixin.java` | `ferrite-world` | 📋 |
-| NoiseChunkGenerator의 청크 단위 채우기 | `mixin/NoiseChunkGeneratorMixin.java` | `ferrite-worldgen` | 📋 |
-| GenerationShapeConfig 사전 계산 | `mixin/GenerationShapeConfigMixin.java` | `ferrite-worldgen` | 📋 |
-
-### 2.4 Paper — Moonrise 통합 + 자체 패치
+### 2.3 Paper — Moonrise 통합 + 자체 패치
 
 - 저장소: <https://github.com/PaperMC/Paper>
 - 라이선스: `LICENSE.md` = **GPL-3.0**, 일부 저자는 MIT 재라이선스에 동의(목록 참조)
@@ -413,7 +390,6 @@ Moonrise는 Starlight를 자체 청크 시스템에 맞게 내장합니다
 | BlockState 캐시 배열 공유 | `common/mixin/perf/cache_blockstate_cache_arrays/AbstractBlockStateCacheMixin.java` | `ferrite-world` | 📋 |
 | 팔레트/비트 스토리지 압축 | `common/mixin/perf/compact_bit_storage/PalettedContainerMixin.java` | `ferrite-world` | 📋 |
 | ImposterProtoChunk 압축 | `common/mixin/perf/compact_imposterprotochunks/*` | `ferrite-world` | 📋 |
-| 구조물/요새(stronghold) 탐색 캐시 | `perf/cache_strongholds/ChunkGeneratorMixin.java`, `ConcentricRingsStructurePlacementMixin.java` | `ferrite-worldgen` | 📋 |
 | 월드젠 벤치마크 | `org/embeddedt/modernfix/benchmark/WorldgenBenchmark.java` | `ferrite-profiler` | 📋 |
 | 청크 데드락/동시성 버그 수정 | `common/mixin/bugfix/chunk_deadlock/*`, `bugfix/concurrency/*` | `ferrite-region` | 📋 |
 | 레지스트리 중복 제거 | `perf/compact_mojang_registries/*` | `ferrite-data` | 📋 |
@@ -551,7 +527,6 @@ Paper의 `0005-Optimize-Connection...`, `0008-Use-Velocity-compression-and-ciphe
 | `ferrite-light` | Starlight 방식 엔진(바닐라 불일치 0), SWMR 니블 배열 | ScalableLux식 조명 워커/청크 잠금 |
 | `ferrite-world` | 팔레트 컨테이너(단일값/간접), Anvil IO, heightmap, 청크 NBT | 비동기 리전 IO, 청크 직렬화 최적화, 섹션 블록 카운트 |
 | `ferrite-region` | Folia 스타일 regionizer v3, 리전별 큐/안전 지점 | 청크 시스템 태스크 스케줄러, 엔티티/글로벌 스케줄러 |
-| `ferrite-worldgen` | 멀티노이즈 바이옴 소스, density 인터프리터, bit-exact 노이즈 | DFC(바이트코드/IR 컴파일), 바이옴 캐시, 객체 풀 |
 | `ferrite-data` | u16 블록 상태 테이블, 레지스트리 | FastMap식 property 조회, 상태 캐시 공유 |
 | `ferrite-item` | 아이템 컴포넌트/와이어 코덱 | 데이터 컴포넌트 패치 압축 |
 | `ferrite-profiler` | TPS/MSPT/샘플러/타이밍 | 틱 루프 연결, `/tps` `/mspt`, 리전 프로파일러 |
@@ -594,4 +569,4 @@ Paper의 `0005-Optimize-Connection...`, `0008-Use-Velocity-compression-and-ciphe
 5. **ServerCore + Leaf + Gale (운영 옵션/미세 패치)** — 설정 게이트와 함께 하나씩.
 6. **FerriteCore/ModernFix** — 26.3 브랜치가 없으므로 구조만 참고(메모리 절감 효과는 큼).
 7. **Paper/Folia** — 26.3이고 GPL-3.0이므로, 청크/스케줄러/네트워킹 패치를 직접 참고.
-8. **Pufferfish/Noisium/Starlight** — 26.x 코드가 없어 기법만 참고.
+8. **Pufferfish/Starlight** — 26.x 코드가 없어 기법만 참고.

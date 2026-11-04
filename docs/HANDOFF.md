@@ -1,3 +1,10 @@
+> **2026-11-04 — world generation removed from this repository.** `ferrite-worldgen` and
+> `ferrite-noise` (a 1:1 port of vanilla classes) are no longer here, along with their docs and
+> benchmarks, to avoid distributing a translation of Mojang code. The server keeps only the
+> `ChunkGenerator` seam; vanilla generation is planned as a separate JVM-backed component. Entries
+> below that mention worldgen (W1–W3, oc6, terra2, `docs/handoff/worldgen-26-3.md`) are history only
+> and are not open work.
+
 > **Coordinator:** how to run the orchestration (start workers, merge, push) is in
 > [`docs/handoff/coordinator-guide.md`](handoff/coordinator-guide.md).
 > **Newest:** the Day 6 end state (what is on main, snapshot branches, unstarted tasks, how to resume) is in
@@ -122,7 +129,7 @@ Relicensed to GPL-3.0-or-later; work coordinated by one Claude coordinator throu
 ## Next steps
 1. (done) fb1 libdeflate and terra2 W1a/W1b merged after ferrite-protocol/net/worldgen tests, clippy and fmt passed; main before them passed the full workspace (minus the light test).
 2. Resume Terra/Terra-2 after the quota reset; collect FB/OC results as they commit, review, merge.
-3. Remaining backlog: entity M2/M3, worldgen W1c-W3, random ticks, plugin onEnable end-to-end (M3 of the plan), signed chat, chunk packet cache, commands, tick-thread-free compression.
+3. Remaining backlog: entity M2/M3, random ticks, plugin onEnable end-to-end (M3 of the plan), signed chat, chunk packet cache, commands, tick-thread-free compression.
 
 ## Hand-over for 2026-10-31 (read this first)
 All usage quotas ran out on 2026-10-30 (Codex until 2026-10-31 00:00, opencode2 exceeded, Freebuff hourly), so the unfinished work was frozen and handed to whoever continues next. Nothing was dispatched after that point.
@@ -244,7 +251,7 @@ away the workspace is still green (782 passed, 0 failed) and the five fixture te
 Linux or Docker runtime on this machine, so the GitHub Linux job itself was not executed here.
 
 ## Real backlog
-See **`docs/BACKLOG.md`** — remaining work by family (worldgen W2/W3, mobs/AI, redstone, command
+See **`docs/BACKLOG.md`** — remaining work by family (mobs/AI, redstone, command
 stubs, plugin API breadth, multi-version, persistence, perf, release).
 
 ## Known issues
@@ -259,7 +266,7 @@ stubs, plugin API breadth, multi-version, persistence, perf, release).
 1. Merge this worktree (`yxshadxw/fb4`): flake fix, selector dedup, docs, CI/release prep.
 2. Re-run `cargo test --workspace` after any packet or test-harness change, and the two drop tests
    ten times in a row (`cargo test -p ferrite-server --lib`) if touching `playerdata`/tracking.
-3. Next feature work in priority order is in `docs/BACKLOG.md`; start with worldgen W2 and mobs.
+3. Next feature work in priority order is in `docs/BACKLOG.md`; start with mobs.
 
 ---
 
@@ -397,5 +404,5 @@ oc9 (pistons) and oc13 (command blocks) were stopped by the user before finishin
 them was merged and their empty worktrees were removed. Their specs stay in
 `docs/handoff/day7-tasks/`. Ten merged or old worktrees were removed to free disk (65 GB free).
 Worker branches are backed up as `origin/yxshadxw/oc6`, `oc10`, `oc11`, `oc12` and `oc14`.
-Still open: worldgen 10x, trees/structures, pistons, brewing/beacons, command blocks,
+Still open: pistons, brewing/beacons, command blocks,
 nether/end dimensions and a real 26.3 client test.

@@ -3,10 +3,10 @@ pub use anvil::{AnvilChunkSource, read_spawn as load_spawn};
 #[cfg(test)]
 mod block_tests;
 mod blocks;
+mod generator;
 #[cfg(test)]
 mod persistence_tests;
-mod terrain;
-pub use terrain::{Generated, StageTimings, TerrainKind, VanillaTerrain};
+pub use generator::{ChunkGenerator, Generated};
 pub mod playerdata;
 pub use brewing::BrewingData;
 pub fn new_anvil_source(
@@ -18,11 +18,11 @@ pub fn new_anvil_source(
 pub fn new_anvil_source_with(
     path: std::path::PathBuf,
     registry: ferrite_world::RuntimeRegistry,
-    terrain: Option<Arc<VanillaTerrain>>,
+    terrain: Option<Arc<dyn ChunkGenerator>>,
 ) -> Arc<AnvilChunkSource> {
     AnvilChunkSource::new_with_terrain(path, registry, terrain)
 }
-pub fn new_memory_source(terrain: Option<Arc<VanillaTerrain>>) -> Arc<AnvilChunkSource> {
+pub fn new_memory_source(terrain: Option<Arc<dyn ChunkGenerator>>) -> Arc<AnvilChunkSource> {
     AnvilChunkSource::new_memory_with_terrain(terrain)
 }
 pub mod beacon;

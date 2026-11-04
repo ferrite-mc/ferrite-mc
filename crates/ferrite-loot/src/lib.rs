@@ -113,9 +113,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// The random source loot evaluation draws from.
 ///
-/// Implement this over the server's own random (for example a
-/// `ferrite-noise` generator) so loot rolls can share vanilla's RNG sequence
-/// without this crate depending on it.
+/// Implement this over the server's own random so loot rolls can use whatever source the
+/// caller prefers without this crate depending on it.
 pub trait Rng {
     /// A uniform integer in `0..bound`. Evaluation only calls this with a
     /// positive `bound`.

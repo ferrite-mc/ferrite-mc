@@ -199,12 +199,6 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             Some(ferrite_server::game::new_anvil_source(path, registry)),
             spawn,
         )
-    } else if std::env::var_os("FERRITE_VANILLA").is_some() {
-        let terrain = ferrite_server::game::VanillaTerrain::spawn(0).unwrap();
-        let source = ferrite_server::game::new_memory_source(Some(std::sync::Arc::new(terrain)));
-        let y = source.spawn_height(0, 0).unwrap_or(100);
-        initial = [0.5, f64::from(y), 0.5];
-        ferrite_server::game::World::start_configured(Some(source), [0, y, 0], Default::default())
     } else {
         ferrite_server::game::World::start()
     };

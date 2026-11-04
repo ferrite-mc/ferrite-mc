@@ -33,15 +33,6 @@ impl FireRng for Rng {
     }
 }
 
-impl FireRng for ferrite_noise::random::XoroshiroRandomSource {
-    fn next_int(&mut self, bound: i32) -> i32 {
-        ferrite_noise::random::RandomSource::next_int_bound(self, bound)
-    }
-    fn next_f32(&mut self) -> f32 {
-        ferrite_noise::random::RandomSource::next_float(self)
-    }
-}
-
 /// Vanilla `FireBlock.getFireTickDelay`.
 pub fn tick_delay(rng: &mut impl FireRng) -> u32 {
     30 + rng.next_int(10) as u32

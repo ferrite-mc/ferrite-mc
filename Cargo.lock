@@ -787,13 +787,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrite-noise"
-version = "0.1.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "ferrite-plugin"
 version = "0.1.0"
 dependencies = [
@@ -874,14 +867,12 @@ dependencies = [
  "ferrite-math",
  "ferrite-nbt",
  "ferrite-net",
- "ferrite-noise",
  "ferrite-plugin",
  "ferrite-profiler",
  "ferrite-protocol",
  "ferrite-recipe",
  "ferrite-region",
  "ferrite-world",
- "ferrite-worldgen",
  "md5",
  "mimalloc",
  "rand 0.8.8",
@@ -931,19 +922,6 @@ dependencies = [
  "tracing",
  "xxhash-rust",
  "zip 2.6.1",
-]
-
-[[package]]
-name = "ferrite-worldgen"
-version = "0.1.0"
-dependencies = [
- "ferrite-nbt",
- "ferrite-noise",
- "ferrite-world",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.21",
 ]
 
 [[package]]

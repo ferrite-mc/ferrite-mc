@@ -24,7 +24,7 @@ struct Config {
     forwarding: ForwardingMode,
     forwarding_secret: String,
     world: Option<std::path::PathBuf>,
-    /// New chunks are generated with vanilla terrain or the flat test world.
+    /// New chunks come from the flat test world; `vanilla` is reserved for the JVM generator.
     generator: WorldGenerator,
     gamemode: GameMode,
     ops: Vec<OpConfig>,
@@ -105,9 +105,10 @@ fn parse_ops(ops: Vec<OpConfig>) -> anyhow::Result<Vec<game::Operator>> {
 #[serde(rename_all = "lowercase")]
 enum WorldGenerator {
     /// The superflat world used by the existing tests and examples.
-    Superflat,
-    /// The 26.3 overworld noise generator with surface rules and carvers.
     #[default]
+    Superflat,
+    /// Reserved for the official vanilla generator running in the embedded JVM; not available
+    /// yet, so the server refuses to start with it.
     Vanilla,
 }
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -147,7 +148,7 @@ impl Default for Config {
             forwarding: ForwardingMode::None,
             forwarding_secret: String::new(),
             world: None,
-            generator: WorldGenerator::Vanilla,
+            generator: WorldGenerator::Superflat,
             gamemode: GameMode::Creative,
             ops: Vec::new(),
             plugins_dir: Some("plugins".into()),
@@ -218,10 +219,10 @@ async fn main() -> anyhow::Result<()> {
     // routed to the region that owns the player.
     let (plugin_command_tx, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
     let (plugin_console_tx, plugin_console) = tokio::sync::mpsc::unbounded_channel();
-    let terrain = match config.generator {
-        WorldGenerator::Vanilla => Some(std::sync::Arc::new(
-            game::VanillaTerrain::spawn(0).context("starting the vanilla world generator")?,
-        )),
+    let terrain: Option<std::sync::Arc<dyn game::ChunkGenerator>> = match config.generator {
+        WorldGenerator::Vanilla => anyhow::bail!(
+            "generator = 'vanilla' is not available yet: the JVM-backed vanilla world generator              has not been added; use generator = 'superflat' or an existing world"
+        ),
         WorldGenerator::Superflat => None,
     };
     let source = if let Some(path) = &config.world {
@@ -490,7 +491,7 @@ mod tests {
         assert_eq!(defaults.forwarding, ForwardingMode::None);
         assert!(defaults.forwarding_secret.is_empty());
         assert_eq!(defaults.world, None);
-        assert_eq!(defaults.generator, WorldGenerator::Vanilla);
+        assert_eq!(defaults.generator, WorldGenerator::Superflat);
         assert_eq!(
             toml::from_str::<Config>("generator = 'superflat'")
                 .unwrap()

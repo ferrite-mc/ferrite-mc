@@ -1,8 +1,8 @@
 //! Server-facing commands: `/locate`, `/reload`, `/datapack`, `/help`, `/schedule` and
 //! `/trigger`.
 //!
-//! `/locate biome` evaluates the vanilla multi-noise biome source on the worldgen thread.
-//! `/locate structure` and `/locate poi` are documented stubs: `ferrite-worldgen` has no
+//! `/locate biome` asks the chunk generator (when one is configured) for the nearest match.
+//! `/locate structure` and `/locate poi` are documented stubs: there is no
 //! structure placement or point-of-interest storage yet, so no such feature can be found.
 //! The command still validates its arguments and reports vanilla's `not_found` translation
 //! key instead of guessing coordinates.

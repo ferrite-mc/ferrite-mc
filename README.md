@@ -17,15 +17,12 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 > hoppers and dispensers, survival, redstone, command blocks, brewing stands and beacons, the nether
 > dimension and portals, mobs (passive and hostile) with combat,
 > ~70 commands, plugin events, a live Bukkit `Server` surface and a
-> Folia-style scheduler, vanilla world generation on a dedicated thread, and a 26.3 → 26.2
+> Folia-style scheduler, and a 26.3 → 26.2
 > protocol translation layer. **It has not yet been tested with a real 26.3 client.** No Mojang
 > code or assets are distributed here; vanilla data is generated locally from the official jar.
 
 ## 진행 현황 (2026-11-03)
 
-- **월드젠 표면 계산**: 청크별로 표면 높이 보간점을 재사용합니다. 시드 0, 100청크, 8스레드의
-  교차 측정 6회 중앙값은 37.33 → 46.30청크/초였습니다. 공유 PC의 부하로 개별 결과가 크게
-  흔들렸으므로 추가 측정이 필요합니다. 기존 계산과의 비트 단위 비교 및 Java 대조 테스트는 통과했습니다.
 - **플러그인 호환성 검사**: 테스트 프로브에 바닐라 데이터 경로를 연결했습니다. EssentialsX 활성화와
   `help` 명령은 확인했지만, 종료 시 예외와 NMS 호환성은 해결해야 합니다.
 
@@ -43,7 +40,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 - **비콘·플러그인 API**: 비콘 결제 슬롯을 한 개로 제한하고, 플러그인의 시야 거리·시뮬레이션 거리와
   바닐라 태그 조회를 연결했습니다. 비콘 테스트와 Java 플러그인 테스트가 통과했습니다.
 - **진행 중**: 청크 조명 갱신, 지도 제작대의 월드 데이터 처리,
-  피스톤 검토, 나무와 구조물 생성. 작업 브랜치의 변경은 검증 후 통합합니다.
+  피스톤 검토. 작업 브랜치의 변경은 검증 후 통합합니다.
 - **다음 호환성 작업**: Paper/Bukkit `Server`의 남은 메서드와 EssentialsX가 요구하는 NMS 호출을
   실제 서버 데이터와 연결하고 단계별 테스트로 검증합니다. 현재 모든 API가 구현된 것은 아닙니다.
 - **호환성 점검**: `Server#audiences`는 콘솔과 접속자를 반환하고, `createCommandSender`는 콘솔과 같은
@@ -71,10 +68,10 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 
 | 구분 | 내용 |
 |---|---|
-| ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 명령 블록, 양조·비컨, 네더 차원·포탈, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화, 바닐라 지형 생성 |
-| 🔧 **진행 중** | 월드젠 처리량(1스레드 4.6→6.2, 8스레드 23.5→38.9 chunks/s, 10x 목표 미달), 나무·구조물, 피스톤 |
-| ⛔ **아직 없음** | 실제 클라이언트 검증, 엔드 차원, 구조물 |
-| 🔬 **검증 수준** | 전체 테스트 105개 바이너리 통과, `clippy -D warnings`·`fmt --check` 클린, 월드젠은 바닐라 Java와 대조 |
+| ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 명령 블록, 양조·비컨, 네더 차원·포탈, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화 |
+| 🔧 **진행 중** | 피스톤 |
+| ⛔ **아직 없음** | 실제 클라이언트 검증, 엔드 차원 |
+| 🔬 **검증 수준** | 전체 테스트 105개 바이너리 통과, `clippy -D warnings`·`fmt --check` 클린 |
 
 ## 무엇이 되나
 
@@ -113,8 +110,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   펜스 게이트·노트 블록
 - **양조·비컨**: 양조 스탠드(5슬롯, 블레이즈 파우더 연료 20회, 400틱, 바닐라 포션 조합·물병·
   발효 거미 눈·화약·드래곤 브레스), 비컨(피라미드 4단계 판정, 빔, 효과 선택·범위, 재생/주효과)
-- **차원**: 오버월드·네더 레지스트리(차원별 저장 경로·스폰·리전 스케줄러), 네더 지형은 자체
-  노이즈·바이옴 프리셋으로 생성, `ChangeDimension`/`Respawn` 전환, 8:1 좌표 포탈·포탈 생성·복귀
+- **차원**: 오버월드·네더 레지스트리(차원별 저장 경로·스폰·리전 스케줄러), `ChangeDimension`/`Respawn` 전환, 8:1 좌표 포탈·포탈 생성·복귀
 - **명령 블록**: 임펄스·체인·반복 모드, 조건·자동 실행, 바닐라 NBT(`Command`, `LastExecution` 등)와
   `/data`·청크 저장 왕복, `SetCommandBlock`/`BlockEntityData` 동기화, 재귀 깊이 제한
 
@@ -151,10 +147,10 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   `sendActionBar`, `clearTitle`/`resetTitle`, 탭 머리글/바닥글 등
 
 ### 월드 생성
-- 밀도 함수, 노이즈 청크, aquifer, 표면 규칙, 동굴·협곡 카버가 바닐라 Java 참조와 일치
-- 서버는 전용 스레드에서 바닐라 지형을 생성합니다(`generator = vanilla | superflat`,
-  기본값 `vanilla`)
-- 광물과 지면 식생 장식 포함
+- 이 저장소에는 월드 생성기가 없습니다. 서버는 `ChunkGenerator` 트레이트(`game/generator.rs`)만 알고,
+  새 청크는 슈퍼플랫(`generator = superflat`, 기본값)이나 기존 Anvil 월드에서 옵니다.
+- 바닐라 월드 생성은 별도 구성요소로 다룹니다. 사용자가 내려받은 공식 서버 jar의 생성기를
+  내장 JVM에서 호출하는 방식을 계획합니다(미착수). 그 전까지 `generator = vanilla`는 시작 시 오류를 냅니다.
 
 ### 관리
 - `/tps`, `/mspt`, `/profile`
@@ -163,9 +159,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 
 - **실제 26.3 클라이언트로 접속해 검증하지 않았습니다.** 지금까지는 프로토콜 봇과 Java
   대조 하네스로만 검증했습니다.
-- 월드젠 처리량은 1스레드 6.2 chunks/s, 8스레드 38.9 chunks/s까지 개선됐지만 10x 목표에는
-  못 미칩니다(청크 출력은 바이너리와 동일).
-- 나무·구조물 생성과 피스톤은 진행 중입니다.
+- 바닐라 월드 생성은 아직 없습니다(위 "월드 생성" 참고). 피스톤은 진행 중입니다.
 - 엔드 차원은 아직 없습니다(네더는 포탈까지 동작).
 - 플러그인 API는 Paper `Server`/`Player`의 일부만 구현했습니다(`Player` 약 600개, `Server` 약 200개의
   스텁 잔존). 모든 메서드를 라우팅 가능하게 만드는 작업이 진행 중이며, 라우팅을 다 구현한 뒤에 테스트합니다. EssentialsX 같은 대형 플러그인의 모든
@@ -211,7 +205,6 @@ cargo fmt --all --check
 ```
 
 - 최근 전체 실행: 전체 테스트 통과, clippy·fmt 클린.
-- 월드젠은 `crates/ferrite-worldgen/tests/java`의 Java 대조 하네스로 바닐라와 비교합니다.
 - 서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다.
 - `ferrite-translate`의 26.2 검증은 `vanilla/26.2` 리포트가 있을 때만 실행됩니다.
 - CI(`.github/workflows/ci.yml`)는 Linux/Windows에서 같은 스크립트로 데이터를 생성한 뒤
@@ -223,16 +216,14 @@ cargo fmt --all --check
 |---|---|---|
 | 1 | **기반** — 워크스페이스, 프로토콜 코덱, NBT, 네트워킹/로그인, 리전화 뼈대 | 완료 |
 | 2 | 월드 IO/청크/이동/블록/채팅 — 접속해 플레이 가능한 최소 서버 | 완료 (봇 검증) |
-| 1 | 월드젠 속도 최적화 — 처리량 병목 분석 및 개선 | **최우선** |
 | 1 | 플러그인 브리지 — Paper/Bukkit API와 NMS 호환성, 서버 스타터·원격 콘솔 UI | **최우선** |
 | 3 | 리전라이저 + 벤치마크 — Paper/Folia 대비 성능 측정 | 진행 중 |
 | 4 | 플러그인 브리지 — 내장 JVM에서 Bukkit 이벤트/커맨드/스케줄러 실행 | 진행 중 |
 | 5 | 게임플레이 — 인벤토리, 엔티티, 전투, 크래프팅, 컨테이너 | 진행 중 |
-| 6 | 바닐라 동일 월드 생성 — 지형/구조물/시드 호환 | 진행 중 |
+| 6 | 바닐라 월드 생성 — 공식 생성기를 내장 JVM에서 호출(별도 구성요소) | 미착수 |
 | 7 | 다중 버전 지원 — 하나의 바이너리로 여러 프로토콜 버전 | 진행 중 |
 | 8 | Paper 기능 동등성 — Paper API/설정/최적화 정렬 | 예정 |
 | 9 | 호환성 확장 — 플러그인 생태계 커버리지 확대 | 예정 |
-| 10 | **선택** — 청크 렌더링 OpenCL GPU 가속(메시 빌드·조명·인코딩을 GPU로) | 미착수 (선택) |
 
 ## 크레이트 구성
 
@@ -243,7 +234,6 @@ cargo fmt --all --check
 | `ferrite-region` | Folia 스타일 리전라이저와 리전 스케줄러 |
 | `ferrite-world` | 청크, 팔레트 컨테이너, Anvil IO |
 | `ferrite-light` | Starlight 스타일 조명 엔진 |
-| `ferrite-worldgen`, `ferrite-noise` | 밀도 함수, 노이즈, 청크 생성, 표면 규칙 |
 | `ferrite-entity`, `ferrite-fluid` | 리전 로컬 엔티티 저장소와 몹, 유체 |
 | `ferrite-translate` | 다중 버전 프로토콜 변환 계층 |
 | `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 메뉴, 아이템, 레시피, 전리품 |
@@ -269,7 +259,7 @@ GPLv3로 바꿨습니다. 포팅한 코드의 출처는 [`NOTICE.md`](NOTICE.md)
 
 ## 해야 할 일
 
-- **공동 1순위:** 월드젠 속도 최적화와 플러그인 브리지 완성. Folia·Starlight·Lithium·C2ME·C2ME OpenCL 가속, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증. 최적화 참고 자료: [최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [서버 최적화 모드팩](https://modrinth.com/modpack/server-optimizationn), [마인크래프트 최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization).
+- **공동 1순위:** 플러그인 브리지 완성. Folia·Starlight·Lithium, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증. 최적화 참고 자료: [최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [서버 최적화 모드팩](https://modrinth.com/modpack/server-optimizationn), [마인크래프트 최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization).
  - 모든 작업을 병렬처리 (해야 함)
 
 ## NMS compatibility shim
