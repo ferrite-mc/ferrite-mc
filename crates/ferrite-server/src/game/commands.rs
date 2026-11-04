@@ -463,6 +463,31 @@ pub enum XpUnit {
     Levels,
 }
 
+/// What `/attribute` does to one attribute of one entity.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttributeOp {
+    GetValue {
+        scale: f64,
+    },
+    GetBase {
+        scale: f64,
+    },
+    SetBase(f64),
+    ResetBase,
+    AddModifier {
+        id: String,
+        amount: f64,
+        operation: super::attributes::Operation,
+    },
+    RemoveModifier {
+        id: String,
+    },
+    GetModifier {
+        id: String,
+        scale: f64,
+    },
+}
+
 /// A command's effect, applied by the game loop.
 /// Where `/rotate` turns an entity.
 #[derive(Debug, Clone, PartialEq)]
@@ -502,6 +527,17 @@ pub enum Action {
     Rotate {
         targets: EntityTarget,
         to: RotateTo,
+    },
+    /// `/spectate [target [player]]`: points the viewer's camera at an entity, or back at itself.
+    Spectate {
+        viewer: Uuid,
+        target: Option<EntityTarget>,
+    },
+    /// `/attribute <target> <attribute> ...`.
+    Attribute {
+        targets: EntityTarget,
+        attribute: String,
+        op: AttributeOp,
     },
     /// `/swing`: arm swing animation of the targets (`Animate` action 0 or 3).
     Swing {

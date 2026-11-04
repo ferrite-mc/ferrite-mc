@@ -6,25 +6,30 @@ dispatcher compared with `vanilla/26.3/generated/reports/commands.json` (94 root
 ## Done on 2026-11-04 (all in `commands_more.rs` unless noted)
 
 version, random, setidletimeout, teammsg/tm, transfer, stopwatch, publish, unpublish, tick,
-rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers, swing.
+rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers, swing, attribute, dialog, posteffect, spectate.
 
-## Not done: 13 commands are still missing
+## Not done: 9 commands are still missing
 
-advancement, attribute, compute, dialog, fillbiome, item, loot, place, posteffect, recipe,
-ride, spectate, waypoint.
+advancement, compute, fillbiome, item, loot, place, recipe, ride, waypoint.
 
 Notes for whoever picks these up:
 
-- `ride`, `spectate`: need passenger/camera plumbing in the region (no vehicle model yet).
+- `ride`: needs passenger plumbing in the region (no vehicle model yet).
 - `item`, `loot`: need slot addressing and loot tables from the extracted vanilla data.
 - `advancement`, `recipe`: need per-player progress state, packets and persistence.
-- `attribute`, `compute`: need an attribute store per entity (only effect-derived attributes
-  exist today).
+- `compute`: needs the context int/float provider registries.
 - `place`, `fillbiome`: need new requests in the worldgen host protocol (Mojang's code stays
   in the host process; Ferrite must not carry it).
-- `dialog`, `posteffect`, `waypoint`: need their registries and clientbound packets.
+- `waypoint`: needs the clientbound `waypoint` packet and entity waypoint state.
 
 ## Partly done (works, but not like vanilla yet)
+
+- `/attribute` stores base values and modifiers per entity and computes vanilla's formula, but
+  nothing in the simulation reads them yet (only generic defaults plus the player overrides for
+  attack damage and movement speed; per-mob defaults and `failed.entity` are missing).
+- `/dialog show` takes registry ids only (no inline dialog). `/spectate` sends `set_camera` but
+  the server does not move the spectator with the target. Feedback texts for the new commands
+  were written from memory of en_us (argument order not verified against a lang file).
 
 - `/swing` sends the arm-swing animation to viewers; the animation type and duration are
   validated but not used, and non-living entities are not rejected (`failed.notliving`).

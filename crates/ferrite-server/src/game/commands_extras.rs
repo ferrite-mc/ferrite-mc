@@ -15,10 +15,11 @@ use ferrite_net::game::{OutboundSender, packet};
 use ferrite_protocol::{
     VarLong,
     packets::play::{
-        BossBar, ClearTitles, DefaultSpawn, LevelParticles, PlayerTeam, ResetScore,
-        SetActionBarText, SetBorderCenter, SetBorderLerpSize, SetBorderSize, SetBorderWarningDelay,
-        SetBorderWarningDistance, SetDisplayObjective, SetObjective, SetScore, SetSubtitleText,
-        SetTitleText, SetTitlesAnimation, SoundEffect, StopSound, SystemChat, Transfer,
+        BossBar, ClearDialog, ClearTitles, DefaultSpawn, LevelParticles, PlayerTeam, PostEffects,
+        ResetScore, SetActionBarText, SetBorderCenter, SetBorderLerpSize, SetBorderSize,
+        SetBorderWarningDelay, SetBorderWarningDistance, SetDisplayObjective, SetObjective,
+        SetScore, SetSubtitleText, SetTitleText, SetTitlesAnimation, ShowDialog, SoundEffect,
+        StopSound, SystemChat, Transfer,
     },
     types::{BlockPos, PlainText},
 };
@@ -56,6 +57,9 @@ pub enum PlayerPacket {
     BossBar(BossBar),
     PlayerTeam(PlayerTeam),
     Transfer(Transfer),
+    PostEffects(PostEffects),
+    ClearDialog(ClearDialog),
+    ShowDialog(ShowDialog),
 }
 
 impl PlayerPacket {
@@ -126,6 +130,15 @@ impl PlayerPacket {
                 let _ = outbound.send(packet(p));
             }
             Self::Transfer(p) => {
+                let _ = outbound.send(packet(p));
+            }
+            Self::PostEffects(p) => {
+                let _ = outbound.send(packet(p));
+            }
+            Self::ClearDialog(p) => {
+                let _ = outbound.send(packet(p));
+            }
+            Self::ShowDialog(p) => {
                 let _ = outbound.send(packet(p));
             }
         }

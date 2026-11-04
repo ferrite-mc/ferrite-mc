@@ -7,6 +7,56 @@
 /// The vanilla `en_us` format string for a key.
 fn template(key: &str) -> Option<&'static str> {
     Some(match key {
+        "commands.rotate.success" => "Rotated %s",
+        "commands.swing.success.single" => "Swung %s's arm",
+        "commands.swing.success.multiple" => "Swung the arms of %s entities",
+        "commands.attribute.value.get.success" => "Value of attribute %s for %s is %s",
+        "commands.attribute.base_value.get.success" => "Base value of attribute %s for %s is %s",
+        "commands.attribute.base_value.set.success" => {
+            "Base value for attribute %s for %s set to %s"
+        }
+        "commands.attribute.base_value.reset.success" => {
+            "Base value for attribute %s for %s reset to default %s"
+        }
+        "commands.attribute.modifier.add.success" => "Added modifier %s to attribute %s for %s",
+        "commands.attribute.modifier.remove.success" => {
+            "Removed modifier %s from attribute %s for %s"
+        }
+        "commands.attribute.modifier.value.get.success" => {
+            "Value of modifier %s on attribute %s for %s is %s"
+        }
+        "commands.attribute.failed.no_attribute" => "Entity %s has no attribute %s",
+        "commands.attribute.failed.modifier_already_present" => {
+            "Modifier %s is already present on attribute %s for entity %s"
+        }
+        "commands.attribute.failed.no_modifier" => "Attribute %s for entity %s has no modifier %s",
+        "commands.dialog.clear.single" => "Cleared dialog for %s",
+        "commands.dialog.clear.multiple" => "Cleared dialog for %s players",
+        "commands.dialog.show.single" => "Showed dialog to %s",
+        "commands.dialog.show.multiple" => "Showed dialog to %s players",
+        "commands.posteffect.add.success.single" => "Added post effect %s to %s",
+        "commands.posteffect.add.success.multiple" => "Added post effect %s to %s players",
+        "commands.posteffect.remove.success.single" => "Removed post effect %s from %s",
+        "commands.posteffect.remove.success.multiple" => "Removed post effect %s from %s players",
+        "commands.posteffect.clear.success.single" => "Cleared post effects for %s",
+        "commands.posteffect.clear.success.multiple" => "Cleared post effects for %s players",
+        "commands.posteffect.list.empty" => "%s has no post effects",
+        "commands.posteffect.list.success" => "%s has %s post effects: %s",
+        "commands.posteffect.add.failed" => {
+            "Nothing changed. The targets already have this post effect"
+        }
+        "commands.posteffect.remove.failed" => {
+            "Nothing changed. The targets do not have this post effect"
+        }
+        "commands.posteffect.clear.failed" => "Nothing changed. The targets have no post effects",
+        "commands.spectate.success.started" => "Now spectating %s",
+        "commands.spectate.success.stopped" => "No longer spectating an entity",
+        "commands.spectate.not_spectator" => "%s is not in spectator mode",
+        "commands.spectate.self" => "You cannot spectate yourself",
+        "commands.spectate.cannot_spectate" => "You cannot spectate %s",
+        "argument.entity.toomany" => {
+            "Only one entity is allowed, but the provided selector allows more than one"
+        }
         "argument.entity.notfound.entity" => "No entity was found",
         "argument.entity.notfound.player" => "No player was found",
         "argument.player.unknown" => "That player does not exist",

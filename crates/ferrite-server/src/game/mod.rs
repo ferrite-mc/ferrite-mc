@@ -1,4 +1,5 @@
 mod anvil;
+mod attributes;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn};
 #[cfg(test)]
 mod block_tests;
@@ -812,6 +813,7 @@ async fn run(
     let parser_registry = ferrite_command::ParserRegistry::load(&registry_dir).ok();
     commands::load_lang(&registry_dir);
     commands_more::load_version(&registry_dir);
+    commands_more::load_dialogs(&registry_dir.join("../data"));
     let world_path = source.as_ref().and_then(|source| source.path());
     let entity_world = world_path.map(std::path::Path::to_path_buf);
     let disabled_packs = world_path.map(functions::read_disabled).unwrap_or_default();
@@ -2156,6 +2158,108 @@ impl CommandRuntime<'_> {
         }
     }
 
+    /// `/attribute`: applies one operation to the single target's attribute.
+    fn run_attribute(
+        &self,
+        targets: &[selectors::SelectedEntity],
+        attribute: &str,
+        op: commands::AttributeOp,
+    ) {
+        use commands::AttributeOp;
+        let [target] = targets else {
+            self.reply.key("argument.entity.toomany", &[]);
+            return;
+        };
+        let path = attribute.strip_prefix("minecraft:").unwrap_or(attribute);
+        let Some(limits) = attributes::default_for(path, target.player) else {
+            self.reply.key(
+                "commands.attribute.failed.no_attribute",
+                &[&target.name, attribute],
+            );
+            return;
+        };
+        let key = (target.uuid, path.to_owned());
+        let mut state = self.state.lock().unwrap();
+        let stored = state.more.attributes.entry(key.clone()).or_default();
+        let number = |value: f64| format!("{value}");
+        let name = target.name.as_str();
+        match op {
+            AttributeOp::GetValue { scale } => {
+                let value = stored.value(limits, limits.default);
+                self.reply.key(
+                    "commands.attribute.value.get.success",
+                    &[attribute, name, &number(value)],
+                );
+                let _ = scale;
+            }
+            AttributeOp::GetBase { scale } => {
+                let value = stored.base.unwrap_or(limits.default);
+                self.reply.key(
+                    "commands.attribute.base_value.get.success",
+                    &[attribute, name, &number(value * scale)],
+                );
+            }
+            AttributeOp::SetBase(value) => {
+                stored.base = Some(value.clamp(limits.min, limits.max));
+                self.reply.key(
+                    "commands.attribute.base_value.set.success",
+                    &[attribute, name, &number(value)],
+                );
+            }
+            AttributeOp::ResetBase => {
+                stored.base = None;
+                self.reply.key(
+                    "commands.attribute.base_value.reset.success",
+                    &[attribute, name, &number(limits.default)],
+                );
+            }
+            AttributeOp::AddModifier {
+                id,
+                amount,
+                operation,
+            } => {
+                if stored.modifiers.contains_key(&id) {
+                    self.reply.key(
+                        "commands.attribute.failed.modifier_already_present",
+                        &[name, attribute, &id],
+                    );
+                } else {
+                    stored.modifiers.insert(id.clone(), (amount, operation));
+                    self.reply.key(
+                        "commands.attribute.modifier.add.success",
+                        &[&id, attribute, name],
+                    );
+                }
+            }
+            AttributeOp::RemoveModifier { id } => {
+                if stored.modifiers.remove(&id).is_some() {
+                    self.reply.key(
+                        "commands.attribute.modifier.remove.success",
+                        &[&id, attribute, name],
+                    );
+                } else {
+                    self.reply.key(
+                        "commands.attribute.failed.no_modifier",
+                        &[name, attribute, &id],
+                    );
+                }
+            }
+            AttributeOp::GetModifier { id, scale } => match stored.modifiers.get(&id) {
+                Some((amount, _)) => self.reply.key(
+                    "commands.attribute.modifier.value.get.success",
+                    &[&id, attribute, name, &number(amount * scale)],
+                ),
+                None => self.reply.key(
+                    "commands.attribute.failed.no_modifier",
+                    &[name, attribute, &id],
+                ),
+            },
+        }
+        if stored.base.is_none() && stored.modifiers.is_empty() {
+            state.more.attributes.remove(&key);
+        }
+    }
+
     fn teleport_feedback(
         &self,
         targets: &[selectors::SelectedEntity],
@@ -2701,6 +2805,88 @@ impl CommandRuntime<'_> {
                 if let Some(first) = targets.first() {
                     self.reply.key("commands.rotate.success", &[&first.name]);
                 }
+                false
+            }
+            Action::Spectate { viewer, target } => {
+                let mode = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .players
+                    .iter()
+                    .find(|p| p.uuid == viewer)
+                    .map(|p| p.game_mode);
+                let Some(online) = self.online.get(&viewer) else {
+                    return false;
+                };
+                if mode != Some(3) {
+                    self.reply
+                        .key("commands.spectate.not_spectator", &[&online.name]);
+                    return false;
+                }
+                let Some(target) = target else {
+                    let _ = online.outbound.send(ferrite_net::game::packet(
+                        &ferrite_protocol::packets::play::SetCamera {
+                            entity: VarInt(online.entity),
+                        },
+                    ));
+                    self.reply.key("commands.spectate.success.stopped", &[]);
+                    return false;
+                };
+                let found = match self.selection(&target) {
+                    Ok(mut found) if found.len() == 1 => found.remove(0),
+                    Ok(_) => {
+                        self.reply.key("argument.entity.toomany", &[]);
+                        return false;
+                    }
+                    Err(error) => {
+                        self.reply.text(&error.to_string());
+                        return false;
+                    }
+                };
+                if found.uuid == viewer {
+                    self.reply.key("commands.spectate.self", &[]);
+                    return false;
+                }
+                let id = match self.online.get(&found.uuid) {
+                    Some(other) => other.entity,
+                    None => match self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .entities
+                        .lock()
+                        .unwrap()
+                        .get(found.uuid)
+                    {
+                        Some(entity) => entity.network_id,
+                        None => {
+                            self.reply
+                                .key("commands.spectate.cannot_spectate", &[&found.name]);
+                            return false;
+                        }
+                    },
+                };
+                let _ = online.outbound.send(ferrite_net::game::packet(
+                    &ferrite_protocol::packets::play::SetCamera { entity: VarInt(id) },
+                ));
+                self.reply
+                    .key("commands.spectate.success.started", &[&found.name]);
+                false
+            }
+            Action::Attribute {
+                targets,
+                attribute,
+                op,
+            } => {
+                let targets = match self.selection(&targets) {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        self.reply.text(&error.to_string());
+                        return false;
+                    }
+                };
+                self.run_attribute(&targets, &attribute, op);
                 false
             }
             Action::Swing { targets, off_hand } => {

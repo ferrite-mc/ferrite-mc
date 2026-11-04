@@ -564,6 +564,25 @@ impl Decode for ServerLinkEntry {
 packet!(ServerLinks,140,Clientbound,{links:Vec<ServerLinkEntry>});
 packet!(CustomPayload,24,Clientbound,{channel:String,data:crate::codec::RestBytes});
 packet!(Transfer,132,Clientbound,{host:String,port:VarInt});
+packet!(SetCamera,95,Clientbound,{entity:VarInt});
+packet!(PostEffects,83,Clientbound,{effects:Vec<String>});
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearDialog;
+impl Encode for ClearDialog {
+    fn encode(&self, _: &mut Vec<u8>) {}
+}
+impl Decode for ClearDialog {
+    fn decode(_: &mut &[u8]) -> Result<Self, DecodeError> {
+        Ok(Self)
+    }
+}
+impl Packet for ClearDialog {
+    const ID: i32 = 142;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
+// A dialog sent as a registry reference: the holder is the entry's registry index plus one.
+packet!(ShowDialog,143,Clientbound,{holder:VarInt});
 packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required:bool,prompt:Option<Vec<u8>>});
 packet!(ResourcePackPop,81,Clientbound,{id:Option<Uuid>});
 // Vanilla `ClientboundStoreCookiePacket`: the client keeps `payload` (at most 5120 bytes) under `key`.
@@ -1430,6 +1449,31 @@ mod interaction_tests {
         assert_eq!(T::decode(&mut data).unwrap(), value);
         assert!(data.is_empty());
     }
+    #[test]
+    fn camera_dialog_and_post_effect_packets_roundtrip_with_vanilla_ids() {
+        assert_eq!(
+            (
+                SetCamera::ID,
+                PostEffects::ID,
+                ClearDialog::ID,
+                ShowDialog::ID
+            ),
+            (95, 83, 142, 143)
+        );
+        roundtrip(SetCamera {
+            entity: VarInt(300),
+        });
+        roundtrip(PostEffects {
+            effects: vec!["minecraft:blur".into(), "pack:glow".into()],
+        });
+        roundtrip(PostEffects { effects: vec![] });
+        roundtrip(ClearDialog);
+        roundtrip(ShowDialog { holder: VarInt(4) });
+        let mut bytes = Vec::new();
+        ClearDialog.encode(&mut bytes);
+        assert!(bytes.is_empty());
+    }
+
     #[test]
     fn plugin_packets_roundtrip_and_have_the_vanilla_ids() {
         assert_eq!(

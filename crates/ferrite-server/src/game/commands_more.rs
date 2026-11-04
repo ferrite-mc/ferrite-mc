@@ -36,6 +36,10 @@ pub struct MoreState {
     pub forced: std::collections::BTreeSet<(String, i32, i32)>,
     /// `/debug` and `/perf` runs in progress: wall clock and game time at the start.
     pub profiling: BTreeMap<&'static str, (std::time::Instant, i64)>,
+    /// `/attribute`: (entity, attribute path) -> base override and modifiers.
+    pub attributes: BTreeMap<(uuid::Uuid, String), super::attributes::Stored>,
+    /// `/posteffect`: post-processing effects each player has, in the order they were added.
+    pub post_effects: BTreeMap<uuid::Uuid, Vec<String>>,
 }
 
 /// What `/tick` changes: the target rate, the frozen flag and the pending steps. The game loop
@@ -188,6 +192,40 @@ fn failure(key: &'static str, args: Vec<String>) -> CommandError {
 // ---------------------------------------------------------------------------------------------
 
 static VERSION: OnceLock<serde_json::Value> = OnceLock::new();
+
+static DIALOGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Installs the dialog registry order (the sorted file names under `data/minecraft/dialog`),
+/// which is the order the configuration phase syncs the registry in, so an entry's position is
+/// its protocol id.
+pub fn load_dialogs(data: &std::path::Path) {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(items) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for item in items.flatten() {
+            let path = item.path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if path.extension().is_some_and(|ext| ext == "json")
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                out.push(format!(
+                    "minecraft:{}",
+                    relative
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                ));
+            }
+        }
+    }
+    let root = data.join("minecraft/dialog");
+    let mut found = Vec::new();
+    walk(&root, &root, &mut found);
+    found.sort();
+    let _ = DIALOGS.set(found);
+}
 
 /// Installs `reports/version.json` (copied from the user's jar by `tools/fetch_vanilla.py`).
 pub fn load_version(reports: &std::path::Path) {
@@ -863,6 +901,464 @@ fn tick_tree() -> NodeBuilder<Source> {
                     }),
                 ),
         )
+}
+
+/// `/attribute <target> <attribute> (get | base get|set|reset | modifier add|remove|value get)`.
+fn attribute_tree() -> NodeBuilder<Source> {
+    use super::attributes::Operation;
+    use crate::game::commands::AttributeOp;
+    fn run(ctx: &CommandContext<Source>, op: AttributeOp) -> Result<i32, CommandError> {
+        let Some(ferrite_command::ArgumentValue::Resource { id, .. }) = ctx.argument("attribute")
+        else {
+            return Err(CommandError::failed("missing attribute"));
+        };
+        let attribute = if id.contains(':') {
+            id.clone()
+        } else {
+            format!("minecraft:{id}")
+        };
+        let path = attribute.strip_prefix("minecraft:").unwrap_or(&attribute);
+        if super::attributes::range_of(path).is_none() {
+            return Err(failure(
+                "argument.resource.not_found",
+                vec![attribute.clone(), "minecraft:attribute".into()],
+            ));
+        }
+        send(
+            ctx.source(),
+            Action::Attribute {
+                targets: entity(ctx, "target")?,
+                attribute,
+                op,
+            },
+        )
+    }
+    fn modifier_id(ctx: &CommandContext<Source>) -> Result<String, CommandError> {
+        match ctx.argument("id") {
+            Some(ferrite_command::ArgumentValue::ResourceLocation(id)) => Ok(if id.contains(':') {
+                id.clone()
+            } else {
+                format!("minecraft:{id}")
+            }),
+            _ => Err(CommandError::failed("missing modifier id")),
+        }
+    }
+    fn amount(ctx: &CommandContext<Source>, operation: Operation) -> Result<i32, CommandError> {
+        let id = modifier_id(ctx)?;
+        let value = ctx
+            .argument("value")
+            .and_then(ferrite_command::ArgumentValue::as_f64)
+            .unwrap_or(0.0);
+        run(
+            ctx,
+            AttributeOp::AddModifier {
+                id,
+                amount: value,
+                operation,
+            },
+        )
+    }
+    let scaled = |name: &'static str| {
+        argument::<Source>("scale", ArgumentType::double()).executes(move |ctx| {
+            let scale = ctx
+                .argument("scale")
+                .and_then(ferrite_command::ArgumentValue::as_f64)
+                .unwrap_or(1.0);
+            run(
+                ctx,
+                if name == "value" {
+                    AttributeOp::GetValue { scale }
+                } else {
+                    AttributeOp::GetBase { scale }
+                },
+            )
+        })
+    };
+    literal::<Source>("attribute")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(
+            argument::<Source>("target", ArgumentType::entity()).then(
+                argument::<Source>(
+                    "attribute",
+                    ArgumentType::Registry {
+                        parser: ferrite_command::arguments::RegistryParser::Resource,
+                        registry: "minecraft:attribute".into(),
+                    },
+                )
+                .then(
+                    literal::<Source>("get")
+                        .executes(|ctx| run(ctx, AttributeOp::GetValue { scale: 1.0 }))
+                        .then(scaled("value")),
+                )
+                .then(
+                    literal::<Source>("base")
+                        .then(
+                            literal::<Source>("get")
+                                .executes(|ctx| run(ctx, AttributeOp::GetBase { scale: 1.0 }))
+                                .then(scaled("base")),
+                        )
+                        .then(literal::<Source>("set").then(
+                            argument::<Source>("value", ArgumentType::double()).executes(|ctx| {
+                                let value = ctx
+                                    .argument("value")
+                                    .and_then(ferrite_command::ArgumentValue::as_f64)
+                                    .unwrap_or(0.0);
+                                run(ctx, AttributeOp::SetBase(value))
+                            }),
+                        ))
+                        .then(
+                            literal::<Source>("reset")
+                                .executes(|ctx| run(ctx, AttributeOp::ResetBase)),
+                        ),
+                )
+                .then(
+                    literal::<Source>("modifier")
+                        .then(
+                            literal::<Source>("add").then(
+                                argument::<Source>("id", ArgumentType::ResourceLocation).then(
+                                    argument::<Source>("value", ArgumentType::double())
+                                        .then(literal::<Source>("add_multiplied_base").executes(
+                                            move |ctx| amount(ctx, Operation::AddMultipliedBase),
+                                        ))
+                                        .then(literal::<Source>("add_multiplied_total").executes(
+                                            move |ctx| amount(ctx, Operation::AddMultipliedTotal),
+                                        ))
+                                        .then(
+                                            literal::<Source>("add_value").executes(move |ctx| {
+                                                amount(ctx, Operation::AddValue)
+                                            }),
+                                        ),
+                                ),
+                            ),
+                        )
+                        .then(literal::<Source>("remove").then(
+                            argument::<Source>("id", ArgumentType::ResourceLocation).executes(
+                                move |ctx| {
+                                    let id = modifier_id(ctx)?;
+                                    run(ctx, AttributeOp::RemoveModifier { id })
+                                },
+                            ),
+                        ))
+                        .then(
+                            literal::<Source>("value").then(
+                                literal::<Source>("get").then(
+                                    argument::<Source>("id", ArgumentType::ResourceLocation)
+                                        .executes(move |ctx| {
+                                            let id = modifier_id(ctx)?;
+                                            run(ctx, AttributeOp::GetModifier { id, scale: 1.0 })
+                                        })
+                                        .then(
+                                            argument::<Source>("scale", ArgumentType::double())
+                                                .executes(move |ctx| {
+                                                    let id = modifier_id(ctx)?;
+                                                    let scale = ctx
+                                                        .argument("scale")
+                                                        .and_then(
+                                                            ferrite_command::ArgumentValue::as_f64,
+                                                        )
+                                                        .unwrap_or(1.0);
+                                                    run(ctx, AttributeOp::GetModifier { id, scale })
+                                                }),
+                                        ),
+                                ),
+                            ),
+                        ),
+                ),
+            ),
+        )
+}
+
+/// `/spectate [<target> [<player>]]`.
+fn spectate_tree() -> NodeBuilder<Source> {
+    fn spectate(ctx: &CommandContext<Source>, with_target: bool) -> Result<i32, CommandError> {
+        let viewer = if ctx.argument("player").is_some() {
+            resolved_targets(ctx, "player")?
+                .first()
+                .copied()
+                .ok_or_else(|| failure("argument.entity.notfound.player", vec![]))?
+        } else {
+            ctx.source().uuid.ok_or_else(player_only)?
+        };
+        let target = if with_target {
+            Some(entity(ctx, "target")?)
+        } else {
+            None
+        };
+        send(ctx.source(), Action::Spectate { viewer, target })
+    }
+    literal::<Source>("spectate")
+        .requires(gamemasters())
+        .restricted(true)
+        .executes(|ctx| spectate(ctx, false))
+        .then(
+            argument::<Source>("target", ArgumentType::entity())
+                .executes(|ctx| spectate(ctx, true))
+                .then(
+                    argument::<Source>("player", ArgumentType::player())
+                        .executes(|ctx| spectate(ctx, true)),
+                ),
+        )
+}
+
+fn dialog_tree() -> NodeBuilder<Source> {
+    fn targets(ctx: &CommandContext<Source>) -> Result<Vec<uuid::Uuid>, CommandError> {
+        resolved_targets(ctx, "targets")
+    }
+    fn names(ctx: &CommandContext<Source>, players: &[uuid::Uuid]) -> Vec<String> {
+        let game = ctx.source().state.lock().unwrap();
+        players
+            .iter()
+            .map(|uuid| {
+                game.players
+                    .iter()
+                    .find(|p| p.uuid == *uuid)
+                    .map_or_else(|| uuid.to_string(), |p| p.name.clone())
+            })
+            .collect()
+    }
+    fn report(
+        ctx: &CommandContext<Source>,
+        players: &[uuid::Uuid],
+        single: &'static str,
+        multiple: &'static str,
+    ) -> Result<i32, CommandError> {
+        if let [_] = players {
+            feedback(ctx, single, names(ctx, players))
+        } else {
+            feedback(ctx, multiple, vec![players.len().to_string()])
+        }
+    }
+    literal::<Source>("dialog")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(literal::<Source>("clear").then(
+            argument::<Source>("targets", ArgumentType::players()).executes(|ctx| {
+                let players = targets(ctx)?;
+                send(
+                    ctx.source(),
+                    Action::Packets {
+                        targets: players.clone(),
+                        packet: PlayerPacket::ClearDialog(
+                            ferrite_protocol::packets::play::ClearDialog,
+                        ),
+                    },
+                )?;
+                report(
+                    ctx,
+                    &players,
+                    "commands.dialog.clear.single",
+                    "commands.dialog.clear.multiple",
+                )
+            }),
+        ))
+        .then(literal::<Source>("show").then(
+            argument::<Source>("targets", ArgumentType::players()).then(
+                argument::<Source>("dialog", ArgumentType::opaque("minecraft:dialog")).executes(
+                    |ctx| {
+                        let Some(ferrite_command::ArgumentValue::Raw(name)) =
+                            ctx.argument("dialog")
+                        else {
+                            return Err(CommandError::failed("missing dialog"));
+                        };
+                        let id = if name.contains(':') {
+                            name.clone()
+                        } else {
+                            format!("minecraft:{name}")
+                        };
+                        let Some(index) = DIALOGS
+                            .get()
+                            .and_then(|all| all.iter().position(|d| *d == id))
+                        else {
+                            return Err(failure(
+                                "argument.resource.not_found",
+                                vec![id, "minecraft:dialog".into()],
+                            ));
+                        };
+                        let players = targets(ctx)?;
+                        send(
+                            ctx.source(),
+                            Action::Packets {
+                                targets: players.clone(),
+                                packet: PlayerPacket::ShowDialog(
+                                    ferrite_protocol::packets::play::ShowDialog {
+                                        holder: VarInt(index as i32 + 1),
+                                    },
+                                ),
+                            },
+                        )?;
+                        report(
+                            ctx,
+                            &players,
+                            "commands.dialog.show.single",
+                            "commands.dialog.show.multiple",
+                        )
+                    },
+                ),
+            ),
+        ))
+}
+
+/// `/posteffect add|remove|clear|list`: the full effect list is resent after every change.
+fn posteffect_tree() -> NodeBuilder<Source> {
+    fn effect(ctx: &CommandContext<Source>) -> Result<String, CommandError> {
+        match ctx.argument("posteffect") {
+            Some(ferrite_command::ArgumentValue::ResourceLocation(id)) => Ok(if id.contains(':') {
+                id.clone()
+            } else {
+                format!("minecraft:{id}")
+            }),
+            _ => Err(CommandError::failed("missing posteffect")),
+        }
+    }
+    fn change(ctx: &CommandContext<Source>, add: Option<bool>) -> Result<i32, CommandError> {
+        let players = resolved_targets(ctx, "targets")?;
+        let wanted = if add.is_some() {
+            Some(effect(ctx)?)
+        } else {
+            None
+        };
+        let mut changed = Vec::new();
+        let mut names = Vec::new();
+        {
+            let mut game = ctx.source().state.lock().unwrap();
+            for uuid in &players {
+                let name = game
+                    .players
+                    .iter()
+                    .find(|p| p.uuid == *uuid)
+                    .map_or_else(|| uuid.to_string(), |p| p.name.clone());
+                let list = game.more.post_effects.entry(*uuid).or_default();
+                let did = match (&wanted, add) {
+                    (Some(id), Some(true)) if !list.contains(id) => {
+                        list.push(id.clone());
+                        true
+                    }
+                    (Some(id), Some(false)) => {
+                        let before = list.len();
+                        list.retain(|e| e != id);
+                        list.len() != before
+                    }
+                    (None, None) if !list.is_empty() => {
+                        list.clear();
+                        true
+                    }
+                    _ => false,
+                };
+                if did {
+                    changed.push((*uuid, list.clone()));
+                    names.push(name);
+                }
+            }
+        }
+        let (action, scope) = match add {
+            Some(true) => ("add", "commands.posteffect.add"),
+            Some(false) => ("remove", "commands.posteffect.remove"),
+            None => ("clear", "commands.posteffect.clear"),
+        };
+        let _ = action;
+        if changed.is_empty() {
+            return Err(failure(
+                match add {
+                    Some(true) => "commands.posteffect.add.failed",
+                    Some(false) => "commands.posteffect.remove.failed",
+                    None => "commands.posteffect.clear.failed",
+                },
+                vec![],
+            ));
+        }
+        for (uuid, effects) in &changed {
+            send(
+                ctx.source(),
+                Action::Packets {
+                    targets: vec![*uuid],
+                    packet: PlayerPacket::PostEffects(
+                        ferrite_protocol::packets::play::PostEffects {
+                            effects: effects.clone(),
+                        },
+                    ),
+                },
+            )?;
+        }
+        let single = match scope {
+            "commands.posteffect.add" => "commands.posteffect.add.success.single",
+            "commands.posteffect.remove" => "commands.posteffect.remove.success.single",
+            _ => "commands.posteffect.clear.success.single",
+        };
+        let multiple = match scope {
+            "commands.posteffect.add" => "commands.posteffect.add.success.multiple",
+            "commands.posteffect.remove" => "commands.posteffect.remove.success.multiple",
+            _ => "commands.posteffect.clear.success.multiple",
+        };
+        let mut single_args = Vec::new();
+        let mut multiple_args = Vec::new();
+        if let Some(id) = &wanted {
+            single_args.push(id.clone());
+            multiple_args.push(id.clone());
+        }
+        if changed.len() == 1 {
+            single_args.push(names[0].clone());
+            feedback(ctx, single, single_args)
+        } else {
+            multiple_args.push(changed.len().to_string());
+            feedback(ctx, multiple, multiple_args)
+        }
+    }
+    literal::<Source>("posteffect")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(
+            literal::<Source>("add").then(
+                argument::<Source>("targets", ArgumentType::players()).then(
+                    argument::<Source>("posteffect", ArgumentType::ResourceLocation)
+                        .executes(|ctx| change(ctx, Some(true))),
+                ),
+            ),
+        )
+        .then(
+            literal::<Source>("remove").then(
+                argument::<Source>("targets", ArgumentType::players()).then(
+                    argument::<Source>("posteffect", ArgumentType::ResourceLocation)
+                        .executes(|ctx| change(ctx, Some(false))),
+                ),
+            ),
+        )
+        .then(
+            literal::<Source>("clear").then(
+                argument::<Source>("targets", ArgumentType::players())
+                    .executes(|ctx| change(ctx, None)),
+            ),
+        )
+        .then(literal::<Source>("list").then(
+            argument::<Source>("target", ArgumentType::player()).executes(|ctx| {
+                let players = resolved_targets(ctx, "target")?;
+                let Some(uuid) = players.first() else {
+                    return Err(failure("argument.entity.notfound.player", vec![]));
+                };
+                let game = ctx.source().state.lock().unwrap();
+                let name = game
+                    .players
+                    .iter()
+                    .find(|p| p.uuid == *uuid)
+                    .map_or_else(|| uuid.to_string(), |p| p.name.clone());
+                let list = game
+                    .more
+                    .post_effects
+                    .get(uuid)
+                    .cloned()
+                    .unwrap_or_default();
+                drop(game);
+                if list.is_empty() {
+                    feedback(ctx, "commands.posteffect.list.empty", vec![name])
+                } else {
+                    feedback(
+                        ctx,
+                        "commands.posteffect.list.success",
+                        vec![name, list.len().to_string(), list.join(", ")],
+                    )
+                }
+            }),
+        ))
 }
 
 /// `/swing <targets> [mainhand|offhand [<animation> [<duration>]]]`. The animation and duration
@@ -1695,6 +2191,10 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(tick_tree());
     tree.register(rotate_tree());
     tree.register(swing_tree());
+    tree.register(attribute_tree());
+    tree.register(dialog_tree());
+    tree.register(spectate_tree());
+    tree.register(posteffect_tree());
     tree.register(forceload_tree());
     tree.register(damage_tree());
     tree.register(debug_tree());
@@ -1778,6 +2278,10 @@ mod tests {
             "tick",
             "rotate",
             "swing",
+            "attribute",
+            "dialog",
+            "spectate",
+            "posteffect",
             "forceload",
             "damage",
             "debug",
@@ -2148,6 +2652,76 @@ mod tests {
         }
         assert!(run("rotate @s 1 2", 1, fresh(), None).0.is_err());
         assert!(run("rotate", 2, fresh(), None).0.is_err());
+    }
+
+    #[test]
+    fn attribute_forms_parse_to_attribute_actions() {
+        use crate::game::commands::AttributeOp;
+        for input in [
+            "attribute @s minecraft:max_health get",
+            "attribute @s max_health get 2",
+            "attribute @s minecraft:armor base get",
+            "attribute @s armor base set 5",
+            "attribute @s armor base reset",
+            "attribute @s armor modifier add test:a 1.5 add_value",
+            "attribute @s armor modifier add test:a 0.1 add_multiplied_total",
+            "attribute @s armor modifier remove test:a",
+            "attribute @s armor modifier value get test:a 10",
+        ] {
+            let (result, actions) = run(input, 2, fresh(), None);
+            assert!(result.is_ok(), "{input}: {result:?}");
+            let Some(Action::Attribute { attribute, op, .. }) = actions.first() else {
+                panic!("{input}: {actions:?}");
+            };
+            assert!(attribute.starts_with("minecraft:"), "{attribute}");
+            if input.ends_with("reset") {
+                assert_eq!(*op, AttributeOp::ResetBase);
+            }
+        }
+        assert!(
+            run("attribute @s minecraft:nonsense get", 2, fresh(), None)
+                .0
+                .is_err()
+        );
+        assert!(run("attribute @s armor get", 1, fresh(), None).0.is_err());
+    }
+
+    #[test]
+    fn spectate_forms_parse_and_need_a_player_source() {
+        let (result, _) = run("spectate", 2, fresh(), None);
+        assert!(result.is_err(), "the console has no camera");
+        assert!(
+            run("spectate @e @a", 2, fresh(), None).0.is_err(),
+            "no such players online"
+        );
+        assert!(
+            run("spectate @s", 1, fresh(), None).0.is_err(),
+            "needs permission level 2"
+        );
+    }
+
+    #[test]
+    fn dialog_and_posteffect_forms_parse() {
+        for input in [
+            "dialog clear @a",
+            "posteffect add @a minecraft:blur",
+            "posteffect remove @a blur",
+            "posteffect clear @a",
+            "posteffect list @p",
+        ] {
+            let (result, _) = run(input, 2, fresh(), None);
+            // Targets resolve against the (empty) test game, so only syntax errors matter.
+            assert!(
+                !format!("{result:?}").contains("Unknown or incomplete"),
+                "{input}: {result:?}"
+            );
+        }
+        assert!(run("posteffect add @a", 2, fresh(), None).0.is_err());
+        assert!(run("dialog show @a", 2, fresh(), None).0.is_err());
+        assert!(
+            run("dialog clear @a", 1, fresh(), None).0.is_err(),
+            "needs permission level 2"
+        );
     }
 
     #[test]
