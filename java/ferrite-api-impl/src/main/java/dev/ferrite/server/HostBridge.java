@@ -78,7 +78,7 @@ public final class HostBridge {
         Map.entry("FireTicks", "0"), Map.entry("FreezeTicks", "0"), Map.entry("Saturation", "5.0"), Map.entry("Exhaustion", "0.0"),
         Map.entry("PVP", "true"), Map.entry("AutoSave", "true"), Map.entry("KeepSpawnInMemory", "true"), Map.entry("Persistent", "true"),
         Map.entry("Swimming", "false"), Map.entry("Gliding", "false"), Map.entry("Climbing", "false"), Map.entry("Blocking", "false"),
-        Map.entry("HealthScaled", "false"), Map.entry("SleepingIgnored", "false"), Map.entry("CustomNameVisible", "false"));
+        Map.entry("MaxStackSize", "64"), Map.entry("MaxDurability", "0"), Map.entry("HealthScaled", "false"), Map.entry("SleepingIgnored", "false"), Map.entry("CustomNameVisible", "false"));
 
     private static String property(String method, String prefix) {
         int paren = method.indexOf('(');

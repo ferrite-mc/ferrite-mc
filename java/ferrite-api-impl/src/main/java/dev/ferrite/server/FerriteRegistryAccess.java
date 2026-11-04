@@ -106,7 +106,8 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                     case "asMaterial" -> material;
                     case "hasBlockType" -> contains("block", k);
                     case "getBlockType" -> org.bukkit.Registry.BLOCK.get(k);
-                    case "getMaxStackSize" -> 64;
+                    case "getMaxStackSize" -> HostBridge.callInt("ItemType", k.toString(), "getMaxStackSize()");
+                    case "getMaxDurability" -> HostBridge.callInt("ItemType", k.toString(), "getMaxDurability()");
                     case "translationKey", "getTranslationKey" -> (material != null && material.isBlock() ? "block." : "item.") + k.getNamespace() + "." + k.getKey();
                     case "createItemStack" -> new FerriteItemStack(material, args == null || args.length == 0 ? 1 : (int) args[0]);
                     case "hashCode" -> k.hashCode();

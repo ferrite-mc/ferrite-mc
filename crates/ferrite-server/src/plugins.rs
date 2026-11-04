@@ -4,6 +4,7 @@ mod cooldown;
 mod extra;
 pub mod facts;
 mod inventory;
+mod items;
 mod motion;
 mod survival;
 
@@ -105,6 +106,9 @@ impl PluginBridge {
                         >::new());
                         let cooldowns = std::sync::Mutex::new(cooldown::Cooldowns::default());
                         let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
+                            if let Some(reply) = items::item_type_answer(call) {
+                                return Some(reply);
+                            }
                             if let Some(reply) = facts::answer(call) {
                                 return Some(reply);
                             }

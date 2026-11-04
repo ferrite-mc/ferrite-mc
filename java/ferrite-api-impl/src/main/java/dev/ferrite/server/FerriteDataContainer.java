@@ -4,6 +4,12 @@ final class FerriteDataContainer implements org.bukkit.persistence.PersistentDat
     private record Entry(org.bukkit.persistence.PersistentDataType<?, ?> type, Object primitive) {}
     private final java.util.Map<org.bukkit.NamespacedKey, Entry> values = new java.util.HashMap<>();
     private final org.bukkit.persistence.PersistentDataAdapterContext context = FerriteDataContainer::new;
+    /** Same keys holding equal primitives, which is what makes two otherwise equal item stacks similar. */
+    boolean sameAs(FerriteDataContainer other) {
+        if (values.size() != other.values.size()) return false;
+        for (var entry : values.entrySet()) { var theirs = other.values.get(entry.getKey()); if (theirs == null || !java.util.Objects.deepEquals(entry.getValue().primitive(), theirs.primitive())) return false; }
+        return true;
+    }
     FerriteDataContainer copy() { var copy = new FerriteDataContainer(); copy.values.putAll(values); return copy; }
     public <P,C> void set(org.bukkit.NamespacedKey key, org.bukkit.persistence.PersistentDataType<P,C> type, C value) { values.put(java.util.Objects.requireNonNull(key), new Entry(type, type.toPrimitive(java.util.Objects.requireNonNull(value), context))); }
     public <P,C> boolean has(org.bukkit.NamespacedKey key, org.bukkit.persistence.PersistentDataType<P,C> type) { var entry = values.get(key); return entry != null && type.getPrimitiveType().isInstance(entry.primitive()); }
