@@ -661,6 +661,12 @@ struct Worlds {
 }
 
 impl Worlds {
+    fn set_period(&self, period: std::time::Duration) {
+        for scheduler in self.schedulers.values() {
+            scheduler.set_period(period);
+        }
+    }
+
     fn scheduler(&self, dimension: Dimension) -> &Scheduler<Region, GlobalRegion> {
         &self.schedulers[&dimension]
     }
@@ -868,6 +874,7 @@ async fn run(
         let fluid_source = dimensions.source(dimension).clone();
         let speed = Arc::clone(&random_tick_speed);
         let samples = tick_samples.clone();
+        let tick_control = command_state.lock().unwrap().more.tick.clone();
         let tick = move |region: &mut Region| {
             let now = std::time::Instant::now();
             let slot = region_profiler.region_slot(&mut region.profile_slot);
@@ -875,13 +882,16 @@ async fn run(
                 .timings
                 .get_or_insert_with(|| Arc::clone(region_profiler.timings()));
             region.tick(&ctx);
-            region.tick_fluids(&fluid_source, &fluid_tracking);
-            region.tick_random(
-                &fluid_source,
-                &fluid_tracking,
-                speed.load(Ordering::Relaxed),
-            );
+            if tick_control.simulating() {
+                region.tick_fluids(&fluid_source, &fluid_tracking);
+                region.tick_random(
+                    &fluid_source,
+                    &fluid_tracking,
+                    speed.load(Ordering::Relaxed),
+                );
+            }
             let elapsed = now.elapsed();
+            tick_control.record_mspt(elapsed.as_secs_f64() * 1000.0);
             region_profiler.record_region(slot, elapsed);
             let mut samples = samples.lock().unwrap();
             if samples.len() < 100_000 {
@@ -936,6 +946,7 @@ async fn run(
     let mut holds: HashMap<(Dimension, ChunkPos), usize> = HashMap::new();
     let positions = Arc::new(Mutex::new(HashMap::new()));
     let mut clock = tokio::time::interval(std::time::Duration::from_millis(50));
+    let mut applied_rate = 20.0_f32;
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut load_ran = false;
     loop {
@@ -1282,7 +1293,17 @@ async fn run(
          },
          _tick = clock.tick() => {
              let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
-             let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = game.tick(advance_time); (due, game.take_idle_players()) };
+             let tick_control = command_state.lock().unwrap().more.tick.clone();
+             let target_rate = tick_control.rate();
+             if (target_rate - applied_rate).abs() > f32::EPSILON {
+                 applied_rate = target_rate;
+                 let period = std::time::Duration::from_secs_f64(1.0 / f64::from(target_rate));
+                 worlds.set_period(period);
+                 clock = tokio::time::interval(period);
+                 clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+             }
+             let runs = tick_control.begin_game_tick();
+             let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
              for uuid in idle { if let Some((_, _, outbound)) = mailboxes.get(&uuid) { let _ = outbound.send(Outbound::Disconnect(commands::Feedback::new("multiplayer.disconnect.idling", vec![]).text)); } }
              for function in due {
                  let (complete, _unused) = oneshot::channel();

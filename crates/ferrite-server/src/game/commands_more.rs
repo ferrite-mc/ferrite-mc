@@ -27,6 +27,100 @@ pub struct MoreState {
     pub stopwatches: BTreeMap<String, i64>,
     /// Game time of each player's last action, for `/setidletimeout`.
     pub last_active: BTreeMap<uuid::Uuid, i64>,
+    /// `/tick`: shared with the game loop and the region ticks.
+    pub tick: std::sync::Arc<TickControl>,
+}
+
+/// What `/tick` changes: the target rate, the frozen flag and the pending steps. The game loop
+/// applies the rate to the schedulers and consumes steps; region ticks read `simulating`.
+#[derive(Debug)]
+pub struct TickControl {
+    rate_milli: std::sync::atomic::AtomicU32,
+    frozen: std::sync::atomic::AtomicBool,
+    steps: std::sync::atomic::AtomicU32,
+    stepping: std::sync::atomic::AtomicBool,
+    mspt_micro: std::sync::atomic::AtomicU64,
+}
+
+impl Default for TickControl {
+    fn default() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+        Self {
+            rate_milli: AtomicU32::new(20_000),
+            frozen: AtomicBool::new(false),
+            steps: AtomicU32::new(0),
+            stepping: AtomicBool::new(false),
+            mspt_micro: AtomicU64::new(0),
+        }
+    }
+}
+
+impl TickControl {
+    const RELAXED: std::sync::atomic::Ordering = std::sync::atomic::Ordering::Relaxed;
+
+    /// Target ticks per second.
+    pub fn rate(&self) -> f32 {
+        self.rate_milli.load(Self::RELAXED) as f32 / 1000.0
+    }
+
+    pub fn set_rate(&self, rate: f32) {
+        self.rate_milli
+            .store((rate * 1000.0).round() as u32, Self::RELAXED);
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.frozen.load(Self::RELAXED)
+    }
+
+    pub fn set_frozen(&self, frozen: bool) {
+        self.frozen.store(frozen, Self::RELAXED);
+        if !frozen {
+            self.steps.store(0, Self::RELAXED);
+        }
+    }
+
+    pub fn add_steps(&self, steps: u32) {
+        self.steps.fetch_add(steps, Self::RELAXED);
+    }
+
+    /// Cancels pending steps; true when any were pending.
+    pub fn stop_steps(&self) -> bool {
+        self.steps.swap(0, Self::RELAXED) > 0
+    }
+
+    /// Called once per game tick: whether the game advances this tick (not frozen, or a step is
+    /// due). Marks the tick as a stepping tick so region ticks run it.
+    pub fn begin_game_tick(&self) -> bool {
+        let run = if !self.frozen() {
+            true
+        } else {
+            self.steps
+                .try_update(Self::RELAXED, Self::RELAXED, |n| n.checked_sub(1))
+                .is_ok()
+        };
+        self.stepping.store(run, Self::RELAXED);
+        run
+    }
+
+    /// Whether world simulation runs: always unless frozen, and during a step.
+    pub fn simulating(&self) -> bool {
+        !self.frozen() || self.stepping.load(Self::RELAXED)
+    }
+
+    /// Folds one region tick duration into the running average.
+    pub fn record_mspt(&self, ms: f64) {
+        let old = self.mspt_micro.load(Self::RELAXED) as f64 / 1000.0;
+        let next = if old == 0.0 {
+            ms
+        } else {
+            old * 0.95 + ms * 0.05
+        };
+        self.mspt_micro.store((next * 1000.0) as u64, Self::RELAXED);
+    }
+
+    pub fn mspt(&self) -> f64 {
+        self.mspt_micro.load(Self::RELAXED) as f64 / 1000.0
+    }
 }
 
 /// Whether a client packet counts as the player doing something. Movement is judged from the
@@ -675,6 +769,95 @@ fn unpublish_tree() -> NodeBuilder<Source> {
 }
 
 /// Adds every command above to the server tree.
+fn tick_tree() -> NodeBuilder<Source> {
+    fn state(ctx: &CommandContext<Source>) -> std::sync::Arc<TickControl> {
+        ctx.source().state.lock().unwrap().more.tick.clone()
+    }
+    fn step(ctx: &CommandContext<Source>, ticks: i32) -> Result<i32, CommandError> {
+        let control = state(ctx);
+        if !control.frozen() {
+            return Err(failure("commands.tick.step.fail", vec![]));
+        }
+        control.add_steps(ticks as u32);
+        feedback(ctx, "commands.tick.step.success", vec![ticks.to_string()])?;
+        Ok(1)
+    }
+    literal::<Source>("tick")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(literal::<Source>("query").executes(|ctx| {
+            let control = state(ctx);
+            let target = control.rate();
+            let mspt = control.mspt();
+            let status = if control.frozen() {
+                "commands.tick.status.frozen"
+            } else if mspt > 1000.0 / f64::from(target) {
+                "commands.tick.status.lagging"
+            } else {
+                "commands.tick.status.running"
+            };
+            feedback(ctx, status, vec![])?;
+            feedback(
+                ctx,
+                "commands.tick.query.rate.running",
+                vec![
+                    format!("{target:.1}"),
+                    format!("{mspt:.1}"),
+                    format!("{:.1}", 1000.0 / f64::from(target)),
+                ],
+            )?;
+            Ok(target as i32)
+        }))
+        .then(literal::<Source>("freeze").executes(|ctx| {
+            state(ctx).set_frozen(true);
+            feedback(ctx, "commands.tick.status.frozen", vec![])?;
+            Ok(1)
+        }))
+        .then(literal::<Source>("unfreeze").executes(|ctx| {
+            state(ctx).set_frozen(false);
+            feedback(ctx, "commands.tick.status.running", vec![])?;
+            Ok(1)
+        }))
+        .then(
+            literal::<Source>("rate").then(
+                argument::<Source>(
+                    "rate",
+                    ArgumentType::Float {
+                        min: 1.0,
+                        max: 10_000.0,
+                    },
+                )
+                .executes(|ctx| {
+                    let rate = ctx
+                        .argument("rate")
+                        .and_then(|value| value.as_f32())
+                        .unwrap_or(20.0);
+                    state(ctx).set_rate(rate);
+                    feedback(ctx, "commands.tick.rate.success", vec![format!("{rate}")])?;
+                    Ok(rate as i32)
+                }),
+            ),
+        )
+        .then(
+            literal::<Source>("step")
+                .executes(|ctx| step(ctx, 1))
+                .then(literal::<Source>("stop").executes(|ctx| {
+                    if state(ctx).stop_steps() {
+                        feedback(ctx, "commands.tick.step.stop.success", vec![])?;
+                        Ok(1)
+                    } else {
+                        Err(failure("commands.tick.step.stop.fail", vec![]))
+                    }
+                }))
+                .then(
+                    argument::<Source>("time", ArgumentType::Time { min: 1 }).executes(|ctx| {
+                        let ticks = ctx.integer("time").unwrap_or(1);
+                        step(ctx, ticks)
+                    }),
+                ),
+        )
+}
+
 pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(version_tree());
     tree.register(random_tree());
@@ -685,6 +868,7 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(stopwatch_tree());
     tree.register(publish_tree());
     tree.register(unpublish_tree());
+    tree.register(tick_tree());
 }
 
 #[cfg(test)]
@@ -948,6 +1132,40 @@ mod tests {
     fn transfer_without_players_needs_a_player_source() {
         let (result, _) = run("transfer play.example.com", 3, fresh(), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tick_freezes_steps_and_changes_the_rate() {
+        let state = fresh();
+        let control = state.lock().unwrap().more.tick.clone();
+        let (result, actions) = run("tick step", 2, state.clone(), None);
+        assert!(result.is_err(), "stepping needs a frozen game");
+        assert!(actions.is_empty());
+        run("tick freeze", 2, state.clone(), None).0.unwrap();
+        assert!(control.frozen() && !control.simulating());
+        assert!(!control.begin_game_tick(), "a frozen game does not tick");
+        let (_, actions) = run("tick step 2", 2, state.clone(), None);
+        assert_eq!(keys(&actions), ["commands.tick.step.success"]);
+        assert!(control.begin_game_tick() && control.simulating());
+        assert!(control.begin_game_tick());
+        assert!(!control.begin_game_tick() && !control.simulating());
+        run("tick step 5", 2, state.clone(), None).0.unwrap();
+        run("tick step stop", 2, state.clone(), None).0.unwrap();
+        assert!(run("tick step stop", 2, state.clone(), None).0.is_err());
+        run("tick unfreeze", 2, state.clone(), None).0.unwrap();
+        assert!(control.begin_game_tick());
+        run("tick rate 40", 2, state.clone(), None).0.unwrap();
+        assert_eq!(control.rate(), 40.0);
+        assert!(run("tick rate 0.5", 2, state.clone(), None).0.is_err());
+        assert!(run("tick rate 40", 1, state.clone(), None).0.is_err());
+        let (_, actions) = run("tick query", 2, state, None);
+        assert_eq!(
+            keys(&actions),
+            [
+                "commands.tick.status.running",
+                "commands.tick.query.rate.running"
+            ]
+        );
     }
 
     #[test]
