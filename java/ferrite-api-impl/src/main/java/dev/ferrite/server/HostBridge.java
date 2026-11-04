@@ -88,7 +88,7 @@ public final class HostBridge {
         Map.entry("PreviousGameMode", NULL), Map.entry("PotentialRespawnLocation", NULL), Map.entry("ResourcePackStatus", NULL), Map.entry("RemovalReason", NULL),
         Map.entry("RemoveEventCause", NULL), Map.entry("ForwardsMovement", "0.0"), Map.entry("SidewaysMovement", "0.0"),
         Map.entry("UpwardsMovement", "0.0"), Map.entry("UnsaturatedRegenRate", "80"), Map.entry("ActiveItemUsedTime", "0"), Map.entry("ActiveItemRemainingTime", "0"),
-        Map.entry("ItemInUseTicks", "0"), Map.entry("ItemInUse", NULL), Map.entry("ActiveItemHand", NULL));
+        Map.entry("WaypointColor", NULL), Map.entry("WaypointStyle", "minecraft:default"), Map.entry("ItemInUseTicks", "0"), Map.entry("ItemInUse", NULL), Map.entry("ActiveItemHand", NULL));
 
     private static String property(String method, String prefix) {
         int paren = method.indexOf('(');

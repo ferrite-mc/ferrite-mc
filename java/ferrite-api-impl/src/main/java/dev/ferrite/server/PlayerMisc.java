@@ -155,4 +155,33 @@ public abstract class PlayerMisc extends PlayerStubs {
         if (data instanceof Number number) { playEffect(location, effect, number.intValue()); return; }
         throw new UnsupportedOperationException("Ferrite: not implemented: Player#playEffect with " + data.getClass().getSimpleName() + " data");
     }
+
+    // ---- looking, tracking and profile ----------------------------------------------------------------
+    @Override public void lookAt(org.bukkit.entity.Entity target, io.papermc.paper.entity.LookAnchor playerAnchor, io.papermc.paper.entity.LookAnchor targetAnchor) {
+        Objects.requireNonNull(target, "entity");
+        var at = target instanceof org.bukkit.entity.LivingEntity living && targetAnchor == io.papermc.paper.entity.LookAnchor.EYES ? living.getEyeLocation() : target.getLocation();
+        lookAt(at.getX(), at.getY(), at.getZ(), playerAnchor);
+    }
+    @Override public void setRotation(io.papermc.paper.math.Angle yaw, io.papermc.paper.math.Angle pitch) {
+        var here = getLocation();
+        setRotation(yaw.relative() ? here.getYaw() + yaw.degrees() : yaw.degrees(), pitch.relative() ? here.getPitch() + pitch.degrees() : pitch.degrees());
+    }
+    /** Players in the same world within the server view distance, the ones whose client tracks this player. */
+    @Override public Set<org.bukkit.entity.Player> getTrackedBy() {
+        var out = new LinkedHashSet<org.bukkit.entity.Player>();
+        var here = getLocation();
+        int range = getServer().getViewDistance() * 16;
+        for (var other : getServer().getOnlinePlayers()) {
+            if (other.equals(this) || !Objects.equals(other.getWorld(), getWorld())) continue;
+            var at = other.getLocation();
+            if (Math.abs(at.getX() - here.getX()) <= range && Math.abs(at.getZ() - here.getZ()) <= range && other.canSee((org.bukkit.entity.Entity) this)) out.add(other);
+        }
+        return out;
+    }
+    @Override public Set<org.bukkit.entity.Player> getTrackedPlayers() { return getTrackedBy(); }
+    @Override public boolean isTrackedBy(org.bukkit.entity.Player viewer) { return getTrackedBy().contains(Objects.requireNonNull(viewer, "player")); }
+    @Override public com.destroystokyo.paper.profile.PlayerProfile getPlayerProfile() { return new FerriteProfile(getUniqueId(), getName()); }
+    @Override public Set<String> getListeningPluginChannels() { return Set.of(); }
+    @Override public void resetCooldown() { }
+    @Override public void resetFlyingTicks() { }
 }

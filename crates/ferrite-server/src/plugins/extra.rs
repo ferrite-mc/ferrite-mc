@@ -149,6 +149,90 @@ pub fn extra_action(call: &HostCall) -> Option<HostAction> {
             )
         }
         ("Player", "setPlayerWeather(WeatherType)") => None,
+        ("World", method) => world_action(call, method),
+        _ => None,
+    }
+}
+
+/// The `x y z` of an encoded `Location` (`world, x, y, z, yaw, pitch`).
+fn location_xyz(encoded: &str) -> Option<(f64, f64, f64)> {
+    let mut parts = encoded.split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+    parts.next()?;
+    let mut axis = || number(parts.next()?).filter(|v| v.abs() < 3.0e7);
+    Some((axis()?, axis()?, axis()?))
+}
+
+/// World effects that vanilla exposes as commands. Only the default world has a console
+/// target, so a call on another world is left unhandled.
+fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
+    if Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id() {
+        return None;
+    }
+    let arg = |index: usize| {
+        call.args
+            .get(index)
+            .map(String::as_str)
+            .filter(|a| *a != HOST_NULL)
+    };
+    let f = |index: usize| arg(index).and_then(number);
+    match method {
+        "strikeLightning(Location)" => {
+            let (x, y, z) = location_xyz(arg(0)?)?;
+            console(format!("summon lightning_bolt {x} {y} {z}"), "")
+        }
+        "playSound(Location,Sound,float,float)"
+        | "playSound(Location,String,float,float)"
+        | "playSound(Location,Sound,SoundCategory,float,float)"
+        | "playSound(Location,String,SoundCategory,float,float)"
+        | "playSound(Location,Sound,float,float,long)"
+        | "playSound(Location,String,float,float,long)"
+        | "playSound(Location,Sound,SoundCategory,float,float,long)"
+        | "playSound(Location,String,SoundCategory,float,float,long)" => {
+            let (x, y, z) = location_xyz(arg(0)?)?;
+            let sound = key(arg(1)?)?;
+            let (cat, rest) = if method.contains("SoundCategory") {
+                (category(arg(2)?)?, 3)
+            } else {
+                ("master", 2)
+            };
+            let volume = f(rest)?.clamp(0.0, 3.4e38);
+            let pitch = f(rest + 1)?.clamp(0.0, 2.0);
+            console(
+                format!("playsound {sound} {cat} @a {x} {y} {z} {volume} {pitch}"),
+                "",
+            )
+        }
+        "spawnParticle(Particle,Location,int)"
+        | "spawnParticle(Particle,Location,int,double)"
+        | "spawnParticle(Particle,Location,int,double,double,double)"
+        | "spawnParticle(Particle,Location,int,double,double,double,double)" => {
+            let (x, y, z) = location_xyz(arg(1)?)?;
+            let count = arg(2)?.parse::<u32>().ok().filter(|c| *c <= 100_000)?;
+            let offsets = if method.ends_with("double,double,double)")
+                || method.ends_with("double,double,double,double)")
+            {
+                (f(3)?, f(4)?, f(5)?)
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+            let speed = if method.ends_with("double,double,double,double)") {
+                f(6)?
+            } else if method.ends_with("int,double)") {
+                f(3)?
+            } else {
+                0.0
+            };
+            console(
+                format!(
+                    "particle {} {x} {y} {z} {} {} {} {speed} {count} normal @a",
+                    key(arg(0)?)?,
+                    offsets.0,
+                    offsets.1,
+                    offsets.2
+                ),
+                "",
+            )
+        }
         _ => None,
     }
 }
@@ -208,6 +292,56 @@ mod tests {
         assert_eq!(line(call("teleport(Entity)", &["@a"])), None);
         assert_eq!(
             line(call("setTitleTimes(int,int,int)", &["-1", "1", "1"])),
+            None
+        );
+    }
+
+    #[test]
+    fn world_effects_target_the_default_world_only() {
+        let default = ferrite_plugin::default_world_id().to_string();
+        let at = format!(
+            "world{0}1.5{0}64{0}-2{0}0{0}0",
+            ferrite_plugin::HOST_ITEM_SEPARATOR
+        );
+        let world = |subject: &str, method: &str, args: &[&str]| HostCall {
+            owner: "World".into(),
+            subject: subject.into(),
+            method: method.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+        };
+        assert_eq!(
+            line(world(&default, "strikeLightning(Location)", &[&at])).as_deref(),
+            Some("summon lightning_bolt 1.5 64 -2")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "playSound(Location,String,SoundCategory,float,float)",
+                &[
+                    &at,
+                    "minecraft:entity.player.levelup",
+                    "PLAYERS",
+                    "1",
+                    "1.5"
+                ]
+            ))
+            .as_deref(),
+            Some("playsound minecraft:entity.player.levelup player @a 1.5 64 -2 1 1.5")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "spawnParticle(Particle,Location,int)",
+                &[&at, "minecraft:flame", "x"]
+            )),
+            None
+        );
+        assert_eq!(
+            line(world(
+                "00000000-0000-0000-0000-0000000000fe",
+                "strikeLightning(Location)",
+                &[&at]
+            )),
             None
         );
     }
