@@ -11,7 +11,7 @@ import java.util.*;
  * remembered so plugins read back what they wrote.
  */
 @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
-public abstract class PlayerExtras extends PlayerStubs {
+public abstract class PlayerExtras extends PlayerSight {
     // ---- conversations -------------------------------------------------------------------
     private final Deque<org.bukkit.conversations.Conversation> conversations = new ArrayDeque<>();
 

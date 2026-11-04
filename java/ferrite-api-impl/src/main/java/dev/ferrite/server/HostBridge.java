@@ -79,7 +79,16 @@ public final class HostBridge {
         Map.entry("FireTicks", "0"), Map.entry("FreezeTicks", "0"), Map.entry("Saturation", "5.0"), Map.entry("Exhaustion", "0.0"),
         Map.entry("PVP", "true"), Map.entry("AutoSave", "true"), Map.entry("KeepSpawnInMemory", "true"), Map.entry("Persistent", "true"),
         Map.entry("Swimming", "false"), Map.entry("Gliding", "false"), Map.entry("Climbing", "false"), Map.entry("Blocking", "false"),
-        Map.entry("MaxStackSize", "64"), Map.entry("MaxDurability", "0"), Map.entry("HealthScaled", "false"), Map.entry("SleepingIgnored", "false"), Map.entry("CustomNameVisible", "false"));
+        Map.entry("MaxStackSize", "64"), Map.entry("MaxDurability", "0"), Map.entry("HealthScaled", "false"), Map.entry("SleepingIgnored", "false"), Map.entry("CustomNameVisible", "false"),
+        Map.entry("Invisible", "false"), Map.entry("VisualFire", "false"), Map.entry("AI", "true"), Map.entry("SoundPitch", "1.0"), Map.entry("SoundVolume", "1.0"),
+        Map.entry("PlayerListOrder", "0"), Map.entry("HealthScale", "20.0"), Map.entry("PortalCooldown", "0"), Map.entry("WardenTimeSinceLastWarning", "0"),
+        Map.entry("WardenWarningCooldown", "0"), Map.entry("SeenWinScreen", "false"), Map.entry("Jumping", "false"), Map.entry("SleepTicks", "0"),
+        Map.entry("Sleeping", "false"), Map.entry("DeeplySleeping", "false"), Map.entry("AllowingServerListings", "true"), Map.entry("Transferred", "false"),
+        Map.entry("CooldownPeriod", "5.0"), Map.entry("AttackCooldown", "1.0"), Map.entry("Killer", NULL), Map.entry("SpectatorTarget", NULL),
+        Map.entry("PreviousGameMode", NULL), Map.entry("PotentialRespawnLocation", NULL), Map.entry("ResourcePackStatus", NULL), Map.entry("RemovalReason", NULL),
+        Map.entry("RemoveEventCause", NULL), Map.entry("ForwardsMovement", "0.0"), Map.entry("SidewaysMovement", "0.0"),
+        Map.entry("UpwardsMovement", "0.0"), Map.entry("UnsaturatedRegenRate", "80"), Map.entry("ActiveItemUsedTime", "0"), Map.entry("ActiveItemRemainingTime", "0"),
+        Map.entry("ItemInUse", NULL), Map.entry("ActiveItemHand", NULL));
 
     private static String property(String method, String prefix) {
         int paren = method.indexOf('(');
