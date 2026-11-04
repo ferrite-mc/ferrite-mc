@@ -102,6 +102,53 @@ mod tests {
     }
 
     #[test]
+    fn plugin_action_bar_clear_title_and_tab_list_reach_the_player() {
+        let player = Uuid::from_u128(7);
+        let plain = |text: &str| ferrite_protocol::types::PlainText(text.into());
+        let bar = routed(
+            ferrite_plugin::PlayerCommand::ActionBar {
+                player,
+                component_json: r#"{"text":"Low ","extra":["health"]}"#.into(),
+            },
+            player,
+        );
+        assert_eq!(
+            bar.iter().map(bytes).collect::<Vec<_>>(),
+            [game::packet(&SetActionBarText {
+                text: plain("Low health")
+            })]
+            .iter()
+            .map(bytes)
+            .collect::<Vec<_>>()
+        );
+        for reset in [false, true] {
+            let cleared = routed(
+                ferrite_plugin::PlayerCommand::ClearTitle { player, reset },
+                player,
+            );
+            assert_eq!(
+                cleared.iter().map(bytes).collect::<Vec<_>>(),
+                vec![bytes(&game::packet(&ClearTitles { reset }))]
+            );
+        }
+        let list = routed(
+            ferrite_plugin::PlayerCommand::ListHeaderFooter {
+                player,
+                header_json: r#"{"text":"Ferrite"}"#.into(),
+                footer_json: r#"{"text":""}"#.into(),
+            },
+            player,
+        );
+        assert_eq!(
+            list.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&TabList {
+                header: plain("Ferrite"),
+                footer: plain(""),
+            }))]
+        );
+    }
+
+    #[test]
     fn plugin_title_sends_times_then_texts() {
         let player = Uuid::from_u128(7);
         let sent = routed(
@@ -566,11 +613,16 @@ fn json_text(json: &str) -> String {
             _ => {}
         }
     }
-    let mut out = String::new();
-    if let Ok(value) = serde_json::from_str(json) {
-        collect(&value, &mut out);
+    // Only text that is not JSON at all is shown as-is: an empty component such as
+    // Adventure's `Component.empty()` (`{"text":""}`) must stay empty.
+    match serde_json::from_str(json) {
+        Ok(value) => {
+            let mut out = String::new();
+            collect(&value, &mut out);
+            out
+        }
+        Err(_) => json.to_owned(),
     }
-    if out.is_empty() { json.to_owned() } else { out }
 }
 fn chat(tx: &OutboundSender, text: &str) {
     emit(
@@ -1251,6 +1303,36 @@ fn route_plugin_command(
                 // Resource-pack sounds need an inline `SoundEvent` holder, which the packet
                 // codec does not model yet.
                 None => tracing::debug!(%sound, "plugin sound is not in the sound registry"),
+            }
+        }
+        PlayerCommand::ActionBar {
+            player,
+            component_json,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                commands_extras::PlayerPacket::ActionBar(SetActionBarText {
+                    text: ferrite_protocol::types::PlainText(json_text(&component_json)),
+                })
+                .send_to(outbound);
+            }
+        }
+        PlayerCommand::ClearTitle { player, reset } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                commands_extras::PlayerPacket::ClearTitles(ClearTitles { reset }).send_to(outbound);
+            }
+        }
+        PlayerCommand::ListHeaderFooter {
+            player,
+            header_json,
+            footer_json,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                let _ = outbound.send(ferrite_net::game::packet(
+                    &ferrite_protocol::packets::play::TabList {
+                        header: ferrite_protocol::types::PlainText(json_text(&header_json)),
+                        footer: ferrite_protocol::types::PlainText(json_text(&footer_json)),
+                    },
+                ));
             }
         }
         // The game loop sends display names to the global region before calling this.

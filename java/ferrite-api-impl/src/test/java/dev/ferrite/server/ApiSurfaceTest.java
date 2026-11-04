@@ -334,4 +334,20 @@ class ApiSurfaceTest {
         p.giveExpLevels(-100);
         assertEquals(0, p.getLevel());
     }
+
+    @Test void playerListHeaderFooterAndActionBarKeepState() {
+        var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000dd");
+        var p = FerritePlayer.create(server, id, "Lister", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));
+        assertNull(p.getPlayerListHeader());
+        assertEquals(net.kyori.adventure.text.Component.empty(), p.playerListFooter());
+        p.setPlayerListHeaderFooter("\u00a7aWelcome", "Footer");
+        assertEquals("\u00a7aWelcome", p.getPlayerListHeader());
+        assertEquals("Footer", p.getPlayerListFooter());
+        p.setPlayerListFooter(null);
+        assertNull(p.getPlayerListFooter(), "a null footer clears it");
+        assertEquals("\u00a7aWelcome", p.getPlayerListHeader(), "setting the footer keeps the header");
+        p.setPlayerListHeaderFooter(new net.md_5.bungee.api.chat.TextComponent("Bungee"), null);
+        assertEquals("Bungee", p.getPlayerListHeader());
+        assertDoesNotThrow(() -> { p.sendActionBar("hi"); p.sendActionBar('&', "&ahi"); p.sendActionBar(net.kyori.adventure.text.Component.text("hi")); p.clearTitle(); p.resetTitle(); });
+    }
 }

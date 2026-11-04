@@ -133,6 +133,34 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftHumanEntity
     @Override public boolean canSee(org.bukkit.entity.Entity entity) { return true; }
     /** Ferrite does not give players a personal border, so they all follow the world's. */
     @Override public org.bukkit.WorldBorder getWorldBorder() { return null; }
+    // --- Action bar, title clearing and the tab list header/footer (playerVisual kinds 3..5). ---
+    private static String json(net.kyori.adventure.text.Component component) { return net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().serialize(component); }
+    private static net.kyori.adventure.text.Component legacy(String text) { return text == null ? net.kyori.adventure.text.Component.empty() : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(text); }
+    private static net.kyori.adventure.text.Component bungee(net.md_5.bungee.api.chat.BaseComponent... components) { return components == null ? net.kyori.adventure.text.Component.empty() : net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().deserialize(net.md_5.bungee.chat.ComponentSerializer.toString(components)); }
+    private void visual(int kind, String first, String second, int flag) { if (!Native.playerVisual(id.toString(), kind, first, second, flag, 0, 0)) throw new IllegalStateException("No player command handler"); }
+    private net.kyori.adventure.text.Component listHeader = net.kyori.adventure.text.Component.empty();
+    private net.kyori.adventure.text.Component listFooter = net.kyori.adventure.text.Component.empty();
+    @Override public void sendActionBar(net.kyori.adventure.text.Component message) { visual(3, json(message), null, 0); }
+    @Override public void sendActionBar(String message) { sendActionBar(legacy(message)); }
+    @Override public void sendActionBar(char alternateChar, String message) { sendActionBar(message == null ? net.kyori.adventure.text.Component.empty() : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacy(alternateChar).deserialize(message)); }
+    @Override public void sendActionBar(net.md_5.bungee.api.chat.BaseComponent... message) { sendActionBar(bungee(message)); }
+    /** Vanilla {@code ClientboundClearTitlesPacket(false)}: hides the title, keeps its timings. */
+    @Override public void clearTitle() { visual(4, null, null, 0); }
+    /** {@code ClientboundClearTitlesPacket(true)}: also restores the default timings. */
+    @Override public void resetTitle() { visual(4, null, null, 1); }
+    @Override public void sendPlayerListHeaderAndFooter(net.kyori.adventure.text.Component header, net.kyori.adventure.text.Component footer) { visual(5, json(header), json(footer), 0); listHeader = header; listFooter = footer; }
+    @Override public void sendPlayerListHeader(net.kyori.adventure.text.Component header) { sendPlayerListHeaderAndFooter(header, listFooter); }
+    @Override public void sendPlayerListFooter(net.kyori.adventure.text.Component footer) { sendPlayerListHeaderAndFooter(listHeader, footer); }
+    @Override public net.kyori.adventure.text.Component playerListHeader() { return listHeader; }
+    @Override public net.kyori.adventure.text.Component playerListFooter() { return listFooter; }
+    private static String legacyText(net.kyori.adventure.text.Component component) { return component.equals(net.kyori.adventure.text.Component.empty()) ? null : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(component); }
+    @Override public String getPlayerListHeader() { return legacyText(listHeader); }
+    @Override public String getPlayerListFooter() { return legacyText(listFooter); }
+    @Override public void setPlayerListHeader(String header) { sendPlayerListHeader(legacy(header)); }
+    @Override public void setPlayerListFooter(String footer) { sendPlayerListFooter(legacy(footer)); }
+    @Override public void setPlayerListHeaderFooter(String header, String footer) { sendPlayerListHeaderAndFooter(legacy(header), legacy(footer)); }
+    @Override public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent[] header, net.md_5.bungee.api.chat.BaseComponent[] footer) { sendPlayerListHeaderAndFooter(bungee(header), bungee(footer)); }
+    @Override public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent header, net.md_5.bungee.api.chat.BaseComponent footer) { sendPlayerListHeaderAndFooter(header == null ? net.kyori.adventure.text.Component.empty() : bungee(header), footer == null ? net.kyori.adventure.text.Component.empty() : bungee(footer)); }
     @Override public int hashCode() { return id.hashCode(); }
     @Override public boolean equals(Object other) { return other instanceof org.bukkit.entity.Player player && id.equals(player.getUniqueId()); }
     @Override public String toString() { return "Player[" + id + "]"; }

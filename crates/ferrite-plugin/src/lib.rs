@@ -218,6 +218,22 @@ pub enum PlayerCommand {
         pitch: f32,
         seed: Option<i64>,
     },
+    /// `Player#sendActionBar`, as Adventure JSON.
+    ActionBar {
+        player: uuid::Uuid,
+        component_json: String,
+    },
+    /// `Player#clearTitle` (`reset: false`) or `Player#resetTitle` (`reset: true`).
+    ClearTitle {
+        player: uuid::Uuid,
+        reset: bool,
+    },
+    /// `Player#sendPlayerListHeaderAndFooter`, both as Adventure JSON.
+    ListHeaderFooter {
+        player: uuid::Uuid,
+        header_json: String,
+        footer_json: String,
+    },
     SetHealth {
         player: uuid::Uuid,
         health: f64,
@@ -912,6 +928,19 @@ extern "system" fn player_visual(
             fade_in,
             stay,
             fade_out,
+        },
+        3 => PlayerCommand::ActionBar {
+            player,
+            component_json: first.unwrap_or_default(),
+        },
+        4 => PlayerCommand::ClearTitle {
+            player,
+            reset: fade_in != 0,
+        },
+        5 => PlayerCommand::ListHeaderFooter {
+            player,
+            header_json: first.unwrap_or_default(),
+            footer_json: second.unwrap_or_default(),
         },
         _ => return 0,
     };
