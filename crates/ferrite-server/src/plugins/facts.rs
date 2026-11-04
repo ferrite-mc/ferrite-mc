@@ -31,9 +31,18 @@ fn ground_registry() -> &'static Mutex<HashMap<Uuid, bool>> {
     GROUND.get_or_init(Default::default)
 }
 
-fn sleeping_registry() -> &'static Mutex<std::collections::HashSet<Uuid>> {
-    static SLEEPING: OnceLock<Mutex<std::collections::HashSet<Uuid>>> = OnceLock::new();
+/// Players in a bed, with the moment they lay down.
+fn sleeping_registry() -> &'static Mutex<HashMap<Uuid, std::time::Instant>> {
+    static SLEEPING: OnceLock<Mutex<HashMap<Uuid, std::time::Instant>>> = OnceLock::new();
     SLEEPING.get_or_init(Default::default)
+}
+
+/// Vanilla `Player.SLEEP_DURATION`: ticks in bed before the player counts as deeply asleep.
+const DEEP_SLEEP_TICKS: u128 = 100;
+
+/// Ticks a player has been in bed, capped at 100 like vanilla's `sleepCounter`.
+fn sleep_ticks(since: std::time::Instant, now: std::time::Instant) -> u128 {
+    (now.saturating_duration_since(since).as_millis() / 50).min(DEEP_SLEEP_TICKS)
 }
 
 /// Hunger, air and fire values the survival tick last computed for a player.
@@ -133,11 +142,11 @@ pub fn set_history(player: Uuid, played_before: bool, first_played: SystemTime) 
 
 /// Records that the player went to bed or got up.
 pub fn set_sleeping(player: Uuid, sleeping: bool) {
-    let mut set = sleeping_registry().lock().unwrap();
+    let mut map = sleeping_registry().lock().unwrap();
     if sleeping {
-        set.insert(player);
+        map.entry(player).or_insert_with(std::time::Instant::now);
     } else {
-        set.remove(&player);
+        map.remove(&player);
     }
 }
 
@@ -221,16 +230,19 @@ pub fn answer(call: &HostCall) -> Option<String> {
             .get(&player)
             .map(|ground| ground.to_string());
     }
-    if call.method == "isSleeping()" {
+    if matches!(
+        call.method.as_str(),
+        "isSleeping()" | "getSleepTicks()" | "isDeeplySleeping()"
+    ) {
         // Only an online player has a bed state to report.
         registry().lock().unwrap().get(&player)?;
-        return Some(
-            sleeping_registry()
-                .lock()
-                .unwrap()
-                .contains(&player)
-                .to_string(),
-        );
+        let since = sleeping_registry().lock().unwrap().get(&player).copied();
+        let ticks = since.map_or(0, |since| sleep_ticks(since, std::time::Instant::now()));
+        return Some(match call.method.as_str() {
+            "isSleeping()" => since.is_some().to_string(),
+            "getSleepTicks()" => ticks.to_string(),
+            _ => (ticks >= DEEP_SLEEP_TICKS).to_string(),
+        });
     }
     if matches!(
         call.method.as_str(),
@@ -425,6 +437,37 @@ mod tests {
         assert_eq!(ask("isSprinting()").as_deref(), Some("true"));
         forget(player);
         assert_eq!(ask("isSneaking()"), None);
+    }
+
+    #[test]
+    fn sleep_ticks_count_up_to_the_deep_sleep_threshold() {
+        let start = std::time::Instant::now();
+        assert_eq!(sleep_ticks(start, start), 0);
+        assert_eq!(sleep_ticks(start, start + Duration::from_millis(500)), 10);
+        assert_eq!(sleep_ticks(start, start + Duration::from_secs(60)), 100);
+        let player = Uuid::from_u128(0x5113);
+        record(
+            player,
+            PlayerFacts {
+                entity_id: 2,
+                joined: SystemTime::now(),
+                address: None,
+            },
+        );
+        let ask = |method: &str| {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: method.into(),
+                args: vec![],
+            })
+        };
+        assert_eq!(ask("getSleepTicks()").as_deref(), Some("0"));
+        assert_eq!(ask("isDeeplySleeping()").as_deref(), Some("false"));
+        set_sleeping(player, true);
+        assert_eq!(ask("isSleeping()").as_deref(), Some("true"));
+        assert_eq!(ask("isDeeplySleeping()").as_deref(), Some("false"));
+        forget(player);
     }
 
     #[test]
