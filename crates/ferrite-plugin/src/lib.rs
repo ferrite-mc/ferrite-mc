@@ -369,6 +369,8 @@ pub enum PlayerCommand {
         kind: String,
         /// The block of a falling block, as a `minecraft:` block key.
         block: Option<String>,
+        /// The speed it starts with, in blocks per tick.
+        velocity: [f64; 3],
     },
     /// `World#dropItem` / `dropItemNaturally` on the default world.
     DropItem {

@@ -89,7 +89,20 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         number(parts.next()?)?,
         number(parts.next()?)?,
     ];
+    let mut velocity = [0.0; 3];
     let (kind, block) = match call.method.as_str() {
+        "spawnArrow(Location,double,double,double)" => {
+            velocity = [
+                number(call.args.get(1)?)?,
+                number(call.args.get(2)?)?,
+                number(call.args.get(3)?)?,
+            ];
+            // Vanilla caps what a bow gives an arrow at 3 blocks per tick; allow a little more.
+            if velocity.iter().map(|v| v * v).sum::<f64>() > 10.0 * 10.0 {
+                return None;
+            }
+            ("minecraft:arrow".to_owned(), None)
+        }
         "spawnEntity(Location,EntityType)" => {
             let kind = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
             let modelled = matches!(kind.as_str(), "minecraft:tnt")
@@ -110,6 +123,7 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         center,
         kind,
         block,
+        velocity,
     })
 }
 
@@ -166,7 +180,8 @@ mod tests {
             Some(PlayerCommand::SpawnEntity {
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:cow".into(),
-                block: None
+                block: None,
+                velocity: [0.0; 3]
             })
         );
         assert!(spawn("spawnEntity(Location,EntityType)", "TNT").is_some());
@@ -176,8 +191,29 @@ mod tests {
             Some(PlayerCommand::SpawnEntity {
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:falling_block".into(),
-                block: Some("minecraft:sand".into())
+                block: Some("minecraft:sand".into()),
+                velocity: [0.0; 3]
             })
+        );
+        let shot = spawn_command(&call(
+            "spawnArrow(Location,double,double,double)",
+            &[&at, "0", "0.5", "2.5"],
+        ));
+        assert_eq!(
+            shot,
+            Some(PlayerCommand::SpawnEntity {
+                center: [1.0, 70.0, 2.0],
+                kind: "minecraft:arrow".into(),
+                block: None,
+                velocity: [0.0, 0.5, 2.5]
+            })
+        );
+        assert_eq!(
+            spawn_command(&call(
+                "spawnArrow(Location,double,double,double)",
+                &[&at, "0", "0", "99"]
+            )),
+            None
         );
         assert_eq!(spawn("spawnFallingBlock(Location,Material)", "NOPE"), None);
     }

@@ -350,4 +350,15 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("spawnEntity(Location,EntityType)", "spawnFallingBlock(Location,Material)"), calls);
     }
+
+    @Test void playersShootArrowsThroughTheHost() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var arrow = player.launchProjectile(org.bukkit.entity.Arrow.class, new org.bukkit.util.Vector(0, 0, 2), null);
+            assertEquals(org.bukkit.entity.EntityType.ARROW, arrow.getType());
+            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.Fireball.class, null, null));
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("spawnArrow(Location,double,double,double)"), calls);
+    }
 }

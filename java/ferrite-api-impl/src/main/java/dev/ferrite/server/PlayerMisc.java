@@ -127,6 +127,19 @@ public abstract class PlayerMisc extends PlayerStubs {
         result.put("UUID", getUniqueId().toString());
         return result;
     }
+    // ---- projectiles ----------------------------------------------------------------------------
+    /** Shoots an arrow from the eyes; other projectile kinds are not modelled by the game yet. */
+    @Override public <T extends org.bukkit.entity.Projectile> T launchProjectile(Class<? extends T> projectile, org.bukkit.util.Vector velocity, java.util.function.Consumer<? super T> callback) {
+        Objects.requireNonNull(projectile, "projectile");
+        if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
+        var eye = getEyeLocation();
+        var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(3.0);
+        @SuppressWarnings("unchecked") var handle = (T) SpawnedEntity.of(org.bukkit.entity.EntityType.ARROW, eye, getWorld());
+        if (callback != null) callback.accept(handle);
+        tellHost("spawnArrow(Location,double,double,double)", eye, direction.getX(), direction.getY(), direction.getZ());
+        return handle;
+    }
+
     // ---- throwing items -------------------------------------------------------------------------
     /** Throws a stack that is no longer in the inventory, as the player would with the drop key. */
     private org.bukkit.entity.Item throwStack(org.bukkit.inventory.ItemStack stack, java.util.function.Consumer<org.bukkit.entity.Item> callback) {
