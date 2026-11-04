@@ -464,6 +464,16 @@ public class FerriteServer extends ServerStubs {
     @Override public com.destroystokyo.paper.profile.PlayerProfile createProfile(java.util.UUID id) { return new FerriteProfile(id, null); }
     @Override public com.destroystokyo.paper.profile.PlayerProfile createProfile(java.util.UUID id, String name) { return new FerriteProfile(id, name); }
     @Override public com.destroystokyo.paper.profile.PlayerProfile createProfileExact(java.util.UUID id, String name) { return new FerriteProfile(id, name); }
+    private final java.util.concurrent.ConcurrentMap<Integer, org.bukkit.map.MapView> maps = new java.util.concurrent.ConcurrentHashMap<>();
+    @Override public org.bukkit.inventory.Merchant createMerchant() { return new FerriteMerchant(); }
+    @Override public org.bukkit.inventory.Merchant createMerchant(String title) { return new FerriteMerchant(title); }
+    @Override public org.bukkit.inventory.Merchant createMerchant(net.kyori.adventure.text.Component title) { return new FerriteMerchant(title); }
+    @Override public org.bukkit.map.MapView createMap(org.bukkit.World world) {
+        var view = new FerriteMapView(java.util.Objects.requireNonNull(world, "world"));
+        maps.put(view.getId(), view);
+        return view;
+    }
+    @Override public org.bukkit.map.MapView getMap(int id) { return maps.get(id); }
     @Override public void sendPluginMessage(org.bukkit.plugin.Plugin source, String channel, byte[] message) {
         for (var player : players.values()) player.sendPluginMessage(source, channel, message);
     }
