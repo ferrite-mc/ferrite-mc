@@ -39,6 +39,29 @@ fn category(text: &str) -> Option<&'static str> {
     })
 }
 
+/// The sound of a note block instrument.
+fn note_sound(instrument: &str) -> Option<&'static str> {
+    Some(match instrument {
+        "PIANO" => "minecraft:block.note_block.harp",
+        "BASS_DRUM" => "minecraft:block.note_block.basedrum",
+        "SNARE_DRUM" => "minecraft:block.note_block.snare",
+        "STICKS" => "minecraft:block.note_block.hat",
+        "BASS_GUITAR" => "minecraft:block.note_block.bass",
+        "FLUTE" => "minecraft:block.note_block.flute",
+        "BELL" => "minecraft:block.note_block.bell",
+        "GUITAR" => "minecraft:block.note_block.guitar",
+        "CHIME" => "minecraft:block.note_block.chime",
+        "XYLOPHONE" => "minecraft:block.note_block.xylophone",
+        "IRON_XYLOPHONE" => "minecraft:block.note_block.iron_xylophone",
+        "COW_BELL" => "minecraft:block.note_block.cow_bell",
+        "DIDGERIDOO" => "minecraft:block.note_block.didgeridoo",
+        "BIT" => "minecraft:block.note_block.bit",
+        "BANJO" => "minecraft:block.note_block.banjo",
+        "PLING" => "minecraft:block.note_block.pling",
+        _ => return None,
+    })
+}
+
 fn console(line: String, reply: &str) -> Option<HostAction> {
     Some(HostAction::Console {
         line,
@@ -90,6 +113,17 @@ pub fn extra_action(call: &HostCall) -> Option<HostAction> {
         ("Player", "sendRawMessage(String)" | "sendRawMessage(UUID,String)") => {
             let text = arg(call.args.len().checked_sub(1)?)?;
             console(format!("tellraw {} {}", player?, tellraw_text(text)), "")
+        }
+        ("Player", "playNote(Location,Instrument,int)") => {
+            let (x, y, z) = location_xyz(arg(0)?)?;
+            let sound = note_sound(arg(1)?)?;
+            let note: i32 = arg(2)?.parse().ok().filter(|n| (0..=24).contains(n))?;
+            // Vanilla `NoteBlock`: the pitch doubles every twelve semitones around note 12.
+            let pitch = 2f64.powf(f64::from(note - 12) / 12.0);
+            console(
+                format!("playsound {sound} record {} {x} {y} {z} 3 {pitch}", player?),
+                "",
+            )
         }
         ("Player", "stopSound(SoundCategory)") => {
             console(format!("stopsound {} {}", player?, category(arg(0)?)?), "")
@@ -305,6 +339,34 @@ mod tests {
                 &["minecraft:block.stone.hit", "BLOCKS"]
             )),
             Some(format!("stopsound {ME} block minecraft:block.stone.hit"))
+        );
+    }
+
+    #[test]
+    fn notes_play_the_instrument_at_the_right_pitch() {
+        let at = format!("world{P}1{P}64{P}2{P}0{P}0", P = '\u{1d}');
+        assert_eq!(
+            line(call(
+                "playNote(Location,Instrument,int)",
+                &[&at, "PLING", "24"]
+            )),
+            Some(format!(
+                "playsound minecraft:block.note_block.pling record {ME} 1 64 2 3 2"
+            ))
+        );
+        assert_eq!(
+            line(call(
+                "playNote(Location,Instrument,int)",
+                &[&at, "KAZOO", "1"]
+            )),
+            None
+        );
+        assert_eq!(
+            line(call(
+                "playNote(Location,Instrument,int)",
+                &[&at, "PIANO", "25"]
+            )),
+            None
         );
     }
 

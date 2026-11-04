@@ -59,6 +59,9 @@ public abstract class PlayerMisc extends PlayerStubs {
         if (lines != null) for (int i = 0; i < Math.min(4, lines.size()); i++) text[i] = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(lines.get(i));
         sendSignChange(loc, text, dyeColor, hasGlowingText);
     }
+    @Override public void playNote(org.bukkit.Location loc, org.bukkit.Instrument instrument, org.bukkit.Note note) {
+        HostBridge.callVoid("Player", getUniqueId(), "playNote(Location,Instrument,int)", loc, instrument, (int) note.getId());
+    }
     @Override public synchronized void hidePlayer(org.bukkit.entity.Player other) { hidden.add(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("hidePlayer(Player)", other); }
     @Override public synchronized void showPlayer(org.bukkit.entity.Player other) { hidden.remove(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("showPlayer(Player)", other); }
     @Override public synchronized void hideEntity(org.bukkit.plugin.Plugin plugin, org.bukkit.entity.Entity entity) {
