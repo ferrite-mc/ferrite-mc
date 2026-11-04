@@ -193,6 +193,10 @@ public abstract class PlayerMisc extends PlayerStubs {
             @Override public boolean isSprint() { return (flags & 64) != 0; }
         };
     }
+    /** The client's latest answer to a pushed resource pack, or null before it has sent any. */
+    @Override public org.bukkit.event.player.PlayerResourcePackStatusEvent.Status getResourcePackStatus() {
+        try { return super.getResourcePackStatus(); } catch (UnsupportedOperationException none) { return null; }
+    }
     @Override public org.bukkit.inventory.ItemStack getItemInHand() { return getInventory().getItemInMainHand(); }
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }

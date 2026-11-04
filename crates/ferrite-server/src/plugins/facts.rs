@@ -117,6 +117,29 @@ fn controls_answer(controls: &Controls, method: &str) -> Option<String> {
     })
 }
 
+/// The Bukkit `PlayerResourcePackStatusEvent.Status` names, in `ServerboundResourcePackPacket.Action`
+/// order.
+const PACK_STATUS: [&str; 8] = [
+    "SUCCESSFULLY_LOADED",
+    "DECLINED",
+    "FAILED_DOWNLOAD",
+    "ACCEPTED",
+    "DOWNLOADED",
+    "INVALID_URL",
+    "FAILED_RELOAD",
+    "DISCARDED",
+];
+
+fn pack_registry() -> &'static Mutex<HashMap<Uuid, i32>> {
+    static PACKS: OnceLock<Mutex<HashMap<Uuid, i32>>> = OnceLock::new();
+    PACKS.get_or_init(Default::default)
+}
+
+/// Records the client's latest resource pack action.
+pub fn set_pack_status(player: Uuid, action: i32) {
+    pack_registry().lock().unwrap().insert(player, action);
+}
+
 fn fall_registry() -> &'static Mutex<HashMap<Uuid, f32>> {
     static FALL: OnceLock<Mutex<HashMap<Uuid, f32>>> = OnceLock::new();
     FALL.get_or_init(Default::default)
@@ -169,6 +192,7 @@ pub fn forget(player: Uuid) {
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
     fall_registry().lock().unwrap().remove(&player);
+    pack_registry().lock().unwrap().remove(&player);
     controls_registry().lock().unwrap().remove(&player);
     vitals_registry().lock().unwrap().remove(&player);
     history_registry().lock().unwrap().remove(&player);
@@ -273,6 +297,14 @@ pub fn answer(call: &HostCall) -> Option<String> {
             .copied()
             .unwrap_or_default();
         return controls_answer(&controls, &call.method);
+    }
+    if call.method == "getResourcePackStatus()" {
+        // No answer until the client has reported something: Bukkit returns null then.
+        let action = *pack_registry().lock().unwrap().get(&player)?;
+        return usize::try_from(action)
+            .ok()
+            .and_then(|index| PACK_STATUS.get(index))
+            .map(|name| (*name).to_owned());
     }
     if call.method == "getFallDistance()" {
         return fall_registry()
@@ -467,6 +499,27 @@ mod tests {
         set_sleeping(player, true);
         assert_eq!(ask("isSleeping()").as_deref(), Some("true"));
         assert_eq!(ask("isDeeplySleeping()").as_deref(), Some("false"));
+        forget(player);
+    }
+
+    #[test]
+    fn resource_pack_status_names_follow_the_client_actions() {
+        let player = Uuid::from_u128(0x9ac4);
+        let ask = || {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: "getResourcePackStatus()".into(),
+                args: vec![],
+            })
+        };
+        assert_eq!(ask(), None);
+        set_pack_status(player, 3);
+        assert_eq!(ask().as_deref(), Some("ACCEPTED"));
+        set_pack_status(player, 0);
+        assert_eq!(ask().as_deref(), Some("SUCCESSFULLY_LOADED"));
+        set_pack_status(player, 99);
+        assert_eq!(ask(), None);
         forget(player);
     }
 

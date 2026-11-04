@@ -16,6 +16,8 @@ pub enum ServerboundPlay {
     PlayerCommand(ServerboundPlayerCommand),
     /// Vanilla `ServerboundPlayerInputPacket`: the movement keys currently held.
     PlayerInput(PlayerInput),
+    /// Vanilla `ServerboundResourcePackPacket`: how the client is doing with a pushed pack.
+    ResourcePackResponse(ResourcePackResponse),
     SignUpdate(SignUpdate),
     SetHeldItem(SetHeldItem),
     CreativeSlot(CreativeSlot<ferrite_item::ItemStack>),
@@ -299,6 +301,9 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         52 => Some(ServerboundPlay::SelectTrade(SelectTrade::decode(&mut b)?)),
         41 => Some(ServerboundPlay::PlayerAction(PlayerAction::decode(&mut b)?)),
         43 => Some(ServerboundPlay::PlayerInput(PlayerInput::decode(&mut b)?)),
+        50 => Some(ServerboundPlay::ResourcePackResponse(
+            ResourcePackResponse::decode(&mut b)?,
+        )),
         42 => Some(ServerboundPlay::PlayerCommand(
             ServerboundPlayerCommand::decode(&mut b)?,
         )),

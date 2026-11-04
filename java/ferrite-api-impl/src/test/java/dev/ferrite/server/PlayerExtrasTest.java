@@ -200,4 +200,12 @@ class PlayerExtrasTest {
             assertFalse(input.isSneak());
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void resourcePackStatusIsNullUntilTheClientAnswers() {
+        assertNull(player.getResourcePackStatus());
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("getResourcePackStatus()") ? "DECLINED" : null;
+        try {
+            assertEquals(org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.DECLINED, player.getResourcePackStatus());
+        } finally { HostBridge.transport = null; }
+    }
 }

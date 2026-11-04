@@ -580,6 +580,10 @@ packet!(ServerboundPlayerCommand,42,Serverbound,{entity_id:VarInt,action:VarInt,
 // Vanilla `ServerboundPlayerInputPacket`: `Input` flags (1 forward, 2 backward, 4 left, 8 right,
 // 16 jump, 32 shift, 64 sprint), sent whenever they change.
 packet!(PlayerInput,43,Serverbound,{flags:u8});
+// Vanilla `ServerboundResourcePackPacket`: the client's progress on a pack the server pushed.
+// `action` is `Action.ordinal()`: 0 loaded, 1 declined, 2 failed download, 3 accepted,
+// 4 downloaded, 5 invalid url, 6 failed reload, 7 discarded.
+packet!(ResourcePackResponse,50,Serverbound,{id:Uuid,action:VarInt});
 item_packet!(SetCursorItem<I = ItemStack>,98,Clientbound,{item:I});
 item_packet!(SetPlayerInventory<I = ItemStack>,110,Clientbound,{slot:VarInt,item:I});
 packet!(ServerboundContainerClose,19,Serverbound,{window:VarInt});
@@ -1666,6 +1670,10 @@ mod interaction_tests {
             data: VarInt(0),
         });
         roundtrip(PlayerInput { flags: 0b0110_0001 });
+        roundtrip(ResourcePackResponse {
+            id: Uuid::from_u128(5),
+            action: VarInt(3),
+        });
     }
     #[test]
     fn entity_packets_roundtrip() {

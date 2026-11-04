@@ -2910,6 +2910,9 @@ impl Player {
                         },
                     );
                 }
+                ServerboundPlay::ResourcePackResponse(p) => {
+                    crate::plugins::facts::set_pack_status(self.uuid, p.action.0);
+                }
                 ServerboundPlay::PlayerInput(p) => {
                     crate::plugins::facts::set_input(self.uuid, p.flags);
                 }
