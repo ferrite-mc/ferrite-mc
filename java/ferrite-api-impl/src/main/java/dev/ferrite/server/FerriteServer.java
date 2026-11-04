@@ -94,6 +94,20 @@ public class FerriteServer extends ServerStubs {
         for (var player : players.values()) if (player.isOp()) result.add(player);
         return java.util.Set.copyOf(result);
     }
+    /** Vanilla objective criteria: only these are written by plugins, everything else is maintained by the game. */
+    @Override public org.bukkit.scoreboard.Criteria getScoreboardCriteria(String name) {
+        java.util.Objects.requireNonNull(name, "name");
+        boolean writable = java.util.Set.of("dummy", "trigger", "deathCount", "playerKillCount", "totalKillCount").contains(name);
+        var render = name.equals("health") ? org.bukkit.scoreboard.RenderType.HEARTS : org.bukkit.scoreboard.RenderType.INTEGER;
+        return new org.bukkit.scoreboard.Criteria() {
+            @Override public String getName() { return name; }
+            @Override public boolean isReadOnly() { return !writable; }
+            @Override public org.bukkit.scoreboard.RenderType getDefaultRenderType() { return render; }
+            @Override public boolean equals(Object other) { return other instanceof org.bukkit.scoreboard.Criteria c && c.getName().equals(name); }
+            @Override public int hashCode() { return name.hashCode(); }
+            @Override public String toString() { return "Criteria[" + name + "]"; }
+        };
+    }
     @Override public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder holder, int size) { return FerriteInventory.create(holder, org.bukkit.event.inventory.InventoryType.CHEST, size); }
     @Override public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder holder, int size, String title) { java.util.Objects.requireNonNull(title); return FerriteInventory.create(holder, org.bukkit.event.inventory.InventoryType.CHEST, size, title); }
     @Override public org.bukkit.inventory.Inventory createInventory(org.bukkit.inventory.InventoryHolder holder, int size, net.kyori.adventure.text.Component title) { java.util.Objects.requireNonNull(title); return FerriteInventory.create(holder, org.bukkit.event.inventory.InventoryType.CHEST, size, net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(title)); }
