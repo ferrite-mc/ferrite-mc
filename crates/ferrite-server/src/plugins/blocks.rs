@@ -1,6 +1,32 @@
 use ferrite_plugin::{HostCall, PlayerCommand};
 
 pub fn block_command(call: &HostCall) -> Option<PlayerCommand> {
+    if call.owner == "Player"
+        && call.method == "openVirtualSign(int,int,int,Side)"
+        && call.args.len() == 4
+    {
+        let player = call.subject.parse().ok()?;
+        let x: i32 = call.args[0].parse().ok()?;
+        let y: i32 = call.args[1].parse().ok()?;
+        let z: i32 = call.args[2].parse().ok()?;
+        if !(-33_554_432..=33_554_431).contains(&x)
+            || !(-2048..=2047).contains(&y)
+            || !(-33_554_432..=33_554_431).contains(&z)
+        {
+            return None;
+        }
+        let front = match call.args[3].as_str() {
+            "FRONT" => true,
+            "BACK" => false,
+            _ => return None,
+        };
+        let position = ferrite_protocol::types::BlockPos::new(x, y, z).pack();
+        return Some(PlayerCommand::OpenVirtualSign {
+            player,
+            position,
+            front,
+        });
+    }
     if call.owner != "Player"
         || call.method != "sendBlockDamage(Location,float,int)"
         || call.args.len() != 3
@@ -48,6 +74,22 @@ mod tests {
                 "99".into(),
             ],
         }
+    }
+    #[test]
+    fn virtual_sign_has_position_and_side() {
+        let mut call = call();
+        call.method = "openVirtualSign(int,int,int,Side)".into();
+        call.args = vec!["1".into(), "64".into(), "-2".into(), "BACK".into()];
+        assert_eq!(
+            block_command(&call),
+            Some(PlayerCommand::OpenVirtualSign {
+                player: call.subject.parse().unwrap(),
+                position: ferrite_protocol::types::BlockPos::new(1, 64, -2).pack(),
+                front: false
+            })
+        );
+        call.args[3] = "INVALID".into();
+        assert_eq!(block_command(&call), None);
     }
     #[test]
     fn block_damage_requests_visual_update() {
