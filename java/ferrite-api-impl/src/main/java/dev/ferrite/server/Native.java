@@ -49,6 +49,7 @@ public final class Native {
     static boolean worldSetBlock(String world, int x, int y, int z, String material) { return !enabled() || Bindings.worldSetBlock(world, x, y, z, material); }
     static void playerState(String player, int kind, double value) { if (enabled()) Bindings.playerState(player, kind, value); }
     static void playerMessage(String player, String message, boolean component) { if (enabled()) Bindings.playerMessage(player, message, component); }
+    static String hostCall(String owner, String subject, String method, String args) { return enabled() ? Bindings.hostCall(owner, subject, method, args) : null; }
     private static volatile boolean linked;
     /** Marks the native bridge as available; the host registers natives before Bootstrap.start. */
     static void link() { linked = enabled(); }
@@ -88,6 +89,7 @@ public final class Native {
         static native boolean playerCommand(String player, String name, String message);
         static native boolean worldSetBlock(String world, int x, int y, int z, String material);
         static native void playerState(String player, int kind, double value);
+        static native String hostCall(String owner, String subject, String method, String args);
         static native void playerMessage(String player, String message, boolean component);
         static native void eventRegistered(String type);
         static native void eventsCleared();
