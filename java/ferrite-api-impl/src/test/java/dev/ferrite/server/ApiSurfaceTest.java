@@ -328,6 +328,21 @@ class ApiSurfaceTest {
         } finally { HostBridge.transport = null; }
     }
 
+    @Test void permissionAttachmentsGrantAndRevoke() {
+        var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000cf");
+        var p = FerritePlayer.create(server, id, "Perms", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));
+        var plugin = (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.plugin.Plugin.class},
+            (proxy, method, args) -> method.getName().equals("isEnabled") ? Boolean.TRUE : method.getReturnType() == boolean.class ? (Object) Boolean.FALSE : null);
+        assertFalse(p.hasPermission("ferrite.test.fly"));
+        assertFalse(p.isPermissionSet("ferrite.test.fly"));
+        var attachment = p.addAttachment(plugin, "ferrite.test.fly", true);
+        assertTrue(p.hasPermission("ferrite.test.fly"));
+        assertTrue(p.isPermissionSet("ferrite.test.fly"));
+        assertTrue(p.getEffectivePermissions().stream().anyMatch(i -> i.getPermission().equals("ferrite.test.fly") && i.getValue()));
+        p.removeAttachment(attachment);
+        assertFalse(p.hasPermission("ferrite.test.fly"));
+    }
+
     @Test void experienceCanBeSetFromATotalNumberOfPoints() {
         var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000cd");
         var p = FerritePlayer.create(server, id, "Total", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));
