@@ -88,7 +88,9 @@ pub fn answer(call: &HostCall) -> Option<String> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
-    if let Some(reply) = client_setting(&ferrite_net::settings::get(player)?, &call.method) {
+    if let Some(settings) = ferrite_net::settings::get(player)
+        && let Some(reply) = client_setting(&settings, &call.method)
+    {
         return Some(reply);
     }
     let facts = *registry().lock().unwrap().get(&player)?;
