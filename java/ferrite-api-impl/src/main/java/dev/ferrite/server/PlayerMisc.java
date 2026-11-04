@@ -180,6 +180,19 @@ public abstract class PlayerMisc extends PlayerStubs {
         HostBridge.callVoid("Player", getUniqueId(), "openMerchant(String,String)", title, offers.toString());
         try { return getOpenInventory(); } catch (UnsupportedOperationException | IllegalStateException unavailable) { return null; }
     }
+    /** The movement keys the client last reported (`player_input`); all false until it sends any. */
+    @Override public org.bukkit.Input getCurrentInput() {
+        int flags = HostBridge.callInt("Player", getUniqueId(), "getInputFlags()");
+        return new org.bukkit.Input() {
+            @Override public boolean isForward() { return (flags & 1) != 0; }
+            @Override public boolean isBackward() { return (flags & 2) != 0; }
+            @Override public boolean isLeft() { return (flags & 4) != 0; }
+            @Override public boolean isRight() { return (flags & 8) != 0; }
+            @Override public boolean isJump() { return (flags & 16) != 0; }
+            @Override public boolean isSneak() { return (flags & 32) != 0; }
+            @Override public boolean isSprint() { return (flags & 64) != 0; }
+        };
+    }
     @Override public org.bukkit.inventory.ItemStack getItemInHand() { return getInventory().getItemInMainHand(); }
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }

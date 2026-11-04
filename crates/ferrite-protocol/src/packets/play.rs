@@ -577,6 +577,9 @@ packet!(ServerboundClientCommand,12,Serverbound,{action:VarInt});
 packet!(ServerboundUseItem,67,Serverbound,{hand:VarInt,sequence:VarInt,yaw:f32,pitch:f32});
 // Vanilla `ServerboundPlayerCommandPacket`: 3/4 = start/stop sprinting.
 packet!(ServerboundPlayerCommand,42,Serverbound,{entity_id:VarInt,action:VarInt,data:VarInt});
+// Vanilla `ServerboundPlayerInputPacket`: `Input` flags (1 forward, 2 backward, 4 left, 8 right,
+// 16 jump, 32 shift, 64 sprint), sent whenever they change.
+packet!(PlayerInput,43,Serverbound,{flags:u8});
 item_packet!(SetCursorItem<I = ItemStack>,98,Clientbound,{item:I});
 item_packet!(SetPlayerInventory<I = ItemStack>,110,Clientbound,{slot:VarInt,item:I});
 packet!(ServerboundContainerClose,19,Serverbound,{window:VarInt});
@@ -1662,6 +1665,7 @@ mod interaction_tests {
             action: VarInt(3),
             data: VarInt(0),
         });
+        roundtrip(PlayerInput { flags: 0b0110_0001 });
     }
     #[test]
     fn entity_packets_roundtrip() {

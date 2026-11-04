@@ -66,6 +66,48 @@ fn vitals_answer(vitals: &Vitals, method: &str) -> Option<String> {
     })
 }
 
+/// What the client last said about its keys and sprinting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Controls {
+    /// `Input` flags: 1 forward, 2 backward, 4 left, 8 right, 16 jump, 32 shift, 64 sprint.
+    input: u8,
+    sprinting: bool,
+}
+
+fn controls_registry() -> &'static Mutex<HashMap<Uuid, Controls>> {
+    static CONTROLS: OnceLock<Mutex<HashMap<Uuid, Controls>>> = OnceLock::new();
+    CONTROLS.get_or_init(Default::default)
+}
+
+/// Records the movement keys from a `player_input` packet.
+pub fn set_input(player: Uuid, flags: u8) {
+    controls_registry()
+        .lock()
+        .unwrap()
+        .entry(player)
+        .or_default()
+        .input = flags;
+}
+
+/// Records a start or stop of sprinting from a `player_command` packet.
+pub fn set_sprinting(player: Uuid, sprinting: bool) {
+    controls_registry()
+        .lock()
+        .unwrap()
+        .entry(player)
+        .or_default()
+        .sprinting = sprinting;
+}
+
+fn controls_answer(controls: &Controls, method: &str) -> Option<String> {
+    Some(match method {
+        "isSneaking()" => (controls.input & 32 != 0).to_string(),
+        "isSprinting()" => (controls.sprinting || controls.input & 64 != 0).to_string(),
+        "getInputFlags()" => controls.input.to_string(),
+        _ => return None,
+    })
+}
+
 fn fall_registry() -> &'static Mutex<HashMap<Uuid, f32>> {
     static FALL: OnceLock<Mutex<HashMap<Uuid, f32>>> = OnceLock::new();
     FALL.get_or_init(Default::default)
@@ -118,6 +160,7 @@ pub fn forget(player: Uuid) {
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
     fall_registry().lock().unwrap().remove(&player);
+    controls_registry().lock().unwrap().remove(&player);
     vitals_registry().lock().unwrap().remove(&player);
     history_registry().lock().unwrap().remove(&player);
     ferrite_net::settings::forget(player);
@@ -204,6 +247,20 @@ pub fn answer(call: &HostCall) -> Option<String> {
         && let Some(reply) = vitals_answer(vitals, &call.method)
     {
         return Some(reply);
+    }
+    if matches!(
+        call.method.as_str(),
+        "isSneaking()" | "isSprinting()" | "getInputFlags()"
+    ) {
+        // An online player who has sent no keys yet is standing still.
+        registry().lock().unwrap().get(&player)?;
+        let controls = controls_registry()
+            .lock()
+            .unwrap()
+            .get(&player)
+            .copied()
+            .unwrap_or_default();
+        return controls_answer(&controls, &call.method);
     }
     if call.method == "getFallDistance()" {
         return fall_registry()
@@ -333,6 +390,41 @@ mod tests {
         assert_eq!(ask("getFireTicks()").as_deref(), Some("0"));
         forget(player);
         assert_eq!(ask("getRemainingAir()"), None);
+    }
+
+    #[test]
+    fn keys_and_sprinting_are_answered_for_online_players() {
+        let player = Uuid::from_u128(0x1e75);
+        let ask = |method: &str| {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: method.into(),
+                args: vec![],
+            })
+        };
+        assert_eq!(ask("isSneaking()"), None);
+        record(
+            player,
+            PlayerFacts {
+                entity_id: 1,
+                joined: SystemTime::now(),
+                address: None,
+            },
+        );
+        assert_eq!(ask("isSneaking()").as_deref(), Some("false"));
+        assert_eq!(ask("getInputFlags()").as_deref(), Some("0"));
+        set_input(player, 1 | 32);
+        assert_eq!(ask("isSneaking()").as_deref(), Some("true"));
+        assert_eq!(ask("getInputFlags()").as_deref(), Some("33"));
+        assert_eq!(ask("isSprinting()").as_deref(), Some("false"));
+        set_sprinting(player, true);
+        assert_eq!(ask("isSprinting()").as_deref(), Some("true"));
+        set_sprinting(player, false);
+        set_input(player, 64);
+        assert_eq!(ask("isSprinting()").as_deref(), Some("true"));
+        forget(player);
+        assert_eq!(ask("isSneaking()"), None);
     }
 
     #[test]

@@ -2910,6 +2910,9 @@ impl Player {
                         },
                     );
                 }
+                ServerboundPlay::PlayerInput(p) => {
+                    crate::plugins::facts::set_input(self.uuid, p.flags);
+                }
                 ServerboundPlay::PlayerCommand(p) => {
                     // Vanilla `ServerboundPlayerCommandPacket.Action.STOP_SLEEPING` (2).
                     if p.action.0 == 2 {
@@ -2918,8 +2921,14 @@ impl Player {
                     // `ServerboundPlayerCommandPacket.Action.START_SPRINTING/STOP_SPRINTING`.
                     if p.entity_id.0 == self.entity {
                         match p.action.0 {
-                            3 => self.survival.sprinting = true,
-                            4 => self.survival.sprinting = false,
+                            3 => {
+                                self.survival.sprinting = true;
+                                crate::plugins::facts::set_sprinting(self.uuid, true);
+                            }
+                            4 => {
+                                self.survival.sprinting = false;
+                                crate::plugins::facts::set_sprinting(self.uuid, false);
+                            }
                             _ => {}
                         }
                     }

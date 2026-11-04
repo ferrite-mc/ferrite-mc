@@ -188,4 +188,16 @@ class PlayerExtrasTest {
         assertThrows(IllegalArgumentException.class, () -> player.setHealthScale(0));
         assertThrows(IllegalArgumentException.class, () -> player.setHealthScale(Double.NaN));
     }
+
+    @Test void currentInputDecodesTheKeyFlags() {
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("getInputFlags()") ? "81" : null;
+        try {
+            var input = player.getCurrentInput();
+            assertTrue(input.isForward());
+            assertTrue(input.isJump());
+            assertTrue(input.isSprint());
+            assertFalse(input.isBackward());
+            assertFalse(input.isSneak());
+        } finally { HostBridge.transport = null; }
+    }
 }
