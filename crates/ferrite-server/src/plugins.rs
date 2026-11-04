@@ -1,6 +1,7 @@
 //! Loading plugins into the embedded JVM at server startup.
 mod blocks;
 mod extra;
+mod messaging;
 mod visual;
 
 use std::path::{Path, PathBuf};
@@ -146,6 +147,12 @@ impl PluginBridge {
                             }
                             if let (Some(players), Some(command)) =
                                 (&players, blocks::block_command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, messaging::message_command(call))
                             {
                                 players(command);
                                 return Some(String::new());

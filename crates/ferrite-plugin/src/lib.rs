@@ -272,6 +272,11 @@ pub enum PlayerCommand {
         source: i32,
         progress: i8,
     },
+    CustomChatCompletions {
+        player: uuid::Uuid,
+        action: i32,
+        entries: Vec<String>,
+    },
     VisualHealth {
         player: uuid::Uuid,
         health: f32,

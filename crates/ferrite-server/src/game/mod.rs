@@ -126,6 +126,28 @@ mod tests {
     }
 
     #[test]
+    fn plugin_completions_reach_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let entries = vec!["hello".into(), "".into()];
+        let command = ferrite_plugin::PlayerCommand::CustomChatCompletions {
+            player,
+            action: 2,
+            entries: entries.clone(),
+        };
+        assert_eq!(
+            routed(command.clone(), player)
+                .iter()
+                .map(bytes)
+                .collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&CustomChatCompletions {
+                action: VarInt(2),
+                entries
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
     fn plugin_block_damage_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
         let position = ferrite_protocol::types::BlockPos::new(1, 64, 2).pack();
@@ -1350,6 +1372,21 @@ fn route_plugin_command(
                         progress,
                         level: Some(level),
                     });
+            }
+        }
+        PlayerCommand::CustomChatCompletions {
+            player,
+            action,
+            entries,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &CustomChatCompletions {
+                        action: VarInt(action),
+                        entries,
+                    },
+                );
             }
         }
         PlayerCommand::VisualBlockDamage {
