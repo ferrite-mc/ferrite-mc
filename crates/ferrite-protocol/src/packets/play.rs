@@ -515,6 +515,44 @@ impl<I: Encode + Decode> Packet for SetEquipment<I> {
     const STATE: State = State::Play;
     const BOUND: Bound = Bound::Clientbound;
 }
+/// One link of `ClientboundServerLinksPacket`: a known type (its index in vanilla `KnownLinkType`,
+/// 0 bug report .. 9 announcements) or a plain-text label, then the URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerLinkEntry {
+    pub known: Option<i32>,
+    pub label: String,
+    pub url: String,
+}
+impl Encode for ServerLinkEntry {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self.known {
+            Some(kind) => {
+                true.encode(out);
+                VarInt(kind).encode(out);
+            }
+            None => {
+                false.encode(out);
+                crate::types::PlainText(self.label.clone()).encode(out);
+            }
+        }
+        self.url.encode(out);
+    }
+}
+impl Decode for ServerLinkEntry {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        let (known, label) = if bool::decode(buf)? {
+            (Some(VarInt::decode(buf)?.0), String::new())
+        } else {
+            (None, crate::types::PlainText::decode(buf)?.0)
+        };
+        Ok(Self {
+            known,
+            label,
+            url: String::decode(buf)?,
+        })
+    }
+}
+packet!(ServerLinks,140,Clientbound,{links:Vec<ServerLinkEntry>});
 packet!(CustomPayload,24,Clientbound,{channel:String,data:crate::codec::RestBytes});
 packet!(Transfer,132,Clientbound,{host:String,port:VarInt});
 packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required:bool,prompt:Option<Vec<u8>>});
@@ -2241,6 +2279,24 @@ mod command_feedback_tests {
         packet.encode(&mut bytes);
         assert_eq!(bytes[..2], [5, 0x85]);
         rt(packet);
+    }
+
+    #[test]
+    fn server_links_roundtrip_known_and_custom_entries() {
+        rt(ServerLinks {
+            links: vec![
+                ServerLinkEntry {
+                    known: Some(6),
+                    label: String::new(),
+                    url: "https://example.org".into(),
+                },
+                ServerLinkEntry {
+                    known: None,
+                    label: "Wiki".into(),
+                    url: "https://wiki.example.org".into(),
+                },
+            ],
+        });
     }
 
     #[test]

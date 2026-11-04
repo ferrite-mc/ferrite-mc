@@ -728,6 +728,17 @@ impl Player {
                     },
                 );
             }
+            PluginPacket::ServerLinks(links) => send(
+                self,
+                &ferrite_protocol::packets::play::ServerLinks {
+                    links: links
+                        .into_iter()
+                        .map(|(known, label, url)| {
+                            ferrite_protocol::packets::play::ServerLinkEntry { known, label, url }
+                        })
+                        .collect(),
+                },
+            ),
             PluginPacket::PotionRemove { entity_id, effect } => send(
                 self,
                 &ferrite_protocol::packets::play::RemoveMobEffect {

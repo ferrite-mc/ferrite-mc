@@ -62,6 +62,15 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public void playNote(org.bukkit.Location loc, org.bukkit.Instrument instrument, org.bukkit.Note note) {
         HostBridge.callVoid("Player", getUniqueId(), "playNote(Location,Instrument,int)", loc, instrument, (int) note.getId());
     }
+    @Override public void sendLinks(org.bukkit.ServerLinks links) {
+        java.util.List<String> entries = new java.util.ArrayList<>();
+        for (var link : links.getLinks()) {
+            var type = link.getType();
+            String head = type != null ? "KNOWN:" + type.ordinal() : "CUSTOM:" + link.getDisplayName();
+            entries.add(head + "	" + link.getUrl());
+        }
+        HostBridge.callVoid("Player", getUniqueId(), "sendLinks(ServerLinks)", entries);
+    }
     @Override public synchronized void hidePlayer(org.bukkit.entity.Player other) { hidden.add(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("hidePlayer(Player)", other); }
     @Override public synchronized void showPlayer(org.bukkit.entity.Player other) { hidden.remove(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("showPlayer(Player)", other); }
     @Override public synchronized void hideEntity(org.bukkit.plugin.Plugin plugin, org.bukkit.entity.Entity entity) {

@@ -209,6 +209,8 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `ClientboundServerLinksPacket`: `(known type index, label, url)` per link.
+    ServerLinks(Vec<(Option<i32>, String, String)>),
     /// A sign's front text shown to one player only (`ClientboundBlockEntityDataPacket`).
     SignText {
         pos: [i32; 3],

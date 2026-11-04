@@ -303,6 +303,34 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
                 glowing: arg(3)? == "true",
             }
         }
+        "sendLinks(ServerLinks)" => {
+            let mut links = Vec::new();
+            for entry in arg(0)?.split(PART).filter(|e| !e.is_empty()).take(100) {
+                // `KNOWN:<index>` or `CUSTOM:<label>`, a tab, then the URL.
+                let (head, url) = entry.split_once('\t')?;
+                if !(url.starts_with("http://") || url.starts_with("https://")) || url.len() > 4096
+                {
+                    return None;
+                }
+                let (known, label) = match head.split_once(':')? {
+                    ("KNOWN", index) => (
+                        Some(index.parse::<i32>().ok().filter(|i| (0..=9).contains(i))?),
+                        String::new(),
+                    ),
+                    ("CUSTOM", label) => (
+                        None,
+                        label
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(256)
+                            .collect(),
+                    ),
+                    _ => return None,
+                };
+                links.push((known, label, url.to_owned()));
+            }
+            PluginPacket::ServerLinks(links)
+        }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "sendOpLevel(byte)" => {
             let level: u8 = arg(0)?.parse().ok().filter(|level| *level <= 4)?;
@@ -455,6 +483,37 @@ mod tests {
             })
         );
         assert_eq!(sign("plaid"), None);
+    }
+
+    #[test]
+    fn server_links_are_parsed_and_checked() {
+        let sep = PART.to_string();
+        let good = [
+            "KNOWN:6\thttps://example.org",
+            "CUSTOM:Wiki\thttps://wiki.example.org",
+        ]
+        .join(&sep);
+        assert_eq!(
+            packet(call("sendLinks(ServerLinks)", &[&good])),
+            Some(PluginPacket::ServerLinks(vec![
+                (Some(6), String::new(), "https://example.org".into()),
+                (None, "Wiki".into(), "https://wiki.example.org".into()),
+            ]))
+        );
+        assert!(
+            packet(call(
+                "sendLinks(ServerLinks)",
+                &["KNOWN:6\tjavascript:alert(1)"]
+            ))
+            .is_none()
+        );
+        assert!(
+            packet(call(
+                "sendLinks(ServerLinks)",
+                &["KNOWN:99\thttps://example.org"]
+            ))
+            .is_none()
+        );
     }
 
     #[test]
