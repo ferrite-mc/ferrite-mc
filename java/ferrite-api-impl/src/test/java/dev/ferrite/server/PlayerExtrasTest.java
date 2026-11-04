@@ -236,4 +236,28 @@ class PlayerExtrasTest {
         p.setNoPhysics(true);
         assertTrue(p.hasNoPhysics());
     }
+
+    @Test void smallPlayerAndWorldLeftovers() {
+        assertTrue(player.canUseEquipmentSlot(org.bukkit.inventory.EquipmentSlot.HEAD));
+        assertFalse(player.canUseEquipmentSlot(org.bukkit.inventory.EquipmentSlot.BODY));
+        assertNull(player.releaseLeftShoulderEntity());
+        assertEquals(player.getUniqueId().toString(), player.serialize().get("UUID"));
+        var world = player.getWorld();
+        assertTrue(world.canGenerateStructures());
+        assertNull(world.getRaid(1));
+        assertEquals(4.0f, world.getVoidDamageAmount());
+        world.setVoidDamageAmount(8f);
+        assertEquals(8f, world.getVoidDamageAmount());
+        world.setChunkForceLoaded(2, 3, true);
+        assertTrue(world.isChunkForceLoaded(2, 3));
+        assertEquals(1, world.getForceLoadedChunks().size());
+        world.setChunkForceLoaded(2, 3, false);
+        assertFalse(world.isChunkForceLoaded(2, 3));
+        var plugin = (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.plugin.Plugin.class}, (proxy, method, args) -> method.getName().equals("hashCode") ? 7 : method.getName().equals("equals") ? proxy == args[0] : null);
+        assertTrue(world.addPluginChunkTicket(1, 1, plugin));
+        assertFalse(world.addPluginChunkTicket(1, 1, plugin));
+        assertEquals(1, world.getPluginChunkTickets().get(plugin).size());
+        world.removePluginChunkTickets(plugin);
+        assertTrue(world.getPluginChunkTickets().isEmpty());
+    }
 }

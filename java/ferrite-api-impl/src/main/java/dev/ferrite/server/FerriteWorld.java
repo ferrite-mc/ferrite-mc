@@ -129,6 +129,14 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> spawnLimits = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> ticksPerSpawns = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean allowAnimals = true, allowMonsters = true;
+    // Kept so plugins read back what they set; the game does not act on these.
+    private volatile float voidDamageAmount = 4.0f;
+    private volatile double voidDamageOffset = -64.0;
+    private final java.util.Map<Long, java.util.Set<org.bukkit.plugin.Plugin>> chunkTickets = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Set<Long> forceLoaded = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static long chunkKey(int x, int z) { return ((long) x & 0xffffffffL) | (((long) z & 0xffffffffL) << 32); }
+    private static int keyX(long key) { return (int) key; }
+    private static int keyZ(long key) { return (int) (key >> 32); }
 
     private volatile org.bukkit.WorldBorder worldBorder;
     private org.bukkit.WorldBorder border() {
@@ -372,8 +380,28 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getViewDistance", "getSendViewDistance" -> server.getViewDistance();
             case "getSimulationDistance" -> server.getSimulationDistance();
             case "getPersistentDataContainer" -> data;
-            case "getPluginChunkTickets" -> java.util.Map.of();
-            case "getForceLoadedChunks", "getRaids", "getPopulators" -> java.util.List.of();
+            case "getPluginChunkTickets" -> {
+                var tickets = new java.util.LinkedHashMap<org.bukkit.plugin.Plugin, java.util.Collection<org.bukkit.Chunk>>();
+                chunkTickets.forEach((key, plugins) -> { for (var plugin : plugins) tickets.computeIfAbsent(plugin, ignored -> new java.util.ArrayList<>()).add(chunk(keyX(key), keyZ(key))); });
+                yield tickets;
+            }
+            case "addPluginChunkTicket" -> chunkTickets.computeIfAbsent(chunkKey((int) args[0], (int) args[1]), ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(java.util.Objects.requireNonNull((org.bukkit.plugin.Plugin) args[2], "plugin"));
+            case "removePluginChunkTicket" -> { var plugins = chunkTickets.get(chunkKey((int) args[0], (int) args[1])); yield plugins != null && plugins.remove((org.bukkit.plugin.Plugin) args[2]); }
+            case "removePluginChunkTickets" -> { chunkTickets.values().forEach(plugins -> plugins.remove((org.bukkit.plugin.Plugin) args[0])); yield null; }
+            case "isChunkForceLoaded" -> forceLoaded.contains(chunkKey((int) args[0], (int) args[1]));
+            case "setChunkForceLoaded" -> { if ((boolean) args[2]) forceLoaded.add(chunkKey((int) args[0], (int) args[1])); else forceLoaded.remove(chunkKey((int) args[0], (int) args[1])); yield null; }
+            case "getForceLoadedChunks" -> { var chunks = new java.util.ArrayList<org.bukkit.Chunk>(); for (long key : forceLoaded) chunks.add(chunk(keyX(key), keyZ(key))); yield chunks; }
+            case "getRaids", "getPopulators" -> java.util.List.of();
+            case "getRaid", "locateNearestRaid" -> null;
+            case "canGenerateStructures" -> true;
+            case "getChunkCount" -> {
+                var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
+                yield text == null || text.isEmpty() ? 0 : text.split(String.valueOf(HostBridge.ITEM)).length;
+            }
+            case "getVoidDamageAmount" -> voidDamageAmount;
+            case "setVoidDamageAmount" -> { voidDamageAmount = (float) args[0]; yield null; }
+            case "getVoidDamageMinBuildHeightOffset" -> voidDamageOffset;
+            case "setVoidDamageMinBuildHeightOffset" -> { voidDamageOffset = (double) args[0]; yield null; }
             case "getFeatureFlags", "getListeningPluginChannels" -> java.util.Set.of();
             case "getGenerator", "getBiomeProvider", "getEnderDragonBattle" -> null;
             default -> NONE;

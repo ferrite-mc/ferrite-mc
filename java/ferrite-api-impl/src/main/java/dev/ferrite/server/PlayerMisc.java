@@ -114,6 +114,31 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public synchronized net.kyori.adventure.key.Key getWaypointStyle() { return waypointStyle; }
     @Override public synchronized void setWaypointStyle(net.kyori.adventure.key.Key style) { waypointStyle = Objects.requireNonNull(style, "style"); }
 
+    /** Players wear no body armor or saddle; every other slot is usable. */
+    @Override public boolean canUseEquipmentSlot(org.bukkit.inventory.EquipmentSlot slot) {
+        Objects.requireNonNull(slot, "slot");
+        return slot != org.bukkit.inventory.EquipmentSlot.BODY && slot != org.bukkit.inventory.EquipmentSlot.SADDLE;
+    }
+    /** Shoulder entities cannot be placed yet, so a shoulder is always empty and there is nothing to release. */
+    @Override public org.bukkit.entity.Entity releaseLeftShoulderEntity() { return null; }
+    @Override public org.bukkit.entity.Entity releaseRightShoulderEntity() { return null; }
+    @Override public Map<String, Object> serialize() {
+        var result = new LinkedHashMap<String, Object>();
+        result.put("UUID", getUniqueId().toString());
+        return result;
+    }
+    /** Adds the items to the inventory; what does not fit is returned unless it is dropped, which needs item entities. */
+    @Override public io.papermc.paper.entity.PlayerGiveResult give(Collection<org.bukkit.inventory.ItemStack> items, boolean dropIfFull) {
+        Objects.requireNonNull(items, "items");
+        var left = getInventory().addItem(items.toArray(new org.bukkit.inventory.ItemStack[0]));
+        if (dropIfFull && !left.isEmpty()) throw new UnsupportedOperationException("Ferrite: not implemented: Player#give with dropIfFull (item entities)");
+        var leftovers = List.copyOf(left.values());
+        return new io.papermc.paper.entity.PlayerGiveResult() {
+            @Override public Collection<org.bukkit.inventory.ItemStack> leftovers() { return leftovers; }
+            @Override public Collection<org.bukkit.entity.Item> drops() { return List.of(); }
+        };
+    }
+
     // ---- tab list and visibility ---------------------------------------------------------------
     private final Set<UUID> unlisted = new HashSet<>();
     private final Set<UUID> hidden = new HashSet<>();
