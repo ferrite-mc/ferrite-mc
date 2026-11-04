@@ -1,6 +1,7 @@
 //! Loading plugins into the embedded JVM at server startup.
 mod appearance;
 mod blocks;
+pub mod chunks;
 mod cooldown;
 mod craft;
 mod extra;
@@ -120,6 +121,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = craft::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = chunks::answer(call) {
                                 return Some(reply);
                             }
                             if let Some(reply) = rules::answer(call) {

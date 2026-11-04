@@ -77,9 +77,11 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             default -> HostBridge.dispatch("Block", "", method, args);
         });
     }
+    private boolean chunkLoaded(int x, int z) { return (boolean) HostBridge.call("World", id, "isChunkLoaded(int,int)", Boolean.class, x, z); }
     private org.bukkit.Chunk chunk(int x, int z) {
         return (org.bukkit.Chunk) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.Chunk.class}, (self, method, args) -> switch (method.getName()) {
             case "getX" -> x; case "getZ" -> z; case "getWorld" -> proxy;
+            case "isLoaded" -> chunkLoaded(x, z);
             case "getBlock" -> block(new Pos((x << 4) + (int) args[0], (int) args[1], (z << 4) + (int) args[2]));
             case "hashCode" -> java.util.Objects.hash(id, x, z);
             case "equals" -> self == args[0];
@@ -201,6 +203,17 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 var values = metadata.get((String) args[0]);
                 if (values != null) { values.remove((org.bukkit.plugin.Plugin) args[1]); if (values.isEmpty()) metadata.remove((String) args[0]); }
                 return null;
+            }
+            case "isChunkLoaded" -> {
+                int cx = args[0] instanceof org.bukkit.Chunk c ? c.getX() : (int) args[0];
+                int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
+                return chunkLoaded(cx, cz);
+            }
+            case "getLoadedChunks" -> {
+                var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
+                var chunks = new java.util.ArrayList<org.bukkit.Chunk>();
+                if (text != null && !text.isEmpty()) for (var pair : text.split(String.valueOf(HostBridge.ITEM))) { var parts = pair.split(","); chunks.add(chunk(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]))); }
+                return chunks.toArray(new org.bukkit.Chunk[0]);
             }
             case "getType" -> { if (args.length == 3) return typeAt(new Pos((int) args[0], (int) args[1], (int) args[2])); }
             case "getBlockData" -> { if (args.length == 3) return FerriteBlockData.create(typeAt(new Pos((int) args[0], (int) args[1], (int) args[2]))); }
