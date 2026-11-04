@@ -52,7 +52,9 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   블록·아이템·유체·엔티티·게임 이벤트 태그의 초기화를 검증했습니다. 격리 검사에서는 데이터 경로가
   설정되지 않아 Paper 재료 태그 제공자가 실패하고, NMS 경고와 종료 오류도 남아 있습니다.
   전체 호환성은 아직 검증되지 않았습니다.
-  `Server`에는 아직 구현되지 않은 상속 스텁 시그니처 55개가 있으며 부분 구현도 별도로 남아 있습니다.
+  **미구현 현황(정직하게)**: `PlayerStubs`에 약 600개, `ServerStubs`에 약 200개, 그 외 스케줄러·플러그인
+  매니저·레지스트리 등에 수십 개의 스텁이 남아 있으며 호출하면 `UnsupportedOperationException`을 던집니다.
+  목표는 자주 쓰는 메서드만이 아니라 **모든 메서드를 호스트로 라우팅**하는 것이며, 진행 중입니다.
 
 ## 현재 상태 한눈에
 
@@ -129,6 +131,13 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   텔레포트 쓰기는 소유 리전으로 라우팅됩니다. 최소 `org.bukkit.craftbukkit` shim 포함
 - Bukkit 스케줄러는 Folia 규칙대로 리전/글로벌/async 스케줄러로 라우팅
 - 월드·플레이어 위치/모드/OP 스냅샷, `Native.playerInventory`(인벤토리 쓰기 → 패킷·메뉴 재동기화)
+- 플레이어 쓰기 라우팅: 표시 이름(채팅에 반영), 킥, 타이틀·액션바·타이틀 초기화, 탭 목록 머리글/바닥글,
+  엔티티 스케줄러 작업(소유 플레이어 리전의 우편함으로 전달)
+- 월드·서버 변경은 콘솔 명령으로 변환: `setBlock`, IP 밴/해제, 화이트리스트 on/off
+- JDBC: SQLite·MySQL 드라이버를 번들하고(JVM 안에서 처리), `plugin.yml`의 `libraries:`를 Maven으로
+  해석해 `libraries/`에 받아 플러그인 클래스로더에 추가합니다. JVM은 `--enable-native-access=ALL-UNNAMED`로 시작
+- `Player` 메서드 1·2차 묶음: 메타데이터, 스코어보드 태그, 위치·시선, 경험치 계산, `performCommand`,
+  `sendActionBar`, `clearTitle`/`resetTitle`, 탭 머리글/바닥글 등
 
 ### 월드 생성
 - 밀도 함수, 노이즈 청크, aquifer, 표면 규칙, 동굴·협곡 카버가 바닐라 Java 참조와 일치
@@ -147,7 +156,8 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   못 미칩니다(청크 출력은 바이너리와 동일).
 - 나무·구조물 생성과 피스톤은 진행 중입니다.
 - 엔드 차원은 아직 없습니다(네더는 포탈까지 동작).
-- 플러그인 API는 Paper `Server`의 일부만 구현했습니다. EssentialsX 같은 대형 플러그인의 모든
+- 플러그인 API는 Paper `Server`/`Player`의 일부만 구현했습니다(`Player` 약 600개, `Server` 약 200개의
+  스텁 잔존). 모든 메서드를 라우팅 가능하게 만드는 작업이 진행 중이며, 라우팅을 다 구현한 뒤에 테스트합니다. EssentialsX 같은 대형 플러그인의 모든
   호출 경로는 동작하지 않고, NMS 타입에 의존하는 메서드는 `UnsupportedOperationException`을
   던집니다.
 
