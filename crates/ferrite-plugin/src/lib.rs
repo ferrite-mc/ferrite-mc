@@ -162,6 +162,39 @@ pub struct PlayerSnapshot {
     pub location: PlayerLocation,
     pub inventory: Vec<Option<ItemSnapshot>>,
 }
+/// What happens to one boss bar of a player; `id` names the bar.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BossBarChange {
+    Add {
+        id: uuid::Uuid,
+        name: String,
+        progress: f32,
+        color: i32,
+        overlay: i32,
+        flags: u8,
+    },
+    Remove {
+        id: uuid::Uuid,
+    },
+    Progress {
+        id: uuid::Uuid,
+        progress: f32,
+    },
+    Name {
+        id: uuid::Uuid,
+        name: String,
+    },
+    Style {
+        id: uuid::Uuid,
+        color: i32,
+        overlay: i32,
+    },
+    Flags {
+        id: uuid::Uuid,
+        flags: u8,
+    },
+}
+
 /// One offer of a plugin-defined merchant (Bukkit `MerchantRecipe`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MerchantTrade {
@@ -237,6 +270,8 @@ pub enum PluginPacket {
     },
     /// `Player#wakeup`: gets the player out of the bed they sleep in, if any.
     WakeUp,
+    /// A boss bar shown to, changed on or removed from this player (`ClientboundBossEventPacket`).
+    BossBar(BossBarChange),
     /// One property of the open menu (`Player#setWindowProperty`, `ClientboundContainerSetDataPacket`).
     WindowProperty {
         id: i16,

@@ -285,4 +285,22 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals("en_us", player.getLocale());
     }
+
+    @Test void bossBarsAreSentAndKeptInStep() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var bar = net.kyori.adventure.bossbar.BossBar.bossBar(net.kyori.adventure.text.Component.text("Boss"), 0.5f, net.kyori.adventure.bossbar.BossBar.Color.RED, net.kyori.adventure.bossbar.BossBar.Overlay.PROGRESS);
+            player.showBossBar(bar);
+            player.showBossBar(bar);
+            bar.progress(0.25f);
+            bar.name(net.kyori.adventure.text.Component.text("Other"));
+            bar.color(net.kyori.adventure.bossbar.BossBar.Color.BLUE);
+            assertTrue(player.activeBossBars().iterator().hasNext());
+            player.hideBossBar(bar);
+            bar.progress(0.75f);
+            assertFalse(player.activeBossBars().iterator().hasNext());
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("bossBarAdd(String,String,float,int,int,int)", "bossBarProgress(String,float)", "bossBarName(String,String)", "bossBarStyle(String,int,int)", "bossBarRemove(String)"), calls);
+    }
 }

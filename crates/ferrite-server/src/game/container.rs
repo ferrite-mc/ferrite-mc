@@ -767,6 +767,41 @@ impl Player {
                 self.open_plugin_merchant(&title, &trades)
             }
             PluginPacket::WakeUp => super::blocks::wake(self),
+            PluginPacket::BossBar(change) => {
+                use ferrite_plugin::BossBarChange as C;
+                use ferrite_protocol::packets::play::BossEvent as E;
+                use ferrite_protocol::types::PlainText;
+                let event = match change {
+                    C::Add {
+                        id,
+                        name,
+                        progress,
+                        color,
+                        overlay,
+                        flags,
+                    } => E::Add {
+                        id,
+                        name: PlainText(name),
+                        progress,
+                        color: VarInt(color),
+                        overlay: VarInt(overlay),
+                        flags,
+                    },
+                    C::Remove { id } => E::Remove { id },
+                    C::Progress { id, progress } => E::Progress { id, progress },
+                    C::Name { id, name } => E::Name {
+                        id,
+                        name: PlainText(name),
+                    },
+                    C::Style { id, color, overlay } => E::Style {
+                        id,
+                        color: VarInt(color),
+                        overlay: VarInt(overlay),
+                    },
+                    C::Flags { id, flags } => E::Flags { id, flags },
+                };
+                send(self, &event);
+            }
             PluginPacket::ResyncInventory => {
                 let full = self.menus.current().broadcast_full_state(&self.inventory);
                 emit(self, vec![full]);

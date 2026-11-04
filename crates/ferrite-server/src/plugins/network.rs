@@ -7,7 +7,7 @@
 //! "not implemented" error rather than a silent no-op.
 
 use base64::Engine as _;
-use ferrite_plugin::{HostCall, PlayerCommand, PluginPacket};
+use ferrite_plugin::{BossBarChange, HostCall, PlayerCommand, PluginPacket};
 use uuid::Uuid;
 
 const PART: char = '\u{1d}';
@@ -134,6 +134,23 @@ fn entity_status(effect: &str) -> Option<u8> {
         "TELEPORT_ENDER" => 46,
         _ => return None,
     })
+}
+
+/// A boss bar's fill, between empty and full.
+fn boss_progress(text: &str) -> Option<f32> {
+    text.parse::<f32>()
+        .ok()
+        .filter(|p| p.is_finite() && (0.0..=1.0).contains(p))
+}
+
+/// A colour or overlay ordinal, at most `max`.
+fn boss_style(text: &str, max: i32) -> Option<i32> {
+    text.parse::<i32>().ok().filter(|v| (0..=max).contains(v))
+}
+
+/// The darken / music / fog bits of a boss bar.
+fn boss_flags(text: &str) -> Option<u8> {
+    text.parse::<u8>().ok().filter(|f| *f <= 7)
 }
 
 /// The registry id of a `minecraft:` mob effect key.
@@ -281,7 +298,7 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
         // `Animate` actions: 0 swing main hand, 3 swing off hand.
         "swingMainHand()" => PluginPacket::Animation { action: 0 },
         "swingOffHand()" => PluginPacket::Animation { action: 3 },
-        "swingHand(EquipmentSlot)" => match arg(0)? {
+        "swingHand(EquipmentSlot)" | "swingHand(EquipmentSlot,SwingAnimation)" => match arg(0)? {
             "HAND" => PluginPacket::Animation { action: 0 },
             "OFF_HAND" => PluginPacket::Animation { action: 3 },
             _ => return None,
@@ -368,6 +385,36 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
         }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "wakeup(boolean)" => PluginPacket::WakeUp,
+        "bossBarAdd(String,String,float,int,int,int)" => {
+            PluginPacket::BossBar(BossBarChange::Add {
+                id: Uuid::parse_str(arg(0)?).ok()?,
+                name: arg(1)?.chars().take(256).collect(),
+                progress: boss_progress(arg(2)?)?,
+                color: boss_style(arg(3)?, 6)?,
+                overlay: boss_style(arg(4)?, 4)?,
+                flags: boss_flags(arg(5)?)?,
+            })
+        }
+        "bossBarRemove(String)" => PluginPacket::BossBar(BossBarChange::Remove {
+            id: Uuid::parse_str(arg(0)?).ok()?,
+        }),
+        "bossBarProgress(String,float)" => PluginPacket::BossBar(BossBarChange::Progress {
+            id: Uuid::parse_str(arg(0)?).ok()?,
+            progress: boss_progress(arg(1)?)?,
+        }),
+        "bossBarName(String,String)" => PluginPacket::BossBar(BossBarChange::Name {
+            id: Uuid::parse_str(arg(0)?).ok()?,
+            name: arg(1)?.chars().take(256).collect(),
+        }),
+        "bossBarStyle(String,int,int)" => PluginPacket::BossBar(BossBarChange::Style {
+            id: Uuid::parse_str(arg(0)?).ok()?,
+            color: boss_style(arg(1)?, 6)?,
+            overlay: boss_style(arg(2)?, 4)?,
+        }),
+        "bossBarFlags(String,int)" => PluginPacket::BossBar(BossBarChange::Flags {
+            id: Uuid::parse_str(arg(0)?).ok()?,
+            flags: boss_flags(arg(1)?)?,
+        }),
         "openMerchant(String,String)" => PluginPacket::OpenMerchant {
             title: arg(0)?
                 .chars()
@@ -819,6 +866,35 @@ mod tests {
         assert_eq!(
             packet(call("wakeup(boolean)", &["true"])),
             Some(PluginPacket::WakeUp)
+        );
+        let bar = Uuid::from_u128(9).to_string();
+        assert_eq!(
+            packet(call(
+                "bossBarAdd(String,String,float,int,int,int)",
+                &[&bar, "Boss", "0.5", "2", "1", "3"]
+            )),
+            Some(PluginPacket::BossBar(BossBarChange::Add {
+                id: Uuid::from_u128(9),
+                name: "Boss".into(),
+                progress: 0.5,
+                color: 2,
+                overlay: 1,
+                flags: 3,
+            }))
+        );
+        assert_eq!(
+            packet(call("bossBarProgress(String,float)", &[&bar, "1.5"])),
+            None
+        );
+        assert_eq!(
+            packet(call("bossBarStyle(String,int,int)", &[&bar, "7", "0"])),
+            None
+        );
+        assert_eq!(
+            packet(call("bossBarRemove(String)", &[&bar])),
+            Some(PluginPacket::BossBar(BossBarChange::Remove {
+                id: Uuid::from_u128(9)
+            }))
         );
         assert_eq!(
             packet(call(

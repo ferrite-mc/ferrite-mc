@@ -589,6 +589,125 @@ packet!(ServerboundPlayerCommand,42,Serverbound,{entity_id:VarInt,action:VarInt,
 // Vanilla `ServerboundPlayerInputPacket`: `Input` flags (1 forward, 2 backward, 4 left, 8 right,
 // 16 jump, 32 shift, 64 sprint), sent whenever they change.
 packet!(PlayerInput,43,Serverbound,{flags:u8});
+/// Vanilla `ClientboundBossEventPacket`: one boss bar, addressed by `id`, and what happens to it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BossEvent {
+    Add {
+        id: Uuid,
+        name: PlainText,
+        progress: f32,
+        color: VarInt,
+        overlay: VarInt,
+        /// 1 darken the sky, 2 play boss music, 4 create fog.
+        flags: u8,
+    },
+    Remove {
+        id: Uuid,
+    },
+    Progress {
+        id: Uuid,
+        progress: f32,
+    },
+    Name {
+        id: Uuid,
+        name: PlainText,
+    },
+    Style {
+        id: Uuid,
+        color: VarInt,
+        overlay: VarInt,
+    },
+    Flags {
+        id: Uuid,
+        flags: u8,
+    },
+}
+impl Encode for BossEvent {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Add {
+                id,
+                name,
+                progress,
+                color,
+                overlay,
+                flags,
+            } => {
+                id.encode(out);
+                VarInt(0).encode(out);
+                name.encode(out);
+                progress.encode(out);
+                color.encode(out);
+                overlay.encode(out);
+                flags.encode(out);
+            }
+            Self::Remove { id } => {
+                id.encode(out);
+                VarInt(1).encode(out);
+            }
+            Self::Progress { id, progress } => {
+                id.encode(out);
+                VarInt(2).encode(out);
+                progress.encode(out);
+            }
+            Self::Name { id, name } => {
+                id.encode(out);
+                VarInt(3).encode(out);
+                name.encode(out);
+            }
+            Self::Style { id, color, overlay } => {
+                id.encode(out);
+                VarInt(4).encode(out);
+                color.encode(out);
+                overlay.encode(out);
+            }
+            Self::Flags { id, flags } => {
+                id.encode(out);
+                VarInt(5).encode(out);
+                flags.encode(out);
+            }
+        }
+    }
+}
+impl Decode for BossEvent {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        let id = Uuid::decode(buf)?;
+        Ok(match VarInt::decode(buf)?.0 {
+            0 => Self::Add {
+                id,
+                name: PlainText::decode(buf)?,
+                progress: f32::decode(buf)?,
+                color: VarInt::decode(buf)?,
+                overlay: VarInt::decode(buf)?,
+                flags: u8::decode(buf)?,
+            },
+            1 => Self::Remove { id },
+            2 => Self::Progress {
+                id,
+                progress: f32::decode(buf)?,
+            },
+            3 => Self::Name {
+                id,
+                name: PlainText::decode(buf)?,
+            },
+            4 => Self::Style {
+                id,
+                color: VarInt::decode(buf)?,
+                overlay: VarInt::decode(buf)?,
+            },
+            5 => Self::Flags {
+                id,
+                flags: u8::decode(buf)?,
+            },
+            _ => return Err(DecodeError::Invalid("boss event action")),
+        })
+    }
+}
+impl Packet for BossEvent {
+    const ID: i32 = 9;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
 // Vanilla `ServerboundResourcePackPacket`: the client's progress on a pack the server pushed.
 // `action` is `Action.ordinal()`: 0 loaded, 1 declined, 2 failed download, 3 accepted,
 // 4 downloaded, 5 invalid url, 6 failed reload, 7 discarded.
@@ -1679,6 +1798,31 @@ mod interaction_tests {
             data: VarInt(0),
         });
         roundtrip(PlayerInput { flags: 0b0110_0001 });
+        let id = Uuid::from_u128(77);
+        for event in [
+            BossEvent::Add {
+                id,
+                name: PlainText("Dragon".into()),
+                progress: 0.5,
+                color: VarInt(2),
+                overlay: VarInt(3),
+                flags: 5,
+            },
+            BossEvent::Remove { id },
+            BossEvent::Progress { id, progress: 0.25 },
+            BossEvent::Name {
+                id,
+                name: PlainText("Wither".into()),
+            },
+            BossEvent::Style {
+                id,
+                color: VarInt(6),
+                overlay: VarInt(1),
+            },
+            BossEvent::Flags { id, flags: 2 },
+        ] {
+            roundtrip(event);
+        }
         roundtrip(UpdateAttributes {
             entity_id: VarInt(3),
             attributes: vec![AttributeSnapshot {

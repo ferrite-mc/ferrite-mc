@@ -139,6 +139,51 @@ public abstract class PlayerMisc extends PlayerStubs {
         };
     }
 
+    // ---- boss bars ----------------------------------------------------------------------------
+    private final Map<net.kyori.adventure.bossbar.BossBar, BossShown> shownBars = new LinkedHashMap<>();
+    private record BossShown(UUID id, net.kyori.adventure.bossbar.BossBar.Listener listener) {}
+
+    private static String plain(net.kyori.adventure.text.Component name) {
+        return net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(name);
+    }
+    private static int flagBits(Set<net.kyori.adventure.bossbar.BossBar.Flag> flags) {
+        int bits = 0;
+        if (flags.contains(net.kyori.adventure.bossbar.BossBar.Flag.DARKEN_SCREEN)) bits |= 1;
+        if (flags.contains(net.kyori.adventure.bossbar.BossBar.Flag.PLAY_BOSS_MUSIC)) bits |= 2;
+        if (flags.contains(net.kyori.adventure.bossbar.BossBar.Flag.CREATE_WORLD_FOG)) bits |= 4;
+        return bits;
+    }
+
+    /** Shows the bar and keeps the client's copy in step with later changes to it. */
+    @Override public void showBossBar(net.kyori.adventure.bossbar.BossBar bar) {
+        Objects.requireNonNull(bar, "bar");
+        UUID id;
+        synchronized (this) {
+            if (shownBars.containsKey(bar)) return;
+            id = UUID.randomUUID();
+            var barId = id;
+            var listener = new net.kyori.adventure.bossbar.BossBar.Listener() {
+                @Override public void bossBarNameChanged(net.kyori.adventure.bossbar.BossBar b, net.kyori.adventure.text.Component oldName, net.kyori.adventure.text.Component newName) { tellHost("bossBarName(String,String)", barId.toString(), plain(newName)); }
+                @Override public void bossBarProgressChanged(net.kyori.adventure.bossbar.BossBar b, float oldProgress, float newProgress) { tellHost("bossBarProgress(String,float)", barId.toString(), newProgress); }
+                @Override public void bossBarColorChanged(net.kyori.adventure.bossbar.BossBar b, net.kyori.adventure.bossbar.BossBar.Color oldColor, net.kyori.adventure.bossbar.BossBar.Color newColor) { tellHost("bossBarStyle(String,int,int)", barId.toString(), newColor.ordinal(), b.overlay().ordinal()); }
+                @Override public void bossBarOverlayChanged(net.kyori.adventure.bossbar.BossBar b, net.kyori.adventure.bossbar.BossBar.Overlay oldOverlay, net.kyori.adventure.bossbar.BossBar.Overlay newOverlay) { tellHost("bossBarStyle(String,int,int)", barId.toString(), b.color().ordinal(), newOverlay.ordinal()); }
+                @Override public void bossBarFlagsChanged(net.kyori.adventure.bossbar.BossBar b, Set<net.kyori.adventure.bossbar.BossBar.Flag> added, Set<net.kyori.adventure.bossbar.BossBar.Flag> removed) { tellHost("bossBarFlags(String,int)", barId.toString(), flagBits(b.flags())); }
+            };
+            shownBars.put(bar, new BossShown(id, listener));
+            bar.addListener(listener);
+        }
+        tellHost("bossBarAdd(String,String,float,int,int,int)", id.toString(), plain(bar.name()), bar.progress(), bar.color().ordinal(), bar.overlay().ordinal(), flagBits(bar.flags()));
+    }
+    @Override public void hideBossBar(net.kyori.adventure.bossbar.BossBar bar) {
+        Objects.requireNonNull(bar, "bar");
+        BossShown shown;
+        synchronized (this) { shown = shownBars.remove(bar); }
+        if (shown == null) return;
+        bar.removeListener(shown.listener());
+        tellHost("bossBarRemove(String)", shown.id().toString());
+    }
+    @Override public synchronized Iterable<? extends net.kyori.adventure.bossbar.BossBar> activeBossBars() { return List.copyOf(shownBars.keySet()); }
+
     // ---- tab list and visibility ---------------------------------------------------------------
     private final Set<UUID> unlisted = new HashSet<>();
     private final Set<UUID> hidden = new HashSet<>();
