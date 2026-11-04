@@ -7,6 +7,8 @@ mod generator;
 #[cfg(test)]
 mod persistence_tests;
 pub use generator::{ChunkGenerator, Generated};
+mod vanilla_gen;
+pub use vanilla_gen::{HostSettings, VanillaGenerator};
 pub mod playerdata;
 pub use brewing::BrewingData;
 pub fn new_anvil_source(

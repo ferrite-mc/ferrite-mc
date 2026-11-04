@@ -36,14 +36,24 @@ fn read_column(
         return Ok(None);
     };
     let (_, tag) = binary::read_named(&data)?;
-    let chunk = chunk_from_nbt(&tag, dimension.min_y(), dimension.height() as u32, registry)?;
+    column_from_tag(&tag, dimension, registry).map(Some)
+}
+
+/// Builds a column and its stored light from the NBT of one Anvil chunk. Used for chunks read
+/// from region files and for chunks returned by an external generator.
+pub(super) fn column_from_tag(
+    tag: &Tag,
+    dimension: Dimension,
+    registry: &RuntimeRegistry,
+) -> anyhow::Result<(Chunk, LightData)> {
+    let chunk = chunk_from_nbt(tag, dimension.min_y(), dimension.height() as u32, registry)?;
     let sections = dimension.light_sections();
     let min_section = dimension.min_y().div_euclid(16);
     let mut light = LightData {
         sky: vec![LightSection::Unknown; sections],
         block: vec![LightSection::Unknown; sections],
     };
-    if let Tag::Compound(root) = &tag
+    if let Tag::Compound(root) = tag
         && let Some(Tag::List(List::Compound(sections))) = root.get("sections")
     {
         for section in sections {
@@ -69,7 +79,7 @@ fn read_column(
             }
         }
     }
-    Ok(Some((chunk, light)))
+    Ok((chunk, light))
 }
 
 use ferrite_protocol::{Encode, Packet, VarInt, packets::play::ChunkData};

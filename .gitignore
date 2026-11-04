@@ -8,3 +8,4 @@ __pycache__/
 /plugins-test/
 **/logs/
 playerdata/
+/worldgen

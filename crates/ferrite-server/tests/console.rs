@@ -13,6 +13,8 @@ fn stop_on_stdin_shuts_down_server() {
         "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\n",
     )
     .unwrap();
+    // The server refuses to start without `eula=true`; this fixture runs only Ferrite.
+    std::fs::write(dir.join("eula.txt"), "eula=true\n").unwrap();
     let mut server = Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
         .current_dir(&dir)
         .stdin(Stdio::piped())

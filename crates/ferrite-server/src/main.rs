@@ -24,7 +24,7 @@ struct Config {
     forwarding: ForwardingMode,
     forwarding_secret: String,
     world: Option<std::path::PathBuf>,
-    /// New chunks come from the flat test world; `vanilla` is reserved for the JVM generator.
+    /// New chunks come from the flat test world or the vanilla world generation host.
     generator: WorldGenerator,
     gamemode: GameMode,
     ops: Vec<OpConfig>,
@@ -34,6 +34,36 @@ struct Config {
     plugins: PluginSettings,
     /// Enforce `whitelist.json` for new connections.
     whitelist: bool,
+    /// Settings for the vanilla world generation host (`generator = 'vanilla'`).
+    worldgen: WorldgenSettings,
+}
+
+/// The `[worldgen]` table: how the vanilla world generation host is run. It uses the user's own
+/// Minecraft server jar in a separate JVM and needs `eula=true` in `eula.txt`.
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct WorldgenSettings {
+    /// Heap of the host JVM in MiB.
+    heap_mb: u32,
+    /// Chunk requests the host serves at the same time.
+    threads: u32,
+    /// Extra JVM options for the host.
+    jvm_args: Vec<String>,
+    /// A Java 25+ installation to use instead of the discovered one.
+    java_home: Option<std::path::PathBuf>,
+    /// The world seed (a number or any text, as in `server.properties`).
+    seed: String,
+}
+impl Default for WorldgenSettings {
+    fn default() -> Self {
+        Self {
+            heap_mb: 1024,
+            threads: 4,
+            jvm_args: Vec::new(),
+            java_home: None,
+            seed: "0".into(),
+        }
+    }
 }
 
 /// Plugin bridge settings from the `[plugins]` table.
@@ -107,8 +137,7 @@ enum WorldGenerator {
     /// The superflat world used by the existing tests and examples.
     #[default]
     Superflat,
-    /// Reserved for the official vanilla generator running in the embedded JVM; not available
-    /// yet, so the server refuses to start with it.
+    /// Mojang's own generator, run by the world generation host from the user's server jar.
     Vanilla,
 }
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -155,6 +184,7 @@ impl Default for Config {
             plugin_bridge: None,
             plugins: PluginSettings::default(),
             whitelist: false,
+            worldgen: WorldgenSettings::default(),
         }
     }
 }
@@ -180,6 +210,9 @@ async fn main() -> anyhow::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
         Err(error) => return Err(error).context("reading ferrite.toml"),
     };
+    // Ferrite never accepts the Mojang EULA for the user; the world generation host reads the
+    // same `eula.txt`.
+    ferrite_server::eula::ensure_accepted(std::path::Path::new("eula.txt"))?;
     let view_distance = effective_view_distance(config.view_distance);
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
@@ -220,9 +253,23 @@ async fn main() -> anyhow::Result<()> {
     let (plugin_command_tx, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
     let (plugin_console_tx, plugin_console) = tokio::sync::mpsc::unbounded_channel();
     let terrain: Option<std::sync::Arc<dyn game::ChunkGenerator>> = match config.generator {
-        WorldGenerator::Vanilla => anyhow::bail!(
-            "generator = 'vanilla' is not available yet: the JVM-backed vanilla world generator              has not been added; use generator = 'superflat' or an existing world"
-        ),
+        WorldGenerator::Vanilla => {
+            let registry = std::sync::Arc::new(
+                ferrite_world::RuntimeRegistry::load(&vanilla_data)
+                    .context("loading vanilla registry")?,
+            );
+            let mut host = game::HostSettings::standard(std::path::Path::new("."));
+            host.heap_mb = config.worldgen.heap_mb;
+            host.threads = config.worldgen.threads.max(1);
+            host.jvm_args = config.worldgen.jvm_args.clone();
+            host.java_home = config.worldgen.java_home.clone();
+            host.seed = config.worldgen.seed.clone();
+            tracing::info!("starting the vanilla world generation host (this takes a few seconds)");
+            let generator =
+                tokio::task::block_in_place(|| game::VanillaGenerator::spawn(&host, registry))
+                    .context("starting the vanilla world generator")?;
+            Some(std::sync::Arc::new(generator))
+        }
         WorldGenerator::Superflat => None,
     };
     let source = if let Some(path) = &config.world {

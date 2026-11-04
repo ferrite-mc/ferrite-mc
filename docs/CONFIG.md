@@ -13,6 +13,28 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 | `view-distance` | 정수 (`u8`) | `10` | 플레이어에게 전송하는 청크 반경(단위: 청크). 실제 적용 시 2~32 범위로 제한됩니다. |
 | `supported-versions` | 문자열 (`all` 또는 `native`) | `all` | `all`은 26.3(프로토콜 777)과 번역 가능한 이전 버전(26.2/776)의 접속을 허용하고, `native`는 26.3 클라이언트만 허용합니다. 허용되지 않는 버전은 로그인 단계에서 "Outdated client"로 끊기며, 서버 목록 상태 응답은 항상 코어 버전을 알립니다. |
 | `compression-threshold` | 정수 (`usize`) | `256` | 이 크기(바이트) 이상인 패킷을 압축합니다. 값이 작을수록 더 많은 패킷을 압축합니다. |
+| `generator` | 문자열 (`superflat` 또는 `vanilla`) | `superflat` | 월드에 없는 새 청크를 만드는 방법. `superflat`은 평지, `vanilla`는 사용자가 받은 공식 서버 jar의 생성기를 별도 JVM 프로세스(월드 생성 호스트)에서 실행합니다. 아래 `[worldgen]` 참고. |
+
+### `[worldgen]` (`generator = "vanilla"`일 때)
+
+| 키 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `heap-mb` | 정수 (`u32`) | `1024` | 호스트 JVM의 힙(MiB). 512에서도 동작을 확인했습니다. |
+| `threads` | 정수 (`u32`) | `4` | 호스트가 동시에 처리하는 청크 요청 수. |
+| `jvm-args` | 문자열 배열 | `[]` | 호스트 JVM에 추가로 넘기는 옵션(GC 등). |
+| `java-home` | 문자열 | (자동 탐색) | 쓸 Java 25 이상 설치 경로. |
+| `seed` | 문자열 | `"0"` | 월드 시드. 숫자나 문자열(`server.properties`와 같은 규칙). |
+
+호스트는 `python tools/fetch_vanilla.py`로 받은 `vanilla/26.3/lib/server-26.3.jar`와
+`python tools/build_worldgen_host.py`로 빌드한 `target/worldgen-host/ferrite-worldgen-host.jar`를 씁니다.
+호스트의 작업 폴더는 `worldgen/`(git 제외)이고 로그는 `worldgen/host.log`입니다. 설계는
+[`docs/worldgen-host.md`](worldgen-host.md)를 보세요.
+
+### EULA (`eula.txt`)
+
+서버는 시작할 때 실행 디렉터리의 `eula.txt`를 확인합니다. 없으면 `eula=false`로 만들고 종료합니다.
+Minecraft EULA(https://aka.ms/MinecraftEULA)를 읽고 **직접** `eula=true`로 바꾸세요. Ferrite는 대신
+동의하지 않으며, 월드 생성 호스트가 실행하는 공식 서버 jar도 같은 파일을 읽습니다.
 
 참고: `compression-threshold`와 `max-players`는 프로토콜이 `i32`로 표현할 수 있는 범위를
 넘으면 서버가 시작 단계에서 오류로 종료됩니다.

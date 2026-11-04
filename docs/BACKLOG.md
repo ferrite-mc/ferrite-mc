@@ -7,10 +7,19 @@ from. Tick items off in the commit that finishes them.
 
 ## World generation
 
-Not part of this repository. The server only has the `ChunkGenerator` seam
-(`crates/ferrite-server/src/game/generator.rs`) and serves superflat or Anvil chunks. Vanilla
-generation is planned as a separate component that calls the official generator from the user's
-own server jar through the embedded JVM; nothing is re-implemented in Rust.
+Not implemented in Rust, on purpose. The server has the `ChunkGenerator` seam
+(`crates/ferrite-server/src/game/generator.rs`); `generator = "vanilla"` runs the official generator
+from the user's own server jar in a separate JVM host process (`docs/worldgen-host.md`). Done: host,
+Rust client, shared `eula.txt` gate, end-to-end test. Open:
+
+- Bytecode patcher (`java.lang.classfile`, applied on the user's machine) that removes network,
+  tick, player handling and other dimensions, keeping only world generation. Keep it only if
+  measurements beat the unpatched jar.
+- Load measurement: hundreds of chunks, requested in sequence and concurrently, for resident
+  memory, CPU and chunks per second; pick defaults for `[worldgen]` from the numbers.
+- `/locate biome` and a prefetch of chunks ahead of players.
+- `worldgen.mode = embedded | process | remote` so large deployments can run several hosts.
+- Chunk loading and encoding optimizations (baseline in `crates/ferrite-world/benches`).
 
 ## Entities and mobs
 

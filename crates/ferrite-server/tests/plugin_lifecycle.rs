@@ -489,6 +489,8 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
     fs::create_dir(&plugins).unwrap();
     fs::copy(plugin_jar, plugins.join("test-plugin.jar")).unwrap();
     fs::copy(dependency_jar, plugins.join("test-dependency.jar")).unwrap();
+    // The server refuses to start without `eula=true`; this fixture runs only Ferrite.
+    fs::write(dir.path().join("eula.txt"), "eula=true\n").unwrap();
     let port = free_port();
     fs::write(
         dir.path().join("ferrite.toml"),
@@ -744,6 +746,8 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
     let plugins = dir.path().join("plugins");
     fs::create_dir(&plugins).unwrap();
     fs::copy(plugin_jar, plugins.join("typical-plugin.jar")).unwrap();
+    // The server refuses to start without `eula=true`; this fixture runs only Ferrite.
+    fs::write(dir.path().join("eula.txt"), "eula=true\n").unwrap();
     let port = free_port();
     fs::write(
         dir.path().join("ferrite.toml"),

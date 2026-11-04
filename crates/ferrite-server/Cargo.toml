@@ -38,8 +38,8 @@ ferrite-item = { path = "../ferrite-item", features = ["protocol"] }
 ferrite-inventory = { path = "../ferrite-inventory" }
 ferrite-recipe = { path = "../ferrite-recipe" }
 ferrite-loot = { path = "../ferrite-loot" }
+ferrite-jvm = { path = "../ferrite-jvm" }
 
 [dev-dependencies]
-ferrite-jvm = { path = "../ferrite-jvm" }
 tempfile = "3"
 rand = "0.8"

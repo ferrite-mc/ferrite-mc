@@ -9,9 +9,12 @@ or sponsored by Mojang Studios or Microsoft. "Minecraft" is a trademark of Mojan
 - Some tests and tools (`tools/wirecheck`, `tools/extractor`) compile small Java
   programs against that locally downloaded jar to check Ferrite's behavior against the real game.
   Only our own source is committed, never the jar, its classes, or dumps produced from it.
-- This repository contains no world generator. Vanilla world generation is planned as a separate
-  component that runs the official generator from the server jar you download yourself, so no
-  Mojang code is re-implemented or distributed here.
+- This repository contains no world generator. Vanilla world generation is done by the official
+  generator inside the server jar you download yourself, run unmodified in a separate JVM process
+  by our own host (`java/ferrite-worldgen-host`, see `docs/worldgen-host.md`). The host is compiled
+  on your machine against that jar and contains only our code; no Mojang code is re-implemented,
+  copied or distributed here. Ferrite never accepts the Minecraft EULA for you: you set `eula=true`
+  in `eula.txt` yourself, and the host's jar reads the same file.
 - Compatibility target for plugins is the public Bukkit/Spigot/Paper API (a separate project,
   licensed by its own authors). The Paper API artifact is downloaded by the Gradle build and not
   vendored here.

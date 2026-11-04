@@ -20,8 +20,19 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 > Folia-style scheduler, and a 26.3 → 26.2
 > protocol translation layer. **It has not yet been tested with a real 26.3 client.** No Mojang
 > code or assets are distributed here; vanilla data is generated locally from the official jar.
+> World generation is not implemented in Rust: an optional host process runs Mojang's own
+> generator from the server jar you download yourself (see `docs/worldgen-host.md`). The server
+> asks you to accept the Minecraft EULA in `eula.txt` before it starts.
 
-## 진행 현황 (2026-11-03)
+## 진행 현황 (2026-11-04)
+
+- **월드 생성 분리**: 바닐라 월드젠을 Rust로 옮겨 구현했던 `ferrite-worldgen`/`ferrite-noise`를
+  저장소에서 제거했습니다(Mojang 코드의 번역물이 될 수 있어서입니다). 이제 새 청크는 사용자가 받은 공식
+  서버 jar의 생성기가 만듭니다. 그 jar를 별도 JVM 프로세스(호스트)에서 수정 없이 실행하고, Ferrite는
+  결과 청크(NBT)만 받아 씁니다. 서버는 시작할 때 `eula.txt`의 `eula=true`를 요구하며(직접 설정해야
+  하고 Ferrite가 대신 동의하지 않습니다), 호스트도 같은 파일을 씁니다. 설계와 한계는
+  [`docs/worldgen-host.md`](docs/worldgen-host.md)에 있습니다. 필요 없는 부분(네트워크·틱·플레이어 처리)을
+  덜어 내는 바이트코드 패처는 아직 없습니다.
 
 - **플러그인 호환성 검사**: 테스트 프로브에 바닐라 데이터 경로를 연결했습니다. EssentialsX 활성화와
   `help` 명령은 확인했지만, 종료 시 예외와 NMS 호환성은 해결해야 합니다.
@@ -69,7 +80,7 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 | 구분 | 내용 |
 |---|---|
 | ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 명령 블록, 양조·비컨, 네더 차원·포탈, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화 |
-| 🔧 **진행 중** | 피스톤 |
+| 🔧 **진행 중** | 피스톤, 바닐라 월드 생성 호스트(바이트코드 패처 미착수) |
 | ⛔ **아직 없음** | 실제 클라이언트 검증, 엔드 차원 |
 | 🔬 **검증 수준** | 전체 테스트 105개 바이너리 통과, `clippy -D warnings`·`fmt --check` 클린 |
 
@@ -148,9 +159,14 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 
 ### 월드 생성
 - 이 저장소에는 월드 생성기가 없습니다. 서버는 `ChunkGenerator` 트레이트(`game/generator.rs`)만 알고,
-  새 청크는 슈퍼플랫(`generator = superflat`, 기본값)이나 기존 Anvil 월드에서 옵니다.
-- 바닐라 월드 생성은 별도 구성요소로 다룹니다. 사용자가 내려받은 공식 서버 jar의 생성기를
-  내장 JVM에서 호출하는 방식을 계획합니다(미착수). 그 전까지 `generator = vanilla`는 시작 시 오류를 냅니다.
+  새 청크는 슈퍼플랫(`generator = "superflat"`, 기본값), 기존 Anvil 월드, 또는 바닐라 호스트에서 옵니다.
+- `generator = "vanilla"`: 사용자가 받은 공식 서버 jar를 별도 JVM 프로세스(`java/ferrite-worldgen-host`)에서
+  실행해 `getChunk(x, z, FULL)`로 청크를 받고, 바닐라 자신의 직렬화기가 만든 Anvil NBT를 읽습니다.
+  Mojang 코드는 배포하지 않고 jar도 수정하지 않습니다. 호스트는 우리 코드만 담은 jar로 사용자 PC에서
+  컴파일합니다(`python tools/build_worldgen_host.py`).
+- `[worldgen]` 설정: `heap-mb`(기본 1024), `threads`(기본 4), `jvm-args`, `java-home`, `seed`.
+- 지금은 청크 단위 요청만 됩니다. 아직 없는 것: 바이트코드 패처(네트워크·틱·플레이어 처리 제거와 자원
+  측정), `/locate biome`, 호스트를 여러 개 띄우는 별도 프로세스·원격 모드, 앞쪽 청크 사전 요청.
 
 ### 관리
 - `/tps`, `/mspt`, `/profile`
@@ -159,7 +175,9 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
 
 - **실제 26.3 클라이언트로 접속해 검증하지 않았습니다.** 지금까지는 프로토콜 봇과 Java
   대조 하네스로만 검증했습니다.
-- 바닐라 월드 생성은 아직 없습니다(위 "월드 생성" 참고). 피스톤은 진행 중입니다.
+- 월드 생성은 Rust로 구현하지 않고 공식 jar에 맡깁니다. 호스트는 jar를 수정하지 않는 첫 단계라서 바닐라
+  수준의 메모리와 속도를 씁니다(시작에 약 10초, 청크당 100~700ms, 힙 512MB에서도 동작을 확인했지만 많은
+  청크를 연속 요청하는 부하 측정은 아직 하지 않았습니다). 피스톤은 진행 중입니다.
 - 엔드 차원은 아직 없습니다(네더는 포탈까지 동작).
 - 플러그인 API는 Paper `Server`/`Player`의 일부만 구현했습니다(`Player` 약 600개, `Server` 약 200개의
   스텁 잔존). 모든 메서드를 라우팅 가능하게 만드는 작업이 진행 중이며, 라우팅을 다 구현한 뒤에 테스트합니다. EssentialsX 같은 대형 플러그인의 모든
@@ -186,8 +204,26 @@ python tools/fetch_vanilla.py 26.2       # 다중 버전 변환용(선택)
 # 2) 선택: 픽스처 월드 (fixture-world를 읽는 테스트용)
 python tools/make_fixture_world.py
 
-# 3) 실행 (오프라인 모드 로컬 서버)
+# 3) 선택: 바닐라 월드 생성 호스트 빌드 (generator = "vanilla"를 쓸 때만, Java 25)
+python tools/build_worldgen_host.py
+
+# 4) 실행 (오프라인 모드 로컬 서버)
 cargo run --release -p ferrite-server
+```
+
+**EULA:** 처음 실행하면 `eula.txt`를 만들고 종료합니다. Minecraft EULA(https://aka.ms/MinecraftEULA)를
+읽고 직접 `eula=true`로 바꾼 뒤 다시 실행하세요. Ferrite가 대신 동의하지 않으며, 월드 생성 호스트가 쓰는
+공식 서버 jar도 같은 파일의 동의를 사용합니다.
+
+바닐라 월드 생성을 켜는 `ferrite.toml` 예:
+
+```toml
+generator = "vanilla"
+
+[worldgen]
+heap-mb = 1024
+threads = 4
+seed = "12345"
 ```
 
 `vanilla/`는 git에 포함되지 않습니다. 패킷 ID·블록·레지스트리 같은 수치는 추측하지 말고
@@ -207,6 +243,9 @@ cargo fmt --all --check
 - 최근 전체 실행: 전체 테스트 통과, clippy·fmt 클린.
 - 서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다.
 - `ferrite-translate`의 26.2 검증은 `vanilla/26.2` 리포트가 있을 때만 실행됩니다.
+- 월드 생성 호스트의 통합 테스트(`cargo test -p ferrite-server --test vanilla_host`)는 서버 jar, 빌드된
+  호스트, `FERRITE_TEST_ACCEPT_EULA=true`가 모두 있을 때만 실행되고, 없으면 건너뜁니다. 이 환경 변수는
+  개발자가 직접 EULA에 동의한다는 표시이며 테스트가 대신 동의하지 않습니다.
 - CI(`.github/workflows/ci.yml`)는 Linux/Windows에서 같은 스크립트로 데이터를 생성한 뒤
   fmt/clippy/test를 돌리고, 바닐라 데이터가 커밋되지 않았는지도 확인합니다.
 
@@ -220,7 +259,7 @@ cargo fmt --all --check
 | 3 | 리전라이저 + 벤치마크 — Paper/Folia 대비 성능 측정 | 진행 중 |
 | 4 | 플러그인 브리지 — 내장 JVM에서 Bukkit 이벤트/커맨드/스케줄러 실행 | 진행 중 |
 | 5 | 게임플레이 — 인벤토리, 엔티티, 전투, 크래프팅, 컨테이너 | 진행 중 |
-| 6 | 바닐라 월드 생성 — 공식 생성기를 내장 JVM에서 호출(별도 구성요소) | 미착수 |
+| 6 | 바닐라 월드 생성 — 공식 서버 jar의 생성기를 별도 JVM 프로세스에서 실행 (바이트코드 패처는 미착수) | 진행 중 |
 | 7 | 다중 버전 지원 — 하나의 바이너리로 여러 프로토콜 버전 | 진행 중 |
 | 8 | Paper 기능 동등성 — Paper API/설정/최적화 정렬 | 예정 |
 | 9 | 호환성 확장 — 플러그인 생태계 커버리지 확대 | 예정 |
@@ -248,7 +287,8 @@ cargo fmt --all --check
 이 저장소는 **Mojang의 코드나 에셋을 배포하지 않습니다.** 바닐라 데이터(패킷 리포트,
 블록/레지스트리 목록, 월드젠 데이터 등)는 사용자의 로컬 환경에서 공식 서버 jar를 내려받아
 생성되며 `vanilla/`에 저장되고 git에서 제외됩니다. 저장소에는 그 데이터를 읽는 코드만
-포함됩니다. Minecraft는 Mojang Studios의 상표이며, 이 프로젝트는 Mojang 또는 Microsoft와
+포함됩니다. 월드 생성은 사용자가 직접 받은 공식 서버 jar가 맡으며, 그 jar를 수정해서 배포하지 않습니다
+(필요하면 사용자 PC에서만 수정합니다). Minecraft는 Mojang Studios의 상표이며, 이 프로젝트는 Mojang 또는 Microsoft와
 아무런 제휴 관계가 없는 비공식 프로젝트입니다.
 
 ## 라이선스
@@ -259,6 +299,9 @@ GPLv3로 바꿨습니다. 포팅한 코드의 출처는 [`NOTICE.md`](NOTICE.md)
 
 ## 해야 할 일
 
+- **월드 생성 호스트:** 바이트코드 패처로 네트워크·틱·플레이어 처리·다른 차원을 덜어 내고 월드 생성만 남기기
+  (적용 전후의 메모리·CPU·처리량을 측정해서 남길지 정함), 청크 수백 개 동시 요청 부하 측정, `/locate biome`,
+  별도 프로세스·원격 모드, 앞쪽 청크 사전 요청. 설계는 [`docs/worldgen-host.md`](docs/worldgen-host.md).
 - **공동 1순위:** 플러그인 브리지 완성. Folia·Starlight·Lithium, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증. 최적화 참고 자료: [최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [서버 최적화 모드팩](https://modrinth.com/modpack/server-optimizationn), [마인크래프트 최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization).
  - 모든 작업을 병렬처리 (해야 함)
 
