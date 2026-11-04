@@ -478,6 +478,12 @@ pub enum RotateTo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// `/forceload`: chunks to start or stop holding in a dimension.
+    ForceLoad {
+        dimension: super::Dimension,
+        add: Vec<(i32, i32)>,
+        remove: Vec<(i32, i32)>,
+    },
     Rotate {
         targets: EntityTarget,
         to: RotateTo,

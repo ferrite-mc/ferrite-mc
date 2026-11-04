@@ -32,6 +32,8 @@ pub struct MoreState {
     pub last_active: BTreeMap<uuid::Uuid, i64>,
     /// `/tick`: shared with the game loop and the region ticks.
     pub tick: std::sync::Arc<TickControl>,
+    /// `/forceload`: (dimension key, chunk x, chunk z) of every force-loaded chunk.
+    pub forced: std::collections::BTreeSet<(String, i32, i32)>,
 }
 
 /// What `/tick` changes: the target rate, the frozen flag and the pending steps. The game loop
@@ -927,6 +929,222 @@ fn rotate_tree() -> NodeBuilder<Source> {
         )
 }
 
+/// Largest area `/forceload add|remove` accepts, in chunks.
+const FORCELOAD_MAX: i64 = 256;
+
+fn chunk_label(x: i32, z: i32) -> String {
+    format!("[{x}, {z}]")
+}
+
+fn column(ctx: &CommandContext<Source>, name: &str) -> Result<(i32, i32), CommandError> {
+    match ctx.argument(name) {
+        Some(ferrite_command::ArgumentValue::ColumnPos(pair)) => {
+            let origin = ctx.source().origin;
+            Ok((
+                (pair[0].resolve(origin[0]).floor() as i32) >> 4,
+                (pair[1].resolve(origin[2]).floor() as i32) >> 4,
+            ))
+        }
+        _ => Err(CommandError::failed(format!("missing column {name}"))),
+    }
+}
+
+fn forceload_change(
+    ctx: &CommandContext<Source>,
+    add: bool,
+    to: bool,
+) -> Result<i32, CommandError> {
+    let from = column(ctx, "from")?;
+    let to = if to { column(ctx, "to")? } else { from };
+    let (x0, x1) = (from.0.min(to.0), from.0.max(to.0));
+    let (z0, z1) = (from.1.min(to.1), from.1.max(to.1));
+    let count = i64::from(x1 - x0 + 1) * i64::from(z1 - z0 + 1);
+    if count > FORCELOAD_MAX {
+        return Err(failure(
+            "commands.forceload.toobig",
+            vec![FORCELOAD_MAX.to_string(), count.to_string()],
+        ));
+    }
+    let dimension = ctx.source().dimension;
+    let key = dimension.key().to_owned();
+    let mut changed = Vec::new();
+    {
+        let mut game = ctx.source().state.lock().unwrap();
+        for x in x0..=x1 {
+            for z in z0..=z1 {
+                let entry = (key.clone(), x, z);
+                let done = if add {
+                    game.more.forced.insert(entry)
+                } else {
+                    game.more.forced.remove(&entry)
+                };
+                if done {
+                    changed.push((x, z));
+                }
+            }
+        }
+    }
+    if changed.is_empty() {
+        return Err(failure(
+            if add {
+                "commands.forceload.added.failure"
+            } else {
+                "commands.forceload.removed.failure"
+            },
+            vec![],
+        ));
+    }
+    let (add_list, remove_list) = if add {
+        (changed.clone(), Vec::new())
+    } else {
+        (Vec::new(), changed.clone())
+    };
+    send(
+        ctx.source(),
+        Action::ForceLoad {
+            dimension,
+            add: add_list,
+            remove: remove_list,
+        },
+    )?;
+    if changed.len() == 1 {
+        feedback(
+            ctx,
+            if add {
+                "commands.forceload.added.single"
+            } else {
+                "commands.forceload.removed.single"
+            },
+            vec![chunk_label(changed[0].0, changed[0].1), key],
+        )?;
+    } else {
+        feedback(
+            ctx,
+            if add {
+                "commands.forceload.added.multiple"
+            } else {
+                "commands.forceload.removed.multiple"
+            },
+            vec![
+                changed.len().to_string(),
+                key,
+                chunk_label(x0, z0),
+                chunk_label(x1, z1),
+            ],
+        )?;
+    }
+    Ok(changed.len() as i32)
+}
+
+fn forceload_tree() -> NodeBuilder<Source> {
+    let pos = |name: &'static str| argument::<Source>(name, ArgumentType::ColumnPos);
+    literal::<Source>("forceload")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(
+            literal::<Source>("add").then(
+                pos("from")
+                    .executes(|ctx| forceload_change(ctx, true, false))
+                    .then(pos("to").executes(|ctx| forceload_change(ctx, true, true))),
+            ),
+        )
+        .then(
+            literal::<Source>("remove")
+                .then(literal::<Source>("all").executes(|ctx| {
+                    let dimension = ctx.source().dimension;
+                    let key = dimension.key().to_owned();
+                    let removed: Vec<(i32, i32)> = {
+                        let mut game = ctx.source().state.lock().unwrap();
+                        let all: Vec<_> = game
+                            .more
+                            .forced
+                            .iter()
+                            .filter(|(k, ..)| *k == key)
+                            .cloned()
+                            .collect();
+                        for entry in &all {
+                            game.more.forced.remove(entry);
+                        }
+                        all.into_iter().map(|(_, x, z)| (x, z)).collect()
+                    };
+                    let count = removed.len() as i32;
+                    send(
+                        ctx.source(),
+                        Action::ForceLoad {
+                            dimension,
+                            add: Vec::new(),
+                            remove: removed,
+                        },
+                    )?;
+                    feedback(ctx, "commands.forceload.removed.all", vec![key])?;
+                    Ok(count)
+                }))
+                .then(
+                    pos("from")
+                        .executes(|ctx| forceload_change(ctx, false, false))
+                        .then(pos("to").executes(|ctx| forceload_change(ctx, false, true))),
+                ),
+        )
+        .then(
+            literal::<Source>("query")
+                .executes(|ctx| {
+                    let key = ctx.source().dimension.key().to_owned();
+                    let chunks: Vec<String> = ctx
+                        .source()
+                        .state
+                        .lock()
+                        .unwrap()
+                        .more
+                        .forced
+                        .iter()
+                        .filter(|(k, ..)| *k == key)
+                        .map(|(_, x, z)| chunk_label(*x, *z))
+                        .collect();
+                    match chunks.len() {
+                        0 => Err(failure("commands.forceload.added.none", vec![key])),
+                        1 => {
+                            feedback(
+                                ctx,
+                                "commands.forceload.list.single",
+                                vec![key, chunks[0].clone()],
+                            )?;
+                            Ok(1)
+                        }
+                        n => {
+                            feedback(
+                                ctx,
+                                "commands.forceload.list.multiple",
+                                vec![n.to_string(), key, chunks.join(", ")],
+                            )?;
+                            Ok(n as i32)
+                        }
+                    }
+                })
+                .then(pos("pos").executes(|ctx| {
+                    let (x, z) = column(ctx, "pos")?;
+                    let key = ctx.source().dimension.key().to_owned();
+                    let forced = ctx.source().state.lock().unwrap().more.forced.contains(&(
+                        key.clone(),
+                        x,
+                        z,
+                    ));
+                    if forced {
+                        feedback(
+                            ctx,
+                            "commands.forceload.query.success",
+                            vec![chunk_label(x, z), key],
+                        )?;
+                        Ok(1)
+                    } else {
+                        Err(failure(
+                            "commands.forceload.query.failure",
+                            vec![chunk_label(x, z), key],
+                        ))
+                    }
+                })),
+        )
+}
+
 pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(version_tree());
     tree.register(random_tree());
@@ -939,6 +1157,7 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(unpublish_tree());
     tree.register(tick_tree());
     tree.register(rotate_tree());
+    tree.register(forceload_tree());
 }
 
 #[cfg(test)]
@@ -1013,6 +1232,7 @@ mod tests {
             "unpublish",
             "tick",
             "rotate",
+            "forceload",
         ] {
             assert!(
                 roots.iter().any(|root| root == name),
@@ -1204,6 +1424,44 @@ mod tests {
     fn transfer_without_players_needs_a_player_source() {
         let (result, _) = run("transfer play.example.com", 3, fresh(), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn forceload_marks_queries_and_removes_chunks() {
+        let state = fresh();
+        let (result, actions) = run("forceload add 0 0 31 15", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 2, "two chunks");
+        assert!(matches!(
+            &actions[0],
+            Action::ForceLoad { add, remove, .. } if add == &[(0, 0), (1, 0)] && remove.is_empty()
+        ));
+        assert_eq!(keys(&actions[1..]), ["commands.forceload.added.multiple"]);
+        assert!(run("forceload add 0 0", 2, state.clone(), None).0.is_err());
+        assert!(
+            run("forceload add 0 0 4000 4000", 2, state.clone(), None)
+                .0
+                .is_err()
+        );
+        assert_eq!(run("forceload query", 2, state.clone(), None).0.unwrap(), 2);
+        assert!(run("forceload query 0 0", 2, state.clone(), None).0.is_ok());
+        assert!(
+            run("forceload query 100 100", 2, state.clone(), None)
+                .0
+                .is_err()
+        );
+        let (result, actions) = run("forceload remove 0 0", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::ForceLoad { remove, .. } if remove == &[(0, 0)]
+        ));
+        assert_eq!(
+            run("forceload remove all", 2, state.clone(), None)
+                .0
+                .unwrap(),
+            1
+        );
+        assert!(run("forceload remove all", 1, state, None).0.is_err());
     }
 
     #[test]

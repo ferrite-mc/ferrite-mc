@@ -1109,6 +1109,7 @@ async fn run(
                   source: &source,
                   events: &event_tx,
                   stop: &stop_tx,
+                  signals: &signal_tx,
                   worlds: &worlds,
                   dimension: runtime_dimension,
                   tracking: &tracking,
@@ -1178,6 +1179,7 @@ async fn run(
                   source: &source,
                   events: &event_tx,
                   stop: &stop_tx,
+                  signals: &signal_tx,
                   worlds: &worlds,
                   dimension: Dimension::Overworld,
                   tracking: &tracking,
@@ -1277,6 +1279,12 @@ async fn run(
                      let name = component_json.as_deref().map(json_text);
                      worlds.schedule_global(move |g| g.set_display_name(player, name));
                  }
+                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { center, kind, block }) => {
+                    let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
+                    if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref()); });
+                    }
+                }
                  Some(ferrite_plugin::PlayerCommand::DropItem { center, item, amount, natural }) => {
                     let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
@@ -1745,7 +1753,9 @@ fn route_plugin_command(
         // The game loop sends visibility to the global region before calling this.
         PlayerCommand::Visibility { .. } => {}
         // The game loop hands explosions to the region owning the chunk before calling this.
-        PlayerCommand::Explosion { .. } | PlayerCommand::DropItem { .. } => {}
+        PlayerCommand::Explosion { .. }
+        | PlayerCommand::DropItem { .. }
+        | PlayerCommand::SpawnEntity { .. } => {}
         // The game loop sends display names to the global region before calling this.
         PlayerCommand::DisplayName { .. } => {
             tracing::debug!("plugin display name reached the player router")
@@ -1934,6 +1944,7 @@ struct CommandRuntime<'a> {
     source: &'a Option<Arc<anvil::AnvilChunkSource>>,
     events: &'a mpsc::UnboundedSender<GameMessage>,
     stop: &'a tokio::sync::watch::Sender<bool>,
+    signals: &'a mpsc::UnboundedSender<Signal>,
     worlds: &'a Worlds,
     /// The dimension the command source acts in.
     dimension: Dimension,
@@ -2393,6 +2404,27 @@ impl CommandRuntime<'_> {
                         "commands.message.display.outgoing",
                         &[&names, &text],
                     ));
+                }
+                false
+            }
+            Action::ForceLoad {
+                dimension,
+                add,
+                remove,
+            } => {
+                for (x, z) in add {
+                    let _ = self.signals.send(Signal::Hold {
+                        dimension,
+                        chunk: ChunkPos(x, z),
+                        add: true,
+                    });
+                }
+                for (x, z) in remove {
+                    let _ = self.signals.send(Signal::Hold {
+                        dimension,
+                        chunk: ChunkPos(x, z),
+                        add: false,
+                    });
                 }
                 false
             }
