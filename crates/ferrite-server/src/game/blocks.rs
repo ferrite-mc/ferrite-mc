@@ -205,6 +205,21 @@ fn use_sign(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     true
 }
 
+/// `Player#openSign`: opens the editor for the sign at `pos` on the given side. `false` when
+/// the block there is not a sign.
+pub fn open_sign_editor(player: &mut Player, pos: [i32; 3], front: bool) -> bool {
+    match state_at(player, pos) {
+        Some(state) if is_sign(state) => {}
+        _ => return false,
+    }
+    player.editing_sign = Some((pos, front));
+    let _ = player.outbound.send(packet(&OpenSignEditor {
+        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+        is_front_text: front,
+    }));
+    true
+}
+
 fn set_held(player: &mut Player, item: &str) {
     if let Some(stack) = ItemStack::from_name(item) {
         let slot = player.inventory.selected_slot();

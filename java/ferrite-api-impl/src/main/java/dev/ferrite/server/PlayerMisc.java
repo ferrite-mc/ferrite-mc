@@ -123,6 +123,12 @@ public abstract class PlayerMisc extends PlayerStubs {
         if (value.length > 5120) throw new IllegalArgumentException("Cookie payload too large (" + value.length + " > 5120)");
         HostBridge.callVoid("Player", getUniqueId(), "storeCookie(NamespacedKey,String)", key, java.util.Base64.getEncoder().encodeToString(value));
     }
+    /** Opens the sign editor for the given side; only a sign block in the player's world can be edited. */
+    @Override public void openSign(org.bukkit.block.Sign sign, org.bukkit.block.sign.Side side) {
+        Objects.requireNonNull(sign, "sign");
+        Objects.requireNonNull(side, "side");
+        HostBridge.callVoid("Player", getUniqueId(), "openSign(Location,Side)", sign.getLocation(), side);
+    }
     @Override public org.bukkit.inventory.ItemStack getItemInHand() { return getInventory().getItemInMainHand(); }
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }

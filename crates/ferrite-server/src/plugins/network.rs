@@ -333,6 +333,14 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
         }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "wakeup(boolean)" => PluginPacket::WakeUp,
+        "openSign(Location,Side)" => PluginPacket::OpenSign {
+            pos: block_pos(arg(0)?)?,
+            front: match arg(1)? {
+                "FRONT" => true,
+                "BACK" => false,
+                _ => return None,
+            },
+        },
         "storeCookie(NamespacedKey,String)" => {
             use base64::Engine;
             let key = arg(0)?.to_ascii_lowercase();
@@ -793,6 +801,15 @@ mod tests {
             )),
             None
         );
+        let at = format!("w{0}3.5{0}64{0}-2{0}0{0}0", PART);
+        assert_eq!(
+            packet(call("openSign(Location,Side)", &[&at, "BACK"])),
+            Some(PluginPacket::OpenSign {
+                pos: [3, 64, -2],
+                front: false
+            })
+        );
+        assert_eq!(packet(call("openSign(Location,Side)", &[&at, "TOP"])), None);
         assert_eq!(packet(call("sendOpLevel(byte)", &["9"])), None);
         assert_eq!(
             packet(call("playEffect(EntityEffect)", &["WOLF_HEARTS"])),

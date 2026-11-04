@@ -209,6 +209,11 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `Player#openSign`: the sign editor for the sign at `pos`.
+    OpenSign {
+        pos: [i32; 3],
+        front: bool,
+    },
     /// `Player#storeCookie`: the client keeps `payload` under `key` across transfers.
     StoreCookie {
         key: String,
