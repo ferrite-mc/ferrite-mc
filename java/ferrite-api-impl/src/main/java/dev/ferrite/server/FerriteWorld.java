@@ -99,7 +99,56 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "hashCode" -> id.hashCode();
             case "equals" -> self == args[0];
             case "toString" -> "World[" + id + "]";
-            default -> HostBridge.dispatch("World", id, method, args);
+            default -> {
+                Object answer = dimension(method.getName(), args);
+                yield answer != NONE ? answer : HostBridge.dispatch("World", id, method, args);
+            }
+        };
+    }
+
+    private static final Object NONE = new Object();
+    private final org.bukkit.persistence.PersistentDataContainer data = new FerriteDataContainer();
+
+    /** The vanilla dimension a world name stands for: the Nether and End are suffixed, everything else is the overworld. */
+    private org.bukkit.World.Environment environment() {
+        if (name.endsWith("_nether")) return org.bukkit.World.Environment.NETHER;
+        if (name.endsWith("_the_end")) return org.bukkit.World.Environment.THE_END;
+        return org.bukkit.World.Environment.NORMAL;
+    }
+
+    private int minHeight() { return environment() == org.bukkit.World.Environment.NORMAL ? -64 : 0; }
+    private int height() { return environment() == org.bukkit.World.Environment.NORMAL ? 384 : 256; }
+
+    /** Constants of the three vanilla dimension types (min_y, height, logical_height, coordinate_scale, flags). */
+    private Object dimension(String method, Object[] args) {
+        var env = environment();
+        boolean nether = env == org.bukkit.World.Environment.NETHER, end = env == org.bukkit.World.Environment.THE_END;
+        return switch (method) {
+            case "getEnvironment" -> env;
+            case "getMinHeight" -> minHeight();
+            case "getMaxHeight" -> minHeight() + height();
+            case "getLogicalHeight" -> nether ? 128 : height();
+            case "getSeaLevel" -> nether ? 32 : 63;
+            case "getCoordinateScale" -> nether ? 8.0 : 1.0;
+            case "hasSkyLight" -> env == org.bukkit.World.Environment.NORMAL;
+            case "hasCeiling" -> nether;
+            case "isNatural", "isBedWorks" -> env == org.bukkit.World.Environment.NORMAL;
+            case "isUltraWarm", "isPiglinSafe", "isRespawnAnchorWorks" -> nether;
+            case "hasRaids" -> !nether;
+            case "isFixedTime" -> nether || end;
+            case "hasBonusChest" -> false;
+            case "key" -> net.kyori.adventure.key.Key.key("minecraft", nether ? "the_nether" : end ? "the_end" : "overworld");
+            case "getKey" -> new org.bukkit.NamespacedKey("minecraft", nether ? "the_nether" : end ? "the_end" : "overworld");
+            case "getPlayerCount", "getEntityCount" -> (int) server.getOnlinePlayers().stream().filter(p -> p.getWorld() == proxy).count();
+            case "getAllowAnimals", "getAllowMonsters" -> true;
+            case "getViewDistance", "getSendViewDistance" -> server.getViewDistance();
+            case "getSimulationDistance" -> server.getSimulationDistance();
+            case "getPersistentDataContainer" -> data;
+            case "getPluginChunkTickets" -> java.util.Map.of();
+            case "getForceLoadedChunks", "getRaids", "getPopulators" -> java.util.List.of();
+            case "getFeatureFlags", "getListeningPluginChannels" -> java.util.Set.of();
+            case "getGenerator", "getBiomeProvider", "getEnderDragonBattle" -> null;
+            default -> NONE;
         };
     }
 }
