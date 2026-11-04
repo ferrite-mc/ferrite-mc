@@ -122,6 +122,19 @@ def run_extractor(java: str, version: str, out: pathlib.Path) -> None:
     )
 
 
+def extract_resources(out: pathlib.Path, version: str) -> None:
+    """Copy the English translations and version.json out of the user's own server jar.
+
+    The server reads them at startup for command feedback and `/version`, so no Mojang text is
+    kept in this repository.
+    """
+    reports = out / "generated" / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(out / "lib" / f"server-{version}.jar") as server:
+        (reports / "lang_en_us.json").write_bytes(server.read("assets/minecraft/lang/en_us.json"))
+        (reports / "version.json").write_bytes(server.read("version.json"))
+
+
 def main() -> None:
     global version_label
     version = sys.argv[1] if len(sys.argv) > 1 else default_version()
@@ -146,6 +159,7 @@ def main() -> None:
         cwd=out, check=True,
     )
     run_extractor(java, version, out)
+    extract_resources(out, version)
     print(f"ok: {gen}")
 
 

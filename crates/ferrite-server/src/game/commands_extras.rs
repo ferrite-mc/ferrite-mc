@@ -18,7 +18,7 @@ use ferrite_protocol::{
         BossBar, ClearTitles, DefaultSpawn, LevelParticles, PlayerTeam, ResetScore,
         SetActionBarText, SetBorderCenter, SetBorderLerpSize, SetBorderSize, SetBorderWarningDelay,
         SetBorderWarningDistance, SetDisplayObjective, SetObjective, SetScore, SetSubtitleText,
-        SetTitleText, SetTitlesAnimation, SoundEffect, StopSound, SystemChat,
+        SetTitleText, SetTitlesAnimation, SoundEffect, StopSound, SystemChat, Transfer,
     },
     types::{BlockPos, PlainText},
 };
@@ -55,6 +55,7 @@ pub enum PlayerPacket {
     SetDisplayObjective(SetDisplayObjective),
     BossBar(BossBar),
     PlayerTeam(PlayerTeam),
+    Transfer(Transfer),
 }
 
 impl PlayerPacket {
@@ -122,6 +123,9 @@ impl PlayerPacket {
                 let _ = outbound.send(packet(p));
             }
             Self::PlayerTeam(p) => {
+                let _ = outbound.send(packet(p));
+            }
+            Self::Transfer(p) => {
                 let _ = outbound.send(packet(p));
             }
         }

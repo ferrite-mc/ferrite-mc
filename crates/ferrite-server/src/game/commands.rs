@@ -172,6 +172,8 @@ pub struct GameState {
     pub schedules: BTreeMap<String, Vec<i64>>,
     /// Trigger objectives a player has "primed" with `scoreboard players enable`.
     pub trigger_enabled: BTreeSet<(String, String)>,
+    /// State of `/random`, `/setidletimeout` and `/stopwatch`.
+    pub more: super::commands_more::MoreState,
 }
 
 impl GameState {
@@ -200,6 +202,7 @@ impl GameState {
             entities: Arc::new(Mutex::new(super::entity_index::EntityIndex::default())),
             schedules: BTreeMap::new(),
             trigger_enabled: BTreeSet::new(),
+            more: super::commands_more::MoreState::default(),
         }
     }
 
@@ -220,11 +223,17 @@ impl GameState {
             xp_level: 0,
         });
         self.max_players = max_players;
+        self.touch(uuid);
     }
 
     /// Records a player's last known position for commands that resolve entity state.
     pub fn set_position(&mut self, uuid: Uuid, pos: [f64; 3], yaw: f32, pitch: f32) {
+        let now = self.game_time;
         if let Some(player) = self.players.iter_mut().find(|player| player.uuid == uuid) {
+            // Standing still while the client resends its position is not activity.
+            if player.pos != pos || player.yaw != yaw || player.pitch != pitch {
+                self.more.last_active.insert(uuid, now);
+            }
             player.pos = pos;
             player.yaw = yaw;
             player.pitch = pitch;
@@ -240,6 +249,34 @@ impl GameState {
 
     pub fn leave(&mut self, uuid: Uuid) {
         self.players.retain(|player| player.uuid != uuid);
+        self.more.last_active.remove(&uuid);
+    }
+
+    /// Marks a player as having just done something (`/setidletimeout` counts from here).
+    pub fn touch(&mut self, uuid: Uuid) {
+        let now = self.game_time;
+        self.more.last_active.insert(uuid, now);
+    }
+
+    /// Players idle for longer than `/setidletimeout` allows; each is reported once.
+    pub fn take_idle_players(&mut self) -> Vec<Uuid> {
+        let minutes = self.more.idle_timeout_minutes;
+        if minutes <= 0 {
+            return Vec::new();
+        }
+        let limit = i64::from(minutes) * 60 * 20;
+        let now = self.game_time;
+        let idle: Vec<Uuid> = self
+            .more
+            .last_active
+            .iter()
+            .filter(|(_, last)| now - **last >= limit)
+            .map(|(uuid, _)| *uuid)
+            .collect();
+        for uuid in &idle {
+            self.more.last_active.insert(*uuid, now);
+        }
+        idle
     }
 
     /// Advances the world tick. The overworld clock only moves while
@@ -1987,6 +2024,7 @@ pub fn dispatcher() -> CommandDispatcher<Source> {
     super::commands_world::register(&mut tree);
     super::commands_extras::register(&mut tree);
     super::commands_server::register(&mut tree);
+    super::commands_more::register(&mut tree);
     super::commands_meta::register(&mut tree);
     super::commands_data::register(&mut tree);
     super::functions::register(&mut tree);

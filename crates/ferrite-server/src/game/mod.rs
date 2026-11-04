@@ -41,6 +41,7 @@ mod commands_data;
 mod commands_exec;
 mod commands_extras;
 mod commands_meta;
+mod commands_more;
 mod commands_server;
 mod commands_world;
 mod container;
@@ -804,6 +805,7 @@ async fn run(
         .join("../../vanilla/26.3/generated/reports");
     let parser_registry = ferrite_command::ParserRegistry::load(&registry_dir).ok();
     commands::load_lang(&registry_dir);
+    commands_more::load_version(&registry_dir);
     let world_path = source.as_ref().and_then(|source| source.path());
     let entity_world = world_path.map(std::path::Path::to_path_buf);
     let disabled_packs = world_path.map(functions::read_disabled).unwrap_or_default();
@@ -938,7 +940,9 @@ async fn run(
     let mut load_ran = false;
     loop {
         tokio::select! {
-         event=events.recv()=>{let Some(event)=event else {break}; match event {
+         event=events.recv()=>{let Some(event)=event else {break};
+          if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { command_state.lock().unwrap().touch(*uuid); }
+          match event {
           GameMessage::Joined{session,uuid,name,properties,address,dimension_type,biome,view_distance,online_mode,secure_chat,chat_type,chat_visibility,max_players,outbound}=>{
            if let Some((_, mailbox, old)) = mailboxes.get(&uuid) {
              let _ = old.send(Outbound::Disconnect("You logged in from another location".into()));
@@ -1278,7 +1282,8 @@ async fn run(
          },
          _tick = clock.tick() => {
              let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
-             let due = command_state.lock().unwrap().tick(advance_time);
+             let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = game.tick(advance_time); (due, game.take_idle_players()) };
+             for uuid in idle { if let Some((_, _, outbound)) = mailboxes.get(&uuid) { let _ = outbound.send(Outbound::Disconnect(commands::Feedback::new("multiplayer.disconnect.idling", vec![]).text)); } }
              for function in due {
                  let (complete, _unused) = oneshot::channel();
                  let _ = event_tx.send(GameMessage::Console {
