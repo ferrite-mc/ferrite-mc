@@ -58,9 +58,50 @@ public final class HostBridge {
         if (t != null) reply = t.call(owner, subjectText, method, joined.toString());
         else if (Native.enabled()) reply = Native.hostCall(owner, subjectText, method, joined.toString());
         else reply = null;
+        if (reply == null) reply = localProperty(owner, subjectText, method, joined.toString());
         if (reply == null) throw new UnsupportedOperationException("Ferrite: not implemented: " + owner + "#" + method);
         return reply;
     }
+
+    /**
+     * Properties the host does not track yet (flying, fire ticks, walk speed, ...). A plugin that sets one reads
+     * the same value back; the effect on the client needs a dedicated host handler. Anything that was never set
+     * and has no known default stays unimplemented, so wrong defaults are never invented.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, String> LOCAL = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Map<String, String> DEFAULTS = Map.ofEntries(
+        Map.entry("WalkSpeed", "0.2"), Map.entry("FlySpeed", "0.1"), Map.entry("MaximumAir", "300"), Map.entry("RemainingAir", "300"),
+        Map.entry("Gravity", "true"), Map.entry("Flying", "false"), Map.entry("AllowFlight", "false"), Map.entry("Sneaking", "false"),
+        Map.entry("Sprinting", "false"), Map.entry("Glowing", "false"), Map.entry("Invulnerable", "false"), Map.entry("Silent", "false"),
+        Map.entry("FireTicks", "0"), Map.entry("FreezeTicks", "0"), Map.entry("Saturation", "5.0"), Map.entry("Exhaustion", "0.0"),
+        Map.entry("PVP", "true"), Map.entry("AutoSave", "true"), Map.entry("KeepSpawnInMemory", "true"), Map.entry("Persistent", "true"),
+        Map.entry("Swimming", "false"), Map.entry("Gliding", "false"), Map.entry("Climbing", "false"), Map.entry("Blocking", "false"),
+        Map.entry("HealthScaled", "false"), Map.entry("SleepingIgnored", "false"), Map.entry("CustomNameVisible", "false"));
+
+    private static String property(String method, String prefix) {
+        int paren = method.indexOf('(');
+        String name = method.substring(0, paren);
+        return name.length() > prefix.length() && name.startsWith(prefix) ? name.substring(prefix.length()) : null;
+    }
+
+    private static String localProperty(String owner, String subject, String method, String args) {
+        boolean noArgs = method.endsWith("()");
+        if (noArgs) {
+            for (String prefix : new String[]{"get", "is", "has"}) {
+                String prop = property(method, prefix);
+                if (prop == null) continue;
+                String stored = LOCAL.get(owner + '|' + subject + '|' + prop);
+                return stored != null ? (stored.equals(NULL) ? NULL : stored) : DEFAULTS.get(prop);
+            }
+            return null;
+        }
+        String prop = property(method, "set");
+        if (prop != null && !method.contains(",") && !args.isEmpty()) { LOCAL.put(owner + '|' + subject + '|' + prop, args); return "true"; }
+        return null;
+    }
+
+    /** Test hook: forgets locally kept properties. */
+    static void clearLocalProperties() { LOCAL.clear(); }
 
     public static void callVoid(String owner, Object subject, String method, Object... args) { raw(owner, subject, method, args); }
     public static boolean callBoolean(String owner, Object subject, String method, Object... args) { return Boolean.parseBoolean(raw(owner, subject, method, args)); }

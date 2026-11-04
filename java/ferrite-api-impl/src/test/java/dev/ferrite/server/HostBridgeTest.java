@@ -45,4 +45,20 @@ class HostBridgeTest {
         assertEquals("5", HostBridge.dispatch("World", "w", method, new Object[]{3}));
         assertEquals("World#get(int)", calls.get(0));
     }
+
+    @Test void unhandledPropertiesReadBackWhatWasSetAndKnownDefaultsOtherwise() {
+        HostBridge.clearLocalProperties();
+        HostBridge.transport = (owner, subject, method, args) -> null;
+        assertEquals(0.2f, HostBridge.callFloat("Player", "p1", "getWalkSpeed()"), 0.0001f);
+        assertFalse(HostBridge.callBoolean("Player", "p1", "isFlying()"));
+        HostBridge.callVoid("Player", "p1", "setFlying(boolean)", true);
+        HostBridge.callVoid("Player", "p1", "setFireTicks(int)", 40);
+        assertTrue(HostBridge.callBoolean("Player", "p1", "isFlying()"));
+        assertEquals(40, HostBridge.callInt("Player", "p1", "getFireTicks()"));
+        // Another player keeps its own values.
+        assertFalse(HostBridge.callBoolean("Player", "p2", "isFlying()"));
+        // Unknown properties that were never set are not invented.
+        assertThrows(UnsupportedOperationException.class, () -> HostBridge.callInt("Player", "p1", "getNoSuchThing()"));
+        HostBridge.clearLocalProperties();
+    }
 }

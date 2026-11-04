@@ -60,7 +60,10 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   `reloadWhitelist`, `setDefaultGameMode` / 플레이어: `addPotionEffect`, `removePotionEffect`,
   `clearActivePotionEffects`, `damage`, `setBedSpawnLocation`, `stopAllSounds` / 월드: `setStorm`, `setThundering`,
   `setTime`, `setDifficulty`, `setSpawnLocation`, `save`)이고, 나머지
-  핸들러를 채우는 작업이 진행 중입니다. 즉 **라우팅은 전부 연결됐지만 구현은 아직 전부가 아닙니다.**
+  핸들러를 채우는 작업이 진행 중입니다. 호스트에 상태가 없는 속성(`setFlying`/`isFlying`, `setFireTicks`,
+  `setWalkSpeed`, `setSneaking` 등 `set/get/is/has` 쌍)은 자바 쪽에 값을 보관해 플러그인이 설정한 값을 그대로
+  읽게 하고, 알려진 기본값만 돌려줍니다. **클라이언트에 실제 효과를 내는 패킷은 아직 보내지 않습니다.**
+  설정한 적 없고 기본값도 모르는 읽기는 예외로 남겨 값을 지어내지 않습니다. 즉 **라우팅은 전부 연결됐지만 구현은 아직 전부가 아닙니다.**
 - **목표**: Spigot·Paper·Folia 플러그인이 모두 동작하는 것. NMS(`net.minecraft.*`)·CraftBukkit 타입에 의존하는
   플러그인도 호환되어야 하며, 이는 라우팅 이후의 별도 단계입니다.
 
