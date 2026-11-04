@@ -98,6 +98,10 @@ public final class Bootstrap {
     /** Fires Paper's {@code AsyncChatEvent} then Bukkit's {@code AsyncPlayerChatEvent}; null means cancelled. */
     public static String fireChat(String id, String name, String message) {
         var player = ensurePlayer(id, name);
+        if (player.isConversing()) {
+            player.acceptConversationInput(message);
+            return null;
+        }
         String result = message;
         synchronized (LEGACY_LOCK) {
             if (server.plugins.hasListeners(io.papermc.paper.event.player.AsyncChatEvent.class)) {

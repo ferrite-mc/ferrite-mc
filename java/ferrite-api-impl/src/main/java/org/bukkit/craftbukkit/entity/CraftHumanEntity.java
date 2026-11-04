@@ -1,7 +1,7 @@
 package org.bukkit.craftbukkit.entity;
 
 /** Compatibility seam for plugins that replace the Bukkit permissible. */
-public abstract class CraftHumanEntity extends dev.ferrite.server.PlayerStubs {
+public abstract class CraftHumanEntity extends dev.ferrite.server.PlayerExtras {
     public org.bukkit.permissions.PermissibleBase perm;
     @Override public boolean hasPermission(String name) { return perm.hasPermission(name); }
     @Override public boolean hasPermission(org.bukkit.permissions.Permission permission) { return perm.hasPermission(permission); }
