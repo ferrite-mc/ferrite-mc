@@ -58,8 +58,8 @@ public final class HostBridge {
         if (t != null) reply = t.call(owner, subjectText, method, joined.toString());
         else if (Native.enabled()) reply = Native.hostCall(owner, subjectText, method, joined.toString());
         else reply = null;
-        else rememberSetter(owner, subjectText, method, joined.toString());
-        if (reply == null) reply = localProperty(owner, subjectText, method, joined.toString());
+        if (reply != null) rememberSetter(owner, subjectText, method, joined.toString());
+        else reply = localProperty(owner, subjectText, method, joined.toString());
         if (reply == null) throw new UnsupportedOperationException("Ferrite: not implemented: " + owner + "#" + method);
         return reply;
     }
