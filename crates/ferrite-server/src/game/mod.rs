@@ -2703,6 +2703,48 @@ impl CommandRuntime<'_> {
                 }
                 false
             }
+            Action::Swing { targets, off_hand } => {
+                let targets = match self.selection(&targets) {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        self.reply.text(&error.to_string());
+                        return false;
+                    }
+                };
+                let action = if off_hand { 3 } else { 0 };
+                for target in &targets {
+                    if target.player {
+                        if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
+                            mailbox.lock().unwrap().push_back(Command::PluginPacket(
+                                ferrite_plugin::PluginPacket::Animation { action },
+                            ));
+                        }
+                    } else {
+                        let uuid = target.uuid;
+                        let chunk = ChunkPos(
+                            (target.pos[0].floor() as i32) >> 4,
+                            (target.pos[2].floor() as i32) >> 4,
+                        );
+                        if self.worlds.owner(self.dimension, chunk).is_some() {
+                            self.worlds
+                                .schedule_at_chunk(self.dimension, chunk, move |region| {
+                                    region.swing_entity(uuid, action);
+                                });
+                        }
+                    }
+                }
+                match targets.as_slice() {
+                    [] => {}
+                    [only] => self
+                        .reply
+                        .key("commands.swing.success.single", &[&only.name]),
+                    many => {
+                        let count = many.len().to_string();
+                        self.reply.key("commands.swing.success.multiple", &[&count]);
+                    }
+                }
+                false
+            }
             Action::Kill { targets } => {
                 let targets = match self.selection(&targets) {
                     Ok(targets) => targets,

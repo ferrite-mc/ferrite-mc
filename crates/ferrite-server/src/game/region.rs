@@ -507,6 +507,8 @@ pub struct Player {
 pub struct Region {
     /// Explosions plugins asked for: center, power and whether fire is left behind.
     pub plugin_explosions: Vec<([f64; 3], f32, bool)>,
+    /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
+    pending_swings: Vec<(Uuid, u8)>,
     pub players: HashMap<Uuid, Player>,
     pub entities: EntityStore,
     generator: FlatGenerator,
@@ -566,6 +568,7 @@ impl RegionData for Region {
             .collect();
         let mut result = Self {
             plugin_explosions: Vec::new(),
+            pending_swings: Vec::new(),
             players: HashMap::new(),
             rng: Rng::default(),
             beacon_clock: 0,
@@ -3281,6 +3284,24 @@ impl Region {
     /// strength, critical hits, sweeping, knockback and the hurt animation. A drawn bow that
     /// was released this tick fires its arrow first.
     fn resolve_attacks(&mut self, ctx: &TickContext) {
+        for (uuid, action) in std::mem::take(&mut self.pending_swings) {
+            let key = self.entities.keys().iter().copied().find(|key| {
+                self.entities
+                    .data(*key)
+                    .is_some_and(|data| data.uuid == uuid)
+            });
+            let Some(key) = key else { continue };
+            let Some(id) = self.entities.data(key).map(|data| VarInt(data.id)) else {
+                continue;
+            };
+            let players = &self.players;
+            tracker::broadcast(
+                &self.entities,
+                key,
+                &Animate { id, action },
+                &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+            );
+        }
         struct Pending {
             uuid: Uuid,
             attacks: Vec<i32>,
@@ -4535,6 +4556,20 @@ impl Region {
         };
         mob::hurt(&mut self.entities, key, amount, None);
         true
+    }
+
+    /// Queues an arm swing (`/swing`) of one entity of this region for the next tick, when the
+    /// tracker can broadcast it. Returns whether the entity is here.
+    pub fn swing_entity(&mut self, uuid: Uuid, action: u8) -> bool {
+        let found = self.entities.keys().iter().any(|key| {
+            self.entities
+                .data(*key)
+                .is_some_and(|data| data.uuid == uuid)
+        });
+        if found {
+            self.pending_swings.push((uuid, action));
+        }
+        found
     }
 
     pub fn kill_entity(&mut self, uuid: Uuid) -> bool {

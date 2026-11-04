@@ -865,6 +865,52 @@ fn tick_tree() -> NodeBuilder<Source> {
         )
 }
 
+/// `/swing <targets> [mainhand|offhand [<animation> [<duration>]]]`. The animation and duration
+/// only matter for the client's item-use pose, so they are validated and otherwise ignored.
+fn swing_tree() -> NodeBuilder<Source> {
+    fn swing(ctx: &CommandContext<Source>, off_hand: bool) -> Result<i32, CommandError> {
+        if let Some(ferrite_command::ArgumentValue::Raw(name)) = ctx.argument("animation")
+            && !["none", "whack", "stab"].contains(&name.to_ascii_lowercase().as_str())
+        {
+            return Err(failure(
+                "argument.swing_animation.invalid",
+                vec![name.clone()],
+            ));
+        }
+        send(
+            ctx.source(),
+            Action::Swing {
+                targets: entity(ctx, "targets")?,
+                off_hand,
+            },
+        )
+    }
+    fn hand(name: &'static str, off_hand: bool) -> NodeBuilder<Source> {
+        literal::<Source>(name)
+            .executes(move |ctx| swing(ctx, off_hand))
+            .then(
+                argument::<Source>(
+                    "animation",
+                    ArgumentType::opaque("minecraft:swing_animation"),
+                )
+                .executes(move |ctx| swing(ctx, off_hand))
+                .then(
+                    argument::<Source>("duration", ArgumentType::Time { min: 1 })
+                        .executes(move |ctx| swing(ctx, off_hand)),
+                ),
+            )
+    }
+    literal::<Source>("swing")
+        .requires(gamemasters())
+        .restricted(true)
+        .then(
+            argument::<Source>("targets", ArgumentType::entity())
+                .executes(|ctx| swing(ctx, false))
+                .then(hand("mainhand", false))
+                .then(hand("offhand", true)),
+        )
+}
+
 fn rotate_tree() -> NodeBuilder<Source> {
     fn rotate(ctx: &CommandContext<Source>, to: RotateTo) -> Result<i32, CommandError> {
         send(
@@ -1648,6 +1694,7 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(unpublish_tree());
     tree.register(tick_tree());
     tree.register(rotate_tree());
+    tree.register(swing_tree());
     tree.register(forceload_tree());
     tree.register(damage_tree());
     tree.register(debug_tree());
@@ -1730,6 +1777,7 @@ mod tests {
             "unpublish",
             "tick",
             "rotate",
+            "swing",
             "forceload",
             "damage",
             "debug",
@@ -2100,6 +2148,31 @@ mod tests {
         }
         assert!(run("rotate @s 1 2", 1, fresh(), None).0.is_err());
         assert!(run("rotate", 2, fresh(), None).0.is_err());
+    }
+
+    #[test]
+    fn swing_picks_the_hand_and_validates_the_animation() {
+        for (input, off) in [
+            ("swing @s", false),
+            ("swing @s mainhand", false),
+            ("swing @s offhand", true),
+            ("swing @s offhand stab 5", true),
+            ("swing @s mainhand whack", false),
+        ] {
+            let (result, actions) = run(input, 2, fresh(), None);
+            assert!(result.is_ok(), "{input}: {result:?}");
+            assert!(
+                matches!(actions.first(), Some(Action::Swing { off_hand, .. }) if *off_hand == off),
+                "{input}: {actions:?}"
+            );
+        }
+        let (bad, actions) = run("swing @s mainhand flail", 2, fresh(), None);
+        assert!(bad.is_err());
+        assert!(actions.is_empty());
+        assert!(
+            run("swing @s", 1, fresh(), None).0.is_err(),
+            "needs permission level 2"
+        );
     }
 
     #[test]

@@ -503,6 +503,11 @@ pub enum Action {
         targets: EntityTarget,
         to: RotateTo,
     },
+    /// `/swing`: arm swing animation of the targets (`Animate` action 0 or 3).
+    Swing {
+        targets: EntityTarget,
+        off_hand: bool,
+    },
     Teleport {
         targets: EntityTarget,
         destination: TeleportDestination,

@@ -6,18 +6,15 @@ dispatcher compared with `vanilla/26.3/generated/reports/commands.json` (94 root
 ## Done on 2026-11-04 (all in `commands_more.rs` unless noted)
 
 version, random, setidletimeout, teammsg/tm, transfer, stopwatch, publish, unpublish, tick,
-rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers.
+rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers, swing.
 
-## Not done: 14 commands are still missing
+## Not done: 13 commands are still missing
 
 advancement, attribute, compute, dialog, fillbiome, item, loot, place, posteffect, recipe,
-ride, spectate, swing, waypoint.
+ride, spectate, waypoint.
 
 Notes for whoever picks these up:
 
-- `swing`: needs a Region method that broadcasts `Animate` (0 = main hand, 3 = off hand) to
-  the viewers of the target. `swing_animation` is not an `ArgumentType` yet (use
-  `ArgumentType::opaque("minecraft:swing_animation")`).
 - `ride`, `spectate`: need passenger/camera plumbing in the region (no vehicle model yet).
 - `item`, `loot`: need slot addressing and loot tables from the extracted vanilla data.
 - `advancement`, `recipe`: need per-player progress state, packets and persistence.
@@ -29,6 +26,8 @@ Notes for whoever picks these up:
 
 ## Partly done (works, but not like vanilla yet)
 
+- `/swing` sends the arm-swing animation to viewers; the animation type and duration are
+  validated but not used, and non-living entities are not rejected (`failed.notliving`).
 - `/tick sprint` is missing; `/tick query` has no percentile line. Freeze stops game time,
   fluid ticks and random ticks, not mob or entity movement.
 - `/forceload` marks are not saved across restarts.
