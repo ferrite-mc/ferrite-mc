@@ -26,6 +26,16 @@ fn registry() -> &'static Mutex<HashMap<Uuid, PlayerFacts>> {
     REGISTRY.get_or_init(Default::default)
 }
 
+fn ground_registry() -> &'static Mutex<HashMap<Uuid, bool>> {
+    static GROUND: OnceLock<Mutex<HashMap<Uuid, bool>>> = OnceLock::new();
+    GROUND.get_or_init(Default::default)
+}
+
+/// Records whether the client last reported the player standing on the ground.
+pub fn set_on_ground(player: Uuid, on_ground: bool) {
+    ground_registry().lock().unwrap().insert(player, on_ground);
+}
+
 pub fn record(player: Uuid, facts: PlayerFacts) {
     registry().lock().unwrap().insert(player, facts);
 }
@@ -37,6 +47,7 @@ pub fn entity_id(player: Uuid) -> Option<i32> {
 
 pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
+    ground_registry().lock().unwrap().remove(&player);
     ferrite_net::settings::forget(player);
 }
 
@@ -88,6 +99,13 @@ pub fn answer(call: &HostCall) -> Option<String> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
+    if call.method == "isOnGround()" {
+        return ground_registry()
+            .lock()
+            .unwrap()
+            .get(&player)
+            .map(|ground| ground.to_string());
+    }
     if call.method == "getClientBrandName()" {
         return ferrite_net::settings::brand(player);
     }
@@ -116,6 +134,22 @@ mod tests {
             method: method.into(),
             args: Vec::new(),
         }
+    }
+
+    #[test]
+    fn ground_state_is_answered_after_the_client_reports_it() {
+        let player = Uuid::from_u128(0x6a0d);
+        let call = HostCall {
+            owner: "Player".into(),
+            subject: player.to_string(),
+            method: "isOnGround()".into(),
+            args: vec![],
+        };
+        assert_eq!(answer(&call), None);
+        set_on_ground(player, false);
+        assert_eq!(answer(&call).as_deref(), Some("false"));
+        forget(player);
+        assert_eq!(answer(&call), None);
     }
 
     #[test]

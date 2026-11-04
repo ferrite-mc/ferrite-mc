@@ -1226,6 +1226,7 @@ async fn run(
           },
           Signal::Update{uuid,pos,yaw,pitch,ground}=>{
             if let Some(player)=online.get_mut(&uuid){player.pos=pos;player.yaw=yaw;player.pitch=pitch;}
+            crate::plugins::facts::set_on_ground(uuid, ground);
             command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
             if let Some(plugins) = &settings.plugins {
               let location = ferrite_plugin::PlayerLocation { world: ferrite_plugin::default_world_id(), x: pos[0], y: pos[1], z: pos[2], yaw, pitch };
