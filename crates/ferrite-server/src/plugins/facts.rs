@@ -37,6 +37,7 @@ pub fn entity_id(player: Uuid) -> Option<i32> {
 
 pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
+    ferrite_net::settings::forget(player);
 }
 
 fn millis(time: SystemTime) -> u128 {
@@ -63,12 +64,33 @@ fn answer_at(facts: &PlayerFacts, method: &str, now: SystemTime) -> Option<Strin
     })
 }
 
+/// The answer to a query about what the client reported in configuration.
+fn client_setting(
+    settings: &ferrite_net::settings::ClientSettings,
+    method: &str,
+) -> Option<String> {
+    Some(match method {
+        "getLocale()" | "locale()" => settings.locale.clone(),
+        "getClientViewDistance()" => settings.view_distance.max(0).to_string(),
+        "getMainHand()" => if settings.left_handed {
+            "LEFT"
+        } else {
+            "RIGHT"
+        }
+        .to_owned(),
+        _ => return None,
+    })
+}
+
 /// The answer to `call`, or `None` when it is not one of these queries or the player is unknown.
 pub fn answer(call: &HostCall) -> Option<String> {
     if call.owner != "Player" || !call.args.is_empty() {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
+    if let Some(reply) = client_setting(&ferrite_net::settings::get(player)?, &call.method) {
+        return Some(reply);
+    }
     let facts = *registry().lock().unwrap().get(&player)?;
     answer_at(&facts, &call.method, SystemTime::now())
 }
@@ -108,6 +130,28 @@ mod tests {
         );
         forget(player);
         assert_eq!(answer(&call(player, "getEntityId()")), None);
+    }
+
+    #[test]
+    fn client_settings_answer_locale_view_distance_and_hand() {
+        let settings = ferrite_net::settings::ClientSettings {
+            locale: "ko_kr".into(),
+            view_distance: 12,
+            left_handed: true,
+        };
+        assert_eq!(
+            client_setting(&settings, "getLocale()").as_deref(),
+            Some("ko_kr")
+        );
+        assert_eq!(
+            client_setting(&settings, "getClientViewDistance()").as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            client_setting(&settings, "getMainHand()").as_deref(),
+            Some("LEFT")
+        );
+        assert_eq!(client_setting(&settings, "getPing()"), None);
     }
 
     #[test]

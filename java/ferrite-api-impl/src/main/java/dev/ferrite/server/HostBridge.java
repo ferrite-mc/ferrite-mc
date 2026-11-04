@@ -144,6 +144,7 @@ public final class HostBridge {
         if (type == Double.class) return Double.valueOf(reply);
         if (type == Float.class) return Float.valueOf(reply);
         if (type.isEnum()) return Enum.valueOf((Class) type, reply);
+        if (type == java.util.Locale.class) return java.util.Locale.forLanguageTag(reply.replace('_', '-'));
         if (type == org.bukkit.NamespacedKey.class) return org.bukkit.NamespacedKey.fromString(reply);
         if (type == byte[].class) return java.util.Base64.getDecoder().decode(reply);
         if (type == net.kyori.adventure.text.Component.class) return net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().deserialize(reply);
