@@ -669,6 +669,10 @@ impl Player {
                     );
                 }
             }
+            PluginPacket::StoreCookie { key, payload } => send(
+                self,
+                &ferrite_protocol::packets::play::StoreCookie { key, payload },
+            ),
             PluginPacket::WakeUp => super::blocks::wake(self),
             PluginPacket::ResyncInventory => {
                 let full = self.menus.current().broadcast_full_state(&self.inventory);

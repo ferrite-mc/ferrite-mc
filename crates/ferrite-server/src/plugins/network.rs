@@ -333,6 +333,24 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
         }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "wakeup(boolean)" => PluginPacket::WakeUp,
+        "storeCookie(NamespacedKey,String)" => {
+            use base64::Engine;
+            let key = arg(0)?.to_ascii_lowercase();
+            let valid_key = !key.is_empty()
+                && key.len() <= 256
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_-./:".contains(c));
+            // Vanilla limits a cookie to 5120 bytes.
+            let payload = base64::engine::general_purpose::STANDARD
+                .decode(arg(1)?)
+                .ok()
+                .filter(|bytes| bytes.len() <= 5120)?;
+            if !valid_key {
+                return None;
+            }
+            PluginPacket::StoreCookie { key, payload }
+        }
         "setWindowProperty(int,int)" => PluginPacket::WindowProperty {
             id: arg(0)?.parse().ok().filter(|id| *id >= 0)?,
             value: arg(1)?.parse().ok()?,
@@ -750,6 +768,30 @@ mod tests {
         assert_eq!(
             packet(call("wakeup(boolean)", &["true"])),
             Some(PluginPacket::WakeUp)
+        );
+        assert_eq!(
+            packet(call(
+                "storeCookie(NamespacedKey,String)",
+                &["my:key", "AQID"]
+            )),
+            Some(PluginPacket::StoreCookie {
+                key: "my:key".into(),
+                payload: vec![1, 2, 3]
+            })
+        );
+        assert_eq!(
+            packet(call(
+                "storeCookie(NamespacedKey,String)",
+                &["bad key", "AQID"]
+            )),
+            None
+        );
+        assert_eq!(
+            packet(call(
+                "storeCookie(NamespacedKey,String)",
+                &["my:key", &"AAAA".repeat(2000)]
+            )),
+            None
         );
         assert_eq!(packet(call("sendOpLevel(byte)", &["9"])), None);
         assert_eq!(

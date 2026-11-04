@@ -126,15 +126,16 @@ class PlayerExtrasTest {
 
     @Test void worldEffectsReachOnlyPlayersInRange() {
         var calls = new java.util.ArrayList<String>();
-        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(subject + "|" + method); return ""; };
         try {
             var world = player.getWorld();
             var here = player.getLocation();
             world.playEffect(here, org.bukkit.Effect.CLICK2, 0, 10);
-            var far = here.clone().add(500, 0, 0);
-            world.playEffect(far, org.bukkit.Effect.CLICK2, 0, 10);
+            assertTrue(calls.contains(player.getUniqueId() + "|playLevelEvent(Location,int,int)"));
+            calls.clear();
+            world.playEffect(here.clone().add(500, 0, 0), org.bukkit.Effect.CLICK2, 0, 10);
+            assertTrue(calls.isEmpty());
         } finally { HostBridge.transport = null; }
-        assertEquals(java.util.List.of("playLevelEvent(Location,int,int)"), calls);
     }
 
     @Test void legacyHandAccessorsUseTheMainHand() {
@@ -144,5 +145,15 @@ class PlayerExtrasTest {
             assertEquals(org.bukkit.Material.STICK, player.getItemInHand().getType());
             assertEquals(3, player.getInventory().getItemInMainHand().getAmount());
         } finally { HostBridge.transport = null; }
+    }
+
+    @Test void cookiesAreSentBase64EncodedAndLimitedTo5120Bytes() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };
+        try {
+            player.storeCookie(new org.bukkit.NamespacedKey("test", "session"), new byte[]{1, 2, 3});
+            assertThrows(IllegalArgumentException.class, () -> player.storeCookie(new org.bukkit.NamespacedKey("test", "big"), new byte[5121]));
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("storeCookie(NamespacedKey,String)|test:session" + HostBridge.ARG + "AQID"), calls);
     }
 }

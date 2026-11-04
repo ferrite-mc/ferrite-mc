@@ -557,6 +557,8 @@ packet!(CustomPayload,24,Clientbound,{channel:String,data:crate::codec::RestByte
 packet!(Transfer,132,Clientbound,{host:String,port:VarInt});
 packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required:bool,prompt:Option<Vec<u8>>});
 packet!(ResourcePackPop,81,Clientbound,{id:Option<Uuid>});
+// Vanilla `ClientboundStoreCookiePacket`: the client keeps `payload` (at most 5120 bytes) under `key`.
+packet!(StoreCookie,122,Clientbound,{key:String,payload:Vec<u8>});
 packet!(ItemCooldown,22,Clientbound,{group:String,ticks:VarInt});
 packet!(SetExperience,105,Clientbound,{progress:f32,level:VarInt,total:VarInt});
 // Vanilla `ClientboundPlayerAbilitiesPacket`: flags (1 invulnerable, 2 flying, 4 may fly, 8 instant build),
@@ -1433,6 +1435,10 @@ mod interaction_tests {
             hash: "ab".repeat(20),
             required: true,
             prompt: None,
+        });
+        roundtrip(StoreCookie {
+            key: "plugin:session".into(),
+            payload: vec![1, 2, 3],
         });
         roundtrip(ResourcePackPop { id: None });
         roundtrip(ResourcePackPop {

@@ -116,6 +116,13 @@ public abstract class PlayerMisc extends PlayerStubs {
         });
     }
     @Override public org.bukkit.inventory.ItemStack getItemOnCursor() { return getOpenInventory().getCursor(); }
+    /** The client keeps the cookie under the key; a cookie is at most 5120 bytes. */
+    @Override public void storeCookie(org.bukkit.NamespacedKey key, byte[] value) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(value, "value");
+        if (value.length > 5120) throw new IllegalArgumentException("Cookie payload too large (" + value.length + " > 5120)");
+        HostBridge.callVoid("Player", getUniqueId(), "storeCookie(NamespacedKey,String)", key, java.util.Base64.getEncoder().encodeToString(value));
+    }
     @Override public org.bukkit.inventory.ItemStack getItemInHand() { return getInventory().getItemInMainHand(); }
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }

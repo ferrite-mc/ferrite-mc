@@ -209,6 +209,11 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `Player#storeCookie`: the client keeps `payload` under `key` across transfers.
+    StoreCookie {
+        key: String,
+        payload: Vec<u8>,
+    },
     /// `Player#wakeup`: gets the player out of the bed they sleep in, if any.
     WakeUp,
     /// One property of the open menu (`Player#setWindowProperty`, `ClientboundContainerSetDataPacket`).
