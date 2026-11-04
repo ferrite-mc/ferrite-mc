@@ -35,6 +35,7 @@ pub enum Command {
     /// A client-only game event a plugin asked for.
     PluginVisualExperience {
         progress: f32,
+        level: Option<i32>,
     },
     PluginGameEvent {
         event: u8,
@@ -2331,13 +2332,13 @@ impl Player {
                     );
                     continue;
                 }
-                Command::PluginVisualExperience { progress } => {
+                Command::PluginVisualExperience { progress, level } => {
                     send(
                         self,
                         &SetExperience {
                             progress,
-                            level: VarInt(self.experience_level),
-                            total: VarInt(0),
+                            level: VarInt(level.unwrap_or(self.experience_level)),
+                            total: VarInt(self.experience_total),
                         },
                     );
                     continue;

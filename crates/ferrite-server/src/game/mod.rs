@@ -104,21 +104,25 @@ mod tests {
     #[test]
     fn plugin_visual_experience_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
-        let command = ferrite_plugin::PlayerCommand::VisualExperience {
-            player,
-            progress: 0.75,
-            level: 12,
-        };
-        let sent = routed(command.clone(), player);
-        assert_eq!(
-            sent.iter().map(bytes).collect::<Vec<_>>(),
-            vec![bytes(&game::packet(&SetExperience {
-                progress: 0.75,
-                level: VarInt(12),
-                total: VarInt(0)
-            }))]
+        let mailbox = Mailbox::default();
+        let (outbound, _rx) = OutboundSender::channel(1 << 20);
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(player, (1, mailbox.clone(), outbound));
+        for target in [Uuid::from_u128(8), player] {
+            route_plugin_command(
+                ferrite_plugin::PlayerCommand::VisualExperience {
+                    player: target,
+                    progress: 0.75,
+                    level: 12,
+                },
+                &mailboxes,
+                &mut HashMap::new(),
+            );
+        }
+        let commands: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
+        assert!(
+            matches!(commands.as_slice(), [Command::PluginVisualExperience { progress, level: Some(12) }] if *progress == 0.75)
         );
-        assert!(routed(command, Uuid::from_u128(8)).is_empty());
     }
 
     #[test]
@@ -1327,7 +1331,10 @@ fn route_plugin_command(
                 mailbox
                     .lock()
                     .unwrap()
-                    .push_back(Command::PluginVisualExperience { progress });
+                    .push_back(Command::PluginVisualExperience {
+                        progress,
+                        level: None,
+                    });
             }
         }
         PlayerCommand::VisualExperience {
@@ -1335,15 +1342,14 @@ fn route_plugin_command(
             progress,
             level,
         } => {
-            if let Some((_, _, outbound)) = mailboxes.get(&player) {
-                emit(
-                    outbound,
-                    &SetExperience {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginVisualExperience {
                         progress,
-                        level: VarInt(level),
-                        total: VarInt(0),
-                    },
-                );
+                        level: Some(level),
+                    });
             }
         }
         PlayerCommand::VisualBlockDamage {

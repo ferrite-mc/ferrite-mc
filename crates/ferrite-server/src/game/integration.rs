@@ -3602,10 +3602,8 @@ async fn plugin_visual_experience_uses_live_level_without_changing_it() {
     let mut bot = join_with_inventory(addr, "VisualXp").await;
     bot.raw(7, "xp set @s 12 levels").await;
     let body = bot.until(SetExperience::ID).await;
-    assert_eq!(
-        SetExperience::decode(&mut body.as_slice()).unwrap().level.0,
-        12
-    );
+    let actual = SetExperience::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(actual.level.0, 12);
     tx.send(
         ferrite_plugin::PlayerCommand::VisualExperienceCurrentLevel {
             player,
@@ -3615,7 +3613,22 @@ async fn plugin_visual_experience_uses_live_level_without_changing_it() {
     .unwrap();
     let body = bot.until(SetExperience::ID).await;
     let visual = SetExperience::decode(&mut body.as_slice()).unwrap();
-    assert_eq!((visual.progress, visual.level.0), (0.25, 12));
+    assert_eq!(
+        (visual.progress, visual.level.0, visual.total.0),
+        (0.25, 12, actual.total.0)
+    );
+    tx.send(ferrite_plugin::PlayerCommand::VisualExperience {
+        player,
+        progress: 0.75,
+        level: 5,
+    })
+    .unwrap();
+    let body = bot.until(SetExperience::ID).await;
+    let visual = SetExperience::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(
+        (visual.progress, visual.level.0, visual.total.0),
+        (0.75, 5, actual.total.0)
+    );
     bot.raw(7, "xp query @s levels").await;
     bot.chat_containing("VisualXp has 12 experience levels")
         .await;
