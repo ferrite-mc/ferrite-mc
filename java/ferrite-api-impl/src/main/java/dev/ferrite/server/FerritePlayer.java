@@ -151,8 +151,6 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     @Override public void giveExpLevels(int amount) { setLevel(Math.max(0, experienceLevel + amount)); }
     @Override public boolean performCommand(String command) { return Native.dispatchCommand(this, command); }
     @Override public org.bukkit.Location getCompassTarget() { return getWorld().getSpawnLocation(); }
-    @Override public boolean canSee(org.bukkit.entity.Player player) { return true; }
-    @Override public boolean canSee(org.bukkit.entity.Entity entity) { return true; }
     /** Ferrite does not give players a personal border, so they all follow the world's. */
     @Override public org.bukkit.WorldBorder getWorldBorder() { return null; }
     // --- Action bar, title clearing and the tab list header/footer (playerVisual kinds 3..5). ---

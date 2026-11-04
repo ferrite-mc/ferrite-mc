@@ -1,0 +1,145 @@
+package dev.ferrite.server;
+
+import java.util.*;
+import java.util.function.Predicate;
+
+/**
+ * Player API answered from Java-side state: ally rules, tab-list and visibility choices, the
+ * ender chest, the entity scheduler, titles, batched block changes and idle time.
+ */
+@SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
+public abstract class PlayerMisc extends PlayerStubs {
+    // ---- allied rules ------------------------------------------------------------------------
+    private final Map<net.kyori.adventure.key.Key, Predicate<org.bukkit.entity.Entity>> alliedRules = new LinkedHashMap<>();
+
+    @Override public synchronized void addAdditionalAlliedRule(net.kyori.adventure.key.Key key, Predicate<org.bukkit.entity.Entity> rule) {
+        alliedRules.put(Objects.requireNonNull(key, "key"), Objects.requireNonNull(rule, "rule"));
+    }
+    @Override public synchronized void removeAdditionalAlliedRule(net.kyori.adventure.key.Key key) { alliedRules.remove(key); }
+    @Override public synchronized void removeAdditionalAlliedRule(net.kyori.adventure.key.Namespaced key) {
+        if (key instanceof net.kyori.adventure.key.Key exact) alliedRules.remove(exact);
+        else alliedRules.keySet().removeIf(k -> k.namespace().equals(key.namespace()));
+    }
+    @Override public synchronized Map<net.kyori.adventure.key.Key, Predicate<org.bukkit.entity.Entity>> getAdditionalAlliedRules() { return Map.copyOf(alliedRules); }
+    @Override public boolean isAlliedTo(org.bukkit.entity.Entity entity) {
+        Objects.requireNonNull(entity, "entity");
+        if (entity.equals(this)) return true;
+        List<Predicate<org.bukkit.entity.Entity>> rules;
+        synchronized (this) { rules = List.copyOf(alliedRules.values()); }
+        for (var rule : rules) if (rule.test(entity)) return true;
+        if (entity instanceof org.bukkit.entity.Player other) {
+            var mine = getScoreboard().getEntryTeam(getName());
+            return mine != null && mine.equals(other.getScoreboard().getEntryTeam(other.getName())) && mine.allowFriendlyFire() == false;
+        }
+        return false;
+    }
+
+    // ---- chat completions --------------------------------------------------------------------
+    @Override public void addAdditionalChatCompletions(Collection<String> completions) { addCustomChatCompletions(completions); }
+    @Override public void removeAdditionalChatCompletions(Collection<String> completions) { removeCustomChatCompletions(completions); }
+
+    // ---- tab list and visibility ---------------------------------------------------------------
+    private final Set<UUID> unlisted = new HashSet<>();
+    private final Set<UUID> hidden = new HashSet<>();
+
+    @Override public synchronized boolean isListed(org.bukkit.entity.Player other) { return !unlisted.contains(Objects.requireNonNull(other, "player").getUniqueId()); }
+    @Override public synchronized boolean unlistPlayer(org.bukkit.entity.Player other) { return unlisted.add(Objects.requireNonNull(other, "player").getUniqueId()); }
+    @Override public synchronized boolean listPlayer(org.bukkit.entity.Player other) { return unlisted.remove(Objects.requireNonNull(other, "player").getUniqueId()); }
+    @Override public synchronized void hidePlayer(org.bukkit.entity.Player other) { hidden.add(Objects.requireNonNull(other, "player").getUniqueId()); }
+    @Override public synchronized void showPlayer(org.bukkit.entity.Player other) { hidden.remove(Objects.requireNonNull(other, "player").getUniqueId()); }
+    @Override public synchronized void hideEntity(org.bukkit.plugin.Plugin plugin, org.bukkit.entity.Entity entity) {
+        Objects.requireNonNull(plugin, "plugin");
+        hidden.add(Objects.requireNonNull(entity, "entity").getUniqueId());
+    }
+    @Override public synchronized void showEntity(org.bukkit.plugin.Plugin plugin, org.bukkit.entity.Entity entity) {
+        Objects.requireNonNull(plugin, "plugin");
+        hidden.remove(Objects.requireNonNull(entity, "entity").getUniqueId());
+    }
+    @Override public synchronized boolean canSee(org.bukkit.entity.Entity entity) { return !hidden.contains(Objects.requireNonNull(entity, "entity").getUniqueId()); }
+    @Override public boolean canSee(org.bukkit.entity.Player other) { return canSee((org.bukkit.entity.Entity) other); }
+    @Override public String getPlayerListName() {
+        return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(playerListName());
+    }
+
+    // ---- containers and equipment --------------------------------------------------------------
+    private org.bukkit.inventory.Inventory enderChest;
+
+    @Override public synchronized org.bukkit.inventory.Inventory getEnderChest() {
+        if (enderChest == null) enderChest = getServer().createInventory(this, org.bukkit.event.inventory.InventoryType.ENDER_CHEST);
+        return enderChest;
+    }
+    @Override public org.bukkit.inventory.EntityEquipment getEquipment() {
+        var inventory = getInventory();
+        return (org.bukkit.inventory.EntityEquipment) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.inventory.EntityEquipment.class}, (proxy, method, args) -> {
+            try {
+                return inventory.getClass().getMethod(method.getName(), method.getParameterTypes()).invoke(inventory, args);
+            } catch (NoSuchMethodException e) {
+                throw new UnsupportedOperationException("Ferrite: not implemented: EntityEquipment#" + method.getName());
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                throw e.getCause();
+            }
+        });
+    }
+    @Override public org.bukkit.inventory.ItemStack getItemOnCursor() { return getOpenInventory().getCursor(); }
+    @Override public org.bukkit.inventory.ItemStack getWeapon() { return getInventory().getItemInMainHand(); }
+    @Override public org.bukkit.inventory.ItemStack getPickItemStack() { return null; }
+
+    // ---- scheduler and view ranges ---------------------------------------------------------------
+    private io.papermc.paper.threadedregions.scheduler.EntityScheduler scheduler;
+
+    @Override public synchronized io.papermc.paper.threadedregions.scheduler.EntityScheduler getScheduler() {
+        if (scheduler == null) scheduler = ((FerriteServer) getServer()).entityScheduler(getUniqueId(), this::isOnline);
+        return scheduler;
+    }
+    @Override public int getViewDistance() { return getServer().getViewDistance(); }
+    @Override public int getSendViewDistance() { return getServer().getViewDistance(); }
+    @Override public int getSimulationDistance() { return getServer().getSimulationDistance(); }
+
+    // ---- entity data that players do not carry -----------------------------------------------------
+    @Override public <T> T getMemory(org.bukkit.entity.memory.MemoryKey<T> key) { Objects.requireNonNull(key, "key"); return null; }
+    @Override public <T> void setMemory(org.bukkit.entity.memory.MemoryKey<T> key, T value) { Objects.requireNonNull(key, "key"); }
+    @Override public <T> T getData(io.papermc.paper.datacomponent.DataComponentType.Valued<T> type) { Objects.requireNonNull(type, "type"); return null; }
+    @Override public boolean hasData(io.papermc.paper.datacomponent.DataComponentType type) { Objects.requireNonNull(type, "type"); return false; }
+    @Override public <T> T getDataOrDefault(io.papermc.paper.datacomponent.DataComponentType.Valued<? extends T> type, T fallback) { Objects.requireNonNull(type, "type"); return fallback; }
+    @Override public org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason getEntitySpawnReason() { return org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.DEFAULT; }
+    @Override public boolean fromMobSpawner() { return false; }
+    @Override public org.bukkit.event.entity.EntityDamageEvent getLastDamageCause() { return lastCause; }
+    @Override public void setLastDamageCause(org.bukkit.event.entity.EntityDamageEvent event) { lastCause = event; }
+    private org.bukkit.event.entity.EntityDamageEvent lastCause;
+    @Override public java.util.Set<UUID> getCollidableExemptions() { return exemptions; }
+    private final Set<UUID> exemptions = new java.util.concurrent.CopyOnWriteArraySet<>();
+    @Override public void resetMaxHealth() { getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).setBaseValue(20.0); }
+
+    // ---- idle time ---------------------------------------------------------------------------------
+    private volatile long lastActive = System.nanoTime();
+
+    /** Called when the player moves, chats or acts. */
+    public void touch() { lastActive = System.nanoTime(); }
+    @Override public java.time.Duration getIdleDuration() { return java.time.Duration.ofNanos(System.nanoTime() - lastActive); }
+    @Override public void resetIdleDuration() { touch(); }
+
+    // ---- respawn point -----------------------------------------------------------------------------
+    private org.bukkit.Location respawn;
+
+    @Override public void setRespawnLocation(org.bukkit.Location location, boolean force) { respawn = location == null ? null : location.clone(); super.setRespawnLocation(location, force); }
+    @Override public org.bukkit.Location getRespawnLocation(boolean validate) { return respawn == null ? null : respawn.clone(); }
+    @Override public org.bukkit.Location getBedLocation() {
+        if (respawn == null) throw new IllegalStateException("Player has not slept in a bed");
+        return respawn.clone();
+    }
+
+    // ---- titles and batched block updates ----------------------------------------------------------
+    @Override public void sendTitle(com.destroystokyo.paper.Title title) { sendTitle(net.md_5.bungee.api.chat.TextComponent.toLegacyText(title.getTitle()), net.md_5.bungee.api.chat.TextComponent.toLegacyText(title.getSubtitle()), title.getFadeIn(), title.getStay(), title.getFadeOut()); }
+    @Override public void updateTitle(com.destroystokyo.paper.Title title) { sendTitle(title); }
+    @Override public void sendHurtAnimation(float yaw) { playHurtAnimation(yaw); }
+    @Override public void sendBlockDamage(org.bukkit.Location location, float progress, org.bukkit.entity.Entity source) {
+        sendBlockDamage(location, progress, Objects.requireNonNull(source, "source").getEntityId());
+    }
+    @Override public void sendBlockChanges(Collection<org.bukkit.block.BlockState> states) {
+        for (var state : Objects.requireNonNull(states, "blocks")) sendBlockChange(state.getLocation(), state.getBlockData());
+    }
+    @Override public void sendMultiBlockChange(Map<? extends io.papermc.paper.math.Position, org.bukkit.block.data.BlockData> changes) {
+        for (var change : Objects.requireNonNull(changes, "blockChanges").entrySet())
+            sendBlockChange(change.getKey().toLocation(getWorld()), change.getValue());
+    }
+}

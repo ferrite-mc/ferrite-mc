@@ -10,7 +10,7 @@ import org.bukkit.util.Vector;
 
 /** Ray tracing, names, sounds and chat answered from the eye position and the block world. */
 @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
-public abstract class PlayerSight extends PlayerStubs {
+public abstract class PlayerSight extends PlayerMisc {
     private net.kyori.adventure.text.Component customName;
     private net.kyori.adventure.text.Component listName;
 

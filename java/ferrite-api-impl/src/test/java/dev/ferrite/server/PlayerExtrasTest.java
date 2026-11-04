@@ -69,4 +69,32 @@ class PlayerExtrasTest {
         assertFalse(player.isInsideVehicle());
         assertTrue(player.getPassengers().isEmpty());
     }
+
+    @Test void visibilityListingAndAlliesAreRemembered() {
+        Bootstrap.registerPlayer("00000000-0000-0000-0000-0000000000cc", "Friend", false);
+        org.bukkit.entity.Player other;
+        try {
+            var ensure = Bootstrap.class.getDeclaredMethod("ensurePlayer", String.class, String.class);
+            ensure.setAccessible(true);
+            other = (org.bukkit.entity.Player) ensure.invoke(null, "00000000-0000-0000-0000-0000000000cc", "Friend");
+        } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
+        assertTrue(player.canSee(other));
+        player.hidePlayer(other);
+        assertFalse(player.canSee(other));
+        player.showPlayer(other);
+        assertTrue(player.canSee(other));
+        assertTrue(player.isListed(other));
+        assertTrue(player.unlistPlayer(other));
+        assertFalse(player.isListed(other));
+        assertTrue(player.listPlayer(other));
+        assertTrue(player.isAlliedTo(player));
+        player.addAdditionalAlliedRule(net.kyori.adventure.key.Key.key("test", "rule"), e -> true);
+        assertTrue(player.isAlliedTo(other));
+        player.removeAdditionalAlliedRule(net.kyori.adventure.key.Key.key("test", "rule"));
+        assertTrue(player.getAdditionalAlliedRules().isEmpty());
+        assertSame(player.getEnderChest(), player.getEnderChest());
+        assertEquals(27, player.getEnderChest().getSize());
+        player.resetIdleDuration();
+        assertTrue(player.getIdleDuration().toSeconds() < 5);
+    }
 }
