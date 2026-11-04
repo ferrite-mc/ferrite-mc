@@ -45,15 +45,21 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public synchronized boolean isListed(org.bukkit.entity.Player other) { return !unlisted.contains(Objects.requireNonNull(other, "player").getUniqueId()); }
     @Override public synchronized boolean unlistPlayer(org.bukkit.entity.Player other) { return unlisted.add(Objects.requireNonNull(other, "player").getUniqueId()); }
     @Override public synchronized boolean listPlayer(org.bukkit.entity.Player other) { return unlisted.remove(Objects.requireNonNull(other, "player").getUniqueId()); }
-    @Override public synchronized void hidePlayer(org.bukkit.entity.Player other) { hidden.add(Objects.requireNonNull(other, "player").getUniqueId()); }
-    @Override public synchronized void showPlayer(org.bukkit.entity.Player other) { hidden.remove(Objects.requireNonNull(other, "player").getUniqueId()); }
+    /** Visibility is remembered here either way; with no host attached (plain Java) only the memory applies. */
+    private void tellHost(String method, Object... args) {
+        try { HostBridge.callVoid("Player", getUniqueId(), method, args); } catch (UnsupportedOperationException offline) { /* no host */ }
+    }
+    @Override public synchronized void hidePlayer(org.bukkit.entity.Player other) { hidden.add(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("hidePlayer(Player)", other); }
+    @Override public synchronized void showPlayer(org.bukkit.entity.Player other) { hidden.remove(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("showPlayer(Player)", other); }
     @Override public synchronized void hideEntity(org.bukkit.plugin.Plugin plugin, org.bukkit.entity.Entity entity) {
         Objects.requireNonNull(plugin, "plugin");
         hidden.add(Objects.requireNonNull(entity, "entity").getUniqueId());
+        tellHost("hideEntity(Plugin,Entity)", plugin, entity);
     }
     @Override public synchronized void showEntity(org.bukkit.plugin.Plugin plugin, org.bukkit.entity.Entity entity) {
         Objects.requireNonNull(plugin, "plugin");
         hidden.remove(Objects.requireNonNull(entity, "entity").getUniqueId());
+        tellHost("showEntity(Plugin,Entity)", plugin, entity);
     }
     @Override public synchronized boolean canSee(org.bukkit.entity.Entity entity) { return !hidden.contains(Objects.requireNonNull(entity, "entity").getUniqueId()); }
     @Override public boolean canSee(org.bukkit.entity.Player other) { return canSee((org.bukkit.entity.Entity) other); }

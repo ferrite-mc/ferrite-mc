@@ -1225,7 +1225,10 @@ async fn run(
                      let name = component_json.as_deref().map(json_text);
                      worlds.schedule_global(move |g| g.set_display_name(player, name));
                  }
-                 Some(command) => route_plugin_command(command, &mailboxes, &mut permissions),
+                 Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
+                    worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
+                }
+                Some(command) => route_plugin_command(command, &mailboxes, &mut permissions),
                  // The plugin host dropped its sender (no plugins loaded): stop polling.
                  None => plugin_commands = None,
              }
@@ -1664,6 +1667,8 @@ fn route_plugin_command(
                 ));
             }
         }
+        // The game loop sends visibility to the global region before calling this.
+        PlayerCommand::Visibility { .. } => {}
         // The game loop sends display names to the global region before calling this.
         PlayerCommand::DisplayName { .. } => {
             tracing::debug!("plugin display name reached the player router")

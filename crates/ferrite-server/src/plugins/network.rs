@@ -142,6 +142,22 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
     let arg = |i: usize| call.args.get(i).map(String::as_str);
+    if let Some(hidden) = match call.method.as_str() {
+        "hidePlayer(Player)" | "hidePlayer(Plugin,Player)" | "hideEntity(Plugin,Entity)" => {
+            Some(true)
+        }
+        "showPlayer(Player)" | "showPlayer(Plugin,Player)" | "showEntity(Plugin,Entity)" => {
+            Some(false)
+        }
+        _ => None,
+    } {
+        let target = Uuid::parse_str(call.args.last()?).ok()?;
+        return (target != player).then_some(PlayerCommand::Visibility {
+            viewer: player,
+            target,
+            hidden,
+        });
+    }
     let packet = match call.method.as_str() {
         "sendBlockChange(Location,BlockData)" | "sendBlockChange(Location,Material,byte)" => {
             let pos = block_pos(arg(0)?)?;
@@ -242,6 +258,23 @@ mod tests {
             PlayerCommand::Packet { packet, .. } => Some(packet),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn hide_and_show_become_visibility_commands() {
+        let other = "00000000-0000-0000-0000-0000000000aa";
+        let command = |method: &str, args: &[&str]| network_command(&call(method, args));
+        assert!(matches!(
+            command("hidePlayer(Player)", &[other]),
+            Some(PlayerCommand::Visibility { hidden: true, target, .. }) if target == Uuid::parse_str(other).unwrap()
+        ));
+        assert!(matches!(
+            command("showEntity(Plugin,Entity)", &["plugin", other]),
+            Some(PlayerCommand::Visibility { hidden: false, .. })
+        ));
+        // A player cannot hide themselves, and a bad UUID is no command.
+        assert!(command("hidePlayer(Player)", &[PLAYER]).is_none());
+        assert!(command("hidePlayer(Player)", &["nope"]).is_none());
     }
 
     fn location(x: &str, y: &str, z: &str) -> String {

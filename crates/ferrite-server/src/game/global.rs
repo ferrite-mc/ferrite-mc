@@ -98,6 +98,8 @@ fn now_millis() -> i64 {
 pub struct GlobalRegion {
     players: HashMap<Uuid, GlobalPlayer>,
     visible: HashMap<(Uuid, Uuid), GlobalPlayer>,
+    /// `(viewer, target)` pairs a plugin hid; the target is neither tracked nor listed for the viewer.
+    hidden: std::collections::HashSet<(Uuid, Uuid)>,
     /// Scope tree attached by the game loop; `None` until the first tick.
     pub timings: Option<Arc<Timings>>,
 }
@@ -287,7 +289,46 @@ impl GlobalRegion {
                 }
             }
             self.visible.retain(|(observer, _), _| *observer != id);
+            self.hidden
+                .retain(|(viewer, target)| *viewer != id && *target != id);
             self.broadcast(&format!("{} left the game", p.name));
+        }
+    }
+    /// Bukkit `hidePlayer`/`showPlayer`. Hiding removes the entity and the tab entry at once;
+    /// the next tick no longer tracks it. Showing re-lists the player, and the next tick adds
+    /// the entity again when it is in range.
+    pub fn set_hidden(&mut self, viewer: Uuid, target: Uuid, hidden: bool) {
+        let key = (viewer, target);
+        let changed = if hidden {
+            self.hidden.insert(key)
+        } else {
+            self.hidden.remove(&key)
+        };
+        let (Some(observer), Some(subject)) =
+            (self.players.get(&viewer), self.players.get(&target))
+        else {
+            return;
+        };
+        if !changed {
+            return;
+        }
+        if hidden {
+            if self.visible.remove(&key).is_some() {
+                send(
+                    observer,
+                    &RemoveEntities {
+                        ids: vec![VarInt(subject.entity)],
+                    },
+                );
+            }
+            send(
+                observer,
+                &PlayerInfoRemove {
+                    uuids: vec![target],
+                },
+            );
+        } else {
+            send(observer, &subject.info());
         }
     }
     pub fn shutdown(&mut self) {
@@ -315,7 +356,9 @@ impl GlobalRegion {
                     .map(|(a, b)| (a - b) * (a - b))
                     .sum::<f64>();
                 // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
-                let inside = observer.dimension == target.dimension && distance <= 48.0 * 48.0;
+                let inside = observer.dimension == target.dimension
+                    && distance <= 48.0 * 48.0
+                    && !self.hidden.contains(&key);
                 match (self.visible.get(&key), inside) {
                     (None, true) => {
                         send(
@@ -473,6 +516,47 @@ mod tests {
         assert!(
             tracked(&mut ar, RemoveEntities::ID),
             "the entity is removed when the player leaves the observer's dimension"
+        );
+    }
+
+    #[test]
+    fn hidden_players_are_removed_unlisted_and_untracked_until_shown() {
+        let mut g = GlobalRegion::default();
+        let (a, mut ar) = OutboundSender::channel(1 << 20);
+        let (b, _br) = OutboundSender::channel(1 << 20);
+        let (alice, bob) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut pa = GlobalPlayer::new(alice, 1, "A".into(), vec![], a, false, 1, 0);
+        pa.pos = [0.5, 64.0, 0.5];
+        let mut pb = GlobalPlayer::new(bob, 2, "B".into(), vec![], b, false, 1, 0);
+        pb.pos = [1.5, 64.0, 0.5];
+        g.join(pa);
+        g.join(pb);
+        g.tick();
+        while ar.try_recv().is_some() {}
+
+        g.set_hidden(alice, bob, true);
+        let sent: Vec<_> = std::iter::from_fn(|| ar.try_recv()).collect();
+        let has = |id: i32| {
+            sent.iter()
+                .any(|p| matches!(p, Outbound::Packet(b) if b[0] == id as u8))
+        };
+        assert!(has(RemoveEntities::ID), "the entity disappears at once");
+        assert!(has(PlayerInfoRemove::ID), "and so does the tab entry");
+        g.tick();
+        assert!(
+            !tracked(&mut ar, AddEntity::ID),
+            "a hidden player is not tracked again"
+        );
+
+        g.set_hidden(alice, bob, false);
+        assert!(
+            tracked(&mut ar, PlayerInfo::ID),
+            "showing lists the player again"
+        );
+        g.tick();
+        assert!(
+            tracked(&mut ar, AddEntity::ID),
+            "and the next tick spawns the entity"
         );
     }
 

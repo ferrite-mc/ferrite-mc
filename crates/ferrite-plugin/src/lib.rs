@@ -257,6 +257,12 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         component_json: Option<String>,
     },
+    /// Bukkit `hidePlayer`/`showPlayer`: whether `viewer` sees `target` (entity and tab list).
+    Visibility {
+        viewer: uuid::Uuid,
+        target: uuid::Uuid,
+        hidden: bool,
+    },
     Kick {
         player: uuid::Uuid,
         component_json: Option<String>,
