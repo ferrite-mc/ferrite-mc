@@ -67,7 +67,7 @@ public final class FerriteUnsafe implements UnsafeValues {
     @Override public int getDataVersion() { return DATA_VERSION; }
 
     @Override public ItemStack modifyItemStack(ItemStack stack, String arguments) {
-        throw unimplemented("modifyItemStack");
+        return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "modifyItemStack(ItemStack,String)", ItemStack.class, stack, arguments);
     }
 
     @Override public void checkSupported(PluginDescriptionFile description) throws InvalidPluginException {
@@ -80,20 +80,20 @@ public final class FerriteUnsafe implements UnsafeValues {
     @Override public byte[] processClass(PluginDescriptionFile description, String path, byte[] data) { return data; }
 
     @Override public Advancement loadAdvancement(Key key, String data, boolean replace) {
-        throw unimplemented("loadAdvancement");
+        return (Advancement) HostBridge.call("UnsafeValues", "unsafe", "loadAdvancement(Key,String,boolean)", Advancement.class, key, data, replace);
     }
 
     @Override public List<Advancement> loadAdvancements(Map<Key, String> data, boolean replace) {
-        throw unimplemented("loadAdvancements");
+        return (List<Advancement>) HostBridge.call("UnsafeValues", "unsafe", "loadAdvancements(Map,boolean)", List.class, data, replace);
     }
 
-    @Override public boolean removeAdvancement(NamespacedKey key) { throw unimplemented("removeAdvancement"); }
+    @Override public boolean removeAdvancement(NamespacedKey key) { return HostBridge.callBoolean("UnsafeValues", "unsafe", "removeAdvancement(NamespacedKey)", key); }
 
     @Override public PotionType.InternalPotionData getInternalPotionData(NamespacedKey key) {
-        throw unimplemented("getInternalPotionData");
+        return (PotionType.InternalPotionData) HostBridge.call("UnsafeValues", "unsafe", "getInternalPotionData(NamespacedKey)", PotionType.InternalPotionData.class, key);
     }
 
-    @Override public String get(Class<?> type, String key) { throw unimplemented("get(Class, String)"); }
+    @Override public String get(Class<?> type, String key) { return (String) HostBridge.call("UnsafeValues", "unsafe", "get(Class,String)", String.class, type, key); }
 
     @SuppressWarnings("unchecked")
     @Override public <B extends org.bukkit.Keyed> B get(RegistryKey<B> registry, NamespacedKey key) {
@@ -104,25 +104,25 @@ public final class FerriteUnsafe implements UnsafeValues {
         return apiVersion == null || apiVersion.equals("26.3") || LEGACY_API_VERSIONS.contains(apiVersion);
     }
 
-    @Override public JsonObject serializeItemAsJson(ItemStack item) { throw unimplemented("serializeItemAsJson"); }
+    @Override public JsonObject serializeItemAsJson(ItemStack item) { return (JsonObject) HostBridge.call("UnsafeValues", "unsafe", "serializeItemAsJson(ItemStack)", JsonObject.class, item); }
 
-    @Override public ItemStack deserializeItemFromJson(JsonObject data) { throw unimplemented("deserializeItemFromJson"); }
+    @Override public ItemStack deserializeItemFromJson(JsonObject data) { return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "deserializeItemFromJson(JsonObject)", ItemStack.class, data); }
 
     @Override public byte[] serializeEntity(Entity entity, EntitySerializationFlag... flags) {
-        throw unimplemented("serializeEntity");
+        return (byte[]) HostBridge.call("UnsafeValues", "unsafe", "serializeEntity(Entity,)", byte[].class, entity, flags);
     }
 
     @Override public Entity deserializeEntity(byte[] data, org.bukkit.World world, boolean uniqueId, boolean intoWorld) {
-        throw unimplemented("deserializeEntity");
+        return (Entity) HostBridge.call("UnsafeValues", "unsafe", "deserializeEntity(byte[],World,boolean,boolean)", Entity.class, data, world, uniqueId, intoWorld);
     }
 
-    @Override public int nextEntityId(org.bukkit.World world) { throw unimplemented("nextEntityId"); }
+    @Override public int nextEntityId(org.bukkit.World world) { return HostBridge.callInt("UnsafeValues", "unsafe", "nextEntityId(World)", world); }
 
     @Override public String getMainLevelName() { return "world"; }
 
     @Override public int getProtocolVersion() { return PROTOCOL_VERSION; }
 
-    @Override public ItemStack deserializeStack(Map<String, Object> args) { throw unimplemented("deserializeStack"); }
+    @Override public ItemStack deserializeStack(Map<String, Object> args) { return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "deserializeStack(Map)", ItemStack.class, args); }
 
-    @Override public ItemStack deserializeItemHover(HoverEvent.ShowItem item) { throw unimplemented("deserializeItemHover"); }
+    @Override public ItemStack deserializeItemHover(HoverEvent.ShowItem item) { return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "deserializeItemHover(ShowItem)", ItemStack.class, item); }
 }

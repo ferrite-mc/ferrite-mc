@@ -76,7 +76,7 @@ public class FerriteServer extends ServerStubs {
             case "hashCode" -> key.hashCode();
             case "equals" -> args[0] instanceof org.bukkit.OfflinePlayer other && key.equals(other.getUniqueId());
             case "toString" -> "OfflinePlayer[" + key + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: OfflinePlayer#" + method.getName());
+            default -> HostBridge.dispatch("OfflinePlayer", key, method, args);
         }));
     }
     @Override public org.bukkit.OfflinePlayer getOfflinePlayer(java.util.UUID id) { var player = players.get(id); return player != null ? player : offline(id, offlineNames.get(id)); }
@@ -183,7 +183,7 @@ public class FerriteServer extends ServerStubs {
             if (method.getName().equals("getName")) return "CONSOLE";
             if (method.getName().equals("getServer")) return this;
             if (method.getName().equals("isOp") || method.getName().equals("hasPermission")) return true;
-            throw new UnsupportedOperationException("Ferrite: not implemented: ConsoleCommandSender#" + method.getName());
+            return HostBridge.dispatch("ConsoleCommandSender", "console", method, args);
         });
     }
     @Override public org.bukkit.command.CommandSender createCommandSender(java.util.function.Consumer<? super net.kyori.adventure.text.Component> feedback) {

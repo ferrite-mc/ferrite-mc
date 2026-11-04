@@ -52,9 +52,15 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   블록·아이템·유체·엔티티·게임 이벤트 태그의 초기화를 검증했습니다. 격리 검사에서는 데이터 경로가
   설정되지 않아 Paper 재료 태그 제공자가 실패하고, NMS 경고와 종료 오류도 남아 있습니다.
   전체 호환성은 아직 검증되지 않았습니다.
-  **미구현 현황(정직하게)**: `PlayerStubs`에 약 600개, `ServerStubs`에 약 200개, 그 외 스케줄러·플러그인
-  매니저·레지스트리 등에 수십 개의 스텁이 남아 있으며 호출하면 `UnsupportedOperationException`을 던집니다.
-  목표는 자주 쓰는 메서드만이 아니라 **모든 메서드를 호스트로 라우팅**하는 것이며, 진행 중입니다.
+  **전부 라우팅(2026-11-04)**: `Player`·`Server`·`BukkitScheduler`·`PluginManager`·`Registry`·`ItemFactory`·
+  `UnsafeValues` 등 약 1000개 메서드와 동적 프록시(World/Block/Inventory 등)의 `default` 분기가 더 이상 곧바로
+  예외를 던지지 않고 `HostBridge` → `Native.hostCall` → Rust `HostCallHandler`로 전달됩니다. 호스트가 처리하지
+  않는 메서드만 `UnsupportedOperationException("Ferrite: not implemented: Owner#method(types)")`를 던지므로
+  빈 곳이 정확히 드러납니다. 현재 호스트가 실제로 처리하는 것은 일부(`broadcastMessage`, `savePlayers`,
+  `shutdown`, `reloadWhitelist`, `setDefaultGameMode`, `clearActivePotionEffects`, `stopAllSounds` 등)이고, 나머지
+  핸들러를 채우는 작업이 진행 중입니다. 즉 **라우팅은 전부 연결됐지만 구현은 아직 전부가 아닙니다.**
+- **목표**: Spigot·Paper·Folia 플러그인이 모두 동작하는 것. NMS(`net.minecraft.*`)·CraftBukkit 타입에 의존하는
+  플러그인도 호환되어야 하며, 이는 라우팅 이후의 별도 단계입니다.
 
 ## 현재 상태 한눈에
 

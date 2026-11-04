@@ -19,6 +19,7 @@ static SERVER_HANDLER: OnceLock<Option<ServerHandler>> = OnceLock::new();
 static WORLD_HANDLER: OnceLock<Option<WorldHandler>> = OnceLock::new();
 static WORLD_VIEW: OnceLock<Option<std::sync::Arc<dyn WorldView>>> = OnceLock::new();
 static PLAYER_HANDLER: OnceLock<Option<PlayerHandler>> = OnceLock::new();
+static HOST_CALL_HANDLER: OnceLock<Option<HostCallHandler>> = OnceLock::new();
 static COMMAND_HANDLER: OnceLock<Option<CommandHandler>> = OnceLock::new();
 thread_local! { static REGION: std::cell::RefCell<Option<(String, i32, i32)>> = const { std::cell::RefCell::new(None) }; }
 thread_local! { static CAPTURED_MESSAGES: std::cell::RefCell<Option<Vec<PluginMessage>>> = const { std::cell::RefCell::new(None) }; }
@@ -65,6 +66,8 @@ pub struct PluginConfig {
     /// Read-only block and biome access for Bukkit's block queries.
     pub world_view: Option<std::sync::Arc<dyn WorldView>>,
     pub server_handler: Option<ServerHandler>,
+    /// Receives every Bukkit/Paper method that has no dedicated native (the generic route).
+    pub host_call_handler: Option<HostCallHandler>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockPosition {
@@ -298,6 +301,33 @@ pub enum ServerCommand {
     },
 }
 pub type ServerHandler = std::sync::Arc<dyn Fn(ServerCommand) + Send + Sync>;
+/// Separates arguments in `HostCall::args` on the Java side.
+pub const HOST_ARG_SEPARATOR: char = '\u{1f}';
+/// Separates the items of a list, map or compound argument (a location, an item stack).
+pub const HOST_ITEM_SEPARATOR: char = '\u{1d}';
+/// What Java sends for a null argument or reply.
+pub const HOST_NULL: &str = "\u{1b}null";
+/// One Bukkit/Paper method call forwarded from the embedded JVM.
+///
+/// `owner` is the API the method belongs to (`Player`, `Server`, ...), `subject` identifies the
+/// receiver (a player UUID, or `server`), `method` is the signature key such as
+/// `addAttachment(Plugin,String,boolean)` and `args` are the encoded arguments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostCall {
+    pub owner: String,
+    pub subject: String,
+    pub method: String,
+    pub args: Vec<String>,
+}
+impl HostCall {
+    /// The method name without its parameter list.
+    pub fn name(&self) -> &str {
+        self.method.split('(').next().unwrap_or(&self.method)
+    }
+}
+/// Answers a [`HostCall`]: `Some(text)` is the encoded return value (empty for `void`), `None`
+/// means the host has no handler, and Java then throws `UnsupportedOperationException`.
+pub type HostCallHandler = std::sync::Arc<dyn Fn(&HostCall) -> Option<String> + Send + Sync>;
 /// Server settings made visible to plugins during startup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerSnapshot {
@@ -1068,6 +1098,42 @@ extern "system" fn player_teleport(
         .is_ok(),
     )
 }
+extern "system" fn host_call<'local>(
+    mut env: JNIEnv<'local>,
+    _: JClass<'local>,
+    owner: JString<'local>,
+    subject: JString<'local>,
+    method: JString<'local>,
+    args: JString<'local>,
+) -> JString<'local> {
+    let mut text = |value: &JString<'local>| -> Option<String> {
+        env.get_string(value).ok().map(String::from)
+    };
+    let (Some(owner), Some(subject), Some(method), Some(args)) =
+        (text(&owner), text(&subject), text(&method), text(&args))
+    else {
+        return view_string(&mut env, None);
+    };
+    let call = HostCall {
+        owner,
+        subject,
+        method,
+        args: if args.is_empty() {
+            Vec::new()
+        } else {
+            args.split(HOST_ARG_SEPARATOR).map(str::to_owned).collect()
+        },
+    };
+    let reply = HOST_CALL_HANDLER
+        .get()
+        .and_then(Option::as_ref)
+        .and_then(|handler| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&call)))
+                .ok()
+                .flatten()
+        });
+    view_string(&mut env, reply)
+}
 extern "system" fn player_state(
     mut env: JNIEnv,
     _: JClass,
@@ -1559,6 +1625,7 @@ impl PluginHost {
         let _ = WORLD_HANDLER.set(cfg.world_handler);
         let _ = WORLD_VIEW.set(cfg.world_view);
         let _ = SERVER_HANDLER.set(cfg.server_handler);
+        let _ = HOST_CALL_HANDLER.set(cfg.host_call_handler);
         let _ = REGION_CONTEXT.set(cfg.region_context.clone());
         jvm.register_natives(
             "dev/ferrite/server/Native$Bindings",
@@ -1625,6 +1692,11 @@ impl PluginHost {
                     "playerTeleport",
                     "(Ljava/lang/String;Ljava/lang/String;DDDFF)Z",
                     player_teleport as *mut _,
+                ),
+                NativeMethod::new(
+                    "hostCall",
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    host_call as *mut _,
                 ),
                 NativeMethod::new(
                     "playerState",

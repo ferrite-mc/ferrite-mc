@@ -94,7 +94,13 @@ fn plugin_lifecycle() {
     let captured_world_commands = world_commands.clone();
     let server_commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_server_commands = server_commands.clone();
+    let host_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_host_calls = host_calls.clone();
     let cfg = PluginConfig {
+        host_call_handler: Some(std::sync::Arc::new(move |call| {
+            captured_host_calls.lock().unwrap().push(call.clone());
+            (call.name() == "clearActivePotionEffects").then(String::new)
+        })),
         server_handler: Some(std::sync::Arc::new(move |command| {
             captured_server_commands.lock().unwrap().push(command)
         })),
@@ -216,6 +222,13 @@ fn plugin_lifecycle() {
     assert!(messages.lock().unwrap().iter().any(
         |command| matches!(command, PlayerCommand::PlaySound { player, .. } if *player == player_id)
     ));
+    let routed = host_calls.lock().unwrap().clone();
+    assert!(
+        routed.iter().any(|call| call.owner == "Player"
+            && call.method == "clearActivePotionEffects()"
+            && call.subject.len() == 36),
+        "generic host call was not routed: {routed:?}"
+    );
     assert!(server_commands.lock().unwrap().iter().any(|command| matches!(command, ServerCommand::BanIp { address, .. } if *address == "192.0.2.2".parse::<std::net::IpAddr>().unwrap())));
     assert!(messages.lock().unwrap().iter().any(|command| matches!(command, PlayerCommand::SetInventorySlot { player, slot: 0, .. } if *player == player_id)));
     assert!(messages.lock().unwrap().iter().any(

@@ -67,7 +67,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                     case "hashCode" -> k.hashCode();
                     case "equals" -> args[0] instanceof org.bukkit.damage.DamageType other && k.equals(other.getKey());
                     case "toString" -> "DamageType[" + k + "]";
-                    default -> throw new UnsupportedOperationException("Ferrite: not implemented: DamageType#" + method.getName());
+                    default -> HostBridge.dispatch("DamageType", "", method, args);
                 }));
             }
             @Override public int size() { return KEYS.get("damage_type").size(); }
@@ -88,7 +88,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                     case "hashCode" -> k.hashCode();
                     case "equals" -> proxy == args[0];
                     case "toString" -> "MenuType[" + k + "]";
-                    default -> throw new UnsupportedOperationException("Ferrite: not implemented: MenuType#" + method.getName());
+                    default -> HostBridge.dispatch("MenuType", "", method, args);
                 }));
             }
         };
@@ -112,7 +112,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                     case "hashCode" -> k.hashCode();
                     case "equals" -> proxy == args[0];
                     case "toString" -> "ItemType[" + k + "]";
-                    default -> throw new UnsupportedOperationException("Ferrite: not implemented: ItemType#" + method.getName());
+                    default -> HostBridge.dispatch("ItemType", "", method, args);
                 }));
             }
         };
@@ -136,7 +136,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                     case "hashCode" -> key.hashCode();
                     case "equals" -> proxy == args[0];
                     case "toString" -> "BlockType[" + key + "]";
-                    default -> throw new UnsupportedOperationException("Ferrite: not implemented: BlockType#" + method.getName());
+                    default -> HostBridge.dispatch("BlockType", "", method, args);
                 });
                 previous = entries.putIfAbsent(key, value); return previous == null ? value : previous;
             }
@@ -180,7 +180,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             case "hashCode" -> System.identityHashCode(proxy);
             case "equals" -> proxy == args[0];
             case "toString" -> "CUSTOM";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: Biome#" + method.getName());
+            default -> HostBridge.dispatch("Biome", "", method, args);
         });
     }
     private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> identityRegistry(String kind, Class<T> type) {
@@ -198,7 +198,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                     case "hashCode" -> k.hashCode();
                     case "equals" -> proxy == args[0];
                     case "toString" -> k.toString();
-                    default -> throw new UnsupportedOperationException("Ferrite: not implemented: " + type.getSimpleName() + "#" + method.getName());
+                    default -> HostBridge.dispatch(type.getSimpleName(), k, method, args);
                 }));
                 T previous = entries.putIfAbsent(key, value);
                 return previous == null ? value : previous;
@@ -261,14 +261,14 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         private final String name;
         BaseRegistry(String name) { this.name = name; }
         private UnsupportedOperationException unavailable() { return new UnsupportedOperationException("Ferrite: registry data not implemented: " + name); }
-        public T get(org.bukkit.NamespacedKey key) { throw unavailable(); }
+        public T get(org.bukkit.NamespacedKey key) { return (T) HostBridge.call("Registry", name, "get(NamespacedKey)", Object.class, key); }
         public org.bukkit.NamespacedKey getKey(T value) { return value.getKey(); }
-        public boolean hasTag(io.papermc.paper.registry.tag.TagKey<T> key) { throw unavailable(); }
-        public io.papermc.paper.registry.tag.Tag<T> getTag(io.papermc.paper.registry.tag.TagKey<T> key) { throw unavailable(); }
-        public java.util.Collection<io.papermc.paper.registry.tag.Tag<T>> getTags() { throw unavailable(); }
-        public java.util.stream.Stream<T> stream() { throw unavailable(); }
-        public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { throw unavailable(); }
-        public int size() { throw unavailable(); }
-        public java.util.Iterator<T> iterator() { throw unavailable(); }
+        public boolean hasTag(io.papermc.paper.registry.tag.TagKey<T> key) { return HostBridge.callBoolean("Registry", name, "hasTag(TagKey)", key); }
+        public io.papermc.paper.registry.tag.Tag<T> getTag(io.papermc.paper.registry.tag.TagKey<T> key) { return (io.papermc.paper.registry.tag.Tag<T>) HostBridge.call("Registry", name, "getTag(TagKey)", io.papermc.paper.registry.tag.Tag.class, key); }
+        public java.util.Collection<io.papermc.paper.registry.tag.Tag<T>> getTags() { return (java.util.Collection<io.papermc.paper.registry.tag.Tag<T>>) HostBridge.call("Registry", name, "getTags()", java.util.Collection.class); }
+        public java.util.stream.Stream<T> stream() { return (java.util.stream.Stream<T>) HostBridge.call("Registry", name, "stream()", java.util.stream.Stream.class); }
+        public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { return (java.util.stream.Stream<org.bukkit.NamespacedKey>) HostBridge.call("Registry", name, "keyStream()", java.util.stream.Stream.class); }
+        public int size() { return HostBridge.callInt("Registry", name, "size()"); }
+        public java.util.Iterator<T> iterator() { return (java.util.Iterator<T>) HostBridge.call("Registry", name, "iterator()", java.util.Iterator.class); }
     }
 }

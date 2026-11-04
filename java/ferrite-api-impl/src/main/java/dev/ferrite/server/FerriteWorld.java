@@ -74,7 +74,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "hashCode" -> java.util.Objects.hash(id, pos);
             case "equals" -> self == args[0];
             case "toString" -> "Block[" + id + ":" + pos + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: Block#" + method.getName());
+            default -> HostBridge.dispatch("Block", "", method, args);
         });
     }
     private org.bukkit.Chunk chunk(int x, int z) {
@@ -84,7 +84,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "hashCode" -> java.util.Objects.hash(id, x, z);
             case "equals" -> self == args[0];
             case "toString" -> "Chunk[" + id + ":" + x + "," + z + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: Chunk#" + method.getName());
+            default -> HostBridge.dispatch("Chunk", "", method, args);
         });
     }
     public Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
@@ -99,7 +99,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "hashCode" -> id.hashCode();
             case "equals" -> self == args[0];
             case "toString" -> "World[" + id + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: World#" + method.getName());
+            default -> HostBridge.dispatch("World", id, method, args);
         };
     }
 }

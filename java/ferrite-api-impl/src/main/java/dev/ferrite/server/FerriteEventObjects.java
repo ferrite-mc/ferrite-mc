@@ -46,7 +46,7 @@ final class FerriteEventObjects {
             case "hashCode" -> block.hashCode();
             case "equals" -> self == args[0];
             case "toString" -> "BlockState[" + block + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: BlockState#" + method.getName());
+            default -> HostBridge.dispatch("BlockState", "", method, args);
         });
     }
 
@@ -63,7 +63,7 @@ final class FerriteEventObjects {
             case "hashCode" -> id.hashCode();
             case "equals" -> args[0] instanceof org.bukkit.entity.Entity other && id.equals(other.getUniqueId());
             case "toString" -> "LivingEntity[" + type + ":" + id + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: LivingEntity#" + method.getName());
+            default -> HostBridge.dispatch("LivingEntity", "", method, args);
         });
     }
 }

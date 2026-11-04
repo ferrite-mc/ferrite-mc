@@ -8,13 +8,13 @@ final class FerritePotionEffectType extends org.bukkit.potion.PotionEffectType {
     public String getTranslationKey() { return translationKey(); }
     private UnsupportedOperationException unsupported() { return new UnsupportedOperationException("Ferrite: effect properties not implemented: " + key); }
     public org.bukkit.potion.PotionEffect createEffect(int duration, int amplifier) { return new org.bukkit.potion.PotionEffect(this, duration, amplifier); }
-    public boolean isInstant() { throw unsupported(); }
-    public org.bukkit.potion.PotionEffectTypeCategory getCategory() { throw unsupported(); }
-    public org.bukkit.Color getColor() { throw unsupported(); }
-    public double getDurationModifier() { throw unsupported(); }
-    public int getId() { throw unsupported(); }
-    public java.util.Map<org.bukkit.attribute.Attribute, org.bukkit.attribute.AttributeModifier> getEffectAttributes() { throw unsupported(); }
-    public double getAttributeModifierAmount(org.bukkit.attribute.Attribute attribute, int amplifier) { throw unsupported(); }
-    public org.bukkit.potion.PotionEffectType.Category getEffectCategory() { throw unsupported(); }
-    public boolean isEnabledByFeature(org.bukkit.World world) { throw unsupported(); }
+    public boolean isInstant() { return HostBridge.callBoolean("PotionEffectType", key, "isInstant()"); }
+    public org.bukkit.potion.PotionEffectTypeCategory getCategory() { return (org.bukkit.potion.PotionEffectTypeCategory) HostBridge.call("PotionEffectType", key, "getCategory()", org.bukkit.potion.PotionEffectTypeCategory.class); }
+    public org.bukkit.Color getColor() { return (org.bukkit.Color) HostBridge.call("PotionEffectType", key, "getColor()", org.bukkit.Color.class); }
+    public double getDurationModifier() { return HostBridge.callDouble("PotionEffectType", key, "getDurationModifier()"); }
+    public int getId() { return HostBridge.callInt("PotionEffectType", key, "getId()"); }
+    public java.util.Map<org.bukkit.attribute.Attribute, org.bukkit.attribute.AttributeModifier> getEffectAttributes() { return (java.util.Map<org.bukkit.attribute.Attribute, org.bukkit.attribute.AttributeModifier>) HostBridge.call("PotionEffectType", key, "getEffectAttributes()", java.util.Map.class); }
+    public double getAttributeModifierAmount(org.bukkit.attribute.Attribute attribute, int amplifier) { return HostBridge.callDouble("PotionEffectType", key, "getAttributeModifierAmount(Attribute,int)", attribute, amplifier); }
+    public org.bukkit.potion.PotionEffectType.Category getEffectCategory() { return (org.bukkit.potion.PotionEffectType.Category) HostBridge.call("PotionEffectType", key, "getEffectCategory()", org.bukkit.potion.PotionEffectType.Category.class); }
+    public boolean isEnabledByFeature(org.bukkit.World world) { return HostBridge.callBoolean("PotionEffectType", key, "isEnabledByFeature(World)", world); }
 }

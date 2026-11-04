@@ -21,7 +21,7 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
             case "hashCode" -> System.identityHashCode(proxy);
             case "equals" -> proxy == args[0];
             case "toString" -> "FerriteScoreboard";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: Scoreboard#" + method.getName());
+            default -> HostBridge.dispatch("Scoreboard", "", method, args);
         };
         return (org.bukkit.scoreboard.Scoreboard) java.lang.reflect.Proxy.newProxyInstance(FerriteScoreboards.class.getClassLoader(), new Class<?>[]{org.bukkit.scoreboard.Scoreboard.class}, board);
     }
@@ -48,7 +48,7 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
                 case "hashCode" -> System.identityHashCode(self);
                 case "equals" -> self == args[0];
                 case "toString" -> "Team[" + name + "]";
-                default -> throw new UnsupportedOperationException("Ferrite: not implemented: Team#" + method.getName());
+                default -> HostBridge.dispatch("Team", "", method, args);
             };
         }
     }

@@ -35,7 +35,7 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
             case "hashCode" -> System.identityHashCode(self);
             case "equals" -> self == args[0];
             case "toString" -> "FerriteItemMeta";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: ItemMeta#" + method.getName());
+            default -> HostBridge.dispatch("ItemMeta", "", method, args);
         };
     }
 }

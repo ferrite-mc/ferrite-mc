@@ -43,7 +43,7 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
             case "hashCode" -> System.identityHashCode(self);
             case "equals" -> self == args[0];
             case "toString" -> "PlayerInventory[" + player.getUniqueId() + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: PlayerInventory#" + method.getName());
+            default -> HostBridge.dispatch("PlayerInventory", "", method, args);
         };
     }
 }

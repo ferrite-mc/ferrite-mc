@@ -90,4 +90,25 @@ public final class HostBridge {
         if (type == java.util.Set.class) return reply.isEmpty() ? new java.util.LinkedHashSet<String>() : new java.util.LinkedHashSet<>(java.util.Arrays.asList(reply.split(String.valueOf(ITEM), -1)));
         throw new UnsupportedOperationException("Ferrite: host reply for " + owner + "#" + method + " cannot be turned into " + type.getName());
     }
+
+    /** Routes a dynamic-proxy call (World, Block, Inventory, ...) whose method has no Java implementation. */
+    public static Object dispatch(String owner, Object subject, java.lang.reflect.Method method, Object[] args) {
+        StringBuilder key = new StringBuilder(method.getName()).append('(');
+        Class<?>[] types = method.getParameterTypes();
+        for (int i = 0; i < types.length; i++) { if (i > 0) key.append(','); key.append(types[i].getSimpleName()); }
+        key.append(')');
+        Object[] values = args == null ? new Object[0] : args;
+        Class<?> r = method.getReturnType();
+        String k = key.toString();
+        if (r == void.class) { callVoid(owner, subject, k, values); return null; }
+        if (r == boolean.class) return callBoolean(owner, subject, k, values);
+        if (r == int.class) return callInt(owner, subject, k, values);
+        if (r == long.class) return callLong(owner, subject, k, values);
+        if (r == short.class) return callShort(owner, subject, k, values);
+        if (r == byte.class) return callByte(owner, subject, k, values);
+        if (r == char.class) return callChar(owner, subject, k, values);
+        if (r == float.class) return callFloat(owner, subject, k, values);
+        if (r == double.class) return callDouble(owner, subject, k, values);
+        return call(owner, subject, k, r, values);
+    }
 }

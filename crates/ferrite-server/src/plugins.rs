@@ -78,10 +78,21 @@ impl PluginBridge {
                             });
                         handler
                     }),
-                    server_handler: settings.console.map(|console| {
+                    server_handler: settings.console.clone().map(|console| {
                         let handler: ferrite_plugin::ServerHandler = Arc::new(move |command| {
                             let _ = console.send(server_console_line(&command));
                         });
+                        handler
+                    }),
+                    host_call_handler: settings.console.map(|console| {
+                        let handler: ferrite_plugin::HostCallHandler =
+                            Arc::new(move |call| match host_action(call)? {
+                                HostAction::Console { line, reply } => {
+                                    let _ = console.send(line);
+                                    Some(reply)
+                                }
+                                HostAction::Reply(reply) => Some(reply),
+                            });
                         handler
                     }),
                     ..Default::default()
@@ -176,6 +187,66 @@ pub fn world_console_line(command: &ferrite_plugin::WorldCommand) -> Option<Stri
     }
 }
 
+/// What the host does for a generic Bukkit/Paper method call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HostAction {
+    /// Run a console command, then answer the plugin with the given encoded value.
+    Console { line: String, reply: String },
+    /// Answer without any side effect.
+    Reply(String),
+}
+
+/// Maps a [`ferrite_plugin::HostCall`] to its host action, or `None` when the method has no host
+/// handler yet (the plugin then gets an `UnsupportedOperationException` naming it).
+///
+/// Everything that vanilla can already do goes through its command, so the effect is identical to
+/// an operator typing it: `Server#broadcastMessage` is `/tellraw @a`, `Player#clearActivePotionEffects`
+/// is `/effect clear <uuid>`, and so on.
+pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
+    use ferrite_plugin::HOST_NULL;
+    let arg = |index: usize| {
+        call.args
+            .get(index)
+            .map(String::as_str)
+            .filter(|a| *a != HOST_NULL)
+    };
+    let console = |line: String, reply: &str| {
+        Some(HostAction::Console {
+            line,
+            reply: reply.to_owned(),
+        })
+    };
+    let player = uuid::Uuid::parse_str(&call.subject).ok();
+    match (call.owner.as_str(), call.method.as_str()) {
+        ("Server", "broadcastMessage(String)") => {
+            let text = arg(0)?;
+            console(
+                format!("tellraw @a {}", serde_json::json!({ "text": text })),
+                "0",
+            )
+        }
+        ("Server", "savePlayers()") => console("save-all".into(), ""),
+        ("Server", "shutdown()") => console("stop".into(), ""),
+        ("Server", "reloadWhitelist()") => console("whitelist reload".into(), ""),
+        ("Server", "setDefaultGameMode(GameMode)") => {
+            let mode = arg(0)?.to_ascii_lowercase();
+            matches!(
+                mode.as_str(),
+                "survival" | "creative" | "adventure" | "spectator"
+            )
+            .then(|| HostAction::Console {
+                line: format!("defaultgamemode {mode}"),
+                reply: String::new(),
+            })
+        }
+        ("Player", "clearActivePotionEffects()") => {
+            console(format!("effect clear {}", player?), "")
+        }
+        ("Player", "stopAllSounds()") => console(format!("stopsound {} *", player?), ""),
+        _ => None,
+    }
+}
+
 /// The vanilla command that performs a plugin's server mutation.
 ///
 /// `/ban-ip` has no expiry or source, so a temporary Bukkit ban is stored as a permanent one;
@@ -247,6 +318,67 @@ mod tests {
         std::fs::write(dir.path().join("empty.jar"), "jar").unwrap();
         assert!(has_plugin_jars(dir.path()));
         assert!(!has_plugin_jars(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn host_calls_map_to_vanilla_commands() {
+        let call =
+            |owner: &str, subject: &str, method: &str, args: &[&str]| ferrite_plugin::HostCall {
+                owner: owner.into(),
+                subject: subject.into(),
+                method: method.into(),
+                args: args.iter().map(|a| (*a).to_owned()).collect(),
+            };
+        let id = "123e4567-e89b-12d3-a456-426614174000";
+        assert_eq!(
+            host_action(&call(
+                "Server",
+                "server",
+                "broadcastMessage(String)",
+                &["hi \"there\""]
+            )),
+            Some(HostAction::Console {
+                line: "tellraw @a {\"text\":\"hi \\\"there\\\"\"}".into(),
+                reply: "0".into()
+            })
+        );
+        assert_eq!(
+            host_action(&call("Player", id, "clearActivePotionEffects()", &[])),
+            Some(HostAction::Console {
+                line: format!("effect clear {id}"),
+                reply: String::new()
+            })
+        );
+        assert_eq!(
+            host_action(&call(
+                "Server",
+                "server",
+                "setDefaultGameMode(GameMode)",
+                &["CREATIVE"]
+            )),
+            Some(HostAction::Console {
+                line: "defaultgamemode creative".into(),
+                reply: String::new()
+            })
+        );
+        // Bad input and unknown methods are refused instead of guessed.
+        assert_eq!(
+            host_action(&call(
+                "Server",
+                "server",
+                "setDefaultGameMode(GameMode)",
+                &["LOUD"]
+            )),
+            None
+        );
+        assert_eq!(
+            host_action(&call("Player", "not-a-uuid", "stopAllSounds()", &[])),
+            None
+        );
+        assert_eq!(
+            host_action(&call("Player", id, "noSuchMethod()", &[])),
+            None
+        );
     }
 
     #[test]

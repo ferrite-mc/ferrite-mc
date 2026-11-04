@@ -36,7 +36,7 @@ final class FerriteInventory implements java.lang.reflect.InvocationHandler {
             case "hashCode" -> System.identityHashCode(self);
             case "equals" -> self == args[0];
             case "toString" -> "FerriteInventory[" + type + ", size=" + contents.length + "]";
-            default -> throw new UnsupportedOperationException("Ferrite: not implemented: Inventory#" + method.getName());
+            default -> HostBridge.dispatch("Inventory", "", method, args);
         };
     }
 }
