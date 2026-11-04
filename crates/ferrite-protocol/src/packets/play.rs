@@ -13,6 +13,7 @@ fields!(DeathLocation {
 packet!(PlayLogin,50,Clientbound,{entity_id:i32,hardcore:bool,dimensions:Vec<String>,max_players:VarInt,view_distance:VarInt,simulation_distance:VarInt,reduced_debug:bool,respawn_screen:bool,limited_crafting:bool,dimension_type:VarInt,dimension:String,seed:i64,game_mode:VarInt,previous_game_mode:VarInt,debug:bool,flat:bool,death_location:Option<DeathLocation>,portal_cooldown:VarInt,sea_level:VarInt,online_mode:bool,secure_chat:bool});
 packet!(PositionSync,73,Clientbound,{teleport_id:VarInt,x:f64,y:f64,z:f64,velocity_x:f64,velocity_y:f64,velocity_z:f64,yaw:f32,pitch:f32,flags:i32});
 packet!(GameEvent,39,Clientbound,{event:u8,value:f32});
+packet!(BlockDestruction,5,Clientbound,{entity_id:VarInt,position:i64,progress:i8});
 packet!(ChunkBatchFinished,11,Clientbound,{size:VarInt});
 packet!(CenterChunk,96,Clientbound,{x:VarInt,z:VarInt});
 packet!(DefaultSpawn,99,Clientbound,{dimension:String,position:i64,yaw:f32,pitch:f32});
@@ -1415,6 +1416,11 @@ mod interaction_tests {
             inside: false,
             world_border_hit: false,
             sequence: VarInt(3),
+        });
+        roundtrip(BlockDestruction {
+            entity_id: VarInt(99),
+            position: crate::types::BlockPos::new(1, 64, -2).pack(),
+            progress: 5,
         });
         roundtrip(BlockUpdate {
             location: 15,

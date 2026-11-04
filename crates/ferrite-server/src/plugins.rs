@@ -1,4 +1,5 @@
 //! Loading plugins into the embedded JVM at server startup.
+mod blocks;
 mod extra;
 mod visual;
 
@@ -139,6 +140,12 @@ impl PluginBridge {
                             }
                             if let (Some(players), Some(command)) =
                                 (&players, visual::visual_command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, blocks::block_command(call))
                             {
                                 players(command);
                                 return Some(String::new());

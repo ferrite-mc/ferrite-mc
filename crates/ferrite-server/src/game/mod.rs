@@ -122,6 +122,28 @@ mod tests {
     }
 
     #[test]
+    fn plugin_block_damage_reaches_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let position = ferrite_protocol::types::BlockPos::new(1, 64, 2).pack();
+        let command = ferrite_plugin::PlayerCommand::VisualBlockDamage {
+            player,
+            position,
+            source: 99,
+            progress: 5,
+        };
+        let sent = routed(command.clone(), player);
+        assert_eq!(
+            sent.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&BlockDestruction {
+                entity_id: VarInt(99),
+                position,
+                progress: 5
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
     fn plugin_visual_health_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
         let command = ferrite_plugin::PlayerCommand::VisualHealth {
@@ -1320,6 +1342,23 @@ fn route_plugin_command(
                         progress,
                         level: VarInt(level),
                         total: VarInt(0),
+                    },
+                );
+            }
+        }
+        PlayerCommand::VisualBlockDamage {
+            player,
+            position,
+            source,
+            progress,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &BlockDestruction {
+                        entity_id: VarInt(source),
+                        position,
+                        progress,
                     },
                 );
             }

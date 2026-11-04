@@ -266,6 +266,12 @@ pub enum PlayerCommand {
         progress: f32,
         level: i32,
     },
+    VisualBlockDamage {
+        player: uuid::Uuid,
+        position: i64,
+        source: i32,
+        progress: i8,
+    },
     VisualHealth {
         player: uuid::Uuid,
         health: f32,
