@@ -25,14 +25,23 @@ pub(super) struct Bot {
     commands: Option<Vec<u8>>,
     /// Chunks per tick sent in automatic `ChunkBatchReceived` acknowledgements.
     chunks_per_tick: f32,
+    /// Set by a test that expects the server to close: writes to a closed socket (including
+    /// the automatic replies made while reading) are then ignored instead of panicking.
+    closing: bool,
 }
 impl Bot {
     pub(super) async fn send<P: Packet>(&mut self, p: &P) {
+        if let Err(error) = self.try_send(p).await {
+            assert!(self.closing, "send failed: {error}");
+        }
+    }
+    /// Like [`Self::send`], for a test that expects the server may already have closed.
+    async fn try_send<P: Packet>(&mut self, p: &P) -> std::io::Result<()> {
         let mut body = Vec::new();
         encode_packet(p, &mut body);
         let mut wire = Vec::new();
         self.encoder.encode(&body, &mut wire);
-        self.stream.write_all(&wire).await.unwrap();
+        self.stream.write_all(&wire).await
     }
     async fn raw(&mut self, id: i32, text: &str) {
         let mut body = Vec::new();
@@ -143,6 +152,7 @@ impl Bot {
             decoder: FrameDecoder::default(),
             commands: None,
             chunks_per_tick: 64.0,
+            closing: false,
         };
         b.send(&Intention {
             protocol_version: 777,
@@ -3449,15 +3459,27 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
     let mut slow = Bot::join_with_rate_and_receive_buffer(addr, "Slow", 1.0, Some(8 * 1024)).await;
     let mut fast = Bot::join_with_rate(addr, "Fast", 1.0).await;
     let before = world.tick_samples.lock().unwrap().len();
-    // One acknowledgement makes the next tick queue a full 64-chunk batch; the bot never reads
-    // it, so the per-connection queue fills while its writer is stuck on the socket. The ack is
-    // fully written before the server can drop the connection, so the disconnect is not lost
-    // to a reset.
-    slow.send(&ChunkBatchReceived {
-        chunks_per_tick: 64.0,
-    })
-    .await;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // The server is expected to drop this connection, so the bot's writes may fail from here.
+    slow.closing = true;
+    // Each acknowledgement lets the next tick queue a full 64-chunk batch (~391 KiB) that the
+    // bot never reads. The writer's budget is released when it takes a packet off the queue,
+    // not when the write finishes, so a writer that wakes while the first batch is still being
+    // queued can pull all of it into one blocked socket write and leave the queue nearly
+    // empty. Later acknowledgements arrive while that write is stuck, so their batches must
+    // overflow the 128 KiB queue. Once the queue has overflowed, the server may close and a
+    // further acknowledgement fails to send, which is expected.
+    for _ in 0..4 {
+        if slow
+            .try_send(&ChunkBatchReceived {
+                chunks_per_tick: 64.0,
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
     // Other players are unaffected: their chat still arrives while the slow bot is blocked.
     fast.chat("still moving").await;
     let chat = tokio::time::timeout(std::time::Duration::from_secs(20), async {
