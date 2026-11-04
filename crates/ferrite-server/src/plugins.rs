@@ -581,6 +581,15 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
         ("World", method) if method.starts_with("border") => {
             console(worldinfo::border_line(call)?, "true")
         }
+        (
+            "World",
+            "setWeatherDuration(int)" | "setThunderDuration(int)" | "setClearWeatherDuration(int)",
+        ) => console(worldinfo::duration_line(call)?, "true"),
+        ("World", "setFullTime(long)") => {
+            default_world(&call.subject)?;
+            let time: i64 = arg(0)?.parse().ok().filter(|t| *t >= 0)?;
+            console(format!("time set {time}"), "")
+        }
         ("World", "setStorm(boolean)") => {
             default_world(&call.subject)?;
             let rain = arg(0)? == "true";
@@ -887,6 +896,14 @@ mod tests {
         assert_eq!(
             line(call("World", &world, "setStorm(boolean)", &["true"])),
             Some("weather rain".into())
+        );
+        assert_eq!(
+            line(call("World", &world, "setFullTime(long)", &["123456"])),
+            Some("time set 123456".into())
+        );
+        assert_eq!(
+            line(call("World", &world, "setFullTime(long)", &["-1"])),
+            None
         );
         assert_eq!(
             line(call("World", &world, "setTime(long)", &["25000"])),

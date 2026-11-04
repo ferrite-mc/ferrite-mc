@@ -102,6 +102,31 @@ pub fn answer(call: &HostCall) -> Option<String> {
     answer_from(&source(), &call.method)
 }
 
+/// The `weather` command for a duration write. A rain or thunder timer only means something
+/// while that weather is active, so it is refused (unhandled) otherwise; the clear-weather
+/// timer always applies.
+pub fn duration_line(call: &HostCall) -> Option<String> {
+    if call.owner != "World"
+        || uuid::Uuid::parse_str(&call.subject).ok() != Some(ferrite_plugin::default_world_id())
+    {
+        return None;
+    }
+    let sky = (slot().lock().unwrap().clone()?)().sky;
+    duration_line_for(call, sky)
+}
+
+fn duration_line_for(call: &HostCall, sky: Sky) -> Option<String> {
+    let ticks: i32 = call.args.first()?.parse().ok().filter(|t| *t > 0)?;
+    match (call.method.as_str(), sky) {
+        ("setClearWeatherDuration(int)", _) => Some(format!("weather clear {ticks}")),
+        ("setWeatherDuration(int)", Sky::Rain) => Some(format!("weather rain {ticks}")),
+        ("setWeatherDuration(int)" | "setThunderDuration(int)", Sky::Thunder) => {
+            Some(format!("weather thunder {ticks}"))
+        }
+        _ => None,
+    }
+}
+
 /// The `worldborder` command for a valid border write on the default world.
 pub fn border_line(call: &HostCall) -> Option<String> {
     if call.owner != "World"
@@ -175,6 +200,40 @@ mod tests {
             },
             seed: -42,
         }
+    }
+
+    #[test]
+    fn weather_durations_only_apply_to_the_weather_that_is_active() {
+        let call = |method: &str, ticks: &str| HostCall {
+            owner: "World".into(),
+            subject: ferrite_plugin::default_world_id().to_string(),
+            method: method.into(),
+            args: vec![ticks.into()],
+        };
+        assert_eq!(
+            duration_line_for(&call("setWeatherDuration(int)", "600"), Sky::Rain).as_deref(),
+            Some("weather rain 600")
+        );
+        assert_eq!(
+            duration_line_for(&call("setThunderDuration(int)", "900"), Sky::Thunder).as_deref(),
+            Some("weather thunder 900")
+        );
+        assert_eq!(
+            duration_line_for(&call("setThunderDuration(int)", "900"), Sky::Clear),
+            None
+        );
+        assert_eq!(
+            duration_line_for(&call("setWeatherDuration(int)", "600"), Sky::Clear),
+            None
+        );
+        assert_eq!(
+            duration_line_for(&call("setClearWeatherDuration(int)", "100"), Sky::Rain).as_deref(),
+            Some("weather clear 100")
+        );
+        assert_eq!(
+            duration_line_for(&call("setClearWeatherDuration(int)", "0"), Sky::Rain),
+            None
+        );
     }
 
     #[test]
