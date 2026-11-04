@@ -143,6 +143,19 @@ impl PluginBridge {
                                 }
                                 return Some(reply);
                             }
+                            if call.owner == "Player"
+                                && call.args.is_empty()
+                                && let Ok(player) = uuid::Uuid::parse_str(&call.subject)
+                                && let Some(reply) = appearances
+                                    .lock()
+                                    .unwrap()
+                                    .get(&player)
+                                    .copied()
+                                    .unwrap_or_default()
+                                    .answer(&call.method)
+                            {
+                                return Some(reply);
+                            }
                             if let (Some(players), Ok(player)) =
                                 (&players, uuid::Uuid::parse_str(&call.subject))
                             {
