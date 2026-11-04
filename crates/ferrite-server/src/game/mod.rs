@@ -1221,6 +1221,24 @@ fn route_plugin_command(
                 mailbox.lock().unwrap().push_back(Command::SetMode(mode));
             }
         }
+        PlayerCommand::Abilities {
+            player,
+            allow_flight,
+            flying,
+            invulnerable,
+            fly_speed,
+            walk_speed,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox.lock().unwrap().push_back(Command::PluginAbilities {
+                    allow_flight,
+                    flying,
+                    invulnerable,
+                    fly_speed,
+                    walk_speed,
+                });
+            }
+        }
         PlayerCommand::SetHealth { player, health } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::SetHealth {

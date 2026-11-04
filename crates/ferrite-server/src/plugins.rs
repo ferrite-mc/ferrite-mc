@@ -46,6 +46,7 @@ impl PluginBridge {
         if !has_plugin_jars(&settings.directory) {
             return Ok(None);
         }
+        let player_commands = settings.player_handler.clone();
         let host = Arc::new(
             PluginHost::start(
                 &settings.directory,
@@ -85,14 +86,39 @@ impl PluginBridge {
                         handler
                     }),
                     host_call_handler: settings.console.map(|console| {
-                        let handler: ferrite_plugin::HostCallHandler =
-                            Arc::new(move |call| match host_action(call)? {
+                        let players = player_commands;
+                        let abilities = std::sync::Mutex::new(std::collections::HashMap::<
+                            uuid::Uuid,
+                            AbilityState,
+                        >::new());
+                        let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
+                            if let (Some(players), Ok(player)) =
+                                (&players, uuid::Uuid::parse_str(&call.subject))
+                            {
+                                let mut all = abilities.lock().unwrap();
+                                let state = all.entry(player).or_default();
+                                let mut next = *state;
+                                if apply_ability(&mut next, call) {
+                                    *state = next;
+                                    players(ferrite_plugin::PlayerCommand::Abilities {
+                                        player,
+                                        allow_flight: next.allow_flight,
+                                        flying: next.flying,
+                                        invulnerable: next.invulnerable,
+                                        fly_speed: next.fly_speed,
+                                        walk_speed: next.walk_speed,
+                                    });
+                                    return Some("true".to_owned());
+                                }
+                            }
+                            match host_action(call)? {
                                 HostAction::Console { line, reply } => {
                                     let _ = console.send(line);
                                     Some(reply)
                                 }
                                 HostAction::Reply(reply) => Some(reply),
-                            });
+                            }
+                        });
                         handler
                     }),
                     ..Default::default()
@@ -216,6 +242,51 @@ fn location_block(encoded: &str) -> Option<(uuid::Uuid, i64, i64, i64)> {
         uuid::Uuid::parse_str(world).ok()?
     };
     Some((world, x, y, z))
+}
+
+/// What a plugin chose for one player's flight and speed; sent whole because the client packet is whole.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AbilityState {
+    pub allow_flight: bool,
+    pub flying: bool,
+    pub invulnerable: bool,
+    pub fly_speed: f32,
+    pub walk_speed: f32,
+}
+impl Default for AbilityState {
+    fn default() -> Self {
+        Self {
+            allow_flight: false,
+            flying: false,
+            invulnerable: false,
+            fly_speed: 0.1,
+            walk_speed: 0.2,
+        }
+    }
+}
+
+/// Applies an ability setter to `state`. `false` means this call is not an ability setter, or its
+/// value is outside what Bukkit accepts (speeds are -1..=1), so nothing changed.
+pub fn apply_ability(state: &mut AbilityState, call: &ferrite_plugin::HostCall) -> bool {
+    let value = call.args.first().map(String::as_str);
+    let flag = || match value {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    };
+    let speed = || {
+        value
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|s| s.is_finite() && (-1.0..=1.0).contains(s))
+    };
+    match (call.owner.as_str(), call.method.as_str()) {
+        ("Player", "setFlying(boolean)") => flag().map(|f| state.flying = f).is_some(),
+        ("Player", "setAllowFlight(boolean)") => flag().map(|f| state.allow_flight = f).is_some(),
+        ("Player", "setInvulnerable(boolean)") => flag().map(|f| state.invulnerable = f).is_some(),
+        ("Player", "setFlySpeed(float)") => speed().map(|s| state.fly_speed = s).is_some(),
+        ("Player", "setWalkSpeed(float)") => speed().map(|s| state.walk_speed = s).is_some(),
+        _ => false,
+    }
 }
 
 /// What the host does for a generic Bukkit/Paper method call.
@@ -601,6 +672,54 @@ mod tests {
             line(call("Server", "server", "reloadData()", &[])),
             Some("reload".into())
         );
+    }
+
+    #[test]
+    fn ability_setters_accumulate_and_reject_bad_values() {
+        let call = |method: &str, arg: &str| ferrite_plugin::HostCall {
+            owner: "Player".into(),
+            subject: "123e4567-e89b-12d3-a456-426614174000".into(),
+            method: method.into(),
+            args: vec![arg.into()],
+        };
+        let mut state = AbilityState::default();
+        assert!(apply_ability(
+            &mut state,
+            &call("setAllowFlight(boolean)", "true")
+        ));
+        assert!(apply_ability(
+            &mut state,
+            &call("setFlying(boolean)", "true")
+        ));
+        assert!(apply_ability(
+            &mut state,
+            &call("setFlySpeed(float)", "0.5")
+        ));
+        assert_eq!(
+            state,
+            AbilityState {
+                allow_flight: true,
+                flying: true,
+                invulnerable: false,
+                fly_speed: 0.5,
+                walk_speed: 0.2
+            }
+        );
+        let before = state;
+        assert!(!apply_ability(
+            &mut state,
+            &call("setWalkSpeed(float)", "2.0")
+        ));
+        assert!(!apply_ability(
+            &mut state,
+            &call("setWalkSpeed(float)", "NaN")
+        ));
+        assert!(!apply_ability(
+            &mut state,
+            &call("setFlying(boolean)", "maybe")
+        ));
+        assert!(!apply_ability(&mut state, &call("getFlying()", "")));
+        assert_eq!(state, before);
     }
 
     #[test]

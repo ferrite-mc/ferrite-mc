@@ -31,6 +31,14 @@ pub enum Command {
     Input(ServerboundPlay),
     Leave,
     SetMode(i32),
+    /// Plugin-chosen abilities; the game mode still decides instant build and creative flight.
+    PluginAbilities {
+        allow_flight: bool,
+        flying: bool,
+        invulnerable: bool,
+        fly_speed: f32,
+        walk_speed: f32,
+    },
     Teleport {
         pos: [f64; 3],
         yaw: Option<f32>,
@@ -2307,6 +2315,31 @@ impl Player {
                         &GameEvent {
                             event: 3,
                             value: mode as f32,
+                        },
+                    );
+                    continue;
+                }
+                Command::PluginAbilities {
+                    allow_flight,
+                    flying,
+                    invulnerable,
+                    fly_speed,
+                    walk_speed,
+                } => {
+                    let creative = self.gamemode == 1;
+                    let spectator = self.gamemode == 3;
+                    let may_fly = allow_flight || creative || spectator;
+                    let flags = u8::from(invulnerable || creative || spectator)
+                        | (u8::from(flying && may_fly) << 1)
+                        | (u8::from(may_fly) << 2)
+                        | (u8::from(creative) << 3);
+                    // Bukkit's scale is twice the protocol's: 0.1 fly and 0.2 walk are the defaults.
+                    send(
+                        self,
+                        &PlayerAbilities {
+                            flags,
+                            flying_speed: fly_speed / 2.0,
+                            walking_speed: walk_speed / 2.0,
                         },
                     );
                     continue;

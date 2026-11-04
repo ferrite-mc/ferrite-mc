@@ -58,6 +58,7 @@ public final class HostBridge {
         if (t != null) reply = t.call(owner, subjectText, method, joined.toString());
         else if (Native.enabled()) reply = Native.hostCall(owner, subjectText, method, joined.toString());
         else reply = null;
+        else rememberSetter(owner, subjectText, method, joined.toString());
         if (reply == null) reply = localProperty(owner, subjectText, method, joined.toString());
         if (reply == null) throw new UnsupportedOperationException("Ferrite: not implemented: " + owner + "#" + method);
         return reply;
@@ -82,6 +83,12 @@ public final class HostBridge {
         int paren = method.indexOf('(');
         String name = method.substring(0, paren);
         return name.length() > prefix.length() && name.startsWith(prefix) ? name.substring(prefix.length()) : null;
+    }
+
+    /** A setter the host accepted is remembered too, so the matching getter reads it back. */
+    private static void rememberSetter(String owner, String subject, String method, String args) {
+        String prop = property(method, "set");
+        if (prop != null && !method.contains(",") && !args.isEmpty()) LOCAL.put(owner + '|' + subject + '|' + prop, args);
     }
 
     private static String localProperty(String owner, String subject, String method, String args) {

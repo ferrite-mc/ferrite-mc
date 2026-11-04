@@ -476,6 +476,9 @@ item_packet!(CreativeSlot<I = ItemStack>,57,Serverbound,{slot:i16,item:I});
 item_packet!(ContainerContent<I = ItemStack>,18,Clientbound,{window:VarInt,state:VarInt,slots:Vec<I>,carried:I});
 item_packet!(ContainerSlot<I = ItemStack>,20,Clientbound,{window:VarInt,state:VarInt,slot:i16,item:I});
 packet!(SetExperience,105,Clientbound,{progress:f32,level:VarInt,total:VarInt});
+// Vanilla `ClientboundPlayerAbilitiesPacket`: flags (1 invulnerable, 2 flying, 4 may fly, 8 instant build),
+// flying speed and the walking speed (field-of-view modifier).
+packet!(PlayerAbilities,65,Clientbound,{flags:u8,flying_speed:f32,walking_speed:f32});
 // Vanilla `ClientboundSetHealthPacket`: health, food level and saturation.
 packet!(SetHealth,106,Clientbound,{health:f32,food:VarInt,saturation:f32});
 // Vanilla `ClientboundPlayerCombatKillPacket`: the death screen (`player_id`, death message).
@@ -1469,6 +1472,11 @@ mod interaction_tests {
             progress: 0.5,
             level: VarInt(12),
             total: VarInt(456),
+        });
+        roundtrip(PlayerAbilities {
+            flags: 0b0110,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
         });
         roundtrip(SetHealth {
             health: 17.5,

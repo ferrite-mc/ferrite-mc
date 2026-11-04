@@ -237,6 +237,15 @@ pub enum PlayerCommand {
         header_json: String,
         footer_json: String,
     },
+    /// Flight and speed abilities. Speeds use Bukkit's scale (`0.1` fly, `0.2` walk).
+    Abilities {
+        player: uuid::Uuid,
+        allow_flight: bool,
+        flying: bool,
+        invulnerable: bool,
+        fly_speed: f32,
+        walk_speed: f32,
+    },
     SetHealth {
         player: uuid::Uuid,
         health: f64,
