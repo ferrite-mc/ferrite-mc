@@ -660,6 +660,29 @@ impl Player {
                 let full = self.menus.current().broadcast_full_state(&self.inventory);
                 emit(self, vec![full]);
             }
+            PluginPacket::PotionEffect {
+                entity_id,
+                effect,
+                amplifier,
+                duration,
+                flags,
+            } => send(
+                self,
+                &ferrite_protocol::packets::play::UpdateMobEffect {
+                    entity_id: VarInt(entity_id),
+                    effect: VarInt(effect),
+                    amplifier: VarInt(amplifier),
+                    duration: VarInt(duration),
+                    flags,
+                },
+            ),
+            PluginPacket::PotionRemove { entity_id, effect } => send(
+                self,
+                &ferrite_protocol::packets::play::RemoveMobEffect {
+                    entity_id: VarInt(entity_id),
+                    effect: VarInt(effect),
+                },
+            ),
             PluginPacket::EntityEvent { entity_id, status } => send(
                 self,
                 &ferrite_protocol::packets::play::EntityEvent { entity_id, status },

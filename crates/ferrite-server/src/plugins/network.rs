@@ -135,6 +135,11 @@ fn entity_status(effect: &str) -> Option<u8> {
     })
 }
 
+/// The registry id of a `minecraft:` mob effect key.
+fn mob_effect(key: &str) -> Option<i32> {
+    ferrite_data::registries::id("minecraft:mob_effect", key)
+}
+
 /// The packet command behind `call`, or `None` when it is another call or a value is invalid.
 pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "Player" {
@@ -194,6 +199,33 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             "OFF_HAND" => PluginPacket::Animation { action: 3 },
             _ => return None,
         },
+        "sendPotionEffectChange(LivingEntity,PotionEffect)" => {
+            let mut parts = arg(1)?.split(PART);
+            let effect = mob_effect(parts.next()?)?;
+            let duration: i32 = parts.next()?.parse().ok().filter(|d: &i32| *d >= -1)?;
+            let amplifier: i32 = parts
+                .next()?
+                .parse()
+                .ok()
+                .filter(|a: &i32| (0..=255).contains(a))?;
+            let flag = |part: Option<&str>| part.map(|p| p == "true");
+            let ambient = flag(parts.next())?;
+            let particles = flag(parts.next())?;
+            let icon = flag(parts.next())?;
+            PluginPacket::PotionEffect {
+                entity_id: super::facts::entity_id(Uuid::parse_str(arg(0)?).ok()?)?,
+                effect,
+                amplifier,
+                duration,
+                flags: u8::from(ambient) | (u8::from(particles) << 1) | (u8::from(icon) << 2),
+            }
+        }
+        "sendPotionEffectChangeRemove(LivingEntity,PotionEffectType)" => {
+            PluginPacket::PotionRemove {
+                entity_id: super::facts::entity_id(Uuid::parse_str(arg(0)?).ok()?)?,
+                effect: mob_effect(arg(1)?)?,
+            }
+        }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "sendOpLevel(byte)" => {
             let level: u8 = arg(0)?.parse().ok().filter(|level| *level <= 4)?;
@@ -258,6 +290,56 @@ mod tests {
             PlayerCommand::Packet { packet, .. } => Some(packet),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn fake_potion_effects_use_registry_ids_and_flags() {
+        let player = Uuid::parse_str(PLAYER).unwrap();
+        let effect = format!("minecraft:speed{PART}100{PART}2{PART}false{PART}true{PART}true");
+        let send = || {
+            packet(call(
+                "sendPotionEffectChange(LivingEntity,PotionEffect)",
+                &[PLAYER, &effect],
+            ))
+        };
+        // Without a recorded player there is no entity id to address.
+        assert!(send().is_none());
+        super::super::facts::record(
+            player,
+            super::super::facts::PlayerFacts {
+                entity_id: 41,
+                joined: std::time::SystemTime::now(),
+                address: None,
+            },
+        );
+        assert_eq!(
+            send(),
+            Some(PluginPacket::PotionEffect {
+                entity_id: 41,
+                effect: 0,
+                amplifier: 2,
+                duration: 100,
+                flags: 0b110
+            })
+        );
+        assert_eq!(
+            packet(call(
+                "sendPotionEffectChangeRemove(LivingEntity,PotionEffectType)",
+                &[PLAYER, "minecraft:speed"]
+            )),
+            Some(PluginPacket::PotionRemove {
+                entity_id: 41,
+                effect: 0
+            })
+        );
+        assert!(
+            packet(call(
+                "sendPotionEffectChangeRemove(LivingEntity,PotionEffectType)",
+                &[PLAYER, "minecraft:nope"]
+            ))
+            .is_none()
+        );
+        super::super::facts::forget(player);
     }
 
     #[test]

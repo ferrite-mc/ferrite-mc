@@ -209,6 +209,18 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `ClientboundUpdateMobEffectPacket` for an entity the client knows.
+    PotionEffect {
+        entity_id: i32,
+        effect: i32,
+        amplifier: i32,
+        duration: i32,
+        flags: u8,
+    },
+    PotionRemove {
+        entity_id: i32,
+        effect: i32,
+    },
     /// An entity event (status byte) of the entity with this network id, shown to this player.
     EntityEvent {
         entity_id: i32,
