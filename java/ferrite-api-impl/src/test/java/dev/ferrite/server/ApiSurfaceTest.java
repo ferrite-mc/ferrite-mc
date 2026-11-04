@@ -313,6 +313,22 @@ class ApiSurfaceTest {
         }
     }
 
+    @Test void experienceCanBeSetFromATotalNumberOfPoints() {
+        var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000cd");
+        var p = FerritePlayer.create(server, id, "Total", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));
+        p.setExperienceLevelAndProgress(10);
+        assertEquals(1, p.getLevel());
+        assertEquals(3f / 9f, p.getExp(), 1e-6);
+        assertEquals(10, p.getTotalExperience());
+        // Levels 0..14 cost 7+9+...+35 = 315 points; 20 more is part of level 15.
+        p.setExperienceLevelAndProgress(335);
+        assertEquals(15, p.getLevel());
+        assertEquals(20f / 37f, p.getExp(), 1e-6);
+        p.setExperienceLevelAndProgress(0);
+        assertEquals(0, p.getLevel());
+        assertThrows(IllegalArgumentException.class, () -> p.setExperienceLevelAndProgress(-1));
+    }
+
     @Test void playerExperienceFollowsVanillaCurve() {
         var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000cc");
         var p = FerritePlayer.create(server, id, "Learner", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));

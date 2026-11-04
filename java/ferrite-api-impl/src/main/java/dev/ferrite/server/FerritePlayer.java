@@ -150,6 +150,13 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
         while (progress >= 1) { progress = (progress - 1) * experienceToLevel(level); level++; progress /= experienceToLevel(level); }
         setTotalExperience(total); if (level != experienceLevel) setLevel(level); setExp(Math.max(0f, Math.min(progress, 1f)));
     }
+    /** Sets the level and the bar from a total number of experience points, like picking them all up from zero. */
+    @Override public void setExperienceLevelAndProgress(int experience) {
+        if (experience < 0) throw new IllegalArgumentException("experience must not be negative");
+        int level = 0; long left = experience;
+        while (left >= experienceToLevel(level)) { left -= experienceToLevel(level); level++; }
+        setTotalExperience(experience); setLevel(level); setExp((float) left / experienceToLevel(level));
+    }
     @Override public void giveExpLevels(int amount) { setLevel(Math.max(0, experienceLevel + amount)); }
     @Override public boolean performCommand(String command) { return Native.dispatchCommand(this, command); }
     @Override public org.bukkit.Location getCompassTarget() { return getWorld().getSpawnLocation(); }
