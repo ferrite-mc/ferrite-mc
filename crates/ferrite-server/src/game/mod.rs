@@ -2117,6 +2117,26 @@ impl CommandRuntime<'_> {
         }
     }
 
+    /// Hurts a non-player entity on the region that owns it.
+    fn damage_entity(&self, uuid: Uuid, from: [f64; 3], amount: f32) {
+        let from = self
+            .state
+            .lock()
+            .unwrap()
+            .entities
+            .lock()
+            .unwrap()
+            .get(uuid)
+            .map_or(from, |entity| entity.pos);
+        let chunk = ChunkPos((from[0].floor() as i32) >> 4, (from[2].floor() as i32) >> 4);
+        if self.worlds.owner(self.dimension, chunk).is_some() {
+            self.worlds
+                .schedule_at_chunk(self.dimension, chunk, move |region| {
+                    region.damage_entity(uuid, amount);
+                });
+        }
+    }
+
     fn kill_entity(&self, uuid: Uuid, from: [f64; 3]) {
         let from = self
             .state
@@ -2464,12 +2484,21 @@ impl CommandRuntime<'_> {
                 };
                 let kind = damage_kind(&damage_type);
                 let mut hurt = 0;
-                for target in targets.iter().filter(|target| target.player) {
-                    if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
-                        mailbox
-                            .lock()
-                            .unwrap()
-                            .push_back(Command::Damage(kind, amount));
+                for target in &targets {
+                    if target.player {
+                        if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
+                            mailbox
+                                .lock()
+                                .unwrap()
+                                .push_back(Command::Damage(kind, amount));
+                            hurt += 1;
+                            self.reply.key(
+                                "commands.damage.success",
+                                &[&format!("{amount}"), &target.name],
+                            );
+                        }
+                    } else {
+                        self.damage_entity(target.uuid, target.pos, amount);
                         hurt += 1;
                         self.reply.key(
                             "commands.damage.success",

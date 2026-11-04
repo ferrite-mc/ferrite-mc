@@ -4522,6 +4522,21 @@ impl Region {
 
     /// Marks one entity for removal (`/kill`). The tracker still sends the remove packet and
     /// the normal sweep drops it on this tick or the next.
+    /// Hurts one mob (`/damage`) through the same path player attacks use. Returns whether the
+    /// entity was found in this region.
+    pub fn damage_entity(&mut self, uuid: Uuid, amount: f32) -> bool {
+        let key = self.entities.keys().iter().copied().find(|key| {
+            self.entities
+                .data(*key)
+                .is_some_and(|data| data.uuid == uuid)
+        });
+        let Some(key) = key else {
+            return false;
+        };
+        mob::hurt(&mut self.entities, key, amount, None);
+        true
+    }
+
     pub fn kill_entity(&mut self, uuid: Uuid) -> bool {
         let key = self.entities.keys().iter().copied().find(|key| {
             self.entities
