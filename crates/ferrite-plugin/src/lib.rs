@@ -246,6 +246,17 @@ pub enum PlayerCommand {
         fly_speed: f32,
         walk_speed: f32,
     },
+    /// One `ClientboundGameEventPacket` for this player (demo screen, credits, weather level...).
+    GameEvent {
+        player: uuid::Uuid,
+        event: u8,
+        value: f32,
+    },
+    /// Generic damage (`Player#damage`); armor and invulnerability apply.
+    Damage {
+        player: uuid::Uuid,
+        amount: f32,
+    },
     SetHealth {
         player: uuid::Uuid,
         health: f64,

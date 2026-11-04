@@ -32,6 +32,15 @@ pub enum Command {
     Leave,
     SetMode(i32),
     /// Plugin-chosen abilities; the game mode still decides instant build and creative flight.
+    /// A client-only game event a plugin asked for.
+    PluginGameEvent {
+        event: u8,
+        value: f32,
+    },
+    /// Generic damage from a plugin.
+    PluginDamage {
+        amount: f32,
+    },
     PluginAbilities {
         allow_flight: bool,
         flying: bool,
@@ -2317,6 +2326,14 @@ impl Player {
                             value: mode as f32,
                         },
                     );
+                    continue;
+                }
+                Command::PluginGameEvent { event, value } => {
+                    send(self, &GameEvent { event, value });
+                    continue;
+                }
+                Command::PluginDamage { amount } => {
+                    self.hurt(DamageKind::Generic, amount);
                     continue;
                 }
                 Command::PluginAbilities {

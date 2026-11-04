@@ -1239,6 +1239,26 @@ fn route_plugin_command(
                 });
             }
         }
+        PlayerCommand::GameEvent {
+            player,
+            event,
+            value,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginGameEvent { event, value });
+            }
+        }
+        PlayerCommand::Damage { player, amount } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginDamage { amount });
+            }
+        }
         PlayerCommand::SetHealth { player, health } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::SetHealth {

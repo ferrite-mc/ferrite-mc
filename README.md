@@ -281,3 +281,13 @@ Only chat and action-bar packets are translated; any other packet sent through `
 routed to the host and fails with a named `UnsupportedOperationException` instead of being dropped.
 `java/ferrite-api-impl/tools/Scan.java` lists the classes and members a plugin jar needs that are still missing:
 `java tools/Scan.java plugin.jar <classpath jars> [--full]`.
+
+### Host-handled plugin calls (what really reaches the game)
+
+`Player#damage` applies generic damage in the player's region (it used to name a `/damage` command this
+server does not have). Also host-handled: `kill`, `teleport(Entity)`, `lookAt`, `setRotation`, `hideTitle`,
+`setTitleTimes`, `sendRawMessage`, `stopSound`, positional `playSound`, `spawnParticle` (particles without
+extra data), `showDemoScreen`/`showWinScreen`/`showElderGuardian`, per-player rain, `ban` (permanent only),
+`setWhitelisted`, and potion-effect reads (`getActivePotionEffects`, `getPotionEffect`, `hasPotionEffect`).
+Everything not listed still throws a named `UnsupportedOperationException` or stores the value without a
+client effect; `CatalogTest` writes the remaining routed-only methods to `build/catalog/stubs.txt`.

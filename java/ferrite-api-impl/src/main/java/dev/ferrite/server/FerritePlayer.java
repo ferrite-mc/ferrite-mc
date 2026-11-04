@@ -161,6 +161,49 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     @Override public void setPlayerListHeaderFooter(String header, String footer) { sendPlayerListHeaderAndFooter(legacy(header), legacy(footer)); }
     @Override public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent[] header, net.md_5.bungee.api.chat.BaseComponent[] footer) { sendPlayerListHeaderAndFooter(bungee(header), bungee(footer)); }
     @Override public void setPlayerListHeaderFooter(net.md_5.bungee.api.chat.BaseComponent header, net.md_5.bungee.api.chat.BaseComponent footer) { sendPlayerListHeaderAndFooter(header == null ? net.kyori.adventure.text.Component.empty() : bungee(header), footer == null ? net.kyori.adventure.text.Component.empty() : bungee(footer)); }
+
+    // --- Batch: methods built from real host paths (teleport, titles, potion effects, bans). ---
+    @Override public boolean teleport(org.bukkit.Location destination, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause, io.papermc.paper.entity.TeleportFlag... flags) { return teleport(destination); }
+    @Override public java.util.concurrent.CompletableFuture<Boolean> teleportAsync(org.bukkit.Location destination, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause cause, io.papermc.paper.entity.TeleportFlag... flags) { return teleportAsync(destination); }
+    @Override public void sendHealthUpdate() { setHealth(health); }
+    @Override public void showTitle(net.md_5.bungee.api.chat.BaseComponent title) { sendTitle(net.md_5.bungee.api.chat.BaseComponent.toLegacyText(title), ""); }
+    @Override public void showTitle(net.md_5.bungee.api.chat.BaseComponent... title) { sendTitle(net.md_5.bungee.api.chat.BaseComponent.toLegacyText(title), ""); }
+    @Override public void showTitle(net.md_5.bungee.api.chat.BaseComponent title, net.md_5.bungee.api.chat.BaseComponent subtitle, int fadeIn, int stay, int fadeOut) { sendTitle(net.md_5.bungee.api.chat.BaseComponent.toLegacyText(title), net.md_5.bungee.api.chat.BaseComponent.toLegacyText(subtitle), fadeIn, stay, fadeOut); }
+    @Override public void showTitle(net.md_5.bungee.api.chat.BaseComponent[] title, net.md_5.bungee.api.chat.BaseComponent[] subtitle, int fadeIn, int stay, int fadeOut) { sendTitle(net.md_5.bungee.api.chat.BaseComponent.toLegacyText(title), net.md_5.bungee.api.chat.BaseComponent.toLegacyText(subtitle), fadeIn, stay, fadeOut); }
+    // Potion effects are tracked here as well as sent to the host, so reads agree with what was applied.
+    private final java.util.concurrent.ConcurrentHashMap<org.bukkit.potion.PotionEffectType, long[]> effects = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<org.bukkit.potion.PotionEffectType, org.bukkit.potion.PotionEffect> effectData = new java.util.concurrent.ConcurrentHashMap<>();
+    private void expireEffects() { long now = System.nanoTime(); effects.entrySet().removeIf(e -> { boolean gone = e.getValue()[0] >= 0 && now > e.getValue()[0]; if (gone) effectData.remove(e.getKey()); return gone; }); }
+    @Override public boolean addPotionEffect(org.bukkit.potion.PotionEffect effect) {
+        boolean accepted = super.addPotionEffect(effect);
+        if (accepted) { effects.put(effect.getType(), new long[] { effect.getDuration() < 0 ? -1 : System.nanoTime() + effect.getDuration() * 50_000_000L }); effectData.put(effect.getType(), effect); }
+        return accepted;
+    }
+    @Override public boolean addPotionEffects(java.util.Collection<org.bukkit.potion.PotionEffect> list) { boolean all = true; for (var effect : list) all &= addPotionEffect(effect); return all; }
+    @Override public void removePotionEffect(org.bukkit.potion.PotionEffectType type) { super.removePotionEffect(type); effects.remove(type); effectData.remove(type); }
+    @Override public boolean clearActivePotionEffects() { boolean had = !getActivePotionEffects().isEmpty(); super.clearActivePotionEffects(); effects.clear(); effectData.clear(); return had; }
+    @Override public boolean hasPotionEffect(org.bukkit.potion.PotionEffectType type) { expireEffects(); return effects.containsKey(type); }
+    @Override public org.bukkit.potion.PotionEffect getPotionEffect(org.bukkit.potion.PotionEffectType type) {
+        expireEffects(); var base = effectData.get(type); var timing = effects.get(type);
+        if (base == null || timing == null) return null;
+        int left = timing[0] < 0 ? -1 : (int) Math.max(1, (timing[0] - System.nanoTime()) / 50_000_000L);
+        return new org.bukkit.potion.PotionEffect(type, left, base.getAmplifier(), base.isAmbient(), base.hasParticles(), base.hasIcon());
+    }
+    @Override public java.util.Collection<org.bukkit.potion.PotionEffect> getActivePotionEffects() { expireEffects(); var list = new java.util.ArrayList<org.bukkit.potion.PotionEffect>(); for (var type : effects.keySet()) { var effect = getPotionEffect(type); if (effect != null) list.add(effect); } return list; }
+    // Bans and the whitelist run the vanilla commands; /ban cannot express an expiry, so a timed ban is refused.
+    private void ban(String reason, boolean timed) {
+        if (timed) throw new UnsupportedOperationException("Ferrite: timed profile bans are not implemented: Player#ban");
+        if (!server.dispatchCommand(server.getConsoleSender(), "ban " + name + (reason == null || reason.isBlank() ? "" : " " + reason.replace('\n', ' ')))) throw new IllegalStateException("ban command failed");
+    }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.util.Date expires, String source) { ban(reason, expires != null); return null; }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.util.Date expires, String source, boolean kickPlayer) { ban(reason, expires != null); return null; }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Instant expires, String source) { ban(reason, expires != null); return null; }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Instant expires, String source, boolean kickPlayer) { ban(reason, expires != null); return null; }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source) { ban(reason, duration != null); return null; }
+    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source, boolean kickPlayer) { ban(reason, duration != null); return null; }
+    private boolean whitelisted;
+    @Override public void setWhitelisted(boolean value) { if (!server.dispatchCommand(server.getConsoleSender(), "whitelist " + (value ? "add " : "remove ") + name)) throw new IllegalStateException("whitelist command failed"); whitelisted = value; }
+    @Override public boolean isWhitelisted() { return whitelisted; }
     @Override public int hashCode() { return id.hashCode(); }
     @Override public boolean equals(Object other) { return other instanceof org.bukkit.entity.Player player && id.equals(player.getUniqueId()); }
     @Override public String toString() { return "Player[" + id + "]"; }

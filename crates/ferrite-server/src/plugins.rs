@@ -1,4 +1,6 @@
 //! Loading plugins into the embedded JVM at server startup.
+mod extra;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -110,6 +112,29 @@ impl PluginBridge {
                                     });
                                     return Some("true".to_owned());
                                 }
+                            }
+                            if let (Some(players), Ok(player)) =
+                                (&players, uuid::Uuid::parse_str(&call.subject))
+                            {
+                                let events = game_events(call);
+                                if !events.is_empty() {
+                                    for (event, value) in events {
+                                        players(ferrite_plugin::PlayerCommand::GameEvent {
+                                            player,
+                                            event,
+                                            value,
+                                        });
+                                    }
+                                    return Some(String::new());
+                                }
+                            }
+                            if let (Some(players), Ok(player), Some(amount)) = (
+                                &players,
+                                uuid::Uuid::parse_str(&call.subject),
+                                damage_amount(call),
+                            ) {
+                                players(ferrite_plugin::PlayerCommand::Damage { player, amount });
+                                return Some(String::new());
                             }
                             match host_action(call)? {
                                 HostAction::Console { line, reply } => {
@@ -289,6 +314,35 @@ pub fn apply_ability(state: &mut AbilityState, call: &ferrite_plugin::HostCall) 
     }
 }
 
+/// The amount of a `Player#damage(...)` call; negative or non-finite amounts are rejected.
+pub fn damage_amount(call: &ferrite_plugin::HostCall) -> Option<f32> {
+    let named = call.owner == "Player"
+        && matches!(
+            call.method.as_str(),
+            "damage(double)" | "damage(double,Entity)" | "damage(double,DamageSource)"
+        );
+    named
+        .then(|| call.args.first()?.parse::<f32>().ok())
+        .flatten()
+        .filter(|a| a.is_finite() && *a >= 0.0)
+}
+
+/// The game events a plugin call maps to, in the order they must reach the client.
+pub fn game_events(call: &ferrite_plugin::HostCall) -> Vec<(u8, f32)> {
+    if call.owner != "Player" {
+        return Vec::new();
+    }
+    match (call.method.as_str(), call.args.first().map(String::as_str)) {
+        ("showDemoScreen()", _) => vec![(5, 0.0)],
+        ("showWinScreen()", _) => vec![(4, 1.0)],
+        ("showElderGuardian(boolean)", Some("true" | "false")) => vec![(10, 0.0)],
+        // Begin/end raining, then the fade level the client renders.
+        ("setPlayerWeather(WeatherType)", Some("DOWNFALL")) => vec![(1, 0.0), (7, 1.0), (8, 0.0)],
+        ("setPlayerWeather(WeatherType)", Some("CLEAR")) => vec![(2, 0.0), (7, 0.0), (8, 0.0)],
+        _ => Vec::new(),
+    }
+}
+
 /// What the host does for a generic Bukkit/Paper method call.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostAction {
@@ -366,13 +420,6 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
             let key = arg(0).filter(|key| is_resource_key(key))?;
             console(format!("effect clear {} {key}", player?), "")
         }
-        ("Player", "damage(double)") => {
-            let amount: f64 = arg(0)?
-                .parse()
-                .ok()
-                .filter(|a: &f64| a.is_finite() && *a >= 0.0)?;
-            console(format!("damage {} {amount}", player?), "")
-        }
         ("Player", "setBedSpawnLocation(Location,boolean)") => {
             let (world, x, y, z) = location_block(arg(0)?)?;
             (world == ferrite_plugin::default_world_id())
@@ -427,7 +474,7 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
             default_world(&call.subject)?;
             console("save-all".into(), "")
         }
-        _ => None,
+        _ => extra::extra_action(call),
     }
 }
 
@@ -623,10 +670,17 @@ mod tests {
             None
         );
         assert_eq!(
-            line(call("Player", id, "damage(double)", &["4.5"])),
-            Some(format!("damage {id} 4.5"))
+            damage_amount(&call("Player", id, "damage(double)", &["4.5"])),
+            Some(4.5)
         );
-        assert_eq!(line(call("Player", id, "damage(double)", &["-1"])), None);
+        assert_eq!(
+            damage_amount(&call("Player", id, "damage(double)", &["-1"])),
+            None
+        );
+        assert_eq!(
+            damage_amount(&call("Player", id, "damage(double,Entity)", &["3", id])),
+            Some(3.0)
+        );
         let bed = format!("world{sep}10.7{sep}64{sep}-3.2{sep}0{sep}0");
         assert_eq!(
             line(call(
@@ -672,6 +726,22 @@ mod tests {
             line(call("Server", "server", "reloadData()", &[])),
             Some("reload".into())
         );
+    }
+
+    #[test]
+    fn game_events_cover_screens_and_player_weather() {
+        let call = |m: &str, a: &str| ferrite_plugin::HostCall {
+            owner: "Player".into(),
+            subject: "00000000-0000-0000-0000-000000000001".into(),
+            method: m.into(),
+            args: vec![a.into()],
+        };
+        assert_eq!(game_events(&call("showDemoScreen()", "")), vec![(5, 0.0)]);
+        assert_eq!(
+            game_events(&call("setPlayerWeather(WeatherType)", "DOWNFALL")),
+            vec![(1, 0.0), (7, 1.0), (8, 0.0)]
+        );
+        assert!(game_events(&call("setPlayerWeather(WeatherType)", "x")).is_empty());
     }
 
     #[test]

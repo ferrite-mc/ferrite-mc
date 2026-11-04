@@ -71,6 +71,8 @@ pub enum DamageKind {
     Arrow,
     /// `DamageTypes.GENERIC_KILL` (`/kill`): bypasses invulnerability and creative mode.
     GenericKill,
+    /// `DamageTypes.GENERIC`: damage a plugin deals without a vanilla cause; armor applies.
+    Generic,
 }
 
 impl DamageKind {
@@ -100,6 +102,7 @@ impl DamageKind {
             Self::Mob => format!("{name} was slain"),
             Self::Arrow => format!("{name} was shot"),
             Self::GenericKill => format!("{name} was killed"),
+            Self::Generic => format!("{name} died"),
         }
     }
 }
