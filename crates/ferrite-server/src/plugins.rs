@@ -170,6 +170,19 @@ impl PluginBridge {
                                     return Some(String::new());
                                 }
                             }
+                            if call.owner == "Player"
+                                && call.args.is_empty()
+                                && let Ok(player) = uuid::Uuid::parse_str(&call.subject)
+                                && let Some(reply) = abilities
+                                    .lock()
+                                    .unwrap()
+                                    .get(&player)
+                                    .copied()
+                                    .unwrap_or_default()
+                                    .speed_answer(&call.method)
+                            {
+                                return Some(reply);
+                            }
                             if let (Some(players), Ok(player)) =
                                 (&players, uuid::Uuid::parse_str(&call.subject))
                             {
@@ -404,6 +417,18 @@ impl Default for AbilityState {
             invulnerable: false,
             fly_speed: 0.1,
             walk_speed: 0.2,
+        }
+    }
+}
+
+impl AbilityState {
+    /// The reply to a speed read. Flight flags are not answered: their defaults depend on the
+    /// player's game mode, which this state does not know.
+    pub fn speed_answer(&self, method: &str) -> Option<String> {
+        match method {
+            "getWalkSpeed()" => Some(self.walk_speed.to_string()),
+            "getFlySpeed()" => Some(self.fly_speed.to_string()),
+            _ => None,
         }
     }
 }
@@ -679,6 +704,21 @@ fn has_plugin_jars(directory: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speeds_are_read_back_but_flight_flags_are_not_guessed() {
+        let mut state = AbilityState::default();
+        assert_eq!(state.speed_answer("getWalkSpeed()").as_deref(), Some("0.2"));
+        let call = ferrite_plugin::HostCall {
+            owner: "Player".into(),
+            subject: "00000000-0000-0000-0000-000000000001".into(),
+            method: "setFlySpeed(float)".into(),
+            args: vec!["0.5".into()],
+        };
+        assert!(apply_ability(&mut state, &call));
+        assert_eq!(state.speed_answer("getFlySpeed()").as_deref(), Some("0.5"));
+        assert_eq!(state.speed_answer("isFlying()"), None);
+    }
 
     #[test]
     fn only_jar_files_count_as_plugins() {
