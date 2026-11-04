@@ -267,6 +267,9 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             hidden,
         });
     }
+    if call.method == "updateCommands()" {
+        return Some(PlayerCommand::UpdateCommands { player });
+    }
     let packet = match call.method.as_str() {
         "sendBlockChange(Location,BlockData)" | "sendBlockChange(Location,Material,byte)" => {
             let pos = block_pos(arg(0)?)?;
@@ -890,6 +893,10 @@ mod tests {
             packet(call("dropStack(ItemStack)", &[&format!("AIR{PART}1")])),
             None
         );
+        assert!(matches!(
+            network_command(&call("updateCommands()", &[])),
+            Some(PlayerCommand::UpdateCommands { .. })
+        ));
         let bar = Uuid::from_u128(9).to_string();
         assert_eq!(
             packet(call(

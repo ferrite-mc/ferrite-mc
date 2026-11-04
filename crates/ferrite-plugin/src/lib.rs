@@ -362,6 +362,11 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         component_json: Option<String>,
     },
+    /// `Player#updateCommands`: sends the player the command tree again, filtered by their
+    /// current permission.
+    UpdateCommands {
+        player: uuid::Uuid,
+    },
     /// `World#spawnEntity` / `spawnFallingBlock` on the default world.
     SpawnEntity {
         center: [f64; 3],

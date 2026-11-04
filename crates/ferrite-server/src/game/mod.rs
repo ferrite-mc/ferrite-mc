@@ -1279,6 +1279,19 @@ async fn run(
                      let name = component_json.as_deref().map(json_text);
                      worlds.schedule_global(move |g| g.set_display_name(player, name));
                  }
+                 Some(ferrite_plugin::PlayerCommand::UpdateCommands { player }) => {
+                    if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
+                        let (actions, _) = mpsc::unbounded_channel();
+                        let permission = *permissions.get(&player).unwrap_or(&0);
+                        let source_for = commands::Source { permission, origin: op.pos, yaw: op.yaw, pitch: op.pitch, uuid: Some(player), name: Some(op.name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: op.dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                        if let Ok(tree) = command_tree.serialize_commands(&source_for, registry) {
+                            let mut packet = Vec::new();
+                            VarInt(16).encode(&mut packet);
+                            packet.extend(tree.body);
+                            let _ = op.outbound.send(Outbound::Packet(packet.into()));
+                        }
+                    }
+                }
                  Some(ferrite_plugin::PlayerCommand::SpawnEntity { center, kind, block, velocity }) => {
                     let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
@@ -1754,6 +1767,7 @@ fn route_plugin_command(
         PlayerCommand::Visibility { .. } => {}
         // The game loop hands explosions to the region owning the chunk before calling this.
         PlayerCommand::Explosion { .. }
+        | PlayerCommand::UpdateCommands { .. }
         | PlayerCommand::DropItem { .. }
         | PlayerCommand::SpawnEntity { .. } => {}
         // The game loop sends display names to the global region before calling this.
