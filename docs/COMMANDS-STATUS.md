@@ -6,11 +6,11 @@ dispatcher compared with `vanilla/26.3/generated/reports/commands.json` (94 root
 ## Done on 2026-11-04 (all in `commands_more.rs` unless noted)
 
 version, random, setidletimeout, teammsg/tm, transfer, stopwatch, publish, unpublish, tick,
-rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers, swing, attribute, dialog, posteffect, spectate.
+rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers, swing, attribute, dialog, posteffect, spectate, fillbiome.
 
-## Not done: 9 commands are still missing
+## Not done: 8 commands are still missing
 
-advancement, compute, fillbiome, item, loot, place, recipe, ride, waypoint.
+advancement, compute, item, loot, place, recipe, ride, waypoint.
 
 Notes for whoever picks these up:
 
@@ -18,11 +18,16 @@ Notes for whoever picks these up:
 - `item`, `loot`: need slot addressing and loot tables from the extracted vanilla data.
 - `advancement`, `recipe`: need per-player progress state, packets and persistence.
 - `compute`: needs the context int/float provider registries.
-- `place`, `fillbiome`: need new requests in the worldgen host protocol (Mojang's code stays
-  in the host process; Ferrite must not carry it).
+- `place`: needs new requests in the worldgen host protocol (Mojang's code stays in the host
+  process; Ferrite must not carry it).
 - `waypoint`: needs the clientbound `waypoint` packet and entity waypoint state.
 
 ## Partly done (works, but not like vanilla yet)
+
+- `/fillbiome` rewrites the 4x4x4 biome cells of loaded chunks (also fixed `biome_name` reading
+  one section too high) and resends the column to tracking players. A `#tag` filter is read
+  from the extracted vanilla tag files; it is not saved to disk until the chunk is flushed, and
+  the client keeps old biome colours until it re-receives the chunk. Feedback text is from memory.
 
 - `/attribute` stores base values and modifiers per entity and computes vanilla's formula, but
   nothing in the simulation reads them yet (only generic defaults plus the player overrides for

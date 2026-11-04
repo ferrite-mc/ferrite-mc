@@ -539,6 +539,12 @@ pub enum Action {
         attribute: String,
         op: AttributeOp,
     },
+    /// Re-sends the full column packets of already edited chunks to the players that track them
+    /// (`/fillbiome` changed their biomes in place).
+    ResendChunks {
+        dimension: super::Dimension,
+        chunks: Vec<(i32, i32)>,
+    },
     /// `/swing`: arm swing animation of the targets (`Animate` action 0 or 3).
     Swing {
         targets: EntityTarget,
@@ -2482,6 +2488,31 @@ mod tests {
 
         denied("locate biome minecraft:plains");
         assert!(run("locate biome", 2).0.is_err());
+    }
+
+    #[test]
+    fn fillbiome_validates_its_arguments() {
+        denied("fillbiome 0 0 0 1 1 1 minecraft:plains");
+        assert!(run("fillbiome 0 0 0 1 1 1", 2).0.is_err());
+        let error = run("fillbiome 0 0 0 100 100 100 minecraft:plains", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Too many blocks"), "{error}");
+        // No loaded world behind the test source.
+        let error = run(
+            "fillbiome 0 0 0 1 1 1 minecraft:plains replace #minecraft:is_ocean",
+            2,
+        )
+        .0
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not loaded"), "{error}");
+        let error = run("fillbiome 0 0 0 1 1 1 #minecraft:is_ocean", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must not be a tag"), "{error}");
     }
 
     #[test]

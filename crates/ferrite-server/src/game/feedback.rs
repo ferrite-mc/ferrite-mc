@@ -8,6 +8,14 @@
 fn template(key: &str) -> Option<&'static str> {
     Some(match key {
         "commands.rotate.success" => "Rotated %s",
+        "commands.fillbiome.success.count" => {
+            "%s biome entries set between %s, %s, %s and %s, %s, %s"
+        }
+        "commands.fillbiome.no_changes" => "No biomes were changed",
+        "commands.fillbiome.toobig" => {
+            "Too many blocks in the specified area (maximum %s, specified %s)"
+        }
+        "argument.pos.unloaded" => "That position is not loaded",
         "commands.swing.success.single" => "Swung %s's arm",
         "commands.swing.success.multiple" => "Swung the arms of %s entities",
         "commands.attribute.value.get.success" => "Value of attribute %s for %s is %s",

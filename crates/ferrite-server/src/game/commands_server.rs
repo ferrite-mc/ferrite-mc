@@ -89,6 +89,143 @@ fn locate_tree() -> NodeBuilder<Source> {
         )
 }
 
+// ---------------------------------------------------------------------------------------------
+// /fillbiome
+// ---------------------------------------------------------------------------------------------
+
+/// Largest box `/fillbiome` accepts, in blocks (vanilla `commands.fillbiome.toobig`).
+const FILLBIOME_LIMIT: u128 = 32768;
+
+fn fillbiome_tree() -> NodeBuilder<Source> {
+    let biome = |name: &'static str| {
+        argument::<Source>(
+            name,
+            ArgumentType::Registry {
+                parser: RegistryParser::ResourceOrTag,
+                registry: "minecraft:worldgen/biome".into(),
+            },
+        )
+    };
+    literal::<Source>("fillbiome").requires(gamemasters()).then(
+        argument("from", ArgumentType::BlockPos).then(argument("to", ArgumentType::BlockPos).then(
+            biome("biome").executes(|ctx| fillbiome(ctx, false)).then(
+                literal("replace").then(biome("filter").executes(|ctx| fillbiome(ctx, true))),
+            ),
+        )),
+    )
+}
+
+/// The biome ids a `#tag` of `data/minecraft/tags/worldgen/biome` expands to.
+fn biome_tag_members(tag: &str, depth: u8) -> Vec<String> {
+    let name = tag.trim_start_matches('#');
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    if depth > 8 || name.contains("..") {
+        return Vec::new();
+    }
+    let relative =
+        std::path::Path::new("vanilla/26.3/generated/data/minecraft/tags/worldgen/biome")
+            .join(format!("{name}.json"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(text) = [relative.clone(), root.join(&relative)]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+    else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut members = Vec::new();
+    for value in json["values"].as_array().into_iter().flatten() {
+        let id = value
+            .as_str()
+            .or_else(|| value["id"].as_str())
+            .unwrap_or_default();
+        if id.starts_with('#') {
+            members.extend(biome_tag_members(id, depth + 1));
+        } else if !id.is_empty() {
+            members.push(namespaced(id));
+        }
+    }
+    members
+}
+
+fn fillbiome(ctx: &CommandContext<Source>, filtered: bool) -> Result<i32, CommandError> {
+    use super::commands_world::{Origin, resolve};
+    let source = ctx.source();
+    let origin = Origin {
+        pos: source.origin,
+        yaw: source.yaw,
+        pitch: source.pitch,
+    };
+    let corner = |name: &str| match ctx.argument(name) {
+        Some(ArgumentValue::BlockPos(coords)) => Ok(resolve(coords, &origin)),
+        _ => Err(CommandError::failed(format!("missing {name}"))),
+    };
+    let (a, b) = (corner("from")?, corner("to")?);
+    let min = [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])];
+    let max = [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])];
+    let side = |i: usize| u128::from(min[i].abs_diff(max[i])) + 1;
+    let volume = side(0) * side(1) * side(2);
+    if volume > FILLBIOME_LIMIT {
+        return Err(CommandError::failed(
+            Feedback::new(
+                "commands.fillbiome.toobig",
+                vec![FILLBIOME_LIMIT.to_string(), volume.to_string()],
+            )
+            .text,
+        ));
+    }
+    let (target, _) = resource_target(ctx, "biome")?;
+    if target.starts_with('#') {
+        return Err(CommandError::failed("Biome must not be a tag"));
+    }
+    let accept: Box<dyn Fn(&str) -> bool> = if filtered {
+        let (filter, _) = resource_target(ctx, "filter")?;
+        if filter.starts_with('#') {
+            let members = biome_tag_members(&filter, 0);
+            Box::new(move |name| members.iter().any(|m| m == name))
+        } else {
+            Box::new(move |name| name == filter)
+        }
+    } else {
+        Box::new(|_| true)
+    };
+    let Some(world) = source.world.clone() else {
+        return Err(CommandError::failed(
+            Feedback::new("argument.pos.unloaded", vec![]).text,
+        ));
+    };
+    let (count, chunks) = world
+        .fill_biome(min, max, &target, &*accept)
+        .map_err(|_| CommandError::failed(Feedback::new("argument.pos.unloaded", vec![]).text))?;
+    if count == 0 {
+        return Err(CommandError::failed(
+            Feedback::new("commands.fillbiome.no_changes", vec![]).text,
+        ));
+    }
+    send(
+        source,
+        Action::ResendChunks {
+            dimension: source.dimension,
+            chunks,
+        },
+    )?;
+    feedback(
+        ctx,
+        "commands.fillbiome.success.count",
+        vec![
+            count.to_string(),
+            min[0].to_string(),
+            min[1].to_string(),
+            min[2].to_string(),
+            max[0].to_string(),
+            max[1].to_string(),
+            max[2].to_string(),
+        ],
+    )
+}
+
 fn located(
     ctx: &CommandContext<Source>,
     key: &'static str,
@@ -461,6 +598,7 @@ fn trigger_value(ctx: &CommandContext<Source>, add: bool) -> Result<i32, Command
 /// Adds every command family above to the server tree.
 pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(locate_tree());
+    tree.register(fillbiome_tree());
     tree.register(reload_tree());
     tree.register(datapack_tree());
     tree.register(help_tree());

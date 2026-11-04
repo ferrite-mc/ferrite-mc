@@ -485,7 +485,7 @@ impl AnvilChunkSource {
                     })?
                     .light
             };
-            let section = usize::try_from(y.div_euclid(16) + 5).ok()?;
+            let section = usize::try_from(y.div_euclid(16) + 4).ok()?;
             let index = (y.rem_euclid(16) as usize * 256)
                 + (z.rem_euclid(16) as usize * 16)
                 + x.rem_euclid(16) as usize;
@@ -510,7 +510,7 @@ impl AnvilChunkSource {
     pub fn biome_name(&self, x: i32, y: i32, z: i32) -> Option<String> {
         let biome = self
             .with_loaded_chunk(x.div_euclid(16), z.div_euclid(16), |chunk| {
-                let section = usize::try_from(y.div_euclid(16) + 5).ok()?;
+                let section = usize::try_from(y.div_euclid(16) + 4).ok()?;
                 let index = (((y.rem_euclid(16) as usize) >> 2) << 4)
                     | (((z.rem_euclid(16) as usize) >> 2) << 2)
                     | ((x.rem_euclid(16) as usize) >> 2);
@@ -696,6 +696,93 @@ impl AnvilChunkSource {
             },
         );
         Ok(())
+    }
+    /// Sets the biome of every 4x4x4 cell touched by the block box `min..=max` (`/fillbiome`).
+    /// `accept` sees the cell's current biome name and decides whether it is replaced. Returns
+    /// the number of cells changed and the chunks that changed; fails, changing nothing, when a
+    /// chunk of the box is not loaded or the biome is unknown.
+    pub fn fill_biome(
+        &self,
+        min: [i32; 3],
+        max: [i32; 3],
+        biome: &str,
+        accept: &dyn Fn(&str) -> bool,
+    ) -> anyhow::Result<(usize, Vec<(i32, i32)>)> {
+        let id = self
+            .registry
+            .biome_id(biome)
+            .ok_or_else(|| anyhow::anyhow!("unknown biome {biome}"))?;
+        let mut edited = Vec::new();
+        let mut cache = self.cache.lock().unwrap();
+        let mut count = 0;
+        for cx in min[0].div_euclid(16)..=max[0].div_euclid(16) {
+            for cz in min[2].div_euclid(16)..=max[2].div_euclid(16) {
+                let key = (cx, cz);
+                let (mut chunk, light) = if let Some(d) = cache.dirty.get(&key) {
+                    (d.chunk.clone(), d.light.clone())
+                } else {
+                    let column = cache
+                        .entries
+                        .iter()
+                        .find_map(|(&(ex, ez, _), entry)| match entry {
+                            Entry::Ready(Ok(c), _) if (ex, ez) == key => Some(c),
+                            _ => None,
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
+                    (column.chunk.clone(), column.light.clone())
+                };
+                let mut changed = 0;
+                for qy in (min[1] >> 2)..=(max[1] >> 2) {
+                    let section = usize::try_from((qy >> 2) + 4).ok();
+                    let Some(section) = section.filter(|s| *s < chunk.sections().len()) else {
+                        continue;
+                    };
+                    for qz in (min[2] >> 2)..=(max[2] >> 2) {
+                        for qx in (min[0] >> 2)..=(max[0] >> 2) {
+                            if qx.div_euclid(4) != cx || qz.div_euclid(4) != cz {
+                                continue;
+                            }
+                            let index = (((qy & 3) as usize) << 4)
+                                | (((qz & 3) as usize) << 2)
+                                | ((qx & 3) as usize);
+                            let current = chunk.sections()[section].biomes().get(index);
+                            if current == Some(id) {
+                                continue;
+                            }
+                            let name = current.and_then(|c| self.registry.biome_name(c));
+                            if !name.is_some_and(accept) {
+                                continue;
+                            }
+                            chunk.sections_mut()[section].set_biome(index, id)?;
+                            changed += 1;
+                        }
+                    }
+                }
+                if changed > 0 {
+                    count += changed;
+                    edited.push((key, chunk, light));
+                }
+            }
+        }
+        let mut chunks = Vec::new();
+        for ((x, z), chunk, light) in edited {
+            self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+            let packet = encode_column_packet(x, z, &chunk, &light)?;
+            cache.clock += 1;
+            let version = cache.clock;
+            invalidate(&mut cache, &self.stats, x, z);
+            cache.dirty.insert(
+                (x, z),
+                Dirty {
+                    chunk,
+                    light,
+                    packet,
+                    version,
+                },
+            );
+            chunks.push((x, z));
+        }
+        Ok((count, chunks))
     }
     /// Records a modified column for streaming and eventual Anvil writeback.
     /// TODO: call this when block-editing gameplay is implemented.
@@ -1105,6 +1192,61 @@ mod tests {
         assert_eq!(stats.encodes, 1, "{stats:?}");
         assert!(stats.hits >= 2, "{stats:?}");
         assert_eq!(stats.invalidations, 0, "{stats:?}");
+    }
+
+    #[tokio::test]
+    async fn fill_biome_replaces_matching_cells_across_chunks() {
+        let source = AnvilChunkSource::new_memory();
+        let before = ready(&source, 0, 0, 0).await;
+        ready(&source, 1, 0, 0).await;
+        let initial = source.biome_name(0, 64, 0).unwrap();
+        assert_ne!(initial, "minecraft:desert");
+
+        // 8 blocks wide in x across the chunk border: 2 cells on each side, 1 in y and z.
+        let (count, chunks) = source
+            .fill_biome([8, 64, 0], [23, 64, 3], "minecraft:desert", &|_| true)
+            .unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            source.biome_name(8, 64, 0).as_deref(),
+            Some("minecraft:desert")
+        );
+        assert_eq!(
+            source.biome_name(20, 64, 3).as_deref(),
+            Some("minecraft:desert")
+        );
+        assert_eq!(
+            source.biome_name(4, 64, 0).as_deref(),
+            Some(initial.as_str())
+        );
+        assert_ne!(
+            &*ready(&source, 0, 0, 0).await,
+            &*before,
+            "the chunk is re-encoded"
+        );
+
+        // A filter that rejects everything, and cells already holding the biome, change nothing.
+        let (count, _) = source
+            .fill_biome([0, 64, 0], [3, 64, 3], "minecraft:desert", &|name| {
+                name == "minecraft:nonexistent"
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        let (count, _) = source
+            .fill_biome([8, 64, 0], [23, 64, 3], "minecraft:desert", &|_| true)
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(
+            source
+                .fill_biome([0, 64, 0], [3, 64, 3], "minecraft:nope", &|_| true)
+                .is_err()
+        );
+        assert!(
+            source
+                .fill_biome([160, 64, 0], [163, 64, 3], "minecraft:desert", &|_| true)
+                .is_err()
+        );
     }
 
     #[tokio::test]

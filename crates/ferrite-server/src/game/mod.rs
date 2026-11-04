@@ -2889,6 +2889,18 @@ impl CommandRuntime<'_> {
                 self.run_attribute(&targets, &attribute, op);
                 false
             }
+            Action::ResendChunks { dimension, chunks } => {
+                if let Some(source) = self.source.clone() {
+                    let tracking = self.tracking.lock().unwrap();
+                    for (x, z) in chunks {
+                        if let Some(Ok(bytes)) = source.get(x, z, 0) {
+                            let packet = Outbound::Packet(bytes.to_vec().into());
+                            region::broadcast_tracked_chunk(&tracking, dimension, (x, z), &packet);
+                        }
+                    }
+                }
+                false
+            }
             Action::Swing { targets, off_hand } => {
                 let targets = match self.selection(&targets) {
                     Ok(targets) => targets,
