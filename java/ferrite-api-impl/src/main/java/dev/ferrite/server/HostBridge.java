@@ -30,6 +30,7 @@ public final class HostBridge {
         if (value instanceof org.bukkit.World w) return w.getName();
         if (value instanceof org.bukkit.Location l) return (l.getWorld() == null ? "" : l.getWorld().getName()) + ITEM + l.getX() + ITEM + l.getY() + ITEM + l.getZ() + ITEM + l.getYaw() + ITEM + l.getPitch();
         if (value instanceof org.bukkit.util.Vector v) return v.getX() + "" + ITEM + v.getY() + ITEM + v.getZ();
+        if (FerriteInventory.isFerrite(value)) return FerriteInventory.wire((org.bukkit.inventory.Inventory) value);
         if (value instanceof org.bukkit.inventory.ItemStack s) return s.getType().name() + ITEM + s.getAmount();
         if (value instanceof org.bukkit.Material m) return m.name();
         if (value instanceof org.bukkit.potion.PotionEffect e) return e.getType().getKey().toString() + ITEM + e.getDuration() + ITEM + e.getAmplifier() + ITEM + e.isAmbient() + ITEM + e.hasParticles() + ITEM + e.hasIcon();

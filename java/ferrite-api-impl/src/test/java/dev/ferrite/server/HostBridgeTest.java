@@ -27,6 +27,24 @@ class HostBridgeTest {
         assertNull(HostBridge.call("Player", "id", "getName()", String.class));
     }
 
+    @Test void pluginInventoriesCrossTheBridgeWithTitleSizeAndItems() {
+        var inventory = FerriteInventory.create(null, org.bukkit.event.inventory.InventoryType.CHEST, 9, "Shop");
+        inventory.setItem(0, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 3));
+        inventory.setItem(2, new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR));
+        List<String> sent = new ArrayList<>();
+        HostBridge.transport = (owner, subject, method, args) -> { sent.add(method); sent.add(args); return ""; };
+        HostBridge.callVoid("Player", "id", "openInventory(Inventory)", inventory);
+        assertEquals("openInventory(Inventory)", sent.get(0));
+        String[] fields = sent.get(1).split(String.valueOf((char) 30), -1);
+        assertEquals(12, fields.length);
+        assertEquals("Shop", fields[0]);
+        assertEquals("9", fields[1]);
+        assertEquals("CHEST", fields[2]);
+        assertEquals("DIAMOND" + (char) 29 + "3", fields[3]);
+        assertEquals("", fields[4]);
+        assertEquals("", fields[5], "air is an empty slot");
+    }
+
     @Test void everyGeneratedStubReachesTheHost() throws Exception {
         List<String> seen = new ArrayList<>();
         HostBridge.transport = (owner, subject, method, args) -> { seen.add(owner + "#" + method); return null; };

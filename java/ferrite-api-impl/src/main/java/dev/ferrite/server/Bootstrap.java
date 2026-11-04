@@ -242,7 +242,7 @@ public final class Bootstrap {
     /** Fires Paper's {@code InventoryClickEvent}; false means a listener cancelled the click. */
     public static boolean fireInventoryClick(String id, String name, int slot, String click, String action) {
         var player = ensurePlayer(id, name);
-        var view = FerriteInventoryView.create(player, player.getInventory());
+        var view = openView(player);
         org.bukkit.event.inventory.ClickType clickType;
         try { clickType = org.bukkit.event.inventory.ClickType.valueOf(click); }
         catch (IllegalArgumentException e) { clickType = org.bukkit.event.inventory.ClickType.UNKNOWN; }
@@ -256,8 +256,14 @@ public final class Bootstrap {
     /** Fires Bukkit's {@code InventoryCloseEvent} when the host closes a player's menu. */
     public static void fireInventoryClose(String id, String name) {
         var player = ensurePlayer(id, name);
-        var view = FerriteInventoryView.create(player, player.getInventory());
-        synchronized (LEGACY_LOCK) { server.plugins.callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(view, org.bukkit.event.inventory.InventoryCloseEvent.Reason.PLUGIN)); }
+        var view = openView(player);
+        try { synchronized (LEGACY_LOCK) { server.plugins.callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(view, org.bukkit.event.inventory.InventoryCloseEvent.Reason.PLUGIN)); } }
+        finally { if (player instanceof FerritePlayer ferrite) ferrite.clearPluginView(); }
+    }
+    /** What the player is looking at: the inventory a plugin opened for them, or their own. */
+    private static org.bukkit.inventory.InventoryView openView(org.bukkit.entity.Player player) {
+        if (player instanceof FerritePlayer ferrite && ferrite.pluginView() != null) return ferrite.pluginView();
+        return FerriteInventoryView.create(player, player.getInventory());
     }
     /** A live player, or a stand-in entity for the mob ids the host sends. */
     private static org.bukkit.entity.Entity entity(String id, String name) {

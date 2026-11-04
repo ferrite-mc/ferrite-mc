@@ -53,6 +53,25 @@ pub enum OpenAt {
     Block([i32; 3], &'static str),
 }
 
+/// Bukkit's `ClickType` and `InventoryAction` names for a vanilla click. The action is the
+/// common outcome of the click, not a replay of the cursor and slot contents, so a listener
+/// should rely on the click type and slot.
+fn click_names(input: ClickInput, button: i8) -> (&'static str, &'static str) {
+    match (input, button) {
+        (ClickInput::Pickup, 1) => ("RIGHT", "PICKUP_HALF"),
+        (ClickInput::Pickup, _) => ("LEFT", "PICKUP_ALL"),
+        (ClickInput::QuickMove, 1) => ("SHIFT_RIGHT", "MOVE_TO_OTHER_INVENTORY"),
+        (ClickInput::QuickMove, _) => ("SHIFT_LEFT", "MOVE_TO_OTHER_INVENTORY"),
+        (ClickInput::Swap, 40) => ("SWAP_OFFHAND", "HOTBAR_SWAP"),
+        (ClickInput::Swap, _) => ("NUMBER_KEY", "HOTBAR_SWAP"),
+        (ClickInput::Clone, _) => ("MIDDLE", "CLONE_STACK"),
+        (ClickInput::Throw, 1) => ("CONTROL_DROP", "DROP_ALL_SLOT"),
+        (ClickInput::Throw, _) => ("DROP", "DROP_ONE_SLOT"),
+        (ClickInput::PickupAll, _) => ("DOUBLE_CLICK", "COLLECT_TO_CURSOR"),
+        (ClickInput::QuickCraft, _) => ("UNKNOWN", "UNKNOWN"),
+    }
+}
+
 /// The block name at a position (vanilla `Level.getBlockState`).
 fn block_name(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> Option<&'static str> {
     source
@@ -266,6 +285,27 @@ impl Player {
         };
         if !self.container_still_valid() {
             return;
+        }
+        // Bukkit's `InventoryClickEvent`: a listener that cancels it leaves the menu as it was
+        // and the client is shown the real contents again. Drags (`QuickCraft`) are
+        // `InventoryDragEvent`s in Bukkit, which are not fired yet.
+        if input != ClickInput::QuickCraft
+            && let Some(plugins) = self.plugins.clone()
+        {
+            let (click, action) = click_names(input, p.button);
+            let allowed = plugins
+                .inventory_clicked(self.uuid, &self.name, i32::from(p.slot), click, action)
+                .unwrap_or(true);
+            if !allowed {
+                let menu = self
+                    .menus
+                    .open
+                    .as_mut()
+                    .unwrap_or(&mut self.menus.inventory);
+                let full = menu.broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+                return;
+            }
         }
         // Vanilla `AnvilMenu.stillValid` cost check: a player without enough levels cannot take
         // the result (creative may).
@@ -509,6 +549,44 @@ impl Player {
         emit(self, std::iter::once(full).chain(data).collect());
     }
 
+    /// A plugin's `Player#openInventory`: a chest screen over `items` that belongs to no block,
+    /// so it stays open until the player or the plugin closes it. Unknown materials show as
+    /// empty slots rather than failing the whole menu.
+    pub fn open_plugin_inventory(
+        &mut self,
+        title: &str,
+        rows: u8,
+        items: &[Option<ferrite_plugin::ItemSnapshot>],
+    ) {
+        let stacks: Vec<ItemStack> = items
+            .iter()
+            .map(|item| {
+                item.as_ref()
+                    .and_then(|item| {
+                        let id = ferrite_item::item_id(&item.material)?;
+                        Some(ItemStack::with_count(id, i32::from(item.amount)))
+                    })
+                    .unwrap_or_else(ItemStack::empty)
+            })
+            .collect();
+        self.open_menu(
+            |id| {
+                let mut menu = Menu::generic(id, rows);
+                let slots = menu.container_mut();
+                let count = slots.len().min(stacks.len());
+                slots[..count].clone_from_slice(&stacks[..count]);
+                menu
+            },
+            title,
+            None,
+        );
+    }
+
+    /// A plugin's `Player#closeInventory`; the client gets `container_close` first.
+    pub fn close_plugin_inventory(&mut self) {
+        self.close_open_container();
+    }
+
     /// Vanilla `useWithoutItem` of blocks with a menu: a crafting table opens `CraftingMenu`
     /// (`CraftingTableBlock`), a chest or barrel a `ChestMenu` over its items (`ChestBlock`,
     /// `BarrelBlock`). Using them opens the menu instead of placing the held item; returns
@@ -715,4 +793,22 @@ impl Player {
 /// The player's inventory as stored and restored by [`super::playerdata`].
 pub fn restore(saved: Option<&super::playerdata::Saved>) -> PlayerInventory {
     saved.map_or_else(PlayerInventory::new, super::playerdata::Saved::inventory)
+}
+
+#[cfg(test)]
+mod click_name_tests {
+    use super::*;
+
+    #[test]
+    fn clicks_map_to_bukkit_names() {
+        assert_eq!(click_names(ClickInput::Pickup, 0), ("LEFT", "PICKUP_ALL"));
+        assert_eq!(click_names(ClickInput::Pickup, 1), ("RIGHT", "PICKUP_HALF"));
+        assert_eq!(
+            click_names(ClickInput::QuickMove, 0),
+            ("SHIFT_LEFT", "MOVE_TO_OTHER_INVENTORY")
+        );
+        assert_eq!(click_names(ClickInput::Swap, 40).0, "SWAP_OFFHAND");
+        assert_eq!(click_names(ClickInput::Swap, 3).0, "NUMBER_KEY");
+        assert_eq!(click_names(ClickInput::Throw, 1).0, "CONTROL_DROP");
+    }
 }

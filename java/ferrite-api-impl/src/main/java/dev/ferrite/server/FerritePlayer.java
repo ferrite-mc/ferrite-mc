@@ -29,6 +29,23 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     }
     void updateLocation(org.bukkit.Location value) { this.location = value; }
     @Override public org.bukkit.inventory.PlayerInventory getInventory() { return inventory.proxy; }
+    private volatile org.bukkit.inventory.InventoryView openView;
+    /** The inventory a plugin opened for this player, or null while none of ours is open. */
+    org.bukkit.inventory.InventoryView pluginView() { return openView; }
+    void clearPluginView() { openView = null; }
+    @Override public org.bukkit.inventory.InventoryView openInventory(org.bukkit.inventory.Inventory target) {
+        if (target == null) return null;
+        if (!FerriteInventory.isFerrite(target)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#openInventory for an inventory of another implementation");
+        var view = FerriteInventoryView.create(this, target);
+        view.setTitle(FerriteInventory.titleOf(target));
+        HostBridge.callVoid("Player", id, "openInventory(Inventory)", target);
+        openView = view;
+        return view;
+    }
+    @Override public void openInventory(org.bukkit.inventory.InventoryView view) { openInventory(view.getTopInventory()); }
+    @Override public org.bukkit.inventory.InventoryView getOpenInventory() { var view = openView; return view != null ? view : FerriteInventoryView.create(this, inventory.proxy); }
+    @Override public void closeInventory() { closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason.UNKNOWN); }
+    @Override public void closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason reason) { HostBridge.callVoid("Player", id, "closeInventory(Reason)", reason); openView = null; }
     @Override public java.util.UUID getUniqueId() { return id; }
     @Override public String getName() { return name; }
     @Override public String getDisplayName() { return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(displayName()); }

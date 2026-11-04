@@ -1,0 +1,167 @@
+//! Plugin-created inventories: parses what the Java bridge sends for `Player#openInventory` and
+//! `Player#closeInventory` into game commands.
+//!
+//! Wire format of an inventory argument: `title`, `size`, `type`, then `size` item fields, all
+//! separated by U+001E; an item is `MATERIAL U+001D amount`, and an empty field is an empty slot.
+//! Values come from plugin code, so every field is validated before it reaches the game loop.
+
+use ferrite_plugin::{HostCall, ItemSnapshot, PlayerCommand};
+use uuid::Uuid;
+
+const FIELD: char = '\u{1e}';
+const PART: char = '\u{1d}';
+const MAX_ROWS: usize = 6;
+
+/// The command behind an inventory call, or `None` when it is not one this module handles
+/// (a hopper or dispenser inventory, say, which the menu code cannot show yet).
+pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
+    if call.owner != "Player" {
+        return None;
+    }
+    let player = Uuid::parse_str(&call.subject).ok()?;
+    match call.method.as_str() {
+        "openInventory(Inventory)" => open(player, call.args.first()?),
+        "closeInventory()" | "closeInventory(Reason)" => {
+            Some(PlayerCommand::CloseInventory { player })
+        }
+        _ => None,
+    }
+}
+
+fn open(player: Uuid, text: &str) -> Option<PlayerCommand> {
+    let mut fields = text.split(FIELD);
+    let title = fields.next()?.to_owned();
+    let size: usize = fields.next()?.parse().ok()?;
+    if fields.next()? != "CHEST" || size == 0 || !size.is_multiple_of(9) || size > MAX_ROWS * 9 {
+        return None;
+    }
+    let items: Vec<Option<ItemSnapshot>> = fields.map(item).collect::<Option<_>>()?;
+    if items.len() != size || title.chars().any(char::is_control) {
+        return None;
+    }
+    Some(PlayerCommand::OpenInventory {
+        player,
+        title,
+        rows: (size / 9) as u8,
+        items,
+    })
+}
+
+/// An empty field is an empty slot, and so is air; anything else must be a well-formed stack.
+fn item(field: &str) -> Option<Option<ItemSnapshot>> {
+    if field.is_empty() {
+        return Some(None);
+    }
+    let (material, amount) = field.split_once(PART)?;
+    let amount: u8 = amount.parse().ok()?;
+    if matches!(material, "AIR" | "CAVE_AIR" | "VOID_AIR") || amount == 0 {
+        return Some(None);
+    }
+    let valid = !material.is_empty()
+        && material
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'));
+    valid.then(|| {
+        Some(ItemSnapshot {
+            material: material.to_owned(),
+            amount: amount.min(99),
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PLAYER: &str = "00000000-0000-0000-0000-000000000001";
+
+    fn call(method: &str, arg: &str) -> HostCall {
+        HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: method.into(),
+            args: vec![arg.into()],
+        }
+    }
+
+    fn inventory(title: &str, size: usize, kind: &str, items: &[&str]) -> String {
+        let mut fields = vec![title.to_owned(), size.to_string(), kind.to_owned()];
+        fields.extend(items.iter().map(|i| (*i).to_owned()));
+        fields.join(&FIELD.to_string())
+    }
+
+    #[test]
+    fn opens_a_chest_with_its_items() {
+        let mut items = vec![""; 9];
+        items[0] = "DIAMOND\u{1d}3";
+        items[4] = "AIR\u{1d}1";
+        let text = inventory("Shop", 9, "CHEST", &items);
+        let Some(PlayerCommand::OpenInventory {
+            title, rows, items, ..
+        }) = inventory_command(&call("openInventory(Inventory)", &text))
+        else {
+            panic!("expected OpenInventory");
+        };
+        assert_eq!((title.as_str(), rows), ("Shop", 1));
+        assert_eq!(
+            items[0],
+            Some(ItemSnapshot {
+                material: "DIAMOND".into(),
+                amount: 3
+            })
+        );
+        assert!(
+            items[1..].iter().all(Option::is_none),
+            "air is an empty slot"
+        );
+    }
+
+    #[test]
+    fn closing_targets_the_calling_player() {
+        let command = inventory_command(&call("closeInventory(Reason)", "PLUGIN"));
+        assert!(matches!(
+            command,
+            Some(PlayerCommand::CloseInventory { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_what_the_menu_cannot_show() {
+        let nine = vec![""; 9];
+        for text in [
+            inventory("T", 9, "HOPPER", &nine),
+            inventory("T", 10, "CHEST", &[""; 10]),
+            inventory("T", 63, "CHEST", &[""; 63]),
+            inventory("T", 9, "CHEST", &nine[..8]),
+            inventory("bad\ntitle", 9, "CHEST", &nine),
+            inventory(
+                "T",
+                9,
+                "CHEST",
+                &["STONE\u{1d}x", "", "", "", "", "", "", "", ""],
+            ),
+            inventory(
+                "T",
+                9,
+                "CHEST",
+                &["ST ONE\u{1d}1", "", "", "", "", "", "", "", ""],
+            ),
+        ] {
+            assert_eq!(
+                inventory_command(&call("openInventory(Inventory)", &text)),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_players_calls_are_not_inventory_calls() {
+        let mut other = call("openInventory(Inventory)", "x");
+        other.owner = "Server".into();
+        assert_eq!(inventory_command(&other), None);
+        other.owner = "Player".into();
+        other.subject = "not-a-uuid".into();
+        assert_eq!(inventory_command(&other), None);
+    }
+}

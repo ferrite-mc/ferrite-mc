@@ -252,6 +252,17 @@ pub enum PlayerCommand {
         event: u8,
         value: f32,
     },
+    /// Opens a plugin-created chest-style inventory (`Player#openInventory`).
+    OpenInventory {
+        player: uuid::Uuid,
+        title: String,
+        rows: u8,
+        items: Vec<Option<ItemSnapshot>>,
+    },
+    /// Closes whatever menu the player has open (`Player#closeInventory`).
+    CloseInventory {
+        player: uuid::Uuid,
+    },
     /// Generic damage (`Player#damage`); armor and invulnerability apply.
     Damage {
         player: uuid::Uuid,

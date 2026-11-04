@@ -7,6 +7,7 @@ final class FerriteInventory implements java.lang.reflect.InvocationHandler {
     private final org.bukkit.inventory.ItemStack[] contents;
     private final org.bukkit.inventory.Inventory proxy;
     private int maxStack = 64;
+    private String title = "";
 
     private FerriteInventory(org.bukkit.inventory.InventoryHolder holder, org.bukkit.event.inventory.InventoryType type, int size) {
         this.holder = holder; this.type = type; this.contents = new org.bukkit.inventory.ItemStack[size];
@@ -15,6 +16,28 @@ final class FerriteInventory implements java.lang.reflect.InvocationHandler {
     static org.bukkit.inventory.Inventory create(org.bukkit.inventory.InventoryHolder holder, org.bukkit.event.inventory.InventoryType type, int size) {
         if (size < 1 || (type == org.bukkit.event.inventory.InventoryType.CHEST && size % 9 != 0)) throw new IllegalArgumentException("Invalid inventory size: " + size);
         return new FerriteInventory(holder, type, size).proxy;
+    }
+    static org.bukkit.inventory.Inventory create(org.bukkit.inventory.InventoryHolder holder, org.bukkit.event.inventory.InventoryType type, int size, String title) {
+        var inventory = create(holder, type, size);
+        ((FerriteInventory) java.lang.reflect.Proxy.getInvocationHandler(inventory)).title = title == null ? "" : title;
+        return inventory;
+    }
+    /** The plain-text title the host shows when the inventory is opened. */
+    static String titleOf(org.bukkit.inventory.Inventory inventory) {
+        return isFerrite(inventory) ? ((FerriteInventory) java.lang.reflect.Proxy.getInvocationHandler(inventory)).title : "";
+    }
+    /** Wire form for the host: title, size, type, then one field per slot (see plugins/inventory.rs). */
+    static String wire(org.bukkit.inventory.Inventory inventory) {
+        var handler = (FerriteInventory) java.lang.reflect.Proxy.getInvocationHandler(inventory);
+        StringBuilder out = new StringBuilder(handler.title).append('\u001e').append(handler.contents.length).append('\u001e').append(handler.type.name());
+        for (var item : handler.contents) {
+            out.append('\u001e');
+            if (item != null && !isAir(item.getType()) && item.getAmount() > 0) out.append(item.getType().name()).append('\u001d').append(item.getAmount());
+        }
+        return out.toString();
+    }
+    static boolean isFerrite(Object value) {
+        return value != null && java.lang.reflect.Proxy.isProxyClass(value.getClass()) && java.lang.reflect.Proxy.getInvocationHandler(value) instanceof FerriteInventory;
     }
     private static boolean isAir(org.bukkit.Material material) { return material == org.bukkit.Material.AIR || material == org.bukkit.Material.CAVE_AIR || material == org.bukkit.Material.VOID_AIR; }
     @Override public Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {

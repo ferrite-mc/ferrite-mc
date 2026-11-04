@@ -1251,6 +1251,27 @@ fn route_plugin_command(
                     .push_back(Command::PluginGameEvent { event, value });
             }
         }
+        PlayerCommand::OpenInventory {
+            player,
+            title,
+            rows,
+            items,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginOpenInventory { title, rows, items });
+            }
+        }
+        PlayerCommand::CloseInventory { player } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginCloseInventory);
+            }
+        }
         PlayerCommand::Damage { player, amount } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox

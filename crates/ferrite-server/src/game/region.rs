@@ -37,6 +37,14 @@ pub enum Command {
         event: u8,
         value: f32,
     },
+    /// A plugin's `Player#openInventory` for a chest-style inventory.
+    PluginOpenInventory {
+        title: String,
+        rows: u8,
+        items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
+    },
+    /// A plugin's `Player#closeInventory`.
+    PluginCloseInventory,
     /// Generic damage from a plugin.
     PluginDamage {
         amount: f32,
@@ -2330,6 +2338,14 @@ impl Player {
                 }
                 Command::PluginGameEvent { event, value } => {
                     send(self, &GameEvent { event, value });
+                    continue;
+                }
+                Command::PluginOpenInventory { title, rows, items } => {
+                    self.open_plugin_inventory(&title, rows, &items);
+                    continue;
+                }
+                Command::PluginCloseInventory => {
+                    self.close_plugin_inventory();
                     continue;
                 }
                 Command::PluginDamage { amount } => {
