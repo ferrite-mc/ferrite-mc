@@ -1519,6 +1519,9 @@ impl PluginHost {
         let jvm = Jvm::start(JvmConfig {
             java_home: cfg.java_home,
             classpath: vec![cfg.bridge_jar],
+            // The bundled sqlite-jdbc driver loads its native library through `System.load`,
+            // which Java 25 only allows silently for modules granted native access.
+            extra_args: vec!["--enable-native-access=ALL-UNNAMED".into()],
             ..Default::default()
         })?;
         let _ = MODES.set(modes);

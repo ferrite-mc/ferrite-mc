@@ -32,6 +32,8 @@ final class FerriteClassLoader extends URLClassLoader implements ConfiguredPlugi
             }
         } finally { visited.remove(lookup); if (visited.isEmpty()) LOOKUP.remove(); }
     }
+    /** Adds the plugin's resolved {@code libraries:} jars to its own classpath. */
+    void addLibraries(java.util.List<URL> libraries) { for (URL library : libraries) addURL(library); }
     public PluginDescriptionFile getConfiguration() { return description; }
     public Class<?> loadClass(String name, boolean resolve, boolean checkGlobal, boolean checkLibraries) throws ClassNotFoundException { return loadClass(name, resolve); }
     public void init(JavaPlugin plugin) {

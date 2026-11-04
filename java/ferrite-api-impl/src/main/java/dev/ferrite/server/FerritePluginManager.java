@@ -81,6 +81,7 @@ final class FerritePluginManager extends PluginManagerStubs {
     boolean isLegacy(Plugin plugin) { return !regionAware.getOrDefault(plugin, false); }
     /** Permissions each plugin declared in its descriptor, removed when it disables. */
     private final Map<Plugin, List<org.bukkit.permissions.Permission>> declaredPermissions = new IdentityHashMap<>();
+    private FerriteLibraryLoader libraryLoader;
     private final FerriteServer server;
     private final List<JavaPlugin> plugins = new ArrayList<>();
     private final Map<String, FerriteClassLoader> loaders = new java.util.concurrent.ConcurrentHashMap<>();
@@ -146,6 +147,12 @@ final class FerritePluginManager extends PluginManagerStubs {
                     }
                 }
                 FerriteClassLoader loader = new FerriteClassLoader(server, file, desc, dependencies, loaders);
+                if (!desc.getLibraries().isEmpty()) {
+                    if (libraryLoader == null) libraryLoader = new FerriteLibraryLoader(new File(server.getWorldContainer(), "libraries"));
+                    var libraries = libraryLoader.resolve(desc.getLibraries());
+                    loader.addLibraries(libraries);
+                    java.util.logging.Logger.getLogger(desc.getName()).info("Loaded " + libraries.size() + " libraries");
+                }
                 loaders.put(desc.getName().toLowerCase(Locale.ROOT), loader);
                 for (String alias : desc.getProvidedPlugins()) loaders.putIfAbsent(alias.toLowerCase(Locale.ROOT), loader);
                 JavaPlugin plugin = Class.forName(desc.getMain(), true, loader).asSubclass(JavaPlugin.class).getDeclaredConstructor().newInstance();
