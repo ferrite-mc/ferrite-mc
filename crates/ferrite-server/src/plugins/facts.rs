@@ -46,6 +46,19 @@ pub fn set_fall_distance(player: Uuid, distance: f32) {
     fall_registry().lock().unwrap().insert(player, distance);
 }
 
+fn history_registry() -> &'static Mutex<HashMap<Uuid, (bool, SystemTime)>> {
+    static HISTORY: OnceLock<Mutex<HashMap<Uuid, (bool, SystemTime)>>> = OnceLock::new();
+    HISTORY.get_or_init(Default::default)
+}
+
+/// Records whether the player had joined before this session and when they first did.
+pub fn set_history(player: Uuid, played_before: bool, first_played: SystemTime) {
+    history_registry()
+        .lock()
+        .unwrap()
+        .insert(player, (played_before, first_played));
+}
+
 /// Records that the player went to bed or got up.
 pub fn set_sleeping(player: Uuid, sleeping: bool) {
     let mut set = sleeping_registry().lock().unwrap();
@@ -75,6 +88,7 @@ pub fn forget(player: Uuid) {
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
     fall_registry().lock().unwrap().remove(&player);
+    history_registry().lock().unwrap().remove(&player);
     ferrite_net::settings::forget(player);
 }
 
@@ -143,6 +157,17 @@ pub fn answer(call: &HostCall) -> Option<String> {
                 .contains(&player)
                 .to_string(),
         );
+    }
+    if matches!(
+        call.method.as_str(),
+        "hasPlayedBefore()" | "getFirstPlayed()"
+    ) {
+        let (played_before, first) = *history_registry().lock().unwrap().get(&player)?;
+        return Some(if call.method == "hasPlayedBefore()" {
+            played_before.to_string()
+        } else {
+            millis(first).to_string()
+        });
     }
     if call.method == "getFallDistance()" {
         return fall_registry()
@@ -222,6 +247,25 @@ mod tests {
         assert_eq!(answer(&call).as_deref(), Some("3.5"));
         forget(player);
         assert_eq!(answer(&call), None);
+    }
+
+    #[test]
+    fn join_history_is_answered_from_what_the_game_loop_recorded() {
+        let player = Uuid::from_u128(0x41570);
+        let ask = |method: &str| {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: method.into(),
+                args: vec![],
+            })
+        };
+        assert_eq!(ask("hasPlayedBefore()"), None);
+        set_history(player, true, UNIX_EPOCH + Duration::from_millis(1234));
+        assert_eq!(ask("hasPlayedBefore()").as_deref(), Some("true"));
+        assert_eq!(ask("getFirstPlayed()").as_deref(), Some("1234"));
+        forget(player);
+        assert_eq!(ask("getFirstPlayed()"), None);
     }
 
     #[test]

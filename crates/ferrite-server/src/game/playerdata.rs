@@ -134,6 +134,12 @@ fn path_in(dir: &Path, uuid: &Uuid) -> PathBuf {
     dir.join(format!("{uuid}.json"))
 }
 
+/// When the player's data file was first created, which is when they first joined.
+pub fn first_played(dir: &Path, uuid: &Uuid) -> Option<std::time::SystemTime> {
+    let meta = std::fs::metadata(path_in(dir, uuid)).ok()?;
+    meta.created().or_else(|_| meta.modified()).ok()
+}
+
 pub fn load_from(dir: &Path, uuid: &Uuid) -> Option<Saved> {
     let bytes = std::fs::read(path_in(dir, uuid)).ok()?;
     match serde_json::from_slice(&bytes) {
@@ -165,6 +171,28 @@ mod tests {
             std::env::temp_dir().join(format!("ferrite-playerdata-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn first_played_is_the_creation_time_of_the_saved_file() {
+        let dir = temp_dir("first-played");
+        let uuid = Uuid::from_u128(8);
+        assert_eq!(first_played(&dir, &uuid), None);
+        let saved = Saved::capture(
+            [0.0, 64.0, 0.0],
+            0.0,
+            0.0,
+            0,
+            crate::game::Dimension::Overworld,
+            &PlayerInventory::new(),
+        );
+        save_to(&dir, &uuid, &saved).unwrap();
+        let first = first_played(&dir, &uuid).unwrap();
+        let age = std::time::SystemTime::now()
+            .duration_since(first)
+            .unwrap_or_default();
+        assert!(age < std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
