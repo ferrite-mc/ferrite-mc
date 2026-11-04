@@ -532,6 +532,7 @@ impl World {
             rules.get_integer("random_tick_speed").unwrap_or(3).max(0) as u32,
         ));
         let game_rules = Arc::new(Mutex::new(rules));
+        crate::plugins::rules::register(Arc::clone(&game_rules));
         let metrics = LoopMetrics {
             game_rules: Arc::clone(&game_rules),
             random_tick_speed: Arc::clone(&random_tick_speed),

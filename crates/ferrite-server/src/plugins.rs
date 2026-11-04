@@ -9,6 +9,7 @@ mod items;
 mod messaging;
 mod motion;
 mod network;
+pub mod rules;
 mod survival;
 mod visual;
 
@@ -114,6 +115,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = facts::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = rules::answer(call) {
                                 return Some(reply);
                             }
                             if call.owner == "Player"
@@ -523,6 +527,7 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
         }
         ("Player", "saveData()") => console("save-all".into(), ""),
         ("Server", "reload()" | "reloadData()") => console("reload".into(), ""),
+        ("World", "setGameRuleValue(String,String)") => console(rules::set_line(call)?, "true"),
         ("World", "setStorm(boolean)") => {
             default_world(&call.subject)?;
             let rain = arg(0)? == "true";

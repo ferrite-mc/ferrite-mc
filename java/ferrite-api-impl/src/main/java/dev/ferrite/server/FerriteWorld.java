@@ -113,6 +113,16 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> ticksPerSpawns = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean allowAnimals = true, allowMonsters = true;
 
+    private Object ruleValue(org.bukkit.GameRule<?> rule, String method) {
+        var text = (String) HostBridge.call("World", id, method, String.class, rule.getName());
+        if (text == null) return null;
+        return rule.getType() == Boolean.class ? (Object) Boolean.valueOf(text) : (Object) Integer.valueOf(text);
+    }
+    private boolean setRule(String name, String value) {
+        try { return HostBridge.callBoolean("World", id, "setGameRuleValue(String,String)", name, value); }
+        catch (UnsupportedOperationException invalidOrOffline) { return false; }
+    }
+
     private java.util.List<org.bukkit.entity.Player> playersHere() {
         return server.getOnlinePlayers().stream().filter(p -> { try { return p.getWorld() == proxy; } catch (UnsupportedOperationException | IllegalStateException e) { return false; } }).map(p -> (org.bukkit.entity.Player) p).toList();
     }
@@ -129,6 +139,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     /** World queries answered from Java-side state and the player list. */
     private Object more(String method, Object[] args) {
         switch (method) {
+            case "isGameRule" -> { return (boolean) HostBridge.call("World", id, "isGameRule(String)", Boolean.class, (String) args[0]); }
+            case "getGameRules" -> {
+                var names = (java.util.List<?>) HostBridge.call("World", id, "getGameRules()", java.util.List.class);
+                return names.toArray(new String[0]);
+            }
+            case "getGameRuleValue" -> {
+                if (args[0] instanceof org.bukkit.GameRule<?> rule) return ruleValue(rule, "getGameRuleValue(String)");
+                return HostBridge.call("World", id, "getGameRuleValue(String)", String.class, (String) args[0]);
+            }
+            case "getGameRuleDefault" -> { return ruleValue((org.bukkit.GameRule<?>) args[0], "getGameRuleDefault(String)"); }
+            case "setGameRule" -> { return setRule(((org.bukkit.GameRule<?>) args[0]).getName(), String.valueOf(args[1])); }
+            case "setGameRuleValue" -> { return setRule((String) args[0], (String) args[1]); }
             case "getMetadata" -> {
                 var values = metadata.get((String) args[0]);
                 return values == null ? java.util.List.<org.bukkit.metadata.MetadataValue>of() : java.util.List.copyOf(values.values());
