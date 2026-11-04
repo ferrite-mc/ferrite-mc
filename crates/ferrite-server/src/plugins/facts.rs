@@ -31,6 +31,21 @@ fn ground_registry() -> &'static Mutex<HashMap<Uuid, bool>> {
     GROUND.get_or_init(Default::default)
 }
 
+fn sleeping_registry() -> &'static Mutex<std::collections::HashSet<Uuid>> {
+    static SLEEPING: OnceLock<Mutex<std::collections::HashSet<Uuid>>> = OnceLock::new();
+    SLEEPING.get_or_init(Default::default)
+}
+
+/// Records that the player went to bed or got up.
+pub fn set_sleeping(player: Uuid, sleeping: bool) {
+    let mut set = sleeping_registry().lock().unwrap();
+    if sleeping {
+        set.insert(player);
+    } else {
+        set.remove(&player);
+    }
+}
+
 /// Records whether the client last reported the player standing on the ground.
 pub fn set_on_ground(player: Uuid, on_ground: bool) {
     ground_registry().lock().unwrap().insert(player, on_ground);
@@ -48,6 +63,7 @@ pub fn entity_id(player: Uuid) -> Option<i32> {
 pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
     ground_registry().lock().unwrap().remove(&player);
+    sleeping_registry().lock().unwrap().remove(&player);
     ferrite_net::settings::forget(player);
 }
 
@@ -106,6 +122,17 @@ pub fn answer(call: &HostCall) -> Option<String> {
             .get(&player)
             .map(|ground| ground.to_string());
     }
+    if call.method == "isSleeping()" {
+        // Only an online player has a bed state to report.
+        registry().lock().unwrap().get(&player)?;
+        return Some(
+            sleeping_registry()
+                .lock()
+                .unwrap()
+                .contains(&player)
+                .to_string(),
+        );
+    }
     if call.method == "getClientBrandName()" {
         return ferrite_net::settings::brand(player);
     }
@@ -134,6 +161,33 @@ mod tests {
             method: method.into(),
             args: Vec::new(),
         }
+    }
+
+    #[test]
+    fn sleeping_state_follows_the_game_loop_for_online_players() {
+        let player = Uuid::from_u128(0x51ee);
+        let call = HostCall {
+            owner: "Player".into(),
+            subject: player.to_string(),
+            method: "isSleeping()".into(),
+            args: vec![],
+        };
+        assert_eq!(answer(&call), None);
+        record(
+            player,
+            PlayerFacts {
+                entity_id: 1,
+                joined: SystemTime::now(),
+                address: None,
+            },
+        );
+        assert_eq!(answer(&call).as_deref(), Some("false"));
+        set_sleeping(player, true);
+        assert_eq!(answer(&call).as_deref(), Some("true"));
+        set_sleeping(player, false);
+        assert_eq!(answer(&call).as_deref(), Some("false"));
+        forget(player);
+        assert_eq!(answer(&call), None);
     }
 
     #[test]

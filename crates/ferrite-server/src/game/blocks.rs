@@ -187,6 +187,7 @@ fn use_bed(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
         }
     }
     player.sleeping = Some(foot);
+    crate::plugins::facts::set_sleeping(player.uuid, true);
     player.spawn = Some(foot);
     true
 }
@@ -444,6 +445,7 @@ pub fn wake(player: &mut Player) {
     let Some(pos) = player.sleeping.take() else {
         return;
     };
+    crate::plugins::facts::set_sleeping(player.uuid, false);
     let Some(state) = state_at(player, pos) else {
         return;
     };
