@@ -631,6 +631,11 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
             let angle: f32 = arg(3)?.parse().ok().filter(|a: &f32| a.is_finite())?;
             console(format!("setworldspawn {x} {y} {z} {angle}"), "true")
         }
+        ("World", "setAutoSave(boolean)") => {
+            default_world(&call.subject)?;
+            let on = arg(0)? == "true";
+            console((if on { "save-on" } else { "save-off" }).into(), "")
+        }
         ("World", "save(boolean)") => {
             default_world(&call.subject)?;
             console("save-all".into(), "")
@@ -896,6 +901,10 @@ mod tests {
         assert_eq!(
             line(call("World", &world, "setStorm(boolean)", &["true"])),
             Some("weather rain".into())
+        );
+        assert_eq!(
+            line(call("World", &world, "setAutoSave(boolean)", &["false"])),
+            Some("save-off".into())
         );
         assert_eq!(
             line(call("World", &world, "setFullTime(long)", &["123456"])),

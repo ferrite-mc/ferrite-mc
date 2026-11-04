@@ -12,6 +12,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.Map<Pos, org.bukkit.Material> blocks = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<Column, Integer> heights = new java.util.concurrent.ConcurrentHashMap<>();
     private org.bukkit.World proxy;
+    // Remembered for the plugin; no server rule reads these (players cannot hurt each other yet, hardcore needs a respawn rule).
+    private volatile boolean hardcore, pvp = true, autoSave = true;
     private FerriteWorld(FerriteServer server, java.util.UUID id, String name, long time, Pos spawn) { this.server = server; this.id = id; this.name = name; this.time = time; this.spawn = spawn; }
     static org.bukkit.World create(FerriteServer server, java.util.UUID id, String name, long time, int x, int y, int z) {
         var world = new FerriteWorld(server, id, name, time, new Pos(x, y, z));
@@ -98,7 +100,12 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "spigot" -> spigot();
             case "getSeed" -> hostLong("getSeed()", 0L);
             case "isDayTime" -> { long t = hostLong("getTime()", time) % 24_000; yield t < 12_000 || t > 23_960; }
-            case "isHardcore" -> false;
+            case "isHardcore" -> hardcore;
+            case "setHardcore" -> { hardcore = (boolean) args[0]; yield null; }
+            case "getPVP" -> pvp;
+            case "setPVP" -> { pvp = (boolean) args[0]; yield null; }
+            case "isAutoSave" -> autoSave;
+            case "setAutoSave" -> { autoSave = (boolean) args[0]; try { HostBridge.callVoid("World", id, "setAutoSave(boolean)", autoSave); } catch (UnsupportedOperationException noHost) { /* remembered only */ } yield null; }
             case "getSpawnLocation" -> location(spawn);
             case "getHighestBlockYAt" -> { if (args.length > 2 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) throw new UnsupportedOperationException("Ferrite: heightmap-specific queries are not implemented"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) { int value = Native.highestBlockY(id.toString(), x, z); if (value == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + x + "," + z); height = value; heights.put(new Column(x, z), height); } yield height; }
             case "getBiome" -> { int x, y, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = (int) args[1]; z = (int) args[2]; } var key = Native.biomeAt(id.toString(), x, y, z); if (key == null) throw new UnsupportedOperationException("Ferrite: no biome data at " + x + "," + y + "," + z); var biome = org.bukkit.Registry.BIOME.get(org.bukkit.NamespacedKey.fromString(key)); if (biome == null) throw new IllegalStateException("Unknown biome " + key); yield biome; }

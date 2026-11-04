@@ -106,4 +106,24 @@ class FerriteChunkDataTest {
         assertEquals(2, future.get().getX());
         assertEquals(-2, future.get().getZ());
     }
+
+    @Test void worldFlagsAreRememberedAndAutoSaveTellsTheHost() {
+        var world = org.bukkit.Bukkit.getWorld("chunkdata");
+        assertTrue(world.getPVP());
+        assertFalse(world.isHardcore());
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };
+        try {
+            world.setPVP(false);
+            world.setHardcore(true);
+            world.setAutoSave(false);
+        } finally { HostBridge.transport = null; }
+        assertFalse(world.getPVP());
+        assertTrue(world.isHardcore());
+        assertFalse(world.isAutoSave());
+        assertEquals(java.util.List.of("setAutoSave(boolean)|false"), calls);
+        world.setPVP(true);
+        world.setHardcore(false);
+        world.setAutoSave(true);
+    }
 }
