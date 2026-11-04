@@ -387,6 +387,8 @@ public class FerriteServer extends ServerStubs {
     @Override public void clearRecipes() { FerriteRecipes.clear(); }
     @Override public void resetRecipes() { FerriteRecipes.reset(); }
     @Override public void updateRecipes() { }
+    @Override public org.bukkit.advancement.Advancement getAdvancement(org.bukkit.NamespacedKey key) { return FerriteAdvancements.get(java.util.Objects.requireNonNull(key, "key")); }
+    @Override public java.util.Iterator<org.bukkit.advancement.Advancement> advancementIterator() { return FerriteAdvancements.iterator(); }
     @Override public org.bukkit.ServerLinks getServerLinks() { return serverLinks; }
     final FerriteServerLinks serverLinks = new FerriteServerLinks();
     @Override public org.bukkit.ServerTickManager getServerTickManager() { return tickManager; }
