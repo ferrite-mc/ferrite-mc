@@ -73,6 +73,48 @@ pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
 }
 
 /// `World#spawnEntity` and `spawnFallingBlock`: an entity of a kind the game models.
+/// An operation a plugin asks of an entity it holds a handle to.
+pub fn entity_command(call: &HostCall) -> Option<PlayerCommand> {
+    use ferrite_plugin::EntityOperation as Op;
+    // `Player#attack(Entity)`: a bare-handed hit of one health point.
+    if call.owner == "Player" && call.method == "attack(String)" {
+        return Some(PlayerCommand::EntityOp {
+            uuid: Uuid::parse_str(call.args.first()?).ok()?,
+            op: Op::Damage(1.0),
+        });
+    }
+    if call.owner != "Entity" {
+        return None;
+    }
+    let uuid = Uuid::parse_str(&call.subject).ok()?;
+    let triple = |text: &str| {
+        let mut parts = text.split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+        Some([
+            number(parts.next()?)?,
+            number(parts.next()?)?,
+            number(parts.next()?)?,
+        ])
+    };
+    let op = match call.method.as_str() {
+        "remove()" => Op::Remove,
+        "setVelocity(Vector)" => Op::SetVelocity(triple(call.args.first()?)?),
+        "teleportTo(double,double,double)" => Op::Teleport([
+            number(call.args.first()?)?,
+            number(call.args.get(1)?)?,
+            number(call.args.get(2)?)?,
+        ]),
+        "damage(double)" => Op::Damage(
+            call.args
+                .first()?
+                .parse::<f32>()
+                .ok()
+                .filter(|a| a.is_finite() && *a > 0.0 && *a <= 1.0e6)?,
+        ),
+        _ => return None,
+    };
+    Some(PlayerCommand::EntityOp { uuid, op })
+}
+
 pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "World"
         || Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id()
@@ -90,8 +132,9 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         number(parts.next()?)?,
     ];
     let mut velocity = [0.0; 3];
+    let uuid = Uuid::parse_str(call.args.last()?).ok()?;
     let (kind, block) = match call.method.as_str() {
-        "spawnArrow(Location,double,double,double)" => {
+        "spawnArrow(Location,double,double,double,String)" => {
             velocity = [
                 number(call.args.get(1)?)?,
                 number(call.args.get(2)?)?,
@@ -103,7 +146,7 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
             }
             ("minecraft:arrow".to_owned(), None)
         }
-        "spawnEntity(Location,EntityType)" => {
+        "spawnEntity(Location,EntityType,String)" => {
             let kind = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
             let modelled = matches!(kind.as_str(), "minecraft:tnt")
                 || ferrite_entity::mob::MobKind::from_name(&kind).is_some();
@@ -112,7 +155,7 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
             }
             (kind, None)
         }
-        "spawnFallingBlock(Location,Material)" => {
+        "spawnFallingBlock(Location,Material,String)" => {
             let block = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
             ferrite_data::blocks::default_state(&block)?;
             ("minecraft:falling_block".to_owned(), Some(block))
@@ -124,14 +167,15 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         kind,
         block,
         velocity,
+        uuid,
     })
 }
 
 /// `World#dropItem(Location, ItemStack)` and `dropItemNaturally`: an item entity at the spot.
 pub fn drop_command(call: &HostCall) -> Option<PlayerCommand> {
     let natural = match call.method.as_str() {
-        "dropItem(Location,ItemStack)" => false,
-        "dropItemNaturally(Location,ItemStack)" => true,
+        "dropItem(Location,ItemStack,String)" => false,
+        "dropItemNaturally(Location,ItemStack,String)" => true,
         _ => return None,
     };
     if call.owner != "World"
@@ -161,6 +205,7 @@ pub fn drop_command(call: &HostCall) -> Option<PlayerCommand> {
         item,
         amount,
         natural,
+        uuid: Uuid::parse_str(call.args.get(2)?).ok()?,
     })
 }
 
@@ -169,35 +214,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn entity_operations_become_commands() {
+        let uuid = Uuid::from_u128(9);
+        let on_entity = |method: &str, args: &[&str]| {
+            let mut c = call(method, args);
+            c.owner = "Entity".into();
+            c.subject = uuid.to_string();
+            entity_command(&c)
+        };
+        assert_eq!(
+            on_entity("remove()", &[]),
+            Some(PlayerCommand::EntityOp {
+                uuid,
+                op: ferrite_plugin::EntityOperation::Remove
+            })
+        );
+        let push = format!("0{0}1.5{0}0", ferrite_plugin::HOST_ITEM_SEPARATOR);
+        assert_eq!(
+            on_entity("setVelocity(Vector)", &[&push]),
+            Some(PlayerCommand::EntityOp {
+                uuid,
+                op: ferrite_plugin::EntityOperation::SetVelocity([0.0, 1.5, 0.0])
+            })
+        );
+        assert_eq!(on_entity("damage(double)", &["-1"]), None);
+        let mut attack = call("attack(String)", &["00000000-0000-0000-0000-000000000009"]);
+        attack.owner = "Player".into();
+        assert!(entity_command(&attack).is_some());
+    }
+
+    #[test]
     fn spawns_are_limited_to_modelled_entities() {
         let at = format!(
             "w{0}1{0}70{0}2{0}0{0}0",
             ferrite_plugin::HOST_ITEM_SEPARATOR
         );
-        let spawn = |method: &str, what: &str| spawn_command(&call(method, &[&at, what]));
+        let spawn = |method: &str, what: &str| {
+            spawn_command(&call(
+                method,
+                &[&at, what, "00000000-0000-0000-0000-000000000009"],
+            ))
+        };
         assert_eq!(
-            spawn("spawnEntity(Location,EntityType)", "COW"),
+            spawn("spawnEntity(Location,EntityType,String)", "COW"),
             Some(PlayerCommand::SpawnEntity {
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:cow".into(),
                 block: None,
-                velocity: [0.0; 3]
+                velocity: [0.0; 3],
+                uuid: Uuid::from_u128(9)
             })
         );
-        assert!(spawn("spawnEntity(Location,EntityType)", "TNT").is_some());
-        assert_eq!(spawn("spawnEntity(Location,EntityType)", "GHAST"), None);
+        assert!(spawn("spawnEntity(Location,EntityType,String)", "TNT").is_some());
         assert_eq!(
-            spawn("spawnFallingBlock(Location,Material)", "SAND"),
+            spawn("spawnEntity(Location,EntityType,String)", "GHAST"),
+            None
+        );
+        assert_eq!(
+            spawn("spawnFallingBlock(Location,Material,String)", "SAND"),
             Some(PlayerCommand::SpawnEntity {
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:falling_block".into(),
                 block: Some("minecraft:sand".into()),
-                velocity: [0.0; 3]
+                velocity: [0.0; 3],
+                uuid: Uuid::from_u128(9)
             })
         );
         let shot = spawn_command(&call(
-            "spawnArrow(Location,double,double,double)",
-            &[&at, "0", "0.5", "2.5"],
+            "spawnArrow(Location,double,double,double,String)",
+            &[
+                &at,
+                "0",
+                "0.5",
+                "2.5",
+                "00000000-0000-0000-0000-000000000009",
+            ],
         ));
         assert_eq!(
             shot,
@@ -205,17 +296,21 @@ mod tests {
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:arrow".into(),
                 block: None,
-                velocity: [0.0, 0.5, 2.5]
+                velocity: [0.0, 0.5, 2.5],
+                uuid: Uuid::from_u128(9)
             })
         );
         assert_eq!(
             spawn_command(&call(
-                "spawnArrow(Location,double,double,double)",
-                &[&at, "0", "0", "99"]
+                "spawnArrow(Location,double,double,double,String)",
+                &[&at, "0", "0", "99", "00000000-0000-0000-0000-000000000009"]
             )),
             None
         );
-        assert_eq!(spawn("spawnFallingBlock(Location,Material)", "NOPE"), None);
+        assert_eq!(
+            spawn("spawnFallingBlock(Location,Material,String)", "NOPE"),
+            None
+        );
     }
 
     #[test]
@@ -227,19 +322,23 @@ mod tests {
         let stack = format!("DIAMOND{}3", ferrite_plugin::HOST_ITEM_SEPARATOR);
         assert_eq!(
             drop_command(&call(
-                "dropItemNaturally(Location,ItemStack)",
-                &[&at, &stack]
+                "dropItemNaturally(Location,ItemStack,String)",
+                &[&at, &stack, "00000000-0000-0000-0000-000000000009"]
             )),
             Some(PlayerCommand::DropItem {
                 center: [1.5, 70.0, -2.0],
                 item: "minecraft:diamond".into(),
                 amount: 3,
                 natural: true,
+                uuid: Uuid::from_u128(9),
             })
         );
         let bad = format!("NOT_AN_ITEM{}1", ferrite_plugin::HOST_ITEM_SEPARATOR);
         assert_eq!(
-            drop_command(&call("dropItem(Location,ItemStack)", &[&at, &bad])),
+            drop_command(&call(
+                "dropItem(Location,ItemStack,String)",
+                &[&at, &bad, "00000000-0000-0000-0000-000000000009"]
+            )),
             None
         );
     }

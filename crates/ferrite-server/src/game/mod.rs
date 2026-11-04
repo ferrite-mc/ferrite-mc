@@ -1292,16 +1292,24 @@ async fn run(
                         }
                     }
                 }
-                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { center, kind, block, velocity }) => {
+                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { center, kind, block, velocity, uuid }) => {
                     let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity); });
+                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid); });
                     }
                 }
-                 Some(ferrite_plugin::PlayerCommand::DropItem { center, item, amount, natural }) => {
+                 Some(ferrite_plugin::PlayerCommand::EntityOp { uuid, op }) => {
+                    if let Some(at) = crate::plugins::facts::entity_position(uuid) {
+                        let chunk = ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+                        if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                            worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_entity_op(uuid, &op); });
+                        }
+                    }
+                }
+                 Some(ferrite_plugin::PlayerCommand::DropItem { center, item, amount, natural, uuid }) => {
                     let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_drop_item(center, &item, amount, natural));
+                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_drop_item(center, &item, amount, natural, uuid));
                     }
                 }
                  Some(ferrite_plugin::PlayerCommand::Explosion { center, power, fire }) => {
@@ -1768,6 +1776,7 @@ fn route_plugin_command(
         // The game loop hands explosions to the region owning the chunk before calling this.
         PlayerCommand::Explosion { .. }
         | PlayerCommand::UpdateCommands { .. }
+        | PlayerCommand::EntityOp { .. }
         | PlayerCommand::DropItem { .. }
         | PlayerCommand::SpawnEntity { .. } => {}
         // The game loop sends display names to the global region before calling this.
@@ -2471,6 +2480,122 @@ impl CommandRuntime<'_> {
                 if hurt == 0 {
                     self.reply.key("commands.damage.invulnerable", &[]);
                 }
+                false
+            }
+            Action::Spread {
+                targets,
+                center,
+                spread,
+                range,
+                respect_teams,
+                max_height,
+            } => {
+                let targets = match self.selection(&targets) {
+                    Ok(targets) if !targets.is_empty() => targets,
+                    Ok(_) => {
+                        self.reply.key("argument.entity.notfound.entity", &[]);
+                        return false;
+                    }
+                    Err(error) => {
+                        self.reply.text(&error.to_string());
+                        return false;
+                    }
+                };
+                // Units that share one destination: each entity alone, or a whole team.
+                let mut units: Vec<Vec<usize>> = Vec::new();
+                {
+                    let game = self.state.lock().unwrap();
+                    let mut teams: std::collections::BTreeMap<String, Vec<usize>> =
+                        std::collections::BTreeMap::new();
+                    for (index, target) in targets.iter().enumerate() {
+                        let team = respect_teams
+                            .then(|| {
+                                game.players
+                                    .iter()
+                                    .find(|player| player.uuid == target.uuid)
+                                    .and_then(|player| player.team.clone())
+                            })
+                            .flatten();
+                        match team {
+                            Some(team) => teams.entry(team).or_default().push(index),
+                            None => units.push(vec![index]),
+                        }
+                    }
+                    units.extend(teams.into_values());
+                }
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0x9E37_79B9, |d| d.as_nanos() as u64)
+                    | 1;
+                let by_team = respect_teams && units.iter().any(|unit| unit.len() > 1);
+                let center_text = [format!("{}", center.0), format!("{}", center.1)];
+                let Some(points) =
+                    commands_more::spread_points(units.len(), center, spread, range, seed)
+                else {
+                    let key = if by_team {
+                        "commands.spreadplayers.failed.teams"
+                    } else {
+                        "commands.spreadplayers.failed.entities"
+                    };
+                    self.reply.key(
+                        key,
+                        &[
+                            &units.len().to_string(),
+                            &center_text[0],
+                            &center_text[1],
+                            &format!("{spread}"),
+                        ],
+                    );
+                    return false;
+                };
+                for (unit, (x, z)) in units.iter().zip(&points) {
+                    let (bx, bz) = (x.floor() as i32, z.floor() as i32);
+                    let surface = self
+                        .source
+                        .as_ref()
+                        .and_then(|world| world.spawn_height(bx, bz))
+                        .unwrap_or(self.origin[1] as i32);
+                    let y = max_height.map_or(surface, |limit| surface.min(limit));
+                    let pos = [f64::from(bx) + 0.5, f64::from(y), f64::from(bz) + 0.5];
+                    for &index in unit {
+                        let target = &targets[index];
+                        self.teleport_selection(
+                            std::slice::from_ref(target),
+                            pos,
+                            target.yaw,
+                            target.pitch,
+                            self.dimension,
+                        );
+                    }
+                }
+                let mut total = 0.0;
+                for (i, a) in points.iter().enumerate() {
+                    total += points
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, b)| (a.0 - b.0).hypot(a.1 - b.1))
+                        .fold(f64::MAX, f64::min)
+                        .min(1.0e9);
+                }
+                let average = if points.len() > 1 {
+                    total / points.len() as f64
+                } else {
+                    0.0
+                };
+                self.reply.key(
+                    if by_team {
+                        "commands.spreadplayers.success.teams"
+                    } else {
+                        "commands.spreadplayers.success.entities"
+                    },
+                    &[
+                        &units.len().to_string(),
+                        &center_text[0],
+                        &center_text[1],
+                        &format!("{average:.2}"),
+                    ],
+                );
                 false
             }
             Action::ForceLoad {

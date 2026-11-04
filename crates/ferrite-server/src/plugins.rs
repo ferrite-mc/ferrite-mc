@@ -227,6 +227,12 @@ impl PluginBridge {
                                 return Some(String::new());
                             }
                             if let (Some(players), Some(command)) =
+                                (&players, blasts::entity_command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
                                 (&players, blasts::spawn_command(call))
                             {
                                 players(command);

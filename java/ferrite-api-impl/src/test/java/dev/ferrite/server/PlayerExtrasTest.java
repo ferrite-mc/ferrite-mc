@@ -321,7 +321,7 @@ class PlayerExtrasTest {
             player.getWorld().dropItem(at, new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 1));
             assertThrows(IllegalArgumentException.class, () -> player.getWorld().dropItem(at, new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR, 1)));
         } finally { HostBridge.transport = null; }
-        assertEquals(java.util.List.of("dropItemNaturally(Location,ItemStack)", "dropItem(Location,ItemStack)"), calls);
+        assertEquals(java.util.List.of("dropItemNaturally(Location,ItemStack,String)", "dropItem(Location,ItemStack,String)"), calls);
     }
 
     @Test void playersThrowItemsThroughTheHost() {
@@ -348,7 +348,7 @@ class PlayerExtrasTest {
             assertEquals(org.bukkit.entity.EntityType.FALLING_BLOCK, sand.getType());
             assertThrows(IllegalArgumentException.class, () -> player.getWorld().spawnFallingBlock(at, org.bukkit.Material.DIAMOND, (byte) 0));
         } finally { HostBridge.transport = null; }
-        assertEquals(java.util.List.of("spawnEntity(Location,EntityType)", "spawnFallingBlock(Location,Material)"), calls);
+        assertEquals(java.util.List.of("spawnEntity(Location,EntityType,String)", "spawnFallingBlock(Location,Material,String)"), calls);
     }
 
     @Test void playersShootArrowsThroughTheHost() {
@@ -359,7 +359,7 @@ class PlayerExtrasTest {
             assertEquals(org.bukkit.entity.EntityType.ARROW, arrow.getType());
             assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.Fireball.class, null, null));
         } finally { HostBridge.transport = null; }
-        assertEquals(java.util.List.of("spawnArrow(Location,double,double,double)"), calls);
+        assertEquals(java.util.List.of("spawnArrow(Location,double,double,double,String)"), calls);
     }
 
     @Test void cookiesAreRetrievedFromTheClient() throws Exception {
@@ -372,5 +372,33 @@ class PlayerExtrasTest {
             HostBridge.transport = (owner, subject, method, args) -> method.equals("getCookieReply(NamespacedKey)") ? HostBridge.NULL : "";
             assertNull(player.retrieveCookie(new org.bukkit.NamespacedKey("test", "none")).get(5, java.util.concurrent.TimeUnit.SECONDS));
         } finally { HostBridge.transport = null; }
+    }
+
+    @Test void spawnedEntityHandlesReachTheLiveEntity() {
+        var seen = new java.util.ArrayList<String>();
+        var sep = String.valueOf(HostBridge.ITEM);
+        HostBridge.transport = (owner, subject, method, args) -> {
+            seen.add(owner + ":" + method);
+            return switch (method) {
+                case "isValid()" -> "true";
+                case "getEntityPosition()" -> "5.5" + sep + "70" + sep + "-1" + sep + "90" + sep + "0";
+                case "getVelocity()" -> "0" + sep + "0.5" + sep + "0";
+                case "getHealth()" -> "7.0";
+                default -> "";
+            };
+        };
+        try {
+            var world = org.bukkit.Bukkit.getWorld("extras_world");
+            var cow = (org.bukkit.entity.LivingEntity) world.spawnEntity(new org.bukkit.Location(world, 0, 70, 0), org.bukkit.entity.EntityType.COW);
+            assertTrue(cow.isValid());
+            assertEquals(5.5, cow.getLocation().getX());
+            assertEquals(0.5, cow.getVelocity().getY());
+            assertEquals(7.0, cow.getHealth());
+            cow.setVelocity(new org.bukkit.util.Vector(0, 1, 0));
+            cow.damage(3.0);
+            cow.remove();
+            player.attack(cow);
+        } finally { HostBridge.transport = null; }
+        assertTrue(seen.contains("Entity:setVelocity(Vector)") && seen.contains("Entity:damage(double)") && seen.contains("Entity:remove()") && seen.contains("Player:attack(String)"), seen.toString());
     }
 }

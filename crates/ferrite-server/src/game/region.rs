@@ -532,6 +532,8 @@ pub struct Region {
     beacon_clock: u32,
     /// UUIDs this region last published into `TickContext::command_entities`.
     published_entities: HashSet<Uuid>,
+    /// What this region last told plugins about its entities.
+    published_facts: HashSet<Uuid>,
 }
 impl RegionData for Region {
     fn merge(&mut self, mut other: Self) {
@@ -552,6 +554,7 @@ impl RegionData for Region {
         self.players.extend(other.players);
         self.entities.merge(other.entities);
         self.published_entities.extend(other.published_entities);
+        self.published_facts.extend(other.published_facts);
         self.generator.merge(other.generator);
     }
     fn split(&mut self, sections: &HashSet<SectionPos>) -> Self {
@@ -599,6 +602,7 @@ impl RegionData for Region {
             profile_slot: None,
             timings: self.timings.clone(),
             published_entities: HashSet::new(),
+            published_facts: HashSet::new(),
         };
         let moving: Vec<_> = self
             .held_chunks
@@ -3543,6 +3547,7 @@ impl Region {
         kind: &str,
         block: Option<&str>,
         velocity: [f64; 3],
+        uuid: Uuid,
     ) -> bool {
         use ferrite_math::Vec3;
         if !center
@@ -3571,16 +3576,25 @@ impl Region {
                 let Some(mob) = ferrite_entity::mob::MobKind::from_name(other) else {
                     return false;
                 };
-                return self.summon(mob, center);
+                mob::new_mob(mob, pos, &mut self.rng)
             }
         };
+        let mut record = record;
+        record.data.uuid = uuid;
         self.entities.insert(record);
         true
     }
 
     /// `World#dropItem`: an item entity at `center`; the natural variant scatters it a little
     /// and pops it up like a block drop. An unknown item is ignored.
-    pub fn plugin_drop_item(&mut self, center: [f64; 3], item: &str, amount: u8, natural: bool) {
+    pub fn plugin_drop_item(
+        &mut self,
+        center: [f64; 3],
+        item: &str,
+        amount: u8,
+        natural: bool,
+        uuid: Uuid,
+    ) {
         use ferrite_math::Vec3;
         let Some(id) = ferrite_item::item_id(item) else {
             return;
@@ -3612,6 +3626,7 @@ impl Region {
         if let Some(state) = &mut record.data.item {
             state.pickup_delay = 10;
         }
+        record.data.uuid = uuid;
         self.entities.insert(record);
     }
 
@@ -4474,6 +4489,35 @@ impl Region {
             .lock()
             .unwrap()
             .sync(&mut self.published_entities, &self.entities);
+        crate::plugins::facts::publish_entities(&mut self.published_facts, &self.entities);
+    }
+
+    /// A plugin's operation on one entity of this region. Returns whether the entity was here.
+    pub fn plugin_entity_op(&mut self, uuid: Uuid, op: &ferrite_plugin::EntityOperation) -> bool {
+        use ferrite_math::Vec3;
+        use ferrite_plugin::EntityOperation as Op;
+        let Some(key) = self.entities.keys().iter().copied().find(|key| {
+            self.entities
+                .data(*key)
+                .is_some_and(|data| data.uuid == uuid)
+        }) else {
+            return false;
+        };
+        match op {
+            Op::Remove => return self.kill_entity(uuid),
+            Op::SetVelocity(v) => self.entities.set_vel(key, Vec3::new(v[0], v[1], v[2])),
+            Op::Teleport(p) => {
+                let (yaw, pitch) = self
+                    .entities
+                    .data(key)
+                    .map_or((0.0, 0.0), |data| (data.yaw, data.pitch));
+                return self.teleport_entity(uuid, *p, yaw, pitch);
+            }
+            Op::Damage(amount) => {
+                mob::hurt(&mut self.entities, key, *amount, None);
+            }
+        }
+        true
     }
 
     /// Marks one entity for removal (`/kill`). The tracker still sends the remove packet and

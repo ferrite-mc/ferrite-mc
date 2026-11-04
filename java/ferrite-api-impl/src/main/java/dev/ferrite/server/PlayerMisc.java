@@ -134,16 +134,23 @@ public abstract class PlayerMisc extends PlayerStubs {
         if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
         var eye = getEyeLocation();
         var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(3.0);
-        @SuppressWarnings("unchecked") var handle = (T) SpawnedEntity.of(org.bukkit.entity.EntityType.ARROW, eye, getWorld());
+        var uuid = UUID.randomUUID();
+        @SuppressWarnings("unchecked") var handle = (T) SpawnedEntity.of(org.bukkit.entity.EntityType.ARROW, eye, getWorld(), uuid);
         if (callback != null) callback.accept(handle);
-        tellHost("spawnArrow(Location,double,double,double)", eye, direction.getX(), direction.getY(), direction.getZ());
+        tellHost("spawnArrow(Location,double,double,double,String)", eye, direction.getX(), direction.getY(), direction.getZ(), uuid.toString());
         return handle;
+    }
+
+    /** Hits the entity as a bare-handed player would: one point of damage. */
+    @Override public void attack(org.bukkit.entity.Entity target) {
+        Objects.requireNonNull(target, "target");
+        tellHost("attack(String)", target.getUniqueId().toString());
     }
 
     // ---- throwing items -------------------------------------------------------------------------
     /** Throws a stack that is no longer in the inventory, as the player would with the drop key. */
     private org.bukkit.entity.Item throwStack(org.bukkit.inventory.ItemStack stack, java.util.function.Consumer<org.bukkit.entity.Item> callback) {
-        var handle = DroppedItem.of(getEyeLocation(), stack.clone(), getWorld());
+        var handle = DroppedItem.of(getEyeLocation(), stack.clone(), getWorld(), UUID.randomUUID());
         if (callback != null) callback.accept(handle);
         tellHost("dropStack(ItemStack)", stack);
         return handle;

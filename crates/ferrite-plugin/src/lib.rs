@@ -162,6 +162,16 @@ pub struct PlayerSnapshot {
     pub location: PlayerLocation,
     pub inventory: Vec<Option<ItemSnapshot>>,
 }
+/// What a plugin asks of one entity.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EntityOperation {
+    Remove,
+    SetVelocity([f64; 3]),
+    Teleport([f64; 3]),
+    /// Hurts a mob by this many health points.
+    Damage(f32),
+}
+
 /// What happens to one boss bar of a player; `id` names the bar.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BossBarChange {
@@ -380,6 +390,13 @@ pub enum PlayerCommand {
         block: Option<String>,
         /// The speed it starts with, in blocks per tick.
         velocity: [f64; 3],
+        /// The id the plugin handle carries, so later calls find this entity again.
+        uuid: uuid::Uuid,
+    },
+    /// An operation on a spawned or known entity, run by the region that owns it.
+    EntityOp {
+        uuid: uuid::Uuid,
+        op: EntityOperation,
     },
     /// `World#dropItem` / `dropItemNaturally` on the default world.
     DropItem {
@@ -388,6 +405,7 @@ pub enum PlayerCommand {
         item: String,
         amount: u8,
         natural: bool,
+        uuid: uuid::Uuid,
     },
     /// `World#createExplosion` on the default world.
     Explosion {

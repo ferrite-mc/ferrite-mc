@@ -181,6 +181,89 @@ fn cookie_answer(call: &HostCall) -> Option<String> {
     })
 }
 
+/// What a plugin may read about an entity of the world.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityFact {
+    pub kind: &'static str,
+    pub pos: [f64; 3],
+    pub vel: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub health: Option<f32>,
+}
+
+fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
+    static ENTITIES: OnceLock<Mutex<HashMap<Uuid, EntityFact>>> = OnceLock::new();
+    ENTITIES.get_or_init(Default::default)
+}
+
+/// Replaces what one region published about its entities; `owned` holds what it published last time.
+pub fn publish_entities(
+    owned: &mut std::collections::HashSet<Uuid>,
+    store: &ferrite_entity::EntityStore,
+) {
+    let mut registry = entity_registry().lock().unwrap();
+    for uuid in owned.drain() {
+        registry.remove(&uuid);
+    }
+    for key in store.keys() {
+        let (Some(data), Some(pos), Some(vel), Some(flags)) = (
+            store.data(*key),
+            store.pos(*key),
+            store.vel(*key),
+            store.flags(*key),
+        ) else {
+            continue;
+        };
+        if flags.has(ferrite_entity::Flags::REMOVED) {
+            continue;
+        }
+        owned.insert(data.uuid);
+        registry.insert(
+            data.uuid,
+            EntityFact {
+                kind: ferrite_data::entity_props::get(data.kind).key,
+                pos: [pos.x, pos.y, pos.z],
+                vel: [vel.x, vel.y, vel.z],
+                yaw: data.yaw,
+                pitch: data.pitch,
+                health: data.mob.as_ref().map(|mob| mob.health),
+            },
+        );
+    }
+}
+
+/// Where an entity was last published, for routing an operation to the region that owns it.
+pub fn entity_position(uuid: Uuid) -> Option<[f64; 3]> {
+    entity_registry()
+        .lock()
+        .unwrap()
+        .get(&uuid)
+        .map(|fact| fact.pos)
+}
+
+fn entity_answer(call: &HostCall) -> Option<String> {
+    let uuid = Uuid::parse_str(&call.subject).ok()?;
+    let sep = ferrite_plugin::HOST_ITEM_SEPARATOR;
+    let fact = entity_registry().lock().unwrap().get(&uuid).cloned();
+    match call.method.as_str() {
+        "isValid()" => return Some(fact.is_some().to_string()),
+        "isDead()" => return Some(fact.is_none().to_string()),
+        _ => {}
+    }
+    let fact = fact?;
+    Some(match call.method.as_str() {
+        "getEntityPosition()" => format!(
+            "{}{sep}{}{sep}{}{sep}{}{sep}{}",
+            fact.pos[0], fact.pos[1], fact.pos[2], fact.yaw, fact.pitch
+        ),
+        "getVelocity()" => format!("{}{sep}{}{sep}{}", fact.vel[0], fact.vel[1], fact.vel[2]),
+        "getHealth()" => fact.health?.to_string(),
+        "getEntityType()" => fact.kind.to_owned(),
+        _ => return None,
+    })
+}
+
 fn fall_registry() -> &'static Mutex<HashMap<Uuid, f32>> {
     static FALL: OnceLock<Mutex<HashMap<Uuid, f32>>> = OnceLock::new();
     FALL.get_or_init(Default::default)
@@ -294,6 +377,9 @@ fn client_setting(
 
 /// The answer to `call`, or `None` when it is not one of these queries or the player is unknown.
 pub fn answer(call: &HostCall) -> Option<String> {
+    if call.owner == "Entity" && call.args.is_empty() {
+        return entity_answer(call);
+    }
     if call.owner == "Player" && call.method == "getCookieReply(NamespacedKey)" {
         return cookie_answer(call);
     }
@@ -598,6 +684,38 @@ mod tests {
         set_cookie(player, "my:key", None);
         forget(player);
         assert_eq!(ask().as_deref(), Some("pending"));
+    }
+
+    #[test]
+    fn entities_are_published_and_answered() {
+        use ferrite_entity::{EntityData, EntityRecord, EntityStore, Flags};
+        use ferrite_math::Vec3;
+        let uuid = Uuid::from_u128(0xe171);
+        let mut store = EntityStore::new(3);
+        store.insert(EntityRecord {
+            pos: Vec3::new(1.0, 64.0, 2.0),
+            vel: Vec3::new(0.0, 0.5, 0.0),
+            flags: Flags::default(),
+            data: EntityData::new(ferrite_entity::allocate_id(), uuid, 71, 0.25, 0.25),
+        });
+        let mut owned = std::collections::HashSet::new();
+        publish_entities(&mut owned, &store);
+        let ask = |method: &str| {
+            answer(&HostCall {
+                owner: "Entity".into(),
+                subject: uuid.to_string(),
+                method: method.into(),
+                args: vec![],
+            })
+        };
+        assert_eq!(ask("isValid()").as_deref(), Some("true"));
+        assert_eq!(entity_position(uuid), Some([1.0, 64.0, 2.0]));
+        assert!(ask("getVelocity()").unwrap().contains("0.5"));
+        let mut empty = EntityStore::new(3);
+        let _ = &mut empty;
+        publish_entities(&mut owned, &empty);
+        assert_eq!(ask("isValid()").as_deref(), Some("false"));
+        assert_eq!(ask("getVelocity()"), None);
     }
 
     #[test]

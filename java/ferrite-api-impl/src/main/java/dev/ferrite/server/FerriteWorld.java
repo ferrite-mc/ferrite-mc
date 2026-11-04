@@ -397,16 +397,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 var at = ((org.bukkit.Location) args[0]).clone();
                 var stack = ((org.bukkit.inventory.ItemStack) args[1]).clone();
                 if (stack.getType().isAir() || stack.getAmount() <= 0) throw new IllegalArgumentException("Cannot drop air");
-                var handle = DroppedItem.of(at, stack, proxy);
+                var uuid = java.util.UUID.randomUUID();
+                var handle = DroppedItem.of(at, stack, proxy, uuid);
                 if (args.length > 2 && args[2] instanceof java.util.function.Consumer<?> consumer) { @SuppressWarnings("unchecked") var typed = (java.util.function.Consumer<org.bukkit.entity.Item>) consumer; typed.accept(handle); }
-                HostBridge.callVoid("World", id, method + "(Location,ItemStack)", at, stack);
+                HostBridge.callVoid("World", id, method + "(Location,ItemStack,String)", at, stack, uuid.toString());
                 yield handle;
             }
             case "spawnEntity" -> {
                 var at = ((org.bukkit.Location) args[0]).clone();
                 var type = (org.bukkit.entity.EntityType) args[1];
-                var handle = SpawnedEntity.of(type, at, proxy);
-                HostBridge.callVoid("World", id, "spawnEntity(Location,EntityType)", at, type);
+                var uuid = java.util.UUID.randomUUID();
+                var handle = SpawnedEntity.of(type, at, proxy, uuid);
+                HostBridge.callVoid("World", id, "spawnEntity(Location,EntityType,String)", at, type, uuid.toString());
                 yield handle;
             }
             case "spawnFallingBlock" -> {
@@ -416,8 +418,9 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 else if (args[1] instanceof org.bukkit.Material m) material = m;
                 else material = ((org.bukkit.material.MaterialData) args[1]).getItemType();
                 if (!material.isBlock()) throw new IllegalArgumentException("Material must be a block");
-                var handle = SpawnedEntity.of(org.bukkit.entity.EntityType.FALLING_BLOCK, at, proxy);
-                HostBridge.callVoid("World", id, "spawnFallingBlock(Location,Material)", at, material);
+                var uuid = java.util.UUID.randomUUID();
+                var handle = SpawnedEntity.of(org.bukkit.entity.EntityType.FALLING_BLOCK, at, proxy, uuid);
+                HostBridge.callVoid("World", id, "spawnFallingBlock(Location,Material,String)", at, material, uuid.toString());
                 yield handle;
             }
             case "canGenerateStructures" -> true;
