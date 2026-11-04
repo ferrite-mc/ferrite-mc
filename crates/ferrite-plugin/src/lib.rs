@@ -259,6 +259,11 @@ pub enum PlayerCommand {
         rows: u8,
         items: Vec<Option<ItemSnapshot>>,
     },
+    /// Pushes the player (`Player#setVelocity`, `knockback`): the client applies the motion.
+    Velocity {
+        player: uuid::Uuid,
+        velocity: [f64; 3],
+    },
     /// Opens a crafting station without a block (`Player#openWorkbench`, `openAnvil`, ...).
     OpenStation {
         player: uuid::Uuid,

@@ -1,6 +1,7 @@
 //! Loading plugins into the embedded JVM at server startup.
 mod extra;
 mod inventory;
+mod motion;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -135,6 +136,12 @@ impl PluginBridge {
                                 damage_amount(call),
                             ) {
                                 players(ferrite_plugin::PlayerCommand::Damage { player, amount });
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, motion::motion_command(call))
+                            {
+                                players(command);
                                 return Some(String::new());
                             }
                             if let (Some(players), Some(command)) =

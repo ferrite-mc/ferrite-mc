@@ -43,6 +43,10 @@ pub enum Command {
         rows: u8,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
+    /// A plugin's `Player#setVelocity` or `knockback`.
+    PluginVelocity {
+        velocity: [f64; 3],
+    },
     /// A plugin's `Player#openWorkbench` and the other block-less crafting stations.
     PluginOpenStation {
         station: String,
@@ -2346,6 +2350,16 @@ impl Player {
                 }
                 Command::PluginOpenInventory { title, rows, items } => {
                     self.open_plugin_inventory(&title, rows, &items);
+                    continue;
+                }
+                Command::PluginVelocity { velocity } => {
+                    send(
+                        self,
+                        &SetEntityMotion {
+                            id: VarInt(self.entity),
+                            velocity: ferrite_protocol::types::LpVec3(velocity),
+                        },
+                    );
                     continue;
                 }
                 Command::PluginOpenStation { station } => {

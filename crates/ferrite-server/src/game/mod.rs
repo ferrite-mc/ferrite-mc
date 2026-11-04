@@ -1264,6 +1264,14 @@ fn route_plugin_command(
                     .push_back(Command::PluginOpenInventory { title, rows, items });
             }
         }
+        PlayerCommand::Velocity { player, velocity } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginVelocity { velocity });
+            }
+        }
         PlayerCommand::OpenStation { player, station } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox
