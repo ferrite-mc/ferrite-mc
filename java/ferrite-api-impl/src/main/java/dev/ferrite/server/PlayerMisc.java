@@ -213,6 +213,11 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public void resetCooldown() { }
     @Override public void resetFlyingTicks() { }
 
+    // ---- advancements ---------------------------------------------------------------------------------------
+    @Override public org.bukkit.advancement.AdvancementProgress getAdvancementProgress(org.bukkit.advancement.Advancement advancement) {
+        return FerriteAdvancementProgress.of(getUniqueId(), Objects.requireNonNull(advancement, "advancement"));
+    }
+
     // ---- bans ----------------------------------------------------------------------------------------------
     private org.bukkit.BanEntry applyBan(String reason, java.util.Date expires, String source, boolean kick) {
         var list = (org.bukkit.ban.ProfileBanList) getServer().getBanList(org.bukkit.BanList.Type.PROFILE);
