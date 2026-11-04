@@ -89,7 +89,9 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     }
     public Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
         return switch (method.getName()) {
-            case "getUID" -> id; case "getName" -> name; case "getTime", "getFullTime" -> time;
+            case "getUID" -> id; case "getName" -> name; case "getTime", "getFullTime" -> hostLong(method.getName() + "()", time);
+            case "getGameTime", "hasStorm", "isThundering", "isClearWeather", "getWeatherDuration", "getThunderDuration", "getClearWeatherDuration", "getDifficulty" -> hostValue(method, null);
+            case "getMoonPhase" -> moonPhase(method);
             case "getSpawnLocation" -> location(spawn);
             case "getHighestBlockYAt" -> { if (args.length > 2 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) throw new UnsupportedOperationException("Ferrite: heightmap-specific queries are not implemented"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) { int value = Native.highestBlockY(id.toString(), x, z); if (value == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + x + "," + z); height = value; heights.put(new Column(x, z), height); } yield height; }
             case "getBiome" -> { int x, y, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = (int) args[1]; z = (int) args[2]; } var key = Native.biomeAt(id.toString(), x, y, z); if (key == null) throw new UnsupportedOperationException("Ferrite: no biome data at " + x + "," + y + "," + z); var biome = org.bukkit.Registry.BIOME.get(org.bukkit.NamespacedKey.fromString(key)); if (biome == null) throw new IllegalStateException("Unknown biome " + key); yield biome; }
@@ -112,6 +114,21 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> spawnLimits = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> ticksPerSpawns = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean allowAnimals = true, allowMonsters = true;
+
+    private long hostLong(String method, long fallback) {
+        try { return Long.parseLong((String) HostBridge.call("World", id, method, String.class)); }
+        catch (UnsupportedOperationException offline) { return fallback; }
+    }
+    /** A world query the host answers from the live state, converted to the method's return type. */
+    private Object hostValue(java.lang.reflect.Method method, Object fallback) {
+        try { return HostBridge.dispatch("World", id, method, new Object[0]); }
+        catch (UnsupportedOperationException offline) { return fallback; }
+    }
+    private Object moonPhase(java.lang.reflect.Method method) {
+        int phase = (int) (hostLong("getMoonPhase()", 0) % 8);
+        Class<?> type = method.getReturnType();
+        return type.isEnum() ? type.getEnumConstants()[phase] : (Object) Integer.valueOf(phase);
+    }
 
     private Object ruleValue(org.bukkit.GameRule<?> rule, String method) {
         var text = (String) HostBridge.call("World", id, method, String.class, rule.getName());

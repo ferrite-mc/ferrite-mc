@@ -12,6 +12,7 @@ mod network;
 pub mod rules;
 mod survival;
 mod visual;
+pub mod worldinfo;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -118,6 +119,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = rules::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = worldinfo::answer(call) {
                                 return Some(reply);
                             }
                             if call.owner == "Player"

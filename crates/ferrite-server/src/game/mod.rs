@@ -811,6 +811,23 @@ async fn run(
         &disabled_packs,
     ));
     let command_state = Arc::new(Mutex::new(initial_state));
+    crate::plugins::worldinfo::register({
+        let state = Arc::clone(&command_state);
+        Arc::new(move || {
+            let state = state.lock().unwrap();
+            crate::plugins::worldinfo::WorldInfo {
+                clock_time: state.clock_time,
+                game_time: state.game_time,
+                difficulty: state.difficulty,
+                sky: match state.weather {
+                    commands::Weather::Clear => crate::plugins::worldinfo::Sky::Clear,
+                    commands::Weather::Rain => crate::plugins::worldinfo::Sky::Rain,
+                    commands::Weather::Thunder => crate::plugins::worldinfo::Sky::Thunder,
+                },
+                weather_duration: state.weather_duration,
+            }
+        })
+    });
     let command_speed = Arc::clone(&random_tick_speed);
     let mut schedulers = HashMap::new();
     for dimension in Dimension::ALL {
