@@ -79,54 +79,86 @@ fn locate_tree() -> NodeBuilder<Source> {
             literal("structure").then(
                 argument(
                     "structure",
-                    ArgumentType::opaque("minecraft:resource_or_tag"),
+                    ArgumentType::Registry {
+                        parser: RegistryParser::ResourceOrTag,
+                        registry: "minecraft:worldgen/structure".into(),
+                    },
                 )
-                .executes(|ctx| {
-                    locate_missing(ctx, "structure", "commands.locate.structure.not_found")
-                }),
+                .executes(locate_structure),
             ),
         )
 }
 
-fn locate_biome(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let (tag, id) = match ctx.argument("biome") {
+fn located(
+    ctx: &CommandContext<Source>,
+    key: &'static str,
+    name: String,
+    (x, y, z): (i32, i32, i32),
+) -> Result<i32, CommandError> {
+    let origin = ctx.source().origin;
+    let distance = ((x as f64 - origin[0]).powi(2) + (z as f64 - origin[2]).powi(2))
+        .sqrt()
+        .round();
+    feedback(
+        ctx,
+        key,
+        vec![name, format!("[{x}, {y}, {z}]"), format!("{distance}")],
+    )
+}
+
+/// The `id` or `#tag` text the host matches against, and the name shown in feedback.
+fn resource_target(
+    ctx: &CommandContext<Source>,
+    argument: &str,
+) -> Result<(String, String), CommandError> {
+    let (tag, id) = match ctx.argument(argument) {
         Some(ArgumentValue::Resource { tag, id }) => (*tag, id.clone()),
-        _ => return Err(CommandError::failed("missing biome argument 'biome'")),
+        _ => {
+            return Err(CommandError::failed(format!(
+                "missing argument '{argument}'"
+            )));
+        }
     };
-    // Biome tags need the tag registry from the vanilla data report, which the server does not
-    // load yet; a tag search is reported as not found rather than matching the wrong biome.
-    if tag {
-        return not_found(
-            ctx,
-            "commands.locate.biome.not_found",
-            vec![format!("#{id}")],
-        );
-    }
-    let target = namespaced(&id);
+    let id = namespaced(&id);
+    Ok(if tag {
+        (format!("#{id}"), format!("#{id}"))
+    } else {
+        (id.clone(), id)
+    })
+}
+
+fn locate_biome(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let (target, name) = resource_target(ctx, "biome")?;
     let Some(world) = ctx.source().world.clone() else {
-        return not_found(ctx, "commands.locate.biome.not_found", vec![target]);
+        return not_found(ctx, "commands.locate.biome.not_found", vec![name]);
     };
     let origin = ctx.source().origin;
-    let found = world.locate_biome(&target, origin[0].floor() as i32, origin[2].floor() as i32);
-    match found {
-        Some(Ok(Some((x, z)))) => {
-            let distance = ((x as f64 - origin[0]).powi(2) + (z as f64 - origin[2]).powi(2))
-                .sqrt()
-                .round();
-            feedback(
-                ctx,
-                "commands.locate.biome.success",
-                vec![
-                    target,
-                    x.to_string(),
-                    "64".into(),
-                    z.to_string(),
-                    format!("{distance}"),
-                ],
-            )
+    match world.locate_biome(&target, origin[0].floor() as i32, origin[2].floor() as i32) {
+        Some(Ok(Some(position))) => located(ctx, "commands.locate.biome.success", name, position),
+        Some(Ok(None)) | None | Some(Err(_)) => {
+            not_found(ctx, "commands.locate.biome.not_found", vec![name])
+        }
+    }
+}
+
+fn locate_structure(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let (target, name) = resource_target(ctx, "structure")?;
+    let Some(world) = ctx.source().world.clone() else {
+        return not_found(ctx, "commands.locate.structure.not_found", vec![name]);
+    };
+    let origin = ctx.source().origin;
+    // Vanilla searches 100 chunks around the command source.
+    match world.locate_structure(
+        &target,
+        origin[0].floor() as i32,
+        origin[2].floor() as i32,
+        100,
+    ) {
+        Some(Ok(Some(position))) => {
+            located(ctx, "commands.locate.structure.success", name, position)
         }
         Some(Ok(None)) | None | Some(Err(_)) => {
-            not_found(ctx, "commands.locate.biome.not_found", vec![target])
+            not_found(ctx, "commands.locate.structure.not_found", vec![name])
         }
     }
 }

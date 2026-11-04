@@ -49,6 +49,38 @@ fn generates_chunks_through_the_host() {
     );
     assert!(generator.generate(Dimension::Nether, 0, 0).is_ok());
 
+    // Queries answered by the jar's own biome source and structure manager.
+    let biome = generator.biome_at(Dimension::Overworld, 0, 64, 0).unwrap();
+    assert!(
+        biome.starts_with("minecraft:"),
+        "unexpected biome {biome:?}"
+    );
+    let found = generator
+        .locate_biome(Dimension::Overworld, &biome, 0, 0, 512)
+        .unwrap()
+        .expect("the biome at the origin is within 512 blocks of the origin");
+    assert!(found.0.abs() <= 512 && found.2.abs() <= 512, "{found:?}");
+    assert!(
+        generator
+            .locate_biome(Dimension::Overworld, "#minecraft:is_overworld", 0, 0, 512)
+            .unwrap()
+            .is_some()
+    );
+    // A tag search must not fail; whether a village is near the origin depends on the seed.
+    generator
+        .locate_structure(Dimension::Overworld, "#minecraft:village", 0, 0, 100)
+        .unwrap();
+    assert!(
+        generator
+            .structure_at(Dimension::Overworld, "minecraft:village_plains", 0, 64, 0)
+            .is_ok()
+    );
+    assert!(
+        generator
+            .locate_structure(Dimension::Overworld, "minecraft:not_a_structure", 0, 0, 10)
+            .is_err()
+    );
+
     // The jar's own game listener must be bound to loopback only, never all interfaces.
     let log = std::fs::read_to_string(scratch.path().join("worldgen/host.log")).unwrap();
     assert!(

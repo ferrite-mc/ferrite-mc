@@ -41,7 +41,9 @@ CMI가 동작한다고 말할 수 없다.
   내구도(`damageItemStack`, `applyMending`), 탑승·어깨 엔티티, 전투 추적기, 화살 외 발사체.
 - **지형·충돌 데이터 필요:** `rayTrace*`, `collidesAt`, `wouldCollideUsing`.
 - **바이옴·구조물 데이터 필요:** `setBiome`, `getComputedBiome`, 기온·습도, `getStructures`,
-  `hasStructureAt`, `locate*`, `createExplorerMap`(Server 3개), `generateTree`.
+  `createExplorerMap`(Server 3개), `generateTree`.
+  (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
+  호스트가 없으면 "not implemented"를 던진다. 호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능.)
 - **청크 관리:** `loadChunk`, `unloadChunk`, `refreshChunk`, `isChunkGenerated`, `getChunkGenerationState`.
 - **기타:** `openBook`(아이템에 written_book 구성요소 없음), `strikeLightningEffect`(피해 없는 번개),
   `sendGameEvent`, `findLightningRod/Target`, `getSentChunks`/`isChunkSent`,

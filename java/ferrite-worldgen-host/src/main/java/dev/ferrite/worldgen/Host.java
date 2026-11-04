@@ -14,7 +14,16 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.HolderSet;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.resources.Identifier;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -41,6 +50,11 @@ public final class Host {
     private static final int OP_GENERATE = 1;
     private static final int OP_SPAWN_HEIGHT = 2;
     private static final int OP_SHUTDOWN = 3;
+    /** Text-argument ops: the request carries a UTF-8 string after the coordinates. */
+    private static final int OP_BIOME_AT = 4;
+    private static final int OP_LOCATE_BIOME = 5;
+    private static final int OP_LOCATE_STRUCTURE = 6;
+    private static final int OP_STRUCTURE_AT = 7;
 
     private Host() {}
 
@@ -190,6 +204,9 @@ public final class Host {
             int dim = in.readUnsignedByte();
             int x = in.readInt();
             int z = in.readInt();
+            byte[] raw = new byte[in.readUnsignedShort()];
+            in.readFully(raw);
+            String argument = new String(raw, StandardCharsets.UTF_8);
             if (op == OP_SHUTDOWN) {
                 break;
             }
@@ -197,7 +214,7 @@ public final class Host {
                 byte[] payload;
                 int status = 0;
                 try {
-                    payload = handle(server, op, dim, x, z);
+                    payload = handle(server, op, dim, x, z, argument);
                 } catch (Throwable error) {
                     status = 1;
                     payload = String.valueOf(error).getBytes(StandardCharsets.UTF_8);
@@ -218,7 +235,73 @@ public final class Host {
         pool.shutdownNow();
     }
 
-    private static byte[] handle(MinecraftServer server, int op, int dim, int x, int z)
+    private static byte[] text(String value) {
+        return value.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static Predicate<Holder<Biome>> biomeMatcher(String spec) {
+        if (spec.startsWith("#")) {
+            TagKey<Biome> tag = TagKey.create(Registries.BIOME, Identifier.parse(spec.substring(1)));
+            return holder -> holder.is(tag);
+        }
+        Identifier id = Identifier.parse(spec);
+        return holder -> holder.is(id);
+    }
+
+    private static String biomeName(Holder<Biome> holder) {
+        return holder.unwrapKey().map(key -> key.identifier().toString()).orElse("");
+    }
+
+    /** {@code spec;radius;x;y;z}: the nearest matching biome, or an empty reply. */
+    private static byte[] locateBiome(ServerLevel level, String argument) {
+        String[] parts = argument.split(";");
+        BlockPos origin = new BlockPos(
+                Integer.parseInt(parts[2]), Integer.parseInt(parts[3]), Integer.parseInt(parts[4]));
+        var found = level.findClosestBiome3d(
+                biomeMatcher(parts[0]), origin, Integer.parseInt(parts[1]), 32, 64);
+        if (found == null) {
+            return new byte[0];
+        }
+        BlockPos at = found.getFirst();
+        return text(at.getX() + " " + at.getY() + " " + at.getZ() + " " + biomeName(found.getSecond()));
+    }
+
+    /** {@code spec;radius;x;z}: the nearest structure of that id or tag, or an empty reply. */
+    private static byte[] locateStructure(ServerLevel level, String argument) {
+        String[] parts = argument.split(";");
+        int radius = Integer.parseInt(parts[1]);
+        BlockPos origin = new BlockPos(Integer.parseInt(parts[2]), 64, Integer.parseInt(parts[3]));
+        BlockPos at;
+        if (parts[0].startsWith("#")) {
+            TagKey<Structure> tag =
+                    TagKey.create(Registries.STRUCTURE, Identifier.parse(parts[0].substring(1)));
+            at = level.findNearestMapStructure(tag, origin, radius, false);
+        } else {
+            var registry = level.registryAccess().lookupOrThrow(Registries.STRUCTURE);
+            Holder<Structure> holder = registry.get(Identifier.parse(parts[0]))
+                    .orElseThrow(() -> new IllegalArgumentException("unknown structure " + parts[0]));
+            var found = level.getChunkSource().getGenerator()
+                    .findNearestMapStructure(level, HolderSet.direct(holder), origin, radius, false);
+            at = found == null ? null : found.getFirst();
+        }
+        return at == null ? new byte[0] : text(at.getX() + " " + at.getY() + " " + at.getZ());
+    }
+
+    /** {@code id x y z}: whether a piece of that structure covers the block. */
+    private static byte[] structureAt(ServerLevel level, String argument) {
+        String[] parts = argument.split(" ");
+        BlockPos pos = new BlockPos(
+                Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+        level.getChunkSource().getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true);
+        var registry = level.registryAccess().lookupOrThrow(Registries.STRUCTURE);
+        Holder<Structure> holder = registry.get(Identifier.parse(parts[0]))
+                .orElseThrow(() -> new IllegalArgumentException("unknown structure " + parts[0]));
+        var start = level.structureManager().getStructureWithPieceAt(pos.getX(), pos.getY(), pos.getZ(), holder.value());
+        return text(start.isValid() ? "1" : "0");
+    }
+
+    private static byte[] handle(
+            MinecraftServer server, int op, int dim, int x, int z, String argument)
             throws IOException {
         ServerLevel level = server.getLevel(dimension(dim));
         if (level == null) {
@@ -239,6 +322,22 @@ public final class Host {
                 level.getChunkSource().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, true);
                 int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
                 return new byte[] {(byte) (y >>> 24), (byte) (y >>> 16), (byte) (y >>> 8), (byte) y};
+            }
+            case OP_BIOME_AT -> {
+                String[] parts = argument.split(" ");
+                BlockPos pos = new BlockPos(
+                        Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+                level.getChunkSource().getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.FULL, true);
+                return text(biomeName(level.getBiome(pos)));
+            }
+            case OP_LOCATE_BIOME -> {
+                return locateBiome(level, argument);
+            }
+            case OP_LOCATE_STRUCTURE -> {
+                return locateStructure(level, argument);
+            }
+            case OP_STRUCTURE_AT -> {
+                return structureAt(level, argument);
             }
             default -> throw new IllegalArgumentException("unknown op " + op);
         }

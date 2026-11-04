@@ -434,7 +434,61 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "setVoidDamageMinBuildHeightOffset" -> { voidDamageOffset = (double) args[0]; yield null; }
             case "getFeatureFlags", "getListeningPluginChannels" -> java.util.Set.of();
             case "getGenerator", "getBiomeProvider", "getEnderDragonBattle" -> null;
+            case "locateNearestBiome", "locateNearestStructure", "hasStructureAt" -> locate(method, args);
             default -> NONE;
         };
+    }
+
+    /** Biome and structure searches, answered by the vanilla world generation host. */
+    private Object locate(String name, Object[] args) {
+        if (name.equals("hasStructureAt")) {
+            if (args.length != 2 || !(args[0] instanceof io.papermc.paper.math.Position at) || !(args[1] instanceof org.bukkit.generator.structure.Structure structure)) return NONE;
+            return Boolean.parseBoolean((String) HostBridge.call("World", id, "hasStructureAt(String,int,int,int)", String.class,
+                structure.getKey().toString(), at.blockX(), at.blockY(), at.blockZ()));
+        }
+        if (!(args[0] instanceof org.bukkit.Location origin)) return NONE;
+        if (name.equals("locateNearestStructure")) {
+            if (args.length != 4 || !(args[1] instanceof org.bukkit.generator.structure.Structure structure)) return NONE;
+            var at = search(true, structure.getKey().toString(), (int) args[2], origin);
+            return at == null ? null : new FoundStructure(structure, at);
+        }
+        // Biomes: (Location, int radius, Biome...) | (Location, int, int, int, Biome...) | (Location, Biome, int[, int]).
+        int radius;
+        java.util.List<org.bukkit.block.Biome> wanted = new java.util.ArrayList<>();
+        boolean legacy = args[1] instanceof org.bukkit.block.Biome;
+        if (legacy) { wanted.add((org.bukkit.block.Biome) args[1]); radius = (int) args[2]; }
+        else {
+            radius = (int) args[1];
+            for (var arg : args) {
+                if (arg instanceof org.bukkit.block.Biome[] many) wanted.addAll(java.util.List.of(many));
+                else if (arg instanceof org.bukkit.block.Biome one) wanted.add(one);
+            }
+        }
+        org.bukkit.block.Biome best = null;
+        org.bukkit.Location bestAt = null;
+        for (var biome : wanted) {
+            var at = search(false, biome.getKey().toString(), radius, origin);
+            if (at != null && (bestAt == null || at.distanceSquared(origin) < bestAt.distanceSquared(origin))) { best = biome; bestAt = at; }
+        }
+        if (legacy) return bestAt;
+        return bestAt == null ? null : new FoundBiome(best, bestAt);
+    }
+
+    private org.bukkit.Location search(boolean structure, String target, int radius, org.bukkit.Location origin) {
+        var method = structure ? "locateStructure(String,int,int,int)" : "locateBiome(String,int,int,int)";
+        var reply = (String) HostBridge.call("World", id, method, String.class, target, radius, origin.getBlockX(), origin.getBlockZ());
+        if (reply == null || reply.isEmpty()) return null;
+        var parts = reply.split(" ");
+        return new org.bukkit.Location((org.bukkit.World) proxy, Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+    }
+
+    private record FoundBiome(org.bukkit.block.Biome biome, org.bukkit.Location location) implements org.bukkit.util.BiomeSearchResult {
+        @Override public org.bukkit.block.Biome getBiome() { return biome; }
+        @Override public org.bukkit.Location getLocation() { return location; }
+    }
+
+    private record FoundStructure(org.bukkit.generator.structure.Structure structure, org.bukkit.Location location) implements org.bukkit.util.StructureSearchResult {
+        @Override public org.bukkit.generator.structure.Structure getStructure() { return structure; }
+        @Override public org.bukkit.Location getLocation() { return location; }
     }
 }

@@ -15,6 +15,7 @@ mod network;
 pub mod rules;
 mod survival;
 mod visual;
+pub mod worldgen;
 pub mod worldinfo;
 
 use std::path::{Path, PathBuf};
@@ -48,6 +49,9 @@ pub struct Settings {
     /// Receives the console commands that carry out plugin world and server mutations
     /// (`World#setBlock`, IP bans, the whitelist toggle); see [`forward_console`].
     pub console: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// The vanilla world generation host, when `generator = "vanilla"`; answers biome and
+    /// structure queries from plugins.
+    pub terrain: Option<std::sync::Arc<dyn crate::game::ChunkGenerator>>,
 }
 
 /// A running embedded JVM with the server's plugins enabled.
@@ -105,6 +109,7 @@ impl PluginBridge {
                     }),
                     host_call_handler: settings.console.map(|console| {
                         let players = player_commands;
+                        let terrain = settings.terrain.clone();
                         let abilities = std::sync::Mutex::new(std::collections::HashMap::<
                             uuid::Uuid,
                             AbilityState,
@@ -292,6 +297,12 @@ impl PluginBridge {
                                 players(command);
                                 return Some(String::new());
                             }
+                            if let Some(reply) = terrain
+                                .as_deref()
+                                .and_then(|terrain| worldgen::world_query(terrain, call))
+                            {
+                                return Some(reply);
+                            }
                             match host_action(call)? {
                                 HostAction::Console { line, reply } => {
                                     let _ = console.send(line);
@@ -395,7 +406,7 @@ pub fn world_console_line(command: &ferrite_plugin::WorldCommand) -> Option<Stri
 }
 
 /// A namespaced resource key such as `minecraft:speed`; refuses anything a command could misread.
-fn is_resource_key(key: &str) -> bool {
+pub(crate) fn is_resource_key(key: &str) -> bool {
     !key.is_empty()
         && key.chars().all(|c| {
             c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '_' | '-' | '.' | '/')

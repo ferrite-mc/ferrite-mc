@@ -46,13 +46,17 @@ only coupling.
 
 ## Wire protocol (loopback TCP, big-endian)
 
-Request: `u32 id, u8 op, u8 dimension, i32 x, i32 z`
+Request: `u32 id, u8 op, u8 dimension, i32 x, i32 z, u16 argument length, argument bytes (UTF-8)`
 
 | op | meaning | ok payload |
 |---|---|---|
 | 1 | generate chunk column | uncompressed named NBT, as stored in an Anvil chunk |
 | 2 | spawn height at block x, z | `i32` |
 | 3 | shutdown | none |
+| 4 | biome at block x, y, z (argument `y`) | UTF-8 biome id |
+| 5 | locate biome (argument `spec;radius;x;y;z`, spec is an id or `#tag`) | `x y z`, or empty when not found |
+| 6 | locate structure (argument `spec;radius;x;z`, radius in chunks) | `x y z`, or empty when not found |
+| 7 | is block inside a structure (argument `id x y z`) | `1` or `0` |
 
 Response: `u32 id, u8 status (0 ok, 1 error), u32 length, bytes` (error payload is UTF-8).
 Responses may arrive out of order; the id matches them to requests.

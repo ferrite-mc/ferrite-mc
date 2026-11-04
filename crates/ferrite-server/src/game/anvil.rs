@@ -275,16 +275,42 @@ impl AnvilChunkSource {
             .ok()
     }
 
-    /// The nearest position with the given surface biome, when vanilla generation is enabled.
-    /// A flat test world has no biome source and reports no match.
+    /// The nearest position with the given biome (`id` or `#tag`), when vanilla generation is
+    /// enabled. A flat test world has no biome source and reports no match.
     pub fn locate_biome(
         &self,
         target: &str,
         x: i32,
         z: i32,
-    ) -> Option<anyhow::Result<Option<(i32, i32)>>> {
+    ) -> Option<anyhow::Result<Option<(i32, i32, i32)>>> {
         let terrain = self.terrain.as_ref()?;
-        Some(terrain.locate_biome(target, x, z, 6_400))
+        Some(terrain.locate_biome(self.dimension, target, x, z, 6_400))
+    }
+
+    /// The biome id at a block, when vanilla generation is enabled.
+    pub fn biome_at(&self, x: i32, y: i32, z: i32) -> Option<anyhow::Result<String>> {
+        Some(self.terrain.as_ref()?.biome_at(self.dimension, x, y, z))
+    }
+
+    /// The nearest structure of `target` (`id` or `#tag`), when vanilla generation is enabled.
+    pub fn locate_structure(
+        &self,
+        target: &str,
+        x: i32,
+        z: i32,
+        radius: i32,
+    ) -> Option<anyhow::Result<Option<(i32, i32, i32)>>> {
+        let terrain = self.terrain.as_ref()?;
+        Some(terrain.locate_structure(self.dimension, target, x, z, radius))
+    }
+
+    /// Whether a piece of structure `id` covers the block, when vanilla generation is enabled.
+    pub fn structure_at(&self, id: &str, x: i32, y: i32, z: i32) -> Option<anyhow::Result<bool>> {
+        Some(
+            self.terrain
+                .as_ref()?
+                .structure_at(self.dimension, id, x, y, z),
+        )
     }
     /// The 26.3 world data file that stores the live game rule values.
     pub(super) fn game_rules_path(&self) -> Option<PathBuf> {

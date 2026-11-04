@@ -33,6 +33,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type == org.bukkit.enchantments.Enchantment.class) return (org.bukkit.Registry<T>) cached("enchantment", FerriteRegistryAccess::enchantmentRegistry);
         if (type == org.bukkit.potion.PotionEffectType.class) return (org.bukkit.Registry<T>) cached("mob_effect", FerriteRegistryAccess::potionRegistry);
         if (type == org.bukkit.block.Biome.class) return (org.bukkit.Registry<T>) cached("worldgen/biome", () -> identityRegistry("worldgen/biome", org.bukkit.block.Biome.class));
+        if (type == org.bukkit.generator.structure.Structure.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.STRUCTURE);
         if (type == org.bukkit.damage.DamageType.class) return (org.bukkit.Registry<T>) cached("damage_type", FerriteRegistryAccess::damageTypeRegistry);
         return unavailable(type.getName());
     }
@@ -48,6 +49,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type.equals(io.papermc.paper.registry.RegistryKey.ATTRIBUTE)) return cast(cached("attribute", () -> identityRegistry("attribute", org.bukkit.attribute.Attribute.class)));
         if (type.equals(io.papermc.paper.registry.RegistryKey.SOUND_EVENT)) return cast(cached("sound_event", () -> identityRegistry("sound_event", org.bukkit.Sound.class)));
         if (type.equals(io.papermc.paper.registry.RegistryKey.BIOME)) return cast(cached("worldgen/biome", () -> identityRegistry("worldgen/biome", org.bukkit.block.Biome.class)));
+        if (type.equals(io.papermc.paper.registry.RegistryKey.STRUCTURE)) return cast(cached("worldgen/structure", () -> identityRegistry("worldgen/structure", org.bukkit.generator.structure.Structure.class, FerriteStructure::new)));
         if (type.equals(io.papermc.paper.registry.RegistryKey.DAMAGE_TYPE)) return cast(cached("damage_type", FerriteRegistryAccess::damageTypeRegistry));
         return unavailable(type.key().toString());
     }
@@ -184,7 +186,8 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             default -> HostBridge.dispatch("Biome", "", method, args);
         });
     }
-    private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> identityRegistry(String kind, Class<T> type) {
+    private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> identityRegistry(String kind, Class<T> type) { return identityRegistry(kind, type, null); }
+    private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> identityRegistry(String kind, Class<T> type, java.util.function.Function<org.bukkit.NamespacedKey, T> factory) {
         return new BaseRegistry<T>(kind) {
             private final java.util.Map<org.bukkit.NamespacedKey,T> entries = new java.util.concurrent.ConcurrentHashMap<>();
             @Override public T get(org.bukkit.NamespacedKey key) {
@@ -192,7 +195,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                 T existing = entries.get(key);
                 if (existing != null) return existing;
                 var k = key;
-                T value = type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
+                T value = factory != null ? factory.apply(key) : type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
                     case "getKey", "key" -> k;
                     case "name", "getName" -> k.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_');
                     case "translationKey", "getTranslationKey" -> kind + "." + k.getNamespace() + "." + k.getKey();

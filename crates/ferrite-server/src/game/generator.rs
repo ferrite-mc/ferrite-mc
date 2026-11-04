@@ -22,12 +22,48 @@ pub trait ChunkGenerator: Send + Sync {
     /// The first free block above `dimension`'s generated surface at block `(x, z)`.
     fn spawn_height(&self, dimension: super::Dimension, x: i32, z: i32) -> anyhow::Result<i32>;
 
-    /// The nearest block position whose surface biome is `target`, within `radius` blocks.
+    /// The nearest block position whose biome is `target` (`id` or `#tag`), within `radius` blocks.
     fn locate_biome(
         &self,
+        dimension: super::Dimension,
         target: &str,
         x: i32,
         z: i32,
         radius: i32,
-    ) -> anyhow::Result<Option<(i32, i32)>>;
+    ) -> anyhow::Result<Option<(i32, i32, i32)>>;
+
+    /// The biome id at a block position.
+    fn biome_at(
+        &self,
+        _dimension: super::Dimension,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("this generator has no biome source")
+    }
+
+    /// The nearest structure of `target` (`id` or `#tag`) around block `(x, z)`.
+    fn locate_structure(
+        &self,
+        _dimension: super::Dimension,
+        _target: &str,
+        _x: i32,
+        _z: i32,
+        _radius: i32,
+    ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+        anyhow::bail!("this generator has no structures")
+    }
+
+    /// Whether a piece of structure `id` covers the block.
+    fn structure_at(
+        &self,
+        _dimension: super::Dimension,
+        _id: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("this generator has no structures")
+    }
 }

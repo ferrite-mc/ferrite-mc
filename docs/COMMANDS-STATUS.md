@@ -39,8 +39,8 @@ Notes for whoever picks these up:
 - `/rotate` assumes the target is in the command's dimension.
 - `/damage` maps the damage type to the nearest survival kind; mobs take the plain amount
   without a hurt animation, and `at`/`by`/`from` are parsed but not used.
-- `/locate biome|structure|poi` still return no result from the vanilla host; the host
-  protocol needs the matching requests.
+- `/locate biome|structure` ask the vanilla host (ops 5 and 6, needs `generator = "vanilla"`).
+  `/locate poi` still returns not found: the host has no POI request yet.
 
 ## Merge state
 

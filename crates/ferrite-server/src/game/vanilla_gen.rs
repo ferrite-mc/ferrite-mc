@@ -24,6 +24,10 @@ use std::{
 const OP_GENERATE: u8 = 1;
 const OP_SPAWN_HEIGHT: u8 = 2;
 const OP_SHUTDOWN: u8 = 3;
+const OP_BIOME_AT: u8 = 4;
+const OP_LOCATE_BIOME: u8 = 5;
+const OP_LOCATE_STRUCTURE: u8 = 6;
+const OP_STRUCTURE_AT: u8 = 7;
 const START_TIMEOUT: Duration = Duration::from_secs(180);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -272,11 +276,20 @@ impl VanillaGenerator {
         })
     }
 
-    fn request(&self, op: u8, dimension: Dimension, x: i32, z: i32) -> anyhow::Result<Vec<u8>> {
+    fn request(
+        &self,
+        op: u8,
+        dimension: Dimension,
+        x: i32,
+        z: i32,
+        argument: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let argument = argument.as_bytes();
+        let length = u16::try_from(argument.len()).context("host request argument is too long")?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).max(1);
         let (reply, result) = channel();
         self.pending.lock().unwrap().insert(id, reply);
-        let mut message = [0u8; 14];
+        let mut message = vec![0u8; 16 + argument.len()];
         message[0..4].copy_from_slice(&id.to_be_bytes());
         message[4] = op;
         message[5] = match dimension {
@@ -286,6 +299,8 @@ impl VanillaGenerator {
         };
         message[6..10].copy_from_slice(&x.to_be_bytes());
         message[10..14].copy_from_slice(&z.to_be_bytes());
+        message[14..16].copy_from_slice(&length.to_be_bytes());
+        message[16..].copy_from_slice(argument);
         if let Err(error) = self.writer.lock().unwrap().write_all(&message) {
             self.pending.lock().unwrap().remove(&id);
             return Err(error).context("sending a request to the world generation host");
@@ -330,14 +345,14 @@ fn read_replies(stream: &mut TcpStream, pending: &Pending) {
 
 impl ChunkGenerator for VanillaGenerator {
     fn generate(&self, dimension: Dimension, x: i32, z: i32) -> anyhow::Result<Generated> {
-        let bytes = self.request(OP_GENERATE, dimension, x, z)?;
+        let bytes = self.request(OP_GENERATE, dimension, x, z, "")?;
         let (_, tag) = binary::read_named(&bytes)?;
         let (chunk, light) = column_from_tag(&tag, dimension, &self.registry)?;
         Ok(Generated { chunk, light })
     }
 
     fn spawn_height(&self, dimension: Dimension, x: i32, z: i32) -> anyhow::Result<i32> {
-        let bytes = self.request(OP_SPAWN_HEIGHT, dimension, x, z)?;
+        let bytes = self.request(OP_SPAWN_HEIGHT, dimension, x, z, "")?;
         let bytes: [u8; 4] = bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("malformed spawn height reply"))?;
@@ -346,19 +361,73 @@ impl ChunkGenerator for VanillaGenerator {
 
     fn locate_biome(
         &self,
-        _target: &str,
-        _x: i32,
-        _z: i32,
-        _radius: i32,
-    ) -> anyhow::Result<Option<(i32, i32)>> {
-        // Not offered by the host yet; reported as "not found".
-        Ok(None)
+        dimension: Dimension,
+        target: &str,
+        x: i32,
+        z: i32,
+        radius: i32,
+    ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+        let argument = format!("{target};{radius};{x};64;{z}");
+        let reply = self.request(OP_LOCATE_BIOME, dimension, 0, 0, &argument)?;
+        parse_position(&reply)
     }
+
+    fn biome_at(&self, dimension: Dimension, x: i32, y: i32, z: i32) -> anyhow::Result<String> {
+        let reply = self.request(OP_BIOME_AT, dimension, 0, 0, &format!("{x} {y} {z}"))?;
+        Ok(String::from_utf8(reply)?)
+    }
+
+    fn locate_structure(
+        &self,
+        dimension: Dimension,
+        target: &str,
+        x: i32,
+        z: i32,
+        radius: i32,
+    ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+        let argument = format!("{target};{radius};{x};{z}");
+        parse_position(&self.request(OP_LOCATE_STRUCTURE, dimension, 0, 0, &argument)?)
+    }
+
+    fn structure_at(
+        &self,
+        dimension: Dimension,
+        id: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> anyhow::Result<bool> {
+        let reply = self.request(
+            OP_STRUCTURE_AT,
+            dimension,
+            0,
+            0,
+            &format!("{id} {x} {y} {z}"),
+        )?;
+        Ok(reply == b"1")
+    }
+}
+
+/// Parses a host reply of `x y z[ text]`; an empty reply means nothing was found.
+fn parse_position(reply: &[u8]) -> anyhow::Result<Option<(i32, i32, i32)>> {
+    if reply.is_empty() {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(reply)?;
+    let mut parts = text.split(' ');
+    let mut next = || -> anyhow::Result<i32> {
+        parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("malformed host position reply"))?
+            .parse::<i32>()
+            .map_err(Into::into)
+    };
+    Ok(Some((next()?, next()?, next()?)))
 }
 
 impl Drop for VanillaGenerator {
     fn drop(&mut self) {
-        let mut message = [0u8; 14];
+        let mut message = [0u8; 16];
         message[4] = OP_SHUTDOWN;
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.write_all(&message);

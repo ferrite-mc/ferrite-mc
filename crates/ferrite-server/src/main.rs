@@ -283,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
         }
         WorldGenerator::Superflat => None,
     };
+    let terrain_for_plugins = terrain.clone();
     let source = if let Some(path) = &config.world {
         let registry = ferrite_world::RuntimeRegistry::load("vanilla/26.3/generated")
             .context("loading vanilla registry")?;
@@ -326,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
             player_handler: Some(std::sync::Arc::new(move |command| {
                 let _ = plugin_command_tx.send(command);
             })),
+            terrain: terrain_for_plugins,
             world_view: Some(ferrite_server::plugins::world_view(std::sync::Arc::clone(
                 &source,
             ))),
