@@ -43,6 +43,11 @@ pub enum Command {
         rows: u8,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
+    /// A plugin's direct change to a survival number.
+    PluginSurvival {
+        stat: ferrite_plugin::SurvivalStat,
+        value: f32,
+    },
     /// A plugin's item cooldown for one group.
     PluginCooldown {
         group: String,
@@ -2362,6 +2367,22 @@ impl Player {
                 }
                 Command::PluginOpenInventory { title, rows, items } => {
                     self.open_plugin_inventory(&title, rows, &items);
+                    continue;
+                }
+                Command::PluginSurvival { stat, value } => {
+                    use ferrite_plugin::SurvivalStat;
+                    match stat {
+                        SurvivalStat::Saturation => {
+                            let food = self.survival.food.food as f32;
+                            self.survival.food.saturation = value.min(food);
+                        }
+                        SurvivalStat::Exhaustion => self.survival.food.exhaustion = value,
+                        SurvivalStat::Absorption => self.survival.absorption = value,
+                        SurvivalStat::FallDistance => {
+                            self.survival.fall_distance = f64::from(value)
+                        }
+                        SurvivalStat::Air => self.survival.air = value as i32,
+                    }
                     continue;
                 }
                 Command::PluginCooldown { group, ticks } => {

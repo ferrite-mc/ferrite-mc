@@ -4,6 +4,7 @@ mod cooldown;
 mod extra;
 mod inventory;
 mod motion;
+mod survival;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -168,6 +169,12 @@ impl PluginBridge {
                                 damage_amount(call),
                             ) {
                                 players(ferrite_plugin::PlayerCommand::Damage { player, amount });
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, survival::survival_command(call))
+                            {
+                                players(command);
                                 return Some(String::new());
                             }
                             if let (Some(players), Some(command)) =

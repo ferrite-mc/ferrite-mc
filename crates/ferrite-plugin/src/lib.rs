@@ -174,6 +174,15 @@ pub enum MessageContent {
     Plain(String),
     AdventureJson(String),
 }
+/// A survival number a plugin can set directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurvivalStat {
+    Saturation,
+    Exhaustion,
+    Absorption,
+    FallDistance,
+    Air,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
     Message {
@@ -258,6 +267,12 @@ pub enum PlayerCommand {
         title: String,
         rows: u8,
         items: Vec<Option<ItemSnapshot>>,
+    },
+    /// Sets one survival number (`Player#setSaturation`, `setFallDistance`, ...).
+    Survival {
+        player: uuid::Uuid,
+        stat: SurvivalStat,
+        value: f32,
     },
     /// Starts (`ticks > 0`) or ends (`ticks == 0`) an item cooldown for one item group.
     Cooldown {
