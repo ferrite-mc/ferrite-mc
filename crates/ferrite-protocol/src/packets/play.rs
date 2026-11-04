@@ -477,6 +477,10 @@ macro_rules! item_packet {($name:ident<$g:ident $(= $d:ty)?>,$id:expr,$bound:ide
 item_packet!(CreativeSlot<I = ItemStack>,57,Serverbound,{slot:i16,item:I});
 item_packet!(ContainerContent<I = ItemStack>,18,Clientbound,{window:VarInt,state:VarInt,slots:Vec<I>,carried:I});
 item_packet!(ContainerSlot<I = ItemStack>,20,Clientbound,{window:VarInt,state:VarInt,slot:i16,item:I});
+packet!(CustomPayload,24,Clientbound,{channel:String,data:crate::codec::RestBytes});
+packet!(Transfer,132,Clientbound,{host:String,port:VarInt});
+packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required:bool,prompt:Option<Vec<u8>>});
+packet!(ResourcePackPop,81,Clientbound,{id:Option<Uuid>});
 packet!(ItemCooldown,22,Clientbound,{group:String,ticks:VarInt});
 packet!(SetExperience,105,Clientbound,{progress:f32,level:VarInt,total:VarInt});
 // Vanilla `ClientboundPlayerAbilitiesPacket`: flags (1 invulnerable, 2 flying, 4 may fly, 8 instant build),
@@ -1327,6 +1331,37 @@ mod interaction_tests {
         let mut data = bytes.as_slice();
         assert_eq!(T::decode(&mut data).unwrap(), value);
         assert!(data.is_empty());
+    }
+    #[test]
+    fn plugin_packets_roundtrip_and_have_the_vanilla_ids() {
+        assert_eq!(
+            (
+                CustomPayload::ID,
+                Transfer::ID,
+                ResourcePackPush::ID,
+                ResourcePackPop::ID
+            ),
+            (24, 132, 82, 81)
+        );
+        roundtrip(CustomPayload {
+            channel: "bungeecord:main".into(),
+            data: crate::codec::RestBytes(vec![1, 2, 3]),
+        });
+        roundtrip(Transfer {
+            host: "play.example.com".into(),
+            port: VarInt(25566),
+        });
+        roundtrip(ResourcePackPush {
+            id: Uuid::from_u128(7),
+            url: "https://example.com/pack.zip".into(),
+            hash: "ab".repeat(20),
+            required: true,
+            prompt: None,
+        });
+        roundtrip(ResourcePackPop { id: None });
+        roundtrip(ResourcePackPop {
+            id: Some(Uuid::from_u128(9)),
+        });
     }
     #[test]
     fn item_cooldown_roundtrips_and_has_the_vanilla_id() {

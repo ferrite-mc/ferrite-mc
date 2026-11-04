@@ -47,6 +47,8 @@ pub enum Command {
         rows: u8,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
+    /// A packet a plugin sends to this player.
+    PluginPacket(ferrite_plugin::PluginPacket),
     /// A plugin's direct change to a survival number.
     PluginSurvival {
         stat: ferrite_plugin::SurvivalStat,
@@ -2382,6 +2384,10 @@ impl Player {
                 }
                 Command::PluginOpenInventory { title, rows, items } => {
                     self.open_plugin_inventory(&title, rows, &items);
+                    continue;
+                }
+                Command::PluginPacket(packet) => {
+                    self.send_plugin_packet(packet);
                     continue;
                 }
                 Command::PluginSurvival { stat, value } => {

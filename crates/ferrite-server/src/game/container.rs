@@ -598,6 +598,63 @@ impl Player {
         self.open_menu(make, title, None);
     }
 
+    /// Builds and sends one packet a plugin asked for (see `plugins/network.rs`).
+    pub fn send_plugin_packet(&mut self, packet: ferrite_plugin::PluginPacket) {
+        use ferrite_plugin::PluginPacket;
+        use ferrite_protocol::{codec::RestBytes, types::BlockPos};
+        match packet {
+            PluginPacket::BlockChange { pos, state } => send(
+                self,
+                &ferrite_protocol::packets::play::BlockUpdate {
+                    location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    block_state: VarInt(state as i32),
+                },
+            ),
+            PluginPacket::PluginMessage { channel, data } => send(
+                self,
+                &ferrite_protocol::packets::play::CustomPayload {
+                    channel,
+                    data: RestBytes(data),
+                },
+            ),
+            PluginPacket::Transfer { host, port } => send(
+                self,
+                &ferrite_protocol::packets::play::Transfer {
+                    host,
+                    port: VarInt(i32::from(port)),
+                },
+            ),
+            PluginPacket::ResourcePackPush {
+                id,
+                url,
+                hash,
+                required,
+            } => send(
+                self,
+                &ferrite_protocol::packets::play::ResourcePackPush {
+                    id,
+                    url,
+                    hash,
+                    required,
+                    prompt: None,
+                },
+            ),
+            PluginPacket::ResourcePackPop { id } => send(
+                self,
+                &ferrite_protocol::packets::play::ResourcePackPop { id },
+            ),
+            PluginPacket::CompassTarget { pos } => send(
+                self,
+                &ferrite_protocol::packets::play::DefaultSpawn {
+                    dimension: self.dimension.key().into(),
+                    position: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            ),
+        }
+    }
+
     /// A plugin's `Player#closeInventory`; the client gets `container_close` first.
     pub fn close_plugin_inventory(&mut self) {
         self.close_open_container();

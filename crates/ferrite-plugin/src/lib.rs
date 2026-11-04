@@ -174,6 +174,35 @@ pub enum MessageContent {
     Plain(String),
     AdventureJson(String),
 }
+/// A packet a plugin sends to one player; the host builds and delivers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginPacket {
+    /// A fake block at a position, as the block state id the client should show.
+    BlockChange {
+        pos: [i32; 3],
+        state: u32,
+    },
+    PluginMessage {
+        channel: String,
+        data: Vec<u8>,
+    },
+    Transfer {
+        host: String,
+        port: u16,
+    },
+    ResourcePackPush {
+        id: uuid::Uuid,
+        url: String,
+        hash: String,
+        required: bool,
+    },
+    ResourcePackPop {
+        id: Option<uuid::Uuid>,
+    },
+    CompassTarget {
+        pos: [i32; 3],
+    },
+}
 /// A survival number a plugin can set directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurvivalStat {
@@ -267,6 +296,11 @@ pub enum PlayerCommand {
         title: String,
         rows: u8,
         items: Vec<Option<ItemSnapshot>>,
+    },
+    /// Sends one packet to the player (`sendBlockChange`, `sendPluginMessage`, `transfer`, ...).
+    Packet {
+        player: uuid::Uuid,
+        packet: PluginPacket,
     },
     /// Sets one survival number (`Player#setSaturation`, `setFallDistance`, ...).
     Survival {

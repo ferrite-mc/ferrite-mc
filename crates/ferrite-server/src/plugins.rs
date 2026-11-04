@@ -8,6 +8,7 @@ mod inventory;
 mod items;
 mod messaging;
 mod motion;
+mod network;
 mod survival;
 mod visual;
 
@@ -180,6 +181,12 @@ impl PluginBridge {
                                 damage_amount(call),
                             ) {
                                 players(ferrite_plugin::PlayerCommand::Damage { player, amount });
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, network::network_command(call))
+                            {
+                                players(command);
                                 return Some(String::new());
                             }
                             if let (Some(players), Some(command)) =
