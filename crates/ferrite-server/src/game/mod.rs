@@ -72,6 +72,28 @@ mod tests {
         std::iter::from_fn(|| rx.try_recv()).collect()
     }
 
+    #[test]
+    fn plugin_entity_tasks_queue_on_the_owning_player() {
+        let player = Uuid::from_u128(7);
+        let (outbound, _rx) = OutboundSender::channel(1 << 20);
+        let mailbox = Mailbox::default();
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(player, (1, mailbox.clone(), outbound));
+        let task = |entity: String| ferrite_plugin::EntityTask {
+            id: 3,
+            entity,
+            region_aware: true,
+        };
+        route_entity_task(task(player.to_string()), &mailboxes);
+        route_entity_task(task(Uuid::from_u128(8).to_string()), &mailboxes);
+        route_entity_task(task("not-a-uuid".into()), &mailboxes);
+        let queued: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
+        assert!(
+            matches!(queued.as_slice(), [Command::PluginEntityTask(t)] if *t == task(player.to_string())),
+            "only the online player's task is queued"
+        );
+    }
+
     fn bytes(message: &Outbound) -> Vec<u8> {
         match message {
             Outbound::Packet(bytes) => bytes.to_vec(),
@@ -1033,6 +1055,11 @@ async fn run(
          }},
          command = async { match plugin_commands.as_mut() { Some(commands) => commands.recv().await, None => std::future::pending().await } }, if plugin_commands.is_some() => {
              match command {
+                 // Chat attribution lives on the global region, so display names go there.
+                 Some(ferrite_plugin::PlayerCommand::DisplayName { player, component_json }) => {
+                     let name = component_json.as_deref().map(json_text);
+                     worlds.schedule_global(move |g| g.set_display_name(player, name));
+                 }
                  Some(command) => route_plugin_command(command, &mailboxes, &mut permissions),
                  // The plugin host dropped its sender (no plugins loaded): stop polling.
                  None => plugin_commands = None,
@@ -1065,6 +1092,11 @@ async fn run(
                              tracing::warn!(%error, "plugin region task failed");
                          }
                      });
+                 }
+                 // Paper's entity scheduler: the only entities plugins hold are players, whose
+                 // mailbox is drained by whichever region owns them, hand-offs included.
+                 for task in plugins.take_entity_tasks() {
+                     route_entity_task(task, &mailboxes);
                  }
              }
              // Vanilla runs `minecraft:load` once at startup and `minecraft:tick` every
@@ -1221,9 +1253,27 @@ fn route_plugin_command(
                 None => tracing::debug!(%sound, "plugin sound is not in the sound registry"),
             }
         }
-        // Display names have no host path yet (chat and the tab list use the profile name);
-        // report them instead of pretending the plugin's call succeeded.
-        other => tracing::debug!(?other, "plugin player command not routed"),
+        // The game loop sends display names to the global region before calling this.
+        PlayerCommand::DisplayName { .. } => {
+            tracing::debug!("plugin display name reached the player router")
+        }
+    }
+}
+/// Queues a Paper entity-scheduler task on the mailbox of the player it belongs to.
+fn route_entity_task(
+    task: ferrite_plugin::EntityTask,
+    mailboxes: &HashMap<Uuid, (u64, Mailbox, OutboundSender)>,
+) {
+    let mailbox = Uuid::parse_str(&task.entity)
+        .ok()
+        .and_then(|id| mailboxes.get(&id));
+    match mailbox {
+        Some((_, mailbox, _)) => mailbox
+            .lock()
+            .unwrap()
+            .push_back(Command::PluginEntityTask(task)),
+        // Paper runs the retired callback instead; the entity is gone, so the task never runs.
+        None => tracing::debug!(entity = %task.entity, "plugin entity task for an absent entity"),
     }
 }
 /// Paper `CraftPlayer#sendTitle`: the timings always go out, then whichever texts are set.

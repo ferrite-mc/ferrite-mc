@@ -27,6 +27,9 @@ pub struct Settings {
     pub player_handler: Option<ferrite_plugin::PlayerHandler>,
     /// Read-only world access for the Bukkit block API.
     pub world_view: Option<std::sync::Arc<dyn ferrite_plugin::WorldView>>,
+    /// Receives the console commands that carry out plugin world and server mutations
+    /// (`World#setBlock`, IP bans, the whitelist toggle); see [`forward_console`].
+    pub console: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// A running embedded JVM with the server's plugins enabled.
@@ -62,6 +65,25 @@ impl PluginBridge {
                     world: Some(settings.world.clone()),
                     player_handler: settings.player_handler,
                     world_view: settings.world_view,
+                    world_handler: settings.console.clone().map(|console| {
+                        let handler: ferrite_plugin::WorldHandler =
+                            Arc::new(move |command| match world_console_line(&command) {
+                                Some(line) => {
+                                    let _ = console.send(line);
+                                }
+                                None => tracing::debug!(
+                                    ?command,
+                                    "plugin world command for a world the server does not own"
+                                ),
+                            });
+                        handler
+                    }),
+                    server_handler: settings.console.map(|console| {
+                        let handler: ferrite_plugin::ServerHandler = Arc::new(move |command| {
+                            let _ = console.send(server_console_line(&command));
+                        });
+                        handler
+                    }),
                     ..Default::default()
                 },
             )
@@ -136,6 +158,70 @@ pub fn world_view(
     Arc::new(SourceWorldView { source })
 }
 
+/// The vanilla command that performs a plugin's world mutation, or `None` for another world.
+///
+/// Bukkit `Block#setType` places the material's default state, exactly like `/setblock`.
+pub fn world_console_line(command: &ferrite_plugin::WorldCommand) -> Option<String> {
+    match command {
+        ferrite_plugin::WorldCommand::SetBlock {
+            world,
+            position,
+            material,
+        } => (*world == ferrite_plugin::default_world_id()).then(|| {
+            format!(
+                "setblock {} {} {} {material}",
+                position.x, position.y, position.z
+            )
+        }),
+    }
+}
+
+/// The vanilla command that performs a plugin's server mutation.
+///
+/// `/ban-ip` has no expiry or source, so a temporary Bukkit ban is stored as a permanent one;
+/// the reason keeps its text on one line because the command reads it as a single argument.
+pub fn server_console_line(command: &ferrite_plugin::ServerCommand) -> String {
+    match command {
+        ferrite_plugin::ServerCommand::BanIp {
+            address, reason, ..
+        } => match reason
+            .as_deref()
+            .map(|reason| reason.replace(['\r', '\n'], " "))
+        {
+            Some(reason) if !reason.trim().is_empty() => format!("ban-ip {address} {reason}"),
+            _ => format!("ban-ip {address}"),
+        },
+        ferrite_plugin::ServerCommand::PardonIp { address } => format!("pardon-ip {address}"),
+        ferrite_plugin::ServerCommand::SetWhitelist { enabled } => {
+            format!("whitelist {}", if *enabled { "on" } else { "off" })
+        }
+    }
+}
+
+/// Runs plugin-issued console commands on the game loop until either side closes.
+pub fn forward_console(
+    mut lines: tokio::sync::mpsc::UnboundedReceiver<String>,
+    game: tokio::sync::mpsc::UnboundedSender<ferrite_net::game::GameMessage>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(command) = lines.recv().await {
+            let (complete, done) = tokio::sync::oneshot::channel();
+            let message = ferrite_net::game::GameMessage::Console {
+                command: command.clone(),
+                complete,
+            };
+            if game.send(message).is_err() {
+                break;
+            }
+            match done.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%command, %error, "plugin command failed"),
+                Err(_) => break,
+            }
+        }
+    })
+}
+
 fn has_plugin_jars(directory: &Path) -> bool {
     std::fs::read_dir(directory).is_ok_and(|entries| {
         entries.filter_map(Result::ok).any(|entry| {
@@ -161,5 +247,46 @@ mod tests {
         std::fs::write(dir.path().join("empty.jar"), "jar").unwrap();
         assert!(has_plugin_jars(dir.path()));
         assert!(!has_plugin_jars(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn plugin_world_and_server_mutations_become_console_commands() {
+        use ferrite_plugin::{BlockPosition, ServerCommand, WorldCommand};
+        let set = |world| WorldCommand::SetBlock {
+            world,
+            position: BlockPosition { x: 1, y: -2, z: 3 },
+            material: "minecraft:stone".into(),
+        };
+        assert_eq!(
+            world_console_line(&set(ferrite_plugin::default_world_id())).as_deref(),
+            Some("setblock 1 -2 3 minecraft:stone")
+        );
+        assert_eq!(world_console_line(&set(uuid::Uuid::nil())), None);
+
+        let address = "10.0.0.1".parse().unwrap();
+        let ban = |reason: Option<&str>| ServerCommand::BanIp {
+            address,
+            reason: reason.map(str::to_owned),
+            expires_unix_millis: Some(1),
+            source: Some("Plugin".into()),
+        };
+        assert_eq!(
+            server_console_line(&ban(Some("spam\nbot"))),
+            "ban-ip 10.0.0.1 spam bot"
+        );
+        assert_eq!(server_console_line(&ban(None)), "ban-ip 10.0.0.1");
+        assert_eq!(server_console_line(&ban(Some(" "))), "ban-ip 10.0.0.1");
+        assert_eq!(
+            server_console_line(&ServerCommand::PardonIp { address }),
+            "pardon-ip 10.0.0.1"
+        );
+        assert_eq!(
+            server_console_line(&ServerCommand::SetWhitelist { enabled: true }),
+            "whitelist on"
+        );
+        assert_eq!(
+            server_console_line(&ServerCommand::SetWhitelist { enabled: false }),
+            "whitelist off"
+        );
     }
 }

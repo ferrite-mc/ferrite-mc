@@ -522,6 +522,15 @@ pub trait ServerHooks: Send + Sync {
     fn run_region_task(&self, _task: RegionTask) -> Result<(), Error> {
         Ok(())
     }
+    /// Entity-scheduler tasks that became due this tick; the server routes them to the region
+    /// that owns the entity.
+    fn take_entity_tasks(&self) -> Vec<EntityTask> {
+        Vec::new()
+    }
+    /// Runs one entity-scheduler task on the thread that owns its entity.
+    fn run_entity_task(&self, _task: EntityTask) -> Result<(), Error> {
+        Ok(())
+    }
     /// Moves the host-side player snapshot with the live player.
     fn update_player_location(
         &self,
@@ -2907,6 +2916,12 @@ impl ServerHooks for PluginHost {
     }
     fn run_region_task(&self, task: RegionTask) -> Result<(), Error> {
         PluginHost::run_region_task(self, task)
+    }
+    fn take_entity_tasks(&self) -> Vec<EntityTask> {
+        PluginHost::take_entity_tasks(self)
+    }
+    fn run_entity_task(&self, task: EntityTask) -> Result<(), Error> {
+        PluginHost::run_entity_task(self, task)
     }
     fn update_player_location(
         &self,
