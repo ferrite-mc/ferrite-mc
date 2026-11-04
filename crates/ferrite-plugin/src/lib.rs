@@ -253,6 +253,14 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `Player#dropItem(boolean)`: throws one or all of the selected stack.
+    DropSelected {
+        all: bool,
+    },
+    /// `Player#dropItem(ItemStack, ...)`: throws a stack that is not taken from the inventory.
+    DropStack {
+        item: ItemSnapshot,
+    },
     /// `Player#openMerchant`: a trading screen with the given offers.
     OpenMerchant {
         title: String,

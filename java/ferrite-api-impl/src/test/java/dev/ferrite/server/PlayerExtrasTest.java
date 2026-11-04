@@ -318,4 +318,17 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("dropItemNaturally(Location,ItemStack)", "dropItem(Location,ItemStack)"), calls);
     }
+
+    @Test void playersThrowItemsThroughTheHost() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var seen = new java.util.ArrayList<Integer>();
+            var item = player.dropItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.APPLE, 2), true, i -> seen.add(i.getItemStack().getAmount()));
+            assertEquals(2, item.getItemStack().getAmount());
+            assertEquals(java.util.List.of(2), seen);
+            assertThrows(IllegalArgumentException.class, () -> player.dropItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR, 1), true, null));
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("dropStack(ItemStack)"), calls);
+    }
 }

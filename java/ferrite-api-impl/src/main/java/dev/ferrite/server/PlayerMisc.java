@@ -127,15 +127,65 @@ public abstract class PlayerMisc extends PlayerStubs {
         result.put("UUID", getUniqueId().toString());
         return result;
     }
-    /** Adds the items to the inventory; what does not fit is returned unless it is dropped, which needs item entities. */
+    // ---- throwing items -------------------------------------------------------------------------
+    /** Throws a stack that is no longer in the inventory, as the player would with the drop key. */
+    private org.bukkit.entity.Item throwStack(org.bukkit.inventory.ItemStack stack, java.util.function.Consumer<org.bukkit.entity.Item> callback) {
+        var handle = DroppedItem.of(getEyeLocation(), stack.clone(), getWorld());
+        if (callback != null) callback.accept(handle);
+        tellHost("dropStack(ItemStack)", stack);
+        return handle;
+    }
+    /** The drop key: one item, or the whole stack, of the selected slot. */
+    @Override public boolean dropItem(boolean dropAll) {
+        var held = getInventory().getItemInMainHand();
+        if (held == null || held.getType().isAir() || held.getAmount() <= 0) return false;
+        tellHost("dropSelected(boolean)", dropAll);
+        return true;
+    }
+    @Override public org.bukkit.entity.Item dropItem(org.bukkit.inventory.ItemStack item, boolean throwRandomly, java.util.function.Consumer<org.bukkit.entity.Item> callback) {
+        Objects.requireNonNull(item, "item");
+        if (item.getType().isAir() || item.getAmount() <= 0) throw new IllegalArgumentException("Cannot drop air");
+        return throwStack(item, callback);
+    }
+    @Override public org.bukkit.entity.Item dropItem(org.bukkit.inventory.EquipmentSlot slot, int amount, boolean throwRandomly, java.util.function.Consumer<org.bukkit.entity.Item> callback) {
+        Objects.requireNonNull(slot, "slot");
+        var inventory = getInventory();
+        var held = inventory.getItem(slot);
+        if (held == null || held.getType().isAir() || amount <= 0) return null;
+        var thrown = held.clone();
+        thrown.setAmount(Math.min(amount, held.getAmount()));
+        var left = held.clone();
+        left.setAmount(held.getAmount() - thrown.getAmount());
+        inventory.setItem(slot, left.getAmount() > 0 ? left : null);
+        return throwStack(thrown, callback);
+    }
+    @Override public org.bukkit.entity.Item dropItem(int slot, int amount, boolean throwRandomly, java.util.function.Consumer<org.bukkit.entity.Item> callback) {
+        var inventory = getInventory();
+        var held = inventory.getItem(slot);
+        if (held == null || held.getType().isAir() || amount <= 0) return null;
+        var thrown = held.clone();
+        thrown.setAmount(Math.min(amount, held.getAmount()));
+        var left = held.clone();
+        left.setAmount(held.getAmount() - thrown.getAmount());
+        inventory.setItem(slot, left.getAmount() > 0 ? left : null);
+        return throwStack(thrown, callback);
+    }
+    /** Adds the items to the inventory; what does not fit is thrown at the player's feet or handed back. */
     @Override public io.papermc.paper.entity.PlayerGiveResult give(Collection<org.bukkit.inventory.ItemStack> items, boolean dropIfFull) {
         Objects.requireNonNull(items, "items");
         var left = getInventory().addItem(items.toArray(new org.bukkit.inventory.ItemStack[0]));
-        if (dropIfFull && !left.isEmpty()) throw new UnsupportedOperationException("Ferrite: not implemented: Player#give with dropIfFull (item entities)");
-        var leftovers = List.copyOf(left.values());
+        var drops = new ArrayList<org.bukkit.entity.Item>();
+        List<org.bukkit.inventory.ItemStack> leftovers;
+        if (dropIfFull) {
+            for (var rest : left.values()) drops.add(throwStack(rest, null));
+            leftovers = List.of();
+        } else {
+            leftovers = List.copyOf(left.values());
+        }
+        var thrown = List.copyOf(drops);
         return new io.papermc.paper.entity.PlayerGiveResult() {
             @Override public Collection<org.bukkit.inventory.ItemStack> leftovers() { return leftovers; }
-            @Override public Collection<org.bukkit.entity.Item> drops() { return List.of(); }
+            @Override public Collection<org.bukkit.entity.Item> drops() { return thrown; }
         };
     }
 

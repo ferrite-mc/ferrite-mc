@@ -385,6 +385,12 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
         }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "wakeup(boolean)" => PluginPacket::WakeUp,
+        "dropSelected(boolean)" => PluginPacket::DropSelected {
+            all: arg(0)? == "true",
+        },
+        "dropStack(ItemStack)" => PluginPacket::DropStack {
+            item: item_snapshot(arg(0)?)??,
+        },
         "bossBarAdd(String,String,float,int,int,int)" => {
             PluginPacket::BossBar(BossBarChange::Add {
                 id: Uuid::parse_str(arg(0)?).ok()?,
@@ -866,6 +872,23 @@ mod tests {
         assert_eq!(
             packet(call("wakeup(boolean)", &["true"])),
             Some(PluginPacket::WakeUp)
+        );
+        assert_eq!(
+            packet(call("dropSelected(boolean)", &["true"])),
+            Some(PluginPacket::DropSelected { all: true })
+        );
+        assert_eq!(
+            packet(call("dropStack(ItemStack)", &[&format!("EMERALD{PART}4")])),
+            Some(PluginPacket::DropStack {
+                item: ferrite_plugin::ItemSnapshot {
+                    material: "minecraft:emerald".into(),
+                    amount: 4
+                }
+            })
+        );
+        assert_eq!(
+            packet(call("dropStack(ItemStack)", &[&format!("AIR{PART}1")])),
+            None
         );
         let bar = Uuid::from_u128(9).to_string();
         assert_eq!(

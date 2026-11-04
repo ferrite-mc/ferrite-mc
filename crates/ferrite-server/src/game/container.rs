@@ -767,6 +767,19 @@ impl Player {
                 self.open_plugin_merchant(&title, &trades)
             }
             PluginPacket::WakeUp => super::blocks::wake(self),
+            PluginPacket::DropSelected { all } => {
+                self.drop_selected(all);
+                // The client did not take the item out itself, so show it the new contents.
+                let full = self.menus.current().broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+            }
+            PluginPacket::DropStack { item } => {
+                if let Some(id) = ferrite_item::item_id(&item.material) {
+                    self.menus
+                        .thrown
+                        .push(ItemStack::with_count(id, i32::from(item.amount)));
+                }
+            }
             PluginPacket::BossBar(change) => {
                 use ferrite_plugin::BossBarChange as C;
                 use ferrite_protocol::packets::play::BossEvent as E;
