@@ -232,6 +232,23 @@ pub fn preload() {
     BOOK.get_or_init(load);
 }
 
+/// The recipe a plugin-supplied grid crafts: its id, result item key and count. Special recipes
+/// without a fixed result match nothing.
+pub fn match_for_plugin(
+    names: &[Option<&str>],
+    width: usize,
+    height: usize,
+) -> Option<(String, String, u32)> {
+    let book = BOOK.get_or_init(load).as_ref()?;
+    let recipe = book.0.match_crafting(names, width, height)?;
+    let result = recipe.result()?;
+    Some((
+        recipe.id.clone(),
+        result.item.clone(),
+        u32::try_from(result.count).ok()?,
+    ))
+}
+
 /// The crafter every menu uses.
 pub fn crafter() -> &'static dyn Crafter {
     match BOOK.get_or_init(load) {

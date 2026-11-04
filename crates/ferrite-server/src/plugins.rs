@@ -2,6 +2,7 @@
 mod appearance;
 mod blocks;
 mod cooldown;
+mod craft;
 mod extra;
 pub mod facts;
 mod inventory;
@@ -116,6 +117,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = facts::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = craft::answer(call) {
                                 return Some(reply);
                             }
                             if let Some(reply) = rules::answer(call) {

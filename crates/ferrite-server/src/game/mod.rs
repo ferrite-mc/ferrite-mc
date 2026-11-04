@@ -45,6 +45,7 @@ mod commands_server;
 mod commands_world;
 mod container;
 mod crafting;
+pub use crafting::match_for_plugin as match_crafting_for_plugin;
 mod dispenser;
 mod drops;
 mod entity_index;
