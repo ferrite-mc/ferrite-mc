@@ -97,4 +97,14 @@ class PlayerExtrasTest {
         player.resetIdleDuration();
         assertTrue(player.getIdleDuration().toSeconds() < 5);
     }
+
+    @Test void nmsTitlePacketsReachThePlayerApi() {
+        var connection = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().connection;
+        var text = net.minecraft.network.chat.Component.literal("Hi");
+        connection.send(new net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket(text));
+        connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket(5, 40, 5));
+        connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket(text));
+        connection.send(new net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket(text));
+        connection.send(new net.minecraft.network.protocol.game.ClientboundClearTitlesPacket(true));
+    }
 }

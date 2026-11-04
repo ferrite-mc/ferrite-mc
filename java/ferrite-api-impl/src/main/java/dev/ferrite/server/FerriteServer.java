@@ -499,4 +499,19 @@ public class FerriteServer extends ServerStubs {
         }
         return out;
     }
+    @Override public boolean addRecipes(Iterable<org.bukkit.inventory.Recipe> recipes) { boolean all = true; for (var recipe : recipes) all &= addRecipe(recipe); return all; }
+    @Override public boolean removeRecipes(Iterable<org.bukkit.NamespacedKey> keys) { boolean all = true; for (var key : keys) all &= removeRecipe(key); return all; }
+    @Override public boolean reloadCommandAliases() { return true; }
+    @Override public boolean suggestPlayerNamesWhenNullTabCompletions() { return true; }
+    @Override public void updateResources() { }
+    private final org.bukkit.Server.Spigot spigot = new org.bukkit.Server.Spigot() {
+        @Override public org.bukkit.configuration.file.YamlConfiguration getConfig() { return new org.bukkit.configuration.file.YamlConfiguration(); }
+        @Override public org.bukkit.configuration.file.YamlConfiguration getBukkitConfig() { return new org.bukkit.configuration.file.YamlConfiguration(); }
+        @Override public org.bukkit.configuration.file.YamlConfiguration getSpigotConfig() { return new org.bukkit.configuration.file.YamlConfiguration(); }
+        @Override public org.bukkit.configuration.file.YamlConfiguration getPaperConfig() { return new org.bukkit.configuration.file.YamlConfiguration(); }
+        @Override public void broadcast(net.md_5.bungee.api.chat.BaseComponent component) { broadcastMessage(net.md_5.bungee.api.chat.TextComponent.toLegacyText(component)); }
+        @Override public void broadcast(net.md_5.bungee.api.chat.BaseComponent... components) { broadcastMessage(net.md_5.bungee.api.chat.TextComponent.toLegacyText(components)); }
+        @Override public void restart() { FerriteServer.this.restart(); }
+    };
+    @Override public org.bukkit.Server.Spigot spigot() { return spigot; }
 }
