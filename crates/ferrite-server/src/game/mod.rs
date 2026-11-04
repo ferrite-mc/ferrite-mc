@@ -827,6 +827,16 @@ async fn run(
                     commands::Weather::Thunder => crate::plugins::worldinfo::Sky::Thunder,
                 },
                 weather_duration: state.weather_duration,
+                border: crate::plugins::worldinfo::Border {
+                    center_x: state.border.center_x,
+                    center_z: state.border.center_z,
+                    diameter: state.border.diameter,
+                    warning_distance: state.border.warning_distance,
+                    warning_ticks: state.border.warning_time,
+                    damage_amount: state.border.damage_per_block,
+                    damage_buffer: state.border.damage_buffer,
+                },
+                seed: state.seed,
             }
         })
     });

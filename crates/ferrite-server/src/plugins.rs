@@ -532,6 +532,9 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
         ("Player", "saveData()") => console("save-all".into(), ""),
         ("Server", "reload()" | "reloadData()") => console("reload".into(), ""),
         ("World", "setGameRuleValue(String,String)") => console(rules::set_line(call)?, "true"),
+        ("World", method) if method.starts_with("border") => {
+            console(worldinfo::border_line(call)?, "true")
+        }
         ("World", "setStorm(boolean)") => {
             default_world(&call.subject)?;
             let rain = arg(0)? == "true";

@@ -92,6 +92,10 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getUID" -> id; case "getName" -> name; case "getTime", "getFullTime" -> hostLong(method.getName() + "()", time);
             case "getGameTime", "hasStorm", "isThundering", "isClearWeather", "getWeatherDuration", "getThunderDuration", "getClearWeatherDuration", "getDifficulty" -> hostValue(method, null);
             case "getMoonPhase" -> moonPhase(method);
+            case "getWorldBorder" -> border();
+            case "getSeed" -> hostLong("getSeed()", 0L);
+            case "isDayTime" -> { long t = hostLong("getTime()", time) % 24_000; yield t < 12_000 || t > 23_960; }
+            case "isHardcore" -> false;
             case "getSpawnLocation" -> location(spawn);
             case "getHighestBlockYAt" -> { if (args.length > 2 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) throw new UnsupportedOperationException("Ferrite: heightmap-specific queries are not implemented"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) { int value = Native.highestBlockY(id.toString(), x, z); if (value == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + x + "," + z); height = value; heights.put(new Column(x, z), height); } yield height; }
             case "getBiome" -> { int x, y, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = (int) args[1]; z = (int) args[2]; } var key = Native.biomeAt(id.toString(), x, y, z); if (key == null) throw new UnsupportedOperationException("Ferrite: no biome data at " + x + "," + y + "," + z); var biome = org.bukkit.Registry.BIOME.get(org.bukkit.NamespacedKey.fromString(key)); if (biome == null) throw new IllegalStateException("Unknown biome " + key); yield biome; }
@@ -115,6 +119,12 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> ticksPerSpawns = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean allowAnimals = true, allowMonsters = true;
 
+    private volatile org.bukkit.WorldBorder worldBorder;
+    private org.bukkit.WorldBorder border() {
+        var b = worldBorder;
+        if (b == null) worldBorder = b = new FerriteHostBorder(proxy, id);
+        return b;
+    }
     private long hostLong(String method, long fallback) {
         try { return Long.parseLong((String) HostBridge.call("World", id, method, String.class)); }
         catch (UnsupportedOperationException offline) { return fallback; }
