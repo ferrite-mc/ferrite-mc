@@ -317,6 +317,12 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         component_json: Option<String>,
     },
+    /// `World#createExplosion` on the default world.
+    Explosion {
+        center: [f64; 3],
+        power: f32,
+        fire: bool,
+    },
     /// Bukkit `hidePlayer`/`showPlayer`: whether `viewer` sees `target` (entity and tab list).
     Visibility {
         viewer: uuid::Uuid,

@@ -1262,6 +1262,12 @@ async fn run(
                      let name = component_json.as_deref().map(json_text);
                      worlds.schedule_global(move |g| g.set_display_name(player, name));
                  }
+                 Some(ferrite_plugin::PlayerCommand::Explosion { center, power, fire }) => {
+                    let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
+                    if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_explosions.push((center, power, fire)));
+                    }
+                }
                  Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
                     worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                 }
@@ -1706,6 +1712,8 @@ fn route_plugin_command(
         }
         // The game loop sends visibility to the global region before calling this.
         PlayerCommand::Visibility { .. } => {}
+        // The game loop hands explosions to the region owning the chunk before calling this.
+        PlayerCommand::Explosion { .. } => {}
         // The game loop sends display names to the global region before calling this.
         PlayerCommand::DisplayName { .. } => {
             tracing::debug!("plugin display name reached the player router")

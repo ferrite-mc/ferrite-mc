@@ -503,6 +503,8 @@ pub struct Player {
 }
 #[derive(Default)]
 pub struct Region {
+    /// Explosions plugins asked for: center, power and whether fire is left behind.
+    pub plugin_explosions: Vec<([f64; 3], f32, bool)>,
     pub players: HashMap<Uuid, Player>,
     pub entities: EntityStore,
     generator: FlatGenerator,
@@ -558,6 +560,7 @@ impl RegionData for Region {
             .map(|(id, _)| *id)
             .collect();
         let mut result = Self {
+            plugin_explosions: Vec::new(),
             players: HashMap::new(),
             rng: Rng::default(),
             beacon_clock: 0,
@@ -4082,7 +4085,7 @@ impl Region {
             seen: Default::default(),
         };
         let ids: Vec<_> = self.players.keys().copied().collect();
-        let mut explosions = Vec::new();
+        let mut explosions = std::mem::take(&mut self.plugin_explosions);
         for id in ids {
             let mut p = self.players.remove(&id).unwrap();
             let updated = match &timings {
