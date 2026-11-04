@@ -33,6 +33,9 @@ pub enum Command {
     SetMode(i32),
     /// Plugin-chosen abilities; the game mode still decides instant build and creative flight.
     /// A client-only game event a plugin asked for.
+    PluginVisualExperience {
+        progress: f32,
+    },
     PluginGameEvent {
         event: u8,
         value: f32,
@@ -2324,6 +2327,17 @@ impl Player {
                         &GameEvent {
                             event: 3,
                             value: mode as f32,
+                        },
+                    );
+                    continue;
+                }
+                Command::PluginVisualExperience { progress } => {
+                    send(
+                        self,
+                        &SetExperience {
+                            progress,
+                            level: VarInt(self.experience_level),
+                            total: VarInt(0),
                         },
                     );
                     continue;

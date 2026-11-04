@@ -102,6 +102,26 @@ mod tests {
     }
 
     #[test]
+    fn plugin_visual_experience_reaches_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let command = ferrite_plugin::PlayerCommand::VisualExperience {
+            player,
+            progress: 0.75,
+            level: 12,
+        };
+        let sent = routed(command.clone(), player);
+        assert_eq!(
+            sent.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&SetExperience {
+                progress: 0.75,
+                level: VarInt(12),
+                total: VarInt(0)
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
     fn plugin_visual_health_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
         let command = ferrite_plugin::PlayerCommand::VisualHealth {
@@ -1278,6 +1298,30 @@ fn route_plugin_command(
                     .lock()
                     .unwrap()
                     .push_back(Command::PluginDamage { amount });
+            }
+        }
+        PlayerCommand::VisualExperienceCurrentLevel { player, progress } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginVisualExperience { progress });
+            }
+        }
+        PlayerCommand::VisualExperience {
+            player,
+            progress,
+            level,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &SetExperience {
+                        progress,
+                        level: VarInt(level),
+                        total: VarInt(0),
+                    },
+                );
             }
         }
         PlayerCommand::VisualHealth {

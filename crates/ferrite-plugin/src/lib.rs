@@ -257,6 +257,15 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         amount: f32,
     },
+    VisualExperienceCurrentLevel {
+        player: uuid::Uuid,
+        progress: f32,
+    },
+    VisualExperience {
+        player: uuid::Uuid,
+        progress: f32,
+        level: i32,
+    },
     VisualHealth {
         player: uuid::Uuid,
         health: f32,

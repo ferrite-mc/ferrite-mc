@@ -1,6 +1,33 @@
 use ferrite_plugin::{HostCall, PlayerCommand};
 
 pub fn visual_command(call: &HostCall) -> Option<PlayerCommand> {
+    if call.owner == "Player"
+        && call.method == "sendExperienceChange(float)"
+        && call.args.len() == 1
+    {
+        let player = call.subject.parse().ok()?;
+        let progress: f32 = call.args[0].parse().ok()?;
+        if !(0.0..=1.0).contains(&progress) {
+            return None;
+        }
+        return Some(PlayerCommand::VisualExperienceCurrentLevel { player, progress });
+    }
+    if call.owner == "Player"
+        && call.method == "sendExperienceChange(float,int)"
+        && call.args.len() == 2
+    {
+        let player = call.subject.parse().ok()?;
+        let progress: f32 = call.args[0].parse().ok()?;
+        let level: i32 = call.args[1].parse().ok()?;
+        if !(0.0..=1.0).contains(&progress) || level < 0 {
+            return None;
+        }
+        return Some(PlayerCommand::VisualExperience {
+            player,
+            progress,
+            level,
+        });
+    }
     if call.owner != "Player"
         || call.method != "sendHealthUpdate(double,int,float)"
         || call.args.len() != 3
@@ -47,6 +74,35 @@ mod tests {
                 health: 12.5,
                 food: 9,
                 saturation: 2.5
+            })
+        );
+    }
+    #[test]
+    fn experience_update_produces_a_client_only_packet_command() {
+        let mut call = call(&["0.75", "12"]);
+        call.method = "sendExperienceChange(float,int)".into();
+        assert_eq!(
+            visual_command(&call),
+            Some(PlayerCommand::VisualExperience {
+                player: "00000000-0000-0000-0000-000000000007".parse().unwrap(),
+                progress: 0.75,
+                level: 12
+            })
+        );
+        call.args[0] = "NaN".into();
+        assert_eq!(visual_command(&call), None);
+        call.args = vec!["0.5".into(), "-1".into()];
+        assert_eq!(visual_command(&call), None);
+    }
+    #[test]
+    fn experience_update_without_level_is_accepted() {
+        let mut call = call(&["0.25"]);
+        call.method = "sendExperienceChange(float)".into();
+        assert_eq!(
+            visual_command(&call),
+            Some(PlayerCommand::VisualExperienceCurrentLevel {
+                player: "00000000-0000-0000-0000-000000000007".parse().unwrap(),
+                progress: 0.25
             })
         );
     }
