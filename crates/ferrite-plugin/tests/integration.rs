@@ -99,7 +99,8 @@ fn plugin_lifecycle() {
     let cfg = PluginConfig {
         host_call_handler: Some(std::sync::Arc::new(move |call| {
             captured_host_calls.lock().unwrap().push(call.clone());
-            (call.name() == "clearActivePotionEffects").then(String::new)
+            matches!(call.name(), "clearActivePotionEffects" | "addPotionEffect")
+                .then(|| "true".into())
         })),
         server_handler: Some(std::sync::Arc::new(move |command| {
             captured_server_commands.lock().unwrap().push(command)
@@ -228,6 +229,16 @@ fn plugin_lifecycle() {
             && call.method == "clearActivePotionEffects()"
             && call.subject.len() == 36),
         "generic host call was not routed: {routed:?}"
+    );
+    assert!(
+        routed
+            .iter()
+            .any(|call| call.method == "addPotionEffect(PotionEffect)"
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|a| a.starts_with("minecraft:speed"))),
+        "potion effect was not encoded: {routed:?}"
     );
     assert!(server_commands.lock().unwrap().iter().any(|command| matches!(command, ServerCommand::BanIp { address, .. } if *address == "192.0.2.2".parse::<std::net::IpAddr>().unwrap())));
     assert!(messages.lock().unwrap().iter().any(|command| matches!(command, PlayerCommand::SetInventorySlot { player, slot: 0, .. } if *player == player_id)));

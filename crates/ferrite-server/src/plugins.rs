@@ -187,6 +187,37 @@ pub fn world_console_line(command: &ferrite_plugin::WorldCommand) -> Option<Stri
     }
 }
 
+/// A namespaced resource key such as `minecraft:speed`; refuses anything a command could misread.
+fn is_resource_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '_' | '-' | '.' | '/')
+        })
+}
+
+/// The world a `World#...` call targets, only when it is the world the server's commands act on.
+fn default_world(subject: &str) -> Option<()> {
+    (uuid::Uuid::parse_str(subject).ok()? == ferrite_plugin::default_world_id()).then_some(())
+}
+
+/// Parses an encoded `Location` (`world, x, y, z, yaw, pitch`) into its world id and block position.
+fn location_block(encoded: &str) -> Option<(uuid::Uuid, i64, i64, i64)> {
+    let mut parts = encoded.split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+    let world = parts.next()?;
+    let mut coordinate = || -> Option<i64> {
+        let value: f64 = parts.next()?.parse().ok()?;
+        value.is_finite().then(|| value.floor() as i64)
+    };
+    let (x, y, z) = (coordinate()?, coordinate()?, coordinate()?);
+    // Bukkit encodes a location's world by name; only the default world has a console target.
+    let world = if world == "world" {
+        ferrite_plugin::default_world_id()
+    } else {
+        uuid::Uuid::parse_str(world).ok()?
+    };
+    Some((world, x, y, z))
+}
+
 /// What the host does for a generic Bukkit/Paper method call.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HostAction {
@@ -243,6 +274,88 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
             console(format!("effect clear {}", player?), "")
         }
         ("Player", "stopAllSounds()") => console(format!("stopsound {} *", player?), ""),
+        ("Player", "addPotionEffect(PotionEffect)") => {
+            let effect = arg(0)?;
+            let mut parts = effect.split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+            let key = parts.next().filter(|key| is_resource_key(key))?;
+            let ticks: i64 = parts.next()?.parse().ok()?;
+            let amplifier: u32 = parts.next()?.parse().ok().filter(|a| *a <= 255)?;
+            let _ambient = parts.next()?;
+            let particles = parts.next()? == "true";
+            let hide = if particles { "false" } else { "true" };
+            let line = if ticks < 0 {
+                format!("effect give {} {key} infinite {amplifier} {hide}", player?)
+            } else {
+                let seconds = ((ticks + 19) / 20).clamp(1, 1_000_000);
+                format!("effect give {} {key} {seconds} {amplifier} {hide}", player?)
+            };
+            console(line, "true")
+        }
+        ("Player", "removePotionEffect(PotionEffectType)") => {
+            let key = arg(0).filter(|key| is_resource_key(key))?;
+            console(format!("effect clear {} {key}", player?), "")
+        }
+        ("Player", "damage(double)") => {
+            let amount: f64 = arg(0)?
+                .parse()
+                .ok()
+                .filter(|a: &f64| a.is_finite() && *a >= 0.0)?;
+            console(format!("damage {} {amount}", player?), "")
+        }
+        ("Player", "setBedSpawnLocation(Location,boolean)") => {
+            let (world, x, y, z) = location_block(arg(0)?)?;
+            (world == ferrite_plugin::default_world_id())
+                .then(|| HostAction::Console {
+                    line: format!("spawnpoint {} {x} {y} {z}", player.unwrap_or_default()),
+                    reply: String::new(),
+                })
+                .filter(|_| player.is_some())
+        }
+        ("Server", "reload()" | "reloadData()") => console("reload".into(), ""),
+        ("World", "setStorm(boolean)") => {
+            default_world(&call.subject)?;
+            let rain = arg(0)? == "true";
+            console(
+                format!("weather {}", if rain { "rain" } else { "clear" }),
+                "",
+            )
+        }
+        ("World", "setThundering(boolean)") => {
+            default_world(&call.subject)?;
+            let thunder = arg(0)? == "true";
+            console(
+                format!("weather {}", if thunder { "thunder" } else { "clear" }),
+                "",
+            )
+        }
+        ("World", "setTime(long)") => {
+            default_world(&call.subject)?;
+            let time: i64 = arg(0)?.parse().ok()?;
+            console(format!("time set {}", time.rem_euclid(24_000)), "")
+        }
+        ("World", "setDifficulty(Difficulty)") => {
+            default_world(&call.subject)?;
+            let difficulty = arg(0)?.to_ascii_lowercase();
+            matches!(difficulty.as_str(), "peaceful" | "easy" | "normal" | "hard").then(|| {
+                HostAction::Console {
+                    line: format!("difficulty {difficulty}"),
+                    reply: String::new(),
+                }
+            })
+        }
+        ("World", "setSpawnLocation(int,int,int)") => {
+            default_world(&call.subject)?;
+            let (x, y, z) = (
+                arg(0)?.parse::<i32>().ok()?,
+                arg(1)?.parse::<i32>().ok()?,
+                arg(2)?.parse::<i32>().ok()?,
+            );
+            console(format!("setworldspawn {x} {y} {z}"), "true")
+        }
+        ("World", "save()") => {
+            default_world(&call.subject)?;
+            console("save-all".into(), "")
+        }
         _ => None,
     }
 }
@@ -378,6 +491,115 @@ mod tests {
         assert_eq!(
             host_action(&call("Player", id, "noSuchMethod()", &[])),
             None
+        );
+    }
+
+    #[test]
+    fn host_calls_cover_effects_damage_world_state_and_spawn() {
+        let call =
+            |owner: &str, subject: &str, method: &str, args: &[&str]| ferrite_plugin::HostCall {
+                owner: owner.into(),
+                subject: subject.into(),
+                method: method.into(),
+                args: args.iter().map(|a| (*a).to_owned()).collect(),
+            };
+        let line = |call: ferrite_plugin::HostCall| match host_action(&call) {
+            Some(HostAction::Console { line, .. }) => Some(line),
+            _ => None,
+        };
+        let id = "123e4567-e89b-12d3-a456-426614174000";
+        let world = ferrite_plugin::default_world_id().to_string();
+        let sep = ferrite_plugin::HOST_ITEM_SEPARATOR;
+        let effect = format!("minecraft:speed{sep}205{sep}1{sep}false{sep}true{sep}true");
+        assert_eq!(
+            line(call(
+                "Player",
+                id,
+                "addPotionEffect(PotionEffect)",
+                &[&effect]
+            )),
+            Some(format!("effect give {id} minecraft:speed 11 1 false"))
+        );
+        let forever = format!("minecraft:glowing{sep}-1{sep}0{sep}false{sep}false{sep}true");
+        assert_eq!(
+            line(call(
+                "Player",
+                id,
+                "addPotionEffect(PotionEffect)",
+                &[&forever]
+            )),
+            Some(format!(
+                "effect give {id} minecraft:glowing infinite 0 true"
+            ))
+        );
+        assert_eq!(
+            line(call(
+                "Player",
+                id,
+                "removePotionEffect(PotionEffectType)",
+                &["minecraft:speed"]
+            )),
+            Some(format!("effect clear {id} minecraft:speed"))
+        );
+        // A key that could smuggle a second argument is refused.
+        assert_eq!(
+            line(call(
+                "Player",
+                id,
+                "removePotionEffect(PotionEffectType)",
+                &["speed @a"]
+            )),
+            None
+        );
+        assert_eq!(
+            line(call("Player", id, "damage(double)", &["4.5"])),
+            Some(format!("damage {id} 4.5"))
+        );
+        assert_eq!(line(call("Player", id, "damage(double)", &["-1"])), None);
+        let bed = format!("world{sep}10.7{sep}64{sep}-3.2{sep}0{sep}0");
+        assert_eq!(
+            line(call(
+                "Player",
+                id,
+                "setBedSpawnLocation(Location,boolean)",
+                &[&bed, "true"]
+            )),
+            Some(format!("spawnpoint {id} 10 64 -4"))
+        );
+        assert_eq!(
+            line(call("World", &world, "setStorm(boolean)", &["true"])),
+            Some("weather rain".into())
+        );
+        assert_eq!(
+            line(call("World", &world, "setTime(long)", &["25000"])),
+            Some("time set 1000".into())
+        );
+        assert_eq!(
+            line(call(
+                "World",
+                &world,
+                "setDifficulty(Difficulty)",
+                &["HARD"]
+            )),
+            Some("difficulty hard".into())
+        );
+        assert_eq!(
+            line(call(
+                "World",
+                &world,
+                "setSpawnLocation(int,int,int)",
+                &["1", "70", "2"]
+            )),
+            Some("setworldspawn 1 70 2".into())
+        );
+        // Another world has no console target.
+        assert_eq!(
+            line(call("World", id, "setStorm(boolean)", &["true"])),
+            None
+        );
+        assert_eq!(
+            line(call("Server", "server", "reloadData()", &[])),
+            Some("reload".into())
         );
     }
 

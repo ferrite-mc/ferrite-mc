@@ -32,6 +32,8 @@ public final class HostBridge {
         if (value instanceof org.bukkit.util.Vector v) return v.getX() + "" + ITEM + v.getY() + ITEM + v.getZ();
         if (value instanceof org.bukkit.inventory.ItemStack s) return s.getType().name() + ITEM + s.getAmount();
         if (value instanceof org.bukkit.Material m) return m.name();
+        if (value instanceof org.bukkit.potion.PotionEffect e) return e.getType().getKey().toString() + ITEM + e.getDuration() + ITEM + e.getAmplifier() + ITEM + e.isAmbient() + ITEM + e.hasParticles() + ITEM + e.hasIcon();
+        if (value instanceof org.bukkit.Keyed k) return k.getKey().toString();
         if (value instanceof org.bukkit.plugin.Plugin p) return p.getName();
         if (value instanceof org.bukkit.NamespacedKey k) return k.toString();
         if (value instanceof net.kyori.adventure.key.Keyed k) return k.key().asString();

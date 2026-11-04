@@ -56,8 +56,10 @@ Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(
   `UnsafeValues` 등 약 1000개 메서드와 동적 프록시(World/Block/Inventory 등)의 `default` 분기가 더 이상 곧바로
   예외를 던지지 않고 `HostBridge` → `Native.hostCall` → Rust `HostCallHandler`로 전달됩니다. 호스트가 처리하지
   않는 메서드만 `UnsupportedOperationException("Ferrite: not implemented: Owner#method(types)")`를 던지므로
-  빈 곳이 정확히 드러납니다. 현재 호스트가 실제로 처리하는 것은 일부(`broadcastMessage`, `savePlayers`,
-  `shutdown`, `reloadWhitelist`, `setDefaultGameMode`, `clearActivePotionEffects`, `stopAllSounds` 등)이고, 나머지
+  빈 곳이 정확히 드러납니다. 현재 호스트가 실제로 처리하는 것은 일부(서버: `broadcastMessage`, `savePlayers`, `shutdown`, `reload`,
+  `reloadWhitelist`, `setDefaultGameMode` / 플레이어: `addPotionEffect`, `removePotionEffect`,
+  `clearActivePotionEffects`, `damage`, `setBedSpawnLocation`, `stopAllSounds` / 월드: `setStorm`, `setThundering`,
+  `setTime`, `setDifficulty`, `setSpawnLocation`, `save`)이고, 나머지
   핸들러를 채우는 작업이 진행 중입니다. 즉 **라우팅은 전부 연결됐지만 구현은 아직 전부가 아닙니다.**
 - **목표**: Spigot·Paper·Folia 플러그인이 모두 동작하는 것. NMS(`net.minecraft.*`)·CraftBukkit 타입에 의존하는
   플러그인도 호환되어야 하며, 이는 라우팅 이후의 별도 단계입니다.
