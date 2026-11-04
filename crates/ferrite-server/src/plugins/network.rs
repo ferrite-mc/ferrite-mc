@@ -332,6 +332,7 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             PluginPacket::ServerLinks(links)
         }
         "updateInventory()" => PluginPacket::ResyncInventory,
+        "wakeup(boolean)" => PluginPacket::WakeUp,
         "setWindowProperty(int,int)" => PluginPacket::WindowProperty {
             id: arg(0)?.parse().ok().filter(|id| *id >= 0)?,
             value: arg(1)?.parse().ok()?,
@@ -745,6 +746,10 @@ mod tests {
         assert_eq!(
             packet(call("setWindowProperty(int,int)", &["-1", "5"])),
             None
+        );
+        assert_eq!(
+            packet(call("wakeup(boolean)", &["true"])),
+            Some(PluginPacket::WakeUp)
         );
         assert_eq!(packet(call("sendOpLevel(byte)", &["9"])), None);
         assert_eq!(

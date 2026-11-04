@@ -669,6 +669,7 @@ impl Player {
                     );
                 }
             }
+            PluginPacket::WakeUp => super::blocks::wake(self),
             PluginPacket::ResyncInventory => {
                 let full = self.menus.current().broadcast_full_state(&self.inventory);
                 emit(self, vec![full]);

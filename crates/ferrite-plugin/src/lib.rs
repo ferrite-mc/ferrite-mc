@@ -209,6 +209,8 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `Player#wakeup`: gets the player out of the bed they sleep in, if any.
+    WakeUp,
     /// One property of the open menu (`Player#setWindowProperty`, `ClientboundContainerSetDataPacket`).
     WindowProperty {
         id: i16,
