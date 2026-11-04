@@ -25,14 +25,23 @@ pub(super) struct Bot {
     commands: Option<Vec<u8>>,
     /// Chunks per tick sent in automatic `ChunkBatchReceived` acknowledgements.
     chunks_per_tick: f32,
+    /// Set by a test that expects the server to close: writes to a closed socket (including
+    /// the automatic replies made while reading) are then ignored instead of panicking.
+    closing: bool,
 }
 impl Bot {
     pub(super) async fn send<P: Packet>(&mut self, p: &P) {
+        if let Err(error) = self.try_send(p).await {
+            assert!(self.closing, "send failed: {error}");
+        }
+    }
+    /// Like [`Self::send`], for a test that expects the server may already have closed.
+    async fn try_send<P: Packet>(&mut self, p: &P) -> std::io::Result<()> {
         let mut body = Vec::new();
         encode_packet(p, &mut body);
         let mut wire = Vec::new();
         self.encoder.encode(&body, &mut wire);
-        self.stream.write_all(&wire).await.unwrap();
+        self.stream.write_all(&wire).await
     }
     async fn raw(&mut self, id: i32, text: &str) {
         let mut body = Vec::new();
@@ -53,19 +62,24 @@ impl Bot {
         .await;
     }
     async fn read(&mut self) -> Vec<u8> {
-        tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            loop {
-                if let Some(frame) = self.decoder.next_frame().unwrap() {
-                    return frame;
-                }
-                let mut bytes = [0u8; 8192];
-                let n = self.stream.read(&mut bytes).await.unwrap();
-                assert_ne!(n, 0);
-                self.decoder.feed(&bytes[..n]);
+        tokio::time::timeout(std::time::Duration::from_secs(60), self.try_read())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    /// The next frame, or the socket error (end of stream is `UnexpectedEof`).
+    async fn try_read(&mut self) -> std::io::Result<Vec<u8>> {
+        loop {
+            if let Some(frame) = self.decoder.next_frame().unwrap() {
+                return Ok(frame);
             }
-        })
-        .await
-        .unwrap()
+            let mut bytes = [0u8; 8192];
+            let n = self.stream.read(&mut bytes).await?;
+            if n == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            self.decoder.feed(&bytes[..n]);
+        }
     }
     async fn next_play(&mut self) -> (i32, Vec<u8>) {
         let bytes = self.read().await;
@@ -143,6 +157,7 @@ impl Bot {
             decoder: FrameDecoder::default(),
             commands: None,
             chunks_per_tick: 64.0,
+            closing: false,
         };
         b.send(&Intention {
             protocol_version: 777,
@@ -3425,7 +3440,9 @@ async fn redstone_torch_inverter_for_bot_on_fixture_world() {
 /// slow down the region ticks or the other players' connections.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slow_reader_is_disconnected_without_stalling_ticks() {
-    use ferrite_protocol::packets::play::{ClientboundPlayerChat, PlayDisconnect};
+    use ferrite_protocol::packets::play::{
+        ClientboundPlayerChat, PlayDisconnect, PlayerInfoRemove,
+    };
     let world = World::start();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -3449,22 +3466,43 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
     let mut slow = Bot::join_with_rate_and_receive_buffer(addr, "Slow", 1.0, Some(8 * 1024)).await;
     let mut fast = Bot::join_with_rate(addr, "Fast", 1.0).await;
     let before = world.tick_samples.lock().unwrap().len();
-    // One acknowledgement makes the next tick queue a full 64-chunk batch; the bot never reads
-    // it, so the per-connection queue fills while its writer is stuck on the socket. The ack is
-    // fully written before the server can drop the connection, so the disconnect is not lost
-    // to a reset.
-    slow.send(&ChunkBatchReceived {
-        chunks_per_tick: 64.0,
-    })
-    .await;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // The server is expected to drop this connection, so the bot's writes may fail from here.
+    slow.closing = true;
+    // Each acknowledgement lets the next tick queue a full 64-chunk batch (~391 KiB) that the
+    // bot never reads. The writer's budget is released when it takes a packet off the queue,
+    // not when the write finishes, so a writer that wakes while the first batch is still being
+    // queued can pull all of it into one blocked socket write and leave the queue nearly
+    // empty. Later acknowledgements arrive while that write is stuck, so their batches must
+    // overflow the 128 KiB queue. Once the queue has overflowed, the server may close and a
+    // further acknowledgement fails to send, which is expected.
+    for _ in 0..4 {
+        if slow
+            .try_send(&ChunkBatchReceived {
+                chunks_per_tick: 64.0,
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
     // Other players are unaffected: their chat still arrives while the slow bot is blocked.
     fast.chat("still moving").await;
+    // The slow bot may already be dropped here, so its `player_info_remove` is remembered.
+    let mut slow_removed = false;
     let chat = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
-            let body = fast.until(66).await;
-            let message = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
-            if message.body.content == "still moving" {
+            let (id, body) = fast.next_play().await;
+            if id == PlayerInfoRemove::ID {
+                slow_removed = true;
+            } else if id == ClientboundPlayerChat::ID
+                && ClientboundPlayerChat::decode(&mut body.as_slice())
+                    .unwrap()
+                    .body
+                    .content
+                    == "still moving"
+            {
                 return;
             }
         }
@@ -3473,28 +3511,49 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
     assert!(chat.is_ok(), "chat stalled while a slow client was blocked");
     // Let the slow bot read again; it must receive the timed-out disconnect.
     let mut reason = None;
+    let mut reset = None;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let Ok((id, body)) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), slow.next_play()).await
-        else {
-            break;
-        };
-        if id == PlayDisconnect::ID {
-            reason = Some(
-                PlayDisconnect::decode(&mut body.as_slice())
-                    .unwrap()
-                    .reason
-                    .0,
-            );
+        let frame =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), slow.try_read()).await {
+                Err(_) => break,
+                Ok(Ok(frame)) => frame,
+                Ok(Err(error)) => {
+                    reset = Some(error);
+                    break;
+                }
+            };
+        let mut body = frame.as_slice();
+        if VarInt::decode(&mut body).unwrap().0 == PlayDisconnect::ID {
+            reason = Some(PlayDisconnect::decode(&mut body).unwrap().reason.0);
             break;
         }
     }
-    assert_eq!(
-        reason.as_deref(),
-        Some("Timed out"),
-        "slow reader must be disconnected as timed out"
-    );
+    match (reason, reset) {
+        (Some(reason), _) => assert_eq!(
+            reason, "Timed out",
+            "slow reader must be disconnected as timed out"
+        ),
+        // Windows answers the acknowledgements sent after the server closed with a reset and
+        // then discards the bytes the bot had not read yet, the disconnect packet included.
+        // The server must still have dropped the player, which the other bot observes.
+        (None, Some(error))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            if !slow_removed {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    fast.until(PlayerInfoRemove::ID),
+                )
+                .await
+                .expect("the server must drop the slow reader");
+            }
+        }
+        (None, error) => panic!("slow reader got no timed-out disconnect: {error:?}"),
+    }
     let samples = world.tick_samples.lock().unwrap().clone();
     assert!(
         samples.len() > before + 5,

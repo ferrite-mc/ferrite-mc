@@ -71,6 +71,12 @@ pub(crate) fn load(dir: &Path, strict: bool) -> Result<WorldgenData, LoadError> 
         material_rules: load_dir(&data_root.join("worldgen").join("material_rule"), strict)?,
         configured_features: load_dir(&data_root.join("worldgen").join("feature"), strict)?,
         placed_features: load_dir(&data_root.join("worldgen").join("placed_feature"), strict)?,
+        structure_sets: load_dir(&data_root.join("worldgen").join("structure_set"), strict)?,
+        structures: load_dir(&data_root.join("worldgen").join("structure"), strict)?,
+        biome_tags: load_dir(
+            &data_root.join("tags").join("worldgen").join("biome"),
+            strict,
+        )?,
         block_state_providers: load_dir::<BlockStateProvider>(
             &data_root.join("worldgen").join("block_state_provider"),
             strict,

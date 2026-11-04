@@ -196,6 +196,7 @@ fn fixture_vegetation_on_land() {
     let mut expected_total = 0usize;
     let mut actual_total = 0usize;
     let mut matched = 0usize;
+    let mut spruce_logs = (0usize, 0usize, 0usize);
     let mut counts = BTreeMap::<String, (usize, usize)>::new();
     for (cx, cz) in [(13, 18), (20, 14), (22, 14), (20, 15)] {
         let Some((expected, clear)) = fixture_chunk(cx, cz, &registry) else {
@@ -228,6 +229,11 @@ fn fixture_vegetation_on_land() {
                     let actual_name = registry
                         .block_state(actual_id)
                         .map_or("", |state| state.name.as_str());
+                    if expected_name == "minecraft:spruce_log" {
+                        spruce_logs.0 += 1;
+                        spruce_logs.2 += usize::from(actual_name == expected_name);
+                    }
+                    spruce_logs.1 += usize::from(actual_name == "minecraft:spruce_log");
                     if is_ground_vegetation(expected_name) {
                         expected_total += 1;
                         counts.entry(expected_name.to_owned()).or_default().0 += 1;
@@ -246,6 +252,14 @@ fn fixture_vegetation_on_land() {
     for (name, (expected, actual)) in &counts {
         println!("vegetation {name}: expected {expected}, actual {actual}");
     }
+    println!(
+        "spruce logs: expected {}, actual {}, same position {}",
+        spruce_logs.0, spruce_logs.1, spruce_logs.2
+    );
+    assert!(
+        spruce_logs.0 > 0 && spruce_logs.2 > 0,
+        "spruce fixture has no matching logs"
+    );
     let ratio = actual_total as f64 / expected_total.max(1) as f64;
     println!(
         "vegetation totals: actual {actual_total}, expected {expected_total}, ratio {ratio:.3}, \
@@ -255,8 +269,7 @@ fn fixture_vegetation_on_land() {
         expected_total > 50,
         "fixture land chunks have no vegetation"
     );
-    // These old-growth taiga chunks also contain spruce trees (non-blob
-    // foliage placer, out of scope for the simple-tree subset) and lush-cave
+    // These old-growth taiga chunks also contain unsupported tree variants and lush-cave
     // moss patches (`vegetation_patch`, also out of scope). The statistical
     // contract therefore covers the implemented ground cover: it must be the
     // same order of magnitude as the Java fixture, not vanish.
@@ -409,6 +422,11 @@ fn fixture_features_match_vanilla() {
     }
 
     assert!(ore_expected > 0, "fixture has no ore blocks");
+    // Placement must consume the shared RNG between candidates, as vanilla does.
+    assert!(
+        ore_rate >= 0.15,
+        "ore position match too low: {ore_rate:.3}"
+    );
     // Exact positions depend on the large andesite/diorite/granite/tuff blobs
     // whose ore shapes shift which base block an ore replaces. The statistical
     // contract is the total ore volume and the presence of every common type.
