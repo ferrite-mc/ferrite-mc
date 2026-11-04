@@ -21,6 +21,10 @@ public class CraftItemStack extends org.bukkit.inventory.ItemStack {
         return stack == null ? null : stack.clone();
     }
 
+    public static net.minecraft.world.item.ItemStack asNMSCopy(org.bukkit.inventory.ItemStack stack) { return net.minecraft.world.item.ItemStack.of(stack); }
+    public static org.bukkit.inventory.ItemStack asBukkitCopy(net.minecraft.world.item.ItemStack stack) { return stack.toBukkit(); }
+    public static CraftItemStack asCraftMirror(net.minecraft.world.item.ItemStack stack) { return new CraftItemStack(stack.toBukkit()); }
+
     public static org.bukkit.inventory.ItemStack asBukkitCopy(org.bukkit.inventory.ItemStack stack) {
         return asCraftCopy(stack);
     }

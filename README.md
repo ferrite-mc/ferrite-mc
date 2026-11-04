@@ -271,3 +271,13 @@ GPLv3로 바꿨습니다. 포팅한 코드의 출처는 [`NOTICE.md`](NOTICE.md)
 
 - **공동 1순위:** 월드젠 속도 최적화와 플러그인 브리지 완성. Folia·Starlight·Lithium·C2ME·C2ME OpenCL 가속, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증. 최적화 참고 자료: [최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [서버 최적화 모드팩](https://modrinth.com/modpack/server-optimizationn), [마인크래프트 최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization).
  - 모든 작업을 병렬처리 (해야 함)
+
+## NMS compatibility shim
+
+Plugins that reach into `net.minecraft.*` through `CraftPlayer#getHandle()`, `CraftWorld#getHandle()`,
+`CraftServer#getServer()` or `CraftItemStack.asNMSCopy` get clean-room classes carrying the Mojang-mapped
+names (`ServerPlayer`, `ServerGamePacketListenerImpl`, `Component`, `BlockPos`, `Vec3`, `ItemStack`, ...).
+Only chat and action-bar packets are translated; any other packet sent through `connection.send` is
+routed to the host and fails with a named `UnsupportedOperationException` instead of being dropped.
+`java/ferrite-api-impl/tools/Scan.java` lists the classes and members a plugin jar needs that are still missing:
+`java tools/Scan.java plugin.jar <classpath jars> [--full]`.

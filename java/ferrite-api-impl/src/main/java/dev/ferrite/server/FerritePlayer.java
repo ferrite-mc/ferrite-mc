@@ -1,7 +1,7 @@
 package dev.ferrite.server;
 
 /** A player snapshot; effects are sent to the host. */
-final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftHumanEntity {
+final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     private final FerriteServer server;
     private final java.util.UUID id;
     private final String name;
