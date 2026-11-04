@@ -293,6 +293,32 @@ fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
                 "",
             )
         }
+        // The coordinate forms: `particle, x, y, z, count` plus optionally the three offsets and a speed.
+        // Overloads taking particle data are left unhandled, as for players.
+        m if m.starts_with("spawnParticle(Particle,double,double,double,int")
+            && !m.contains("Object") =>
+        {
+            let count = arg(4)?.parse::<u32>().ok().filter(|c| *c <= 100_000)?;
+            let offsets = match call.args.len() {
+                5 => (0.0, 0.0, 0.0),
+                8 | 9 => (f(5)?, f(6)?, f(7)?),
+                _ => return None,
+            };
+            let speed = if call.args.len() == 9 { f(8)? } else { 0.0 };
+            console(
+                format!(
+                    "particle {} {} {} {} {} {} {} {speed} {count} normal @a",
+                    key(arg(0)?)?,
+                    f(1).filter(|v| v.abs() < 3.0e7)?,
+                    f(2).filter(|v| v.abs() < 3.0e7)?,
+                    f(3).filter(|v| v.abs() < 3.0e7)?,
+                    offsets.0,
+                    offsets.1,
+                    offsets.2
+                ),
+                "",
+            )
+        }
         _ => None,
     }
 }
@@ -460,6 +486,54 @@ mod tests {
                 "00000000-0000-0000-0000-0000000000fe",
                 "strikeLightning(Location)",
                 &[&at]
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn coordinate_particles_use_the_same_command_as_location_particles() {
+        let default = ferrite_plugin::default_world_id().to_string();
+        let world = |subject: &str, method: &str, args: &[&str]| HostCall {
+            owner: "World".into(),
+            subject: subject.into(),
+            method: method.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+        };
+        let args = [
+            "minecraft:flame",
+            "1",
+            "64.5",
+            "-2",
+            "7",
+            "0.1",
+            "0.2",
+            "0.3",
+            "0.05",
+        ];
+        assert_eq!(
+            line(world(
+                &default,
+                "spawnParticle(Particle,double,double,double,int,double,double,double,double)",
+                &args
+            ))
+            .as_deref(),
+            Some("particle minecraft:flame 1 64.5 -2 0.1 0.2 0.3 0.05 7 normal @a")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "spawnParticle(Particle,double,double,double,int)",
+                &args[..5]
+            ))
+            .as_deref(),
+            Some("particle minecraft:flame 1 64.5 -2 0 0 0 0 7 normal @a")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "spawnParticle(Particle,double,double,double,int,Object)",
+                &args[..6]
             )),
             None
         );
