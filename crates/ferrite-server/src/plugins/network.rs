@@ -154,6 +154,18 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
                 port,
             }
         }
+        // `Animate` actions: 0 swing main hand, 3 swing off hand.
+        "swingMainHand()" => PluginPacket::Animation { action: 0 },
+        "swingOffHand()" => PluginPacket::Animation { action: 3 },
+        "swingHand(EquipmentSlot)" => match arg(0)? {
+            "HAND" => PluginPacket::Animation { action: 0 },
+            "OFF_HAND" => PluginPacket::Animation { action: 3 },
+            _ => return None,
+        },
+        "playHurtAnimation(float)" => {
+            let yaw: f32 = arg(0)?.parse().ok().filter(|yaw: &f32| yaw.is_finite())?;
+            PluginPacket::HurtAnimation { yaw }
+        }
         "setCompassTarget(Location)" => PluginPacket::CompassTarget {
             pos: block_pos(arg(0)?)?,
         },
@@ -388,6 +400,28 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn swings_and_hurt_tilts_are_animations() {
+        assert_eq!(
+            packet(call("swingMainHand()", &[])),
+            Some(PluginPacket::Animation { action: 0 })
+        );
+        assert_eq!(
+            packet(call("swingOffHand()", &[])),
+            Some(PluginPacket::Animation { action: 3 })
+        );
+        assert_eq!(
+            packet(call("swingHand(EquipmentSlot)", &["OFF_HAND"])),
+            Some(PluginPacket::Animation { action: 3 })
+        );
+        assert_eq!(packet(call("swingHand(EquipmentSlot)", &["HEAD"])), None);
+        assert_eq!(
+            packet(call("playHurtAnimation(float)", &["90"])),
+            Some(PluginPacket::HurtAnimation { yaw: 90.0 })
+        );
+        assert_eq!(packet(call("playHurtAnimation(float)", &["NaN"])), None);
     }
 
     #[test]

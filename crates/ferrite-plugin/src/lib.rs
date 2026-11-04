@@ -175,7 +175,7 @@ pub enum MessageContent {
     AdventureJson(String),
 }
 /// A packet a plugin sends to one player; the host builds and delivers it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PluginPacket {
     /// A fake block at a position, as the block state id the client should show.
     BlockChange {
@@ -201,6 +201,15 @@ pub enum PluginPacket {
     },
     CompassTarget {
         pos: [i32; 3],
+    },
+    /// An animation of the player's own entity (swing, ...), shown to everyone who has the
+    /// player's chunk loaded.
+    Animation {
+        action: u8,
+    },
+    /// The hurt tilt (`Player#playHurtAnimation`) from a yaw, shown to the same viewers.
+    HurtAnimation {
+        yaw: f32,
     },
 }
 /// A survival number a plugin can set directly.

@@ -643,6 +643,33 @@ impl Player {
                 self,
                 &ferrite_protocol::packets::play::ResourcePackPop { id },
             ),
+            PluginPacket::Animation { action } => {
+                let update = ferrite_net::game::packet(&ferrite_protocol::packets::play::Animate {
+                    id: VarInt(self.entity),
+                    action,
+                });
+                let tracking = self.tracking.lock().unwrap();
+                super::region::broadcast_tracked_chunk(
+                    &tracking,
+                    self.dimension,
+                    (self.chunk.0, self.chunk.1),
+                    &update,
+                );
+            }
+            PluginPacket::HurtAnimation { yaw } => {
+                let update =
+                    ferrite_net::game::packet(&ferrite_protocol::packets::play::HurtAnimation {
+                        id: VarInt(self.entity),
+                        yaw,
+                    });
+                let tracking = self.tracking.lock().unwrap();
+                super::region::broadcast_tracked_chunk(
+                    &tracking,
+                    self.dimension,
+                    (self.chunk.0, self.chunk.1),
+                    &update,
+                );
+            }
             PluginPacket::CompassTarget { pos } => send(
                 self,
                 &ferrite_protocol::packets::play::DefaultSpawn {
