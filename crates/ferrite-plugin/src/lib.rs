@@ -209,6 +209,13 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// A sign's front text shown to one player only (`ClientboundBlockEntityDataPacket`).
+    SignText {
+        pos: [i32; 3],
+        lines: [String; 4],
+        color: String,
+        glowing: bool,
+    },
     /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
     Equipment {
         entity_id: i32,

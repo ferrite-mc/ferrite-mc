@@ -141,6 +141,26 @@ fn mob_effect(key: &str) -> Option<i32> {
     ferrite_data::registries::id("minecraft:mob_effect", key)
 }
 
+/// The dye names a sign's text colour may have.
+const SIGN_COLORS: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
 /// The wire slot of a Bukkit `EquipmentSlot`.
 fn equipment_slot(name: &str) -> Option<u8> {
     Some(match name {
@@ -263,6 +283,26 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             slot: equipment_slot(arg(1)?)?,
             item: item_snapshot(arg(2)?)?,
         },
+        "sendSignChange(Location,String[],DyeColor,boolean)" => {
+            let mut lines: [String; 4] = Default::default();
+            let mut given = arg(1)?.split(PART);
+            for line in &mut lines {
+                let text = given.next().unwrap_or("");
+                if text != NULL_ARG {
+                    *line = text.chars().filter(|c| !c.is_control()).take(384).collect();
+                }
+            }
+            let color = arg(2)?.to_ascii_lowercase();
+            if !SIGN_COLORS.contains(&color.as_str()) {
+                return None;
+            }
+            PluginPacket::SignText {
+                pos: block_pos(arg(0)?)?,
+                lines,
+                color,
+                glowing: arg(3)? == "true",
+            }
+        }
         "updateInventory()" => PluginPacket::ResyncInventory,
         "sendOpLevel(byte)" => {
             let level: u8 = arg(0)?.parse().ok().filter(|level| *level <= 4)?;
@@ -394,6 +434,27 @@ mod tests {
         assert_eq!(item_snapshot(NULL_ARG), Some(None));
         assert_eq!(item_snapshot(&format!("NOT_AN_ITEM{PART}1")), None);
         assert_eq!(item_snapshot(&format!("STONE{PART}0")), None);
+    }
+
+    #[test]
+    fn sign_text_keeps_four_clean_lines_and_a_known_colour() {
+        let lines = ["one", "two\u{7}x", "\u{1b}null"].join(&PART.to_string());
+        let sign = |color: &str| {
+            packet(call(
+                "sendSignChange(Location,String[],DyeColor,boolean)",
+                &[&location("1", "64", "2"), &lines, color, "true"],
+            ))
+        };
+        assert_eq!(
+            sign("RED"),
+            Some(PluginPacket::SignText {
+                pos: [1, 64, 2],
+                lines: ["one".into(), "twox".into(), String::new(), String::new()],
+                color: "red".into(),
+                glowing: true,
+            })
+        );
+        assert_eq!(sign("plaid"), None);
     }
 
     #[test]

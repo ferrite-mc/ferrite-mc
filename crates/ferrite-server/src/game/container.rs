@@ -696,6 +696,38 @@ impl Player {
                     },
                 );
             }
+            PluginPacket::SignText {
+                pos,
+                lines,
+                color,
+                glowing,
+            } => {
+                let Some(type_id) =
+                    ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:sign")
+                else {
+                    return;
+                };
+                let mut front = ferrite_nbt::Compound::new();
+                front.insert(
+                    "messages".into(),
+                    ferrite_nbt::Tag::List(ferrite_nbt::List::String(lines.to_vec())),
+                );
+                front.insert("color".into(), ferrite_nbt::Tag::String(color));
+                front.insert(
+                    "has_glowing_text".into(),
+                    ferrite_nbt::Tag::Byte(i8::from(glowing)),
+                );
+                let mut data = ferrite_nbt::Compound::new();
+                data.insert("front_text".into(), ferrite_nbt::Tag::Compound(front));
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::BlockEntityData {
+                        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                        block_type: VarInt(type_id),
+                        nbt: data,
+                    },
+                );
+            }
             PluginPacket::PotionRemove { entity_id, effect } => send(
                 self,
                 &ferrite_protocol::packets::play::RemoveMobEffect {
