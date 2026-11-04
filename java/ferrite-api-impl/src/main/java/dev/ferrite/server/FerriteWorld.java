@@ -210,7 +210,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 var effect = (org.bukkit.Effect) args[1];
                 int radius = args.length > 3 ? (int) args[3] : 64;
                 for (var viewer : server.getOnlinePlayers()) {
-                    var there = viewer.getLocation();
+                    org.bukkit.Location there;
+                    try { there = viewer.getLocation(); } catch (UnsupportedOperationException | IllegalStateException unknown) { continue; }
                     if (there.getWorld() != proxy || there.distanceSquared(at) > (double) radius * radius) continue;
                     viewer.playEffect(at, effect, args[2]);
                 }

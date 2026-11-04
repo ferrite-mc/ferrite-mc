@@ -136,4 +136,13 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("playLevelEvent(Location,int,int)"), calls);
     }
+
+    @Test void legacyHandAccessorsUseTheMainHand() {
+        HostBridge.transport = (owner, subject, method, args) -> "";
+        try {
+            player.setItemInHand(new org.bukkit.inventory.ItemStack(org.bukkit.Material.STICK, 3));
+            assertEquals(org.bukkit.Material.STICK, player.getItemInHand().getType());
+            assertEquals(3, player.getInventory().getItemInMainHand().getAmount());
+        } finally { HostBridge.transport = null; }
+    }
 }
