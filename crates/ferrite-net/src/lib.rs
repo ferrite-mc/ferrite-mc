@@ -807,8 +807,10 @@ async fn play(
     let (mut reader, writer) = stream.into_split();
     let translator =
         translator.map(|translator| std::sync::Arc::new(std::sync::Mutex::new(translator)));
+    let probe = settings::PingProbe::new(uuid);
     let mut writer_task = tokio::spawn(write_loop(
         writer,
+        probe.clone(),
         encoder,
         queue,
         config.write_timeout,
@@ -828,6 +830,9 @@ async fn play(
                     match &translator {
                         // Native clients decode the frame directly, as before translation.
                         None => {
+                            if settings::is_keepalive_answer(&frame) {
+                                probe.answered();
+                            }
                             if let Some(packet) = game::decode_play(&frame)? {
                                 game.send(GameMessage::Input { session, uuid, packet })
                                     .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
@@ -839,6 +844,9 @@ async fn play(
                                 .unwrap_or_else(|error| error.into_inner())
                                 .serverbound(State::Play, RawPacket::parse(&frame)?)?;
                             for packet in packets {
+                                if settings::is_keepalive_answer(&packet.to_frame()) {
+                                    probe.answered();
+                                }
                                 if let Some(packet) = game::decode_play(&packet.to_frame())? {
                                     game.send(GameMessage::Input { session, uuid, packet })
                                         .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
@@ -858,6 +866,7 @@ async fn play(
 }
 async fn write_loop<W: wire::BatchWriter>(
     mut writer: W,
+    probe: std::sync::Arc<settings::PingProbe>,
     encoder: FrameEncoder,
     mut queue: game::OutboundReceiver,
     write_timeout: std::time::Duration,
@@ -880,6 +889,7 @@ async fn write_loop<W: wire::BatchWriter>(
         tokio::select! {
             biased;
             _ = keepalive.tick() => {
+                probe.sent();
                 if translator.is_none() {
                     encoder.encode(&keepalive_body, &mut batch);
                 } else {
@@ -1183,6 +1193,7 @@ mod tests {
         };
         let task = tokio::spawn(write_loop(
             writer,
+            settings::PingProbe::new(uuid::Uuid::nil()),
             FrameEncoder::default(),
             rx,
             Duration::from_secs(5),

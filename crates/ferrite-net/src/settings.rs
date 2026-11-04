@@ -34,6 +34,62 @@ pub fn get(player: Uuid) -> Option<ClientSettings> {
 
 pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
+    pings().lock().unwrap().remove(&player);
+}
+
+fn pings() -> &'static Mutex<HashMap<Uuid, i32>> {
+    static PINGS: OnceLock<Mutex<HashMap<Uuid, i32>>> = OnceLock::new();
+    PINGS.get_or_init(Default::default)
+}
+
+/// The smoothed round trip time of a player's connection in milliseconds, once measured.
+pub fn ping(player: Uuid) -> Option<i32> {
+    pings().lock().unwrap().get(&player).copied()
+}
+
+/// Measures the round trip of the play keepalive: the writer marks `sent`, the reader marks
+/// `answered`, and the result is smoothed like vanilla (`(old * 3 + new) / 4`).
+#[derive(Debug)]
+pub struct PingProbe {
+    player: Uuid,
+    sent: Mutex<Option<std::time::Instant>>,
+}
+
+impl PingProbe {
+    pub fn new(player: Uuid) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            player,
+            sent: Mutex::new(None),
+        })
+    }
+
+    /// A keepalive left; an earlier unanswered one keeps its older timestamp.
+    pub fn sent(&self) {
+        self.sent
+            .lock()
+            .unwrap()
+            .get_or_insert_with(std::time::Instant::now);
+    }
+
+    /// The client answered the keepalive.
+    pub fn answered(&self) {
+        let Some(at) = self.sent.lock().unwrap().take() else {
+            return;
+        };
+        let rtt = i32::try_from(at.elapsed().as_millis()).unwrap_or(i32::MAX);
+        let mut pings = pings().lock().unwrap();
+        let next = match pings.get(&self.player) {
+            Some(old) => ((i64::from(*old) * 3 + i64::from(rtt)) / 4) as i32,
+            None => rtt,
+        };
+        pings.insert(self.player, next);
+    }
+}
+
+/// Whether a serverbound play frame is the keepalive answer.
+pub fn is_keepalive_answer(frame: &[u8]) -> bool {
+    let mut buf = frame;
+    matches!(<ferrite_protocol::VarInt as ferrite_protocol::Decode>::decode(&mut buf), Ok(id) if id.0 == 28)
 }
 
 #[cfg(test)]
@@ -53,5 +109,27 @@ mod tests {
         assert_eq!(get(player), Some(settings));
         forget(player);
         assert_eq!(get(player), None);
+    }
+
+    #[test]
+    fn ping_is_measured_from_the_keepalive_round_trip_and_smoothed() {
+        let player = Uuid::from_u128(0x9179);
+        assert_eq!(ping(player), None);
+        let probe = PingProbe::new(player);
+        probe.answered();
+        assert_eq!(
+            ping(player),
+            None,
+            "an answer without a keepalive is ignored"
+        );
+        probe.sent();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        probe.answered();
+        let first = ping(player).unwrap();
+        assert!((20..2000).contains(&first), "{first}");
+        forget(player);
+        assert_eq!(ping(player), None);
+        assert!(is_keepalive_answer(&[28, 0, 0, 0, 0, 0, 0, 0, 1]));
+        assert!(!is_keepalive_answer(&[29]));
     }
 }

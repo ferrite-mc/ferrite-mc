@@ -88,6 +88,11 @@ pub fn answer(call: &HostCall) -> Option<String> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
+    if call.method == "getPing()"
+        && let Some(ping) = ferrite_net::settings::ping(player)
+    {
+        return Some(ping.to_string());
+    }
     if let Some(settings) = ferrite_net::settings::get(player)
         && let Some(reply) = client_setting(&settings, &call.method)
     {
