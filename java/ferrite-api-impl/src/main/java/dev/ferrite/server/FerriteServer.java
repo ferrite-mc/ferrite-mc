@@ -372,6 +372,10 @@ public class FerriteServer extends ServerStubs {
     @Override public java.util.Iterator<org.bukkit.inventory.Recipe> recipeIterator() { return FerriteRecipes.all().iterator(); }
     @Override public org.bukkit.inventory.Recipe getRecipe(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return FerriteRecipes.get(key); }
     @Override public boolean hasRecipe(org.bukkit.NamespacedKey key) { return getRecipe(key) != null; }
+    @Override public org.bukkit.generator.ChunkGenerator.ChunkData createChunkData(org.bukkit.World world) {
+        java.util.Objects.requireNonNull(world, "world");
+        return new FerriteChunkData(world.getMinHeight(), world.getMaxHeight());
+    }
     @Override public org.bukkit.inventory.Recipe getCraftingRecipe(org.bukkit.inventory.ItemStack[] craftingMatrix, org.bukkit.World world) { return FerriteCrafting.recipe(craftingMatrix); }
     @Override public org.bukkit.inventory.ItemCraftResult craftItemResult(org.bukkit.inventory.ItemStack[] craftingMatrix, org.bukkit.World world) { return FerriteCrafting.craft(craftingMatrix); }
     @Override public org.bukkit.inventory.ItemCraftResult craftItemResult(org.bukkit.inventory.ItemStack[] craftingMatrix, org.bukkit.World world, org.bukkit.entity.Player player) { return FerriteCrafting.craft(craftingMatrix); }
