@@ -64,4 +64,15 @@ class FerriteChunkDataTest {
         assertEquals(-64, snap.getHighestBlockYAt(0, 0));
         assertThrows(IndexOutOfBoundsException.class, () -> snap.getBlockType(16, 0, 0));
     }
+
+    @Test void lootTablesExistOnlyForVanillaFilesAndAreCached() {
+        var server = org.bukkit.Bukkit.getServer();
+        var key = org.bukkit.NamespacedKey.minecraft("blocks/stone");
+        var table = server.getLootTable(key);
+        assertNotNull(table);
+        assertSame(table, server.getLootTable(key));
+        assertEquals(key, table.getKey());
+        assertNull(server.getLootTable(org.bukkit.NamespacedKey.minecraft("blocks/no_such_table")));
+        assertThrows(UnsupportedOperationException.class, () -> table.populateLoot(new java.util.Random(), null));
+    }
 }
