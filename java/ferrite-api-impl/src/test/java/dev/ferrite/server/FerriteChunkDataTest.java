@@ -94,4 +94,16 @@ class FerriteChunkDataTest {
             assertFalse(world.getChunkAt(0, 0).isLoaded());
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void asyncChunkLookupsHandBackTheChunkView() throws Exception {
+        var world = org.bukkit.Bukkit.getWorld("chunkdata");
+        var seen = new java.util.ArrayList<org.bukkit.Chunk>();
+        world.getChunkAtAsync(5, -6, true, true, seen::add);
+        assertEquals(1, seen.size());
+        assertEquals(5, seen.get(0).getX());
+        assertEquals(-6, seen.get(0).getZ());
+        var future = world.getChunkAtAsync(new org.bukkit.Location(world, 33, 70, -17));
+        assertEquals(2, future.get().getX());
+        assertEquals(-2, future.get().getZ());
+    }
 }

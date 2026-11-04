@@ -217,6 +217,21 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 }
                 return null;
             }
+            case "isChunkInUse" -> { return chunkLoaded((int) args[0], (int) args[1]); }
+            case "getChunkAtAsync" -> {
+                // The chunk handle is a view that needs no loading step, so the callback runs at once.
+                var done = new java.util.concurrent.CompletableFuture<org.bukkit.Chunk>();
+                int cx, cz;
+                if (args[0] instanceof org.bukkit.Location l) { cx = l.getBlockX() >> 4; cz = l.getBlockZ() >> 4; }
+                else if (args[0] instanceof org.bukkit.block.Block b) { cx = b.getX() >> 4; cz = b.getZ() >> 4; }
+                else { cx = (int) args[0]; cz = (int) args[1]; }
+                var found = chunk(cx, cz);
+                Object last = args[args.length - 1];
+                if (last instanceof java.util.function.Consumer<?> consumer) { @SuppressWarnings("unchecked") var typed = (java.util.function.Consumer<org.bukkit.Chunk>) consumer; typed.accept(found); return null; }
+                if (last instanceof org.bukkit.World.ChunkLoadCallback callback) { callback.onLoad(found); return null; }
+                done.complete(found);
+                return done;
+            }
             case "isChunkLoaded" -> {
                 int cx = args[0] instanceof org.bukkit.Chunk c ? c.getX() : (int) args[0];
                 int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
