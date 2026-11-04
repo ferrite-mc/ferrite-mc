@@ -656,6 +656,19 @@ impl Player {
                     &update,
                 );
             }
+            PluginPacket::WindowProperty { id, value } => {
+                if self.menus.open.is_some() {
+                    let window = self.menus.current().container_id();
+                    send(
+                        self,
+                        &ContainerSetData {
+                            window: VarInt(window),
+                            id,
+                            value,
+                        },
+                    );
+                }
+            }
             PluginPacket::ResyncInventory => {
                 let full = self.menus.current().broadcast_full_state(&self.inventory);
                 emit(self, vec![full]);

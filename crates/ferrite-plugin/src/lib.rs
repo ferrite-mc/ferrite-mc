@@ -209,6 +209,11 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// One property of the open menu (`Player#setWindowProperty`, `ClientboundContainerSetDataPacket`).
+    WindowProperty {
+        id: i16,
+        value: i16,
+    },
     /// `ClientboundServerLinksPacket`: `(known type index, label, url)` per link.
     ServerLinks(Vec<(Option<i32>, String, String)>),
     /// A sign's front text shown to one player only (`ClientboundBlockEntityDataPacket`).

@@ -332,6 +332,10 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             PluginPacket::ServerLinks(links)
         }
         "updateInventory()" => PluginPacket::ResyncInventory,
+        "setWindowProperty(int,int)" => PluginPacket::WindowProperty {
+            id: arg(0)?.parse().ok().filter(|id| *id >= 0)?,
+            value: arg(1)?.parse().ok()?,
+        },
         "sendOpLevel(byte)" => {
             let level: u8 = arg(0)?.parse().ok().filter(|level| *level <= 4)?;
             PluginPacket::EntityEvent {
@@ -733,6 +737,14 @@ mod tests {
         assert_eq!(
             packet(call("updateInventory()", &[])),
             Some(PluginPacket::ResyncInventory)
+        );
+        assert_eq!(
+            packet(call("setWindowProperty(int,int)", &["2", "-5"])),
+            Some(PluginPacket::WindowProperty { id: 2, value: -5 })
+        );
+        assert_eq!(
+            packet(call("setWindowProperty(int,int)", &["-1", "5"])),
+            None
         );
         assert_eq!(packet(call("sendOpLevel(byte)", &["9"])), None);
         assert_eq!(

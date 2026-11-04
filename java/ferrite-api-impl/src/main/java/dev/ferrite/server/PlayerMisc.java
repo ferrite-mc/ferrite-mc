@@ -71,6 +71,13 @@ public abstract class PlayerMisc extends PlayerStubs {
         }
         HostBridge.callVoid("Player", getUniqueId(), "sendLinks(ServerLinks)", entries);
     }
+    /** Sends the property to the open menu; false when the value does not fit the client's 16-bit field. */
+    @Override public boolean setWindowProperty(org.bukkit.inventory.InventoryView.Property prop, int value) {
+        Objects.requireNonNull(prop, "prop");
+        if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) return false;
+        tellHost("setWindowProperty(int,int)", prop.getId(), value);
+        return true;
+    }
     @Override public synchronized void hidePlayer(org.bukkit.entity.Player other) { hidden.add(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("hidePlayer(Player)", other); }
     @Override public synchronized void showPlayer(org.bukkit.entity.Player other) { hidden.remove(Objects.requireNonNull(other, "player").getUniqueId()); tellHost("showPlayer(Player)", other); }
     @Override public synchronized void hideEntity(org.bukkit.plugin.Plugin plugin, org.bukkit.entity.Entity entity) {
