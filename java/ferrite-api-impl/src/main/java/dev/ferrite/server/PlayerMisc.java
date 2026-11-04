@@ -77,7 +77,7 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public synchronized boolean unlistPlayer(org.bukkit.entity.Player other) { return unlisted.add(Objects.requireNonNull(other, "player").getUniqueId()); }
     @Override public synchronized boolean listPlayer(org.bukkit.entity.Player other) { return unlisted.remove(Objects.requireNonNull(other, "player").getUniqueId()); }
     /** Visibility is remembered here either way; with no host attached (plain Java) only the memory applies. */
-    private void tellHost(String method, Object... args) {
+    protected void tellHost(String method, Object... args) {
         try { HostBridge.callVoid("Player", getUniqueId(), method, args); } catch (UnsupportedOperationException offline) { /* no host */ }
     }
     @Override public void sendSignChange(org.bukkit.Location loc, String[] lines, org.bukkit.DyeColor dyeColor, boolean hasGlowingText) {

@@ -218,6 +218,10 @@ pub struct Survival {
     pub health: f32,
     /// Vanilla `Attributes.MAX_HEALTH` (health boost raises it above 20).
     pub max_health: f32,
+    /// The base value a plugin set; effects add to it.
+    pub base_max_health: f32,
+    /// The `max_health` the client was last told, so it is resent only when it changes.
+    pub sent_max_health: f32,
     /// `LivingEntity.absorptionAmount`.
     pub absorption: f32,
     pub food: FoodData,
@@ -256,6 +260,8 @@ impl Default for Survival {
         Self {
             health: MAX_HEALTH,
             max_health: MAX_HEALTH,
+            base_max_health: MAX_HEALTH,
+            sent_max_health: MAX_HEALTH,
             absorption: 0.0,
             food: FoodData::default(),
             invulnerable: 0,

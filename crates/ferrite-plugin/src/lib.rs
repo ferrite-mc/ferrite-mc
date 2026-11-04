@@ -293,6 +293,8 @@ pub enum SurvivalStat {
     Absorption,
     FallDistance,
     Air,
+    /// The base `max_health`, before effects such as health boost.
+    MaxHealth,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {

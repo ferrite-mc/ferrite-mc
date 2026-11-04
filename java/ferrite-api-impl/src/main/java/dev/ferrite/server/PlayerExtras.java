@@ -83,12 +83,15 @@ public abstract class PlayerExtras extends PlayerSight {
         private double base;
         private final Map<net.kyori.adventure.key.Key, org.bukkit.attribute.AttributeModifier> modifiers = new LinkedHashMap<>();
 
-        ValueAttribute(org.bukkit.attribute.Attribute attribute) { this.attribute = attribute; this.base = defaultOf(attribute); }
+        private final Runnable changed;
+
+        ValueAttribute(org.bukkit.attribute.Attribute attribute, Runnable changed) { this.attribute = attribute; this.base = defaultOf(attribute); this.changed = changed; }
         @Override public org.bukkit.attribute.Attribute getAttribute() { return attribute; }
         @Override public double getBaseValue() { return base; }
         @Override public void setBaseValue(double value) {
             if (!Double.isFinite(value)) throw new IllegalArgumentException("value must be finite");
             base = value;
+            changed.run();
         }
         @Override public synchronized Collection<org.bukkit.attribute.AttributeModifier> getModifiers() { return List.copyOf(modifiers.values()); }
         @Override public synchronized org.bukkit.attribute.AttributeModifier getModifier(net.kyori.adventure.key.Key key) { return modifiers.get(key); }
@@ -96,13 +99,14 @@ public abstract class PlayerExtras extends PlayerSight {
             for (var modifier : modifiers.values()) if (modifier.getUniqueId().equals(id)) return modifier;
             return null;
         }
-        @Override public synchronized void removeModifier(net.kyori.adventure.key.Key key) { modifiers.remove(key); }
-        @Override public synchronized void removeModifier(UUID id) { modifiers.values().removeIf(m -> m.getUniqueId().equals(id)); }
-        @Override public synchronized void removeModifier(org.bukkit.attribute.AttributeModifier modifier) { modifiers.remove(modifier.getKey()); }
+        @Override public synchronized void removeModifier(net.kyori.adventure.key.Key key) { modifiers.remove(key); changed.run(); }
+        @Override public synchronized void removeModifier(UUID id) { modifiers.values().removeIf(m -> m.getUniqueId().equals(id)); changed.run(); }
+        @Override public synchronized void removeModifier(org.bukkit.attribute.AttributeModifier modifier) { modifiers.remove(modifier.getKey()); changed.run(); }
         @Override public synchronized void addModifier(org.bukkit.attribute.AttributeModifier modifier) {
             Objects.requireNonNull(modifier, "modifier");
             if (modifiers.putIfAbsent(modifier.getKey(), modifier) != null)
                 throw new IllegalArgumentException("Modifier is already applied on this attribute!");
+            changed.run();
         }
         @Override public void addTransientModifier(org.bukkit.attribute.AttributeModifier modifier) { addModifier(modifier); }
         @Override public synchronized double getValue() {
@@ -121,7 +125,13 @@ public abstract class PlayerExtras extends PlayerSight {
 
     @Override public synchronized org.bukkit.attribute.AttributeInstance getAttribute(org.bukkit.attribute.Attribute attribute) {
         Objects.requireNonNull(attribute, "attribute");
-        return attributes.computeIfAbsent(attribute, ValueAttribute::new);
+        return attributes.computeIfAbsent(attribute, key -> {
+            if (!key.getKey().getKey().equals("max_health")) return new ValueAttribute(key, () -> { });
+            // The game keeps the player's health cap and tells the client, so changes are passed on.
+            var holder = new ValueAttribute[1];
+            holder[0] = new ValueAttribute(key, () -> { if (holder[0] != null) tellHost("setMaxHealth(double)", Math.max(1.0, Math.min(1024.0, holder[0].getValue()))); });
+            return holder[0];
+        });
     }
     @Override public void registerAttribute(org.bukkit.attribute.Attribute attribute) { getAttribute(attribute); }
 

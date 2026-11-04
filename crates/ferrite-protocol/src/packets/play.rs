@@ -36,6 +36,15 @@ impl Packet for ChunkBatchStart {
     const BOUND: Bound = Bound::Clientbound;
 }
 fields!(Heightmap {kind:VarInt,data:Vec<i64>});
+fields!(AttributeModifier {
+    id: String,
+    amount: f64,
+    operation: VarInt
+});
+fields!(AttributeSnapshot {attribute:VarInt,base:f64,modifiers:Vec<AttributeModifier>});
+// Vanilla `ClientboundUpdateAttributesPacket`: the attribute values the client computes with
+// (the health bar's size comes from `max_health`).
+packet!(UpdateAttributes,134,Clientbound,{entity_id:VarInt,attributes:Vec<AttributeSnapshot>});
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkData {
     pub x: i32,
@@ -1670,6 +1679,18 @@ mod interaction_tests {
             data: VarInt(0),
         });
         roundtrip(PlayerInput { flags: 0b0110_0001 });
+        roundtrip(UpdateAttributes {
+            entity_id: VarInt(3),
+            attributes: vec![AttributeSnapshot {
+                attribute: VarInt(23),
+                base: 40.0,
+                modifiers: vec![AttributeModifier {
+                    id: "minecraft:effect.health_boost".into(),
+                    amount: 8.0,
+                    operation: VarInt(0),
+                }],
+            }],
+        });
         roundtrip(ResourcePackResponse {
             id: Uuid::from_u128(5),
             action: VarInt(3),

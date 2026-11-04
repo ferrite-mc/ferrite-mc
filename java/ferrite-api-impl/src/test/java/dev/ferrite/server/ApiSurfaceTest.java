@@ -313,6 +313,21 @@ class ApiSurfaceTest {
         }
     }
 
+    @Test void maxHealthIsKeptOnTheAttributeAndPassedToTheHost() {
+        var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000ce");
+        var p = FerritePlayer.create(server, id, "Hearts", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };
+        try {
+            assertEquals(20.0, p.getMaxHealth(), 1e-9);
+            p.setMaxHealth(40.0);
+            assertEquals(40.0, p.getMaxHealth(), 1e-9);
+            assertEquals(40.0, p.getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getBaseValue(), 1e-9);
+            assertTrue(calls.stream().anyMatch(c -> c.startsWith("setMaxHealth(double)|") && c.contains("40")), calls.toString());
+            assertThrows(IllegalArgumentException.class, () -> p.setMaxHealth(0));
+        } finally { HostBridge.transport = null; }
+    }
+
     @Test void experienceCanBeSetFromATotalNumberOfPoints() {
         var id = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000cd");
         var p = FerritePlayer.create(server, id, "Total", false, 20.0, 20, 0, new org.bukkit.Location(world, 0, 65, 0));

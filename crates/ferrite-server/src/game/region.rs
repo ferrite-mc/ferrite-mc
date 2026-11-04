@@ -1726,7 +1726,26 @@ impl Player {
     /// Feeds `Attributes.MAX_HEALTH` (health boost) into the survival state.
     fn refresh_attributes(&mut self) {
         let bonus = self.effects.attributes().max_health_bonus;
-        self.survival.set_max_health(MAX_HEALTH + bonus);
+        self.survival
+            .set_max_health(self.survival.base_max_health + bonus);
+        // The client sizes the health bar from its own `max_health` attribute, so tell it.
+        if self.survival.max_health.to_bits() != self.survival.sent_max_health.to_bits()
+            && let Some(attribute) =
+                ferrite_data::registries::id("minecraft:attribute", "minecraft:max_health")
+        {
+            self.survival.sent_max_health = self.survival.max_health;
+            send(
+                self,
+                &ferrite_protocol::packets::play::UpdateAttributes {
+                    entity_id: VarInt(self.entity),
+                    attributes: vec![ferrite_protocol::packets::play::AttributeSnapshot {
+                        attribute: VarInt(attribute),
+                        base: f64::from(self.survival.max_health),
+                        modifiers: Vec::new(),
+                    }],
+                },
+            );
+        }
     }
 
     /// `Player.checkTotemDeathProtection`: consume a totem and revive with the vanilla buffs.
@@ -2417,6 +2436,10 @@ impl Player {
                             self.survival.fall_distance = f64::from(value)
                         }
                         SurvivalStat::Air => self.survival.air = value as i32,
+                        SurvivalStat::MaxHealth => {
+                            self.survival.base_max_health = value;
+                            self.refresh_attributes();
+                        }
                     }
                     continue;
                 }

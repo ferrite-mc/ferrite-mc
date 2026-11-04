@@ -23,6 +23,7 @@ pub fn survival_command(call: &HostCall) -> Option<PlayerCommand> {
         "setAbsorptionAmount(double)" => (SurvivalStat::Absorption, 0.0..=1024.0),
         "setFallDistance(float)" => (SurvivalStat::FallDistance, 0.0..=1.0e6),
         "setRemainingAir(int)" => (SurvivalStat::Air, -20.0..=3600.0),
+        "setMaxHealth(double)" => (SurvivalStat::MaxHealth, 1.0..=1024.0),
         _ => return None,
     };
     range.contains(&value).then_some(PlayerCommand::Survival {
@@ -53,6 +54,7 @@ mod tests {
             ("setAbsorptionAmount(double)", "4", SurvivalStat::Absorption),
             ("setFallDistance(float)", "12.5", SurvivalStat::FallDistance),
             ("setRemainingAir(int)", "150", SurvivalStat::Air),
+            ("setMaxHealth(double)", "40", SurvivalStat::MaxHealth),
         ] {
             assert!(
                 matches!(
@@ -74,6 +76,8 @@ mod tests {
             call("setAbsorptionAmount(double)", "-0.5"),
             call("setFallDistance(float)", "-3"),
             call("setRemainingAir(int)", "100000"),
+            call("setMaxHealth(double)", "0"),
+            call("setMaxHealth(double)", "2000"),
             call("setRemainingAir(int)", "abc"),
         ] {
             assert!(survival_command(&bad).is_none(), "{bad:?}");

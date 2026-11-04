@@ -132,7 +132,11 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     @Override public boolean isDead() { return health <= 0; }
     @Override public boolean isValid() { return isOnline() && !isDead(); }
     @Override public boolean isConnected() { return isOnline(); }
-    @Override public double getMaxHealth() { return 20.0; }
+    @Override public double getMaxHealth() { return getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue(); }
+    @Override public void setMaxHealth(double health) {
+        if (!(health > 0)) throw new IllegalArgumentException("Max health must be greater than 0");
+        getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).setBaseValue(health);
+    }
     @Override public void heal(double amount) { heal(amount, org.bukkit.event.entity.EntityRegainHealthEvent.RegainReason.CUSTOM); }
     @Override public void heal(double amount, org.bukkit.event.entity.EntityRegainHealthEvent.RegainReason reason) { if (!(amount > 0)) throw new IllegalArgumentException("amount must be positive"); setHealth(Math.min(getMaxHealth(), health + amount)); }
     /** Vanilla {@code Player#getXpNeededForNextLevel}. */
