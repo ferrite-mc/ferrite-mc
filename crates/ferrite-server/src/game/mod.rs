@@ -148,6 +148,28 @@ mod tests {
     }
 
     #[test]
+    fn plugin_virtual_sign_reaches_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let position = ferrite_protocol::types::BlockPos::new(1, 64, -2).pack();
+        let command = ferrite_plugin::PlayerCommand::OpenVirtualSign {
+            player,
+            position,
+            front: false,
+        };
+        assert_eq!(
+            routed(command.clone(), player)
+                .iter()
+                .map(bytes)
+                .collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&OpenSignEditor {
+                location: position,
+                is_front_text: false
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
     fn plugin_block_damage_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
         let position = ferrite_protocol::types::BlockPos::new(1, 64, 2).pack();
@@ -1385,6 +1407,21 @@ fn route_plugin_command(
                     &CustomChatCompletions {
                         action: VarInt(action),
                         entries,
+                    },
+                );
+            }
+        }
+        PlayerCommand::OpenVirtualSign {
+            player,
+            position,
+            front,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &OpenSignEditor {
+                        location: position,
+                        is_front_text: front,
                     },
                 );
             }

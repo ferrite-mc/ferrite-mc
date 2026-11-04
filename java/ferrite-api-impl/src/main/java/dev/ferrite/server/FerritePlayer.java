@@ -69,6 +69,7 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     @Override public void setHealth(double value) { if (!Double.isFinite(value) || value < 0) throw new IllegalArgumentException("health"); health = value; Native.playerState(id.toString(), 0, value); }
     @Override public int getFoodLevel() { return food; }
     @Override public void setFoodLevel(int value) { if (value < 0 || value > 20) throw new IllegalArgumentException("food"); food = value; Native.playerState(id.toString(), 1, value); }
+    @Override public void openVirtualSign(io.papermc.paper.math.Position position, org.bukkit.block.sign.Side side) { java.util.Objects.requireNonNull(position); java.util.Objects.requireNonNull(side); HostBridge.callVoid("Player", id, "openVirtualSign(int,int,int,Side)", position.blockX(), position.blockY(), position.blockZ(), side); }
     private void customChatCompletions(String method, java.util.Collection<String> entries) { java.util.Objects.requireNonNull(entries); HostBridge.callVoid("Player", id, method, new com.google.gson.Gson().toJson(entries)); }
     @Override public void addCustomChatCompletions(java.util.Collection<String> entries) { customChatCompletions("addCustomChatCompletions(Collection)", entries); }
     @Override public void removeCustomChatCompletions(java.util.Collection<String> entries) { customChatCompletions("removeCustomChatCompletions(Collection)", entries); }

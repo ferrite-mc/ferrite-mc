@@ -277,6 +277,11 @@ pub enum PlayerCommand {
         action: i32,
         entries: Vec<String>,
     },
+    OpenVirtualSign {
+        player: uuid::Uuid,
+        position: i64,
+        front: bool,
+    },
     VisualHealth {
         player: uuid::Uuid,
         health: f32,
