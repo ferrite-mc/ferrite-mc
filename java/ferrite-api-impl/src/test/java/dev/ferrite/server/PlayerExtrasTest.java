@@ -401,4 +401,28 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertTrue(seen.contains("Entity:setVelocity(Vector)") && seen.contains("Entity:damage(double)") && seen.contains("Entity:remove()") && seen.contains("Player:attack(String)"), seen.toString());
     }
+
+    @Test void scoreboardsAreShownAndKeptInStep() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args.replace(String.valueOf(HostBridge.ARG), ",")); return ""; };
+        try {
+            var board = org.bukkit.Bukkit.getScoreboardManager().getNewScoreboard();
+            var objective = board.registerNewObjective("kills", org.bukkit.scoreboard.Criteria.DUMMY, net.kyori.adventure.text.Component.text("Kills"));
+            objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+            objective.getScore("Alex").setScore(3);
+            player.setScoreboard(board);
+            assertSame(board, player.getScoreboard());
+            objective.getScore("Alex").setScore(4);
+            objective.getScore("Alex").resetScore();
+            objective.unregister();
+            player.setScoreboard(org.bukkit.Bukkit.getScoreboardManager().getNewScoreboard());
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of(
+            "sbObjective(String,int,String,int)|kills,0,Kills,0",
+            "sbDisplay(int,String)|1,kills",
+            "sbScore(String,String,int)|Alex,kills,3",
+            "sbScore(String,String,int)|Alex,kills,4",
+            "sbReset(String,String)|Alex,kills",
+            "sbObjective(String,int,String,int)|kills,1,,0"), calls);
+    }
 }

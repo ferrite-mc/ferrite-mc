@@ -25,7 +25,24 @@ public abstract class PlayerSight extends PlayerMisc {
         return team == null ? name() : team.displayName().append(name());
     }
     @Override public net.kyori.adventure.sound.Sound.Source soundSource() { return net.kyori.adventure.sound.Sound.Source.PLAYER; }
-    @Override public org.bukkit.scoreboard.Scoreboard getScoreboard() { return org.bukkit.Bukkit.getScoreboardManager().getMainScoreboard(); }
+    private org.bukkit.scoreboard.Scoreboard scoreboard;
+    private ScoreboardView view;
+
+    @Override public synchronized org.bukkit.scoreboard.Scoreboard getScoreboard() {
+        return scoreboard != null ? scoreboard : org.bukkit.Bukkit.getScoreboardManager().getMainScoreboard();
+    }
+    /** Shows the board to this player: its sidebar, list and below-name objectives are sent to the client. */
+    @Override public void setScoreboard(org.bukkit.scoreboard.Scoreboard board) {
+        java.util.Objects.requireNonNull(board, "scoreboard");
+        ScoreboardView current;
+        synchronized (this) {
+            scoreboard = board;
+            if (view == null) view = new ScoreboardView((method, args) -> tellHost(method, args));
+            current = view;
+        }
+        current.clear();
+        current.attach(board);
+    }
 
     // ---- sounds ------------------------------------------------------------------------------
     @Override public org.bukkit.Sound getHurtSound() { return org.bukkit.Sound.ENTITY_PLAYER_HURT; }

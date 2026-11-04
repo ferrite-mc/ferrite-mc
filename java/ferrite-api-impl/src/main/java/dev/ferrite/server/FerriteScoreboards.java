@@ -27,6 +27,10 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
         final java.util.Map<String, ObjectiveState> objectives = new java.util.LinkedHashMap<>();
         final java.util.Map<DisplaySlot, ObjectiveState> slots = new java.util.EnumMap<>(DisplaySlot.class);
         org.bukkit.scoreboard.Scoreboard proxy;
+        final java.util.List<Runnable> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        /** Tells everyone showing this board that something on it changed. */
+        void touch() { for (var listener : listeners) listener.run(); }
 
         synchronized ObjectiveState register(Object[] args) {
             String name = (String) args[0];
@@ -40,6 +44,15 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
         }
 
         public synchronized Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
+            var result = call(self, method, args);
+            switch (method.getName()) {
+                case "registerNewObjective", "clearSlot", "resetScores" -> touch();
+                default -> { }
+            }
+            return result;
+        }
+
+        private Object call(Object self, java.lang.reflect.Method method, Object[] args) {
             return switch (method.getName()) {
                 case "registerNewObjective" -> register(args).proxy;
                 case "getObjective" -> {
@@ -87,10 +100,45 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
         return entry instanceof org.bukkit.OfflinePlayer player ? java.util.Objects.requireNonNullElse(player.getName(), player.getUniqueId().toString()) : String.valueOf(entry);
     }
 
+    private static final java.util.Map<org.bukkit.scoreboard.Scoreboard, BoardState> STATES = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
     private static org.bukkit.scoreboard.Scoreboard newBoard() {
         var state = new BoardState();
         state.proxy = (org.bukkit.scoreboard.Scoreboard) java.lang.reflect.Proxy.newProxyInstance(FerriteScoreboards.class.getClassLoader(), new Class<?>[]{org.bukkit.scoreboard.Scoreboard.class}, state);
+        STATES.put(state.proxy, state);
         return state.proxy;
+    }
+
+    /** What a client needs to draw a board: each displayed objective with its slot and scores. */
+    record Shown(String name, int slot, String title, boolean hearts, java.util.Map<String, Integer> scores) { }
+
+    /** The objectives of the board that sit in a slot the client can draw (list, sidebar, below name). */
+    static java.util.List<Shown> shown(org.bukkit.scoreboard.Scoreboard board) {
+        var state = STATES.get(board);
+        if (state == null) return java.util.List.of();
+        synchronized (state) {
+            var result = new java.util.ArrayList<Shown>();
+            for (var entry : state.slots.entrySet()) {
+                int slot = switch (entry.getKey()) {
+                    case PLAYER_LIST -> 0;
+                    case SIDEBAR -> 1;
+                    case BELOW_NAME -> 2;
+                    default -> -1;
+                };
+                if (slot < 0) continue;
+                var objective = entry.getValue();
+                result.add(new Shown(objective.name, slot, net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(objective.display), objective.render == RenderType.HEARTS, new java.util.LinkedHashMap<>(objective.scores)));
+            }
+            return result;
+        }
+    }
+
+    /** Runs the action whenever the board changes; the returned handle stops it. */
+    static Runnable watch(org.bukkit.scoreboard.Scoreboard board, Runnable action) {
+        var state = STATES.get(board);
+        if (state == null) return () -> { };
+        state.listeners.add(action);
+        return () -> state.listeners.remove(action);
     }
 
     private static final class ObjectiveState implements java.lang.reflect.InvocationHandler {
@@ -114,9 +162,9 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
                 case "getObjective" -> proxy;
                 case "getScoreboard" -> board.proxy;
                 case "getScore" -> { synchronized (board) { yield scores.getOrDefault(entry, 0); } }
-                case "setScore" -> { synchronized (board) { check(); scores.put(entry, (int) args[0]); } yield null; }
+                case "setScore" -> { synchronized (board) { check(); scores.put(entry, (int) args[0]); board.touch(); } yield null; }
                 case "isScoreSet" -> { synchronized (board) { yield scores.containsKey(entry); } }
-                case "resetScore" -> { synchronized (board) { check(); scores.remove(entry); } yield null; }
+                case "resetScore" -> { synchronized (board) { check(); scores.remove(entry); board.touch(); } yield null; }
                 case "hashCode" -> java.util.Objects.hash(name, entry);
                 case "equals" -> args[0] != null && java.lang.reflect.Proxy.isProxyClass(args[0].getClass()) && args[0].toString().equals(self.toString());
                 case "toString" -> "Score[" + name + ":" + entry + "]";
@@ -131,23 +179,24 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
                 return switch (method.getName()) {
                     case "getName" -> name;
                     case "getDisplayName" -> LEGACY.serialize(display);
-                    case "setDisplayName" -> { check(); display = component(args[0]); yield null; }
-                    case "displayName" -> { if (args == null || args.length == 0) yield display; check(); display = args[0] == null ? Component.empty() : (Component) args[0]; yield null; }
+                    case "setDisplayName" -> { check(); display = component(args[0]); board.touch(); yield null; }
+                    case "displayName" -> { if (args == null || args.length == 0) yield display; check(); display = args[0] == null ? Component.empty() : (Component) args[0]; board.touch(); yield null; }
                     case "getCriteria" -> criteria;
                     case "getTrackedCriteria" -> Criteria.create(criteria);
                     case "getScoreboard" -> registered ? board.proxy : null;
                     case "isModifiable" -> !Criteria.create(criteria).isReadOnly();
                     case "getRenderType" -> render;
-                    case "setRenderType" -> { check(); render = (RenderType) args[0]; yield null; }
+                    case "setRenderType" -> { check(); render = (RenderType) args[0]; board.touch(); yield null; }
                     case "getDisplaySlot" -> board.slots.entrySet().stream().filter(e -> e.getValue() == this).map(java.util.Map.Entry::getKey).findFirst().orElse(null);
                     case "setDisplaySlot" -> {
                         check();
                         board.slots.values().removeIf(o -> o == this);
                         if (args[0] != null) board.slots.put((DisplaySlot) args[0], this);
+                        board.touch();
                         yield null;
                     }
                     case "getScore" -> { check(); yield score(entryName(args[0])); }
-                    case "unregister" -> { check(); board.objectives.remove(name); board.slots.values().removeIf(o -> o == this); registered = false; yield null; }
+                    case "unregister" -> { check(); board.objectives.remove(name); board.slots.values().removeIf(o -> o == this); registered = false; board.touch(); yield null; }
                     case "hashCode" -> System.identityHashCode(self);
                     case "equals" -> self == args[0];
                     case "toString" -> "Objective[" + name + "]";

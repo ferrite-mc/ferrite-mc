@@ -172,6 +172,27 @@ pub enum EntityOperation {
     Damage(f32),
 }
 
+/// One step of showing a scoreboard to a player.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScoreboardStep {
+    /// Adds (`method` 0), changes (2) or removes (1) an objective.
+    Objective {
+        name: String,
+        method: u8,
+        display: String,
+        hearts: bool,
+    },
+    /// Puts an objective in a display slot (0 list, 1 sidebar, 2 below name); empty clears it.
+    Display { slot: i32, name: String },
+    Score {
+        owner: String,
+        objective: String,
+        score: i32,
+    },
+    /// Forgets an entry's score in one objective (or all when `objective` is empty).
+    Reset { owner: String, objective: String },
+}
+
 /// What happens to one boss bar of a player; `id` names the bar.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BossBarChange {
@@ -294,6 +315,8 @@ pub enum PluginPacket {
     },
     /// A boss bar shown to, changed on or removed from this player (`ClientboundBossEventPacket`).
     BossBar(BossBarChange),
+    /// One step of showing a scoreboard to this player.
+    Scoreboard(ScoreboardStep),
     /// One property of the open menu (`Player#setWindowProperty`, `ClientboundContainerSetDataPacket`).
     WindowProperty {
         id: i16,

@@ -7,7 +7,7 @@
 //! "not implemented" error rather than a silent no-op.
 
 use base64::Engine as _;
-use ferrite_plugin::{BossBarChange, HostCall, PlayerCommand, PluginPacket};
+use ferrite_plugin::{BossBarChange, HostCall, PlayerCommand, PluginPacket, ScoreboardStep};
 use uuid::Uuid;
 
 const PART: char = '\u{1d}';
@@ -134,6 +134,21 @@ fn entity_status(effect: &str) -> Option<u8> {
         "TELEPORT_ENDER" => 46,
         _ => return None,
     })
+}
+
+/// An objective name: vanilla allows 16 characters from a small set.
+fn sb_name(text: &str) -> Option<String> {
+    (!text.is_empty()
+        && text.chars().count() <= 16
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c)))
+    .then(|| text.to_owned())
+}
+
+/// A score holder: a player name or any text of at most 40 characters.
+fn sb_owner(text: &str) -> Option<String> {
+    (!text.is_empty() && text.chars().count() <= 40).then(|| text.to_owned())
 }
 
 /// A boss bar's fill, between empty and full.
@@ -394,6 +409,38 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
         "dropStack(ItemStack)" => PluginPacket::DropStack {
             item: item_snapshot(arg(0)?)??,
         },
+        "sbObjective(String,int,String,int)" => {
+            PluginPacket::Scoreboard(ScoreboardStep::Objective {
+                name: sb_name(arg(0)?)?,
+                method: arg(1)?.parse::<u8>().ok().filter(|m| *m <= 2)?,
+                display: arg(2)?.chars().take(256).collect(),
+                hearts: arg(3)? == "1",
+            })
+        }
+        "sbDisplay(int,String)" => PluginPacket::Scoreboard(ScoreboardStep::Display {
+            slot: arg(0)?
+                .parse::<i32>()
+                .ok()
+                .filter(|s| (0..=2).contains(s))?,
+            name: if arg(1)?.is_empty() {
+                String::new()
+            } else {
+                sb_name(arg(1)?)?
+            },
+        }),
+        "sbScore(String,String,int)" => PluginPacket::Scoreboard(ScoreboardStep::Score {
+            owner: sb_owner(arg(0)?)?,
+            objective: sb_name(arg(1)?)?,
+            score: arg(2)?.parse().ok()?,
+        }),
+        "sbReset(String,String)" => PluginPacket::Scoreboard(ScoreboardStep::Reset {
+            owner: sb_owner(arg(0)?)?,
+            objective: if arg(1)?.is_empty() {
+                String::new()
+            } else {
+                sb_name(arg(1)?)?
+            },
+        }),
         "bossBarAdd(String,String,float,int,int,int)" => {
             PluginPacket::BossBar(BossBarChange::Add {
                 id: Uuid::parse_str(arg(0)?).ok()?,
@@ -909,6 +956,34 @@ mod tests {
             network_command(&call("updateCommands()", &[])),
             Some(PlayerCommand::UpdateCommands { .. })
         ));
+        assert_eq!(
+            packet(call(
+                "sbObjective(String,int,String,int)",
+                &["kills", "0", "Kills", "0"]
+            )),
+            Some(PluginPacket::Scoreboard(ScoreboardStep::Objective {
+                name: "kills".into(),
+                method: 0,
+                display: "Kills".into(),
+                hearts: false
+            }))
+        );
+        assert_eq!(
+            packet(call(
+                "sbObjective(String,int,String,int)",
+                &["has space", "0", "x", "0"]
+            )),
+            None
+        );
+        assert_eq!(packet(call("sbDisplay(int,String)", &["5", "kills"])), None);
+        assert_eq!(
+            packet(call("sbScore(String,String,int)", &["Alex", "kills", "-4"])),
+            Some(PluginPacket::Scoreboard(ScoreboardStep::Score {
+                owner: "Alex".into(),
+                objective: "kills".into(),
+                score: -4
+            }))
+        );
         let bar = Uuid::from_u128(9).to_string();
         assert_eq!(
             packet(call(

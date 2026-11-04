@@ -787,11 +787,59 @@ impl Player {
                         .push(ItemStack::with_count(id, i32::from(item.amount)));
                 }
             }
+            PluginPacket::Scoreboard(step) => {
+                use ferrite_plugin::ScoreboardStep as S;
+                use ferrite_protocol::packets::play as p;
+                use ferrite_protocol::types::PlainText;
+                match step {
+                    S::Objective {
+                        name,
+                        method,
+                        display,
+                        hearts,
+                    } => send(
+                        self,
+                        &p::SetObjective {
+                            name,
+                            mode: method,
+                            display_name: (method != 1).then_some(PlainText(display)),
+                            render_type: (method != 1).then(|| VarInt(i32::from(hearts))),
+                        },
+                    ),
+                    S::Display { slot, name } => send(
+                        self,
+                        &p::SetDisplayObjective {
+                            slot: VarInt(slot),
+                            objective: name,
+                        },
+                    ),
+                    S::Score {
+                        owner,
+                        objective,
+                        score,
+                    } => send(
+                        self,
+                        &p::SetScore {
+                            entity: owner,
+                            objective,
+                            value: VarInt(score),
+                            display_name: None,
+                        },
+                    ),
+                    S::Reset { owner, objective } => send(
+                        self,
+                        &p::ResetScore {
+                            entity: owner,
+                            objective: (!objective.is_empty()).then_some(objective),
+                        },
+                    ),
+                }
+            }
             PluginPacket::BossBar(change) => {
                 use ferrite_plugin::BossBarChange as C;
-                use ferrite_protocol::packets::play::BossEvent as E;
+                use ferrite_protocol::packets::play::{BossBar, BossBarAction as A};
                 use ferrite_protocol::types::PlainText;
-                let event = match change {
+                let (uuid, action) = match change {
                     C::Add {
                         id,
                         name,
@@ -799,28 +847,29 @@ impl Player {
                         color,
                         overlay,
                         flags,
-                    } => E::Add {
+                    } => (
                         id,
-                        name: PlainText(name),
-                        progress,
-                        color: VarInt(color),
-                        overlay: VarInt(overlay),
-                        flags,
-                    },
-                    C::Remove { id } => E::Remove { id },
-                    C::Progress { id, progress } => E::Progress { id, progress },
-                    C::Name { id, name } => E::Name {
+                        A::Add {
+                            name: PlainText(name),
+                            progress,
+                            color: VarInt(color),
+                            overlay: overlay as u8,
+                            flags,
+                        },
+                    ),
+                    C::Remove { id } => (id, A::Remove),
+                    C::Progress { id, progress } => (id, A::UpdateProgress(progress)),
+                    C::Name { id, name } => (id, A::UpdateName(PlainText(name))),
+                    C::Style { id, color, overlay } => (
                         id,
-                        name: PlainText(name),
-                    },
-                    C::Style { id, color, overlay } => E::Style {
-                        id,
-                        color: VarInt(color),
-                        overlay: VarInt(overlay),
-                    },
-                    C::Flags { id, flags } => E::Flags { id, flags },
+                        A::UpdateStyle {
+                            color: VarInt(color),
+                            overlay: overlay as u8,
+                        },
+                    ),
+                    C::Flags { id, flags } => (id, A::UpdateProperties(flags)),
                 };
-                send(self, &event);
+                send(self, &BossBar { uuid, action });
             }
             PluginPacket::ResyncInventory => {
                 let full = self.menus.current().broadcast_full_state(&self.inventory);
