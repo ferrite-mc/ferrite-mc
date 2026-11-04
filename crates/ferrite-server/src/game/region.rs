@@ -43,6 +43,11 @@ pub enum Command {
         rows: u8,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
+    /// A plugin's item cooldown for one group.
+    PluginCooldown {
+        group: String,
+        ticks: i32,
+    },
     /// A plugin's glowing, invisibility, fire, silence, gravity or freeze change.
     PluginEntityData {
         flags: Option<u8>,
@@ -2357,6 +2362,16 @@ impl Player {
                 }
                 Command::PluginOpenInventory { title, rows, items } => {
                     self.open_plugin_inventory(&title, rows, &items);
+                    continue;
+                }
+                Command::PluginCooldown { group, ticks } => {
+                    send(
+                        self,
+                        &ItemCooldown {
+                            group,
+                            ticks: VarInt(ticks),
+                        },
+                    );
                     continue;
                 }
                 Command::PluginEntityData {

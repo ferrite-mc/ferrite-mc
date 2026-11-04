@@ -259,6 +259,12 @@ pub enum PlayerCommand {
         rows: u8,
         items: Vec<Option<ItemSnapshot>>,
     },
+    /// Starts (`ticks > 0`) or ends (`ticks == 0`) an item cooldown for one item group.
+    Cooldown {
+        player: uuid::Uuid,
+        group: String,
+        ticks: i32,
+    },
     /// Entity data the player's own client shows (`setGlowing`, `setInvisible`, `setVisualFire`,
     /// `setSilent`, `setGravity`, `setFreezeTicks`); `None` leaves a value as it was.
     EntityData {

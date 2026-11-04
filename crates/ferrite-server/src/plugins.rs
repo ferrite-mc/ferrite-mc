@@ -1,5 +1,6 @@
 //! Loading plugins into the embedded JVM at server startup.
 mod appearance;
+mod cooldown;
 mod extra;
 mod inventory;
 mod motion;
@@ -100,7 +101,19 @@ impl PluginBridge {
                             uuid::Uuid,
                             appearance::AppearanceState,
                         >::new());
+                        let cooldowns = std::sync::Mutex::new(cooldown::Cooldowns::default());
                         let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
+                            if call.owner == "Player"
+                                && let Some((command, reply)) = cooldowns
+                                    .lock()
+                                    .unwrap()
+                                    .handle(call, std::time::Instant::now())
+                            {
+                                if let (Some(players), Some(command)) = (&players, command) {
+                                    players(command);
+                                }
+                                return Some(reply);
+                            }
                             if let (Some(players), Ok(player)) =
                                 (&players, uuid::Uuid::parse_str(&call.subject))
                             {

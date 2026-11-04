@@ -475,6 +475,7 @@ macro_rules! item_packet {($name:ident<$g:ident $(= $d:ty)?>,$id:expr,$bound:ide
 item_packet!(CreativeSlot<I = ItemStack>,57,Serverbound,{slot:i16,item:I});
 item_packet!(ContainerContent<I = ItemStack>,18,Clientbound,{window:VarInt,state:VarInt,slots:Vec<I>,carried:I});
 item_packet!(ContainerSlot<I = ItemStack>,20,Clientbound,{window:VarInt,state:VarInt,slot:i16,item:I});
+packet!(ItemCooldown,22,Clientbound,{group:String,ticks:VarInt});
 packet!(SetExperience,105,Clientbound,{progress:f32,level:VarInt,total:VarInt});
 // Vanilla `ClientboundPlayerAbilitiesPacket`: flags (1 invulnerable, 2 flying, 4 may fly, 8 instant build),
 // flying speed and the walking speed (field-of-view modifier).
@@ -1324,6 +1325,14 @@ mod interaction_tests {
         let mut data = bytes.as_slice();
         assert_eq!(T::decode(&mut data).unwrap(), value);
         assert!(data.is_empty());
+    }
+    #[test]
+    fn item_cooldown_roundtrips_and_has_the_vanilla_id() {
+        assert_eq!(ItemCooldown::ID, 22);
+        roundtrip(ItemCooldown {
+            group: "minecraft:ender_pearl".into(),
+            ticks: VarInt(300),
+        });
     }
     #[test]
     fn container_packets_roundtrip() {
