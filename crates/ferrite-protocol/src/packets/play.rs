@@ -479,6 +479,42 @@ macro_rules! item_packet {($name:ident<$g:ident $(= $d:ty)?>,$id:expr,$bound:ide
 item_packet!(CreativeSlot<I = ItemStack>,57,Serverbound,{slot:i16,item:I});
 item_packet!(ContainerContent<I = ItemStack>,18,Clientbound,{window:VarInt,state:VarInt,slots:Vec<I>,carried:I});
 item_packet!(ContainerSlot<I = ItemStack>,20,Clientbound,{window:VarInt,state:VarInt,slot:i16,item:I});
+/// Vanilla `ClientboundSetEquipmentPacket`: the entity id, then `(slot, item)` pairs where every slot
+/// byte but the last has bit 0x80 set. Slots: 0 main hand, 1 off hand, 2 feet, 3 legs, 4 chest, 5 head.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetEquipment<I = ItemStack> {
+    pub entity_id: VarInt,
+    pub slots: Vec<(u8, I)>,
+}
+impl<I: Encode> Encode for SetEquipment<I> {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.entity_id.encode(out);
+        for (i, (slot, item)) in self.slots.iter().enumerate() {
+            let more = if i + 1 < self.slots.len() { 0x80 } else { 0 };
+            (slot & 0x7f | more).encode(out);
+            item.encode(out);
+        }
+    }
+}
+impl<I: Decode> Decode for SetEquipment<I> {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        let entity_id = VarInt::decode(buf)?;
+        let mut slots = Vec::new();
+        loop {
+            let byte = u8::decode(buf)?;
+            slots.push((byte & 0x7f, I::decode(buf)?));
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        Ok(Self { entity_id, slots })
+    }
+}
+impl<I: Encode + Decode> Packet for SetEquipment<I> {
+    const ID: i32 = 104;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
 packet!(CustomPayload,24,Clientbound,{channel:String,data:crate::codec::RestBytes});
 packet!(Transfer,132,Clientbound,{host:String,port:VarInt});
 packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required:bool,prompt:Option<Vec<u8>>});
@@ -2192,6 +2228,19 @@ mod command_feedback_tests {
         let mut input = bytes.as_slice();
         assert_eq!(T::decode(&mut input).unwrap(), value);
         assert!(input.is_empty());
+    }
+
+    #[test]
+    fn equipment_packet_marks_all_but_the_last_slot() {
+        let item = ItemStack::default();
+        let packet = SetEquipment {
+            entity_id: VarInt(5),
+            slots: vec![(5, item), (0, item)],
+        };
+        let mut bytes = Vec::new();
+        packet.encode(&mut bytes);
+        assert_eq!(bytes[..2], [5, 0x85]);
+        rt(packet);
     }
 
     #[test]

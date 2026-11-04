@@ -209,6 +209,12 @@ pub enum PluginPacket {
     },
     /// Resends the open menu and the carried item (`Player#updateInventory`).
     ResyncInventory,
+    /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
+    Equipment {
+        entity_id: i32,
+        slot: u8,
+        item: Option<ItemSnapshot>,
+    },
     /// `ClientboundUpdateMobEffectPacket` for an entity the client knows.
     PotionEffect {
         entity_id: i32,

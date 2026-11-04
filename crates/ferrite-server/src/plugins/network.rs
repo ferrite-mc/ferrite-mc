@@ -11,6 +11,7 @@ use ferrite_plugin::{HostCall, PlayerCommand, PluginPacket};
 use uuid::Uuid;
 
 const PART: char = '\u{1d}';
+const NULL_ARG: &str = "\u{1b}null";
 /// Vanilla limit for a clientbound custom payload.
 const MAX_PAYLOAD: usize = 1_048_576;
 
@@ -140,6 +141,37 @@ fn mob_effect(key: &str) -> Option<i32> {
     ferrite_data::registries::id("minecraft:mob_effect", key)
 }
 
+/// The wire slot of a Bukkit `EquipmentSlot`.
+fn equipment_slot(name: &str) -> Option<u8> {
+    Some(match name {
+        "HAND" => 0,
+        "OFF_HAND" => 1,
+        "FEET" => 2,
+        "LEGS" => 3,
+        "CHEST" => 4,
+        "HEAD" => 5,
+        _ => return None,
+    })
+}
+
+/// An encoded `ItemStack` (`MATERIAL<ITEM>amount`); `Some(None)` is an empty stack, `None` is invalid.
+fn item_snapshot(text: &str) -> Option<Option<ferrite_plugin::ItemSnapshot>> {
+    if text == NULL_ARG {
+        return Some(None);
+    }
+    let (material, amount) = text.split_once(PART)?;
+    let amount: u8 = amount.parse().ok().filter(|a| (1..=99).contains(a))?;
+    if material == "AIR" {
+        return Some(None);
+    }
+    let key = format!("minecraft:{}", material.to_ascii_lowercase());
+    ferrite_item::item_id(&key)?;
+    Some(Some(ferrite_plugin::ItemSnapshot {
+        material: key,
+        amount,
+    }))
+}
+
 /// The packet command behind `call`, or `None` when it is another call or a value is invalid.
 pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "Player" {
@@ -226,6 +258,11 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
                 effect: mob_effect(arg(1)?)?,
             }
         }
+        "sendEquipmentChange(LivingEntity,EquipmentSlot,ItemStack)" => PluginPacket::Equipment {
+            entity_id: super::facts::entity_id(Uuid::parse_str(arg(0)?).ok()?)?,
+            slot: equipment_slot(arg(1)?)?,
+            item: item_snapshot(arg(2)?)?,
+        },
         "updateInventory()" => PluginPacket::ResyncInventory,
         "sendOpLevel(byte)" => {
             let level: u8 = arg(0)?.parse().ok().filter(|level| *level <= 4)?;
@@ -340,6 +377,23 @@ mod tests {
             .is_none()
         );
         super::super::facts::forget(player);
+    }
+
+    #[test]
+    fn equipment_items_and_slots_are_validated() {
+        assert_eq!(equipment_slot("HEAD"), Some(5));
+        assert_eq!(equipment_slot("BODY"), None);
+        assert_eq!(
+            item_snapshot(&format!("DIAMOND_HELMET{PART}1")),
+            Some(Some(ferrite_plugin::ItemSnapshot {
+                material: "minecraft:diamond_helmet".into(),
+                amount: 1
+            }))
+        );
+        assert_eq!(item_snapshot(&format!("AIR{PART}1")), Some(None));
+        assert_eq!(item_snapshot(NULL_ARG), Some(None));
+        assert_eq!(item_snapshot(&format!("NOT_AN_ITEM{PART}1")), None);
+        assert_eq!(item_snapshot(&format!("STONE{PART}0")), None);
     }
 
     #[test]

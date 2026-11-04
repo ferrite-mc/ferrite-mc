@@ -676,6 +676,26 @@ impl Player {
                     flags,
                 },
             ),
+            PluginPacket::Equipment {
+                entity_id,
+                slot,
+                item,
+            } => {
+                let stack = match item.and_then(|i| {
+                    ferrite_item::item_id(&i.material)
+                        .map(|id| ferrite_item::ItemStack::with_count(id, i32::from(i.amount)))
+                }) {
+                    Some(stack) => stack,
+                    None => ferrite_item::ItemStack::empty(),
+                };
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::SetEquipment {
+                        entity_id: VarInt(entity_id),
+                        slots: vec![(slot, stack)],
+                    },
+                );
+            }
             PluginPacket::PotionRemove { entity_id, effect } => send(
                 self,
                 &ferrite_protocol::packets::play::RemoveMobEffect {
