@@ -102,6 +102,27 @@ mod tests {
     }
 
     #[test]
+    fn plugin_visual_health_reaches_only_the_target() {
+        let player = Uuid::from_u128(7);
+        let command = ferrite_plugin::PlayerCommand::VisualHealth {
+            player,
+            health: 12.5,
+            food: 9,
+            saturation: 2.5,
+        };
+        let sent = routed(command.clone(), player);
+        assert_eq!(
+            sent.iter().map(bytes).collect::<Vec<_>>(),
+            vec![bytes(&game::packet(&SetHealth {
+                health: 12.5,
+                food: VarInt(9),
+                saturation: 2.5
+            }))]
+        );
+        assert!(routed(command, Uuid::from_u128(8)).is_empty());
+    }
+
+    #[test]
     fn plugin_action_bar_clear_title_and_tab_list_reach_the_player() {
         let player = Uuid::from_u128(7);
         let plain = |text: &str| ferrite_protocol::types::PlainText(text.into());
@@ -1257,6 +1278,23 @@ fn route_plugin_command(
                     .lock()
                     .unwrap()
                     .push_back(Command::PluginDamage { amount });
+            }
+        }
+        PlayerCommand::VisualHealth {
+            player,
+            health,
+            food,
+            saturation,
+        } => {
+            if let Some((_, _, outbound)) = mailboxes.get(&player) {
+                emit(
+                    outbound,
+                    &SetHealth {
+                        health,
+                        food: VarInt(food),
+                        saturation,
+                    },
+                );
             }
         }
         PlayerCommand::SetHealth { player, health } => {

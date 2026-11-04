@@ -257,6 +257,12 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         amount: f32,
     },
+    VisualHealth {
+        player: uuid::Uuid,
+        health: f32,
+        food: i32,
+        saturation: f32,
+    },
     SetHealth {
         player: uuid::Uuid,
         health: f64,
