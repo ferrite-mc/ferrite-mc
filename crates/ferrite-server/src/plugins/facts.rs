@@ -36,6 +36,36 @@ fn sleeping_registry() -> &'static Mutex<std::collections::HashSet<Uuid>> {
     SLEEPING.get_or_init(Default::default)
 }
 
+/// Hunger, air and fire values the survival tick last computed for a player.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vitals {
+    pub saturation: f32,
+    pub exhaustion: f32,
+    pub absorption: f32,
+    pub air: i32,
+    pub fire_ticks: i32,
+}
+
+fn vitals_registry() -> &'static Mutex<HashMap<Uuid, Vitals>> {
+    static VITALS: OnceLock<Mutex<HashMap<Uuid, Vitals>>> = OnceLock::new();
+    VITALS.get_or_init(Default::default)
+}
+
+pub fn set_vitals(player: Uuid, vitals: Vitals) {
+    vitals_registry().lock().unwrap().insert(player, vitals);
+}
+
+fn vitals_answer(vitals: &Vitals, method: &str) -> Option<String> {
+    Some(match method {
+        "getSaturation()" => vitals.saturation.to_string(),
+        "getExhaustion()" => vitals.exhaustion.to_string(),
+        "getAbsorptionAmount()" => f64::from(vitals.absorption).to_string(),
+        "getRemainingAir()" => vitals.air.to_string(),
+        "getFireTicks()" => vitals.fire_ticks.max(0).to_string(),
+        _ => return None,
+    })
+}
+
 fn fall_registry() -> &'static Mutex<HashMap<Uuid, f32>> {
     static FALL: OnceLock<Mutex<HashMap<Uuid, f32>>> = OnceLock::new();
     FALL.get_or_init(Default::default)
@@ -88,6 +118,7 @@ pub fn forget(player: Uuid) {
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
     fall_registry().lock().unwrap().remove(&player);
+    vitals_registry().lock().unwrap().remove(&player);
     history_registry().lock().unwrap().remove(&player);
     ferrite_net::settings::forget(player);
 }
@@ -168,6 +199,11 @@ pub fn answer(call: &HostCall) -> Option<String> {
         } else {
             millis(first).to_string()
         });
+    }
+    if let Some(vitals) = vitals_registry().lock().unwrap().get(&player)
+        && let Some(reply) = vitals_answer(vitals, &call.method)
+    {
+        return Some(reply);
     }
     if call.method == "getFallDistance()" {
         return fall_registry()
@@ -266,6 +302,37 @@ mod tests {
         assert_eq!(ask("getFirstPlayed()").as_deref(), Some("1234"));
         forget(player);
         assert_eq!(ask("getFirstPlayed()"), None);
+    }
+
+    #[test]
+    fn vitals_are_answered_from_the_last_survival_tick() {
+        let player = Uuid::from_u128(0x7a15);
+        let ask = |method: &str| {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: method.into(),
+                args: vec![],
+            })
+        };
+        assert_eq!(ask("getSaturation()"), None);
+        set_vitals(
+            player,
+            Vitals {
+                saturation: 5.0,
+                exhaustion: 1.5,
+                absorption: 4.0,
+                air: 120,
+                fire_ticks: -1,
+            },
+        );
+        assert_eq!(ask("getSaturation()").as_deref(), Some("5"));
+        assert_eq!(ask("getExhaustion()").as_deref(), Some("1.5"));
+        assert_eq!(ask("getAbsorptionAmount()").as_deref(), Some("4"));
+        assert_eq!(ask("getRemainingAir()").as_deref(), Some("120"));
+        assert_eq!(ask("getFireTicks()").as_deref(), Some("0"));
+        forget(player);
+        assert_eq!(ask("getRemainingAir()"), None);
     }
 
     #[test]

@@ -1808,6 +1808,16 @@ impl Player {
             self.survival.sprinting,
         );
         crate::plugins::facts::set_fall_distance(self.uuid, self.survival.fall_distance as f32);
+        crate::plugins::facts::set_vitals(
+            self.uuid,
+            crate::plugins::facts::Vitals {
+                saturation: self.survival.food.saturation,
+                exhaustion: self.survival.food.exhaustion,
+                absorption: self.survival.absorption,
+                air: self.survival.air,
+                fire_ticks: self.survival.fire_ticks,
+            },
+        );
         for (kind, amount) in damage.into_iter().flatten() {
             if (fire_resistance && matches!(kind, DamageKind::Lava | DamageKind::Fire))
                 || (water_breathing && kind == DamageKind::Drown)
