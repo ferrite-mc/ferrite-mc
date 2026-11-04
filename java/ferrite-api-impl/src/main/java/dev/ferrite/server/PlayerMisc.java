@@ -199,4 +199,18 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source, boolean kick) { return (E) applyBan(reason, duration == null ? null : java.util.Date.from(java.time.Instant.now().plus(duration)), source, kick); }
     @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source) { return (E) applyBan(reason, duration == null ? null : java.util.Date.from(java.time.Instant.now().plus(duration)), source, true); }
     @Override public boolean isBanned() { return ((org.bukkit.ban.ProfileBanList) getServer().getBanList(org.bukkit.BanList.Type.PROFILE)).isBanned((org.bukkit.profile.PlayerProfile) getPlayerProfile()); }
+
+    // ---- connection --------------------------------------------------------------------------------------------
+    /** The connecting address; the host keeps the IP but not the client port, which is reported as 0. */
+    @Override public java.net.InetSocketAddress getAddress() {
+        String text = (String) HostBridge.call("Player", getUniqueId(), "getAddressText()", String.class);
+        try {
+            return new java.net.InetSocketAddress(java.net.InetAddress.getByName(text), 0);
+        } catch (java.net.UnknownHostException e) {
+            throw new IllegalStateException("Invalid player address " + text, e);
+        }
+    }
+    @Override public java.net.SocketAddress getSocketAddress() { return getAddress(); }
+    @Override public java.net.InetSocketAddress getVirtualHost() { return null; }
+    @Override public java.net.InetSocketAddress getHAProxyAddress() { return null; }
 }

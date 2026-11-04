@@ -17,6 +17,8 @@ use uuid::Uuid;
 pub struct PlayerFacts {
     pub entity_id: i32,
     pub joined: SystemTime,
+    /// The connecting address (the forwarded one behind a proxy); the port is not kept.
+    pub address: Option<std::net::IpAddr>,
 }
 
 fn registry() -> &'static Mutex<HashMap<Uuid, PlayerFacts>> {
@@ -56,6 +58,7 @@ fn answer_at(facts: &PlayerFacts, method: &str, now: SystemTime) -> Option<Strin
         // An online player is being seen and is playing right now.
         "getLastSeen()" | "getLastPlayed()" => millis(now).to_string(),
         "isInWorld()" | "isTicking()" => "true".to_owned(),
+        "getAddressText()" => facts.address?.to_string(),
         _ => return None,
     })
 }
@@ -92,6 +95,7 @@ mod tests {
             PlayerFacts {
                 entity_id: 77,
                 joined: SystemTime::now(),
+                address: None,
             },
         );
         assert_eq!(
@@ -112,6 +116,7 @@ mod tests {
         let facts = PlayerFacts {
             entity_id: 1,
             joined,
+            address: None,
         };
         let later = joined + Duration::from_millis(2_025);
         assert_eq!(
@@ -137,11 +142,28 @@ mod tests {
             PlayerFacts {
                 entity_id: 5,
                 joined: SystemTime::now(),
+                address: None,
             },
         );
         let mut with_arg = call(player, "getEntityId()");
         with_arg.args.push("x".into());
         assert_eq!(answer(&with_arg), None);
         forget(player);
+    }
+
+    #[test]
+    fn the_address_is_answered_as_text_when_known() {
+        let now = UNIX_EPOCH;
+        let mut facts = PlayerFacts {
+            entity_id: 1,
+            joined: now,
+            address: Some("203.0.113.9".parse().unwrap()),
+        };
+        assert_eq!(
+            answer_at(&facts, "getAddressText()", now).as_deref(),
+            Some("203.0.113.9")
+        );
+        facts.address = None;
+        assert_eq!(answer_at(&facts, "getAddressText()", now), None);
     }
 }
