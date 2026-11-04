@@ -28,6 +28,11 @@ pub fn record(player: Uuid, facts: PlayerFacts) {
     registry().lock().unwrap().insert(player, facts);
 }
 
+/// The network entity id of an online player.
+pub fn entity_id(player: Uuid) -> Option<i32> {
+    registry().lock().unwrap().get(&player).map(|f| f.entity_id)
+}
+
 pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
 }

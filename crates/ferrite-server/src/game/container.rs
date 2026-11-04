@@ -656,6 +656,23 @@ impl Player {
                     &update,
                 );
             }
+            PluginPacket::ResyncInventory => {
+                let full = self.menus.current().broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+            }
+            PluginPacket::EntityEvent { entity_id, status } => send(
+                self,
+                &ferrite_protocol::packets::play::EntityEvent { entity_id, status },
+            ),
+            PluginPacket::LevelEvent { event, pos, data } => send(
+                self,
+                &ferrite_protocol::packets::play::LevelEvent {
+                    event,
+                    location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    data,
+                    global: false,
+                },
+            ),
             PluginPacket::HurtAnimation { yaw } => {
                 let update =
                     ferrite_net::game::packet(&ferrite_protocol::packets::play::HurtAnimation {

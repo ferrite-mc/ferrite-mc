@@ -119,6 +119,22 @@ fn resource_pack(player: Uuid, call: &HostCall) -> Option<PlayerCommand> {
     })
 }
 
+/// The vanilla entity-event status of a Bukkit `EntityEffect`, for the effects whose status is
+/// certain; others are left unhandled.
+fn entity_status(effect: &str) -> Option<u8> {
+    Some(match effect {
+        "HURT" => 2,
+        "DEATH" => 3,
+        "SHIELD_BLOCK" => 29,
+        "SHIELD_BREAK" => 30,
+        "TOTEM_RESURRECT" => 35,
+        "HURT_DROWN" => 36,
+        "HURT_EXPLOSION" => 37,
+        "TELEPORT_ENDER" => 46,
+        _ => return None,
+    })
+}
+
 /// The packet command behind `call`, or `None` when it is another call or a value is invalid.
 pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "Player" {
@@ -161,6 +177,27 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             "HAND" => PluginPacket::Animation { action: 0 },
             "OFF_HAND" => PluginPacket::Animation { action: 3 },
             _ => return None,
+        },
+        "updateInventory()" => PluginPacket::ResyncInventory,
+        "sendOpLevel(byte)" => {
+            let level: u8 = arg(0)?.parse().ok().filter(|level| *level <= 4)?;
+            PluginPacket::EntityEvent {
+                entity_id: super::facts::entity_id(player)?,
+                status: 24 + level,
+            }
+        }
+        "playEffect(EntityEffect)" => PluginPacket::EntityEvent {
+            entity_id: super::facts::entity_id(player)?,
+            status: entity_status(arg(0)?)?,
+        },
+        "sendEntityEffect(EntityEffect,Entity)" => PluginPacket::EntityEvent {
+            entity_id: super::facts::entity_id(Uuid::parse_str(arg(1)?).ok()?)?,
+            status: entity_status(arg(0)?)?,
+        },
+        "playLevelEvent(Location,int,int)" => PluginPacket::LevelEvent {
+            event: arg(1)?.parse().ok().filter(|event| *event >= 0)?,
+            pos: block_pos(arg(0)?)?,
+            data: arg(2)?.parse().ok()?,
         },
         "playHurtAnimation(float)" => {
             let yaw: f32 = arg(0)?.parse().ok().filter(|yaw: &f32| yaw.is_finite())?;
@@ -397,6 +434,37 @@ mod tests {
             packet(call(
                 "setResourcePack(String,byte[],String,boolean)",
                 &["https://x/p.zip", &short, "", "false"]
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn effects_resync_and_world_events_become_packets() {
+        assert_eq!(
+            packet(call("updateInventory()", &[])),
+            Some(PluginPacket::ResyncInventory)
+        );
+        assert_eq!(packet(call("sendOpLevel(byte)", &["9"])), None);
+        assert_eq!(
+            packet(call("playEffect(EntityEffect)", &["WOLF_HEARTS"])),
+            None
+        );
+        assert_eq!(
+            packet(call(
+                "playLevelEvent(Location,int,int)",
+                &[&location("1", "64", "2"), "1000", "0"]
+            )),
+            Some(PluginPacket::LevelEvent {
+                event: 1000,
+                pos: [1, 64, 2],
+                data: 0
+            })
+        );
+        assert_eq!(
+            packet(call(
+                "playLevelEvent(Location,int,int)",
+                &[&location("1", "64", "2"), "-1", "0"]
             )),
             None
         );

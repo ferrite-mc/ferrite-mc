@@ -142,4 +142,17 @@ public abstract class PlayerMisc extends PlayerStubs {
         for (var change : Objects.requireNonNull(changes, "blockChanges").entrySet())
             sendBlockChange(change.getKey().toLocation(getWorld()), change.getValue());
     }
+
+    // ---- world effects -------------------------------------------------------------------------------
+    @Override public void playEffect(org.bukkit.Location location, org.bukkit.Effect effect, int data) {
+        Objects.requireNonNull(location, "location");
+        Objects.requireNonNull(effect, "effect");
+        HostBridge.callVoid("Player", getUniqueId(), "playLevelEvent(Location,int,int)", location, effect.getId(), data);
+    }
+    @Override public <T> void playEffect(org.bukkit.Location location, org.bukkit.Effect effect, T data) {
+        Objects.requireNonNull(effect, "effect");
+        if (data == null) { playEffect(location, effect, 0); return; }
+        if (data instanceof Number number) { playEffect(location, effect, number.intValue()); return; }
+        throw new UnsupportedOperationException("Ferrite: not implemented: Player#playEffect with " + data.getClass().getSimpleName() + " data");
+    }
 }

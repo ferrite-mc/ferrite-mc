@@ -464,6 +464,8 @@ packet!(ServerboundInteract,26,Serverbound,{entity_id:VarInt,hand:VarInt,x:f64,y
 packet!(HurtAnimation,43,Clientbound,{id:VarInt,yaw:f32});
 // Vanilla `ClientboundAnimatePacket`: 4 = critical hit, 5 = magic critical hit.
 packet!(Animate,2,Clientbound,{id:VarInt,action:u8});
+packet!(EntityEvent,34,Clientbound,{entity_id:i32,status:u8});
+packet!(LevelEvent,47,Clientbound,{event:i32,location:i64,data:i32,global:bool});
 
 /// Packets carrying item stacks are generic over the stack type: this crate cannot depend on
 /// `ferrite-item`, whose full `ItemStack` (and `HashedSlot`) implement `Encode`/`Decode` behind
@@ -1497,6 +1499,16 @@ mod interaction_tests {
         roundtrip(Animate {
             id: VarInt(9),
             action: 4,
+        });
+        roundtrip(EntityEvent {
+            entity_id: 77,
+            status: 26,
+        });
+        roundtrip(LevelEvent {
+            event: 1000,
+            location: 123,
+            data: 0,
+            global: false,
         });
         roundtrip(CreativeSlot {
             slot: 36,

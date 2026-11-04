@@ -207,6 +207,19 @@ pub enum PluginPacket {
     Animation {
         action: u8,
     },
+    /// Resends the open menu and the carried item (`Player#updateInventory`).
+    ResyncInventory,
+    /// An entity event (status byte) of the entity with this network id, shown to this player.
+    EntityEvent {
+        entity_id: i32,
+        status: u8,
+    },
+    /// A world event (sound or particle effect, `Player#playEffect`) at a block position.
+    LevelEvent {
+        event: i32,
+        pos: [i32; 3],
+        data: i32,
+    },
     /// The hurt tilt (`Player#playHurtAnimation`) from a yaw, shown to the same viewers.
     HurtAnimation {
         yaw: f32,
