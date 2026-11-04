@@ -53,6 +53,11 @@ struct WorldgenSettings {
     java_home: Option<std::path::PathBuf>,
     /// The world seed (a number or any text, as in `server.properties`).
     seed: String,
+    /// Build a patched copy of the jar on this machine (rules in `patch-rules`) that keeps only
+    /// world generation, and run that instead of the unmodified jar.
+    patch: bool,
+    /// The rule file for `patch`.
+    patch_rules: std::path::PathBuf,
 }
 impl Default for WorldgenSettings {
     fn default() -> Self {
@@ -62,6 +67,8 @@ impl Default for WorldgenSettings {
             jvm_args: Vec::new(),
             java_home: None,
             seed: "0".into(),
+            patch: false,
+            patch_rules: "java/ferrite-worldgen-host/rules/worldgen.rules".into(),
         }
     }
 }
@@ -264,6 +271,10 @@ async fn main() -> anyhow::Result<()> {
             host.jvm_args = config.worldgen.jvm_args.clone();
             host.java_home = config.worldgen.java_home.clone();
             host.seed = config.worldgen.seed.clone();
+            host.patch_rules = config
+                .worldgen
+                .patch
+                .then(|| config.worldgen.patch_rules.clone());
             tracing::info!("starting the vanilla world generation host (this takes a few seconds)");
             let generator =
                 tokio::task::block_in_place(|| game::VanillaGenerator::spawn(&host, registry))

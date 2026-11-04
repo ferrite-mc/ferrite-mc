@@ -1,326 +1,98 @@
 # Ferrite
 
-Rust로 작성된 **Minecraft Java 서버**입니다. Folia 스타일의 리전(region) 기반 멀티스레딩을
-목표로 하며, 내장 JVM으로 Bukkit/Spigot/Paper/Folia 플러그인을 그대로 실행하는 것을 최종
-목표로 합니다.
+Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레딩을 쓰고, 내장 JVM으로
+Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **언어**: Rust (edition 2024)
-- **상태**: 봇·Java 대조 테스트로 검증된 생존 기본기 동작. **실제 26.3 클라이언트 접속은 아직
-  검증하지 않았습니다.**
+- **상태**: 프로토콜 봇과 Java 대조 테스트로 검증한 생존 기본기. **실제 26.3 클라이언트 접속은 아직 검증하지 않았습니다.**
 - **라이선스**: GPL-3.0-or-later
 
-> **English summary** — Ferrite is a Minecraft Java server written in Rust (target 26.3,
-> protocol 777) with Folia-style regionized multithreading and an embedded JVM for
-> Bukkit/Paper plugins. It currently runs a bot-verified survival server: login/encryption,
-> signed chat, server-list ping, blocks and items, inventory/crafting/chests/furnaces/anvils, villagers and trading,
-> hoppers and dispensers, survival, redstone, command blocks, brewing stands and beacons, the nether
-> dimension and portals, mobs (passive and hostile) with combat,
-> ~70 commands, plugin events, a live Bukkit `Server` surface and a
-> Folia-style scheduler, and a 26.3 → 26.2
-> protocol translation layer. **It has not yet been tested with a real 26.3 client.** No Mojang
-> code or assets are distributed here; vanilla data is generated locally from the official jar.
-> World generation is not implemented in Rust: an optional host process runs Mojang's own
-> generator from the server jar you download yourself (see `docs/worldgen-host.md`). The server
-> asks you to accept the Minecraft EULA in `eula.txt` before it starts.
+> **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
+> regionized multithreading and an embedded JVM for Bukkit/Paper plugins. It runs a bot-verified
+> survival server and has **not** been tested with a real 26.3 client. No Mojang code or assets are
+> distributed; vanilla data is generated locally from the official jar.
 
-## 진행 현황 (2026-11-04)
-
-- **월드 생성 분리**: 바닐라 월드젠을 Rust로 옮겨 구현했던 `ferrite-worldgen`/`ferrite-noise`를
-  저장소에서 제거했습니다(Mojang 코드의 번역물이 될 수 있어서입니다). 이제 새 청크는 사용자가 받은 공식
-  서버 jar의 생성기가 만듭니다. 그 jar를 별도 JVM 프로세스(호스트)에서 수정 없이 실행하고, Ferrite는
-  결과 청크(NBT)만 받아 씁니다. 서버는 시작할 때 `eula.txt`의 `eula=true`를 요구하며(직접 설정해야
-  하고 Ferrite가 대신 동의하지 않습니다), 호스트도 같은 파일을 씁니다. 설계와 한계는
-  [`docs/worldgen-host.md`](docs/worldgen-host.md)에 있습니다. 필요 없는 부분(네트워크·틱·플레이어 처리)을
-  덜어 내는 바이트코드 패처는 아직 없습니다.
-
-- **플러그인 호환성 검사**: 테스트 프로브에 바닐라 데이터 경로를 연결했습니다. EssentialsX 활성화와
-  `help` 명령은 확인했지만, 종료 시 예외와 NMS 호환성은 해결해야 합니다.
-
-- **CI**: 지역 병합과 느린 연결 테스트의 동기화를 보강했습니다. 바닐라 테스트 월드의 오래된
-  조명 배열을 제거한 뒤 다시 계산하도록 수정했습니다. 같은 조명 수정의 통합 브랜치는 Linux·Windows CI가
-  통과했으며, 최신 `main` CI 결과는 확인 중입니다.
-- **청크 로딩 측정**: i5-14600KF, 통합 브랜치에서 `cargo bench -p ferrite-world --bench chunk_load`의
-  NBT → 청크 변환 중앙 추정치는 1.6107ms/청크(구간 1.6036~1.6193ms, 100 표본)였습니다.
-  디스크 읽기와 네트워크 전송은 포함하지 않습니다.
-- **차원별 갱신**: 블록·블록 엔티티·유체 갱신과 플레이어 엔티티 추적을 차원별로 분리하고,
-  설정된 차원의 월드 소스를 재사용하도록 수정했습니다. 차원·네더 침대·추적 테스트와 clippy가 통과했습니다.
-- **지역 병합 테스트**: 세 지역이 동시에 실행되는 경우를 명시적으로 검사하도록 수정했으며,
-  해당 테스트 30회 반복과 지역 변경 테스트·clippy가 통과했습니다.
-- **서버 검증**: 차원별 갱신 수정 후 Windows 로컬 서버 라이브러리 테스트 286개가 통과했습니다.
-- **비콘·플러그인 API**: 비콘 결제 슬롯을 한 개로 제한하고, 플러그인의 시야 거리·시뮬레이션 거리와
-  바닐라 태그 조회를 연결했습니다. 비콘 테스트와 Java 플러그인 테스트가 통과했습니다.
-- **진행 중**: 청크 조명 갱신, 지도 제작대의 월드 데이터 처리,
-  피스톤 검토. 작업 브랜치의 변경은 검증 후 통합합니다.
-- **다음 호환성 작업**: Paper/Bukkit `Server`의 남은 메서드와 EssentialsX가 요구하는 NMS 호출을
-  실제 서버 데이터와 연결하고 단계별 테스트로 검증합니다. 현재 모든 API가 구현된 것은 아닙니다.
-- **호환성 점검**: `Server#audiences`는 콘솔과 접속자를 반환하고, `createCommandSender`는 콘솔과 같은
-  권한으로 명령 피드백을 전달합니다. `getPermissionMessage`와 64×64 서버 아이콘 로딩도 구현했습니다.
-  EssentialsX 2.22.0 검사에서 비동기 스케줄러 잠금을 수정한 후 `/help`가 반환되는 것을 확인했습니다.
-  블록·아이템·유체·엔티티·게임 이벤트 태그의 초기화를 검증했습니다. 격리 검사에서는 데이터 경로가
-  설정되지 않아 Paper 재료 태그 제공자가 실패하고, NMS 경고와 종료 오류도 남아 있습니다.
-  전체 호환성은 아직 검증되지 않았습니다.
-  **전부 라우팅(2026-11-04)**: `Player`·`Server`·`BukkitScheduler`·`PluginManager`·`Registry`·`ItemFactory`·
-  `UnsafeValues` 등 약 1000개 메서드와 동적 프록시(World/Block/Inventory 등)의 `default` 분기가 더 이상 곧바로
-  예외를 던지지 않고 `HostBridge` → `Native.hostCall` → Rust `HostCallHandler`로 전달됩니다. 호스트가 처리하지
-  않는 메서드만 `UnsupportedOperationException("Ferrite: not implemented: Owner#method(types)")`를 던지므로
-  빈 곳이 정확히 드러납니다. 현재 호스트가 실제로 처리하는 것은 일부(서버: `broadcastMessage`, `savePlayers`, `shutdown`, `reload`,
-  `reloadWhitelist`, `setDefaultGameMode` / 플레이어: `addPotionEffect`, `removePotionEffect`,
-  `clearActivePotionEffects`, `damage`, `setBedSpawnLocation`, `stopAllSounds` / 월드: `setStorm`, `setThundering`,
-  `setTime`, `setDifficulty`, `setSpawnLocation`, `save`)이고, 나머지
-  핸들러를 채우는 작업이 진행 중입니다. 호스트에 상태가 없는 속성(`setFlying`/`isFlying`, `setFireTicks`,
-  `setWalkSpeed`, `setSneaking` 등 `set/get/is/has` 쌍)은 자바 쪽에 값을 보관해 플러그인이 설정한 값을 그대로
-  읽게 하고, 알려진 기본값만 돌려줍니다. 클라이언트 효과 패킷은 비행·속도(`setFlying`, `setAllowFlight`, `setFlySpeed`, `setWalkSpeed`, `setInvulnerable` → `PlayerAbilities`)부터 보내기 시작했고, 나머지는 아직 보내지 않습니다.
-  설정한 적 없고 기본값도 모르는 읽기는 예외로 남겨 값을 지어내지 않습니다. 즉 **라우팅은 전부 연결됐지만 구현은 아직 전부가 아닙니다.**
-- **목표**: Spigot·Paper·Folia 플러그인이 모두 동작하는 것. NMS(`net.minecraft.*`)·CraftBukkit 타입에 의존하는
-  플러그인도 호환되어야 하며, 이는 라우팅 이후의 별도 단계입니다.
-
-## 현재 상태 한눈에
+## 상태
 
 | 구분 | 내용 |
 |---|---|
-| ✅ **완료 (봇 검증)** | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록/아이템, 인벤토리·제작·컨테이너, 생존, 전투·몹, 주민·거래, 레드스톤·호퍼·디스펜서, 명령 블록, 양조·비컨, 네더 차원·포탈, 유체·화재, 명령 약 70개, 플러그인 브리지, 엔티티 영속화 |
-| 🔧 **진행 중** | 피스톤, 바닐라 월드 생성 호스트(바이트코드 패처 미착수) |
-| ⛔ **아직 없음** | 실제 클라이언트 검증, 엔드 차원 |
-| 🔬 **검증 수준** | 전체 테스트 105개 바이너리 통과, `clippy -D warnings`·`fmt --check` 클린 |
+| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·컨테이너, 생존·전투·몹, 주민 거래, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 약 70개, 다중 버전(26.3 ↔ 26.2) |
+| 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API, NMS), 피스톤 |
+| ⛔ 아직 없음 | 실제 클라이언트 검증, 엔드 차원 |
 
-## 무엇이 되나
-
-### 접속과 네트워킹
-- 오프라인/온라인 로그인(RSA/AES-CFB8, AES-NI), 암호화, 압축
-- 서명 채팅, 레지스트리·태그 동기화
-- 서버 목록: 실제 접속자 수와 샘플(최대 12명), 64x64 favicon, MOTD, `enforcesSecureChat`
-- Velocity 모던 포워딩, BungeeCord 레거시 포워딩
-- 연결별 writer task로 패킷 압축·암호화를 틱 스레드 밖에서 처리
-- **다중 버전**: `ferrite-translate`가 26.3 ↔ 26.2 패킷·블록 상태·레지스트리를 변환
-  (`supported-versions = all | native`). 네이티브 클라이언트는 변환 경로를 타지 않습니다.
-
-### 월드와 게임플레이
-- Anvil IO, 청크 패킷 캐시, Starlight 스타일 조명(바닐라 대비 불일치 0)
-- 랜덤 틱(잔디 번짐·나뭇잎 소멸), 유체(물·용암), 화재 번짐·점화
-- 블록 캐기/설치와 드롭, 아이템 엔티티와 줍기, 실크터치
-- 인벤토리 클릭, 2x2·작업대 크래프팅, 상자·통
-- **제작대**: 용광로·용해로·훈연기 제련(연료·조리 진행도·경험치), 모루 수리·이름·레벨 비용,
-  마법 부여대, 숫돌, 석재 절단기, 대장장이 작업대, 베틀
-- **호퍼·디스펜서**: 8틱 아이템 이동(위에서 당기고 앞으로 밀기, 레드스톤 차단, 비교기 출력),
-  드로퍼/디스펜서(화살·눈덩이·달걀 발사)
-- 게임룰 59종과 저장
-
-### 생존과 전투
-- 체력·피해(낙하/익사/용암/불/공허), 허기·포화도, 음식, 사망·리스폰(`keepInventory`), 경험치
-- 공격 패킷과 무기 공격 속도·공격력, 치명타(1.5배), 휩쓸기, 넉백, 방패 방어
-- **몹**: 프레임워크(체력·피해·전리품·디스폰), 수동 몹(돼지·소·양·닭)과 적대 몹(좀비·스켈레톤·
-  거미·크리퍼·엔더맨), 목표 기반 AI, 블록 격자 길찾기, 화살, 몬스터 자연 스폰(밝기·몹 캡),
-  `/summon`
-- **주민**: 직업과 작업대 연동, UUID별 결정적 거래 목록, 가격·사용 횟수·XP, 상인 메뉴
-
-### 블록과 레드스톤
-- 이웃 업데이트와 `canSurvive`, 낙하 블록(모래·자갈·콘크리트 가루·모루)
-- 바닐라 폭발 알고리즘(TNT, 크리퍼), 문·레버·침대·표지판 상호작용, 양동이·가마솥
-- 와이어 신호 감쇠, 레버·버튼·압력판·횃불(번아웃)·관찰자·반복기·비교기, 램프·문·트랩도어·
-  펜스 게이트·노트 블록
-- **양조·비컨**: 양조 스탠드(5슬롯, 블레이즈 파우더 연료 20회, 400틱, 바닐라 포션 조합·물병·
-  발효 거미 눈·화약·드래곤 브레스), 비컨(피라미드 4단계 판정, 빔, 효과 선택·범위, 재생/주효과)
-- **차원**: 오버월드·네더 레지스트리(차원별 저장 경로·스폰·리전 스케줄러), `ChangeDimension`/`Respawn` 전환, 8:1 좌표 포탈·포탈 생성·복귀
-- **명령 블록**: 임펄스·체인·반복 모드, 조건·자동 실행, 바닐라 NBT(`Command`, `LastExecution` 등)와
-  `/data`·청크 저장 왕복, `SetCommandBlock`/`BlockEntityData` 동기화, 재귀 깊이 제한
-
-### 명령 (약 70개)
-- 기본: `gamemode`, `tp`, `teleport`, `time`, `weather`, `difficulty`, `gamerule`, `seed`,
-  `list`, `say`, `me`, `msg`/`tell`/`w`
-- 아이템·상태: `give`, `clear`, `xp`, `effect`, `enchant`, `title`, `tellraw`, `playsound`,
-  `particle`, `spawnpoint`
-- 월드: `setblock`, `fill`, `clone`, `worldborder`
-- 스코어보드: `scoreboard`, `bossbar`, `tag`, `team`
-- 서버: `locate`(생물군계·POI, 구조물은 문서화된 스텁), `datapack`(list/enable/disable),
-  `help`, `schedule`, `trigger`, `reload`, `op`, `ban`, `whitelist`, `stop`, `function`
-- 고급: `execute`(as/at/if/unless/store/run 등), `data`(get/merge/modify/remove),
-  데이터팩 `.mcfunction`(load/tick 태그, 매크로, `return`)
-- 선택자는 권한 레벨 2 이상, `@e`는 리전 엔티티 저장소에서 type(부정·태그)/distance/
-  dx·dy·dz/scores/tag/team/level/gamemode/x_rotation/y_rotation/nbt/limit/sort 해석
-
-### 플러그인 (내장 JVM)
-- `plugin.yml`·`paper-plugin.yml` 로딩, Java 25 내장 JVM에서 `onEnable`/`onDisable` 실행
-- 이벤트: 플레이어 이동·상호작용·블록 파괴/설치·명령, 인벤토리 클릭/닫기, 사망·리스폰,
-  엔티티 피해/사망, 청크 로드/언로드, 날씨·월드 로드, 레벨/경험치(취소 가능한 이벤트는 취소 반영), 오류 정책
-  `plugins.on-event-error = allow | deny`
-- Bukkit `Server`/`Player`/`World`/`Inventory`/`Scheduler`/`ConfigurationSection`의 자주 쓰는
-  표면: 레시피·태그·보스바·월드/블록 조회가 실제 서버 데이터를 반환하고, 체력·음식·경험치·
-  텔레포트 쓰기는 소유 리전으로 라우팅됩니다. 최소 `org.bukkit.craftbukkit` shim 포함
-- Bukkit 스케줄러는 Folia 규칙대로 리전/글로벌/async 스케줄러로 라우팅
-- 월드·플레이어 위치/모드/OP 스냅샷, `Native.playerInventory`(인벤토리 쓰기 → 패킷·메뉴 재동기화)
-- 플레이어 쓰기 라우팅: 표시 이름(채팅에 반영), 킥, 타이틀·액션바·타이틀 초기화, 탭 목록 머리글/바닥글,
-  엔티티 스케줄러 작업(소유 플레이어 리전의 우편함으로 전달)
-- 월드·서버 변경은 콘솔 명령으로 변환: `setBlock`, IP 밴/해제, 화이트리스트 on/off
-- JDBC: SQLite·MySQL 드라이버를 번들하고(JVM 안에서 처리), `plugin.yml`의 `libraries:`를 Maven으로
-  해석해 `libraries/`에 받아 플러그인 클래스로더에 추가합니다. JVM은 `--enable-native-access=ALL-UNNAMED`로 시작
-- `Player` 메서드 1·2차 묶음: 메타데이터, 스코어보드 태그, 위치·시선, 경험치 계산, `performCommand`,
-  `sendActionBar`, `clearTitle`/`resetTitle`, 탭 머리글/바닥글 등
-
-### 월드 생성
-- 이 저장소에는 월드 생성기가 없습니다. 서버는 `ChunkGenerator` 트레이트(`game/generator.rs`)만 알고,
-  새 청크는 슈퍼플랫(`generator = "superflat"`, 기본값), 기존 Anvil 월드, 또는 바닐라 호스트에서 옵니다.
-- `generator = "vanilla"`: 사용자가 받은 공식 서버 jar를 별도 JVM 프로세스(`java/ferrite-worldgen-host`)에서
-  실행해 `getChunk(x, z, FULL)`로 청크를 받고, 바닐라 자신의 직렬화기가 만든 Anvil NBT를 읽습니다.
-  Mojang 코드는 배포하지 않고 jar도 수정하지 않습니다. 호스트는 우리 코드만 담은 jar로 사용자 PC에서
-  컴파일합니다(`python tools/build_worldgen_host.py`).
-- `[worldgen]` 설정: `heap-mb`(기본 1024), `threads`(기본 4), `jvm-args`, `java-home`, `seed`.
-- 지금은 청크 단위 요청만 됩니다. 아직 없는 것: 바이트코드 패처(네트워크·틱·플레이어 처리 제거와 자원
-  측정), `/locate biome`, 호스트를 여러 개 띄우는 별도 프로세스·원격 모드, 앞쪽 청크 사전 요청.
-
-### 관리
-- `/tps`, `/mspt`, `/profile`
-
-## 아직 아닌 것 (솔직하게)
-
-- **실제 26.3 클라이언트로 접속해 검증하지 않았습니다.** 지금까지는 프로토콜 봇과 Java
-  대조 하네스로만 검증했습니다.
-- 월드 생성은 Rust로 구현하지 않고 공식 jar에 맡깁니다. 호스트는 jar를 수정하지 않는 첫 단계라서 바닐라
-  수준의 메모리와 속도를 씁니다(시작에 약 10초, 청크당 100~700ms, 힙 512MB에서도 동작을 확인했지만 많은
-  청크를 연속 요청하는 부하 측정은 아직 하지 않았습니다). 피스톤은 진행 중입니다.
-- 엔드 차원은 아직 없습니다(네더는 포탈까지 동작).
-- 플러그인 API는 Paper `Server`/`Player`의 일부만 구현했습니다(`Player` 약 600개, `Server` 약 200개의
-  스텁 잔존). 모든 메서드를 라우팅 가능하게 만드는 작업이 진행 중이며, 라우팅을 다 구현한 뒤에 테스트합니다. EssentialsX 같은 대형 플러그인의 모든
-  호출 경로는 동작하지 않고, NMS 타입에 의존하는 메서드는 `UnsupportedOperationException`을
-  던집니다.
+플러그인 API는 Paper `Server`/`Player`의 일부만 처리합니다. 처리하지 않는 호출은
+`UnsupportedOperationException("Ferrite: not implemented: …")`로 드러납니다. EssentialsX 같은
+대형 플러그인의 모든 경로와 NMS 의존 플러그인은 아직 동작하지 않습니다.
 
 ## 빌드와 실행
 
-필요한 것:
-
-- **Rust stable** — `rust-toolchain.toml`이 Windows MSVC 채널을 고정합니다. Linux/macOS는
-  `RUSTUP_TOOLCHAIN=stable`로 덮어쓰세요(CI가 그렇게 합니다).
-- **Java 25** — 바닐라 데이터 생성기와 내장 JVM/플러그인 브리지용
-- **Python 3** — `tools/fetch_vanilla.py` 실행용
+필요: **Rust stable**(`rust-toolchain.toml`이 Windows MSVC를 고정, Linux/macOS는 `RUSTUP_TOOLCHAIN=stable`),
+**Java 25**, **Python 3**.
 
 ```sh
-# Git Bash: Rust가 PATH에 없다면 먼저 실행 (PowerShell: . .\tools\env.ps1)
-source tools/env.sh
-
-# 1) 바닐라 데이터 생성 (최초 1회, 네트워크 + Java 25)
-python tools/fetch_vanilla.py            # 26.3
-python tools/fetch_vanilla.py 26.2       # 다중 버전 변환용(선택)
-
-# 2) 선택: 픽스처 월드 (fixture-world를 읽는 테스트용)
-python tools/make_fixture_world.py
-
-# 3) 선택: 바닐라 월드 생성 호스트 빌드 (generator = "vanilla"를 쓸 때만, Java 25)
-python tools/build_worldgen_host.py
-
-# 4) 실행 (오프라인 모드 로컬 서버)
-cargo run --release -p ferrite-server
+source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
+python tools/fetch_vanilla.py              # 바닐라 데이터 생성 (최초 1회, 네트워크 + Java 25)
+cargo run --release -p ferrite-server      # 오프라인 모드 로컬 서버
 ```
 
-**EULA:** 처음 실행하면 `eula.txt`를 만들고 종료합니다. Minecraft EULA(https://aka.ms/MinecraftEULA)를
-읽고 직접 `eula=true`로 바꾼 뒤 다시 실행하세요. Ferrite가 대신 동의하지 않으며, 월드 생성 호스트가 쓰는
-공식 서버 jar도 같은 파일의 동의를 사용합니다.
+처음 실행하면 `eula.txt`를 만들고 종료합니다. [Minecraft EULA](https://aka.ms/MinecraftEULA)를 읽고
+직접 `eula=true`로 바꾼 뒤 다시 실행하세요. Ferrite가 대신 동의하지 않습니다.
 
-바닐라 월드 생성을 켜는 `ferrite.toml` 예:
-
-```toml
-generator = "vanilla"
-
-[worldgen]
-heap-mb = 1024
-threads = 4
-seed = "12345"
-```
-
-`vanilla/`는 git에 포함되지 않습니다. 패킷 ID·블록·레지스트리 같은 수치는 추측하지 말고
-`vanilla/<버전>/generated/`의 리포트에서 읽어야 합니다. `fixture-world`가 없으면 픽스처를
-읽는 테스트는 건너뜁니다(CI가 그 상태입니다).
-
-설정 키와 자세한 실행 방법은 [`docs/CONFIG.md`](docs/CONFIG.md)에 정리되어 있습니다.
+`vanilla/`는 git에 포함되지 않습니다. 패킷 ID·블록·레지스트리 수치는 추측하지 말고
+`vanilla/<버전>/generated/` 리포트에서 읽습니다. 설정 키는 [`docs/CONFIG.md`](docs/CONFIG.md).
 
 ## 검증
 
 ```sh
-cargo test --workspace                          # 전체 테스트
+cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-- 최근 전체 실행: 전체 테스트 통과, clippy·fmt 클린.
-- 서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다.
-- `ferrite-translate`의 26.2 검증은 `vanilla/26.2` 리포트가 있을 때만 실행됩니다.
-- 월드 생성 호스트의 통합 테스트(`cargo test -p ferrite-server --test vanilla_host`)는 서버 jar, 빌드된
-  호스트, `FERRITE_TEST_ACCEPT_EULA=true`가 모두 있을 때만 실행되고, 없으면 건너뜁니다. 이 환경 변수는
-  개발자가 직접 EULA에 동의한다는 표시이며 테스트가 대신 동의하지 않습니다.
-- CI(`.github/workflows/ci.yml`)는 Linux/Windows에서 같은 스크립트로 데이터를 생성한 뒤
-  fmt/clippy/test를 돌리고, 바닐라 데이터가 커밋되지 않았는지도 확인합니다.
+서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. CI는 Linux/Windows에서
+fmt·clippy·test를 돌리고 바닐라 데이터가 커밋되지 않았는지도 확인합니다.
 
 ## 로드맵
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
-| 1 | **기반** — 워크스페이스, 프로토콜 코덱, NBT, 네트워킹/로그인, 리전화 뼈대 | 완료 |
-| 2 | 월드 IO/청크/이동/블록/채팅 — 접속해 플레이 가능한 최소 서버 | 완료 (봇 검증) |
-| 1 | 플러그인 브리지 — Paper/Bukkit API와 NMS 호환성, 서버 스타터·원격 콘솔 UI | **최우선** |
-| 3 | 리전라이저 + 벤치마크 — Paper/Folia 대비 성능 측정 | 진행 중 |
-| 4 | 플러그인 브리지 — 내장 JVM에서 Bukkit 이벤트/커맨드/스케줄러 실행 | 진행 중 |
-| 5 | 게임플레이 — 인벤토리, 엔티티, 전투, 크래프팅, 컨테이너 | 진행 중 |
-| 6 | 바닐라 월드 생성 — 공식 서버 jar의 생성기를 별도 JVM 프로세스에서 실행 (바이트코드 패처는 미착수) | 진행 중 |
-| 7 | 다중 버전 지원 — 하나의 바이너리로 여러 프로토콜 버전 | 진행 중 |
-| 8 | Paper 기능 동등성 — Paper API/설정/최적화 정렬 | 예정 |
-| 9 | 호환성 확장 — 플러그인 생태계 커버리지 확대 | 예정 |
+| 1 | 기반: 프로토콜 코덱, NBT, 네트워킹, 리전화 | 완료 |
+| 2 | 월드 IO·이동·블록·채팅 | 완료 (봇 검증) |
+| 3 | 리전라이저 벤치마크 | 진행 중 |
+| 4 | 플러그인 브리지(Bukkit 이벤트·명령·스케줄러) | 진행 중, 최우선 |
+| 5 | 게임플레이: 인벤토리·엔티티·전투·제작 | 진행 중 |
+| 6 | 다중 버전 지원 | 진행 중 |
+| 7 | Paper 기능 동등성 | 예정 |
+| 8 | 플러그인 생태계 호환 확대 | 예정 |
 
-## 크레이트 구성
+## 크레이트
 
 | 크레이트 | 담당 |
 |---|---|
-| `ferrite-protocol` | `Encode`/`Decode`, `VarInt`, 프레이밍, 패킷 구조체 |
-| `ferrite-net` | tokio 연결, 암호화, 로그인/설정/플레이, 서버 목록 |
-| `ferrite-region` | Folia 스타일 리전라이저와 리전 스케줄러 |
-| `ferrite-world` | 청크, 팔레트 컨테이너, Anvil IO |
-| `ferrite-light` | Starlight 스타일 조명 엔진 |
-| `ferrite-entity`, `ferrite-fluid` | 리전 로컬 엔티티 저장소와 몹, 유체 |
-| `ferrite-translate` | 다중 버전 프로토콜 변환 계층 |
-| `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 메뉴, 아이템, 레시피, 전리품 |
-| `ferrite-command`, `ferrite-admin` | 브리가디어식 명령 디스패처, 게임룰, 권한/관리 |
+| `ferrite-protocol`, `ferrite-net`, `ferrite-translate` | 패킷 코덱, 연결·암호화·로그인, 다중 버전 변환 |
+| `ferrite-region` | Folia 스타일 리전라이저와 스케줄러 |
+| `ferrite-world`, `ferrite-light`, `ferrite-nbt` | 청크·Anvil IO, 조명, NBT |
+| `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 엔티티·몹, 유체, 메뉴·아이템·레시피·전리품 |
+| `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | 명령 디스패처, 게임룰·권한, `/tps`·`/profile` |
 | `ferrite-plugin`, `ferrite-plugin-meta`, `ferrite-jvm` | 플러그인 로딩, `plugin.yml`, 내장 JVM |
-| `ferrite-profiler` | 틱 프로파일러(`/tps`, `/mspt`, `/profile`) |
-| `ferrite-nbt`, `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | NBT, 바닐라 데이터, 텍스트, 수학, 설정, 콘솔 |
-| `ferrite-server` | 바이너리: 설정, 콘솔, 배선 |
+| `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | 바닐라 데이터, 텍스트, 수학, 설정, 콘솔 |
+| `ferrite-server` | 바이너리: 설정·콘솔·배선 |
 
 ## 법적 고지
 
-이 저장소는 **Mojang의 코드나 에셋을 배포하지 않습니다.** 바닐라 데이터(패킷 리포트,
-블록/레지스트리 목록, 월드젠 데이터 등)는 사용자의 로컬 환경에서 공식 서버 jar를 내려받아
-생성되며 `vanilla/`에 저장되고 git에서 제외됩니다. 저장소에는 그 데이터를 읽는 코드만
-포함됩니다. 월드 생성은 사용자가 직접 받은 공식 서버 jar가 맡으며, 그 jar를 수정해서 배포하지 않습니다
-(필요하면 사용자 PC에서만 수정합니다). Minecraft는 Mojang Studios의 상표이며, 이 프로젝트는 Mojang 또는 Microsoft와
-아무런 제휴 관계가 없는 비공식 프로젝트입니다.
+이 저장소는 **Mojang의 코드나 에셋을 배포하지 않습니다.** 바닐라 데이터는 사용자의 환경에서 공식 서버 jar로
+생성되어 `vanilla/`에 저장되고 git에서 제외됩니다. Minecraft는 Mojang Studios의 상표이며, 이 프로젝트는
+Mojang·Microsoft와 무관한 비공식 프로젝트입니다.
 
 ## 라이선스
 
-GPL-3.0-or-later. 전체 내용은 [`LICENSE`](LICENSE)에 있습니다.
-Paper, Folia, Lithium 등 GPL/LGPL 프로젝트의 코드를 직접 포팅하기 위해 MIT/Apache에서
-GPLv3로 바꿨습니다. 포팅한 코드의 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주석에 적습니다.
+GPL-3.0-or-later ([`LICENSE`](LICENSE)). Paper·Folia·Lithium 등 GPL/LGPL 코드를 포팅하기 위해 MIT/Apache에서
+GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주석에 적습니다.
 
 ## 해야 할 일
 
-- **월드 생성 호스트:** 바이트코드 패처로 네트워크·틱·플레이어 처리·다른 차원을 덜어 내고 월드 생성만 남기기
-  (적용 전후의 메모리·CPU·처리량을 측정해서 남길지 정함), 청크 수백 개 동시 요청 부하 측정, `/locate biome`,
-  별도 프로세스·원격 모드, 앞쪽 청크 사전 요청. 설계는 [`docs/worldgen-host.md`](docs/worldgen-host.md).
-- **공동 1순위:** 플러그인 브리지 완성. Folia·Starlight·Lithium, 서버 스타터·원격 콘솔 UI 조사 및 Rust 서버 적용 가능성 검증. 최적화 참고 자료: [최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods), [서버 최적화 모드팩](https://modrinth.com/modpack/server-optimizationn), [마인크래프트 최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization).
- - 모든 작업을 병렬처리 (해야 함)
-
-## NMS compatibility shim
-
-Plugins that reach into `net.minecraft.*` through `CraftPlayer#getHandle()`, `CraftWorld#getHandle()`,
-`CraftServer#getServer()` or `CraftItemStack.asNMSCopy` get clean-room classes carrying the Mojang-mapped
-names (`ServerPlayer`, `ServerGamePacketListenerImpl`, `Component`, `BlockPos`, `Vec3`, `ItemStack`, ...).
-Only chat and action-bar packets are translated; any other packet sent through `connection.send` is
-routed to the host and fails with a named `UnsupportedOperationException` instead of being dropped.
-`java/ferrite-api-impl/tools/Scan.java` lists the classes and members a plugin jar needs that are still missing:
-`java tools/Scan.java plugin.jar <classpath jars> [--full]`.
-
-### Host-handled plugin calls (what really reaches the game)
-
-`Player#damage` applies generic damage in the player's region (it used to name a `/damage` command this
-server does not have). Also host-handled: `kill`, `teleport(Entity)`, `lookAt`, `setRotation`, `hideTitle`,
-`setTitleTimes`, `sendRawMessage`, `stopSound`, positional `playSound`, `spawnParticle` (particles without
-extra data), `showDemoScreen`/`showWinScreen`/`showElderGuardian`, per-player rain, `ban` (permanent only),
-`setWhitelisted`, and potion-effect reads (`getActivePotionEffects`, `getPotionEffect`, `hasPotionEffect`).
-Everything not listed still throws a named `UnsupportedOperationException` or stores the value without a
-client effect; `CatalogTest` writes the remaining routed-only methods to `build/catalog/stubs.txt`.
+- 플러그인 브리지 완성(NMS 호환 포함), 피스톤, 엔드 차원, 실제 클라이언트 검증
+- 최적화 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
+  [최적화 모드팩](https://modrinth.com/modpack/server-optimizationn),
+  [최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization)
+- 모든 작업을 병렬 처리

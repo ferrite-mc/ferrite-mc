@@ -13,8 +13,10 @@ disable parts of the user's jar on the user's machine.
 Done: the host (`Host.java`), the Rust client (`vanilla_gen.rs`), the shared `eula.txt` gate,
 `tools/build_worldgen_host.py`, `[worldgen]` settings and an end-to-end test
 (`crates/ferrite-server/tests/vanilla_host.rs`). The host runs the user's jar **unmodified**.
-Not done: the patcher and its rule file, `/locate biome`, the `process`/`remote` modes, load
-measurements.
+The patcher (`Patcher.java`, rules in `rules/worldgen.rules`, `[worldgen] patch = true`) removes the
+network listener, gameplay ticking, player and function ticks; it is off by default until it
+measurably beats the unmodified jar (see Measuring). Not done: `call:` hooks for optimisations,
+`/locate biome`, the `process`/`remote` modes.
 
 ## Rules
 
@@ -72,7 +74,17 @@ The patcher applies the rules with `java.lang.classfile` when it builds the patc
 user's jar, and refuses to run if a rule's target is missing (a Minecraft update changed it).
 The patched jar is cached in `worldgen/` and never leaves the machine.
 
-## Measuring
+## Measuring (2026-11-04, noisy shared machine)
+
+- Live heap after load is about 136 MB; the 1 GB working set is JVM heap headroom. `heap-mb` and the
+  GC matter more than removing code: 384 MB works.
+- Idle CPU: 0.28 s per 15 s unmodified, 0.06 s with ticks removed. Throughput difference between
+  the unmodified and the patched jar is inside run-to-run noise (19–39 chunks/s for the same
+  settings), so the patch is not enabled by default.
+- Vanilla 26.3 already generates on its own worker pool (87% of CPU samples). Top costs: structure
+  stages 14%, terrain noise 12%, surface 8%, chunk parse from disk 4%, block counts 4%.
+- Unmodified hosts differ from each other block by block, so comparisons use a tolerance.
+- `LevelTicks.tick` must stay: scheduled ticks settle leaves and fluids in generated chunks.
 
 Each step is kept only if it beats the baseline for resident memory, CPU and chunks per second
 (see `tools/` benchmark). Baseline: unpatched jar, 512 MB heap, about 280 MB live after load,

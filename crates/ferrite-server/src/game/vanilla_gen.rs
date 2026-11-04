@@ -39,6 +39,9 @@ pub struct HostSettings {
     pub libraries: PathBuf,
     /// Our compiled host (`tools/build_worldgen_host.py`).
     pub host_jar: PathBuf,
+    /// Rule file for the bytecode patcher. `None` runs the user's jar unmodified; with a file, a
+    /// patched copy is built on this machine under `work_dir/patched` and used instead.
+    pub patch_rules: Option<PathBuf>,
     /// The host's private working directory (world, properties, log).
     pub work_dir: PathBuf,
     /// Ferrite's `eula.txt`; its acceptance is mirrored into `work_dir`.
@@ -57,6 +60,7 @@ impl HostSettings {
             server_jar: root.join("vanilla/26.3/lib/server-26.3.jar"),
             libraries: root.join("vanilla/26.3/lib/libraries"),
             host_jar: root.join("target/worldgen-host/ferrite-worldgen-host.jar"),
+            patch_rules: None,
             work_dir: root.join("worldgen"),
             eula: root.join("eula.txt"),
             java_home: None,
@@ -91,7 +95,61 @@ fn jar_paths(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Builds (or reuses) the patched copy of the user's jar. It is rebuilt whenever the original
+/// jar, the rule file or the host (which contains the patcher) is newer than the copy.
+fn patched_jar(
+    settings: &HostSettings,
+    rules: &std::path::Path,
+    java_bin: &std::path::Path,
+) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        rules.exists(),
+        "the patch rules are missing: {}",
+        rules.display()
+    );
+    let out = settings.work_dir.join("patched").join("server.jar");
+    let modified = |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified());
+    let newest_input = [
+        &settings.server_jar,
+        &settings.host_jar,
+        &rules.to_path_buf(),
+    ]
+    .iter()
+    .filter_map(|path| modified(path).ok())
+    .max();
+    let fresh = match (modified(&out), newest_input) {
+        (Ok(built), Some(input)) => built >= input,
+        _ => false,
+    };
+    if fresh {
+        return Ok(out);
+    }
+    let output = Command::new(java_bin)
+        .arg("-cp")
+        .arg(&settings.host_jar)
+        .arg("dev.ferrite.worldgen.Patcher")
+        .arg("--in")
+        .arg(&settings.server_jar)
+        .arg("--rules")
+        .arg(rules)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .context("running the patcher")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "the patcher failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(out)
+}
+
 impl VanillaGenerator {
+    /// The host JVM's process id (for measuring it from outside).
+    pub fn process_id(&self) -> u32 {
+        self.child.lock().unwrap().id()
+    }
+
     /// Starts the host and waits until the jar's generator is ready. Requires the user's
     /// `eula=true`.
     pub fn spawn(settings: &HostSettings, registry: Arc<RuntimeRegistry>) -> anyhow::Result<Self> {
@@ -117,7 +175,11 @@ impl VanillaGenerator {
                 .join("bin")
                 .join(if cfg!(windows) { "java.exe" } else { "java" });
 
-        let mut classpath = vec![settings.host_jar.clone(), settings.server_jar.clone()];
+        let server_jar = match &settings.patch_rules {
+            Some(rules) => patched_jar(settings, rules, &java_bin)?,
+            None => settings.server_jar.clone(),
+        };
+        let mut classpath = vec![settings.host_jar.clone(), server_jar];
         jar_paths(&settings.libraries, &mut classpath);
         let classpath = classpath
             .iter()
