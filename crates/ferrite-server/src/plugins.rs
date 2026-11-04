@@ -227,6 +227,12 @@ impl PluginBridge {
                                 return Some(String::new());
                             }
                             if let (Some(players), Some(command)) =
+                                (&players, blasts::drop_command(call))
+                            {
+                                players(command);
+                                return Some("true".to_owned());
+                            }
+                            if let (Some(players), Some(command)) =
                                 (&players, blasts::explosion_command(call))
                             {
                                 players(command);

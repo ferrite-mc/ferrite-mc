@@ -72,9 +72,72 @@ pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
     })
 }
 
+/// `World#dropItem(Location, ItemStack)` and `dropItemNaturally`: an item entity at the spot.
+pub fn drop_command(call: &HostCall) -> Option<PlayerCommand> {
+    let natural = match call.method.as_str() {
+        "dropItem(Location,ItemStack)" => false,
+        "dropItemNaturally(Location,ItemStack)" => true,
+        _ => return None,
+    };
+    if call.owner != "World"
+        || Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id()
+    {
+        return None;
+    }
+    let mut parts = call
+        .args
+        .first()?
+        .split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+    parts.next()?;
+    let center = [
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+    ];
+    let (material, amount) = call
+        .args
+        .get(1)?
+        .split_once(ferrite_plugin::HOST_ITEM_SEPARATOR)?;
+    let amount: u8 = amount.parse().ok().filter(|a| (1..=99).contains(a))?;
+    let item = format!("minecraft:{}", material.to_ascii_lowercase());
+    ferrite_item::item_id(&item)?;
+    Some(PlayerCommand::DropItem {
+        center,
+        item,
+        amount,
+        natural,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_items_become_commands() {
+        let at = format!(
+            "w{0}1.5{0}70{0}-2{0}0{0}0",
+            ferrite_plugin::HOST_ITEM_SEPARATOR
+        );
+        let stack = format!("DIAMOND{}3", ferrite_plugin::HOST_ITEM_SEPARATOR);
+        assert_eq!(
+            drop_command(&call(
+                "dropItemNaturally(Location,ItemStack)",
+                &[&at, &stack]
+            )),
+            Some(PlayerCommand::DropItem {
+                center: [1.5, 70.0, -2.0],
+                item: "minecraft:diamond".into(),
+                amount: 3,
+                natural: true,
+            })
+        );
+        let bad = format!("NOT_AN_ITEM{}1", ferrite_plugin::HOST_ITEM_SEPARATOR);
+        assert_eq!(
+            drop_command(&call("dropItem(Location,ItemStack)", &[&at, &bad])),
+            None
+        );
+    }
 
     fn call(method: &str, args: &[&str]) -> HostCall {
         HostCall {

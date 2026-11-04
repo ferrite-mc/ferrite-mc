@@ -303,4 +303,19 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("bossBarAdd(String,String,float,int,int,int)", "bossBarProgress(String,float)", "bossBarName(String,String)", "bossBarStyle(String,int,int)", "bossBarRemove(String)"), calls);
     }
+
+    @Test void droppedItemsGoToTheHostAndComeBackAsAHandle() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var at = new org.bukkit.Location(player.getWorld(), 1, 70, 2);
+            var seen = new java.util.ArrayList<org.bukkit.Material>();
+            var item = player.getWorld().dropItemNaturally(at, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 3), i -> seen.add(i.getItemStack().getType()));
+            assertEquals(3, item.getItemStack().getAmount());
+            assertEquals(java.util.List.of(org.bukkit.Material.DIAMOND), seen);
+            player.getWorld().dropItem(at, new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 1));
+            assertThrows(IllegalArgumentException.class, () -> player.getWorld().dropItem(at, new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR, 1)));
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("dropItemNaturally(Location,ItemStack)", "dropItem(Location,ItemStack)"), calls);
+    }
 }

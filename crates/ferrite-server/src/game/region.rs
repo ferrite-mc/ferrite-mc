@@ -3526,6 +3526,43 @@ impl Region {
         self.updates.apply(&mut world, removed);
     }
 
+    /// `World#dropItem`: an item entity at `center`; the natural variant scatters it a little
+    /// and pops it up like a block drop. An unknown item is ignored.
+    pub fn plugin_drop_item(&mut self, center: [f64; 3], item: &str, amount: u8, natural: bool) {
+        use ferrite_math::Vec3;
+        let Some(id) = ferrite_item::item_id(item) else {
+            return;
+        };
+        let stack = ferrite_protocol::packets::play::ItemStack {
+            count: i32::from(amount),
+            item_id: i32::from(id),
+        };
+        let (pos, vel) = if natural {
+            (
+                Vec3::new(
+                    center[0] + self.rng.range(-0.25, 0.25),
+                    center[1] + self.rng.range(-0.25, 0.25),
+                    center[2] + self.rng.range(-0.25, 0.25),
+                ),
+                Vec3::new(
+                    self.rng.next_f64() * 0.2 - 0.1,
+                    0.2,
+                    self.rng.next_f64() * 0.2 - 0.1,
+                ),
+            )
+        } else {
+            (
+                Vec3::new(center[0], center[1], center[2]),
+                Vec3::new(0.0, 0.0, 0.0),
+            )
+        };
+        let mut record = item::new_item(pos, vel, stack, &mut self.rng);
+        if let Some(state) = &mut record.data.item {
+            state.pickup_delay = 10;
+        }
+        self.entities.insert(record);
+    }
+
     /// Drops the loot table of a block broken by a neighbor or gravity update.
     fn spawn_block_drops(&mut self, pos: [i32; 3], state: u16) {
         let empty = ferrite_item::ItemStack::empty();

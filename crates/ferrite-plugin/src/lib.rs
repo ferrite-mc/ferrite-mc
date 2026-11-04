@@ -354,6 +354,14 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         component_json: Option<String>,
     },
+    /// `World#dropItem` / `dropItemNaturally` on the default world.
+    DropItem {
+        center: [f64; 3],
+        /// The `minecraft:` item key.
+        item: String,
+        amount: u8,
+        natural: bool,
+    },
     /// `World#createExplosion` on the default world.
     Explosion {
         center: [f64; 3],

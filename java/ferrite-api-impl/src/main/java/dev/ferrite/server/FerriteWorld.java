@@ -393,6 +393,15 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getForceLoadedChunks" -> { var chunks = new java.util.ArrayList<org.bukkit.Chunk>(); for (long key : forceLoaded) chunks.add(chunk(keyX(key), keyZ(key))); yield chunks; }
             case "getRaids", "getPopulators" -> java.util.List.of();
             case "getRaid", "locateNearestRaid" -> null;
+            case "dropItem", "dropItemNaturally" -> {
+                var at = ((org.bukkit.Location) args[0]).clone();
+                var stack = ((org.bukkit.inventory.ItemStack) args[1]).clone();
+                if (stack.getType().isAir() || stack.getAmount() <= 0) throw new IllegalArgumentException("Cannot drop air");
+                var handle = DroppedItem.of(at, stack, proxy);
+                if (args.length > 2 && args[2] instanceof java.util.function.Consumer<?> consumer) { @SuppressWarnings("unchecked") var typed = (java.util.function.Consumer<org.bukkit.entity.Item>) consumer; typed.accept(handle); }
+                HostBridge.callVoid("World", id, method + "(Location,ItemStack)", at, stack);
+                yield handle;
+            }
             case "canGenerateStructures" -> true;
             case "getChunkCount" -> {
                 var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
