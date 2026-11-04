@@ -22,6 +22,47 @@ final class FerriteRecipes {
     }
 
     private static volatile List<Entry> entries;
+    /** Recipes plugins added, by key; the Rust crafting menus do not know them. */
+    private static final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.inventory.Recipe> custom = new java.util.LinkedHashMap<>();
+    /** Vanilla recipes a plugin removed from the Bukkit view. */
+    private static final java.util.Set<org.bukkit.NamespacedKey> removed = new java.util.HashSet<>();
+
+    /** Vanilla (minus removed) followed by plugin recipes. */
+    static synchronized List<org.bukkit.inventory.Recipe> all() {
+        var out = new ArrayList<org.bukkit.inventory.Recipe>();
+        for (var entry : entries()) if (!removed.contains(entry.key())) out.add(entry);
+        out.addAll(custom.values());
+        return List.copyOf(out);
+    }
+
+    static synchronized boolean add(org.bukkit.inventory.Recipe recipe) {
+        if (!(recipe instanceof org.bukkit.Keyed keyed)) return false;
+        var key = keyed.getKey();
+        boolean vanilla = entries().stream().anyMatch(e -> e.key().equals(key)) && !removed.contains(key);
+        if (vanilla || custom.containsKey(key)) return false;
+        custom.put(key, recipe);
+        return true;
+    }
+
+    static synchronized boolean remove(org.bukkit.NamespacedKey key) {
+        if (custom.remove(key) != null) return true;
+        return entries().stream().anyMatch(e -> e.key().equals(key)) && removed.add(key);
+    }
+
+    static synchronized void clear() {
+        custom.clear();
+        for (var entry : entries()) removed.add(entry.key());
+    }
+
+    static synchronized void reset() {
+        custom.clear();
+        removed.clear();
+    }
+
+    static synchronized org.bukkit.inventory.Recipe get(org.bukkit.NamespacedKey key) {
+        for (var recipe : all()) if (recipe instanceof org.bukkit.Keyed k && k.getKey().equals(key)) return recipe;
+        return null;
+    }
 
     static List<Entry> entries() {
         var loaded = entries;

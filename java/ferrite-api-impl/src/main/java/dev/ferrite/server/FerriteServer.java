@@ -356,16 +356,25 @@ public class FerriteServer extends ServerStubs {
     @Override public java.util.Iterator<org.bukkit.boss.KeyedBossBar> getBossBars() { return java.util.List.copyOf(bossBars.values()).iterator(); }
     @Override public org.bukkit.boss.KeyedBossBar getBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return bossBars.get(key); }
     @Override public boolean removeBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return bossBars.remove(key) != null; }
-    @Override public java.util.Iterator<org.bukkit.inventory.Recipe> recipeIterator() { return FerriteRecipes.entries().stream().map(recipe -> (org.bukkit.inventory.Recipe) recipe).toList().iterator(); }
-    @Override public org.bukkit.inventory.Recipe getRecipe(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); for (var entry : FerriteRecipes.entries()) if (entry.key().equals(key)) return entry; return null; }
+    @Override public java.util.Iterator<org.bukkit.inventory.Recipe> recipeIterator() { return FerriteRecipes.all().iterator(); }
+    @Override public org.bukkit.inventory.Recipe getRecipe(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return FerriteRecipes.get(key); }
     @Override public boolean hasRecipe(org.bukkit.NamespacedKey key) { return getRecipe(key) != null; }
     @Override public java.util.List<org.bukkit.inventory.Recipe> getRecipesFor(org.bukkit.inventory.ItemStack result) {
         java.util.Objects.requireNonNull(result, "result");
         if (result.getType() == org.bukkit.Material.AIR) return java.util.List.of();
         var matches = new java.util.ArrayList<org.bukkit.inventory.Recipe>();
-        for (var entry : FerriteRecipes.entries()) if (entry.result().getType() == result.getType()) matches.add(entry);
+        for (var recipe : FerriteRecipes.all()) if (recipe.getResult().getType() == result.getType()) matches.add(recipe);
         return java.util.List.copyOf(matches);
     }
+    @Override public boolean addRecipe(org.bukkit.inventory.Recipe recipe) { java.util.Objects.requireNonNull(recipe, "recipe"); return FerriteRecipes.add(recipe); }
+    @Override public boolean removeRecipe(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return FerriteRecipes.remove(key); }
+    @Override public void clearRecipes() { FerriteRecipes.clear(); }
+    @Override public void resetRecipes() { FerriteRecipes.reset(); }
+    @Override public void updateRecipes() { }
+    @Override public org.bukkit.ServerLinks getServerLinks() { return serverLinks; }
+    final FerriteServerLinks serverLinks = new FerriteServerLinks();
+    @Override public org.bukkit.ServerTickManager getServerTickManager() { return tickManager; }
+    final FerriteTickManager tickManager = new FerriteTickManager();
     /** Resolves one tag from the same generated block/item tables {@link #getTags} exposes. */
     @SuppressWarnings("unchecked")
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Tag<T> getTag(String registry, org.bukkit.NamespacedKey tag, Class<T> type) {
@@ -456,5 +465,37 @@ public class FerriteServer extends ServerStubs {
     @Override public com.destroystokyo.paper.profile.PlayerProfile createProfileExact(java.util.UUID id, String name) { return new FerriteProfile(id, name); }
     @Override public void sendPluginMessage(org.bukkit.plugin.Plugin source, String channel, byte[] message) {
         for (var player : players.values()) player.sendPluginMessage(source, channel, message);
+    }
+    /** Ferrite has a fixed set of dimensions: a creator naming a loaded world returns it, any other name cannot be created. */
+    @Override public org.bukkit.World createWorld(org.bukkit.WorldCreator creator) {
+        java.util.Objects.requireNonNull(creator, "creator");
+        var existing = getWorld(creator.name());
+        if (existing == null) existing = getWorld(creator.key());
+        if (existing != null) return existing;
+        throw new UnsupportedOperationException("Ferrite: creating worlds at runtime is not supported (requested '" + creator.name() + "')");
+    }
+    @Override public boolean unloadWorld(String name, boolean save) { return false; }
+    @Override public boolean unloadWorld(org.bukkit.World world, boolean save) { java.util.Objects.requireNonNull(world, "world"); return false; }
+    @Override public void allowPausing(org.bukkit.plugin.Plugin plugin, boolean value) { java.util.Objects.requireNonNull(plugin, "plugin"); }
+    @Override public org.bukkit.util.CachedServerIcon getServerIcon() { return null; }
+    @Override public void restart() { HostBridge.callVoid("Server", "server", "shutdown()"); }
+    @Override public java.util.List<org.bukkit.entity.Entity> selectEntities(org.bukkit.command.CommandSender sender, String selector) {
+        java.util.Objects.requireNonNull(sender, "sender");
+        java.util.Objects.requireNonNull(selector, "selector");
+        var out = new java.util.ArrayList<org.bukkit.entity.Entity>();
+        switch (selector) {
+            case "@a", "@e" -> out.addAll(players.values());
+            case "@p" -> { var from = sender instanceof org.bukkit.entity.Entity e ? e.getLocation() : null;
+                players.values().stream().filter(p -> from == null || p.getWorld().equals(from.getWorld()))
+                        .min(java.util.Comparator.comparingDouble(p -> from == null ? 0 : p.getLocation().distanceSquared(from))).ifPresent(out::add); }
+            case "@r" -> { var all = new java.util.ArrayList<>(players.values()); if (!all.isEmpty()) out.add(all.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(all.size()))); }
+            case "@s" -> { if (sender instanceof org.bukkit.entity.Entity e) out.add(e); }
+            default -> {
+                if (selector.startsWith("@")) throw new IllegalArgumentException("Unsupported selector: " + selector);
+                var named = getPlayerExact(selector);
+                if (named != null) out.add(named);
+            }
+        }
+        return out;
     }
 }
