@@ -525,4 +525,13 @@ class PlayerExtrasTest {
             assertTrue(player.wouldCollideUsing(new org.bukkit.util.BoundingBox(50.1, 200.1, 50.1, 50.4, 200.4, 50.4)));
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void settingABiomeGoesToTheHost() {
+        var seen = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { seen.add(method + "|" + args.replace(String.valueOf(HostBridge.ARG), ",")); return ""; };
+        try {
+            org.bukkit.Bukkit.getWorld("extras_world").setBiome(8, 70, -3, org.bukkit.block.Biome.DESERT);
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("setBiome(int,int,int,Biome)|8,70,-3,minecraft:desert"), seen);
+    }
 }
