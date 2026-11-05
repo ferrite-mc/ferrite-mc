@@ -20,13 +20,28 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
         if (!Native.playerInventory(player.getUniqueId().toString(), slot, material, amount)) throw new IllegalStateException("No player command handler");
         items[slot] = item == null ? null : item.clone();
     }
+    /** An inventory index, or the index an equipment slot lives at (0 main hand, 36 boots .. 39 helmet, 40 off hand). */
+    private static int slotOf(Object slot) {
+        if (slot instanceof org.bukkit.inventory.EquipmentSlot equipment) {
+            return switch (equipment) {
+                case HAND -> 0;
+                case OFF_HAND -> 40;
+                case FEET -> 36;
+                case LEGS -> 37;
+                case CHEST -> 38;
+                case HEAD -> 39;
+                default -> throw new UnsupportedOperationException("Ferrite: not implemented: equipment slot " + equipment);
+            };
+        }
+        return (int) slot;
+    }
     public Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
         return switch (method.getName()) {
             case "getSize" -> items.length;
             case "getHolder" -> player;
             case "getType" -> org.bukkit.event.inventory.InventoryType.PLAYER;
-            case "getItem" -> read((int) args[0]);
-            case "setItem" -> { write((int) args[0], (org.bukkit.inventory.ItemStack) args[1]); yield null; }
+            case "getItem" -> read(slotOf(args[0]));
+            case "setItem" -> { write(slotOf(args[0]), (org.bukkit.inventory.ItemStack) args[1]); yield null; }
             case "getItemInMainHand" -> read(0);
             case "setItemInMainHand" -> { write(0, (org.bukkit.inventory.ItemStack) args[0]); yield null; }
             case "getItemInOffHand" -> read(40);

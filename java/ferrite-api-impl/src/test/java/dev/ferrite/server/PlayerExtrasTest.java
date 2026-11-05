@@ -539,4 +539,17 @@ class PlayerExtrasTest {
         var world = org.bukkit.Bukkit.getWorld("extras_world");
         world.sendGameEvent(player, org.bukkit.GameEvent.EXPLODE, new org.bukkit.util.Vector(1, 64, 1));
     }
+
+    @Test void toolsWearOutAndNothingMendableLeavesXpAlone() {
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("getMaxDurability()") ? "1561" : "";
+        try {
+            var pick = new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_PICKAXE);
+            var worn = player.damageItemStack(pick, 10);
+            assertEquals(10, ((org.bukkit.inventory.meta.Damageable) worn.getItemMeta()).getDamage());
+            assertEquals(0, ((org.bukkit.inventory.meta.Damageable) pick.getItemMeta()).getDamage(), "the original is untouched");
+            assertTrue(player.damageItemStack(worn, 1551).getType().isAir(), "a tool that wears out breaks");
+            assertSame(pick, player.damageItemStack(pick, 0));
+            assertEquals(30, player.applyMending(30), "with nothing mendable worn, no xp is used up");
+        } finally { HostBridge.transport = null; }
+    }
 }

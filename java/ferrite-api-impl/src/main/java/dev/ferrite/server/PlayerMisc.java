@@ -9,6 +9,44 @@ import java.util.function.Predicate;
  */
 @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
 public abstract class PlayerMisc extends PlayerStubs {
+    // ---- durability --------------------------------------------------------------------------
+    /** Wears the item by `amount`; the result is empty when it breaks. Unbreaking is not modelled. */
+    @Override public org.bukkit.inventory.ItemStack damageItemStack(org.bukkit.inventory.ItemStack stack, int amount) {
+        java.util.Objects.requireNonNull(stack, "stack");
+        int max = stack.getType().getMaxDurability();
+        if (amount <= 0 || max <= 0 || !(stack.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable meta) || meta.isUnbreakable()) return stack;
+        int worn = meta.getDamage() + amount;
+        if (worn >= max) return new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR);
+        meta.setDamage(worn);
+        var copy = stack.clone();
+        copy.setItemMeta(meta);
+        return copy;
+    }
+    @Override public void damageItemStack(org.bukkit.inventory.EquipmentSlot slot, int amount) {
+        var equipment = getEquipment();
+        var item = equipment.getItem(slot);
+        if (item == null || item.getType().isAir()) return;
+        equipment.setItem(slot, damageItemStack(item, amount));
+    }
+    /** XP mends the first worn item that has Mending and is damaged (2 durability per point); returns the XP left over. */
+    @Override public int applyMending(int amount) {
+        var equipment = getEquipment();
+        for (var slot : new org.bukkit.inventory.EquipmentSlot[]{org.bukkit.inventory.EquipmentSlot.HAND, org.bukkit.inventory.EquipmentSlot.OFF_HAND, org.bukkit.inventory.EquipmentSlot.FEET,
+                org.bukkit.inventory.EquipmentSlot.LEGS, org.bukkit.inventory.EquipmentSlot.CHEST, org.bukkit.inventory.EquipmentSlot.HEAD}) {
+            if (amount <= 0) break;
+            var item = equipment.getItem(slot);
+            if (item == null || item.getType().isAir() || !(item.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable meta)) continue;
+            if (meta.getDamage() <= 0 || !meta.hasEnchant(org.bukkit.enchantments.Enchantment.MENDING)) continue;
+            int repair = Math.min(amount * 2, meta.getDamage());
+            meta.setDamage(meta.getDamage() - repair);
+            var mended = item.clone();
+            mended.setItemMeta(meta);
+            equipment.setItem(slot, mended);
+            amount -= (repair + 1) / 2;
+        }
+        return amount;
+    }
+
     /** Whether the player's body, moved to the location, would overlap a solid block. */
     @Override public boolean collidesAt(org.bukkit.Location location) {
         return getWorld().hasCollisionsIn(getBoundingBox().shift(location.toVector().subtract(getLocation().toVector())));
