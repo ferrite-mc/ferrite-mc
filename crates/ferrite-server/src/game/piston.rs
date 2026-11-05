@@ -1,6 +1,6 @@
 //! Piston movement planning.
 
-use ferrite_data::{block_props, blocks};
+use ferrite_data::{block_props, blocks, piston_props};
 use ferrite_math::Direction;
 use std::collections::HashSet;
 
@@ -54,18 +54,8 @@ fn reaction(world: &impl PistonWorld, pos: [i32; 3], state: u16) -> Reaction {
     if physical.is_air {
         return Reaction::Air;
     }
-    if world.has_block_entity(pos)
-        || physical.hardness < 0.0
-        || matches!(
-            name,
-            "obsidian"
-                | "crying_obsidian"
-                | "respawn_anchor"
-                | "reinforced_deepslate"
-                | "moving_piston"
-                | "piston_head"
-        )
-    {
+    let piston = piston_props::get(state);
+    if world.has_block_entity(pos) || piston.has_block_entity || physical.hardness < 0.0 {
         return Reaction::Block;
     }
     if matches!(name, "piston" | "sticky_piston")
@@ -73,41 +63,14 @@ fn reaction(world: &impl PistonWorld, pos: [i32; 3], state: u16) -> Reaction {
     {
         return Reaction::Block;
     }
-    if name.ends_with("_glazed_terracotta") {
-        return Reaction::PushOnly;
+    match piston.reaction {
+        piston_props::PushReaction::PushPull | piston_props::PushReaction::IgnoreEntity => {
+            Reaction::Move
+        }
+        piston_props::PushReaction::PushOnly => Reaction::PushOnly,
+        piston_props::PushReaction::Destroy => Reaction::Destroy,
+        piston_props::PushReaction::Immovable => Reaction::Block,
     }
-    if matches!(
-        name,
-        "redstone_wire"
-            | "redstone_torch"
-            | "redstone_wall_torch"
-            | "rail"
-            | "powered_rail"
-            | "detector_rail"
-            | "activator_rail"
-            | "torch"
-            | "wall_torch"
-            | "tripwire"
-            | "tripwire_hook"
-            | "lever"
-            | "fire"
-            | "soul_fire"
-            | "snow"
-            | "vine"
-            | "lily_pad"
-            | "short_grass"
-            | "tall_grass"
-            | "fern"
-            | "large_fern"
-            | "dead_bush"
-    ) || name.ends_with("_button")
-        || name.ends_with("_pressure_plate")
-        || name.ends_with("_flower")
-        || name.ends_with("_sapling")
-    {
-        return Reaction::Destroy;
-    }
-    Reaction::Move
 }
 
 fn sticky(state: u16) -> Option<&'static str> {
@@ -334,6 +297,20 @@ mod tests {
         grid.0.insert([1, 64, 0], state("redstone_wire"));
         let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
         assert_eq!(plan.to_destroy, vec![[1, 64, 0]]);
+    }
+
+    #[test]
+    fn state_metadata_prevents_moving_an_uninitialized_chest_and_pops_water() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("chest"));
+        assert!(resolve(&grid, [0, 64, 0], Direction::East, true).is_none());
+        grid.0.insert([1, 64, 0], state("water"));
+        assert_eq!(
+            resolve(&grid, [0, 64, 0], Direction::East, true)
+                .unwrap()
+                .to_destroy,
+            vec![[1, 64, 0]]
+        );
     }
 
     #[test]

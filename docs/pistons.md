@@ -7,11 +7,12 @@ The module also prepares expected-state changes for extension and retraction and
 provides the piston-specific direct and quasi-connectivity power check. These are
 covered by unit tests, but do not animate or apply a piston in a running server.
 
-The block reaction list is incomplete and has not been validated against all 26.3
-states. In particular, the available block properties do not expose vanilla push
-reactions or whether a block state supports a block entity. The caller must supply
-block-entity presence; presence alone is not a complete state classification.
-Do not use this planner for live movement until those gaps are resolved.
+The local vanilla extractor records push reactions and block-entity capability for
+every state in `vanilla/26.3/generated/ferrite/piston_states.json`. Existing vanilla
+extractions need to be regenerated with `python tools/fetch_vanilla.py`. The caller
+also supplies actual block-entity presence. Resolver parity across all branching,
+world-border and height-limit cases is not yet established; do not use this planner
+for live movement until those gaps are resolved.
 
 Extension, retraction, drops, animation and block events, observer notifications,
 and runtime region-boundary handling remain unimplemented and untested. A complete

@@ -43,7 +43,10 @@ done < <(find "$lib/libraries" -name '*.jar' | sort)
 classes="$lib/extractor-classes"
 mkdir -p "$classes"
 "$javac" -d "$(to_native "$classes")" -cp "$classpath" \
-  "$(to_native "$root/tools/extractor/Extractor.java")"
+  "$(to_native "$root/tools/extractor/Extractor.java")" \
+  "$(to_native "$root/tools/extractor/PistonExtractor.java")"
 "$java" -cp "$(to_native "$classes")$sep$classpath" Extractor \
   "$(to_native "$root/vanilla/$version/generated/ferrite")" \
   "$(to_native "$root/vanilla/$version/generated/reports/minecraft/components/item")"
+"$java" -cp "$(to_native "$classes")$sep$classpath" PistonExtractor \
+  "$(to_native "$root/vanilla/$version/generated/ferrite/piston_states.json")"
