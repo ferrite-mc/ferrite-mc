@@ -54,7 +54,7 @@ CMI가 동작한다고 말할 수 없다.
 
 - **엔티티 모델 확장 필요:** 아이템 사용 상태는 연결됨(`startUsingItem`/`completeUsingActiveItem`/`clearActiveItem`, `hasActiveItem` 등은 먹기·활·방패 상태를 따른다; 방패는 사용 시간을 세지 않는다),
   내구도는 이제 `setItem`에 마모(`Damageable`)만 있는 아이템을 넣으면 호스트가 `Damage` 컴포넌트까지 반영한다(이름·인챈트 등 다른 메타는 여전히 거부), 어깨 엔티티(탑승은 `/ride`와 같은 탑승표로 연결됨: `getVehicle`/`getPassengers`/`addPassenger`/`leaveVehicle`/`eject`, 시트 위치는 고정 오프셋), 전투 추적기, 화살 외 발사체.
-- **바이옴·구조물 데이터 필요:** 기온·습도, `getStructures`(구조물 영역 조회가 호스트에 없다),
+- **바이옴·구조물 데이터 필요:** `getStructures`(구조물 영역 조회가 호스트에 없다),
   `createExplorerMap`(Server 3개).
   (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
   호스트가 없으면 "not implemented"를 던진다. 호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능.)

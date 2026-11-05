@@ -3,6 +3,7 @@ mod appearance;
 mod blasts;
 mod blocks;
 pub mod chunks;
+mod climate;
 mod cooldown;
 mod craft;
 mod extra;
@@ -134,6 +135,9 @@ impl PluginBridge {
                                 if let (Some(players), Some(command)) = (&players, command) {
                                     players(command);
                                 }
+                                return Some(reply);
+                            }
+                            if let Some(reply) = climate::answer(call) {
                                 return Some(reply);
                             }
                             if let Some(reply) = facts::answer(call) {

@@ -66,6 +66,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getLocation" -> location(pos);
             case "getChunk" -> chunk(pos.x() >> 4, pos.z() >> 4);
             case "getType" -> typeAt(pos);
+            case "getTemperature" -> climate(true, pos.x(), pos.y(), pos.z());
+            case "getHumidity" -> climate(false, pos.x(), pos.y(), pos.z());
             case "getLightFromSky" -> { int level = Native.skyLight(id.toString(), pos.x(), pos.y(), pos.z()); if (level < 0) throw new UnsupportedOperationException("Ferrite: no light data at " + pos); yield (byte) level; }
             case "setType" -> { setType(pos, java.util.Objects.requireNonNull((org.bukkit.Material) args[0])); yield null; }
             case "getBlockData" -> FerriteBlockData.create(typeAt(pos));
@@ -248,8 +250,23 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     }
 
     /** World queries answered from Java-side state and the player list. */
+    /** Biome temperature (cooler above y=81, noise ignored) or humidity at a position. */
+    private double climate(boolean temperature, int x, int y, int z) {
+        var key = Native.biomeAt(id.toString(), x, y, z);
+        if (key == null) throw new UnsupportedOperationException("Ferrite: no biome data at " + x + "," + y + "," + z);
+        var text = (String) HostBridge.call("World", id, "biomeClimate(String)", String.class, key);
+        var parts = text.split(String.valueOf(HostBridge.ITEM));
+        double value = Double.parseDouble(parts[temperature ? 0 : 1]);
+        if (temperature && y > 81) value -= (y - 81) * 0.05 / 40;
+        return value;
+    }
     private Object more(String method, Object[] args) {
         switch (method) {
+            case "getTemperature", "getHumidity" -> {
+                int x, y, z;
+                if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = args.length > 3 ? (int) args[1] : 64; z = (int) args[args.length - 1]; }
+                return climate(method.equals("getTemperature"), x, y, z);
+            }
             case "isGameRule" -> { return (boolean) HostBridge.call("World", id, "isGameRule(String)", Boolean.class, (String) args[0]); }
             case "getGameRules" -> {
                 var names = (java.util.List<?>) HostBridge.call("World", id, "getGameRules()", java.util.List.class);
