@@ -49,8 +49,9 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `vanilla/26.3/generated/data/minecraft/structure/**.nbt`, which `tools/fetch_vanilla.py`
   extracts from the user's own jar. Block entity data and template entities are not placed
   (chests are empty), `strict` is accepted and ignored, jigsaw blocks become their `final_state`.
-  `/place feature|jigsaw|structure` still fail with "not supported": they need chunk state in the
-  worldgen host.
+  `/place feature|jigsaw|structure` run the jar's own `/place` in the worldgen host (op 8) on a
+  force-loaded area and apply the changed blocks; block entity data (chest contents) is not
+  transferred, and they need `generator = "vanilla"`.
 
 - `/fillbiome` rewrites the 4x4x4 biome cells of loaded chunks (also fixed `biome_name` reading
   one section too high) and resends the column to tracking players. A `#tag` filter is read
@@ -66,9 +67,11 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 
 - `/swing` sends the arm-swing animation to viewers; the animation type and duration are
   validated but not used, and non-living entities are not rejected (`failed.notliving`).
-- `/tick sprint` is missing; `/tick query` has no percentile line. Freeze stops game time,
-  fluid ticks and random ticks, not mob or entity movement.
-- `/forceload` marks are not saved across restarts.
+- `/tick sprint <time>|stop` raises the clock to the maximum rate, restores the rate and the
+  frozen state afterwards and broadcasts the report; `/tick query` has no percentile line.
+  Freeze stops game time, fluid ticks and random ticks, not mob or entity movement.
+- `/forceload` marks are saved per dimension in `data/minecraft/chunk_tickets.dat` (forced
+  tickets only) and held again at startup.
 - `/debug function` always fails; `/test` accepts all syntax but never runs a test (no game
   test framework); `/jfr` always fails (Ferrite is not a JVM process); `/perf` and `/debug`
   report time and ticks but write no report file.
@@ -76,8 +79,10 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 - `/rotate` assumes the target is in the command's dimension.
 - `/damage` maps the damage type to the nearest survival kind; mobs take the plain amount
   without a hurt animation, and `at`/`by`/`from` are parsed but not used.
-- `/locate biome|structure` ask the vanilla host (ops 5 and 6, needs `generator = "vanilla"`).
-  `/locate poi` still returns not found: the host has no POI request yet.
+- `/locate biome|structure|poi` ask the vanilla host (ops 5, 6 and 9, need
+  `generator = "vanilla"`); `poi` only finds points of interest of chunks that are stored.
+- Plugin `World#generateTree` runs the matching vanilla feature through the host and keeps block
+  states; it reports `false` when nothing was placed and is unavailable without the host.
 
 ## Merge state
 
