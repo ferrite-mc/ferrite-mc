@@ -1989,6 +1989,8 @@ impl Player {
         if water_breathing {
             self.survival.air = super::survival::MAX_AIR;
         }
+        // The nether and the end start at y 0, so their void is 64 blocks below that.
+        self.survival.void_y = f64::from(self.dimension.min_y() - 64);
         let damage = self.survival.environment_tick(
             self.pos,
             self.ground,

@@ -237,6 +237,8 @@ pub struct Survival {
     pub last_pos: [f64; 3],
     pub was_ground: bool,
     pub sprinting: bool,
+    /// Below this height the void hurts: the dimension's minimum build height - 64.
+    pub void_y: f64,
     /// `true` once health reached zero (`LivingEntity.isDeadOrDying`).
     pub dead: bool,
     /// Set by the region once the death drops, message and packets ran.
@@ -271,6 +273,7 @@ impl Default for Survival {
             last_pos: [0.0; 3],
             was_ground: true,
             sprinting: false,
+            void_y: VOID_Y,
             dead: false,
             death_processed: false,
             death_cause: None,
@@ -428,7 +431,7 @@ impl Survival {
         }
 
         // `Player.isBelowWorld`: 4 damage per tick below min build height - 64.
-        if pos[1] < VOID_Y {
+        if pos[1] < self.void_y {
             queue_damage(&mut queue, DamageKind::Void, 4.0);
         }
 
@@ -702,6 +705,29 @@ mod tests {
             false,
         );
         assert_eq!(damage(queue), [(DamageKind::Void, 4.0)]);
+    }
+
+    #[test]
+    fn the_void_starts_sixty_four_blocks_below_the_dimensions_floor() {
+        // The end and the nether start at y 0, so falling to y -65 is already the void there.
+        let mut state = Survival::new();
+        state.void_y = -64.0;
+        let queue = state.environment_tick([0.0, -65.0, 0.0], false, false, false, false, 0, false);
+        assert!(
+            queue
+                .iter()
+                .flatten()
+                .any(|(kind, _)| *kind == DamageKind::Void)
+        );
+        let mut state = Survival::new();
+        let queue = state.environment_tick([0.0, -65.0, 0.0], false, false, false, false, 0, false);
+        assert!(
+            !queue
+                .iter()
+                .flatten()
+                .any(|(kind, _)| *kind == DamageKind::Void),
+            "the overworld void is still at -128"
+        );
     }
 
     #[test]
