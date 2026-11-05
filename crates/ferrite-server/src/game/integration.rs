@@ -3664,6 +3664,60 @@ async fn sticky_piston_pulls_stone_after_power_is_removed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retracting_sticky_piston_carries_the_mob_standing_on_the_block() {
+    use ferrite_protocol::packets::play::{AddEntity, EntityTeleport};
+    let lever = block_state(
+        "minecraft:lever",
+        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+    );
+    let (world, temp, addr, server) = redstone_fixture(&[
+        ([0, 64, 0], lever),
+        (
+            [1, 64, 0],
+            block_state(
+                "minecraft:sticky_piston",
+                &[("facing", "east"), ("extended", "false")],
+            ),
+        ),
+        ([2, 64, 0], block_state("minecraft:stone", &[])),
+    ])
+    .await;
+    let mut bot = Bot::join(addr, "RedstoneBot").await;
+    bot.until(46).await;
+    click_block(&mut bot, [0, 64, 0]).await;
+    wait_for_lamp(&mut bot, [3, 64, 0], block_state("minecraft:stone", &[])).await;
+    // The cow stands on the pushed stone; pulling the stone back must take it along.
+    world
+        .console_command("/summon minecraft:cow 3.5 65 0.5".into())
+        .await
+        .unwrap();
+    let cow = ferrite_entity::mob::MobKind::Cow.entity_type() as i32;
+    let id = loop {
+        let body = bot.until(AddEntity::ID).await;
+        let add = AddEntity::decode(&mut body.as_slice()).unwrap();
+        if add.entity_type.0 == cow {
+            break add.id.0;
+        }
+    };
+    click_block(&mut bot, [0, 64, 0]).await;
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let body = bot.until(EntityTeleport::ID).await;
+            let teleport = EntityTeleport::decode(&mut body.as_slice()).unwrap();
+            if teleport.id.0 == id && teleport.x < 3.0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the sticky piston should carry the cow to x 2.5");
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn observer_pulses_when_piston_moves_a_block_in_front_of_it() {
     let lever = block_state(
         "minecraft:lever",

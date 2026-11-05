@@ -4765,22 +4765,36 @@ impl Region {
                 );
                 piston_changes.push(at);
             }
-            if extending {
+            {
                 // Entities standing where a block was pushed are carried one block along, when
                 // there is room for them there (vanilla `PistonMovingBlockEntity.moveCollidedEntities`).
+                // A pull moves the block toward the piston, and whatever stands on it follows.
                 let (dx, dy, dz) = facing.step();
-                let delta = ferrite_math::Vec3::new(f64::from(dx), f64::from(dy), f64::from(dz));
+                let sign = if extending { 1 } else { -1 };
+                let delta = ferrite_math::Vec3::new(
+                    f64::from(dx * sign),
+                    f64::from(dy * sign),
+                    f64::from(dz * sign),
+                );
                 for &(at, _, state) in &operation.edits {
                     if state == 0 {
                         continue;
                     }
+                    // Extension: the cell the block now fills. Retraction: the cell it left,
+                    // reaching slightly above it for entities standing on top.
+                    let from = if extending {
+                        at
+                    } else {
+                        [at[0] + dx, at[1] + dy, at[2] + dz]
+                    };
+                    let lift = if extending { 0.0 } else { 0.05 };
                     let cell = ferrite_math::AABB::new(
-                        f64::from(at[0]),
-                        f64::from(at[1]),
-                        f64::from(at[2]),
-                        f64::from(at[0] + 1),
-                        f64::from(at[1] + 1),
-                        f64::from(at[2] + 1),
+                        f64::from(from[0]),
+                        f64::from(from[1]),
+                        f64::from(from[2]),
+                        f64::from(from[0] + 1),
+                        f64::from(from[1] + 1) + lift,
+                        f64::from(from[2] + 1),
                     );
                     for key in self.entities.query_vec(cell) {
                         let (Some(pos), Some(bbox)) =
