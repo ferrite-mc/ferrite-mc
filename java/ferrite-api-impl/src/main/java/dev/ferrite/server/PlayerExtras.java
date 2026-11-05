@@ -340,8 +340,16 @@ public abstract class PlayerExtras extends PlayerSight {
         return item == null ? org.bukkit.inventory.ItemStack.empty() : item;
     }
     @Override public org.bukkit.entity.FishHook getFishHook() { return null; }
-    @Override public org.bukkit.entity.Entity getShoulderEntityRight() { return null; }
-    @Override public org.bukkit.entity.Entity getShoulderEntityLeft() { return null; }
+    // Shoulder parrots are bookkeeping only: the game has no parrot and the client is not shown one.
+    private volatile org.bukkit.entity.Entity shoulderLeft, shoulderRight;
+    @Override public org.bukkit.entity.Entity getShoulderEntityRight() { return shoulderRight; }
+    @Override public org.bukkit.entity.Entity getShoulderEntityLeft() { return shoulderLeft; }
+    @Override public void setShoulderEntityLeft(org.bukkit.entity.Entity entity) { shoulderLeft = shoulder(entity); }
+    @Override public void setShoulderEntityRight(org.bukkit.entity.Entity entity) { shoulderRight = shoulder(entity); }
+    private static org.bukkit.entity.Entity shoulder(org.bukkit.entity.Entity entity) {
+        if (entity != null && entity.getType() != org.bukkit.entity.EntityType.PARROT) throw new IllegalArgumentException("Only parrots can sit on a shoulder, not " + entity.getType());
+        return entity;
+    }
     @Override public double getDefaultGravity() { return 0.08; }
     @Override public float getAirDrag() { return 0.02f; }
     @Override public org.bukkit.entity.EntityCategory getCategory() { return org.bukkit.entity.EntityCategory.NONE; }

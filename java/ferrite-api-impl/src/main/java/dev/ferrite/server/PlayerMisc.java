@@ -208,8 +208,8 @@ public abstract class PlayerMisc extends PlayerStubs {
         return slot != org.bukkit.inventory.EquipmentSlot.BODY && slot != org.bukkit.inventory.EquipmentSlot.SADDLE;
     }
     /** Shoulder entities cannot be placed yet, so a shoulder is always empty and there is nothing to release. */
-    @Override public org.bukkit.entity.Entity releaseLeftShoulderEntity() { return null; }
-    @Override public org.bukkit.entity.Entity releaseRightShoulderEntity() { return null; }
+    @Override public org.bukkit.entity.Entity releaseLeftShoulderEntity() { var entity = getShoulderEntityLeft(); setShoulderEntityLeft(null); return entity; }
+    @Override public org.bukkit.entity.Entity releaseRightShoulderEntity() { var entity = getShoulderEntityRight(); setShoulderEntityRight(null); return entity; }
     @Override public Map<String, Object> serialize() {
         var result = new LinkedHashMap<String, Object>();
         result.put("UUID", getUniqueId().toString());
@@ -529,6 +529,10 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public org.bukkit.event.entity.EntityDamageEvent getLastDamageCause() { return lastCause; }
     @Override public void setLastDamageCause(org.bukkit.event.entity.EntityDamageEvent event) { lastCause = event; }
     private org.bukkit.event.entity.EntityDamageEvent lastCause;
+    private final FerriteCombatTracker combat = new FerriteCombatTracker(this);
+    @Override public io.papermc.paper.world.damagesource.CombatTracker getCombatTracker() { return combat; }
+    /** Called by the host's damage event so the tracker knows what hit the player. */
+    void recordDamage(org.bukkit.damage.DamageSource source, double damage) { combat.record(source, (float) damage); }
     @Override public java.util.Set<UUID> getCollidableExemptions() { return exemptions; }
     private final Set<UUID> exemptions = new java.util.concurrent.CopyOnWriteArraySet<>();
     @Override public void resetMaxHealth() { getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).setBaseValue(20.0); }

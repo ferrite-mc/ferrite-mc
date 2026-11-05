@@ -52,23 +52,20 @@ CMI가 동작한다고 말할 수 없다.
 
 서버 쪽 기능이나 데이터가 먼저 필요하다.
 
-- **엔티티 모델 확장 필요:** 아이템 사용 상태는 연결됨(`startUsingItem`/`completeUsingActiveItem`/`clearActiveItem`, `hasActiveItem` 등은 먹기·활·방패 상태를 따른다; 방패는 사용 시간을 세지 않는다),
-  내구도는 이제 `setItem`에 마모(`Damageable`)만 있는 아이템을 넣으면 호스트가 `Damage` 컴포넌트까지 반영한다(이름·인챈트 등 다른 메타는 여전히 거부), 어깨 엔티티(탑승은 `/ride`와 같은 탑승표로 연결됨: `getVehicle`/`getPassengers`/`addPassenger`/`leaveVehicle`/`eject`, 시트 위치는 고정 오프셋), 전투 추적기.
-- **바이옴·구조물 데이터 필요:** `getStructures`(구조물 영역 조회가 호스트에 없다),
-  `createExplorerMap`(Server 3개).
+- **연결됨(이번 라운드):** 아이템 사용 상태, 마모 동기화, 탑승·승객(`/ride` 탑승표), `openBook`(제목·저자·일반 텍스트 쪽), `sendMap`(렌더러를 캔버스에 그려 `map_item_data` 전송; 장식/커서는 보내지 않음),
+  `refreshChunk`/`getChunkGenerationState`/`unloadChunk`, 기온·습도(바이옴 데이터, 높이 보정은 노이즈 없이), 전투 추적기(호스트가 보고한 피해를 기록, 낙하 위치 종류는 GENERIC),
+  눈덩이·달걀·엔더 진주(플레이어가 던질 수 있고 `launchProjectile`로도 발사; 진주는 같은 리전의 던진 사람만 순간이동 + 낙하 피해 5, 달걀은 닭을 낳지 않음).
+- **장부만 있는 것:** 어깨 앵무새(`set/get/releaseShoulderEntity*`는 Java에서 기억만 하고 게임엔 앵무새도, 클라이언트 표시도 없다).
+- **아직 안 됨:** 화염구 등 나머지 발사체, `findLightningRod/Target`(피뢰침 위치 색인이 없다), `sendBlockUpdate(TileState)`.
+- **월드젠 쪽(다른 작업자 담당):** `getStructures`, `createExplorerMap`(Server 3개).
   (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
   호스트가 없으면 "not implemented"를 던진다. 호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능.)
-- **청크 관리:** `refreshChunk`, `getChunkGenerationState`는 연결됨. `unloadChunk`는 서버가 홀더 없는 청크를 스스로 내리므로 "이미 내려가 있으면 true, 플레이어·스폰이 잡고 있으면 false"로 답한다(강제 언로드는 없음).
-  (구현됨: `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk` = 생성돼 있으면 true,
-  `generate`면 월드 뷰로 블록 하나를 읽어 생성을 유도한 뒤 true. Java 쪽은 이 환경에 Java 25가 없어 컴파일을 확인하지 못했다.
-  청크를 실제로 로드 상태로 붙잡아 두지는 않는다.)
-- **기타:** `openBook`(아이템에 written_book 구성요소 없음),
-  `findLightningRod/Target`,
-  `sendMap`/`sendBlockUpdate(TileState)`.
+- **청크:** `unloadChunk`는 서버가 홀더 없는 청크를 스스로 내리므로 "이미 내려가 있으면 true, 플레이어·스폰이 잡고 있으면 false"로 답한다(강제 언로드는 없음).
+  `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk`는 월드 뷰로 블록 하나를 읽어 생성을 유도한다.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.
 
 ## 다음 단계 제안
 
 1. 실제 클라이언트로 위 기능(보스바, 스코어보드, 아이템 드롭, 화살)을 확인한다.
 2. 실제 플러그인을 넣어 부팅하고 로그의 `not implemented` 이름을 모아 우선순위를 정한다.
-3. 엔티티 연결 장치를 넓힌다(다른 발사체, 아이템 사용 상태), 그 뒤 충돌/바이옴 데이터.
+3. 화염구 같은 나머지 발사체와 피뢰침 색인을 붙인다.

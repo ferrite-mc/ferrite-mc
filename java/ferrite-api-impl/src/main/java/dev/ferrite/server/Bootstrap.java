@@ -212,7 +212,9 @@ public final class Bootstrap {
         var entity = entity(id, name);
         var event = new org.bukkit.event.entity.EntityDamageEvent(entity, damageCause(cause), amount);
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
-        return event.isCancelled() ? 0.0 : event.getFinalDamage();
+        double finalDamage = event.isCancelled() ? 0.0 : event.getFinalDamage();
+        if (finalDamage > 0 && entity instanceof PlayerMisc tracked) tracked.recordDamage(damageSource(), finalDamage);
+        return finalDamage;
     }
     /** Fires Bukkit's {@code EntityDeathEvent} for a non-player entity the host removed. */
     public static void fireEntityDeath(String id, String type, double x, double y, double z, int droppedExp) {

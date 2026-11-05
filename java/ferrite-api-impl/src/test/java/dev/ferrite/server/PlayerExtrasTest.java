@@ -658,4 +658,16 @@ class PlayerExtrasTest {
             assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.Fireball.class));
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void damageTheHostReportsEndsUpInTheCombatTracker() {
+        var tracker = player.getCombatTracker();
+        assertFalse(tracker.isInCombat());
+        Bootstrap.fireEntityDamage(player.getUniqueId().toString(), player.getName(), "fall", 3.0);
+        assertTrue(tracker.isInCombat());
+        assertTrue(tracker.isTakingDamage());
+        assertEquals(1, tracker.getCombatEntries().size());
+        assertEquals(3.0f, tracker.getCombatEntries().get(0).getDamage());
+        tracker.resetCombatState();
+        assertFalse(tracker.isInCombat());
+    }
 }
