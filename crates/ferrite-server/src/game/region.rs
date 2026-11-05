@@ -4832,6 +4832,39 @@ impl Region {
                             }
                         }
                     }
+                    // Players are pushed the same way; their client is told with a position sync.
+                    for player in self.players.values_mut() {
+                        let bbox = ferrite_math::AABB::new(
+                            player.pos[0] - 0.3,
+                            player.pos[1],
+                            player.pos[2] - 0.3,
+                            player.pos[0] + 0.3,
+                            player.pos[1] + 1.8,
+                            player.pos[2] + 0.3,
+                        );
+                        if !bbox.intersects(cell) {
+                            continue;
+                        }
+                        let moved = [
+                            player.pos[0] + delta.x,
+                            player.pos[1] + delta.y,
+                            player.pos[2] + delta.z,
+                        ];
+                        let free = |y: f64| {
+                            super::redstone::RedstoneWorld::block(
+                                &world,
+                                [
+                                    moved[0].floor() as i32,
+                                    (moved[1] + y).floor() as i32,
+                                    moved[2].floor() as i32,
+                                ],
+                            ) == Some(0)
+                        };
+                        if free(0.0) && free(1.79) {
+                            player.pos = moved;
+                            player.teleport();
+                        }
+                    }
                 }
             }
             destroyed.extend(operation.destroyed);

@@ -28,7 +28,8 @@ items) standing in a cell a block is pushed into one block along, when the desti
 room for them (test `an_extending_piston_carries_the_mob_in_the_way`); a retracting sticky piston carries non-player
 entities standing on the pulled block toward the piston (test
 `a_retracting_sticky_piston_carries_the_mob_standing_on_the_block`, needs the fixture world and
-has not been run); players are not carried. The server sends
+has not been run); players are pushed the same way (feet and head cells
+must be air; the client gets a position sync). Player pushing is untested. The server sends
 a block event and final block updates, but client animation has not been verified.
 Vanilla edge cases, including interrupted movement, world borders, drops and full
 cross-region runtime behaviour, still need regression coverage and parity validation.
