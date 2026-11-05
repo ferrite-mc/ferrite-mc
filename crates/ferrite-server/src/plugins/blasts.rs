@@ -1,7 +1,7 @@
 //! `World#createExplosion`: an ordinary vanilla explosion at a point of the default world.
 //!
-//! The blast hurts and pushes players and mobs like a bed explosion and breaks blocks unless the
-//! plugin asked it not to.
+//! The blast pushes players and mobs and breaks blocks unless the plugin asked it not to.
+//! Explosion damage is not yet implemented by the region engine.
 
 use ferrite_plugin::{HostCall, PlayerCommand};
 use uuid::Uuid;
