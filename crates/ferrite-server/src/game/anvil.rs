@@ -702,6 +702,78 @@ impl AnvilChunkSource {
         );
         Ok(())
     }
+    /// Atomically applies a set of expected-state block changes to loaded chunks.
+    pub fn compare_set_blocks(&self, changes: &[([i32; 3], u32, u32)]) -> anyhow::Result<()> {
+        let mut cache = self.cache.lock().unwrap();
+        let mut edited = std::collections::BTreeMap::new();
+        let mut positions = std::collections::HashSet::new();
+        for &(pos @ [x, y, z], expected, state) in changes {
+            anyhow::ensure!(positions.insert(pos), "duplicate block position");
+            let key = (x.div_euclid(16), z.div_euclid(16));
+            if let std::collections::btree_map::Entry::Vacant(entry) = edited.entry(key) {
+                let column = if let Some(dirty) = cache.dirty.get(&key) {
+                    (dirty.chunk.clone(), dirty.light.clone())
+                } else {
+                    let column = cache
+                        .entries
+                        .iter()
+                        .find_map(|(&(cx, cz, _), entry)| {
+                            if (cx, cz) == key {
+                                if let Entry::Ready(Ok(column), _) = entry {
+                                    Some(column)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
+                    (column.chunk.clone(), column.light.clone())
+                };
+                entry.insert(column);
+            }
+            let (chunk, _) = edited.get_mut(&key).expect("inserted above");
+            let local_x = x.rem_euclid(16) as u8;
+            let local_z = z.rem_euclid(16) as u8;
+            anyhow::ensure!(
+                chunk.block(local_x, y, local_z) == Some(expected),
+                "block changed"
+            );
+            chunk.set_block(local_x, y, local_z, state, &*self.registry)?;
+        }
+        let new_dirty = edited
+            .keys()
+            .filter(|key| !cache.dirty.contains_key(key))
+            .count();
+        anyhow::ensure!(
+            self.path.is_none() || cache.dirty.len() + new_dirty <= CACHE_LIMIT,
+            "dirty chunk cache is full"
+        );
+        // Encoding can fail: prepare every packet before publishing any modified chunk.
+        let mut prepared = Vec::with_capacity(edited.len());
+        for ((x, z), (chunk, light)) in edited {
+            let packet = encode_column_packet(x, z, &chunk, &light)?;
+            prepared.push(((x, z), chunk, light, packet));
+        }
+        for ((x, z), chunk, light, packet) in prepared {
+            self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+            cache.clock += 1;
+            let version = cache.clock;
+            invalidate(&mut cache, &self.stats, x, z);
+            cache.dirty.insert(
+                (x, z),
+                Dirty {
+                    chunk,
+                    light,
+                    packet,
+                    version,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Sets the biome of every 4x4x4 cell touched by the block box `min..=max` (`/fillbiome`).
     /// `accept` sees the cell's current biome name and decides whether it is replaced. Returns
     /// the number of cells changed and the chunks that changed; fails, changing nothing, when a
@@ -1252,6 +1324,30 @@ mod tests {
                 .fill_biome([160, 64, 0], [163, 64, 3], "minecraft:desert", &|_| true)
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn block_batch_is_atomic_across_loaded_chunks() {
+        let source = AnvilChunkSource::new_memory();
+        ready(&source, 0, 0, 0).await;
+        ready(&source, 1, 0, 0).await;
+        let stone = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+        let a = [15, 70, 0];
+        let b = [16, 70, 0];
+        let old_a = source.block(a[0], a[1], a[2]).unwrap();
+        let old_b = source.block(b[0], b[1], b[2]).unwrap();
+        assert!(
+            source
+                .compare_set_blocks(&[(a, old_a, stone), (b, old_b + 1, stone)])
+                .is_err()
+        );
+        assert_eq!(source.block(a[0], a[1], a[2]), Some(old_a));
+        assert_eq!(source.block(b[0], b[1], b[2]), Some(old_b));
+        source
+            .compare_set_blocks(&[(a, old_a, stone), (b, old_b, stone)])
+            .unwrap();
+        assert_eq!(source.block(a[0], a[1], a[2]), Some(stone));
+        assert_eq!(source.block(b[0], b[1], b[2]), Some(stone));
     }
 
     #[tokio::test]

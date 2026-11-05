@@ -1,0 +1,259 @@
+//! Piston movement planning.
+
+use ferrite_data::{block_props, blocks};
+use ferrite_math::Direction;
+use std::collections::HashSet;
+
+/// Read-only view of blocks owned by the current region. None means unavailable.
+pub trait PistonWorld {
+    fn block(&self, pos: [i32; 3]) -> Option<u16>;
+    fn has_block_entity(&self, pos: [i32; 3]) -> bool;
+}
+
+/// A complete plan; no world mutation has happened when resolution returns.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    pub to_move: Vec<[i32; 3]>,
+    pub to_destroy: Vec<[i32; 3]>,
+}
+
+fn offset([x, y, z]: [i32; 3], direction: Direction) -> [i32; 3] {
+    let (dx, dy, dz) = direction.step();
+    [x + dx, y + dy, z + dz]
+}
+
+#[derive(PartialEq, Eq)]
+enum Reaction {
+    Air,
+    Move,
+    Block,
+    Destroy,
+    PushOnly,
+}
+
+fn reaction(world: &impl PistonWorld, pos: [i32; 3], state: u16) -> Reaction {
+    let Some((name, props)) = blocks::state(state) else {
+        return Reaction::Block;
+    };
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    let physical = block_props::get(state);
+    if physical.is_air {
+        return Reaction::Air;
+    }
+    if world.has_block_entity(pos)
+        || physical.hardness < 0.0
+        || matches!(
+            name,
+            "obsidian"
+                | "crying_obsidian"
+                | "respawn_anchor"
+                | "reinforced_deepslate"
+                | "moving_piston"
+                | "piston_head"
+        )
+    {
+        return Reaction::Block;
+    }
+    if matches!(name, "piston" | "sticky_piston")
+        && props.iter().any(|&(k, v)| k == "extended" && v == "true")
+    {
+        return Reaction::Block;
+    }
+    if name.ends_with("_glazed_terracotta") {
+        return Reaction::PushOnly;
+    }
+    if matches!(
+        name,
+        "redstone_wire"
+            | "redstone_torch"
+            | "redstone_wall_torch"
+            | "rail"
+            | "powered_rail"
+            | "detector_rail"
+            | "activator_rail"
+            | "torch"
+            | "wall_torch"
+            | "tripwire"
+            | "tripwire_hook"
+            | "lever"
+            | "fire"
+            | "soul_fire"
+            | "snow"
+            | "vine"
+            | "lily_pad"
+            | "short_grass"
+            | "tall_grass"
+            | "fern"
+            | "large_fern"
+            | "dead_bush"
+    ) || name.ends_with("_button")
+        || name.ends_with("_pressure_plate")
+        || name.ends_with("_flower")
+        || name.ends_with("_sapling")
+    {
+        return Reaction::Destroy;
+    }
+    Reaction::Move
+}
+
+fn sticky(state: u16) -> Option<&'static str> {
+    let (name, _) = blocks::state(state)?;
+    match name.strip_prefix("minecraft:").unwrap_or(name) {
+        "slime_block" => Some("slime"),
+        "honey_block" => Some("honey"),
+        _ => None,
+    }
+}
+
+/// Resolve an extension or a sticky retraction without mutating the world.
+pub fn resolve(
+    world: &impl PistonWorld,
+    base: [i32; 3],
+    facing: Direction,
+    extending: bool,
+) -> Option<Plan> {
+    let direction = if extending { facing } else { facing.opposite() };
+    let first = if extending {
+        offset(base, facing)
+    } else {
+        offset(offset(base, facing), facing)
+    };
+    let mut plan = Plan::default();
+    let mut visited = HashSet::new();
+    let mut pending = vec![(first, true)];
+    while let Some((pos, required)) = pending.pop() {
+        if pos == base || visited.contains(&pos) {
+            continue;
+        }
+        // Retraction removes the head before the pulled block enters its cell.
+        if !extending && pos == offset(base, facing) {
+            continue;
+        }
+        let state = world.block(pos)?;
+        match reaction(world, pos, state) {
+            Reaction::Air => continue,
+            Reaction::Block | Reaction::PushOnly if !required => continue,
+            Reaction::Block => return None,
+            Reaction::PushOnly if !extending => return None,
+            Reaction::Destroy if required && extending => {
+                plan.to_destroy.push(pos);
+                continue;
+            }
+            Reaction::Destroy => continue,
+            _ => {}
+        }
+        if plan.to_move.len() == 12 {
+            return None;
+        }
+        visited.insert(pos);
+        plan.to_move.push(pos);
+        pending.push((offset(pos, direction), true));
+        if let Some(kind) = sticky(state) {
+            for side in Direction::ALL {
+                if side == direction {
+                    continue;
+                }
+                let adjacent = offset(pos, side);
+                if adjacent == base {
+                    continue;
+                }
+                let other = world.block(adjacent)?;
+                if sticky(other).is_some_and(|other_kind| other_kind != kind) {
+                    continue;
+                }
+                pending.push((adjacent, false));
+            }
+        }
+    }
+    plan.to_move.sort_by_key(|pos| {
+        let (x, y, z) = direction.step();
+        -(i64::from(pos[0]) * i64::from(x)
+            + i64::from(pos[1]) * i64::from(y)
+            + i64::from(pos[2]) * i64::from(z))
+    });
+    Some(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Grid(HashMap<[i32; 3], u16>);
+    impl PistonWorld for Grid {
+        fn block(&self, pos: [i32; 3]) -> Option<u16> {
+            Some(*self.0.get(&pos).unwrap_or(&0))
+        }
+        fn has_block_entity(&self, _: [i32; 3]) -> bool {
+            false
+        }
+    }
+    fn state(name: &str) -> u16 {
+        ferrite_data::blocks::default_state(name).unwrap()
+    }
+
+    #[test]
+    fn twelve_blocks_move_but_thirteen_do_not() {
+        let mut grid = Grid::default();
+        for x in 1..=12 {
+            grid.0.insert([x, 64, 0], state("stone"));
+        }
+        assert_eq!(
+            resolve(&grid, [0, 64, 0], Direction::East, true)
+                .unwrap()
+                .to_move
+                .len(),
+            12
+        );
+        grid.0.insert([13, 64, 0], state("stone"));
+        assert!(resolve(&grid, [0, 64, 0], Direction::East, true).is_none());
+    }
+
+    #[test]
+    fn immovable_blocks_stop_and_breakable_blocks_are_destroyed() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("obsidian"));
+        assert!(resolve(&grid, [0, 64, 0], Direction::East, true).is_none());
+        grid.0.insert([1, 64, 0], state("redstone_wire"));
+        let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
+        assert_eq!(plan.to_destroy, vec![[1, 64, 0]]);
+    }
+
+    #[test]
+    fn slime_moves_a_side_block_but_not_honey() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("slime_block"));
+        grid.0.insert([1, 65, 0], state("stone"));
+        grid.0.insert([1, 63, 0], state("honey_block"));
+        let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
+        assert!(plan.to_move.contains(&[1, 65, 0]));
+        assert!(!plan.to_move.contains(&[1, 63, 0]));
+    }
+
+    #[test]
+    fn sticky_retraction_moves_the_block_into_the_head_cell() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("piston_head"));
+        grid.0.insert([2, 64, 0], state("stone"));
+        let plan = resolve(&grid, [0, 64, 0], Direction::East, false).unwrap();
+        assert_eq!(plan.to_move, vec![[2, 64, 0]]);
+    }
+
+    #[test]
+    fn unloaded_destination_rejects_the_entire_plan() {
+        struct Boundary;
+        impl PistonWorld for Boundary {
+            fn block(&self, pos: [i32; 3]) -> Option<u16> {
+                match pos[0] {
+                    1 => Some(state("stone")),
+                    _ => None,
+                }
+            }
+            fn has_block_entity(&self, _: [i32; 3]) -> bool {
+                false
+            }
+        }
+        assert!(resolve(&Boundary, [0, 64, 0], Direction::East, true).is_none());
+    }
+}
