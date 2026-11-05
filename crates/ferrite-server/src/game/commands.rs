@@ -488,7 +488,6 @@ pub enum AttributeOp {
     },
 }
 
-/// A command's effect, applied by the game loop.
 /// Where `/rotate` turns an entity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RotateTo {
@@ -501,6 +500,33 @@ pub enum RotateTo {
     },
 }
 
+/// How `/item` and `/loot` write into slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotMode {
+    /// A single stack goes to every slot; several go to the slots pairwise.
+    Replace,
+    /// Only empty slots change.
+    Fill,
+    /// Like replace, but slots left without a stack are cleared when several are given.
+    Override,
+    /// Adds stacks to a container, merging with what is there (`/loot insert`).
+    Insert,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SlotTarget {
+    Block([i32; 3]),
+    Entities(EntityTarget),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SlotSource {
+    Stacks(Vec<ferrite_item::ItemStack>),
+    FromBlock { pos: [i32; 3], slots: String },
+    FromEntity { target: EntityTarget, slots: String },
+}
+
+/// A command's effect, applied by the game loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// `/spreadplayers`: scatter the targets (players and other entities) around a point.
@@ -545,11 +571,18 @@ pub enum Action {
         dimension: super::Dimension,
         chunks: Vec<(i32, i32)>,
     },
-    /// `/item replace entity`: puts a stack (or clears the slot) in each player's inventory slot.
-    SetSlot {
-        targets: Vec<Uuid>,
-        slot: u8,
-        item: Option<(String, u8)>,
+    /// `/item` and `/loot ... insert|replace`: writes stacks into container or inventory slots.
+    Slots {
+        mode: SlotMode,
+        target: SlotTarget,
+        /// Comma separated slot names (`container.*`, `hotbar.3`, ...).
+        slots: String,
+        source: SlotSource,
+    },
+    /// `/loot spawn`: drops the stacks as item entities.
+    DropItems {
+        pos: [f64; 3],
+        stacks: Vec<ferrite_item::ItemStack>,
     },
     /// `/swing`: arm swing animation of the targets (`Animate` action 0 or 3).
     Swing {
@@ -1686,7 +1719,9 @@ pub fn parse_item(raw: &str) -> Result<u16, CommandError> {
 }
 
 /// Parses the `[component={...}]` suffix of a `/give` item argument into raw component NBT.
-fn parse_item_components(raw: &str) -> Result<Vec<(u16, ferrite_nbt::Tag)>, CommandError> {
+pub(crate) fn parse_item_components(
+    raw: &str,
+) -> Result<Vec<(u16, ferrite_nbt::Tag)>, CommandError> {
     let Some(start) = raw.find('[') else {
         return Ok(Vec::new());
     };
@@ -2563,7 +2598,7 @@ mod tests {
     }
 
     #[test]
-    fn loot_give_rolls_tables_and_other_targets_fail_clearly() {
+    fn loot_rolls_tables_for_every_destination() {
         denied("loot give @s loot minecraft:blocks/stone");
         // No player `@s` for the test source: the table is rolled and checked first.
         let error = run("loot give @s loot minecraft:nope/none", 2)
@@ -2571,35 +2606,55 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Unknown loot table"), "{error}");
-        let error = run("loot spawn 0 64 0 loot minecraft:blocks/stone", 2)
-            .0
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not supported"), "{error}");
-        let error = run("loot insert 0 64 0 mine 0 64 0", 2)
-            .0
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not supported"), "{error}");
+        // spawn and insert now route through the same roll; a bad table fails the same way.
+        for line in [
+            "loot spawn 0 64 0 loot minecraft:nope/none",
+            "loot insert 0 64 0 loot minecraft:nope/none",
+            "loot replace entity @s hotbar.0 3 loot minecraft:nope/none",
+        ] {
+            let error = run(line, 2).0.unwrap_err().to_string();
+            assert!(error.contains("Unknown loot table"), "{line}: {error}");
+        }
+        // Without a loaded world there is no block to mine.
+        assert!(run("loot insert 0 64 0 mine 0 64 0", 2).0.is_err());
     }
 
     #[test]
-    fn item_replace_parses_and_other_forms_fail_clearly() {
+    fn item_commands_emit_slot_actions() {
         denied("item replace entity @s hotbar.0 with minecraft:stone");
         let error = run("item replace entity @s hotbar.0 with minecraft:nope", 2)
             .0
             .unwrap_err()
             .to_string();
         assert!(error.contains("Unknown item"), "{error}");
-        for line in [
-            "item modify entity @s hotbar.0 minecraft:foo",
-            "item replace block 0 64 0 container.0 with minecraft:stone",
-            "item fill entity @s hotbar.* with minecraft:stone",
-            "item override entity @s hotbar.* from entity @s hotbar.1",
+        let error = run("item modify entity @s hotbar.0 minecraft:foo", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown item modifier"), "{error}");
+        for (line, mode) in [
+            (
+                "item replace block 0 64 0 container.0 with minecraft:stone",
+                SlotMode::Replace,
+            ),
+            (
+                "item fill entity @s hotbar.* with minecraft:stone 3",
+                SlotMode::Fill,
+            ),
+            (
+                "item override entity @s hotbar.* from entity @s hotbar.1",
+                SlotMode::Override,
+            ),
         ] {
-            let error = run(line, 2).0.unwrap_err().to_string();
-            assert!(error.contains("not supported"), "{line}: {error}");
+            let (result, actions) = run(line, 2);
+            assert!(result.is_ok(), "{line}: {result:?}");
+            assert!(
+                matches!(actions.first(), Some(Action::Slots { mode: m, .. }) if *m == mode),
+                "{line}: {actions:?}"
+            );
         }
+        let (result, _) = run("item replace entity @s hotbar.0 with minecraft:stone 99", 2);
+        assert!(result.unwrap_err().to_string().contains("Can't give"));
     }
 
     #[test]

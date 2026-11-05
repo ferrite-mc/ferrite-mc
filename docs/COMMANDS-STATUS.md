@@ -23,14 +23,20 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   entity data yet.
 - `/waypoint`: `list` lists online players; `modify` stores color/style per entity but sends no
   `waypoint` packet.
-- `/loot give <players> loot|mine|fish`: rolls the extracted tables (`mine` reads the block at
-  the position; `mainhand`/`offhand` count as no tool) and gives the stacks with `/give`.
-  `kill`, `insert`, `replace`, `spawn` fail with "not supported" (no entity type in selectors, no
-  item-entity spawn, no container write path).
-- `/item replace entity <players> <slot> with <item> [count]` works for player inventories
-  (`container.N`, `hotbar.N`, `inventory.N`, `armor.*`, `weapon.offhand`, `*` wildcards;
-  components ignored). `block`, `from`, `modify`, `fill`, `override` and `weapon.mainhand`
-  fail with "not supported".
+- `/loot give|insert|replace|spawn <target> loot|mine|fish|kill ...` roll the extracted tables
+  (`mine` reads the block at the position; `mainhand`/`offhand` count as no tool; `kill` rolls
+  `entities/<type>` of the first selected entity with an empty context). `insert` merges into
+  chest/barrel/hopper/dropper/dispenser/furnace contents and reports "full"; `replace` takes
+  `<slot> [count]` consecutive slots on a block container or a player; `spawn` drops item entities.
+  Stacks over the max size are split.
+- `/item replace|fill|override` work on block containers and player inventories (`container.N`,
+  `hotbar.N`, `inventory.N`, `armor.*`, `weapon.mainhand|offhand|*`, `*` wildcards) with `with`
+  or `from block|entity`. Several source stacks map pairwise onto the slots; `fill` only touches
+  empty slots; `override` clears slots left without a stack (these fill/override semantics are
+  inferred, not checked against vanilla). Item components are ignored. No item modifiers ship in
+  the vanilla data, so `modify` and any `<modifier>` fail with `argument.item_modifier.unknown`.
+  Non-player entities have no inventory here, so only players are written. Feedback texts are
+  from memory.
 - `/ride`: syntax only; `mount` fails ("not supported", no passenger model), `dismount` always
   reports "not riding".
 - `/place`: syntax only; every form fails ("not supported"). Needs chunk state in the worldgen

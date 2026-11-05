@@ -1,5 +1,6 @@
 mod anvil;
 mod attributes;
+mod slot_ops;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn};
 #[cfg(test)]
 mod block_tests;
@@ -2905,26 +2906,45 @@ impl CommandRuntime<'_> {
                 }
                 false
             }
-            Action::SetSlot {
-                targets,
-                slot,
-                item,
+            Action::Slots {
+                mode,
+                target,
+                slots,
+                source,
             } => {
-                for target in targets {
-                    if let Some((_, mailbox, _)) = self.mailboxes.get(&target) {
-                        mailbox
-                            .lock()
-                            .unwrap()
-                            .push_back(Command::SetInventorySlot {
-                                slot,
-                                item: item.as_ref().map(|(material, amount)| {
-                                    ferrite_plugin::ItemSnapshot {
-                                        material: material.clone(),
-                                        amount: *amount,
-                                    }
-                                }),
-                            });
-                    }
+                self.run_slots(mode, target, slots, source);
+                false
+            }
+            Action::DropItems { pos, stacks } => {
+                let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+                if self.worlds.owner(self.dimension, chunk).is_none() {
+                    self.reply.key("argument.pos.unloaded", &[]);
+                    return false;
+                }
+                let total: i32 = stacks.iter().map(|s| s.count).sum();
+                let first = stacks
+                    .first()
+                    .map(|s| commands::item_display(s.item))
+                    .unwrap_or_default();
+                let single = stacks.len() == 1;
+                self.worlds
+                    .schedule_at_chunk(self.dimension, chunk, move |region| {
+                        for stack in stacks {
+                            if let (Some(name), Ok(amount)) =
+                                (stack.name(), u8::try_from(stack.count))
+                            {
+                                region.plugin_drop_item(pos, name, amount, true, Uuid::new_v4());
+                            }
+                        }
+                    });
+                if single {
+                    self.reply.key(
+                        "commands.drop.success.single",
+                        &[&total.to_string(), &first],
+                    );
+                } else {
+                    self.reply
+                        .key("commands.drop.success.multiple", &[&total.to_string()]);
                 }
                 false
             }

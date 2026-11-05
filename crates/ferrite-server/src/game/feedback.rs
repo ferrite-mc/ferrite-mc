@@ -97,6 +97,18 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.item.entity.set.success.single" => "Replaced a slot on %s with %s",
         "commands.item.entity.set.success.multiple" => "Replaced a slot on %s entities with %s",
         "slot.unknown" => "Unknown slot '%s'",
+        "commands.item.source.not_a_container" => "Source position %s, %s, %s is not a container",
+        "commands.item.target.not_a_container" => "Target position %s, %s, %s is not a container",
+        "commands.item.source.no_such_slot" => "The source does not have slot %s",
+        "commands.item.target.no_such_slot" => "The target does not have slot %s",
+        "commands.item.target.no_changes" => "No targets accepted item into slot %s",
+        "commands.item.block.set.success" => "Replaced a slot at %s, %s, %s with %s",
+        "commands.loot.insert.full" => "Container at %s, %s, %s is full",
+        "commands.loot.insert.success" => "Inserted the loot into the container at %s, %s, %s",
+        "commands.drop.success.single" => "Dropped %s %s",
+        "commands.drop.success.multiple" => "Dropped %s items",
+        "argument.entity.notfound.entity" => "No entity was found",
+        "argument.item_modifier.unknown" => "Unknown item modifier '%s'",
         "commands.swing.success.single" => "Swung %s's arm",
         "commands.swing.success.multiple" => "Swung the arms of %s entities",
         "commands.attribute.value.get.success" => "Value of attribute %s for %s is %s",
@@ -146,7 +158,6 @@ fn template(key: &str) -> Option<&'static str> {
         "argument.entity.toomany" => {
             "Only one entity is allowed, but the provided selector allows more than one"
         }
-        "argument.entity.notfound.entity" => "No entity was found",
         "argument.entity.notfound.player" => "No player was found",
         "argument.player.unknown" => "That player does not exist",
         "argument.anchor.invalid" => "Invalid entity anchor position %s",

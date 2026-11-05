@@ -12,11 +12,10 @@ use ferrite_command::{
 };
 use ferrite_loot::LootContext;
 
-use super::commands::{Action, Feedback, Source, item_display, parse_item, resolved_targets, send};
-
-fn unsupported(what: &str) -> CommandError {
-    CommandError::failed(format!("Ferrite: /loot {what} is not supported yet"))
-}
+use super::commands::{
+    Action, Feedback, SlotMode, SlotSource, SlotTarget, Source, item_display, parse_item,
+    resolved_targets, send,
+};
 
 fn block_context(ctx: &CommandContext<Source>) -> Result<LootContext, CommandError> {
     let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("pos") else {
@@ -88,24 +87,62 @@ fn stacks(ctx: &CommandContext<Source>, from: From) -> Result<Vec<(String, i32)>
             );
             rolled(&table, &context)
         }
-        From::Kill => Err(unsupported("kill")),
+        From::Kill => {
+            let target = super::commands::entity(ctx, "target")?;
+            let source = ctx.source();
+            let state = source.state.lock().unwrap();
+            let selected =
+                super::selectors::resolve_selection(&state, &target, source.uuid, source.origin)?;
+            let entities = state.entities.lock().unwrap();
+            let Some(entry) = selected.first().and_then(|e| entities.get(e.uuid)) else {
+                return Err(CommandError::failed(
+                    Feedback::new("commands.loot.no_loot_table", vec![]).text,
+                ));
+            };
+            let table = format!(
+                "minecraft:entities/{}",
+                entry.type_name().trim_start_matches("minecraft:")
+            );
+            drop(entities);
+            drop(state);
+            rolled(&table, &LootContext::default())
+        }
     }
 }
 
+fn item_stacks(
+    ctx: &CommandContext<Source>,
+    from: From,
+) -> Result<Vec<ferrite_item::ItemStack>, CommandError> {
+    let mut out = Vec::new();
+    for (name, count) in stacks(ctx, from)?.into_iter().filter(|(_, c)| *c > 0) {
+        let item = parse_item(&name)?;
+        let max = ferrite_item::item_defaults(item)
+            .map_or(64, |d| d.max_stack_size)
+            .max(1);
+        let mut left = count;
+        while left > 0 {
+            let take = left.min(max);
+            out.push(ferrite_item::ItemStack::with_count(item, take));
+            left -= take;
+        }
+    }
+    Ok(out)
+}
+
 fn give(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
-    let stacks = stacks(ctx, from)?;
+    let stacks = item_stacks(ctx, from)?;
     let targets = resolved_targets(ctx, "players")?;
     let mut total = 0;
-    for (name, count) in stacks.iter().filter(|(_, count)| *count > 0) {
-        let item = parse_item(name)?;
-        total += count;
+    for stack in &stacks {
+        total += stack.count;
         send(
             ctx.source(),
             Action::Give {
                 targets: targets.clone(),
-                item,
-                count: *count,
-                item_name: item_display(item),
+                item: stack.item,
+                count: stack.count,
+                item_name: item_display(stack.item),
                 components: Vec::new(),
             },
         )?;
@@ -119,8 +156,58 @@ fn give(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
     Ok(total)
 }
 
-fn failing(what: &'static str) -> impl Fn(&CommandContext<Source>) -> Result<i32, CommandError> {
-    move |_| Err(unsupported(what))
+fn insert_loot(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
+    let stacks = item_stacks(ctx, from)?;
+    send(
+        ctx.source(),
+        Action::Slots {
+            mode: SlotMode::Insert,
+            target: SlotTarget::Block(super::commands_item::block_pos(ctx, "targetPos")?),
+            slots: String::new(),
+            source: SlotSource::Stacks(stacks),
+        },
+    )
+}
+
+fn spawn_loot(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
+    let stacks = item_stacks(ctx, from)?;
+    let Some(ArgumentValue::Vec3(coords)) = ctx.argument("targetPos") else {
+        return Err(CommandError::failed("Missing position"));
+    };
+    let source = ctx.source();
+    let pos = coords.resolve(source.origin, source.yaw, source.pitch);
+    send(source, Action::DropItems { pos, stacks })
+}
+
+/// `replace`: `<slot> [<count>]` names `count` consecutive slots starting at `slot`.
+fn replace(ctx: &CommandContext<Source>, from: From, block: bool) -> Result<i32, CommandError> {
+    let stacks = item_stacks(ctx, from)?;
+    let slot = ctx.string("slot").unwrap_or_default();
+    let count = ctx.integer("count").unwrap_or(1).max(1);
+    let slots = match slot
+        .rsplit_once('.')
+        .and_then(|(p, n)| Some((p, n.parse::<i32>().ok()?)))
+    {
+        Some((prefix, first)) if count > 1 => (0..count)
+            .map(|i| format!("{prefix}.{}", first + i))
+            .collect::<Vec<_>>()
+            .join(","),
+        _ => slot.to_owned(),
+    };
+    let target = if block {
+        SlotTarget::Block(super::commands_item::block_pos(ctx, "targetPos")?)
+    } else {
+        SlotTarget::Entities(super::commands::entity(ctx, "entities")?)
+    };
+    send(
+        ctx.source(),
+        Action::Slots {
+            mode: SlotMode::Replace,
+            target,
+            slots,
+            source: SlotSource::Stacks(stacks),
+        },
+    )
 }
 
 /// The four sources under one parent; `run` handles the executes of each.
@@ -171,23 +258,21 @@ fn loot_tree() -> NodeBuilder<Source> {
     give_node = give_node.then(players);
 
     let mut insert = argument::<Source>("targetPos", ArgumentType::BlockPos);
-    for node in sources(|_| Box::new(failing("insert"))) {
+    for node in sources(|from| Box::new(move |ctx| insert_loot(ctx, from))) {
         insert = insert.then(node);
     }
     let mut spawn = argument::<Source>("targetPos", ArgumentType::Vec3);
-    for node in sources(|_| Box::new(failing("spawn"))) {
+    for node in sources(|from| Box::new(move |ctx| spawn_loot(ctx, from))) {
         spawn = spawn.then(node);
     }
-    let slot_sources = |count: bool| {
+    let slot_sources = |block: bool| {
         let mut slot = argument::<Source>("slot", ArgumentType::opaque("minecraft:item_slot"));
-        if count {
-            let mut counted = argument::<Source>("count", ArgumentType::integer());
-            for node in sources(|_| Box::new(failing("replace"))) {
-                counted = counted.then(node);
-            }
-            slot = slot.then(counted);
+        let mut counted = argument::<Source>("count", ArgumentType::integer());
+        for node in sources(|from| Box::new(move |ctx| replace(ctx, from, block))) {
+            counted = counted.then(node);
         }
-        for node in sources(|_| Box::new(failing("replace"))) {
+        slot = slot.then(counted);
+        for node in sources(|from| Box::new(move |ctx| replace(ctx, from, block))) {
             slot = slot.then(node);
         }
         slot
@@ -198,7 +283,7 @@ fn loot_tree() -> NodeBuilder<Source> {
                 argument::<Source>("targetPos", ArgumentType::BlockPos).then(slot_sources(true)),
             ))
             .then(literal::<Source>("entity").then(
-                argument::<Source>("entities", ArgumentType::entity()).then(slot_sources(true)),
+                argument::<Source>("entities", ArgumentType::entity()).then(slot_sources(false)),
             ));
     literal::<Source>("loot")
         .requires(|s| s.permission >= 2)

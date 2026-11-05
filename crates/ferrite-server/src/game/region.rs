@@ -27,6 +27,17 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
+/// How `/item` writes stacks into a player's slots.
+#[derive(Debug, Clone)]
+pub enum SlotFill {
+    /// A single stack goes to every slot; several go to the slots pairwise.
+    Set(Vec<ferrite_item::ItemStack>),
+    /// Like `Set`, but slots without a matching stack are cleared when several are given.
+    Override(Vec<ferrite_item::ItemStack>),
+    /// Like `Set`, but only slots that are empty change.
+    FillEmpty(Vec<ferrite_item::ItemStack>),
+}
+
 pub enum Command {
     Input(ServerboundPlay),
     Leave,
@@ -128,6 +139,18 @@ pub enum Command {
     SetInventorySlot {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
+    },
+    /// `/item` on the player's own inventory: writes the stacks into the slots (`-1` is the
+    /// selected hotbar slot).
+    ItemSlots {
+        slots: Vec<i16>,
+        fill: SlotFill,
+    },
+    /// `/item ... from entity` and `/loot`: sends back the stacks of the slots (`-1` is the
+    /// selected hotbar slot).
+    ReadSlots {
+        slots: Vec<i16>,
+        reply: std::sync::mpsc::Sender<Vec<ferrite_item::ItemStack>>,
     },
     /// A plugin's `Player#setHealth`, applied on the owning region thread.
     SetHealth {
@@ -1345,6 +1368,62 @@ impl Player {
         );
     }
     /// A plugin's `PlayerInventory#setItem`: replaces one slot and syncs it to the client.
+    /// `-1` is the selected hotbar slot; other values must be valid inventory indexes.
+    fn resolve_slot(&self, slot: i16) -> Option<usize> {
+        if slot == -1 {
+            return Some(self.inventory.selected_slot());
+        }
+        usize::try_from(slot)
+            .ok()
+            .filter(|slot| *slot < ferrite_inventory::SIZE)
+    }
+
+    /// Stores `stack` in `slot` and sends it to the client.
+    fn put_slot(&mut self, slot: usize, stack: ferrite_item::ItemStack) {
+        self.inventory.set(slot, stack.clone());
+        send(
+            self,
+            &SetPlayerInventory {
+                slot: VarInt(slot as i32),
+                item: stack,
+            },
+        );
+    }
+
+    fn fill_slots(&mut self, slots: &[i16], fill: SlotFill) {
+        let slots: Vec<usize> = slots.iter().filter_map(|s| self.resolve_slot(*s)).collect();
+        for (index, slot) in slots.iter().enumerate() {
+            let pick = |stacks: &[ferrite_item::ItemStack]| match stacks.len() {
+                0 => None,
+                1 => stacks.first().cloned(),
+                _ => stacks.get(index).cloned(),
+            };
+            match &fill {
+                SlotFill::Set(stacks) => {
+                    if let Some(stack) = pick(stacks) {
+                        self.put_slot(*slot, stack);
+                    }
+                }
+                SlotFill::Override(stacks) => {
+                    let stack = if stacks.len() > 1 {
+                        stacks.get(index).cloned()
+                    } else {
+                        pick(stacks)
+                    };
+                    self.put_slot(*slot, stack.unwrap_or_else(ferrite_item::ItemStack::empty));
+                }
+                SlotFill::FillEmpty(stacks) => {
+                    if self.inventory.get(*slot).is_empty()
+                        && let Some(stack) = pick(stacks)
+                    {
+                        self.put_slot(*slot, stack);
+                    }
+                }
+            }
+        }
+        self.sync_containers();
+    }
+
     fn set_inventory_slot(&mut self, slot: u8, item: Option<ferrite_plugin::ItemSnapshot>) {
         let slot = usize::from(slot);
         if slot >= ferrite_inventory::SIZE {
@@ -2690,6 +2769,19 @@ impl Player {
                 }
                 Command::SetInventorySlot { slot, item } => {
                     self.set_inventory_slot(slot, item);
+                    continue;
+                }
+                Command::ItemSlots { slots, fill } => {
+                    self.fill_slots(&slots, fill);
+                    continue;
+                }
+                Command::ReadSlots { slots, reply } => {
+                    let stacks = slots
+                        .iter()
+                        .filter_map(|slot| self.resolve_slot(*slot))
+                        .map(|slot| self.inventory.get(slot).clone())
+                        .collect();
+                    let _ = reply.send(stacks);
                     continue;
                 }
                 Command::PluginEntityTask(task) => {

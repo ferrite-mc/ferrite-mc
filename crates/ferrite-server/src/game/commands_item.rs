@@ -1,63 +1,59 @@
-//! `/item replace entity <players> <slot> with <item> [count]`.
+//! `/item replace|fill|override|modify` on block containers and entities.
 //!
-//! Only players' own inventories and the `with` source are supported: `block` targets, `from`,
-//! `modify`, `fill` and `override` need container writes, cross-entity slot reads and loot
-//! modifiers that the command layer does not have yet, so they fail with a clear message.
-//! Item components in the `item[...]` argument are ignored.
+//! Writes go through [`Action::Slots`]. Players are the only entities with inventories the
+//! command layer can address, so `entity` targets act on players. Item components in the
+//! `item[...]` argument are ignored, and no item modifiers ship with vanilla data, so
+//! `modify` and every `<modifier>` report `argument.item_modifier.unknown`.
 
 use ferrite_command::{
-    ArgumentType, CommandContext, CommandDispatcher, CommandError, NodeBuilder, argument, literal,
+    ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
+    argument, literal,
+};
+use ferrite_item::ItemStack;
+
+use super::commands::{
+    Action, Feedback, SlotMode, SlotSource, SlotTarget, Source, entity, item_display, parse_item,
+    send,
 };
 
-use super::commands::{Action, Feedback, Source, item_display, parse_item, resolved_targets, send};
-
-fn unsupported(what: &str) -> CommandError {
-    CommandError::failed(format!("Ferrite: /item {what} is not supported yet"))
-}
-
-/// The inventory index of a command slot name for a player (`container.N`, `hotbar.N`,
-/// `inventory.N`, `armor.*`, `weapon.offhand`).
-pub fn player_slot(name: &str) -> Result<u8, CommandError> {
-    let number = |prefix: &str, max: u8| -> Option<u8> {
-        name.strip_prefix(prefix)?
-            .parse::<u8>()
-            .ok()
-            .filter(|n| *n < max)
-    };
-    let slot = match name {
-        "armor.feet" => Some(36),
-        "armor.legs" => Some(37),
-        "armor.chest" => Some(38),
-        "armor.head" => Some(39),
-        "weapon.offhand" => Some(40),
-        "weapon.mainhand" => return Err(unsupported("replace weapon.mainhand")),
-        _ => number("container.", 36)
-            .or_else(|| number("hotbar.", 9))
-            .or_else(|| number("inventory.", 27).map(|n| 9 + n)),
-    };
-    slot.ok_or_else(|| {
-        CommandError::failed(Feedback::new("slot.unknown", vec![name.to_owned()]).text)
-    })
-}
-
-/// Every inventory index a slot source names (`hotbar.*` expands to all nine, and so on).
-pub fn player_slots(name: &str) -> Result<Vec<u8>, CommandError> {
-    let range = match name {
-        "container.*" => Some(0..36),
-        "hotbar.*" => Some(0..9),
-        "inventory.*" => Some(9..36),
-        "armor.*" => Some(36..40),
-        "weapon.*" => return Err(unsupported("replace weapon.*")),
-        _ => None,
-    };
-    match range {
-        Some(range) => Ok(range.collect()),
-        None => Ok(vec![player_slot(name)?]),
+/// The block position of a `<pos>` argument (relative coordinates resolved).
+pub(super) fn block_pos(
+    ctx: &CommandContext<Source>,
+    name: &str,
+) -> Result<[i32; 3], CommandError> {
+    match ctx.argument(name) {
+        Some(ArgumentValue::BlockPos(coords)) | Some(ArgumentValue::Vec3(coords)) => {
+            let source = ctx.source();
+            let pos = coords.resolve(source.origin, source.yaw, source.pitch);
+            Ok([
+                pos[0].floor() as i32,
+                pos[1].floor() as i32,
+                pos[2].floor() as i32,
+            ])
+        }
+        _ => Err(CommandError::failed(format!("Missing position '{name}'"))),
     }
 }
 
-fn replace(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let slots = player_slots(ctx.string("slots").unwrap_or_default())?;
+fn unknown_modifier(name: &str) -> CommandError {
+    CommandError::failed(
+        Feedback::new("argument.item_modifier.unknown", vec![name.to_owned()]).text,
+    )
+}
+
+fn target(ctx: &CommandContext<Source>, block: bool) -> Result<SlotTarget, CommandError> {
+    if block {
+        Ok(SlotTarget::Block(block_pos(ctx, "target")?))
+    } else {
+        Ok(SlotTarget::Entities(entity(ctx, "targets")?))
+    }
+}
+
+fn run_with(
+    ctx: &CommandContext<Source>,
+    mode: SlotMode,
+    block: bool,
+) -> Result<i32, CommandError> {
     let raw = ctx
         .string("item")
         .ok_or_else(|| CommandError::failed("Missing item"))?;
@@ -70,105 +66,110 @@ fn replace(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             item_display(item)
         )));
     }
-    let targets = resolved_targets(ctx, "targets")?;
-    let name = ferrite_item::item_name(item).unwrap_or_default().to_owned();
-    let key = if targets.len() == 1 {
-        "commands.item.entity.set.success.single"
-    } else {
-        "commands.item.entity.set.success.multiple"
-    };
-    let who = if targets.len() == 1 {
-        ctx.source()
-            .state
-            .lock()
-            .unwrap()
-            .players
-            .iter()
-            .find(|p| p.uuid == targets[0])
-            .map_or_else(|| targets[0].to_string(), |p| p.name.clone())
-    } else {
-        targets.len().to_string()
-    };
-    let total = i32::try_from(targets.len()).unwrap_or(i32::MAX);
-    for slot in slots {
-        send(
-            ctx.source(),
-            Action::SetSlot {
-                targets: targets.clone(),
-                slot,
-                item: Some((name.clone(), u8::try_from(count).unwrap_or(1))),
-            },
-        )?;
-    }
     send(
         ctx.source(),
-        Action::Feedback(Feedback::new(key, vec![who, item_display(item)])),
-    )?;
-    Ok(total)
+        Action::Slots {
+            mode,
+            target: target(ctx, block)?,
+            slots: ctx.string("slots").unwrap_or_default().to_owned(),
+            source: SlotSource::Stacks(vec![ItemStack::with_count(item, count)]),
+        },
+    )
 }
 
-type Run = fn(&CommandContext<Source>) -> Result<i32, CommandError>;
+fn run_from(
+    ctx: &CommandContext<Source>,
+    mode: SlotMode,
+    block: bool,
+    from_block: bool,
+) -> Result<i32, CommandError> {
+    if let Some(modifier) = ctx.string("modifier") {
+        return Err(unknown_modifier(modifier));
+    }
+    let slots = ctx.string("sourceSlots").unwrap_or_default().to_owned();
+    let source = if from_block {
+        SlotSource::FromBlock {
+            pos: block_pos(ctx, "source")?,
+            slots,
+        }
+    } else {
+        SlotSource::FromEntity {
+            target: entity(ctx, "source")?,
+            slots,
+        }
+    };
+    send(
+        ctx.source(),
+        Action::Slots {
+            mode,
+            target: target(ctx, block)?,
+            slots: ctx.string("slots").unwrap_or_default().to_owned(),
+            source,
+        },
+    )
+}
 
-/// `<sourceSlots> [<modifier>]`: always the "unsupported" branch.
-fn source_slots(what: &'static str) -> NodeBuilder<Source> {
-    argument::<Source>("sourceSlots", ArgumentType::opaque("minecraft:slot_source"))
-        .executes(move |_| Err(unsupported(what)))
+fn from_node(from_block: bool, mode: SlotMode, block: bool) -> NodeBuilder<Source> {
+    let source = if from_block {
+        argument::<Source>("source", ArgumentType::BlockPos)
+    } else {
+        argument::<Source>("source", ArgumentType::entity())
+    };
+    let tail = argument::<Source>("sourceSlots", ArgumentType::opaque("minecraft:slot_source"))
+        .executes(move |ctx| run_from(ctx, mode, block, from_block))
         .then(
             argument::<Source>("modifier", ArgumentType::opaque("minecraft:loot_modifier"))
-                .executes(move |_| Err(unsupported(what))),
-        )
+                .executes(move |ctx| run_from(ctx, mode, block, from_block)),
+        );
+    literal::<Source>(if from_block { "block" } else { "entity" }).then(source.then(tail))
 }
 
-/// The `with`/`from` branches under `<slots>`; `with` runs `with_run`.
-fn slot_node(what: &'static str, with_run: Option<Run>) -> NodeBuilder<Source> {
-    let fail = move |_: &CommandContext<Source>| Err(unsupported(what));
-    let run = with_run.unwrap_or(|_| Err(unsupported("this form")));
-    let slots = argument::<Source>("slots", ArgumentType::opaque("minecraft:slot_source"));
-    if what == "modify" {
-        return slots.then(
-            argument::<Source>("modifier", ArgumentType::opaque("minecraft:loot_modifier"))
-                .executes(fail),
-        );
-    }
-    slots
+fn slot_node(mode: SlotMode, block: bool) -> NodeBuilder<Source> {
+    let with = move |ctx: &CommandContext<Source>| run_with(ctx, mode, block);
+    argument::<Source>("slots", ArgumentType::opaque("minecraft:slot_source"))
         .then(
             literal::<Source>("from")
-                .then(literal::<Source>("block").then(
-                    argument::<Source>("source", ArgumentType::BlockPos).then(source_slots(what)),
-                ))
-                .then(literal::<Source>("entity").then(
-                    argument::<Source>("source", ArgumentType::entity()).then(source_slots(what)),
-                )),
+                .then(from_node(true, mode, block))
+                .then(from_node(false, mode, block)),
         )
         .then(
             literal::<Source>("with").then(
                 argument::<Source>("item", ArgumentType::opaque("minecraft:item_stack"))
-                    .executes(run)
-                    .then(argument::<Source>("count", ArgumentType::integer()).executes(run)),
+                    .executes(with)
+                    .then(argument::<Source>("count", ArgumentType::integer()).executes(with)),
             ),
         )
 }
 
+fn modify_node() -> NodeBuilder<Source> {
+    argument::<Source>("slots", ArgumentType::opaque("minecraft:slot_source")).then(
+        argument::<Source>("modifier", ArgumentType::opaque("minecraft:loot_modifier"))
+            .executes(|ctx| Err(unknown_modifier(ctx.string("modifier").unwrap_or_default()))),
+    )
+}
+
 fn item_tree() -> NodeBuilder<Source> {
     let mut root = literal::<Source>("item").requires(|s| s.permission >= 2);
-    for what in ["replace", "modify", "fill", "override"] {
-        // Only `replace entity ... with` works; every other branch reports "unsupported".
-        let entity_run: Option<Run> = (what == "replace").then_some(replace);
-        root = root.then(
-            literal::<Source>(what)
-                .then(
-                    literal::<Source>("block").then(
-                        argument::<Source>("target", ArgumentType::BlockPos)
-                            .then(slot_node(what, None)),
-                    ),
-                )
-                .then(
-                    literal::<Source>("entity").then(
-                        argument::<Source>("targets", ArgumentType::entity())
-                            .then(slot_node(what, entity_run)),
-                    ),
-                ),
-        );
+    for (name, mode) in [
+        ("replace", Some(SlotMode::Replace)),
+        ("modify", None),
+        ("fill", Some(SlotMode::Fill)),
+        ("override", Some(SlotMode::Override)),
+    ] {
+        let node = |block: bool| match mode {
+            Some(mode) => slot_node(mode, block),
+            None => modify_node(),
+        };
+        root =
+            root.then(
+                literal::<Source>(name)
+                    .then(literal::<Source>("block").then(
+                        argument::<Source>("target", ArgumentType::BlockPos).then(node(true)),
+                    ))
+                    .then(literal::<Source>("entity").then(
+                        argument::<Source>("targets", ArgumentType::entity()).then(node(false)),
+                    )),
+            );
     }
     root
 }
@@ -236,17 +237,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slot_names_map_to_inventory_indexes() {
-        assert_eq!(player_slot("hotbar.3").unwrap(), 3);
-        assert_eq!(player_slot("container.8").unwrap(), 8);
-        assert_eq!(player_slot("inventory.0").unwrap(), 9);
-        assert_eq!(player_slot("inventory.26").unwrap(), 35);
-        assert_eq!(player_slot("armor.head").unwrap(), 39);
-        assert_eq!(player_slot("weapon.offhand").unwrap(), 40);
-        assert_eq!(player_slots("hotbar.*").unwrap().len(), 9);
-        assert_eq!(player_slots("armor.*").unwrap(), vec![36, 37, 38, 39]);
-        assert!(player_slot("hotbar.9").is_err());
-        assert!(player_slot("weapon.mainhand").is_err());
-        assert!(player_slot("nope").is_err());
+    fn unknown_modifier_text() {
+        assert!(unknown_modifier("x").to_string().contains("x"));
     }
 }
