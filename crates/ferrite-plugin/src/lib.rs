@@ -446,6 +446,11 @@ pub enum PlayerCommand {
         natural: bool,
         uuid: uuid::Uuid,
     },
+    /// The passengers of `vehicle` changed (the ride table already holds the new state):
+    /// resend its passenger list to the players.
+    RideChanged {
+        vehicle: uuid::Uuid,
+    },
     /// `World#strikeLightning(Effect)` on the default world: the bolt and its thunder, shown
     /// to the players around it. Nothing is burnt or hurt.
     Lightning {

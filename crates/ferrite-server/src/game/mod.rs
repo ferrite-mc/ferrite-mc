@@ -1,6 +1,6 @@
 mod anvil;
 mod attributes;
-mod ride;
+pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn};
@@ -1340,6 +1340,12 @@ async fn run(
                         worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_explosions.push((center, power, fire, breaks)));
                     }
                 }
+                 Some(ferrite_plugin::PlayerCommand::RideChanged { vehicle }) => {
+                    let packet = ride::passengers_packet(&command_state.lock().unwrap(), &online, vehicle);
+                    if let Some(bytes) = packet {
+                        for player in online.values() { let _ = player.outbound.send(Outbound::Packet(bytes.clone().into())); }
+                    }
+                }
                  Some(ferrite_plugin::PlayerCommand::Lightning { center }) => {
                     worlds.schedule_global(move |g| g.plugin_lightning(center));
                 }
@@ -1840,6 +1846,7 @@ fn route_plugin_command(
         // The game loop hands explosions to the region owning the chunk before calling this.
         PlayerCommand::Explosion { .. }
         | PlayerCommand::Lightning { .. }
+        | PlayerCommand::RideChanged { .. }
         | PlayerCommand::UpdateCommands { .. }
         | PlayerCommand::EntityOp { .. }
         | PlayerCommand::DropItem { .. }

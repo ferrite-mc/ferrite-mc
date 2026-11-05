@@ -12,6 +12,7 @@ mod items;
 mod messaging;
 mod motion;
 mod network;
+mod riding;
 pub mod rules;
 mod survival;
 mod visual;
@@ -121,6 +122,12 @@ impl PluginBridge {
                         let cooldowns = std::sync::Mutex::new(cooldown::Cooldowns::default());
                         let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
                             if let Some(reply) = items::item_type_answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some((reply, command)) = riding::handle(call) {
+                                if let (Some(players), Some(command)) = (&players, command) {
+                                    players(command);
+                                }
                                 return Some(reply);
                             }
                             if let Some(reply) = facts::answer(call) {

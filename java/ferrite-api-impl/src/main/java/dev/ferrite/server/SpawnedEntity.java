@@ -47,6 +47,8 @@ final class SpawnedEntity {
             case "isValid": { String text = ask(uuid, "isValid()"); return text == null || Boolean.parseBoolean(text); }
             case "isDead": { String text = ask(uuid, "isValid()"); return text != null && !Boolean.parseBoolean(text); }
             case "remove": tell(uuid, "remove()"); return null;
+            case "isInsideVehicle", "leaveVehicle", "eject", "isEmpty": { String text = ask(uuid, name + "()"); return text != null ? Boolean.parseBoolean(text) : name.equals("isEmpty"); }
+            case "addPassenger", "removePassenger": return HostBridge.callBoolean("Entity", uuid, name + "(Entity)", args[0]);
             case "getVelocity": {
                 String text = ask(uuid, "getVelocity()");
                 if (text == null) return new org.bukkit.util.Vector();

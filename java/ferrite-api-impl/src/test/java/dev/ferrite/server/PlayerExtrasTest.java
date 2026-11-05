@@ -570,4 +570,27 @@ class PlayerExtrasTest {
             assertThrows(UnsupportedOperationException.class, () -> player.getInventory().setItem(4, named));
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void ridingIsAskedOfTheHostAndMobsComeBackAsHandles() {
+        var pig = java.util.UUID.fromString("00000000-0000-0000-0000-00000000p1c0".replace("p1c0", "0a1c"));
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> {
+            calls.add(owner + "#" + method);
+            return switch (method) {
+                case "getVehicle()" -> pig.toString();
+                case "isInsideVehicle()", "leaveVehicle()" -> "true";
+                case "getEntityType()" -> "minecraft:pig";
+                case "getPassengers()" -> pig.toString();
+                default -> "";
+            };
+        };
+        try {
+            assertTrue(player.isInsideVehicle());
+            var vehicle = player.getVehicle();
+            assertEquals(org.bukkit.entity.EntityType.PIG, vehicle.getType());
+            assertEquals(pig, vehicle.getUniqueId());
+            assertEquals(1, player.getPassengers().size());
+            assertTrue(player.leaveVehicle());
+        } finally { HostBridge.transport = null; }
+    }
 }

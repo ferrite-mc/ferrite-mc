@@ -214,14 +214,39 @@ public abstract class PlayerExtras extends PlayerSight {
     @Override public void resetPlayerWeather() { weather = null; }
 
     // ---- vehicles, passengers and leashes ------------------------------------------------------
-    @Override public org.bukkit.entity.Entity getVehicle() { return null; }
-    @Override public boolean isInsideVehicle() { return false; }
-    @Override public boolean leaveVehicle() { return false; }
-    @Override public List<org.bukkit.entity.Entity> getPassengers() { return List.of(); }
-    @Override public org.bukkit.entity.Entity getPassenger() { return null; }
-    @Override public boolean isEmpty() { return true; }
-    @Override public boolean eject() { return false; }
-    @Override public boolean removePassenger(org.bukkit.entity.Entity passenger) { Objects.requireNonNull(passenger, "passenger"); return false; }
+    private String rideAsk(String method) {
+        try { return (String) HostBridge.call("Player", getUniqueId(), method, String.class); }
+        catch (UnsupportedOperationException | IllegalStateException noHost) { return null; }
+    }
+    /** The entity with this id: an online player, or a handle built from what the host knows of it. */
+    private org.bukkit.entity.Entity entityById(String id) {
+        var uuid = java.util.UUID.fromString(id);
+        var online = org.bukkit.Bukkit.getPlayer(uuid);
+        if (online != null) return online;
+        String kind;
+        try { kind = (String) HostBridge.call("Entity", uuid, "getEntityType()", String.class); }
+        catch (UnsupportedOperationException | IllegalStateException unknown) { return null; }
+        var type = kind == null || kind.isEmpty() ? null : org.bukkit.Registry.ENTITY_TYPE.get(org.bukkit.NamespacedKey.fromString(kind));
+        if (type == null) return null;
+        return SpawnedEntity.of(type, getLocation(), getWorld(), uuid);
+    }
+    @Override public org.bukkit.entity.Entity getVehicle() { var id = rideAsk("getVehicle()"); return id == null || id.isEmpty() ? null : entityById(id); }
+    @Override public boolean isInsideVehicle() { return "true".equals(rideAsk("isInsideVehicle()")); }
+    @Override public boolean leaveVehicle() { return "true".equals(rideAsk("leaveVehicle()")); }
+    @Override public List<org.bukkit.entity.Entity> getPassengers() {
+        var ids = rideAsk("getPassengers()");
+        var result = new java.util.ArrayList<org.bukkit.entity.Entity>();
+        if (ids == null || ids.isEmpty()) return result;
+        for (var id : ids.split(String.valueOf(HostBridge.ITEM))) { var entity = entityById(id); if (entity != null) result.add(entity); }
+        return result;
+    }
+    @Override public org.bukkit.entity.Entity getPassenger() { var all = getPassengers(); return all.isEmpty() ? null : all.get(0); }
+    @Override public boolean isEmpty() { var answer = rideAsk("isEmpty()"); return answer == null || Boolean.parseBoolean(answer); }
+    @Override public boolean eject() { return "true".equals(rideAsk("eject()")); }
+    @Override public boolean removePassenger(org.bukkit.entity.Entity passenger) {
+        Objects.requireNonNull(passenger, "passenger");
+        return HostBridge.callBoolean("Player", getUniqueId(), "removePassenger(Entity)", passenger);
+    }
     @Override public boolean isLeashed() { return false; }
     @Override public org.bukkit.entity.Entity getLeashHolder() { throw new IllegalStateException("Entity not leashed"); }
 
