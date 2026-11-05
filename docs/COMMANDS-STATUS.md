@@ -47,11 +47,13 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   origin, rotating/mirroring `facing`, `axis`, `rotation` and `north/east/south/west`
   properties (stair shapes are not adjusted). Templates are read from
   `vanilla/26.3/generated/data/minecraft/structure/**.nbt`, which `tools/fetch_vanilla.py`
-  extracts from the user's own jar. Block entity data and template entities are not placed
-  (chests are empty), `strict` is accepted and ignored, jigsaw blocks become their `final_state`.
+  extracts from the user's own jar. Block entity data and template entities of `/place template`
+  are not placed (chests are empty), `strict` is accepted and ignored, jigsaw blocks become their `final_state`.
   `/place feature|jigsaw|structure` run the jar's own `/place` in the worldgen host (op 8) on a
-  force-loaded area and apply the changed blocks; block entity data (chest contents) is not
-  transferred, and they need `generator = "vanilla"`.
+  force-loaded area and apply the changed blocks. Block entities (chest contents and loot
+  tables, signs) come back from the host as NBT and are stored under their `id`; they need
+  `generator = "vanilla"`. The host integration test only runs with your own
+  `FERRITE_TEST_ACCEPT_EULA=true`, so it is not part of the default test run.
 
 - `/fillbiome` rewrites the 4x4x4 biome cells of loaded chunks (also fixed `biome_name` reading
   one section too high) and resends the column to tracking players. A `#tag` filter is read
