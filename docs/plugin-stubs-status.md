@@ -27,6 +27,7 @@ CMI가 동작한다고 말할 수 없다.
 - 클라이언트가 가진 청크: `Player#isChunkSent`, `getSentChunks`는 실제로 보낸/버린 청크를 따라간다.
 - 광선 추적: `World#rayTraceBlocks`/`rayTraceEntities`/`rayTrace`는 칸 단위로 따라가 정확한 적중 위치·면을 준다. 고체 블록은 꽉 찬 정육면체로 본다(반블록·계단 모양은 모델링하지 않음). 엔티티는 접속한 플레이어만 대상이다. `Player#collidesAt`/`wouldCollideUsing`도 같은 방식이다.
 - 바이옴: `World#setBiome`은 `/fillbiome`으로 연결되고(4×4×4 칸 단위, 기본 월드만), `getComputedBiome`은 `getBiome`과 같다.
+- `World#sendGameEvent`는 받아서 아무 일도 하지 않는다(스컬크 센서 같은 청취자가 게임에 없다).
 - 번개: `strikeLightning`/`strikeLightningEffect`는 번개 엔티티와 천둥 소리를 주변 오버월드 플레이어에게만 보낸다(불·피해 없음, 실제 클라이언트로 미확인).
 - 그 밖: `createExplosion`, `updateCommands`, `retrieveCookie`, `storeCookie`, `openMerchant`, `openSign`,
   `setWindowProperty`, 입력/스프린트/수면/낙하 상태 읽기, 리소스팩 상태, 날씨 지속시간 등.
@@ -61,7 +62,7 @@ CMI가 동작한다고 말할 수 없다.
   `generate`면 월드 뷰로 블록 하나를 읽어 생성을 유도한 뒤 true. Java 쪽은 이 환경에 Java 25가 없어 컴파일을 확인하지 못했다.
   청크를 실제로 로드 상태로 붙잡아 두지는 않는다.)
 - **기타:** `openBook`(아이템에 written_book 구성요소 없음),
-  `sendGameEvent`, `findLightningRod/Target`,
+  `findLightningRod/Target`,
   `sendMap`/`sendBlockUpdate(TileState)`.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.
 

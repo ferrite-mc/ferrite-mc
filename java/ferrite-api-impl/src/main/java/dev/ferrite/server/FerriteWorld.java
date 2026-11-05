@@ -401,6 +401,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                             if (solid(x, y, z)) return true;
                 return false;
             }
+            // Game events only matter to listeners such as sculk sensors; the game has none, so nobody hears them.
+            case "sendGameEvent" -> { return null; }
             case "rayTraceBlocks" -> { return traceBlocks((org.bukkit.Location) args[0], (org.bukkit.util.Vector) args[1], ((Number) args[2]).doubleValue(),
                 args.length > 3 ? (org.bukkit.FluidCollisionMode) args[3] : org.bukkit.FluidCollisionMode.NEVER, args.length > 4 && (boolean) args[4]); }
             case "rayTraceEntities" -> {

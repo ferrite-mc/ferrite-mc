@@ -534,4 +534,9 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("setBiome(int,int,int,Biome)|8,70,-3,minecraft:desert"), seen);
     }
+
+    @Test void gameEventsHaveNoListenersAndDoNothing() {
+        var world = org.bukkit.Bukkit.getWorld("extras_world");
+        world.sendGameEvent(player, org.bukkit.GameEvent.EXPLODE, new org.bukkit.util.Vector(1, 64, 1));
+    }
 }
