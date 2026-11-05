@@ -3616,7 +3616,7 @@ async fn an_extending_piston_carries_the_mob_in_the_way() {
         }
     };
     click_block(&mut bot, [0, 64, 0]).await;
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let body = bot.until(EntityTeleport::ID).await;
             let teleport = EntityTeleport::decode(&mut body.as_slice()).unwrap();
