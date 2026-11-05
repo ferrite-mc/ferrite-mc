@@ -140,6 +140,11 @@ pub enum Command {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
     },
+    /// A plugin started (0), completed (1) or cleared (2) the use of an item.
+    ItemUse {
+        action: u8,
+        hand: u8,
+    },
     /// A plugin wore the stack in an inventory slot down to `damage`.
     ItemDamage {
         slot: u8,
@@ -2001,6 +2006,7 @@ impl Player {
             self.survival.sprinting,
         );
         crate::plugins::facts::set_fall_distance(self.uuid, self.survival.fall_distance as f32);
+        crate::plugins::facts::set_use_state(self.uuid, self.use_state());
         crate::plugins::facts::set_vitals(
             self.uuid,
             crate::plugins::facts::Vitals {
@@ -2052,10 +2058,36 @@ impl Player {
                 sequence: p.sequence,
             },
         );
-        if self.survival.dead || !(0..=1).contains(&p.hand.0) {
+        self.start_use(p.hand.0);
+    }
+
+    /// What the player is using right now as `(hand, ticks left, ticks used)`; hand 0 is the
+    /// main hand, 1 the off hand. A bow or a raised shield has no end (vanilla 72000 ticks).
+    fn use_state(&self) -> Option<(u8, i32, i32)> {
+        if self.survival.dead {
+            return None;
+        }
+        if let Some(eating) = self.survival.eating {
+            let hand = u8::from(eating.slot == ferrite_inventory::OFFHAND);
+            return Some((hand, eating.remaining, EAT_TICKS - eating.remaining));
+        }
+        if self.using_bow {
+            return Some((0, 72_000 - self.bow_charge, self.bow_charge));
+        }
+        if self.blocking {
+            let main = self.inventory.get(self.hand_slot(0));
+            let hand = u8::from(!matches!(main.name(), Some("minecraft:shield")));
+            return Some((hand, 72_000, 0));
+        }
+        None
+    }
+
+    /// Vanilla `LivingEntity.startUsingItem` for the stack in `hand` (0 main, 1 off).
+    fn start_use(&mut self, hand: i32) {
+        if self.survival.dead || !(0..=1).contains(&hand) {
             return;
         }
-        let slot = self.hand_slot(p.hand.0);
+        let slot = self.hand_slot(hand);
         let stack = self.inventory.get(slot).clone();
         // Milk bucket: `MilkBucketItem.finishUsingItem` removes every effect and leaves a bucket.
         if matches!(stack.name(), Some("minecraft:milk_bucket")) {
@@ -2888,6 +2920,21 @@ impl Player {
                 }
                 Command::SetInventorySlot { slot, item } => {
                     self.set_inventory_slot(slot, item);
+                    continue;
+                }
+                Command::ItemUse { action, hand } => {
+                    match action {
+                        0 => self.start_use(i32::from(hand)),
+                        // Finish a meal or potion at the next use tick; fire a drawn bow.
+                        1 => {
+                            if let Some(eating) = &mut self.survival.eating {
+                                eating.remaining = 1;
+                            } else if self.using_bow {
+                                self.release_use();
+                            }
+                        }
+                        _ => self.release_use(),
+                    }
                     continue;
                 }
                 Command::ItemDamage { slot, damage } => {

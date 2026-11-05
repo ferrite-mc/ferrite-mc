@@ -1477,6 +1477,18 @@ fn route_plugin_command(
                     .push_back(Command::SetInventorySlot { slot, item });
             }
         }
+        PlayerCommand::ItemUse {
+            player,
+            action,
+            hand,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::ItemUse { action, hand });
+            }
+        }
         PlayerCommand::ItemDamage {
             player,
             slot,

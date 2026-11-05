@@ -402,6 +402,13 @@ pub enum PlayerCommand {
         item: Option<ItemSnapshot>,
     },
     /// How worn the stack in an inventory slot is (the `minecraft:damage` component).
+    /// `startUsingItem` (action 0, with the hand 0 main / 1 off), `completeUsingActiveItem`
+    /// (1) or `clearActiveItem` (2).
+    ItemUse {
+        player: uuid::Uuid,
+        action: u8,
+        hand: u8,
+    },
     ItemDamage {
         player: uuid::Uuid,
         slot: u8,

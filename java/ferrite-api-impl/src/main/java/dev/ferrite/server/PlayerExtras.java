@@ -334,9 +334,11 @@ public abstract class PlayerExtras extends PlayerSight {
     @Override public void setAbsorptionAmount(double amount) { absorption = amount; super.setAbsorptionAmount(amount); }
     @Override public boolean canBreatheUnderwater() { return false; }
     @Override public boolean isRiptiding() { return false; }
-    @Override public boolean isHandRaised() { return false; }
-    @Override public boolean hasActiveItem() { return false; }
-    @Override public org.bukkit.inventory.ItemStack getActiveItem() { return org.bukkit.inventory.ItemStack.empty(); }
+    @Override public org.bukkit.inventory.ItemStack getActiveItem() {
+        if (!hasActiveItem()) return org.bukkit.inventory.ItemStack.empty();
+        var item = getActiveItemHand() == org.bukkit.inventory.EquipmentSlot.OFF_HAND ? getInventory().getItemInOffHand() : getInventory().getItemInMainHand();
+        return item == null ? org.bukkit.inventory.ItemStack.empty() : item;
+    }
     @Override public org.bukkit.entity.FishHook getFishHook() { return null; }
     @Override public org.bukkit.entity.Entity getShoulderEntityRight() { return null; }
     @Override public org.bukkit.entity.Entity getShoulderEntityLeft() { return null; }

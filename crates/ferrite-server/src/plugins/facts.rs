@@ -264,9 +264,41 @@ fn entity_answer(call: &HostCall) -> Option<String> {
     })
 }
 
+/// The item-use queries; the main hand and no time apply when nothing is in use.
+fn use_answer(player: Uuid, method: &str) -> Option<String> {
+    let state = use_registry().lock().unwrap().get(&player).copied();
+    Some(match method {
+        "hasActiveItem()" | "isHandRaised()" => state.is_some().to_string(),
+        "getActiveItemHand()" => match state {
+            Some((1, _, _)) => "OFF_HAND",
+            _ => "HAND",
+        }
+        .to_owned(),
+        "getActiveItemRemainingTime()" => state.map_or(0, |s| s.1).to_string(),
+        "getActiveItemUsedTime()" => state.map_or(0, |s| s.2).to_string(),
+        _ => return None,
+    })
+}
+
 fn fall_registry() -> &'static Mutex<HashMap<Uuid, f32>> {
     static FALL: OnceLock<Mutex<HashMap<Uuid, f32>>> = OnceLock::new();
     FALL.get_or_init(Default::default)
+}
+
+type UseStates = HashMap<Uuid, (u8, i32, i32)>;
+
+fn use_registry() -> &'static Mutex<UseStates> {
+    static USE: OnceLock<Mutex<UseStates>> = OnceLock::new();
+    USE.get_or_init(Default::default)
+}
+
+/// Records which item the player is using: `(hand, ticks left, ticks used)`, or none.
+pub fn set_use_state(player: Uuid, state: Option<(u8, i32, i32)>) {
+    let mut map = use_registry().lock().unwrap();
+    match state {
+        Some(state) => map.insert(player, state),
+        None => map.remove(&player),
+    };
 }
 
 /// Records how far the player has fallen since last standing on something.
@@ -338,6 +370,7 @@ pub fn forget(player: Uuid) {
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
     fall_registry().lock().unwrap().remove(&player);
+    use_registry().lock().unwrap().remove(&player);
     sent_registry().lock().unwrap().remove(&player);
     cookie_registry()
         .lock()
@@ -483,6 +516,9 @@ pub fn answer(call: &HostCall) -> Option<String> {
             .and_then(|index| PACK_STATUS.get(index))
             .map(|name| (*name).to_owned());
     }
+    if let Some(reply) = use_answer(player, &call.method) {
+        return Some(reply);
+    }
     if call.method == "getFallDistance()" {
         return fall_registry()
             .lock()
@@ -557,6 +593,30 @@ mod tests {
         assert_eq!(answer(&call).as_deref(), Some("false"));
         forget(player);
         assert_eq!(answer(&call), None);
+    }
+
+    #[test]
+    fn item_use_is_reported_until_it_ends() {
+        let player = Uuid::from_u128(0x05e1);
+        let ask = |method: &str| {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: method.into(),
+                args: vec![],
+            })
+            .unwrap()
+        };
+        assert_eq!(ask("hasActiveItem()"), "false");
+        assert_eq!(ask("getActiveItemRemainingTime()"), "0");
+        set_use_state(player, Some((1, 20, 12)));
+        assert_eq!(ask("isHandRaised()"), "true");
+        assert_eq!(ask("getActiveItemHand()"), "OFF_HAND");
+        assert_eq!(ask("getActiveItemRemainingTime()"), "20");
+        assert_eq!(ask("getActiveItemUsedTime()"), "12");
+        set_use_state(player, None);
+        assert_eq!(ask("hasActiveItem()"), "false");
+        forget(player);
     }
 
     #[test]

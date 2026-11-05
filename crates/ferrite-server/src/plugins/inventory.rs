@@ -28,6 +28,25 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         "openStonecutter(Location,boolean)" => station(player, "stonecutter"),
         "openSmithingTable(Location,boolean)" => station(player, "smithing"),
         "openLoom(Location,boolean)" => station(player, "loom"),
+        "startUsingItem(EquipmentSlot)" => Some(PlayerCommand::ItemUse {
+            player,
+            action: 0,
+            hand: match call.args.first()?.as_str() {
+                "HAND" => 0,
+                "OFF_HAND" => 1,
+                _ => return None,
+            },
+        }),
+        "completeUsingActiveItem()" => Some(PlayerCommand::ItemUse {
+            player,
+            action: 1,
+            hand: 0,
+        }),
+        "clearActiveItem()" => Some(PlayerCommand::ItemUse {
+            player,
+            action: 2,
+            hand: 0,
+        }),
         "setItemDamage(int,int)" => Some(PlayerCommand::ItemDamage {
             player,
             slot: call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?,
@@ -206,6 +225,37 @@ mod tests {
         other.owner = "Player".into();
         other.subject = "not-a-uuid".into();
         assert_eq!(inventory_command(&other), None);
+    }
+
+    #[test]
+    fn item_use_calls_become_use_commands() {
+        let call = |method: &str, args: &[&str]| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: method.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        };
+        let player = Uuid::parse_str(PLAYER).unwrap();
+        assert_eq!(
+            inventory_command(&call("startUsingItem(EquipmentSlot)", &["OFF_HAND"])),
+            Some(PlayerCommand::ItemUse {
+                player,
+                action: 0,
+                hand: 1
+            })
+        );
+        assert_eq!(
+            inventory_command(&call("startUsingItem(EquipmentSlot)", &["HEAD"])),
+            None
+        );
+        assert_eq!(
+            inventory_command(&call("clearActiveItem()", &[])),
+            Some(PlayerCommand::ItemUse {
+                player,
+                action: 2,
+                hand: 0
+            })
+        );
     }
 
     #[test]
