@@ -44,9 +44,13 @@ classes="$lib/extractor-classes"
 mkdir -p "$classes"
 "$javac" -d "$(to_native "$classes")" -cp "$classpath" \
   "$(to_native "$root/tools/extractor/Extractor.java")" \
-  "$(to_native "$root/tools/extractor/PistonExtractor.java")"
+  "$(to_native "$root/tools/extractor/PistonExtractor.java")" \
+  "$(to_native "$root/tools/extractor/AdvancementExtractor.java")"
 "$java" -cp "$(to_native "$classes")$sep$classpath" Extractor \
   "$(to_native "$root/vanilla/$version/generated/ferrite")" \
   "$(to_native "$root/vanilla/$version/generated/reports/minecraft/components/item")"
 "$java" -cp "$(to_native "$classes")$sep$classpath" PistonExtractor \
   "$(to_native "$root/vanilla/$version/generated/ferrite/piston_states.json")"
+"$java" -cp "$(to_native "$classes")$sep$classpath" AdvancementExtractor \
+  "$(to_native "$root/vanilla/$version/generated/data")" \
+  "$(to_native "$root/vanilla/$version/generated/ferrite/advancements.json")"

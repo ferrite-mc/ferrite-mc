@@ -14,10 +14,14 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 
 ## Partly done (works, but not like vanilla yet)
 
-- `/advancement`, `/recipe`: grant/revoke/give/take with the vanilla tree (`only/from/until/
-  through/everything`, criteria) and recipe/advancement ids from the extracted data. State is in
-  memory per player (not saved) and no `update_advancements` / `recipe_book_*` packet is sent,
-  so there is no toast or recipe-book entry, and triggers never complete advancements.
+- `/advancement`: grant/revoke with the vanilla tree (`only/from/until/through/everything`,
+  criteria). Progress is saved per player (`playerdata/<uuid>.advancements.json`) and sent as
+  `update_advancements` (`advancement_packets.rs`; entries are encoded with the server's own codec by
+  `tools/extractor/AdvancementExtractor.java`, framing checked against the vanilla packet bytes), so
+  tabs and toasts work. Not done: triggers never complete advancements on their own, rewards are not
+  given, and there is no chat announcement.
+- `/recipe`: give/take with the extracted recipe ids; state is in memory only and no
+  `recipe_book_*` packet is sent yet.
 - `/compute`: evaluates `context_int_provider` / `context_float_provider` (constant, reference,
   conditional, div, number_dispatcher, weighted_list, match_block). `entity` context carries no
   entity data yet.

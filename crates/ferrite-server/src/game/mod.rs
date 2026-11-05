@@ -1,3 +1,4 @@
+mod advancement_packets;
 mod anvil;
 mod attributes;
 pub(crate) mod ride;
@@ -960,6 +961,7 @@ async fn run(
     let mut plugin_commands = settings.plugin_commands.take();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
     let mut locator = waypoints::Locator::default();
+    let mut advancement_sync = advancement_packets::AdvancementSync::default();
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -1011,6 +1013,7 @@ async fn run(
            // Resume where the player left off; a first join (or unreadable data) uses the
            // spawn of the dimension the world is configured for.
            let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
+           if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } }
            let start_dimension = saved.as_ref().map_or(settings.dimension, |s| s.dimension());
            let dimension_spawn = dimensions.spawn(start_dimension);
            let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
@@ -1381,6 +1384,12 @@ async fn run(
                  let styles = command_state.lock().unwrap().more.waypoints.clone();
                  for (receiver, bytes) in locator.sync(&online, &styles) {
                      if let Some(player) = online.get(&receiver) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
+                 }
+             }
+             {
+                 let owned = command_state.lock().unwrap().more.advancements.clone();
+                 for (target, bytes) in advancement_sync.sync(&online, &owned, settings.playerdata.as_deref()) {
+                     if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
                  }
              }
              let ride_steps = ride::plan(&command_state.lock().unwrap());

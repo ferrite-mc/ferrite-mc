@@ -1,8 +1,9 @@
 //! `/advancement` and `/recipe`: per-player progress kept in [`super::commands_more::MoreState`].
 //!
 //! Ids and the advancement tree (parents, criteria) come from the locally extracted vanilla
-//! data. The state is in memory only, and no `update_advancements` / `recipe_book_*` packet is
-//! sent yet, so the client shows no toast or recipe-book entry.
+//! data. Advancement progress is sent to the client by [`super::advancement_packets`] (tabs and
+//! toast) and saved per player; recipe state is in memory only and no `recipe_book_*` packet is
+//! sent yet, so the client shows no recipe-book entry.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

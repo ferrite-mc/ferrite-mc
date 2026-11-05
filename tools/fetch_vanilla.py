@@ -27,6 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 EXTRACTOR = ROOT / "tools" / "extractor" / "Extractor.java"
 PISTON_EXTRACTOR = ROOT / "tools" / "extractor" / "PistonExtractor.java"
+ADVANCEMENT_EXTRACTOR = ROOT / "tools" / "extractor" / "AdvancementExtractor.java"
 
 
 def default_version() -> str:
@@ -111,7 +112,8 @@ def run_extractor(java: str, version: str, out: pathlib.Path) -> None:
     )
     print("compiling tools/extractor/Extractor.java")
     subprocess.run(
-        [str(javac), "-d", str(classes), "-cp", classpath, str(EXTRACTOR), str(PISTON_EXTRACTOR)],
+        [str(javac), "-d", str(classes), "-cp", classpath, str(EXTRACTOR), str(PISTON_EXTRACTOR),
+         str(ADVANCEMENT_EXTRACTOR)],
         check=True,
     )
     print("extracting block, item and entity properties")
@@ -124,6 +126,12 @@ def run_extractor(java: str, version: str, out: pathlib.Path) -> None:
     subprocess.run(
         [java, "-cp", os.pathsep.join([str(classes), classpath]), "PistonExtractor",
          str(out / "generated" / "ferrite" / "piston_states.json")],
+        check=True,
+    )
+    subprocess.run(
+        [java, "-cp", os.pathsep.join([str(classes), classpath]), "AdvancementExtractor",
+         str(out / "generated" / "data"),
+         str(out / "generated" / "ferrite" / "advancements.json")],
         check=True,
     )
 
