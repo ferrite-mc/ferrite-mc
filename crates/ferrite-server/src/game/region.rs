@@ -3703,6 +3703,7 @@ impl Region {
             let portal = ferrite_data::blocks::default_state("minecraft:end_portal");
             // A portal on the podium means an earlier dragon already died.
             if portal.is_some_and(|p| source.block(1, floor, 0) == Some(u32::from(p))) {
+                fight.killed = true;
                 return;
             }
             drop(state);
@@ -3878,7 +3879,8 @@ impl Region {
         for (at, _) in &placed {
             self.updates.block_changed(*at);
         }
-        for record in experience::award(pos, super::end_fight::dragon_experience(true) as i32) {
+        let first = !std::mem::replace(&mut ctx.state.lock().unwrap().more.end_fight.killed, true);
+        for record in experience::award(pos, super::end_fight::dragon_experience(first) as i32) {
             self.entities.insert(record);
         }
     }
@@ -4158,6 +4160,15 @@ impl Region {
             }
         }
         for landing in arrow::tick_thrown(&mut self.entities, &blocks, &players) {
+            // Vanilla large fireball: a power-1 explosion that sets fires.
+            if landing.kind == arrow::Kind::Fireball {
+                self.plugin_explosions.push((
+                    [landing.pos.x, landing.pos.y, landing.pos.z],
+                    1.0,
+                    true,
+                    true,
+                ));
+            }
             // Vanilla ender pearl impact: the thrower arrives where the pearl landed and takes
             // 5 fall damage.
             if landing.kind == arrow::Kind::EnderPearl

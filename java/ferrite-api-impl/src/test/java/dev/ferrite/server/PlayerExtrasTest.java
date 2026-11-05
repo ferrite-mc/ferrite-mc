@@ -389,7 +389,7 @@ class PlayerExtrasTest {
         try {
             var arrow = player.launchProjectile(org.bukkit.entity.Arrow.class, new org.bukkit.util.Vector(0, 0, 2), null);
             assertEquals(org.bukkit.entity.EntityType.ARROW, arrow.getType());
-            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.Fireball.class, null, null));
+            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.SmallFireball.class, null, null));
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of("spawnArrow(Location,double,double,double,String)"), calls);
     }
@@ -655,7 +655,8 @@ class PlayerExtrasTest {
             player.launchProjectile(org.bukkit.entity.Arrow.class);
             assertTrue(calls.contains("Player#launchThrown(Location,EntityType,double,double,double,String,String)"), calls.toString());
             assertTrue(calls.contains("Player#spawnArrow(Location,double,double,double,String)"), calls.toString());
-            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.Fireball.class));
+            assertEquals(org.bukkit.entity.EntityType.FIREBALL, player.launchProjectile(org.bukkit.entity.Fireball.class).getType());
+            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.SmallFireball.class));
         } finally { HostBridge.transport = null; }
     }
 

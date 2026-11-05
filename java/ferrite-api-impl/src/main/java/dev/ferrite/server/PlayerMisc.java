@@ -223,6 +223,7 @@ public abstract class PlayerMisc extends PlayerStubs {
         if (org.bukkit.entity.Snowball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SNOWBALL;
         else if (org.bukkit.entity.Egg.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.EGG;
         else if (org.bukkit.entity.EnderPearl.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.ENDER_PEARL;
+        else if (projectile == org.bukkit.entity.Fireball.class || org.bukkit.entity.LargeFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.FIREBALL;
         else if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
         var eye = getEyeLocation();
         var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(thrown != null ? 1.5 : 3.0);

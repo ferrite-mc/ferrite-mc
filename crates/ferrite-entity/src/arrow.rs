@@ -90,6 +90,8 @@ pub enum Kind {
     Snowball,
     Egg,
     EnderPearl,
+    /// `minecraft:fireball` (the large one): flies straight and explodes where it lands.
+    Fireball,
 }
 
 impl Kind {
@@ -99,6 +101,7 @@ impl Kind {
             Self::Snowball => "snowball",
             Self::Egg => "egg",
             Self::EnderPearl => "ender_pearl",
+            Self::Fireball => "fireball",
         }
     }
 
@@ -108,6 +111,7 @@ impl Kind {
             "snowball" => Some(Self::Snowball),
             "egg" => Some(Self::Egg),
             "ender_pearl" => Some(Self::EnderPearl),
+            "fireball" => Some(Self::Fireball),
             _ => None,
         }
     }
@@ -121,9 +125,15 @@ impl Kind {
 
 /// Which projectile `data` is, when its type is one of ours.
 pub fn kind_of(data: &EntityData) -> Option<Kind> {
-    [Kind::Arrow, Kind::Snowball, Kind::Egg, Kind::EnderPearl]
-        .into_iter()
-        .find(|kind| kind.entity_type() == data.kind)
+    [
+        Kind::Arrow,
+        Kind::Snowball,
+        Kind::Egg,
+        Kind::EnderPearl,
+        Kind::Fireball,
+    ]
+    .into_iter()
+    .find(|kind| kind.entity_type() == data.kind)
 }
 
 /// A new snowball, egg or ender pearl at `pos` flying with `vel`.
@@ -172,10 +182,13 @@ pub fn tick_thrown(
             continue;
         }
         let mut vel = store.vel(key).unwrap_or_default();
-        vel.y -= THROWN_GRAVITY;
-        vel.x *= DRAG;
-        vel.y *= DRAG;
-        vel.z *= DRAG;
+        // A fireball keeps its speed and ignores gravity; the rest arc like thrown items.
+        if kind != Kind::Fireball {
+            vel.y -= THROWN_GRAVITY;
+            vel.x *= DRAG;
+            vel.y *= DRAG;
+            vel.z *= DRAG;
+        }
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
         let pos = store.pos(key).unwrap_or_default();
@@ -372,6 +385,24 @@ mod tests {
             MobKind::Cow.max_health(),
             "snowballs do no damage"
         );
+    }
+
+    #[test]
+    fn a_fireball_flies_level_and_lands_on_a_wall() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let fireball = store.insert(new_thrown(
+            Kind::Fireball,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 1.0),
+            None,
+        ));
+        tick_thrown(&mut store, &world, &[]);
+        assert_eq!(store.vel(fireball).unwrap().y, 0.0, "no gravity");
+        assert_eq!(kind_of(store.data(fireball).unwrap()), Some(Kind::Fireball));
+        store.set_vel(fireball, Vec3::new(0.0, -8.0, 0.0));
+        let landed = tick_thrown(&mut store, &world, &[]);
+        assert_eq!(landed[0].kind, Kind::Fireball);
     }
 
     #[test]
