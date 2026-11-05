@@ -15,9 +15,19 @@ on the branch only.
 - Removed multi-version support (`ferrite-translate` crate, `supported-versions`): only 26.3 / 777.
 - README and `docs/COMMANDS-STATUS.md` refreshed.
 
+## Test flakiness seen in CI today (not root-caused)
+
+- `chest_contents_are_shared_saved_and_spilled_when_broken`: fails on both Linux and Windows CI with
+  only 26-32 of 40 stone picked up, even with the 90 s deadline; passes locally every time
+  (3 of 3 alone). Look at spilled-item pickup/merge when two players stand on the chest.
+- `an_extending_piston_carries_the_mob_in_the_way`: timed out on Windows CI (15 s wait for the
+  cow's teleport to x 4.5); passes locally. Probably timing under load, but unverified.
+- The plugin worker saw the chest test fail once in a full workspace run and not alone.
+
 ## To do next
 
-1. **Push to main.** Push up to `b14c18d` once its CI is green (`git push origin b14c18d:main`).
+1. **Merge/push to main** is being done by the other worker (plugin session); do not duplicate it.
+   If it is still open: **push to main.** Push up to `b14c18d` once its CI is green (`git push origin b14c18d:main`).
    Commit `a13cd9b` (piston height) also carries another session's half-finished `region.rs`
    change (`Command::ItemMeta`, `ItemMetaFields`); its matching files (`game/mod.rs`,
    `plugins/inventory.rs`, `ferrite-plugin/src/lib.rs`, Java `FerritePlayerInventory`) were still
