@@ -1,4 +1,3 @@
-#![allow(dead_code)] // the end gateways are not spawned by the fight yet
 //! Block layouts of the end: the exit portal podium the dragon leaves behind and the end
 //! gateways that lead to the outer islands.
 //!
@@ -27,6 +26,8 @@ pub struct FightState {
     pub started: bool,
     /// A dragon already died in this world: later kills give less experience.
     pub killed: bool,
+    /// Gateways opened so far; each kill opens the next one of the ring.
+    pub gateways: u32,
     /// Spike numbers whose crystal was already placed (or that have none).
     pub crystals: std::collections::BTreeSet<u8>,
 }

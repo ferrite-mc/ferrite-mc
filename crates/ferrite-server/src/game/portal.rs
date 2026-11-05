@@ -67,6 +67,25 @@ pub fn is_end_portal(state: u16) -> bool {
     ferrite_data::blocks::state(state).is_some_and(|(name, _)| name == END_PORTAL)
 }
 
+pub fn is_end_gateway(state: u16) -> bool {
+    ferrite_data::blocks::state(state).is_some_and(|(name, _)| name == "minecraft:end_gateway")
+}
+
+/// How far from the origin a gateway sends a player, along the direction it stands in.
+pub const GATEWAY_EXIT_DISTANCE: f64 = 1024.0;
+
+/// Where a gateway at `(x, z)` leads in the horizontal plane: the outer ring in the same direction.
+pub fn gateway_exit(x: f64, z: f64) -> [f64; 2] {
+    let length = x.hypot(z);
+    if length < 1.0 {
+        return [GATEWAY_EXIT_DISTANCE, 0.0];
+    }
+    [
+        x / length * GATEWAY_EXIT_DISTANCE,
+        z / length * GATEWAY_EXIT_DISTANCE,
+    ]
+}
+
 /// Where a player arrives in the end: the centre of the obsidian platform.
 pub const END_ARRIVAL: [f64; 3] = [100.5, 49.0, 0.5];
 
@@ -450,6 +469,26 @@ mod tests {
             None,
             "only the end gets one"
         );
+    }
+
+    #[test]
+    fn a_gateway_leads_to_the_outer_ring_in_its_own_direction() {
+        assert_eq!(gateway_exit(-96.0, 0.0), [-GATEWAY_EXIT_DISTANCE, 0.0]);
+        let [x, z] = gateway_exit(30.0, 40.0);
+        assert!(
+            (x - 614.4).abs() < 1e-6 && (z - 819.2).abs() < 1e-6,
+            "{x} {z}"
+        );
+        assert_eq!(
+            gateway_exit(0.2, 0.1),
+            [GATEWAY_EXIT_DISTANCE, 0.0],
+            "at the origin"
+        );
+        let gateway = ferrite_data::blocks::default_state("minecraft:end_gateway").unwrap();
+        assert!(is_end_gateway(gateway));
+        assert!(!is_end_gateway(
+            ferrite_data::blocks::default_state("minecraft:stone").unwrap()
+        ));
     }
 
     #[test]

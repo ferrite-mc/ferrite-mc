@@ -2366,6 +2366,10 @@ impl Player {
                     super::Dimension::End => Some(super::Dimension::Overworld),
                     super::Dimension::Nether => None,
                 }
+            } else if super::portal::is_end_gateway(state)
+                && self.dimension == super::Dimension::End
+            {
+                Some(super::Dimension::End)
             } else if super::portal::is_portal(state) && self.dimension != super::Dimension::End {
                 super::portal::counterpart(self.dimension)
             } else {
@@ -2382,9 +2386,11 @@ impl Player {
         if self.portal_cooldown > 0 {
             return;
         }
+        let gateway = inside.is_some_and(super::portal::is_end_gateway);
         if self.portal_pending.is_none() {
             self.portal_ticks += 1;
-            if self.portal_ticks < super::portal::WAIT_TICKS {
+            // A gateway works at once; the portals make you wait.
+            if !gateway && self.portal_ticks < super::portal::WAIT_TICKS {
                 return;
             }
             self.portal_ticks = 0;
@@ -2400,6 +2406,10 @@ impl Player {
                         f64::from(spawn[1]),
                         f64::from(spawn[2]) + 0.5,
                     ]
+                }
+                (super::Dimension::End, super::Dimension::End) => {
+                    let [x, z] = super::portal::gateway_exit(self.pos[0], self.pos[2]);
+                    [x, 0.0, z]
                 }
                 _ => super::portal::scale(self.dimension, target, self.pos),
             };
@@ -2423,6 +2433,22 @@ impl Player {
                 super::portal::create_end_platform(target_source.as_ref())
             }
             (super::Dimension::End, super::Dimension::Overworld) => Some(scaled),
+            (super::Dimension::End, super::Dimension::End) => {
+                // A gateway: land on top of whatever the outer island offers there.
+                let (x, z) = (scaled[0].floor() as i32, scaled[2].floor() as i32);
+                match super::end_fight::podium_floor(|y| target_source.block(x, y, z)) {
+                    None => None,
+                    Some(top) if top > 0 => {
+                        Some([f64::from(x) + 0.5, f64::from(top) + 1.0, f64::from(z) + 0.5])
+                    }
+                    // Empty void out there: give up rather than drop the player into it.
+                    Some(_) => {
+                        self.portal_pending = None;
+                        self.portal_cooldown = super::portal::COOLDOWN_TICKS;
+                        return;
+                    }
+                }
+            }
             _ => super::portal::find_portal(
                 target_source.as_ref(),
                 scaled,
@@ -2436,7 +2462,12 @@ impl Player {
         };
         self.portal_pending = None;
         self.portal_ticks = 0;
-        self.change_dimension(target, destination, self.yaw, self.pitch);
+        if gateway {
+            self.pos = destination;
+            self.teleport();
+        } else {
+            self.change_dimension(target, destination, self.yaw, self.pitch);
+        }
         self.portal_cooldown = super::portal::COOLDOWN_TICKS;
         let sound =
             ferrite_data::registries::id("minecraft:sound_event", "minecraft:block.portal.travel")
@@ -3879,7 +3910,18 @@ impl Region {
         for (at, _) in &placed {
             self.updates.block_changed(*at);
         }
-        let first = !std::mem::replace(&mut ctx.state.lock().unwrap().more.end_fight.killed, true);
+        let first;
+        {
+            let mut state = ctx.state.lock().unwrap();
+            let fight = &mut state.more.end_fight;
+            first = !std::mem::replace(&mut fight.killed, true);
+            // The next gateway of the ring opens; chunks that are not loaded keep the old air.
+            let at = super::end_fight::gateway_position(fight.gateways);
+            fight.gateways += 1;
+            for ([x, y, z], block) in super::end_fight::gateway_blocks(at) {
+                let _ = source.set_block(x, y, z, u32::from(block));
+            }
+        }
         for record in experience::award(pos, super::end_fight::dragon_experience(first) as i32) {
             self.entities.insert(record);
         }

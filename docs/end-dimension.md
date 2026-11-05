@@ -33,8 +33,10 @@ What works, how it is built, and what is still missing.
 - **Crystals.** Arrows break them (as does melee); explosions do not. No healing beam. No iron
   bar cages on the guarded spikes unless the terrain provides them.
 - **Respawning the dragon** (four crystals on the portal) is not implemented.
-- **Gateways.** `end_fight.rs` can lay out the 20 gateway blocks, but nothing places them and
-  nothing teleports a player to the outer islands.
+- **Gateways.** Each dragon kill opens the next gateway of the 20-ring (radius 96, y 75), when
+  its chunk is loaded. Standing in one sends a player to the top of the ground 1024 blocks out
+  in the same direction (or does nothing over empty void); vanilla instead searches for the
+  nearest outer island and plays the beam animation, which is not modelled.
 - **Credits** after the first return and the first-kill advancement. (Later kills give 500 xp,
   first kills 12000; the first-kill flag is remembered from the exit portal.)
 - **Persistence.** The fight state lives in memory. After a restart the dragon is respawned unless
