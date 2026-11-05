@@ -466,6 +466,9 @@ impl Packet for BlockEntityData {
 packet!(SetCommandBlock,55,Serverbound,{location:i64,command:String,mode:VarInt,track_output:bool,conditional:bool,automatic:bool});
 packet!(AcknowledgeBlockChange,4,Clientbound,{sequence:VarInt});
 packet!(OpenBook,59,Clientbound,{hand:VarInt});
+// `minecraft:map_item_data` with no decorations and one full-size colour patch (the only shape
+// Ferrite sends: `width` and `height` are never 0).
+packet!(MapItemData,52,Clientbound,{map_id:VarInt,scale:u8,locked:bool,has_decorations:bool,width:u8,height:u8,x:u8,z:u8,colors:Vec<u8>});
 packet!(SetHeldItem,54,Serverbound,{slot:i16});
 // Vanilla `ServerboundAttackPacket`: left-click on an entity, by network id.
 packet!(ServerboundAttack,1,Serverbound,{entity_id:VarInt});
@@ -1646,6 +1649,18 @@ mod interaction_tests {
         roundtrip(BlockUpdate {
             location: 15,
             block_state: VarInt(9),
+        });
+        assert_eq!(MapItemData::ID, 52);
+        roundtrip(MapItemData {
+            map_id: VarInt(3),
+            scale: 0,
+            locked: true,
+            has_decorations: false,
+            width: 128,
+            height: 128,
+            x: 0,
+            z: 0,
+            colors: vec![4; 16],
         });
         assert_eq!(OpenBook::ID, 59);
         roundtrip(OpenBook { hand: VarInt(1) });

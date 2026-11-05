@@ -28,6 +28,20 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         "openStonecutter(Location,boolean)" => station(player, "stonecutter"),
         "openSmithingTable(Location,boolean)" => station(player, "smithing"),
         "openLoom(Location,boolean)" => station(player, "loom"),
+        "sendMapData(int,int,boolean,byte[])" => {
+            use base64::Engine;
+            let colors = base64::engine::general_purpose::STANDARD
+                .decode(call.args.get(3)?)
+                .ok()
+                .filter(|c| c.len() == 128 * 128)?;
+            Some(PlayerCommand::MapData {
+                player,
+                id: call.args.first()?.parse().ok().filter(|id| *id >= 0)?,
+                scale: call.args.get(1)?.parse::<u8>().ok().filter(|s| *s <= 4)?,
+                locked: call.args.get(2)?.parse().ok()?,
+                colors,
+            })
+        }
         "openBookContent(String)" => {
             let text = call.args.first()?;
             let mut fields = text.split(FIELD);
@@ -249,6 +263,28 @@ mod tests {
         other.owner = "Player".into();
         other.subject = "not-a-uuid".into();
         assert_eq!(inventory_command(&other), None);
+    }
+
+    #[test]
+    fn map_data_needs_a_full_colour_grid() {
+        use base64::Engine;
+        let encode = |n: usize| base64::engine::general_purpose::STANDARD.encode(vec![5u8; n]);
+        let call = |colors: String| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "sendMapData(int,int,boolean,byte[])".into(),
+            args: vec!["7".into(), "2".into(), "true".into(), colors],
+        };
+        assert!(matches!(
+            inventory_command(&call(encode(16384))),
+            Some(PlayerCommand::MapData {
+                id: 7,
+                scale: 2,
+                locked: true,
+                ..
+            })
+        ));
+        assert_eq!(inventory_command(&call(encode(100))), None);
     }
 
     #[test]

@@ -610,4 +610,23 @@ class PlayerExtrasTest {
             assertThrows(IllegalArgumentException.class, () -> player.openBook(new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE)));
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void mapsArePaintedByTheirRenderersAndSentAsColours() {
+        var calls = new java.util.ArrayList<Object[]>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{method, args}); return ""; };
+        try {
+            var view = new FerriteMapView(player.getWorld());
+            view.addRenderer(new org.bukkit.map.MapRenderer() {
+                @Override public void render(org.bukkit.map.MapView map, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player viewer) {
+                    canvas.setPixel(2, 1, (byte) 44);
+                    canvas.setPixelColor(0, 0, java.awt.Color.WHITE);
+                }
+            });
+            var pixels = view.render(player);
+            assertEquals(44, pixels[1 * 128 + 2]);
+            assertNotEquals(0, pixels[0]);
+            player.sendMap(view);
+            assertEquals("sendMapData(int,int,boolean,byte[])", calls.get(0)[0]);
+        } finally { HostBridge.transport = null; }
+    }
 }

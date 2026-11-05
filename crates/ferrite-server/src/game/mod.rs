@@ -1478,6 +1478,22 @@ fn route_plugin_command(
                     .push_back(Command::SetInventorySlot { slot, item });
             }
         }
+        PlayerCommand::MapData {
+            player,
+            id,
+            scale,
+            locked,
+            colors,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox.lock().unwrap().push_back(Command::MapData {
+                    id,
+                    scale,
+                    locked,
+                    colors,
+                });
+            }
+        }
         PlayerCommand::OpenBook {
             player,
             title,

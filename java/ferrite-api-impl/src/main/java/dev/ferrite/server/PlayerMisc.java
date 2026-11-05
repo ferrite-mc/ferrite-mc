@@ -59,6 +59,13 @@ public abstract class PlayerMisc extends PlayerStubs {
         for (var entry : items.entrySet()) sendEquipmentChange(entity, entry.getKey(), entry.getValue());
     }
 
+    /** Sends the map's colours as its renderers paint them for this player. */
+    @Override public void sendMap(org.bukkit.map.MapView map) {
+        java.util.Objects.requireNonNull(map, "map");
+        byte[] colors = map instanceof FerriteMapView ferrite ? ferrite.render(this) : new byte[128 * 128];
+        HostBridge.callVoid("Player", getUniqueId(), "sendMapData(int,int,boolean,byte[])", map.getId(), map.getScale().getValue(), map.isLocked(), colors);
+    }
+
     /** Shows a written book. Only the title, author and the plain text of each page reach the client. */
     @Override public void openBook(org.bukkit.inventory.ItemStack book) {
         java.util.Objects.requireNonNull(book, "book");

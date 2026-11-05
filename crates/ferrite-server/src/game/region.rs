@@ -140,6 +140,13 @@ pub enum Command {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
     },
+    /// A plugin sends the colours of a map.
+    MapData {
+        id: i32,
+        scale: u8,
+        locked: bool,
+        colors: Vec<u8>,
+    },
     /// A plugin shows a written book to the player.
     OpenBook {
         title: String,
@@ -598,6 +605,8 @@ pub struct Region {
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
     pending_hurts: Vec<Uuid>,
+    /// The dragon boss bar each player was last shown: bar id and progress.
+    dragon_bars: HashMap<Uuid, (Uuid, f32)>,
     pub players: HashMap<Uuid, Player>,
     pub entities: EntityStore,
     generator: FlatGenerator,
@@ -659,6 +668,7 @@ impl RegionData for Region {
             plugin_explosions: Vec::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
+            dragon_bars: HashMap::new(),
             players: HashMap::new(),
             rng: Rng::default(),
             beacon_clock: 0,
@@ -2987,6 +2997,28 @@ impl Player {
                     self.set_inventory_slot(slot, item);
                     continue;
                 }
+                Command::MapData {
+                    id,
+                    scale,
+                    locked,
+                    colors,
+                } => {
+                    send(
+                        self,
+                        &ferrite_protocol::packets::play::MapItemData {
+                            map_id: VarInt(id),
+                            scale,
+                            locked,
+                            has_decorations: false,
+                            width: 128,
+                            height: 128,
+                            x: 0,
+                            z: 0,
+                            colors,
+                        },
+                    );
+                    continue;
+                }
                 Command::OpenBook {
                     title,
                     author,
@@ -3628,6 +3660,77 @@ impl Region {
                 ];
                 let record = item::pop_resource(block, stack, &mut self.rng);
                 self.entities.insert(record);
+            }
+        }
+        self.update_dragon_bar();
+    }
+    /// Shows the living dragon's health to every player of the dimension as a boss bar, keeps
+    /// it current and takes it away when the dragon is gone (vanilla `EnderDragon.bossEvent`).
+    fn update_dragon_bar(&mut self) {
+        let dragon = self.entities.keys().iter().find_map(|&key| {
+            let data = self.entities.data(key)?;
+            let mob = data.mob?;
+            (mob.kind == ferrite_entity::mob::MobKind::EnderDragon && !mob.is_dead()).then(|| {
+                (
+                    data.uuid,
+                    (mob.health / mob.kind.max_health()).clamp(0.0, 1.0),
+                )
+            })
+        });
+        self.dragon_bars
+            .retain(|player, _| self.players.contains_key(player));
+        for (uuid, p) in &self.players {
+            let shown = self.dragon_bars.get(uuid).copied();
+            match (dragon, shown) {
+                (Some((bar, progress)), None) => {
+                    send(
+                        p,
+                        &BossBar {
+                            uuid: bar,
+                            action: BossBarAction::Add {
+                                name: ferrite_protocol::types::PlainText("Ender Dragon".into()),
+                                progress,
+                                color: VarInt(0),
+                                overlay: 0,
+                                // Darkens the sky, plays the boss music and thickens the fog.
+                                flags: 0b111,
+                            },
+                        },
+                    );
+                    self.dragon_bars.insert(*uuid, (bar, progress));
+                }
+                (Some((bar, progress)), Some((shown_bar, shown_progress))) => {
+                    if shown_bar != bar {
+                        send(
+                            p,
+                            &BossBar {
+                                uuid: shown_bar,
+                                action: BossBarAction::Remove,
+                            },
+                        );
+                        self.dragon_bars.remove(uuid);
+                    } else if (shown_progress - progress).abs() > f32::EPSILON {
+                        send(
+                            p,
+                            &BossBar {
+                                uuid: bar,
+                                action: BossBarAction::UpdateProgress(progress),
+                            },
+                        );
+                        self.dragon_bars.insert(*uuid, (bar, progress));
+                    }
+                }
+                (None, Some((bar, _))) => {
+                    send(
+                        p,
+                        &BossBar {
+                            uuid: bar,
+                            action: BossBarAction::Remove,
+                        },
+                    );
+                    self.dragon_bars.remove(uuid);
+                }
+                (None, None) => {}
             }
         }
     }

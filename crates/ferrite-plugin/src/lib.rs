@@ -460,6 +460,14 @@ pub enum PlayerCommand {
         author: String,
         pages: Vec<String>,
     },
+    /// `Player#sendMap`: the full 128x128 colour data of a map.
+    MapData {
+        player: uuid::Uuid,
+        id: i32,
+        scale: u8,
+        locked: bool,
+        colors: Vec<u8>,
+    },
     /// `World#refreshChunk` on the default world: players that have the chunk get it again.
     RefreshChunk {
         x: i32,
