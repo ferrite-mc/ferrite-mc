@@ -770,7 +770,6 @@ dependencies = [
  "ferrite-item",
  "ferrite-nbt",
  "ferrite-protocol",
- "ferrite-translate",
  "hmac",
  "md5",
  "num-bigint",
@@ -896,16 +895,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ferrite-translate"
-version = "0.1.0"
-dependencies = [
- "ferrite-protocol",
- "serde_json",
- "thiserror 2.0.21",
- "uuid",
 ]
 
 [[package]]

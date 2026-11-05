@@ -17,9 +17,6 @@ struct Config {
     server_icon: Option<std::path::PathBuf>,
     max_players: u32,
     view_distance: u8,
-    /// Which client protocol versions are accepted: `all` translates older clients,
-    /// `native` serves only the core protocol.
-    supported_versions: SupportedVersionsMode,
     compression_threshold: usize,
     forwarding: ForwardingMode,
     forwarding_secret: String,
@@ -156,13 +153,6 @@ enum GameMode {
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum SupportedVersionsMode {
-    #[default]
-    All,
-    Native,
-}
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
 enum ForwardingMode {
     #[default]
     None,
@@ -179,7 +169,6 @@ impl Default for Config {
             server_icon: Some("server-icon.png".into()),
             max_players: 20,
             view_distance: 10,
-            supported_versions: SupportedVersionsMode::All,
             compression_threshold: 256,
             forwarding: ForwardingMode::None,
             forwarding_secret: String::new(),
@@ -374,10 +363,6 @@ async fn main() -> anyhow::Result<()> {
             enforce_secure_profile: config.enforce_secure_profile,
             compression_threshold: config.compression_threshold,
             view_distance,
-            supported_versions: match config.supported_versions {
-                SupportedVersionsMode::All => ferrite_net::SupportedVersions::All,
-                SupportedVersionsMode::Native => ferrite_net::SupportedVersions::Native,
-            },
             forwarding,
             favicon,
             status: Default::default(),
@@ -545,9 +530,6 @@ mod tests {
         let defaults: Config = toml::from_str("").unwrap();
         assert_eq!(defaults.bind_address, "0.0.0.0:25565");
         assert_eq!(defaults.max_players, 20);
-        assert_eq!(defaults.supported_versions, SupportedVersionsMode::All);
-        let native: Config = toml::from_str("supported-versions = 'native'").unwrap();
-        assert_eq!(native.supported_versions, SupportedVersionsMode::Native);
         assert_eq!(defaults.compression_threshold, 256);
         assert_eq!(defaults.forwarding, ForwardingMode::None);
         assert!(defaults.forwarding_secret.is_empty());

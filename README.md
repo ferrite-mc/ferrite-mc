@@ -16,7 +16,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 | 구분 | 내용 |
 |---|---|
-| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·컨테이너, 생존·전투·몹, 주민 거래, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)), 다중 버전(26.3 ↔ 26.2) |
+| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·컨테이너, 생존·전투·몹, 주민 거래, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
 | 🟡 부분 구현 | 피스톤(블록 이동만, [`docs/pistons.md`](docs/pistons.md)), 엔드 차원(아래) |
 | 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API, NMS), 엔드 드래곤 전투 |
 | ⛔ 아직 없음 | 실제 클라이언트 검증 |
@@ -64,15 +64,14 @@ fmt·clippy·test를 돌리고 바닐라 데이터가 커밋되지 않았는지�
 | 3 | 리전라이저 벤치마크 | 진행 중 |
 | 4 | 플러그인 브리지(Bukkit 이벤트·명령·스케줄러) | 진행 중, 최우선 |
 | 5 | 게임플레이: 인벤토리·엔티티·전투·제작 | 진행 중 |
-| 6 | 다중 버전 지원 | 진행 중 |
-| 7 | Paper 기능 동등성 | 예정 |
-| 8 | 플러그인 생태계 호환 확대 | 예정 |
+| 6 | Paper 기능 동등성 | 예정 |
+| 7 | 플러그인 생태계 호환 확대 | 예정 |
 
 ## 크레이트
 
 | 크레이트 | 담당 |
 |---|---|
-| `ferrite-protocol`, `ferrite-net`, `ferrite-translate` | 패킷 코덱, 연결·암호화·로그인, 다중 버전 변환 |
+| `ferrite-protocol`, `ferrite-net` | 패킷 코덱, 연결·암호화·로그인 |
 | `ferrite-region` | Folia 스타일 리전라이저와 스케줄러 |
 | `ferrite-world`, `ferrite-light`, `ferrite-nbt` | 청크·Anvil IO, 조명, NBT |
 | `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 엔티티·몹, 유체, 메뉴·아이템·레시피·전리품 |

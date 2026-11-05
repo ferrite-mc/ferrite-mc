@@ -1,6 +1,6 @@
 use ferrite_protocol::{Decode, DecodeError, Encode, Packet, VarInt};
 
-/// One packet as it travels through the translator: its ID and its body (fields only).
+/// One packet as it is framed on the wire: its ID and its body (fields only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawPacket {
     pub id: i32,
@@ -39,18 +39,5 @@ impl RawPacket {
         let mut body = Vec::new();
         packet.encode(&mut body);
         Self { id: P::ID, body }
-    }
-
-    /// Decode the body as a core (777) packet, requiring it to be consumed entirely.
-    pub fn decode<P: Packet>(&self) -> Result<P, DecodeError> {
-        if self.id != P::ID {
-            return Err(DecodeError::Invalid("unexpected packet id"));
-        }
-        let mut buf = self.body.as_slice();
-        let packet = P::decode(&mut buf)?;
-        if !buf.is_empty() {
-            return Err(DecodeError::Invalid("trailing bytes"));
-        }
-        Ok(packet)
     }
 }

@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 ferrite-protocol.workspace = true
-ferrite-translate = { path = "../ferrite-translate" }
 ferrite-nbt.workspace = true
 ferrite-item = { path = "../ferrite-item", features = ["protocol"] }
 tokio.workspace = true
