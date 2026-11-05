@@ -31,6 +31,17 @@ fn offset([x, y, z]: [i32; 3], direction: Direction) -> [i32; 3] {
     [x + dx, y + dy, z + dz]
 }
 
+pub(super) fn within_border(border: &super::commands::WorldBorderState, pos: [i32; 3]) -> bool {
+    const LIMIT: f64 = 29_999_984.0;
+    let half = border.diameter / 2.0;
+    let x = f64::from(pos[0]);
+    let z = f64::from(pos[2]);
+    x >= (border.center_x - half).clamp(-LIMIT, LIMIT)
+        && x < (border.center_x + half).clamp(-LIMIT, LIMIT)
+        && z >= (border.center_z - half).clamp(-LIMIT, LIMIT)
+        && z < (border.center_z + half).clamp(-LIMIT, LIMIT)
+}
+
 /// Check direct and quasi-connected power using the redstone engine's directional signal.
 pub fn powered(
     pos: [i32; 3],
@@ -390,6 +401,34 @@ mod tests {
     }
 
     #[test]
+    fn slime_does_not_drag_glazed_terracotta_or_immovable_side_blocks() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("slime_block"));
+        grid.0.insert([1, 65, 0], state("white_glazed_terracotta"));
+        grid.0.insert([1, 63, 0], state("obsidian"));
+        let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
+        assert_eq!(plan.to_move, vec![[1, 64, 0]]);
+    }
+
+    #[test]
+    fn sticky_branches_share_the_twelve_block_limit() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("slime_block"));
+        for x in 2..=12 {
+            grid.0.insert([x, 64, 0], state("stone"));
+        }
+        assert_eq!(
+            resolve(&grid, [0, 64, 0], Direction::East, true)
+                .unwrap()
+                .to_move
+                .len(),
+            12
+        );
+        grid.0.insert([1, 65, 0], state("stone"));
+        assert!(resolve(&grid, [0, 64, 0], Direction::East, true).is_none());
+    }
+
+    #[test]
     fn sticky_retraction_moves_the_block_into_the_head_cell() {
         let mut grid = Grid::default();
         grid.0.insert([1, 64, 0], state("piston_head"));
@@ -413,6 +452,46 @@ mod tests {
             }
         }
         assert!(resolve(&Boundary, [0, 64, 0], Direction::East, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn region_refuses_a_push_into_an_unowned_loaded_chunk() {
+        use std::sync::{Arc, Mutex};
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        for x in [0, 1] {
+            loop {
+                if let Some(result) = source.get(x, 0, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        let piston =
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "false")]).unwrap();
+        let stone = state("stone");
+        source.set_block(14, 70, 0, u32::from(piston)).unwrap();
+        source.set_block(15, 70, 0, u32::from(stone)).unwrap();
+        let held = HashMap::from([(ferrite_region::ChunkPos(0, 0), 1)]);
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let world = super::super::fluid::RegionFluidWorld::new(&source, &held, &tracking);
+        assert!(operation(&world, [14, 70, 0], Direction::East, true).is_none());
+        assert_eq!(source.block(14, 70, 0), Some(u32::from(piston)));
+        assert_eq!(source.block(15, 70, 0), Some(u32::from(stone)));
+    }
+
+    #[test]
+    fn world_border_includes_minimum_and_excludes_maximum() {
+        let border = super::super::commands::WorldBorderState {
+            center_x: 0.0,
+            center_z: 0.0,
+            diameter: 10.0,
+            ..Default::default()
+        };
+        assert!(within_border(&border, [-5, 64, 0]));
+        assert!(within_border(&border, [4, 64, 0]));
+        assert!(!within_border(&border, [5, 64, 0]));
+        assert!(!within_border(&border, [-6, 64, 0]));
     }
 
     #[test]

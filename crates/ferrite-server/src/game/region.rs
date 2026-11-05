@@ -3976,10 +3976,18 @@ impl Region {
         let actions = self.redstone.take_piston_actions(&world);
         let mut piston_changes = Vec::new();
         let mut destroyed = Vec::new();
+        let border = ctx.state.lock().unwrap().border.clone();
         for (pos, facing, extending) in actions {
             let Some(operation) = super::piston::operation(&world, pos, facing, extending) else {
                 continue;
             };
+            if operation
+                .edits
+                .iter()
+                .any(|(at, _, _)| !super::piston::within_border(&border, *at))
+            {
+                continue;
+            }
             if let Err(error) = source.compare_set_blocks(&operation.edits) {
                 tracing::warn!(?pos, %error, "piston movement rejected");
                 continue;

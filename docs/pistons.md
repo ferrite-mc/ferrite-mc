@@ -15,7 +15,8 @@ extractions need to be regenerated with `python tools/fetch_vanilla.py`. The cal
 also supplies actual block-entity presence. Resolver parity across all branching,
 world-border and height-limit cases is not yet established.
 
-The region adapter rejects movement plans that read an unowned or unloaded position.
+The region adapter rejects movement plans that read an unowned or unloaded position;
+the tick also rejects edits outside the current world border.
 `AnvilChunkSource::compare_set_blocks` validates and publishes the resulting batch
 across loaded chunks atomically. Sticky retraction leaves its target in place if it
 cannot resolve a pull.
