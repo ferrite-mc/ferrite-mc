@@ -172,6 +172,10 @@ pub fn tick_with(
         let Some(kind) = mob::state(store, key).map(|state| state.kind) else {
             continue;
         };
+        // The dragon's fight controller owns its movement and lifetime.
+        if kind == MobKind::EnderDragon {
+            continue;
+        }
         let start = store.pos(key).unwrap_or_default();
         let flags = store.flags(key).unwrap_or_default();
         let was_on_ground = flags.has(Flags::ON_GROUND);

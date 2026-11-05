@@ -36,6 +36,7 @@ pub enum MobKind {
     Spider,
     Creeper,
     Enderman,
+    EnderDragon,
     Villager,
 }
 
@@ -51,7 +52,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 10] = [
+    pub const ALL_MOBS: [Self; 11] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -61,6 +62,7 @@ impl MobKind {
         Self::Spider,
         Self::Creeper,
         Self::Enderman,
+        Self::EnderDragon,
         Self::Villager,
     ];
 
@@ -76,6 +78,7 @@ impl MobKind {
             Self::Spider => "minecraft:spider",
             Self::Creeper => "minecraft:creeper",
             Self::Enderman => "minecraft:enderman",
+            Self::EnderDragon => "minecraft:ender_dragon",
             Self::Villager => "minecraft:villager",
         }
     }
@@ -150,6 +153,7 @@ impl MobKind {
             Self::Spider => "minecraft:entities/spider",
             Self::Creeper => "minecraft:entities/creeper",
             Self::Enderman => "minecraft:entities/enderman",
+            Self::EnderDragon => "",
             // Villagers drop their held items only, which this server does not model.
             Self::Villager => "",
         }
@@ -179,6 +183,7 @@ impl MobKind {
             Self::Spider => "Spider",
             Self::Creeper => "Creeper",
             Self::Enderman => "Enderman",
+            Self::EnderDragon => "Ender Dragon",
             Self::Villager => "Villager",
         }
     }
@@ -510,6 +515,16 @@ mod tests {
         let mut store = EntityStore::default();
         let key = store.insert(new_mob(kind, Vec3::new(0.5, 64.0, 0.5), &mut Rng::new(1)));
         (store, key)
+    }
+
+    #[test]
+    fn dragon_has_vanilla_health_and_does_not_despawn() {
+        assert_eq!(
+            MobKind::from_name("minecraft:ender_dragon"),
+            Some(MobKind::EnderDragon)
+        );
+        assert_eq!(MobKind::EnderDragon.max_health(), 200.0);
+        assert!(!MobKind::EnderDragon.despawns_when_far());
     }
 
     #[test]
