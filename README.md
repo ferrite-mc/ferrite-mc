@@ -16,9 +16,12 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 | 구분 | 내용 |
 |---|---|
-| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·컨테이너, 생존·전투·몹, 주민 거래, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 약 70개, 다중 버전(26.3 ↔ 26.2) |
-| 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API, NMS), 피스톤 |
-| ⛔ 아직 없음 | 실제 클라이언트 검증, 엔드 차원 |
+| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·컨테이너, 생존·전투·몹, 주민 거래, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)), 다중 버전(26.3 ↔ 26.2) |
+| 🟡 부분 구현 | 피스톤(블록 이동만, [`docs/pistons.md`](docs/pistons.md)), 엔드 차원(아래) |
+| 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API, NMS), 엔드 드래곤 전투 |
+| ⛔ 아직 없음 | 실제 클라이언트 검증 |
+
+**엔드**: 눈 끼우기로 엔드 포탈 활성화, 오버월드↔엔드 이동, 도착 플랫폼, 바닐라 지형(사용자 jar의 월드젠 호스트), 공허 판정, 출구 포탈·게이트웨이 블록 배치까지 구현. 엔더 드래곤·보스바·엔드 수정·게이트웨이 순간이동·크레딧은 아직 없습니다.
 
 플러그인 API는 Paper `Server`/`Player`의 일부만 처리합니다. 처리하지 않는 호출은
 `UnsupportedOperationException("Ferrite: not implemented: …")`로 드러납니다. EssentialsX 같은
@@ -91,7 +94,7 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 
 ## 해야 할 일
 
-- 플러그인 브리지 완성(NMS 호환 포함), 피스톤, 엔드 차원, 실제 클라이언트 검증
+- 플러그인 브리지 완성(NMS 호환 포함), 피스톤 마무리(애니메이션·엔티티 밀기), 엔드 드래곤 전투, 실제 클라이언트 검증
 - 최적화 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [최적화 모드팩](https://modrinth.com/modpack/server-optimizationn),
   [최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization)
