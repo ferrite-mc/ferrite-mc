@@ -33,6 +33,13 @@ pub fn position_at(age: u32) -> (Vec3, f32) {
     (pos, yaw)
 }
 
+/// The dragon never moves faster than this many blocks per tick.
+pub const MAX_SPEED: f64 = 1.2;
+/// A dive at the nearest player starts every `CHARGE_PERIOD` ticks, lasts `CHARGE_TICKS` and
+/// only happens for players within `CHARGE_RANGE` blocks.
+pub const CHARGE_PERIOD: u32 = 600;
+pub const CHARGE_TICKS: u32 = 80;
+pub const CHARGE_RANGE: f64 = 100.0;
 /// Players closer than this to the dragon's body are hit (wings and body, `knockBack`).
 pub const CONTACT_RANGE: f64 = 5.0;
 /// Damage of one hit and the ticks between hits.
@@ -149,7 +156,39 @@ pub fn fly(
         None => return,
     };
     let previous = store.pos(key).unwrap_or_default();
-    let (pos, yaw) = position_at(age);
+    let (circle, circle_yaw) = position_at(age);
+    // Every `CHARGE_PERIOD` ticks the dragon dives at the nearest player for a while, then
+    // rejoins the circle; between those it never moves faster than `MAX_SPEED`.
+    let charging = age % CHARGE_PERIOD >= CHARGE_PERIOD - CHARGE_TICKS;
+    let target = players
+        .iter()
+        .filter(|target| target.pos.distance_to_sqr(previous) <= CHARGE_RANGE * CHARGE_RANGE)
+        .min_by(|a, b| {
+            a.pos
+                .distance_to_sqr(previous)
+                .total_cmp(&b.pos.distance_to_sqr(previous))
+        });
+    let goal = match target {
+        Some(target) if charging => target.pos,
+        _ => circle,
+    };
+    let step = goal - previous;
+    let length = (step.x * step.x + step.y * step.y + step.z * step.z).sqrt();
+    let pos = if length <= MAX_SPEED {
+        goal
+    } else {
+        previous
+            + Vec3::new(
+                step.x / length * MAX_SPEED,
+                step.y / length * MAX_SPEED,
+                step.z / length * MAX_SPEED,
+            )
+    };
+    let yaw = if length > 0.5 {
+        (-step.x).atan2(step.z).to_degrees() as f32
+    } else {
+        circle_yaw
+    };
     store.set_pos(key, pos);
     store.set_vel(key, pos - previous);
     if let Some(data) = store.data_mut(key) {
@@ -239,6 +278,38 @@ mod tests {
             .filter(|e| matches!(e, MobEvent::Melee { damage, .. } if *damage == CONTACT_DAMAGE))
             .count();
         assert_eq!(hits, 2);
+    }
+
+    #[test]
+    fn the_dragon_dives_at_a_player_and_comes_back_to_the_circle() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let (spot, _) = position_at(0);
+        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        let player = Target {
+            uuid: uuid::Uuid::from_u128(9),
+            pos: Vec3::new(10.0, 70.0, 10.0),
+        };
+        let mut events = Vec::new();
+        let mut closest = f64::MAX;
+        for _ in 0..(CHARGE_PERIOD + 200) {
+            fly(&mut store, key, &[player], &mut events);
+            closest = closest.min(store.pos(key).unwrap().distance_to_sqr(player.pos));
+        }
+        assert!(
+            closest.sqrt() < CONTACT_RANGE,
+            "it got within {}",
+            closest.sqrt()
+        );
+        assert!(!events.is_empty(), "the dive hits the player");
+        // Without a player it holds the circle.
+        let mut calm = EntityStore::new(4);
+        let key = calm.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        for _ in 0..(CHARGE_PERIOD + 200) {
+            fly(&mut calm, key, &[], &mut Vec::new());
+        }
+        let age = CHARGE_PERIOD + 200;
+        assert!(calm.pos(key).unwrap().distance_to_sqr(position_at(age).0) < 1e-9);
     }
 
     #[test]

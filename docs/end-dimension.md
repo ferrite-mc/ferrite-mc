@@ -29,7 +29,7 @@ What works, how it is built, and what is still missing.
 ## Missing
 
 - **Dragon behaviour.** No strafing, charging, perching, breath, fireball or dragon-phase
-  machine; it only circles. It does not destroy blocks and has no separate head/wing hitboxes.
+  machine; it circles and dives at the nearest player every 30 seconds. It does not destroy blocks and has no separate head/wing hitboxes.
 - **Crystals.** Arrows, melee and explosions break them (a blast chains to the next crystal). No healing beam. No iron
   bar cages on the guarded spikes unless the terrain provides them.
 - **Respawning the dragon** (four crystals on the portal) is not implemented.
