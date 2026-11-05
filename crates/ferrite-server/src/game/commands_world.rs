@@ -490,7 +490,14 @@ pub fn execute(
             }
             Ok(Outcome {
                 changes,
-                message: format!("Loaded template '{name}' at {ox}, {oy}, {oz}"),
+                message: if name.starts_with("feature ")
+                    || name.starts_with("structure ")
+                    || name.starts_with("jigsaw ")
+                {
+                    format!("Placed {name} at {ox}, {oy}, {oz}")
+                } else {
+                    format!("Loaded template '{name}' at {ox}, {oy}, {oz}")
+                },
             })
         }
     }

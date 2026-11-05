@@ -55,6 +55,7 @@ public final class Host {
     private static final int OP_LOCATE_BIOME = 5;
     private static final int OP_LOCATE_STRUCTURE = 6;
     private static final int OP_STRUCTURE_AT = 7;
+    private static final int OP_PLACE = 8;
 
     private Host() {}
 
@@ -302,7 +303,7 @@ public final class Host {
 
     private static byte[] handle(
             MinecraftServer server, int op, int dim, int x, int z, String argument)
-            throws IOException {
+            throws Exception {
         ServerLevel level = server.getLevel(dimension(dim));
         if (level == null) {
             throw new IllegalStateException("dimension " + dim + " is not loaded");
@@ -338,6 +339,9 @@ public final class Host {
             }
             case OP_STRUCTURE_AT -> {
                 return structureAt(level, argument);
+            }
+            case OP_PLACE -> {
+                return Placer.place(server, level, dim, argument);
             }
             default -> throw new IllegalArgumentException("unknown op " + op);
         }

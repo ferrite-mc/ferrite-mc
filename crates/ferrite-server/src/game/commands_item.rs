@@ -7,7 +7,9 @@
 
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
-    argument, literal,
+    argument,
+    arguments::{Coordinates, WorldCoordinate},
+    literal,
 };
 use ferrite_item::ItemStack;
 
@@ -181,31 +183,42 @@ fn item_tree() -> NodeBuilder<Source> {
 /// state in the worldgen host (features, jigsaw, structures) or the structure template files,
 /// which the extracted data does not include.
 fn place_tree() -> NodeBuilder<Source> {
-    let fail = |_: &CommandContext<Source>| -> Result<i32, CommandError> {
-        Err(CommandError::failed("Ferrite: /place is not supported yet"))
+    let pos = |run: fn(&CommandContext<Source>) -> Result<i32, CommandError>| {
+        argument::<Source>("pos", ArgumentType::BlockPos).executes(run)
     };
-    let pos = || argument::<Source>("pos", ArgumentType::BlockPos).executes(fail);
     let resource = |name: &'static str| {
         argument::<Source>(name, ArgumentType::opaque("minecraft:resource_location"))
     };
     literal::<Source>("place")
         .requires(|s| s.permission >= 2)
-        .then(literal::<Source>("feature").then(resource("feature").executes(fail).then(pos())))
+        .then(
+            literal::<Source>("feature").then(
+                resource("feature")
+                    .executes(|ctx| host_place(ctx, "feature"))
+                    .then(pos(|ctx| host_place(ctx, "feature"))),
+            ),
+        )
         .then(
             literal::<Source>("jigsaw").then(
                 resource("pool").then(
                     resource("target").then(
                         argument::<Source>("max_depth", ArgumentType::integer())
-                            .executes(fail)
+                            .executes(|ctx| host_place(ctx, "jigsaw"))
                             .then(
                                 argument::<Source>("position", ArgumentType::BlockPos)
-                                    .executes(fail),
+                                    .executes(|ctx| host_place(ctx, "jigsaw")),
                             ),
                     ),
                 ),
             ),
         )
-        .then(literal::<Source>("structure").then(resource("structure").executes(fail).then(pos())))
+        .then(
+            literal::<Source>("structure").then(
+                resource("structure")
+                    .executes(|ctx| host_place(ctx, "structure"))
+                    .then(pos(|ctx| host_place(ctx, "structure"))),
+            ),
+        )
         .then(
             literal::<Source>("template").then(
                 resource("template").then(
@@ -240,6 +253,88 @@ fn place_tree() -> NodeBuilder<Source> {
                 ),
             ),
         )
+}
+
+/// `/place feature|structure|jigsaw`: the worldgen host runs vanilla's own placement on its
+/// world and Ferrite applies the blocks that changed.
+fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, CommandError> {
+    let source = ctx.source();
+    let position_name = if kind == "jigsaw" { "position" } else { "pos" };
+    // Vanilla defaults to the source position when no position is given.
+    let coords = match ctx.argument(position_name) {
+        Some(ArgumentValue::BlockPos(coords)) => *coords,
+        _ => Coordinates::World([
+            WorldCoordinate::relative(0.0),
+            WorldCoordinate::relative(0.0),
+            WorldCoordinate::relative(0.0),
+        ]),
+    };
+    let at = coords.resolve(source.origin, source.yaw, source.pitch);
+    let base = [
+        at[0].floor() as i32,
+        at[1].floor() as i32,
+        at[2].floor() as i32,
+    ];
+    let name = |key: &str| ctx.string(key).unwrap_or_default().to_owned();
+    let position = format!("{};{};{}", base[0], base[1], base[2]);
+    let (argument, label) = match kind {
+        "feature" => (
+            format!("feature;{};{position}", name("feature")),
+            format!("feature {}", name("feature")),
+        ),
+        "structure" => (
+            format!("structure;{};{position}", name("structure")),
+            format!("structure {}", name("structure")),
+        ),
+        _ => (
+            format!(
+                "jigsaw;{};{};{};{position}",
+                name("pool"),
+                name("target"),
+                ctx.integer("max_depth").unwrap_or(1)
+            ),
+            format!("jigsaw {}", name("pool")),
+        ),
+    };
+    let Some(world) = source.world.as_ref() else {
+        return Err(CommandError::failed(
+            "Ferrite: /place needs a world with generator = vanilla",
+        ));
+    };
+    let Some(result) = world.place(&argument) else {
+        return Err(CommandError::failed(
+            "Ferrite: /place needs generator = vanilla (the worldgen host)",
+        ));
+    };
+    let placed = result.map_err(|error| {
+        let key = match kind {
+            "feature" => "commands.place.feature.failed",
+            "jigsaw" => "commands.place.jigsaw.failed",
+            _ => "commands.place.structure.failed",
+        };
+        let text = error.to_string();
+        if text.contains("nothing changed") || text.contains("Failed") {
+            CommandError::failed(Feedback::new(key, vec![]).text)
+        } else {
+            CommandError::failed(text)
+        }
+    })?;
+    let blocks: Vec<([i32; 3], u16)> = placed
+        .into_iter()
+        .map(|([x, y, z], state)| ([x - base[0], y - base[1], z - base[2]], state))
+        .collect();
+    send(
+        source,
+        Action::World(WorldCommand::Template {
+            pos: Coordinates::World([
+                WorldCoordinate::absolute(f64::from(base[0])),
+                WorldCoordinate::absolute(f64::from(base[1])),
+                WorldCoordinate::absolute(f64::from(base[2])),
+            ]),
+            name: label,
+            blocks: std::sync::Arc::new(blocks),
+        }),
+    )
 }
 
 /// `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]`.

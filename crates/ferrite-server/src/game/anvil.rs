@@ -304,6 +304,11 @@ impl AnvilChunkSource {
         Some(terrain.locate_structure(self.dimension, target, x, z, radius))
     }
 
+    /// Runs a vanilla placement in the worldgen host, when vanilla generation is enabled.
+    pub fn place(&self, argument: &str) -> Option<anyhow::Result<super::generator::PlacedBlocks>> {
+        Some(self.terrain.as_ref()?.place(self.dimension, argument))
+    }
+
     /// Whether a piece of structure `id` covers the block, when vanilla generation is enabled.
     pub fn structure_at(&self, id: &str, x: i32, y: i32, z: i32) -> Option<anyhow::Result<bool>> {
         Some(

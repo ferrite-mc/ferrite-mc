@@ -297,3 +297,55 @@ fn patched_jar_generates_the_same_terrain() {
         "{differing} of {total} blocks differ between the unmodified and the patched jar"
     );
 }
+
+/// `/place feature|structure|jigsaw` run vanilla's own placement in the host and return the
+/// blocks it changed.
+#[test]
+fn places_features_and_structures_through_the_host() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let defaults = HostSettings::standard(&root);
+    if std::env::var("FERRITE_TEST_ACCEPT_EULA").as_deref() != Ok("true")
+        || !defaults.server_jar.exists()
+        || !defaults.host_jar.exists()
+    {
+        eprintln!("skipping place test: jar, host or FERRITE_TEST_ACCEPT_EULA missing");
+        return;
+    }
+    let Ok(registry) = RuntimeRegistry::load(root.join("vanilla/26.3/generated")) else {
+        return;
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let eula = scratch.path().join("eula.txt");
+    std::fs::write(&eula, "eula=true\n").unwrap();
+    let settings = HostSettings {
+        work_dir: scratch.path().join("worldgen"),
+        eula,
+        heap_mb: 1024,
+        threads: 2,
+        seed: "12345".into(),
+        ..defaults
+    };
+    let generator = VanillaGenerator::spawn(&settings, Arc::new(registry)).unwrap();
+    let height = generator.spawn_height(Dimension::Overworld, 0, 0).unwrap();
+    let tree = generator
+        .place(
+            Dimension::Overworld,
+            &format!("feature;minecraft:oak;0;{height};0"),
+        )
+        .unwrap();
+    assert!(
+        tree.len() > 10,
+        "an oak changes more than {} blocks",
+        tree.len()
+    );
+    let village = generator.place(
+        Dimension::Overworld,
+        &format!("structure;minecraft:village_plains;0;{height};0"),
+    );
+    eprintln!("village: {:?}", village.as_ref().map(Vec::len));
+    let missing = generator.place(
+        Dimension::Overworld,
+        "feature;minecraft:not_a_feature;0;70;0",
+    );
+    assert!(missing.is_err());
+}

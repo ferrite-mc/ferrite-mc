@@ -6,6 +6,9 @@
 //! chunks come from the built-in flat test world.
 use ferrite_world::{Chunk, LightData};
 
+/// Blocks a placement changed: world position and block state id.
+pub type PlacedBlocks = Vec<([i32; 3], u16)>;
+
 /// A generated column plus the light data the wire encoder needs.
 pub struct Generated {
     pub chunk: Chunk,
@@ -53,6 +56,12 @@ pub trait ChunkGenerator: Send + Sync {
         _radius: i32,
     ) -> anyhow::Result<Option<(i32, i32, i32)>> {
         anyhow::bail!("this generator has no structures")
+    }
+
+    /// Runs the vanilla `/place feature|jigsaw|structure` described by `argument`
+    /// (`kind;...;x;y;z`) and returns the blocks it changed as `(position, state id)`.
+    fn place(&self, _dimension: super::Dimension, _argument: &str) -> anyhow::Result<PlacedBlocks> {
+        anyhow::bail!("this generator cannot place features or structures")
     }
 
     /// Whether a piece of structure `id` covers the block.

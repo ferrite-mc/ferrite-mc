@@ -2671,13 +2671,13 @@ mod tests {
     }
 
     #[test]
-    fn place_is_registered_but_reports_unsupported() {
+    fn place_needs_the_worldgen_host_for_features() {
         denied("place feature minecraft:oak");
         let error = run("place feature minecraft:oak 0 64 0", 2)
             .0
             .unwrap_err()
             .to_string();
-        assert!(error.contains("not supported"), "{error}");
+        assert!(error.contains("generator = vanilla"), "{error}");
         assert!(
             run("place template minecraft:foo 0 64 0 90 none", 2)
                 .0

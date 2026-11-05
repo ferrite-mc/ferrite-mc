@@ -28,6 +28,7 @@ const OP_BIOME_AT: u8 = 4;
 const OP_LOCATE_BIOME: u8 = 5;
 const OP_LOCATE_STRUCTURE: u8 = 6;
 const OP_STRUCTURE_AT: u8 = 7;
+const OP_PLACE: u8 = 8;
 const START_TIMEOUT: Duration = Duration::from_secs(180);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -389,6 +390,11 @@ impl ChunkGenerator for VanillaGenerator {
         parse_position(&self.request(OP_LOCATE_STRUCTURE, dimension, 0, 0, &argument)?)
     }
 
+    fn place(&self, dimension: Dimension, argument: &str) -> anyhow::Result<Vec<([i32; 3], u16)>> {
+        let reply = self.request(OP_PLACE, dimension, 0, 0, argument)?;
+        parse_placed(&reply)
+    }
+
     fn structure_at(
         &self,
         dimension: Dimension,
@@ -406,6 +412,42 @@ impl ChunkGenerator for VanillaGenerator {
         )?;
         Ok(reply == b"1")
     }
+}
+
+/// Parses the host reply of a placement: `ok` then `x y z block[props]` lines, or `fail <text>`.
+fn parse_placed(reply: &[u8]) -> anyhow::Result<Vec<([i32; 3], u16)>> {
+    let text = std::str::from_utf8(reply)?;
+    let mut lines = text.lines();
+    match lines.next() {
+        Some("ok") => {}
+        Some(first) => anyhow::bail!("{}", first.strip_prefix("fail ").unwrap_or(first)),
+        None => anyhow::bail!("the host returned nothing"),
+    }
+    let mut blocks = Vec::new();
+    for line in lines {
+        let mut fields = line.splitn(4, ' ');
+        let (Some(x), Some(y), Some(z), Some(state)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Ok(x), Ok(y), Ok(z)) = (x.parse(), y.parse(), z.parse()) else {
+            continue;
+        };
+        let (name, properties) = match state.split_once('[') {
+            Some((name, rest)) => (name, rest.trim_end_matches(']')),
+            None => (state, ""),
+        };
+        let props: Vec<(&str, &str)> = properties
+            .split(',')
+            .filter(|pair| !pair.is_empty())
+            .filter_map(|pair| pair.split_once('='))
+            .collect();
+        if let Some(id) = ferrite_data::blocks::state_id(name, &props) {
+            blocks.push(([x, y, z], id));
+        }
+    }
+    Ok(blocks)
 }
 
 /// Parses a host reply of `x y z[ text]`; an empty reply means nothing was found.
@@ -444,6 +486,21 @@ impl Drop for VanillaGenerator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn placed_blocks_are_parsed_and_failures_are_reported() {
+        let reply = b"ok\n10 64 -3 minecraft:stone\n11 64 -3 minecraft:oak_log[axis=y]\n12 64 -3 minecraft:not_a_block\n";
+        let blocks = super::parse_placed(reply).unwrap();
+        assert_eq!(blocks.len(), 2, "unknown blocks are skipped");
+        assert_eq!(blocks[0].0, [10, 64, -3]);
+        assert_eq!(
+            Some(blocks[1].1),
+            ferrite_data::blocks::state_id("minecraft:oak_log", &[("axis", "y")])
+        );
+        let error = super::parse_placed(b"fail Could not place\n").unwrap_err();
+        assert_eq!(error.to_string(), "Could not place");
+        assert!(super::parse_placed(b"").is_err());
+    }
+
     use super::default_gc;
 
     #[test]
