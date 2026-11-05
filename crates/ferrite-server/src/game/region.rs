@@ -4543,21 +4543,29 @@ impl Region {
             source: ctx.source.as_deref(),
             seen: Default::default(),
         };
-        item::tick_items(&mut self.entities, &blocks, &mut self.rng);
+        // `/tick freeze` stops every entity but players (vanilla `TickRateManager.isEntityFrozen`).
+        let entities_run = ctx.state.lock().unwrap().more.tick.simulating();
+        if entities_run {
+            item::tick_items(&mut self.entities, &blocks, &mut self.rng);
+        }
         self.resolve_attacks(ctx);
-        self.tick_arrows(ctx);
-        self.tick_mobs(ctx, &blocks);
+        if entities_run {
+            self.tick_arrows(ctx);
+            self.tick_mobs(ctx, &blocks);
+        }
         let alive: Vec<ferrite_math::Vec3> = self
             .players
             .values()
             .filter(|p| p.gamemode != 3 && !p.survival.dead)
             .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]))
             .collect();
-        experience::tick_orbs(&mut self.entities, &blocks, &alive, &mut self.rng);
-        self.pick_up_experience(ctx);
-        self.pick_up_items(ctx);
-        self.tick_falling(ctx);
-        self.tick_tnt(ctx);
+        if entities_run {
+            experience::tick_orbs(&mut self.entities, &blocks, &alive, &mut self.rng);
+            self.pick_up_experience(ctx);
+            self.pick_up_items(ctx);
+            self.tick_falling(ctx);
+            self.tick_tnt(ctx);
+        }
         self.tick_beacons(ctx);
         for p in self.players.values_mut() {
             p.tick_containers();
@@ -4839,6 +4847,53 @@ mod tests {
         assert!(
             report.rows.iter().any(|row| row.path == "region-tick"),
             "{report}"
+        );
+    }
+
+    #[test]
+    fn a_frozen_game_does_not_move_mobs() {
+        let state: Arc<Mutex<super::super::commands::GameState>> = Default::default();
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let context = |state: &Arc<Mutex<super::super::commands::GameState>>| TickContext {
+            signals: signals.clone(),
+            tracking: Default::default(),
+            source: None,
+            dimension: crate::game::Dimension::Overworld,
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state: state.clone(),
+            tree: None,
+        };
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let record = mob::new_mob(
+            mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        );
+        region.add_entities(vec![record]);
+        let height = |region: &Region| {
+            let key = region.entities.keys().first().copied()?;
+            region.entities.pos(key).map(|p| p.y)
+        };
+        let control = state.lock().unwrap().more.tick.clone();
+        control.set_frozen(true);
+        for _ in 0..20 {
+            control.begin_game_tick();
+            region.tick(&context(&state));
+        }
+        assert_eq!(height(&region), Some(64.0), "frozen mobs stay put");
+        control.set_frozen(false);
+        for _ in 0..20 {
+            control.begin_game_tick();
+            region.tick(&context(&state));
+        }
+        assert_ne!(
+            height(&region),
+            Some(64.0),
+            "unfrozen mobs fall, move or leave"
         );
     }
 

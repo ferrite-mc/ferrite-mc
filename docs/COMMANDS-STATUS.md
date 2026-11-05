@@ -69,7 +69,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   validated but not used, and non-living entities are not rejected (`failed.notliving`).
 - `/tick sprint <time>|stop` raises the clock to the maximum rate, restores the rate and the
   frozen state afterwards and broadcasts the report; `/tick query` has no percentile line.
-  Freeze stops game time, fluid ticks and random ticks, not mob or entity movement.
+  Freeze stops game time, fluid ticks, random ticks and all entity simulation except players.
 - `/forceload` marks are saved per dimension in `data/minecraft/chunk_tickets.dat` (forced
   tickets only) and held again at startup.
 - `/debug function` always fails; `/test` accepts all syntax but never runs a test (no game
