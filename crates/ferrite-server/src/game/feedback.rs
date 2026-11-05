@@ -105,6 +105,7 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.item.block.set.success" => "Replaced a slot at %s, %s, %s with %s",
         "commands.loot.insert.full" => "Container at %s, %s, %s is full",
         "commands.loot.insert.success" => "Inserted the loot into the container at %s, %s, %s",
+        "commands.place.template.invalid" => "There is no template with id %s",
         "commands.drop.success.single" => "Dropped %s %s",
         "commands.drop.success.multiple" => "Dropped %s items",
         "argument.entity.notfound.entity" => "No entity was found",

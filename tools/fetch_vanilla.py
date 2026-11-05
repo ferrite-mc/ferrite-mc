@@ -135,6 +135,21 @@ def extract_resources(out: pathlib.Path, version: str) -> None:
         (reports / "version.json").write_bytes(server.read("version.json"))
 
 
+def extract_structures(out: pathlib.Path, version: str) -> int:
+    """Copy the structure templates (`/place template`) out of the user's own server jar."""
+    target = out / "generated" / "data" / "minecraft" / "structure"
+    prefix = "data/minecraft/structure/"
+    count = 0
+    with zipfile.ZipFile(out / "lib" / f"server-{version}.jar") as server:
+        for name in server.namelist():
+            if name.startswith(prefix) and name.endswith(".nbt"):
+                path = target / name[len(prefix):]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(server.read(name))
+                count += 1
+    return count
+
+
 def main() -> None:
     global version_label
     version = sys.argv[1] if len(sys.argv) > 1 else default_version()
@@ -160,6 +175,7 @@ def main() -> None:
     )
     run_extractor(java, version, out)
     extract_resources(out, version)
+    print(f"extracted {extract_structures(out, version)} structure templates")
     print(f"ok: {gen}")
 
 

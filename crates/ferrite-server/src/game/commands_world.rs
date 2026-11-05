@@ -95,6 +95,12 @@ pub enum WorldCommand {
         destination: Coordinates,
         mode: CloneMode,
     },
+    /// `/place template`: blocks relative to `pos`, already rotated, mirrored and thinned.
+    Template {
+        pos: Coordinates,
+        name: String,
+        blocks: std::sync::Arc<Vec<([i32; 3], u16)>>,
+    },
 }
 
 /// A source position and rotation, used to resolve `~` and `^` coordinates.
@@ -467,6 +473,26 @@ pub fn execute(
             *mode,
             world,
         ),
+        WorldCommand::Template { pos, name, blocks } => {
+            let [ox, oy, oz] = resolve(pos, origin);
+            let mut changes = Vec::new();
+            for ([x, y, z], state) in blocks.iter() {
+                let (x, y, z) = (ox + x, oy + y, oz + z);
+                if world.block(x, y, z).is_some() && world.set_block(x, y, z, u32::from(*state)) {
+                    changes.push(Change {
+                        location: BlockPos::new(x, y, z).pack(),
+                        state: u32::from(*state),
+                    });
+                }
+            }
+            if changes.is_empty() {
+                return Err("Chunk not loaded".into());
+            }
+            Ok(Outcome {
+                changes,
+                message: format!("Loaded template '{name}' at {ox}, {oy}, {oz}"),
+            })
+        }
     }
 }
 
@@ -507,6 +533,7 @@ pub fn command_chunk(command: &WorldCommand, origin: &Origin) -> ChunkPos {
         WorldCommand::SetBlock { pos, .. } => resolve(pos, origin),
         WorldCommand::Fill { from, .. } => resolve(from, origin),
         WorldCommand::Clone { begin, .. } => resolve(begin, origin),
+        WorldCommand::Template { pos, .. } => resolve(pos, origin),
     };
     ChunkPos(x.div_euclid(16), z.div_euclid(16))
 }

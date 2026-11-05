@@ -2673,6 +2673,27 @@ mod tests {
     }
 
     #[test]
+    fn place_template_emits_a_world_action_for_extracted_templates() {
+        let missing = run("place template minecraft:nope/none 0 64 0", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("nope/none"), "{missing}");
+        if !crate::game::structure_template::available() {
+            return;
+        }
+        let (result, actions) = run(
+            "place template minecraft:igloo/top 0 64 0 clockwise_90 front_back 0.5 7 strict",
+            2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(matches!(
+            actions.first(),
+            Some(Action::World(crate::game::commands_world::WorldCommand::Template { blocks, .. })) if !blocks.is_empty()
+        ));
+    }
+
+    #[test]
     fn reload_and_datapack_commands_produce_actions() {
         assert_eq!(only("reload", 4), Action::Reload);
         denied("reload");

@@ -1,6 +1,7 @@
 mod anvil;
 mod attributes;
 mod slot_ops;
+mod structure_template;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn};
 #[cfg(test)]
 mod block_tests;

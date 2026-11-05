@@ -11,6 +11,9 @@ use ferrite_command::{
 };
 use ferrite_item::ItemStack;
 
+use super::commands_world::WorldCommand;
+use super::structure_template::{Mirror, Rotation, Template};
+
 use super::commands::{
     Action, Feedback, SlotMode, SlotSource, SlotTarget, Source, entity, item_display, parse_item,
     send,
@@ -205,26 +208,82 @@ fn place_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("structure").then(resource("structure").executes(fail).then(pos())))
         .then(
             literal::<Source>("template").then(
-                resource("template").executes(fail).then(
+                resource("template").then(
                     argument::<Source>("pos", ArgumentType::BlockPos)
-                        .executes(fail)
+                        .executes(template)
                         .then(
                             argument::<Source>(
                                 "rotation",
                                 ArgumentType::opaque("minecraft:template_rotation"),
                             )
-                            .executes(fail)
+                            .executes(template)
                             .then(
                                 argument::<Source>(
                                     "mirror",
                                     ArgumentType::opaque("minecraft:template_mirror"),
                                 )
-                                .executes(fail),
+                                .executes(template)
+                                .then(
+                                    argument::<Source>(
+                                        "integrity",
+                                        ArgumentType::Float { min: 0.0, max: 1.0 },
+                                    )
+                                    .executes(template)
+                                    .then(
+                                        argument::<Source>("seed", ArgumentType::integer())
+                                            .executes(template)
+                                            .then(literal::<Source>("strict").executes(template)),
+                                    ),
+                                ),
                             ),
                         ),
                 ),
             ),
         )
+}
+
+/// `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]`.
+fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let id = ctx.string("template").unwrap_or_default().to_owned();
+    let Some(template) = Template::load(&id) else {
+        return Err(CommandError::failed(
+            Feedback::new("commands.place.template.invalid", vec![id]).text,
+        ));
+    };
+    let rotation = match ctx.string("rotation") {
+        Some(name) => Rotation::parse(name)
+            .ok_or_else(|| CommandError::failed(format!("Unknown rotation '{name}'")))?,
+        None => Rotation::None,
+    };
+    let mirror = match ctx.string("mirror") {
+        Some(name) => Mirror::parse(name)
+            .ok_or_else(|| CommandError::failed(format!("Unknown mirror '{name}'")))?,
+        None => Mirror::None,
+    };
+    let integrity = match ctx.argument("integrity") {
+        Some(ArgumentValue::Float(value)) => *value,
+        _ => 1.0,
+    };
+    let seed = ctx.integer("seed").map_or_else(
+        || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.as_nanos() as u64)
+        },
+        |seed| seed as u64,
+    );
+    let blocks = template.place(rotation, mirror, integrity, seed);
+    let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("pos") else {
+        return Err(CommandError::failed("Missing position"));
+    };
+    send(
+        ctx.source(),
+        Action::World(WorldCommand::Template {
+            pos: *coords,
+            name: id,
+            blocks: std::sync::Arc::new(blocks),
+        }),
+    )
 }
 
 pub fn register(tree: &mut CommandDispatcher<Source>) {

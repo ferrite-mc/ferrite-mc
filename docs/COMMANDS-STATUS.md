@@ -39,8 +39,15 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   from memory.
 - `/ride`: syntax only; `mount` fails ("not supported", no passenger model), `dismount` always
   reports "not riding".
-- `/place`: syntax only; every form fails ("not supported"). Needs chunk state in the worldgen
-  host and the structure template files, which the extracted data lacks.
+- `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]` places the block
+  palette of a structure template with vanilla's mirror-then-rotate transform about the
+  origin, rotating/mirroring `facing`, `axis`, `rotation` and `north/east/south/west`
+  properties (stair shapes are not adjusted). Templates are read from
+  `vanilla/26.3/generated/data/minecraft/structure/**.nbt`, which `tools/fetch_vanilla.py`
+  extracts from the user's own jar. Block entity data and template entities are not placed
+  (chests are empty), `strict` is accepted and ignored, jigsaw blocks become their `final_state`.
+  `/place feature|jigsaw|structure` still fail with "not supported": they need chunk state in the
+  worldgen host.
 
 - `/fillbiome` rewrites the 4x4x4 biome cells of loaded chunks (also fixed `biome_name` reading
   one section too high) and resends the column to tracking players. A `#tag` filter is read
