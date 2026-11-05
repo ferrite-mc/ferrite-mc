@@ -1478,6 +1478,20 @@ fn route_plugin_command(
                     .push_back(Command::SetInventorySlot { slot, item });
             }
         }
+        PlayerCommand::OpenBook {
+            player,
+            title,
+            author,
+            pages,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox.lock().unwrap().push_back(Command::OpenBook {
+                    title,
+                    author,
+                    pages,
+                });
+            }
+        }
         PlayerCommand::RefreshChunk { x, z } => {
             for (_, mailbox, _) in mailboxes.values() {
                 mailbox

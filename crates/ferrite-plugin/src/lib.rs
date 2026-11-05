@@ -453,6 +453,13 @@ pub enum PlayerCommand {
         natural: bool,
         uuid: uuid::Uuid,
     },
+    /// `Player#openBook`: shows a written book with this content in the main hand.
+    OpenBook {
+        player: uuid::Uuid,
+        title: String,
+        author: String,
+        pages: Vec<String>,
+    },
     /// `World#refreshChunk` on the default world: players that have the chunk get it again.
     RefreshChunk {
         x: i32,

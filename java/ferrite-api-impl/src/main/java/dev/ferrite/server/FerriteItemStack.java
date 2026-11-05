@@ -10,12 +10,12 @@ final class FerriteItemStack extends org.bukkit.inventory.ItemStack {
     @Override public void setType(org.bukkit.Material type) { this.type = java.util.Objects.requireNonNull(type); }
     @Override public int getAmount() { return amount; }
     @Override public void setAmount(int amount) { this.amount = amount; }
-    @Override public org.bukkit.inventory.meta.ItemMeta getItemMeta() { return meta == null ? FerriteItemMeta.create() : meta.clone(); }
+    @Override public org.bukkit.inventory.meta.ItemMeta getItemMeta() { return meta == null ? FerriteItemMeta.create(type) : meta.clone(); }
     @Override public boolean setItemMeta(org.bukkit.inventory.meta.ItemMeta meta) { this.meta = meta == null ? null : meta.clone(); return true; }
     @Override public boolean hasItemMeta() { return meta != null; }
     private static boolean air(org.bukkit.Material material) { return material == org.bukkit.Material.AIR || material == org.bukkit.Material.CAVE_AIR || material == org.bukkit.Material.VOID_AIR; }
     private org.bukkit.inventory.meta.ItemMeta metaOrNull() { return meta; }
-    private org.bukkit.inventory.meta.ItemMeta editable() { return meta != null ? meta : FerriteItemMeta.create(); }
+    private org.bukkit.inventory.meta.ItemMeta editable() { return meta != null ? meta : FerriteItemMeta.create(type); }
     private FerriteItemStack withAmount(int newAmount) { var result = clone(); result.amount = newAmount; return result; }
     @Override public int getMaxStackSize() { int size = type.getMaxStackSize(); return size > 0 ? size : 64; }
     @Override public boolean isEmpty() { return air(type) || amount <= 0; }

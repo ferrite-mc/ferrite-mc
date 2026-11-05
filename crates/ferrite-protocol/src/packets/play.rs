@@ -465,6 +465,7 @@ impl Packet for BlockEntityData {
 // (0 = impulse, 1 = chain, 2 = repeat) and the three editor toggles.
 packet!(SetCommandBlock,55,Serverbound,{location:i64,command:String,mode:VarInt,track_output:bool,conditional:bool,automatic:bool});
 packet!(AcknowledgeBlockChange,4,Clientbound,{sequence:VarInt});
+packet!(OpenBook,59,Clientbound,{hand:VarInt});
 packet!(SetHeldItem,54,Serverbound,{slot:i16});
 // Vanilla `ServerboundAttackPacket`: left-click on an entity, by network id.
 packet!(ServerboundAttack,1,Serverbound,{entity_id:VarInt});
@@ -1646,6 +1647,8 @@ mod interaction_tests {
             location: 15,
             block_state: VarInt(9),
         });
+        assert_eq!(OpenBook::ID, 59);
+        roundtrip(OpenBook { hand: VarInt(1) });
         roundtrip(AcknowledgeBlockChange {
             sequence: VarInt(3),
         });

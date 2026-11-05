@@ -140,6 +140,12 @@ pub enum Command {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
     },
+    /// A plugin shows a written book to the player.
+    OpenBook {
+        title: String,
+        author: String,
+        pages: Vec<String>,
+    },
     /// A plugin asked for a chunk to be sent again.
     RefreshChunk {
         x: i32,
@@ -212,6 +218,32 @@ pub enum Command {
 pub type Mailbox = Arc<Mutex<VecDeque<Command>>>;
 pub type ChunkObservers = HashMap<Uuid, (super::Dimension, HashSet<(i32, i32)>, OutboundSender)>;
 pub type Tracking = Arc<Mutex<ChunkObservers>>;
+
+/// A written book with plain-text pages, as the client reads it from a hand.
+pub(super) fn written_book(
+    title: &str,
+    author: &str,
+    pages: &[String],
+) -> Option<ferrite_item::ItemStack> {
+    use ferrite_protocol::{Encode, types::PlainText};
+    let mut stack = ferrite_item::ItemStack::from_name("written_book")?;
+    let mut raw = Vec::new();
+    title.to_owned().encode(&mut raw);
+    0u8.encode(&mut raw);
+    author.to_owned().encode(&mut raw);
+    VarInt(0).encode(&mut raw);
+    VarInt(pages.len() as i32).encode(&mut raw);
+    for page in pages {
+        PlainText(page.clone()).encode(&mut raw);
+        0u8.encode(&mut raw);
+    }
+    1u8.encode(&mut raw);
+    stack.components.insert(
+        ferrite_item::component_ids::WRITTEN_BOOK_CONTENT,
+        ferrite_item::Component::Raw(raw),
+    );
+    Some(stack)
+}
 
 /// The stack worn down to `damage` (never past its last point of durability); `None` for an
 /// empty stack or an item that cannot wear.
@@ -2066,6 +2098,34 @@ impl Player {
         self.start_use(p.hand.0);
     }
 
+    /// `Player#openBook`: the client reads the book from the main hand, so the stack is swapped
+    /// in for the packet and the real one restored right after (the way Paper does it).
+    fn open_book(&mut self, title: &str, author: &str, pages: &[String]) {
+        let Some(book) = written_book(title, author, pages) else {
+            return;
+        };
+        let slot = self.hand_slot(0) as i32;
+        send(
+            self,
+            &SetPlayerInventory {
+                slot: VarInt(slot),
+                item: book,
+            },
+        );
+        send(
+            self,
+            &ferrite_protocol::packets::play::OpenBook { hand: VarInt(0) },
+        );
+        let original = self.inventory.get(self.hand_slot(0)).clone();
+        send(
+            self,
+            &SetPlayerInventory {
+                slot: VarInt(slot),
+                item: original,
+            },
+        );
+    }
+
     /// What the player is using right now as `(hand, ticks left, ticks used)`; hand 0 is the
     /// main hand, 1 the off hand. A bow or a raised shield has no end (vanilla 72000 ticks).
     fn use_state(&self) -> Option<(u8, i32, i32)> {
@@ -2927,6 +2987,14 @@ impl Player {
                     self.set_inventory_slot(slot, item);
                     continue;
                 }
+                Command::OpenBook {
+                    title,
+                    author,
+                    pages,
+                } => {
+                    self.open_book(&title, &author, &pages);
+                    continue;
+                }
                 Command::RefreshChunk { x, z } => {
                     if self.dimension == crate::game::Dimension::Overworld
                         && self.loaded.contains(&(x, z))
@@ -3549,6 +3617,9 @@ impl Region {
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
             }
+            if kind == ferrite_entity::mob::MobKind::EnderDragon {
+                self.dragon_died(ctx, pos);
+            }
             for stack in super::drops::mob_drops(kind, &mut self.rng) {
                 let block = [
                     pos.x.floor() as i32,
@@ -3558,6 +3629,46 @@ impl Region {
                 let record = item::pop_resource(block, stack, &mut self.rng);
                 self.entities.insert(record);
             }
+        }
+    }
+    /// The dragon's death: the exit portal rises on the podium under the world origin with the
+    /// dragon egg on top, and the dragon's experience rains where it fell.
+    fn dragon_died(&mut self, ctx: &TickContext, pos: ferrite_math::Vec3) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        // The podium stands on the end island's surface at the origin.
+        let floor = (0..=255)
+            .rev()
+            .find(|&y| source.block(0, y, 0).is_some_and(|state| state != 0))
+            .unwrap_or(63);
+        let origin = [0, floor, 0];
+        let mut placed = super::end_fight::podium_blocks(origin, true);
+        if let Some(egg) = super::end_fight::dragon_egg() {
+            placed.push((super::end_fight::egg_position(origin), egg));
+        }
+        {
+            let mut world =
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+            for (at, state) in &placed {
+                let chunk = ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16));
+                if !self.held_chunks.contains_key(&chunk) {
+                    continue;
+                }
+                ferrite_fluid::FluidWorld::set_block(
+                    &mut world,
+                    at[0],
+                    at[1],
+                    at[2],
+                    u32::from(*state),
+                );
+            }
+        }
+        for (at, _) in &placed {
+            self.updates.block_changed(*at);
+        }
+        for record in experience::award(pos, super::end_fight::dragon_experience(true) as i32) {
+            self.entities.insert(record);
         }
     }
     /// Resolves this tick's `serverbound_attack` swings: reach, weapon damage and attack
@@ -5256,7 +5367,16 @@ fn chunk_holders_follow_region_merge_and_split() {
 
 #[cfg(test)]
 mod worn_stack_tests {
-    use super::worn_stack;
+    use super::{worn_stack, written_book};
+
+    #[test]
+    fn books_carry_their_pages_on_the_wire() {
+        let book = written_book("T", "A", &["one".into(), "two".into()]).unwrap();
+        let mut wire = Vec::new();
+        ferrite_protocol::Encode::encode(&book, &mut wire);
+        assert!(wire.windows(3).any(|w| w == b"one"));
+        assert!(wire.windows(3).any(|w| w == b"two"));
+    }
 
     #[test]
     fn tools_wear_but_never_break_through_this_path() {

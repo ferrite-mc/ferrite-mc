@@ -21,6 +21,7 @@
 pub mod ai;
 pub mod arrow;
 pub mod combat;
+pub mod dragon;
 pub mod effect;
 pub mod experience;
 pub mod falling;

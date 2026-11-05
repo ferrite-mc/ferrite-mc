@@ -5,7 +5,7 @@ final class FerriteItemFactory implements org.bukkit.inventory.ItemFactory {
     private static final org.bukkit.Color LEATHER_COLOR = org.bukkit.Color.fromRGB(0xA06540);
     @Override public org.bukkit.inventory.meta.ItemMeta getItemMeta(org.bukkit.Material material) {
         java.util.Objects.requireNonNull(material, "material");
-        return material.isItem() && !material.isAir() ? FerriteItemMeta.create() : null;
+        return material.isItem() && !material.isAir() ? FerriteItemMeta.create(material) : null;
     }
     @Override public boolean isApplicable(org.bukkit.inventory.meta.ItemMeta meta, org.bukkit.inventory.ItemStack item) {
         java.util.Objects.requireNonNull(item, "item");

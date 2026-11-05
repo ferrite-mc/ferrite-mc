@@ -37,6 +37,7 @@ pub enum MobKind {
     Creeper,
     Enderman,
     Villager,
+    EnderDragon,
 }
 
 impl MobKind {
@@ -51,7 +52,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 10] = [
+    pub const ALL_MOBS: [Self; 11] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -62,6 +63,7 @@ impl MobKind {
         Self::Creeper,
         Self::Enderman,
         Self::Villager,
+        Self::EnderDragon,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -77,6 +79,7 @@ impl MobKind {
             Self::Creeper => "minecraft:creeper",
             Self::Enderman => "minecraft:enderman",
             Self::Villager => "minecraft:villager",
+            Self::EnderDragon => "minecraft:ender_dragon",
         }
     }
 
@@ -152,6 +155,8 @@ impl MobKind {
             Self::Enderman => "minecraft:entities/enderman",
             // Villagers drop their held items only, which this server does not model.
             Self::Villager => "",
+            // The dragon drops experience and the egg, handled by the fight.
+            Self::EnderDragon => "",
         }
     }
 
@@ -180,6 +185,7 @@ impl MobKind {
             Self::Creeper => "Creeper",
             Self::Enderman => "Enderman",
             Self::Villager => "Villager",
+            Self::EnderDragon => "Ender Dragon",
         }
     }
 

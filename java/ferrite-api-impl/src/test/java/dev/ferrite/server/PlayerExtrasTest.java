@@ -593,4 +593,21 @@ class PlayerExtrasTest {
             assertTrue(player.leaveVehicle());
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void booksAreSentAsTitleAuthorAndPlainPages() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };
+        try {
+            var book = new org.bukkit.inventory.ItemStack(org.bukkit.Material.WRITTEN_BOOK);
+            var meta = (org.bukkit.inventory.meta.BookMeta) book.getItemMeta();
+            meta.title(net.kyori.adventure.text.Component.text("T"));
+            meta.author(net.kyori.adventure.text.Component.text("A"));
+            meta.addPages(net.kyori.adventure.text.Component.text("p1"), net.kyori.adventure.text.Component.text("p2"));
+            book.setItemMeta(meta);
+            player.openBook(book);
+            assertEquals(1, calls.size());
+            assertTrue(calls.get(0).startsWith("openBookContent(String)|TAp1"), calls.get(0));
+            assertThrows(IllegalArgumentException.class, () -> player.openBook(new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE)));
+        } finally { HostBridge.transport = null; }
+    }
 }

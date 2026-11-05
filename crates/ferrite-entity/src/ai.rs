@@ -172,6 +172,10 @@ pub fn tick_with(
         let Some(kind) = mob::state(store, key).map(|state| state.kind) else {
             continue;
         };
+        if kind == MobKind::EnderDragon {
+            crate::dragon::fly(store, key);
+            continue;
+        }
         let start = store.pos(key).unwrap_or_default();
         let flags = store.flags(key).unwrap_or_default();
         let was_on_ground = flags.has(Flags::ON_GROUND);

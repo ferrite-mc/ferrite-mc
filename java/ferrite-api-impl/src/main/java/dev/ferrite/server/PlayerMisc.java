@@ -59,6 +59,23 @@ public abstract class PlayerMisc extends PlayerStubs {
         for (var entry : items.entrySet()) sendEquipmentChange(entity, entry.getKey(), entry.getValue());
     }
 
+    /** Shows a written book. Only the title, author and the plain text of each page reach the client. */
+    @Override public void openBook(org.bukkit.inventory.ItemStack book) {
+        java.util.Objects.requireNonNull(book, "book");
+        if (book.getType() != org.bukkit.Material.WRITTEN_BOOK) throw new IllegalArgumentException("Book must be Material.WRITTEN_BOOK");
+        var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
+        String title = "", author = "";
+        var pages = new java.util.ArrayList<String>();
+        if (book.getItemMeta() instanceof org.bukkit.inventory.meta.BookMeta meta) {
+            if (meta.title() != null) title = plain.serialize(meta.title());
+            if (meta.author() != null) author = plain.serialize(meta.author());
+            for (var page : meta.pages()) pages.add(plain.serialize(page));
+        }
+        if (pages.isEmpty()) pages.add("");
+        String field = String.valueOf(''), part = String.valueOf(HostBridge.ITEM);
+        HostBridge.callVoid("Player", getUniqueId(), "openBookContent(String)", title + field + author + field + String.join(part, pages));
+    }
+
     /** The chunks the client currently has, as the host last recorded them. */
     @Override public java.util.Set<org.bukkit.Chunk> getSentChunks() {
         String text;

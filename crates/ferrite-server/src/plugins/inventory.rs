@@ -28,6 +28,30 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         "openStonecutter(Location,boolean)" => station(player, "stonecutter"),
         "openSmithingTable(Location,boolean)" => station(player, "smithing"),
         "openLoom(Location,boolean)" => station(player, "loom"),
+        "openBookContent(String)" => {
+            let text = call.args.first()?;
+            let mut fields = text.split(FIELD);
+            let title = fields.next()?;
+            let author = fields.next()?;
+            let pages: Vec<String> = fields
+                .next()?
+                .split(ferrite_plugin::HOST_ITEM_SEPARATOR)
+                .map(str::to_owned)
+                .collect();
+            if title.chars().count() > 32
+                || author.chars().count() > 32
+                || pages.len() > 100
+                || pages.iter().any(|p| p.chars().count() > 32_767)
+            {
+                return None;
+            }
+            Some(PlayerCommand::OpenBook {
+                player,
+                title: title.to_owned(),
+                author: author.to_owned(),
+                pages,
+            })
+        }
         "startUsingItem(EquipmentSlot)" => Some(PlayerCommand::ItemUse {
             player,
             action: 0,
@@ -225,6 +249,31 @@ mod tests {
         other.owner = "Player".into();
         other.subject = "not-a-uuid".into();
         assert_eq!(inventory_command(&other), None);
+    }
+
+    #[test]
+    fn book_content_becomes_an_open_book_command() {
+        let call = |text: &str| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "openBookContent(String)".into(),
+            args: vec![text.into()],
+        };
+        let text = format!(
+            "Title{FIELD}Me{FIELD}one{}two",
+            ferrite_plugin::HOST_ITEM_SEPARATOR
+        );
+        assert_eq!(
+            inventory_command(&call(&text)),
+            Some(PlayerCommand::OpenBook {
+                player: Uuid::parse_str(PLAYER).unwrap(),
+                title: "Title".into(),
+                author: "Me".into(),
+                pages: vec!["one".into(), "two".into()],
+            })
+        );
+        let long = format!("{}{FIELD}Me{FIELD}x", "t".repeat(33));
+        assert_eq!(inventory_command(&call(&long)), None);
     }
 
     #[test]

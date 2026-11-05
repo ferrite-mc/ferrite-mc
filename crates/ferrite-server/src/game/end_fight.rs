@@ -1,4 +1,4 @@
-#![allow(dead_code)] // wired up by the dragon fight, which is not built yet
+#![allow(dead_code)] // the end gateways are not spawned by the fight yet
 //! Block layouts of the end: the exit portal podium the dragon leaves behind and the end
 //! gateways that lead to the outer islands.
 //!
