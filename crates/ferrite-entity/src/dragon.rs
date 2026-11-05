@@ -77,6 +77,30 @@ pub fn is_crystal(store: &EntityStore, key: EntityKey) -> bool {
             .is_some_and(|flags| !flags.has(Flags::REMOVED))
 }
 
+/// Every end crystal an arrow is inside of: crystal, arrow and the crystal position.
+pub fn arrows_in_crystals(store: &EntityStore) -> Vec<(EntityKey, EntityKey, Vec3)> {
+    let arrow_type = ferrite_data::entity_props::by_name("minecraft:arrow").map(|p| p.id);
+    let mut hits = Vec::new();
+    for key in store.keys().to_vec() {
+        if !is_crystal(store, key) {
+            continue;
+        }
+        let (Some(bbox), Some(pos)) = (store.bbox(key), store.pos(key)) else {
+            continue;
+        };
+        let arrow = store.query_vec(bbox).into_iter().find(|&other| {
+            store.data(other).map(|data| data.kind) == arrow_type
+                && store
+                    .flags(other)
+                    .is_some_and(|flags| !flags.has(Flags::REMOVED))
+        });
+        if let Some(arrow) = arrow {
+            hits.push((key, arrow, pos));
+        }
+    }
+    hits
+}
+
 /// Lets every living dragon of the store regain health from crystals within [`HEAL_RANGE`].
 pub fn heal_from_crystals(store: &mut EntityStore) {
     for key in store.keys().to_vec() {
@@ -215,6 +239,29 @@ mod tests {
             .filter(|e| matches!(e, MobEvent::Melee { damage, .. } if *damage == CONTACT_DAMAGE))
             .count();
         assert_eq!(hits, 2);
+    }
+
+    #[test]
+    fn an_arrow_inside_a_crystal_is_found() {
+        let mut store = EntityStore::new(4);
+        let crystal = store.insert(new_crystal(Vec3::new(5.5, 100.0, 5.5)));
+        assert!(arrows_in_crystals(&store).is_empty());
+        let mut rng = Rng::new(1);
+        let arrow = store.insert(crate::arrow::new_arrow(
+            Vec3::new(5.5, 100.5, 5.5),
+            Vec3::ZERO,
+            2.0,
+            None,
+            &mut rng,
+        ));
+        let hits = arrows_in_crystals(&store);
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].0, hits[0].1), (crystal, arrow));
+        store.flags_mut(arrow).unwrap().set(Flags::REMOVED, true);
+        assert!(
+            arrows_in_crystals(&store).is_empty(),
+            "a spent arrow breaks nothing"
+        );
     }
 
     #[test]

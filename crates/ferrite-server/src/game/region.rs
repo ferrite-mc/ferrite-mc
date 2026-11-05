@@ -4171,6 +4171,19 @@ impl Region {
                 }
             }
         }
+        // An arrow that reaches an end crystal breaks it and is used up.
+        let mut blasts = Vec::new();
+        for (crystal, arrow, pos) in ferrite_entity::dragon::arrows_in_crystals(&self.entities) {
+            for hit in [crystal, arrow] {
+                if let Some(flags) = self.entities.flags_mut(hit) {
+                    flags.set(ferrite_entity::Flags::REMOVED, true);
+                }
+            }
+            blasts.push(pos);
+        }
+        for pos in blasts {
+            self.explode([pos.x, pos.y + 1.0, pos.z], 6.0, true, ctx);
+        }
     }
 
     /// Runs the neighbor updates of this tick's block changes (vanilla

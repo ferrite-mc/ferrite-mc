@@ -30,7 +30,7 @@ What works, how it is built, and what is still missing.
 
 - **Dragon behaviour.** No strafing, charging, perching, breath, fireball or dragon-phase
   machine; it only circles. It does not destroy blocks and has no separate head/wing hitboxes.
-- **Crystals.** Arrows and explosions do not break them (only melee). No healing beam. No iron
+- **Crystals.** Arrows break them (as does melee); explosions do not. No healing beam. No iron
   bar cages on the guarded spikes unless the terrain provides them.
 - **Respawning the dragon** (four crystals on the portal) is not implemented.
 - **Gateways.** `end_fight.rs` can lay out the 20 gateway blocks, but nothing places them and
