@@ -4971,7 +4971,7 @@ impl Region {
             return;
         };
         // Players are not in the entity store; vanilla pushes them like any other entity.
-        let hits: Vec<(i32, [f64; 3])> = self
+        let hits: Vec<(Uuid, Option<[f64; 3]>, f32)> = self
             .players
             .values()
             .filter_map(|p| {
@@ -4983,25 +4983,26 @@ impl Region {
                     p.pos[1] + 1.8,
                     p.pos[2] + 0.3,
                 );
-                let impulse = super::explosion::impulse(
-                    source,
-                    center,
-                    power,
-                    ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
-                    bbox,
-                )?;
-                Some((p.entity, impulse))
+                let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+                let impulse = super::explosion::impulse(source, center, power, feet, bbox);
+                let damage = super::explosion::damage(source, center, power, feet, bbox);
+                (impulse.is_some() || damage > 0.0).then_some((p.uuid, impulse, damage))
             })
             .collect();
-        for (entity, impulse) in hits {
-            if let Some(p) = self.players.values().find(|p| p.entity == entity) {
-                send(
-                    p,
-                    &SetEntityMotion {
-                        id: VarInt(entity),
-                        velocity: ferrite_protocol::types::LpVec3(impulse),
-                    },
-                );
+        for (uuid, impulse, damage) in hits {
+            if let Some(p) = self.players.get_mut(&uuid) {
+                if damage > 0.0 {
+                    p.hurt(DamageKind::Explosion, damage);
+                }
+                if let Some(impulse) = impulse {
+                    send(
+                        p,
+                        &SetEntityMotion {
+                            id: VarInt(p.entity),
+                            velocity: ferrite_protocol::types::LpVec3(impulse),
+                        },
+                    );
+                }
             }
         }
         // Entity push (vanilla `Entity.push`).
@@ -5026,16 +5027,23 @@ impl Region {
             let (Some(pos), Some(bbox)) = (self.entities.pos(key), self.entities.bbox(key)) else {
                 continue;
             };
-            let Some(impulse) = super::explosion::impulse(source, center, power, pos, bbox) else {
-                continue;
-            };
-            let vel = self.entities.vel(key).unwrap_or_default();
-            self.entities.set_vel(
-                key,
-                ferrite_math::Vec3::new(vel.x + impulse[0], vel.y + impulse[1], vel.z + impulse[2]),
-            );
-            if let Some(flags) = self.entities.flags_mut(key) {
-                flags.set(ferrite_entity::Flags::NEEDS_SYNC, true);
+            let damage = super::explosion::damage(source, center, power, pos, bbox);
+            if damage > 0.0 {
+                mob::hurt(&mut self.entities, key, damage, None);
+            }
+            if let Some(impulse) = super::explosion::impulse(source, center, power, pos, bbox) {
+                let vel = self.entities.vel(key).unwrap_or_default();
+                self.entities.set_vel(
+                    key,
+                    ferrite_math::Vec3::new(
+                        vel.x + impulse[0],
+                        vel.y + impulse[1],
+                        vel.z + impulse[2],
+                    ),
+                );
+                if let Some(flags) = self.entities.flags_mut(key) {
+                    flags.set(ferrite_entity::Flags::NEEDS_SYNC, true);
+                }
             }
             // An explosion breaks any end crystal it reaches, and that one blows up too.
             if ferrite_entity::dragon::is_crystal(&self.entities, key) {
@@ -5646,6 +5654,11 @@ mod tests {
             flags: Flags::default(),
             data: EntityData::new(allocate_id(), random_uuid(), 71, 0.25, 0.25),
         });
+        let cow = region.entities.insert(mob::new_mob(
+            mob::MobKind::Cow,
+            Vec3::new(15.0, 66.0, 8.5),
+            &mut region.rng,
+        ));
         let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = TickContext {
             signals,
@@ -5662,6 +5675,7 @@ mod tests {
         region.explode([8.5, 66.5, 8.5], 4.0, false, &ctx);
         assert_eq!(source.block(8, 65, 9), Some(stone));
         assert_ne!(region.entities.vel(key).unwrap(), Vec3::ZERO);
+        assert!(mob::state(&region.entities, cow).unwrap().health < mob::MobKind::Cow.max_health());
         region.explode([8.5, 66.5, 8.5], 4.0, true, &ctx);
         assert_ne!(source.block(8, 65, 9), Some(stone));
     }

@@ -192,6 +192,26 @@ pub fn seen_percent(world: &impl BlockWorld, center: [f64; 3], bbox: AABB) -> f3
     }
 }
 
+/// Explosion damage falls with distance and the exposed fraction of the entity's bounds.
+pub fn damage(
+    world: &impl BlockWorld,
+    center: [f64; 3],
+    power: f32,
+    feet: Vec3,
+    bbox: AABB,
+) -> f32 {
+    let radius = f64::from(power) * 2.0;
+    if radius <= 0.0 {
+        return 0.0;
+    }
+    let distance = (feet - Vec3::new(center[0], center[1], center[2])).length() / radius;
+    if distance > 1.0 {
+        return 0.0;
+    }
+    let impact = (1.0 - distance) * f64::from(seen_percent(world, center, bbox));
+    (((impact * impact + impact) / 2.0 * 7.0 * radius) + 1.0) as f32
+}
+
 /// Vanilla `Explosion` entity push: `(1 - distanceSqr / radius²) * getSeenPercent()` along the
 /// direction from the blast center. Returns the velocity delta to add to the entity.
 pub fn impulse(
@@ -253,6 +273,27 @@ mod tests {
                     .unwrap_or(&ferrite_data::blocks::default_state("air").unwrap()),
             )
         }
+    }
+
+    #[test]
+    fn explosion_damage_falls_with_distance_and_respects_cover() {
+        let mut world = Grid::new();
+        let center = [0.5, 1.0, 0.5];
+        let near = AABB::new(1.2, 0.0, 0.2, 1.8, 1.8, 0.8);
+        let far = AABB::new(5.2, 0.0, 0.2, 5.8, 1.8, 0.8);
+        let near_damage = damage(&world, center, 4.0, Vec3::new(1.5, 1.0, 0.5), near);
+        let far_damage = damage(&world, center, 4.0, Vec3::new(5.5, 1.0, 0.5), far);
+        assert!(near_damage > far_damage && far_damage > 0.0);
+        assert_eq!(
+            damage(&world, center, 4.0, Vec3::new(9.0, 1.0, 0.5), far),
+            0.0
+        );
+        for y in -1..=3 {
+            for z in -2..=2 {
+                world.set([3, y, z], "stone");
+            }
+        }
+        assert!(damage(&world, center, 4.0, Vec3::new(5.5, 1.0, 0.5), far) < far_damage);
     }
 
     #[test]
