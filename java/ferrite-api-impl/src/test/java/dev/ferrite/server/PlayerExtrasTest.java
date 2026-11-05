@@ -351,6 +351,17 @@ class PlayerExtrasTest {
         assertEquals(java.util.List.of("spawnEntity(Location,EntityType,String)", "spawnFallingBlock(Location,Material,String)"), calls);
     }
 
+    @Test void lightningStrikesGoToTheHost() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var at = new org.bukkit.Location(player.getWorld(), 3, 70, 3);
+            assertEquals(org.bukkit.entity.EntityType.LIGHTNING_BOLT, player.getWorld().strikeLightning(at).getType());
+            assertEquals(org.bukkit.entity.EntityType.LIGHTNING_BOLT, player.getWorld().strikeLightningEffect(at).getType());
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("strikeLightning(Location)", "strikeLightningEffect(Location)"), calls);
+    }
+
     @Test void playersShootArrowsThroughTheHost() {
         var calls = new java.util.ArrayList<String>();
         HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };

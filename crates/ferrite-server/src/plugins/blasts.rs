@@ -17,6 +17,32 @@ fn number(text: &str) -> Option<f64> {
         .filter(|v| v.is_finite() && v.abs() < 3.0e7)
 }
 
+/// `World#strikeLightning` / `strikeLightningEffect` on the default world.
+pub fn lightning_command(call: &HostCall) -> Option<PlayerCommand> {
+    if call.owner != "World"
+        || !matches!(
+            call.method.as_str(),
+            "strikeLightning(Location)" | "strikeLightningEffect(Location)"
+        )
+    {
+        return None;
+    }
+    if Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id() {
+        return None;
+    }
+    let mut parts = call
+        .args
+        .first()?
+        .split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+    parts.next()?;
+    let center = [
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+        number(parts.next()?)?,
+    ];
+    Some(PlayerCommand::Lightning { center })
+}
+
 pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "World" || !call.method.starts_with("createExplosion(") {
         return None;
@@ -341,6 +367,30 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn lightning_calls_become_a_bolt_at_the_location() {
+        let at = format!(
+            "world{s}1.5{s}64{s}-2{s}0{s}0",
+            s = ferrite_plugin::HOST_ITEM_SEPARATOR
+        );
+        for method in [
+            "strikeLightning(Location)",
+            "strikeLightningEffect(Location)",
+        ] {
+            assert_eq!(
+                lightning_command(&call(method, &[&at])),
+                Some(PlayerCommand::Lightning {
+                    center: [1.5, 64.0, -2.0]
+                })
+            );
+        }
+        assert_eq!(
+            lightning_command(&call("strikeLightning(Location)", &["bad"])),
+            None
+        );
+        assert_eq!(lightning_command(&call("getName()", &[&at])), None);
     }
 
     fn call(method: &str, args: &[&str]) -> HostCall {

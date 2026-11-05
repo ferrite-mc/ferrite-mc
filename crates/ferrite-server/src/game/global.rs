@@ -294,6 +294,68 @@ impl GlobalRegion {
             self.broadcast(&format!("{} left the game", p.name));
         }
     }
+    /// `World#strikeLightning`: a lightning bolt entity and its thunder for the overworld players
+    /// within sight. The client removes the bolt itself after its flashes; nothing is burnt.
+    pub fn plugin_lightning(&mut self, center: [f64; 3]) {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        static NEXT: AtomicI32 = AtomicI32::new(1_900_000_000);
+        if !center
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
+        {
+            return;
+        }
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let sound =
+            |name: &str| ferrite_data::registries::id("minecraft:sound_event", name).unwrap_or(0);
+        for p in self.players.values() {
+            if p.dimension != Dimension::Overworld {
+                continue;
+            }
+            let dx = p.pos[0] - center[0];
+            let dz = p.pos[2] - center[2];
+            let distance = dx * dx + dz * dz;
+            if distance <= 256.0 * 256.0 {
+                send(
+                    p,
+                    &AddEntity {
+                        id: VarInt(id),
+                        uuid: Uuid::from_u128(u128::from(id as u32)),
+                        entity_type: VarInt(78),
+                        x: center[0],
+                        y: center[1],
+                        z: center[2],
+                        velocity: ferrite_protocol::types::LpVec3::ZERO,
+                        pitch: 0,
+                        yaw: 0,
+                        head_yaw: 0,
+                        data: VarInt(0),
+                    },
+                );
+            }
+            if distance <= 512.0 * 512.0 {
+                // Vanilla plays the thunder very loud (distance fades it) and a short impact.
+                for (name, volume, pitch) in [
+                    ("minecraft:entity.lightning_bolt.thunder", 10_000.0, 0.9),
+                    ("minecraft:entity.lightning_bolt.impact", 2.0, 0.7),
+                ] {
+                    send(
+                        p,
+                        &SoundEffect {
+                            sound: super::commands_extras::sound_holder(sound(name)),
+                            source: VarInt(3),
+                            x: (center[0] * 8.0) as i32,
+                            y: (center[1] * 8.0) as i32,
+                            z: (center[2] * 8.0) as i32,
+                            volume,
+                            pitch,
+                            seed: 0,
+                        },
+                    );
+                }
+            }
+        }
+    }
     /// Bukkit `hidePlayer`/`showPlayer`. Hiding removes the entity and the tab entry at once;
     /// the next tick no longer tracks it. Showing re-lists the player, and the next tick adds
     /// the entity again when it is in range.
@@ -479,6 +541,24 @@ mod tests {
     fn tracked(ar: &mut ferrite_net::game::OutboundReceiver, id: i32) -> bool {
         std::iter::from_fn(|| ar.try_recv())
             .any(|p| matches!(p, Outbound::Packet(ref b) if b[0] == id as u8))
+    }
+
+    #[test]
+    fn lightning_reaches_only_overworld_players_in_range() {
+        let mut g = GlobalRegion::default();
+        let (a, mut ar) = OutboundSender::channel(1 << 20);
+        let (b, mut br) = OutboundSender::channel(1 << 20);
+        let mut near = GlobalPlayer::new(Uuid::from_u128(1), 1, "A".into(), vec![], a, false, 1, 0);
+        near.pos = [10.0, 64.0, 10.0];
+        let mut far = GlobalPlayer::new(Uuid::from_u128(2), 2, "B".into(), vec![], b, false, 1, 0);
+        far.pos = [900.0, 64.0, 0.0];
+        g.join(near);
+        g.join(far);
+        while ar.try_recv().is_some() {}
+        while br.try_recv().is_some() {}
+        g.plugin_lightning([0.0, 64.0, 0.0]);
+        assert!(tracked(&mut ar, AddEntity::ID));
+        assert!(!tracked(&mut br, AddEntity::ID));
     }
 
     #[test]

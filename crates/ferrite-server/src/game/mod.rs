@@ -1327,6 +1327,9 @@ async fn run(
                         worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_explosions.push((center, power, fire)));
                     }
                 }
+                 Some(ferrite_plugin::PlayerCommand::Lightning { center }) => {
+                    worlds.schedule_global(move |g| g.plugin_lightning(center));
+                }
                  Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
                     worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                 }
@@ -1807,6 +1810,7 @@ fn route_plugin_command(
         PlayerCommand::Visibility { .. } => {}
         // The game loop hands explosions to the region owning the chunk before calling this.
         PlayerCommand::Explosion { .. }
+        | PlayerCommand::Lightning { .. }
         | PlayerCommand::UpdateCommands { .. }
         | PlayerCommand::EntityOp { .. }
         | PlayerCommand::DropItem { .. }

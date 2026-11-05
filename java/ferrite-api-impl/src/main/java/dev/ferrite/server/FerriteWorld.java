@@ -427,6 +427,13 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 HostBridge.callVoid("World", id, "spawnEntity(Location,EntityType,String)", at, type, uuid.toString());
                 yield handle;
             }
+            case "strikeLightning", "strikeLightningEffect" -> {
+                var at = ((org.bukkit.Location) args[0]).clone();
+                var uuid = java.util.UUID.randomUUID();
+                var handle = SpawnedEntity.of(org.bukkit.entity.EntityType.LIGHTNING_BOLT, at, proxy, uuid);
+                HostBridge.callVoid("World", id, method + "(Location)", at);
+                yield handle;
+            }
             case "spawnFallingBlock" -> {
                 var at = ((org.bukkit.Location) args[0]).clone();
                 org.bukkit.Material material;

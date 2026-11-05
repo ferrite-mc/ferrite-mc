@@ -250,6 +250,12 @@ impl PluginBridge {
                                 return Some("true".to_owned());
                             }
                             if let (Some(players), Some(command)) =
+                                (&players, blasts::lightning_command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
+                            if let (Some(players), Some(command)) =
                                 (&players, blasts::explosion_command(call))
                             {
                                 players(command);

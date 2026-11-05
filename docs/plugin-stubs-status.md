@@ -15,6 +15,7 @@ CMI가 동작한다고 말할 수 없다.
   `spawnEntity`(TNT와 게임이 아는 몹), `spawnFallingBlock`, `launchProjectile`(화살만).
 - 엔티티 핸들: 스폰·드롭이 돌려주는 핸들은 실제 엔티티의 id를 가지며 위치·유효성·속도·체력 읽기와
   `remove`/`setVelocity`/`teleport`/`damage`가 실제 엔티티에 닿는다. `Player#attack`은 1점 피해.
+- 번개: `strikeLightning`/`strikeLightningEffect`는 번개 엔티티와 천둥 소리를 주변 오버월드 플레이어에게만 보낸다(불·피해 없음, 실제 클라이언트로 미확인).
 - 그 밖: `createExplosion`, `updateCommands`, `retrieveCookie`, `storeCookie`, `openMerchant`, `openSign`,
   `setWindowProperty`, 입력/스프린트/수면/낙하 상태 읽기, 리소스팩 상태, 날씨 지속시간 등.
 
@@ -48,7 +49,7 @@ CMI가 동작한다고 말할 수 없다.
   (구현됨: `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk` = 생성돼 있으면 true,
   `generate`면 월드 뷰로 블록 하나를 읽어 생성을 유도한 뒤 true. Java 쪽은 이 환경에 Java 25가 없어 컴파일을 확인하지 못했다.
   청크를 실제로 로드 상태로 붙잡아 두지는 않는다.)
-- **기타:** `openBook`(아이템에 written_book 구성요소 없음), `strikeLightningEffect`(피해 없는 번개),
+- **기타:** `openBook`(아이템에 written_book 구성요소 없음),
   `sendGameEvent`, `findLightningRod/Target`, `getSentChunks`/`isChunkSent`,
   `sendEquipmentChange`/`sendMap`/`sendBlockUpdate(TileState)`, 스코어보드 팀 패킷.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.

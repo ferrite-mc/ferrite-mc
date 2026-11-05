@@ -430,6 +430,11 @@ pub enum PlayerCommand {
         natural: bool,
         uuid: uuid::Uuid,
     },
+    /// `World#strikeLightning(Effect)` on the default world: the bolt and its thunder, shown
+    /// to the players around it. Nothing is burnt or hurt.
+    Lightning {
+        center: [f64; 3],
+    },
     /// `World#createExplosion` on the default world.
     Explosion {
         center: [f64; 3],
