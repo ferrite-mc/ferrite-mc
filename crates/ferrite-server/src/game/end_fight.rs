@@ -1,0 +1,228 @@
+#![allow(dead_code)] // wired up by the dragon fight, which is not built yet
+//! Block layouts of the end: the exit portal podium the dragon leaves behind and the end
+//! gateways that lead to the outer islands.
+//!
+//! These are pure functions from a position to the blocks vanilla places; the fight state machine
+//! and the entities live elsewhere.
+
+use ferrite_data::blocks::{default_state, state_id};
+
+const BEDROCK: &str = "minecraft:bedrock";
+const END_STONE: &str = "minecraft:end_stone";
+const END_PORTAL: &str = "minecraft:end_portal";
+const END_GATEWAY: &str = "minecraft:end_gateway";
+const DRAGON_EGG: &str = "minecraft:dragon_egg";
+const WALL_TORCH: &str = "minecraft:wall_torch";
+
+/// Radius of the circle of end gateways around the main island, and their height.
+pub const GATEWAY_RADIUS: f64 = 96.0;
+pub const GATEWAY_Y: i32 = 75;
+/// How many gateways a fight can open before the ring repeats.
+pub const GATEWAY_COUNT: u32 = 20;
+
+/// Squared distance of a block from the podium centre, as `Vec3i.closerThan` measures it.
+fn distance_squared(origin: [i32; 3], at: [i32; 3]) -> f64 {
+    let d = [
+        f64::from(at[0] - origin[0]),
+        f64::from(at[1] - origin[1]),
+        f64::from(at[2] - origin[2]),
+    ];
+    d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+}
+
+/// Vanilla `EndPodiumFeature`: the bedrock fountain around `origin`. With `active` the middle
+/// layer is end portal, otherwise air (the dragon is alive, or the portal is not open yet).
+pub fn podium_blocks(origin: [i32; 3], active: bool) -> Vec<([i32; 3], u16)> {
+    let (Some(bedrock), Some(stone), Some(portal)) = (
+        default_state(BEDROCK),
+        default_state(END_STONE),
+        default_state(END_PORTAL),
+    ) else {
+        return Vec::new();
+    };
+    let mut blocks = Vec::new();
+    for x in origin[0] - 4..=origin[0] + 4 {
+        for y in origin[1] - 1..=origin[1] + 32 {
+            for z in origin[2] - 4..=origin[2] + 4 {
+                let at = [x, y, z];
+                let d2 = distance_squared(origin, at);
+                let close = d2 < 2.5 * 2.5;
+                if !(close || d2 < 3.5 * 3.5) {
+                    continue;
+                }
+                let state = if y < origin[1] {
+                    if close { bedrock } else { stone }
+                } else if y > origin[1] {
+                    0
+                } else if !close {
+                    bedrock
+                } else if active {
+                    portal
+                } else {
+                    0
+                };
+                blocks.push((at, state));
+            }
+        }
+    }
+    // The bedrock column in the middle, with a torch on each side of its third block.
+    for up in 0..4 {
+        blocks.push(([origin[0], origin[1] + up, origin[2]], bedrock));
+    }
+    for (dx, dz, facing) in [
+        (0, -1, "north"),
+        (0, 1, "south"),
+        (-1, 0, "west"),
+        (1, 0, "east"),
+    ] {
+        if let Some(torch) = state_id(WALL_TORCH, &[("facing", facing)]) {
+            blocks.push(([origin[0] + dx, origin[1] + 2, origin[2] + dz], torch));
+        }
+    }
+    blocks
+}
+
+/// Where the dragon egg appears once the dragon dies.
+pub fn egg_position(origin: [i32; 3]) -> [i32; 3] {
+    [origin[0], origin[1] + 4, origin[2]]
+}
+
+pub fn dragon_egg() -> Option<u16> {
+    default_state(DRAGON_EGG)
+}
+
+/// The position of gateway number `index` (0-based, wrapping at twenty): vanilla spaces them
+/// evenly on a circle of radius 96 around the world origin at y 75.
+pub fn gateway_position(index: u32) -> [i32; 3] {
+    let angle = 2.0
+        * (-std::f64::consts::PI + std::f64::consts::PI / 20.0 * f64::from(index % GATEWAY_COUNT));
+    [
+        (GATEWAY_RADIUS * angle.cos()).floor() as i32,
+        GATEWAY_Y,
+        (GATEWAY_RADIUS * angle.sin()).floor() as i32,
+    ]
+}
+
+/// Vanilla `EndGatewayFeature`: the gateway block in a bedrock cross, with air around it.
+pub fn gateway_blocks(origin: [i32; 3]) -> Vec<([i32; 3], u16)> {
+    let (Some(bedrock), Some(gateway)) = (default_state(BEDROCK), default_state(END_GATEWAY))
+    else {
+        return Vec::new();
+    };
+    let mut blocks = Vec::new();
+    for x in origin[0] - 1..=origin[0] + 1 {
+        for y in origin[1] - 2..=origin[1] + 2 {
+            for z in origin[2] - 1..=origin[2] + 1 {
+                let same_x = x == origin[0];
+                let same_y = y == origin[1];
+                let same_z = z == origin[2];
+                let not_center_y = (y - origin[1]).abs() == 2;
+                let state = if same_x && same_y && same_z {
+                    gateway
+                } else if same_y {
+                    0
+                } else if (not_center_y && same_x && same_z)
+                    || ((same_x || same_z) && !not_center_y)
+                {
+                    bedrock
+                } else {
+                    0
+                };
+                blocks.push(([x, y, z], state));
+            }
+        }
+    }
+    blocks
+}
+
+/// Experience the dragon drops: 12000 for the first kill of a fight world, 500 afterwards.
+pub fn dragon_experience(first_kill: bool) -> u32 {
+    if first_kill { 12_000 } else { 500 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn layout(blocks: Vec<([i32; 3], u16)>) -> HashMap<[i32; 3], u16> {
+        blocks.into_iter().collect()
+    }
+
+    fn named(state: u16) -> &'static str {
+        ferrite_data::blocks::state(state).map_or("?", |(name, _)| name)
+    }
+
+    #[test]
+    fn the_podium_is_a_bedrock_fountain_with_a_portal_in_its_middle() {
+        let origin = [0, 64, 0];
+        let active = layout(podium_blocks(origin, true));
+        assert_eq!(
+            named(active[&[0, 64, 0]]),
+            BEDROCK,
+            "the pillar stands in the middle"
+        );
+        assert_eq!(named(active[&[2, 64, 0]]), END_PORTAL);
+        assert_eq!(named(active[&[1, 64, 1]]), END_PORTAL);
+        assert_eq!(
+            named(active[&[3, 64, 0]]),
+            BEDROCK,
+            "the rim of the top layer"
+        );
+        assert_eq!(named(active[&[0, 63, 0]]), BEDROCK, "under the portal");
+        assert_eq!(
+            named(active[&[3, 63, 0]]),
+            END_STONE,
+            "the outer ring below"
+        );
+        assert_eq!(active[&[3, 65, 0]], 0, "air above the rim");
+        assert_eq!(named(active[&[0, 66, 0]]), BEDROCK, "the central column");
+        assert_eq!(named(active[&[0, 67, 0]]), BEDROCK);
+        assert_eq!(named(active[&[1, 66, 0]]), WALL_TORCH);
+        let dormant = layout(podium_blocks(origin, false));
+        assert_eq!(dormant[&[2, 64, 0]], 0, "no portal while the dragon lives");
+        assert_eq!(named(dormant[&[3, 64, 0]]), BEDROCK);
+    }
+
+    #[test]
+    fn twenty_gateways_sit_on_a_circle_of_ninety_six_blocks() {
+        let all: Vec<[i32; 3]> = (0..GATEWAY_COUNT).map(gateway_position).collect();
+        assert_eq!(all[0], [96, 75, 0], "the ring starts to the east");
+        for position in &all {
+            let r = f64::from(position[0]).hypot(f64::from(position[2]));
+            assert!(
+                (r - GATEWAY_RADIUS).abs() < 1.5,
+                "{position:?} is {r} from the centre"
+            );
+            assert_eq!(position[1], GATEWAY_Y);
+        }
+        assert_eq!(gateway_position(GATEWAY_COUNT), all[0], "the ring wraps");
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), 20);
+    }
+
+    #[test]
+    fn a_gateway_is_a_bedrock_cross_around_the_portal_block() {
+        let origin = [10, 75, 20];
+        let blocks = layout(gateway_blocks(origin));
+        assert_eq!(named(blocks[&origin]), END_GATEWAY);
+        assert_eq!(named(blocks[&[10, 73, 20]]), BEDROCK, "below");
+        assert_eq!(named(blocks[&[10, 77, 20]]), BEDROCK, "above");
+        assert_eq!(
+            named(blocks[&[10, 74, 20]]),
+            BEDROCK,
+            "the cross arm under the block"
+        );
+        assert_eq!(blocks[&[11, 75, 20]], 0, "air beside it");
+        assert_eq!(blocks[&[11, 74, 21]], 0, "air in the corners");
+        assert_eq!(blocks.len(), 3 * 5 * 3);
+    }
+
+    #[test]
+    fn the_egg_sits_four_blocks_above_the_podium_floor() {
+        assert_eq!(egg_position([0, 64, 0]), [0, 68, 0]);
+        assert_eq!(named(dragon_egg().unwrap()), DRAGON_EGG);
+        assert_eq!(dragon_experience(true), 12_000);
+        assert_eq!(dragon_experience(false), 500);
+    }
+}
