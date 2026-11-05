@@ -77,6 +77,61 @@ pub fn world_query(terrain: &dyn ChunkGenerator, call: &HostCall) -> Option<Stri
     }
 }
 
+/// `setblock` lines for a state id, keeping its properties (`minecraft:oak_log[axis=y]`).
+fn state_text(state: u16) -> Option<String> {
+    let (name, props) = ferrite_data::blocks::state(state)?;
+    let mut text = name.to_owned();
+    if !props.is_empty() {
+        let list: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        text.push_str(&format!("[{}]", list.join(",")));
+    }
+    Some(text)
+}
+
+/// `World#generateTree`: runs the vanilla feature in the worldgen host and returns the console
+/// lines that apply the changed blocks with their full states, plus the reply (`true` only when
+/// the host really changed something). `None` when this is not that call or there is no host.
+pub fn place_feature(
+    terrain: &dyn ChunkGenerator,
+    call: &HostCall,
+) -> Option<(Vec<String>, String)> {
+    if call.owner != "World" || call.method != "placeFeature(Location,String)" {
+        return None;
+    }
+    if uuid::Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id() {
+        return None;
+    }
+    let mut parts = call
+        .args
+        .first()?
+        .split(ferrite_plugin::HOST_ITEM_SEPARATOR);
+    parts.next()?;
+    let mut axis = || {
+        let v: f64 = parts.next()?.parse().ok()?;
+        (v.is_finite() && v.abs() < 3.0e7).then(|| v.floor() as i32)
+    };
+    let (x, y, z) = (axis()?, axis()?, axis()?);
+    let feature = call.args.get(1)?.to_ascii_lowercase();
+    if !is_resource_key(&feature) {
+        return None;
+    }
+    let blocks = match terrain.place(
+        Dimension::Overworld,
+        &format!("feature;{feature};{x};{y};{z}"),
+    ) {
+        Ok(blocks) => blocks,
+        Err(_) => return Some((Vec::new(), "false".into())),
+    };
+    let lines: Vec<String> = blocks
+        .iter()
+        .filter_map(|([bx, by, bz], state)| {
+            Some(format!("setblock {bx} {by} {bz} {}", state_text(*state)?))
+        })
+        .collect();
+    let reply = if lines.is_empty() { "false" } else { "true" };
+    Some((lines, reply.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +173,42 @@ mod tests {
         ) -> anyhow::Result<bool> {
             Ok(id == "minecraft:village_plains")
         }
+        fn place(&self, _: Dimension, argument: &str) -> anyhow::Result<Vec<([i32; 3], u16)>> {
+            if argument.starts_with("feature;minecraft:oak;") {
+                let log = ferrite_data::blocks::state_id("minecraft:oak_log", &[("axis", "y")]);
+                Ok(vec![([1, 65, -2], log.unwrap())])
+            } else if argument.starts_with("feature;minecraft:empty;") {
+                Ok(Vec::new())
+            } else {
+                anyhow::bail!("no such feature")
+            }
+        }
+    }
+
+    #[test]
+    fn generate_tree_applies_the_host_blocks_with_their_states() {
+        let at = format!(
+            "w{0}1.5{0}64{0}-2{0}0{0}0",
+            ferrite_plugin::HOST_ITEM_SEPARATOR
+        );
+        let place = |feature: &str| {
+            place_feature(
+                &Fake,
+                &call("placeFeature(Location,String)", &[&at, feature]),
+            )
+        };
+        let (lines, reply) = place("minecraft:oak").unwrap();
+        assert_eq!(lines, vec!["setblock 1 65 -2 minecraft:oak_log[axis=y]"]);
+        assert_eq!(reply, "true");
+        assert_eq!(
+            place("minecraft:empty").unwrap(),
+            (Vec::new(), "false".into())
+        );
+        assert_eq!(
+            place("minecraft:nope").unwrap(),
+            (Vec::new(), "false".into())
+        );
+        assert!(place("bad key").is_none());
     }
 
     fn call(method: &str, args: &[&str]) -> HostCall {

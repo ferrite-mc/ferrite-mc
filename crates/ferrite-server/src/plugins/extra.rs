@@ -240,20 +240,6 @@ fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
             let (x, y, z) = location_xyz(arg(0)?)?;
             console(format!("summon lightning_bolt {x} {y} {z}"), "")
         }
-        // `World#generateTree`: vanilla's own placement of a configured feature, run by the host.
-        "placeFeature(Location,String)" => {
-            let (x, y, z) = location_xyz(arg(0)?)?;
-            let feature = key(arg(1)?)?;
-            console(
-                format!(
-                    "place feature {feature} {} {} {}",
-                    x.floor() as i64,
-                    y.floor() as i64,
-                    z.floor() as i64
-                ),
-                "true",
-            )
-        }
         "playSound(Location,Sound,float,float)"
         | "playSound(Location,String,float,float)"
         | "playSound(Location,Sound,SoundCategory,float,float)"
@@ -471,23 +457,6 @@ mod tests {
         assert_eq!(
             line(world(&default, "strikeLightning(Location)", &[&at])).as_deref(),
             Some("summon lightning_bolt 1.5 64 -2")
-        );
-        assert_eq!(
-            line(world(
-                &default,
-                "placeFeature(Location,String)",
-                &[&at, "minecraft:fancy_oak"]
-            ))
-            .as_deref(),
-            Some("place feature minecraft:fancy_oak 1 64 -2")
-        );
-        assert_eq!(
-            line(world(
-                &default,
-                "placeFeature(Location,String)",
-                &[&at, "a b"]
-            )),
-            None
         );
         assert_eq!(
             line(world(

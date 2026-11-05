@@ -303,6 +303,15 @@ impl PluginBridge {
                                 players(command);
                                 return Some(String::new());
                             }
+                            if let Some((lines, reply)) = terrain
+                                .as_deref()
+                                .and_then(|terrain| worldgen::place_feature(terrain, call))
+                            {
+                                for line in lines {
+                                    let _ = console.send(line);
+                                }
+                                return Some(reply);
+                            }
                             if let Some(reply) = terrain
                                 .as_deref()
                                 .and_then(|terrain| worldgen::world_query(terrain, call))
