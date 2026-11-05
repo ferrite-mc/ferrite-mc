@@ -140,6 +140,11 @@ pub enum Command {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
     },
+    /// A plugin asked for a chunk to be sent again.
+    RefreshChunk {
+        x: i32,
+        z: i32,
+    },
     /// A plugin started (0), completed (1) or cleared (2) the use of an item.
     ItemUse {
         action: u8,
@@ -2920,6 +2925,15 @@ impl Player {
                 }
                 Command::SetInventorySlot { slot, item } => {
                     self.set_inventory_slot(slot, item);
+                    continue;
+                }
+                Command::RefreshChunk { x, z } => {
+                    if self.dimension == crate::game::Dimension::Overworld
+                        && self.loaded.contains(&(x, z))
+                        && !self.queue.contains(&(x, z))
+                    {
+                        self.queue.push_front((x, z));
+                    }
                     continue;
                 }
                 Command::ItemUse { action, hand } => {

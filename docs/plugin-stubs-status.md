@@ -58,7 +58,7 @@ CMI가 동작한다고 말할 수 없다.
   `createExplorerMap`(Server 3개).
   (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
   호스트가 없으면 "not implemented"를 던진다. 호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능.)
-- **청크 관리:** `unloadChunk`, `refreshChunk`, `getChunkGenerationState`.
+- **청크 관리:** `refreshChunk`는 이제 청크를 가진 플레이어에게 다시 보낸다(캐시된 청크라 방금 바뀐 블록이 늦게 반영될 수 있음). 남은 것: `unloadChunk`, `getChunkGenerationState`.
   (구현됨: `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk` = 생성돼 있으면 true,
   `generate`면 월드 뷰로 블록 하나를 읽어 생성을 유도한 뒤 true. Java 쪽은 이 환경에 Java 25가 없어 컴파일을 확인하지 못했다.
   청크를 실제로 로드 상태로 붙잡아 두지는 않는다.)

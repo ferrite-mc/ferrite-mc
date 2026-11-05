@@ -124,6 +124,12 @@ impl PluginBridge {
                             if let Some(reply) = items::item_type_answer(call) {
                                 return Some(reply);
                             }
+                            if let (Some(players), Some(command)) =
+                                (&players, chunks::refresh_command(call))
+                            {
+                                players(command);
+                                return Some("true".to_owned());
+                            }
                             if let Some((reply, command)) = riding::handle(call) {
                                 if let (Some(players), Some(command)) = (&players, command) {
                                     players(command);

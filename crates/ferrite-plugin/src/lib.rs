@@ -453,6 +453,11 @@ pub enum PlayerCommand {
         natural: bool,
         uuid: uuid::Uuid,
     },
+    /// `World#refreshChunk` on the default world: players that have the chunk get it again.
+    RefreshChunk {
+        x: i32,
+        z: i32,
+    },
     /// The passengers of `vehicle` changed (the ride table already holds the new state):
     /// resend its passenger list to the players.
     RideChanged {

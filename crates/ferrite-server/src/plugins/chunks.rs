@@ -53,6 +53,20 @@ fn is_default_world(subject: &str) -> bool {
     uuid::Uuid::parse_str(subject).ok() == Some(ferrite_plugin::default_world_id())
 }
 
+/// `World#refreshChunk(x, z)` on the default world.
+pub fn refresh_command(call: &HostCall) -> Option<ferrite_plugin::PlayerCommand> {
+    if call.owner != "World"
+        || !is_default_world(&call.subject)
+        || call.method != "refreshChunk(int,int)"
+    {
+        return None;
+    }
+    Some(ferrite_plugin::PlayerCommand::RefreshChunk {
+        x: call.args.first()?.parse().ok()?,
+        z: call.args.get(1)?.parse().ok()?,
+    })
+}
+
 /// The reply to a chunk state query about the default world, or `None` for anything else.
 pub fn answer(call: &HostCall) -> Option<String> {
     if call.owner != "World" || !is_default_world(&call.subject) {
@@ -92,6 +106,22 @@ mod tests {
             method: method.into(),
             args: args.iter().map(|a| (*a).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn refreshing_a_chunk_becomes_a_command() {
+        assert_eq!(
+            refresh_command(&call("refreshChunk(int,int)", &["3", "-4"])),
+            Some(ferrite_plugin::PlayerCommand::RefreshChunk { x: 3, z: -4 })
+        );
+        assert_eq!(
+            refresh_command(&call("refreshChunk(int,int)", &["x", "1"])),
+            None
+        );
+        assert_eq!(
+            refresh_command(&call("isChunkLoaded(int,int)", &["3", "4"])),
+            None
+        );
     }
 
     #[test]

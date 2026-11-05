@@ -1478,6 +1478,14 @@ fn route_plugin_command(
                     .push_back(Command::SetInventorySlot { slot, item });
             }
         }
+        PlayerCommand::RefreshChunk { x, z } => {
+            for (_, mailbox, _) in mailboxes.values() {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::RefreshChunk { x, z });
+            }
+        }
         PlayerCommand::ItemUse {
             player,
             action,
