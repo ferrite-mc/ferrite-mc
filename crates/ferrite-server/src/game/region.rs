@@ -4905,6 +4905,7 @@ impl Region {
             center[1] + radius,
             center[2] + radius,
         );
+        let mut chained = Vec::new();
         for key in self.entities.query_vec(area) {
             if self
                 .entities
@@ -4927,6 +4928,16 @@ impl Region {
             if let Some(flags) = self.entities.flags_mut(key) {
                 flags.set(ferrite_entity::Flags::NEEDS_SYNC, true);
             }
+            // An explosion breaks any end crystal it reaches, and that one blows up too.
+            if ferrite_entity::dragon::is_crystal(&self.entities, key) {
+                if let Some(flags) = self.entities.flags_mut(key) {
+                    flags.set(ferrite_entity::Flags::REMOVED, true);
+                }
+                chained.push(pos);
+            }
+        }
+        for pos in chained {
+            self.explode([pos.x, pos.y + 1.0, pos.z], 6.0, true, ctx);
         }
         if !breaks {
             return;
