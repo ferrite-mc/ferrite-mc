@@ -56,6 +56,7 @@ public final class Host {
     private static final int OP_LOCATE_STRUCTURE = 6;
     private static final int OP_STRUCTURE_AT = 7;
     private static final int OP_PLACE = 8;
+    private static final int OP_LOCATE_POI = 9;
 
     private Host() {}
 
@@ -267,6 +268,40 @@ public final class Host {
         return text(at.getX() + " " + at.getY() + " " + at.getZ() + " " + biomeName(found.getSecond()));
     }
 
+    /**
+     * {@code spec;radius;x;y;z}: the nearest point of interest of that type id or tag, or an empty
+     * reply. Like the jar's own /locate poi it only knows points of interest of chunks that were
+     * generated and stored.
+     */
+    private static byte[] locatePoi(MinecraftServer server, ServerLevel level, String argument)
+            throws Exception {
+        String[] parts = argument.split(";");
+        BlockPos origin = new BlockPos(
+                Integer.parseInt(parts[2]), Integer.parseInt(parts[3]), Integer.parseInt(parts[4]));
+        int radius = Integer.parseInt(parts[1]);
+        java.util.function.Predicate<Holder<net.minecraft.world.entity.ai.village.poi.PoiType>> match;
+        if (parts[0].startsWith("#")) {
+            TagKey<net.minecraft.world.entity.ai.village.poi.PoiType> tag = TagKey.create(
+                    Registries.POINT_OF_INTEREST_TYPE, Identifier.parse(parts[0].substring(1)));
+            match = holder -> holder.is(tag);
+        } else {
+            Identifier id = Identifier.parse(parts[0]);
+            match = holder -> holder.is(id);
+        }
+        var finalMatch = match;
+        java.util.function.Supplier<byte[]> search = () -> {
+            var found = level.getPoiManager().findClosestWithType(
+                    finalMatch, origin, radius,
+                    net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy.ANY);
+            if (found.isEmpty()) {
+                return new byte[0];
+            }
+            BlockPos at = found.get().getSecond();
+            return text(at.getX() + " " + at.getY() + " " + at.getZ());
+        };
+        return server.submit(search).get(120, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
     /** {@code spec;radius;x;z}: the nearest structure of that id or tag, or an empty reply. */
     private static byte[] locateStructure(ServerLevel level, String argument) {
         String[] parts = argument.split(";");
@@ -339,6 +374,9 @@ public final class Host {
             }
             case OP_STRUCTURE_AT -> {
                 return structureAt(level, argument);
+            }
+            case OP_LOCATE_POI -> {
+                return locatePoi(server, level, argument);
             }
             case OP_PLACE -> {
                 return Placer.place(server, level, dim, argument);

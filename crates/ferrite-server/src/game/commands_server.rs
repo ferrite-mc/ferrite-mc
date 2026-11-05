@@ -71,8 +71,14 @@ fn locate_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal("poi").then(
-                argument("poi", ArgumentType::opaque("minecraft:resource_or_tag"))
-                    .executes(|ctx| locate_missing(ctx, "poi", "commands.locate.poi.not_found")),
+                argument(
+                    "poi",
+                    ArgumentType::Registry {
+                        parser: RegistryParser::ResourceOrTag,
+                        registry: "minecraft:point_of_interest_type".into(),
+                    },
+                )
+                .executes(locate_poi),
             ),
         )
         .then(
@@ -278,6 +284,27 @@ fn locate_biome(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     }
 }
 
+fn locate_poi(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let (target, name) = resource_target(ctx, "poi")?;
+    let Some(world) = ctx.source().world.clone() else {
+        return not_found(ctx, "commands.locate.poi.not_found", vec![name]);
+    };
+    let origin = ctx.source().origin;
+    // Vanilla searches 256 blocks around the command source.
+    match world.locate_poi(
+        &target,
+        origin[0].floor() as i32,
+        origin[1].floor() as i32,
+        origin[2].floor() as i32,
+        256,
+    ) {
+        Some(Ok(Some(position))) => located(ctx, "commands.locate.poi.success", name, position),
+        Some(Ok(None)) | None | Some(Err(_)) => {
+            not_found(ctx, "commands.locate.poi.not_found", vec![name])
+        }
+    }
+}
+
 fn locate_structure(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let (target, name) = resource_target(ctx, "structure")?;
     let Some(world) = ctx.source().world.clone() else {
@@ -298,19 +325,6 @@ fn locate_structure(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             not_found(ctx, "commands.locate.structure.not_found", vec![name])
         }
     }
-}
-
-/// `locate poi` / `locate structure`: documented stubs naming the missing subsystem.
-fn locate_missing(
-    ctx: &CommandContext<Source>,
-    argument_name: &str,
-    key: &'static str,
-) -> Result<i32, CommandError> {
-    let id = ctx
-        .string(argument_name)
-        .map(namespaced)
-        .unwrap_or_default();
-    not_found(ctx, key, vec![id])
 }
 
 // ---------------------------------------------------------------------------------------------

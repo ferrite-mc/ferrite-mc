@@ -343,6 +343,11 @@ fn places_features_and_structures_through_the_host() {
         &format!("structure;minecraft:village_plains;0;{height};0"),
     );
     eprintln!("village: {:?}", village.as_ref().map(Vec::len));
+    // After a village exists, the host can locate its points of interest (best effort: only
+    // stored chunks count, like the jar's own /locate poi).
+    let poi = generator.locate_poi(Dimension::Overworld, "minecraft:bed", 0, height, 0, 256);
+    eprintln!("poi: {poi:?}");
+    assert!(poi.is_ok(), "locate_poi must answer without a host error");
     let missing = generator.place(
         Dimension::Overworld,
         "feature;minecraft:not_a_feature;0;70;0",

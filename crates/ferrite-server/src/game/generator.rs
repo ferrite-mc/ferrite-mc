@@ -64,6 +64,19 @@ pub trait ChunkGenerator: Send + Sync {
         anyhow::bail!("this generator cannot place features or structures")
     }
 
+    /// The nearest point of interest of type `target` (`id` or `#tag`) within `radius` blocks.
+    fn locate_poi(
+        &self,
+        _dimension: super::Dimension,
+        _target: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _radius: i32,
+    ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+        anyhow::bail!("this generator has no points of interest")
+    }
+
     /// Whether a piece of structure `id` covers the block.
     fn structure_at(
         &self,

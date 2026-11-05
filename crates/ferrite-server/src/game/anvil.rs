@@ -304,6 +304,19 @@ impl AnvilChunkSource {
         Some(terrain.locate_structure(self.dimension, target, x, z, radius))
     }
 
+    /// The nearest point of interest of a type (`id` or `#tag`), when vanilla generation is on.
+    pub fn locate_poi(
+        &self,
+        target: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        radius: i32,
+    ) -> Option<anyhow::Result<Option<(i32, i32, i32)>>> {
+        let terrain = self.terrain.as_ref()?;
+        Some(terrain.locate_poi(self.dimension, target, x, y, z, radius))
+    }
+
     /// Runs a vanilla placement in the worldgen host, when vanilla generation is enabled.
     pub fn place(&self, argument: &str) -> Option<anyhow::Result<super::generator::PlacedBlocks>> {
         Some(self.terrain.as_ref()?.place(self.dimension, argument))

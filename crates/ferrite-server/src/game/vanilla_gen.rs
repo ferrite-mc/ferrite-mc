@@ -29,6 +29,7 @@ const OP_LOCATE_BIOME: u8 = 5;
 const OP_LOCATE_STRUCTURE: u8 = 6;
 const OP_STRUCTURE_AT: u8 = 7;
 const OP_PLACE: u8 = 8;
+const OP_LOCATE_POI: u8 = 9;
 const START_TIMEOUT: Duration = Duration::from_secs(180);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -393,6 +394,19 @@ impl ChunkGenerator for VanillaGenerator {
     fn place(&self, dimension: Dimension, argument: &str) -> anyhow::Result<Vec<([i32; 3], u16)>> {
         let reply = self.request(OP_PLACE, dimension, 0, 0, argument)?;
         parse_placed(&reply)
+    }
+
+    fn locate_poi(
+        &self,
+        dimension: Dimension,
+        target: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        radius: i32,
+    ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+        let argument = format!("{target};{radius};{x};{y};{z}");
+        parse_position(&self.request(OP_LOCATE_POI, dimension, 0, 0, &argument)?)
     }
 
     fn structure_at(
