@@ -14,10 +14,24 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
     }
     private org.bukkit.inventory.ItemStack read(int slot) { var item = items[slot]; return item == null ? null : item.clone(); }
     private void write(int slot, org.bukkit.inventory.ItemStack item) {
-        if (item != null && item.hasItemMeta()) throw new UnsupportedOperationException("Ferrite: inventory metadata commands are not implemented");
+        int damage = 0;
+        if (item != null && item.hasItemMeta()) {
+            // Wear is the one piece of metadata the host can carry; anything else is refused.
+            boolean wearOnly = false;
+            if (item.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable worn) {
+                damage = worn.getDamage();
+                var plain = org.bukkit.Bukkit.getItemFactory().getItemMeta(item.getType());
+                if (plain instanceof org.bukkit.inventory.meta.Damageable fresh) {
+                    fresh.setDamage(damage);
+                    wearOnly = fresh.equals(worn);
+                }
+            }
+            if (!wearOnly) throw new UnsupportedOperationException("Ferrite: inventory metadata commands are not implemented");
+        }
         String material = item == null ? "" : item.getType().getKey().toString();
         int amount = item == null ? 0 : item.getAmount();
         if (!Native.playerInventory(player.getUniqueId().toString(), slot, material, amount)) throw new IllegalStateException("No player command handler");
+        if (damage > 0) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemDamage(int,int)", slot, damage);
         items[slot] = item == null ? null : item.clone();
     }
     /** An inventory index, or the index an equipment slot lives at (0 main hand, 36 boots .. 39 helmet, 40 off hand). */

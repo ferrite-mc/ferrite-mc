@@ -140,6 +140,11 @@ pub enum Command {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
     },
+    /// A plugin wore the stack in an inventory slot down to `damage`.
+    ItemDamage {
+        slot: u8,
+        damage: i32,
+    },
     /// `/item` on the player's own inventory: writes the stacks into the slots (`-1` is the
     /// selected hotbar slot).
     ItemSlots {
@@ -197,6 +202,22 @@ pub enum Command {
 pub type Mailbox = Arc<Mutex<VecDeque<Command>>>;
 pub type ChunkObservers = HashMap<Uuid, (super::Dimension, HashSet<(i32, i32)>, OutboundSender)>;
 pub type Tracking = Arc<Mutex<ChunkObservers>>;
+
+/// The stack worn down to `damage` (never past its last point of durability); `None` for an
+/// empty stack or an item that cannot wear.
+pub(super) fn worn_stack(
+    mut stack: ferrite_item::ItemStack,
+    damage: i32,
+) -> Option<ferrite_item::ItemStack> {
+    let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage)?;
+    if stack.count <= 0 || max <= 0 {
+        return None;
+    }
+    let component = ferrite_item::Component::Damage(damage.clamp(0, max - 1));
+    let id = component.type_id()?;
+    stack.components.insert(id, component);
+    Some(stack)
+}
 
 pub(super) fn broadcast_tracked_chunk(
     players: &ChunkObservers,
@@ -1455,6 +1476,25 @@ impl Player {
         );
         self.sync_containers();
     }
+    /// Sets the wear of the stack in a slot; an empty slot or an item that cannot wear is ignored.
+    fn set_item_damage(&mut self, slot: u8, damage: i32) {
+        let slot = usize::from(slot);
+        if slot >= ferrite_inventory::SIZE {
+            return;
+        }
+        let Some(stack) = worn_stack(self.inventory.get(slot).clone(), damage) else {
+            return;
+        };
+        self.inventory.set(slot, stack.clone());
+        send(
+            self,
+            &SetPlayerInventory {
+                slot: VarInt(slot as i32),
+                item: stack,
+            },
+        );
+        self.sync_containers();
+    }
     /// `/give`: places the stack back in the inventory, dropping what does not fit.
     fn give_items(
         &mut self,
@@ -2147,9 +2187,6 @@ impl Player {
             self.portal_ticks = 0;
             return;
         }
-        let Some(target) = super::portal::counterpart(self.dimension) else {
-            return;
-        };
         let Some(source) = self.source.clone() else {
             return;
         };
@@ -2158,10 +2195,26 @@ impl Player {
             self.pos[1].floor() as i32,
             self.pos[2].floor() as i32,
         ];
-        let in_portal = source
+        // The block at the feet decides where the portal leads: a nether portal pairs the
+        // overworld with the nether, an end portal the overworld with the end.
+        let inside = source
             .block(feet[0], feet[1], feet[2])
-            .and_then(|state| u16::try_from(state).ok())
-            .is_some_and(super::portal::is_portal);
+            .and_then(|state| u16::try_from(state).ok());
+        let target = inside.and_then(|state| {
+            if super::portal::is_end_portal(state) {
+                match self.dimension {
+                    super::Dimension::Overworld => Some(super::Dimension::End),
+                    super::Dimension::End => Some(super::Dimension::Overworld),
+                    super::Dimension::Nether => None,
+                }
+            } else if super::portal::is_portal(state) && self.dimension != super::Dimension::End {
+                super::portal::counterpart(self.dimension)
+            } else {
+                None
+            }
+        });
+        let in_portal = target.is_some();
+        let target = target.unwrap_or(self.dimension);
         if !in_portal {
             self.portal_ticks = 0;
             self.portal_pending = None;
@@ -2176,7 +2229,18 @@ impl Player {
                 return;
             }
             self.portal_ticks = 0;
-            let scaled = super::portal::scale(self.dimension, target, self.pos);
+            let scaled = match (self.dimension, target) {
+                (super::Dimension::Overworld, super::Dimension::End) => [100.5, 49.0, 0.5],
+                (super::Dimension::End, super::Dimension::Overworld) => {
+                    let spawn = self.dimensions.spawn(super::Dimension::Overworld);
+                    [
+                        f64::from(spawn[0]) + 0.5,
+                        f64::from(spawn[1]),
+                        f64::from(spawn[2]) + 0.5,
+                    ]
+                }
+                _ => super::portal::scale(self.dimension, target, self.pos),
+            };
             self.portal_pending = Some((target, scaled));
         }
         let Some((target, scaled)) = self.portal_pending else {
@@ -2188,12 +2252,18 @@ impl Player {
             (scaled[2].floor() as i32).div_euclid(16),
             self.biome,
         );
-        let destination = super::portal::find_portal(
-            target_source.as_ref(),
-            scaled,
-            super::portal::SEARCH_RADIUS,
-        )
-        .or_else(|| super::portal::create_portal(target_source.as_ref(), scaled));
+        let destination = match (self.dimension, target) {
+            (super::Dimension::Overworld, super::Dimension::End) => {
+                super::portal::create_end_platform(target_source.as_ref())
+            }
+            (super::Dimension::End, super::Dimension::Overworld) => Some(scaled),
+            _ => super::portal::find_portal(
+                target_source.as_ref(),
+                scaled,
+                super::portal::SEARCH_RADIUS,
+            )
+            .or_else(|| super::portal::create_portal(target_source.as_ref(), scaled)),
+        };
         let Some(destination) = destination else {
             // The destination chunk is still loading; retry on the next tick.
             return;
@@ -2777,6 +2847,10 @@ impl Player {
                 }
                 Command::SetInventorySlot { slot, item } => {
                     self.set_inventory_slot(slot, item);
+                    continue;
+                }
+                Command::ItemDamage { slot, damage } => {
+                    self.set_item_damage(slot, damage);
                     continue;
                 }
                 Command::ItemSlots { slots, fill } => {
@@ -5076,6 +5150,30 @@ fn chunk_holders_follow_region_merge_and_split() {
     assert_eq!(right.held_chunks.get(&ChunkPos(32, 0)), Some(&1));
     right.release_chunk(ChunkPos(32, 0));
     assert!(right.held_chunks.is_empty());
+}
+
+#[cfg(test)]
+mod worn_stack_tests {
+    use super::worn_stack;
+
+    #[test]
+    fn tools_wear_but_never_break_through_this_path() {
+        let pick = ferrite_item::item_id("diamond_pickaxe").unwrap();
+        let worn = worn_stack(ferrite_item::ItemStack::with_count(pick, 1), 10).unwrap();
+        let id = ferrite_item::Component::Damage(0).type_id().unwrap();
+        assert_eq!(
+            worn.components.get(id),
+            Some(&ferrite_item::Component::Damage(10))
+        );
+        let clamped = worn_stack(ferrite_item::ItemStack::with_count(pick, 1), 99_999).unwrap();
+        assert_eq!(
+            clamped.components.get(id),
+            Some(&ferrite_item::Component::Damage(1560))
+        );
+        let stone = ferrite_item::item_id("stone").unwrap();
+        assert!(worn_stack(ferrite_item::ItemStack::with_count(stone, 1), 5).is_none());
+        assert!(worn_stack(ferrite_item::ItemStack::empty(), 5).is_none());
+    }
 }
 
 #[cfg(test)]

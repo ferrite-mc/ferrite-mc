@@ -28,6 +28,11 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         "openStonecutter(Location,boolean)" => station(player, "stonecutter"),
         "openSmithingTable(Location,boolean)" => station(player, "smithing"),
         "openLoom(Location,boolean)" => station(player, "loom"),
+        "setItemDamage(int,int)" => Some(PlayerCommand::ItemDamage {
+            player,
+            slot: call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?,
+            damage: call.args.get(1)?.parse::<i32>().ok().filter(|d| *d >= 0)?,
+        }),
         "closeInventory()" | "closeInventory(Reason)" => {
             Some(PlayerCommand::CloseInventory { player })
         }
@@ -201,5 +206,26 @@ mod tests {
         other.owner = "Player".into();
         other.subject = "not-a-uuid".into();
         assert_eq!(inventory_command(&other), None);
+    }
+
+    #[test]
+    fn item_damage_calls_become_a_slot_command() {
+        let call = |slot: &str, damage: &str| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "setItemDamage(int,int)".into(),
+            args: vec![slot.into(), damage.into()],
+        };
+        assert_eq!(
+            inventory_command(&call("3", "40")),
+            Some(PlayerCommand::ItemDamage {
+                player: Uuid::parse_str(PLAYER).unwrap(),
+                slot: 3,
+                damage: 40
+            })
+        );
+        assert_eq!(inventory_command(&call("41", "1")), None);
+        assert_eq!(inventory_command(&call("3", "-1")), None);
+        assert_eq!(inventory_command(&call("x", "1")), None);
     }
 }

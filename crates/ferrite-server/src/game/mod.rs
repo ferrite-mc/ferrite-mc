@@ -1470,6 +1470,18 @@ fn route_plugin_command(
                     .push_back(Command::SetInventorySlot { slot, item });
             }
         }
+        PlayerCommand::ItemDamage {
+            player,
+            slot,
+            damage,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::ItemDamage { slot, damage });
+            }
+        }
         PlayerCommand::Teleport { player, location } => {
             if location.world == ferrite_plugin::default_world_id()
                 && let Some((_, mailbox, _)) = mailboxes.get(&player)

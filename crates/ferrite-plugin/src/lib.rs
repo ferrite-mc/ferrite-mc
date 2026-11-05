@@ -401,6 +401,12 @@ pub enum PlayerCommand {
         slot: u8,
         item: Option<ItemSnapshot>,
     },
+    /// How worn the stack in an inventory slot is (the `minecraft:damage` component).
+    ItemDamage {
+        player: uuid::Uuid,
+        slot: u8,
+        damage: i32,
+    },
     SetOperator {
         player: uuid::Uuid,
         operator: bool,

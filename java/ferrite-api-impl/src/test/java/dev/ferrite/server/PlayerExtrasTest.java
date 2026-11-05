@@ -552,4 +552,22 @@ class PlayerExtrasTest {
             assertEquals(30, player.applyMending(30), "with nothing mendable worn, no xp is used up");
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void wornToolsReachTheHostAsMaterialAmountAndDamage() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> {
+            calls.add(method + "[" + args + "]");
+            return method.equals("getMaxDurability()") ? "1561" : "";
+        };
+        try {
+            var worn = player.damageItemStack(new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_PICKAXE), 7);
+            try { player.getInventory().setItem(3, worn); } catch (IllegalStateException noNative) { /* no host in unit tests */ }
+            assertTrue(calls.stream().anyMatch(c -> c.startsWith("setItemDamage(int,int)[3") && c.endsWith("7]")), calls.toString());
+            var named = worn.clone();
+            var meta = named.getItemMeta();
+            meta.displayName(net.kyori.adventure.text.Component.text("x"));
+            named.setItemMeta(meta);
+            assertThrows(UnsupportedOperationException.class, () -> player.getInventory().setItem(4, named));
+        } finally { HostBridge.transport = null; }
+    }
 }
