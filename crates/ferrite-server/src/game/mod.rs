@@ -2230,8 +2230,20 @@ impl CommandRuntime<'_> {
             match ride::dismount(rider.uuid) {
                 Some(old) => {
                     self.broadcast_passengers(old);
-                    self.reply
-                        .key("commands.ride.dismount.success", &[&rider.name]);
+                    let vehicle_name = self
+                        .online
+                        .get(&old)
+                        .map(|p| p.name.clone())
+                        .or_else(|| {
+                            let state = self.state.lock().unwrap();
+                            let entities = state.entities.lock().unwrap();
+                            entities.get(old).map(|e| e.type_name().to_owned())
+                        })
+                        .unwrap_or_default();
+                    self.reply.key(
+                        "commands.ride.dismount.success",
+                        &[&rider.name, &vehicle_name],
+                    );
                 }
                 None => self.reply.key("commands.ride.not_riding", &[&rider.name]),
             }

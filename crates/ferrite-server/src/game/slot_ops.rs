@@ -238,16 +238,17 @@ impl CommandRuntime<'_> {
                 let source = self.source.clone().unwrap();
                 let mut items = block_container::load_slots(&source, pos, size);
                 if mode == SlotMode::Insert {
-                    for stack in stacks {
+                    for stack in stacks.iter().cloned() {
                         let left = insert_stack(&mut items, stack);
                         if !left.is_empty() {
-                            self.reply.key("commands.loot.insert.full", &[&x, &y, &z]);
+                            self.reply.key("commands.item.target.failed", &[]);
                             return;
                         }
                     }
                     block_container::store_slots(&source, pos, &name, &items);
+                    let total: i32 = stacks.iter().map(|s| s.count).sum();
                     self.reply
-                        .key("commands.loot.insert.success", &[&x, &y, &z]);
+                        .key("commands.drop.success.multiple", &[&total.to_string()]);
                     return;
                 }
                 let Ok(indexes) = block_slots(&slots, size) else {

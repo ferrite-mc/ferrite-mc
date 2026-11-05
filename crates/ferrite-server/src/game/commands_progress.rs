@@ -247,21 +247,21 @@ fn advancement_run(
     } else {
         names.first().cloned().unwrap_or_default()
     };
-    let to = if many_targets { "to_many" } else { "to_one" };
+    let to = if many_targets { "to.many" } else { "to.one" };
     if changed_players == 0 {
         let key: &'static str = match (criterion.is_some(), set.len() == 1, many_targets, grant) {
-            (true, _, false, true) => "commands.advancement.grant.criterion.to_one.failure",
-            (true, _, true, true) => "commands.advancement.grant.criterion.to_many.failure",
-            (true, _, false, false) => "commands.advancement.revoke.criterion.to_one.failure",
-            (true, _, true, false) => "commands.advancement.revoke.criterion.to_many.failure",
-            (false, true, false, true) => "commands.advancement.grant.one.to_one.failure",
-            (false, true, true, true) => "commands.advancement.grant.one.to_many.failure",
-            (false, false, false, true) => "commands.advancement.grant.many.to_one.failure",
-            (false, false, true, true) => "commands.advancement.grant.many.to_many.failure",
-            (false, true, false, false) => "commands.advancement.revoke.one.to_one.failure",
-            (false, true, true, false) => "commands.advancement.revoke.one.to_many.failure",
-            (false, false, false, false) => "commands.advancement.revoke.many.to_one.failure",
-            (false, false, true, false) => "commands.advancement.revoke.many.to_many.failure",
+            (true, _, false, true) => "commands.advancement.grant.criterion.to.one.failure",
+            (true, _, true, true) => "commands.advancement.grant.criterion.to.many.failure",
+            (true, _, false, false) => "commands.advancement.revoke.criterion.to.one.failure",
+            (true, _, true, false) => "commands.advancement.revoke.criterion.to.many.failure",
+            (false, true, false, true) => "commands.advancement.grant.one.to.one.failure",
+            (false, true, true, true) => "commands.advancement.grant.one.to.many.failure",
+            (false, false, false, true) => "commands.advancement.grant.many.to.one.failure",
+            (false, false, true, true) => "commands.advancement.grant.many.to.many.failure",
+            (false, true, false, false) => "commands.advancement.revoke.one.to.one.failure",
+            (false, true, true, false) => "commands.advancement.revoke.one.to.many.failure",
+            (false, false, false, false) => "commands.advancement.revoke.many.to.one.failure",
+            (false, false, true, false) => "commands.advancement.revoke.many.to.many.failure",
         };
         let args = match (&criterion, set.len() == 1) {
             (Some(name), _) => vec![name.clone(), id.clone().unwrap_or_default(), target_text],

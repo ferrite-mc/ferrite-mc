@@ -16,60 +16,68 @@ fn template(key: &str) -> Option<&'static str> {
             "Too many blocks in the specified area (maximum %s, specified %s)"
         }
         "argument.pos.unloaded" => "That position is not loaded",
-        "commands.advancement.grant.one.to_one" => "Granted the advancement %s to %s",
-        "commands.advancement.grant.one.to_many" => "Granted the advancement %s to %s players",
-        "commands.advancement.grant.many.to_one" => "Granted %s advancements to %s",
-        "commands.advancement.grant.many.to_many" => "Granted %s advancements to %s players",
-        "commands.advancement.grant.criterion.to_one" => {
+        "commands.advancement.grant.one.to.one.success" => "Granted the advancement %s to %s",
+        "commands.advancement.grant.one.to.many.success" => {
+            "Granted the advancement %s to %s players"
+        }
+        "commands.advancement.grant.many.to.one.success" => "Granted %s advancements to %s",
+        "commands.advancement.grant.many.to.many.success" => {
+            "Granted %s advancements to %s players"
+        }
+        "commands.advancement.grant.criterion.to.one.success" => {
             "Granted the criterion '%s' of advancement %s to %s"
         }
-        "commands.advancement.grant.criterion.to_many" => {
+        "commands.advancement.grant.criterion.to.many.success" => {
             "Granted the criterion '%s' of advancement %s to %s players"
         }
-        "commands.advancement.grant.one.to_one.failure" => {
+        "commands.advancement.grant.one.to.one.failure" => {
             "Couldn't grant advancement %s to %s as nothing changed"
         }
-        "commands.advancement.grant.one.to_many.failure" => {
+        "commands.advancement.grant.one.to.many.failure" => {
             "Couldn't grant advancement %s to %s players as nothing changed"
         }
-        "commands.advancement.grant.many.to_one.failure" => {
+        "commands.advancement.grant.many.to.one.failure" => {
             "Couldn't grant %s advancements to %s as nothing changed"
         }
-        "commands.advancement.grant.many.to_many.failure" => {
+        "commands.advancement.grant.many.to.many.failure" => {
             "Couldn't grant %s advancements to %s players as nothing changed"
         }
-        "commands.advancement.grant.criterion.to_one.failure" => {
+        "commands.advancement.grant.criterion.to.one.failure" => {
             "Couldn't grant criterion '%s' of advancement %s to %s as nothing changed"
         }
-        "commands.advancement.grant.criterion.to_many.failure" => {
+        "commands.advancement.grant.criterion.to.many.failure" => {
             "Couldn't grant criterion '%s' of advancement %s to %s players as nothing changed"
         }
-        "commands.advancement.revoke.one.to_one" => "Revoked the advancement %s from %s",
-        "commands.advancement.revoke.one.to_many" => "Revoked the advancement %s from %s players",
-        "commands.advancement.revoke.many.to_one" => "Revoked %s advancements from %s",
-        "commands.advancement.revoke.many.to_many" => "Revoked %s advancements from %s players",
-        "commands.advancement.revoke.criterion.to_one" => {
+        "commands.advancement.revoke.one.to.one.success" => "Revoked the advancement %s from %s",
+        "commands.advancement.revoke.one.to.many.success" => {
+            "Revoked the advancement %s from %s players"
+        }
+        "commands.advancement.revoke.many.to.one.success" => "Revoked %s advancements from %s",
+        "commands.advancement.revoke.many.to.many.success" => {
+            "Revoked %s advancements from %s players"
+        }
+        "commands.advancement.revoke.criterion.to.one.success" => {
             "Revoked the criterion '%s' of advancement %s from %s"
         }
-        "commands.advancement.revoke.criterion.to_many" => {
+        "commands.advancement.revoke.criterion.to.many.success" => {
             "Revoked the criterion '%s' of advancement %s from %s players"
         }
-        "commands.advancement.revoke.one.to_one.failure" => {
+        "commands.advancement.revoke.one.to.one.failure" => {
             "Couldn't revoke advancement %s from %s as nothing changed"
         }
-        "commands.advancement.revoke.one.to_many.failure" => {
+        "commands.advancement.revoke.one.to.many.failure" => {
             "Couldn't revoke advancement %s from %s players as nothing changed"
         }
-        "commands.advancement.revoke.many.to_one.failure" => {
+        "commands.advancement.revoke.many.to.one.failure" => {
             "Couldn't revoke %s advancements from %s as nothing changed"
         }
-        "commands.advancement.revoke.many.to_many.failure" => {
+        "commands.advancement.revoke.many.to.many.failure" => {
             "Couldn't revoke %s advancements from %s players as nothing changed"
         }
-        "commands.advancement.revoke.criterion.to_one.failure" => {
+        "commands.advancement.revoke.criterion.to.one.failure" => {
             "Couldn't revoke criterion '%s' of advancement %s from %s as nothing changed"
         }
-        "commands.advancement.revoke.criterion.to_many.failure" => {
+        "commands.advancement.revoke.criterion.to.many.failure" => {
             "Couldn't revoke criterion '%s' of advancement %s from %s players as nothing changed"
         }
         "advancement.advancementNotFound" => "Unknown advancement: %s",
@@ -92,8 +100,7 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.waypoint.modify.color.reset" => "Reset waypoint color of %s",
         "commands.waypoint.modify.style" => "Changed waypoint style of %s",
         "commands.ride.not_riding" => "%s is not riding any vehicle",
-        "commands.loot.unknown_table" => "Unknown loot table: %s",
-        "commands.loot.empty" => "The loot table dropped nothing",
+        "commands.drop.no_loot_table" => "Entity %s has no loot table",
         "commands.item.entity.set.success.single" => "Replaced a slot on %s with %s",
         "commands.item.entity.set.success.multiple" => "Replaced a slot on %s entities with %s",
         "slot.unknown" => "Unknown slot '%s'",
@@ -103,10 +110,9 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.item.target.no_such_slot" => "The target does not have slot %s",
         "commands.item.target.no_changes" => "No targets accepted item into slot %s",
         "commands.item.block.set.success" => "Replaced a slot at %s, %s, %s with %s",
-        "commands.loot.insert.full" => "Container at %s, %s, %s is full",
-        "commands.loot.insert.success" => "Inserted the loot into the container at %s, %s, %s",
-        "commands.place.template.invalid" => "There is no template with id %s",
-        "commands.ride.dismount.success" => "%s stopped riding",
+
+        "commands.place.template.invalid" => "There is no template with ID \"%s\"",
+        "commands.ride.dismount.success" => "%s stopped riding %s",
         "commands.ride.mount.success" => "%s started riding %s",
         "commands.ride.already_riding" => "%s is already riding %s",
         "commands.ride.mount.failure.generic" => "%s could not start riding %s",

@@ -2623,7 +2623,7 @@ mod tests {
             .0
             .unwrap_err()
             .to_string();
-        assert!(error.contains("Unknown loot table"), "{error}");
+        assert!(error.contains("Unknown ID"), "{error}");
         // spawn and insert now route through the same roll; a bad table fails the same way.
         for line in [
             "loot spawn 0 64 0 loot minecraft:nope/none",
@@ -2631,7 +2631,7 @@ mod tests {
             "loot replace entity @s hotbar.0 3 loot minecraft:nope/none",
         ] {
             let error = run(line, 2).0.unwrap_err().to_string();
-            assert!(error.contains("Unknown loot table"), "{line}: {error}");
+            assert!(error.contains("Unknown ID"), "{line}: {error}");
         }
         // Without a loaded world there is no block to mine.
         assert!(run("loot insert 0 64 0 mine 0 64 0", 2).0.is_err());
@@ -2649,7 +2649,7 @@ mod tests {
             .0
             .unwrap_err()
             .to_string();
-        assert!(error.contains("Unknown item modifier"), "{error}");
+        assert!(error.contains("Unknown ID"), "{error}");
         for (line, mode) in [
             (
                 "item replace block 0 64 0 container.0 with minecraft:stone",

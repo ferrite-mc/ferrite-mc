@@ -41,9 +41,7 @@ pub(super) fn block_pos(
 }
 
 fn unknown_modifier(name: &str) -> CommandError {
-    CommandError::failed(
-        Feedback::new("argument.item_modifier.unknown", vec![name.to_owned()]).text,
-    )
+    CommandError::failed(Feedback::new("argument.id.unknown", vec![name.to_owned()]).text)
 }
 
 fn target(ctx: &CommandContext<Source>, block: bool) -> Result<SlotTarget, CommandError> {

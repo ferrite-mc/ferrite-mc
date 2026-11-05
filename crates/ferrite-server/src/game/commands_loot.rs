@@ -50,9 +50,7 @@ fn block_context(ctx: &CommandContext<Source>) -> Result<LootContext, CommandErr
 
 fn rolled(table: &str, context: &LootContext) -> Result<Vec<(String, i32)>, CommandError> {
     super::drops::roll_table(table, context).ok_or_else(|| {
-        CommandError::failed(
-            Feedback::new("commands.loot.unknown_table", vec![table.to_owned()]).text,
-        )
+        CommandError::failed(Feedback::new("argument.id.unknown", vec![table.to_owned()]).text)
     })
 }
 
@@ -96,7 +94,7 @@ fn stacks(ctx: &CommandContext<Source>, from: From) -> Result<Vec<(String, i32)>
             let entities = state.entities.lock().unwrap();
             let Some(entry) = selected.first().and_then(|e| entities.get(e.uuid)) else {
                 return Err(CommandError::failed(
-                    Feedback::new("commands.loot.no_loot_table", vec![]).text,
+                    Feedback::new("argument.entity.notfound.entity", vec![]).text,
                 ));
             };
             let table = format!(
@@ -150,7 +148,10 @@ fn give(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
     if total == 0 {
         send(
             ctx.source(),
-            Action::Feedback(Feedback::new("commands.loot.empty", vec![])),
+            Action::Feedback(Feedback::new(
+                "commands.drop.success.multiple",
+                vec!["0".to_owned()],
+            )),
         )?;
     }
     Ok(total)
