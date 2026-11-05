@@ -360,6 +360,17 @@ public abstract class PlayerMisc extends PlayerStubs {
     protected void tellHost(String method, Object... args) {
         try { HostBridge.callVoid("Player", getUniqueId(), method, args); } catch (UnsupportedOperationException offline) { /* no host */ }
     }
+    /** Signs are the one tile entity the client can be sent; any other state has no host form. */
+    @Override public void sendBlockUpdate(org.bukkit.Location loc, org.bukkit.block.TileState tileState) {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(tileState, "tileState");
+        if (!(tileState instanceof org.bukkit.block.Sign sign)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#sendBlockUpdate(" + tileState.getType() + ")");
+        var side = sign.getSide(org.bukkit.block.sign.Side.FRONT);
+        var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
+        var lines = new String[4];
+        for (int i = 0; i < 4; i++) lines[i] = plain.serialize(side.line(i));
+        sendSignChange(loc, lines, side.getColor(), side.isGlowingText());
+    }
     @Override public void sendSignChange(org.bukkit.Location loc, String[] lines, org.bukkit.DyeColor dyeColor, boolean hasGlowingText) {
         java.util.List<String> text = new java.util.ArrayList<>();
         if (lines != null) for (int i = 0; i < Math.min(4, lines.length); i++) text.add(lines[i]);

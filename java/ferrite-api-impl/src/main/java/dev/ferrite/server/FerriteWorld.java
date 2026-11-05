@@ -250,6 +250,29 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     }
 
     /** World queries answered from Java-side state and the player list. */
+    /** The nearest lightning rod within 128 blocks, looking at the top block of each loaded column. */
+    private org.bukkit.Location findRod(org.bukkit.Location from) {
+        var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
+        if (text == null || text.isEmpty()) return null;
+        Pos best = null;
+        double bestDistance = 128.0 * 128.0;
+        for (var pair : text.split(String.valueOf(HostBridge.ITEM))) {
+            var parts = pair.split(",");
+            int cx = Integer.parseInt(parts[0]), cz = Integer.parseInt(parts[1]);
+            if (Math.abs((cx << 4) + 8 - from.getX()) > 144 || Math.abs((cz << 4) + 8 - from.getZ()) > 144) continue;
+            for (int dx = 0; dx < 16; dx++) for (int dz = 0; dz < 16; dz++) {
+                int x = (cx << 4) + dx, z = (cz << 4) + dz;
+                double d = (x + 0.5 - from.getX()) * (x + 0.5 - from.getX()) + (z + 0.5 - from.getZ()) * (z + 0.5 - from.getZ());
+                if (d >= bestDistance) continue;
+                try {
+                    int top = Native.highestBlockY(id.toString(), x, z);
+                    if (top == Integer.MIN_VALUE) continue;
+                    if (typeAt(new Pos(x, top, z)) == org.bukkit.Material.LIGHTNING_ROD) { best = new Pos(x, top, z); bestDistance = d; }
+                } catch (UnsupportedOperationException | IllegalStateException noData) { /* column not readable */ }
+            }
+        }
+        return best == null ? null : new org.bukkit.Location(proxy, best.x(), best.y(), best.z());
+    }
     /** Biome temperature (cooler above y=81, noise ignored) or humidity at a position. */
     private double climate(boolean temperature, int x, int y, int z) {
         var key = Native.biomeAt(id.toString(), x, y, z);
@@ -355,6 +378,15 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 if (!generate) return false;
                 typeAt(new Pos(cx << 4, 64, cz << 4));
                 return true;
+            }
+            case "findLightningRod" -> { return findRod((org.bukkit.Location) args[0]); }
+            case "findLightningTarget" -> {
+                var at = (org.bukkit.Location) args[0];
+                var rod = findRod(at);
+                if (rod != null) return rod;
+                int top = Native.highestBlockY(id.toString(), at.getBlockX(), at.getBlockZ());
+                if (top == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + at.getBlockX() + "," + at.getBlockZ());
+                return new org.bukkit.Location(proxy, at.getBlockX(), top + 1, at.getBlockZ());
             }
             case "getLoadedChunks" -> {
                 var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);

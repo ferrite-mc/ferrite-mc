@@ -671,4 +671,17 @@ class PlayerExtrasTest {
         tracker.resetCombatState();
         assertFalse(tracker.isInCombat());
     }
+
+    @Test void noLoadedColumnMeansNoLightningRod() {
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("getLoadedChunkCoordinates()") ? "0,0" : "";
+        try {
+            assertNull(player.getWorld().findLightningRod(new org.bukkit.Location(player.getWorld(), 1, 64, 1)));
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void onlySignsCanBeSentAsBlockUpdates() {
+        var chest = (org.bukkit.block.TileState) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.block.TileState.class},
+            (self, method, args) -> method.getName().equals("getType") ? org.bukkit.Material.CHEST : null);
+        assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(new org.bukkit.Location(player.getWorld(), 0, 64, 0), chest));
+    }
 }
