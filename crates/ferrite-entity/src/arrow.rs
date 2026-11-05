@@ -78,6 +78,154 @@ pub fn new_arrow(
     }
 }
 
+/// Vanilla `ThrowableProjectile` gravity per tick (snowball, egg, ender pearl).
+pub const THROWN_GRAVITY: f64 = 0.03;
+/// Box size of a thrown snowball, egg or ender pearl.
+pub const THROWN_SIZE: f64 = 0.25;
+
+/// Which projectile an entity of this module is, told apart by its entity type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Arrow,
+    Snowball,
+    Egg,
+    EnderPearl,
+}
+
+impl Kind {
+    fn entity_name(self) -> &'static str {
+        match self {
+            Self::Arrow => "arrow",
+            Self::Snowball => "snowball",
+            Self::Egg => "egg",
+            Self::EnderPearl => "ender_pearl",
+        }
+    }
+
+    /// The projectile for a `minecraft:` entity key; arrows are not "thrown".
+    pub fn thrown_from_name(name: &str) -> Option<Self> {
+        match name.strip_prefix("minecraft:").unwrap_or(name) {
+            "snowball" => Some(Self::Snowball),
+            "egg" => Some(Self::Egg),
+            "ender_pearl" => Some(Self::EnderPearl),
+            _ => None,
+        }
+    }
+
+    pub fn entity_type(self) -> u16 {
+        ferrite_data::entity_props::by_name(self.entity_name())
+            .expect("vanilla has the projectile entity types")
+            .id
+    }
+}
+
+/// Which projectile `data` is, when its type is one of ours.
+pub fn kind_of(data: &EntityData) -> Option<Kind> {
+    [Kind::Arrow, Kind::Snowball, Kind::Egg, Kind::EnderPearl]
+        .into_iter()
+        .find(|kind| kind.entity_type() == data.kind)
+}
+
+/// A new snowball, egg or ender pearl at `pos` flying with `vel`.
+pub fn new_thrown(kind: Kind, pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> EntityRecord {
+    let mut record = new_arrow(pos, vel, 0.0, owner, &mut Rng::new(0));
+    record.data.kind = kind.entity_type();
+    record.data.width = THROWN_SIZE;
+    record.data.height = THROWN_SIZE;
+    record
+}
+
+/// Where a thrown projectile ended.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Landing {
+    pub kind: Kind,
+    pub owner: Option<Uuid>,
+    pub pos: Vec3,
+}
+
+/// Advances every snowball, egg and ender pearl one tick and reports where each one landed.
+/// Mobs are pushed away (they take no damage); the region teleports pearl owners.
+pub fn tick_thrown(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[(Uuid, AABB)],
+) -> Vec<Landing> {
+    let keys = store.keys().to_vec();
+    let mut landings = Vec::new();
+    for key in keys {
+        let Some(data) = store.data(key) else {
+            continue;
+        };
+        let (Some(mut state), Some(kind)) = (data.arrow, kind_of(data)) else {
+            continue;
+        };
+        if kind == Kind::Arrow
+            || store
+                .flags(key)
+                .is_some_and(|flags| flags.has(Flags::REMOVED))
+        {
+            continue;
+        }
+        state.age += 1;
+        if state.age > LIFETIME {
+            remove(store, key);
+            continue;
+        }
+        let mut vel = store.vel(key).unwrap_or_default();
+        vel.y -= THROWN_GRAVITY;
+        vel.x *= DRAG;
+        vel.y *= DRAG;
+        vel.z *= DRAG;
+        store.set_vel(key, vel);
+        physics::move_entity(store, key, vel, blocks);
+        let pos = store.pos(key).unwrap_or_default();
+        let land = |store: &mut EntityStore, landings: &mut Vec<Landing>| {
+            landings.push(Landing {
+                kind,
+                owner: state.owner,
+                pos,
+            });
+            remove(store, key);
+        };
+        if store.flags(key).is_some_and(|flags| {
+            flags.has(Flags::HORIZONTAL_COLLISION) || flags.has(Flags::VERTICAL_COLLISION)
+        }) {
+            land(store, &mut landings);
+            continue;
+        }
+        let Some(bbox) = store.bbox(key) else {
+            continue;
+        };
+        let grace = state.age <= OWNER_GRACE;
+        if players
+            .iter()
+            .any(|(uuid, box_)| box_.intersects(bbox) && !(grace && state.owner == Some(*uuid)))
+        {
+            land(store, &mut landings);
+            continue;
+        }
+        let target = store
+            .query_vec(bbox)
+            .into_iter()
+            .find(|other| *other != key && mob::is_mob(store, *other));
+        if let Some(target) = target {
+            // Vanilla knockback of a thrown item: 0.4 away from the projectile's heading.
+            let length = (vel.x * vel.x + vel.z * vel.z).sqrt().max(1.0e-4);
+            let mut push = store.vel(target).unwrap_or_default();
+            push.x += vel.x / length * 0.4;
+            push.z += vel.z / length * 0.4;
+            push.y = push.y.max(0.3);
+            store.set_vel(target, push);
+            land(store, &mut landings);
+            continue;
+        }
+        if let Some(data) = store.data_mut(key) {
+            data.arrow = Some(state);
+        }
+    }
+    landings
+}
+
 /// A player an arrow hit; the region applies the damage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerHit {
@@ -103,7 +251,11 @@ pub fn tick_arrows(
     let keys = store.keys().to_vec();
     let mut hits = Vec::new();
     for key in keys {
-        let Some(mut arrow) = store.data(key).and_then(|data| data.arrow) else {
+        let Some(mut arrow) = store
+            .data(key)
+            .filter(|data| kind_of(data) == Some(Kind::Arrow))
+            .and_then(|data| data.arrow)
+        else {
             continue;
         };
         if store
@@ -176,6 +328,50 @@ mod tests {
 
     fn spawn_arrow_from(store: &mut EntityStore, pos: Vec3, vel: Vec3, owner: Uuid) -> EntityKey {
         store.insert(new_arrow(pos, vel, 4.0, Some(owner), &mut Rng::new(1)))
+    }
+
+    #[test]
+    fn a_pearl_lands_where_it_hits_the_floor_and_a_snowball_shoves_a_cow() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let owner = Uuid::from_u128(5);
+        let pearl = store.insert(new_thrown(
+            Kind::EnderPearl,
+            Vec3::new(0.5, 64.4, 0.5),
+            Vec3::new(0.0, -1.0, 0.0),
+            Some(owner),
+        ));
+        let landings = tick_thrown(&mut store, &world, &[]);
+        assert_eq!(landings.len(), 1);
+        assert_eq!(landings[0].kind, Kind::EnderPearl);
+        assert_eq!(landings[0].owner, Some(owner));
+        assert!(store.flags(pearl).unwrap().has(Flags::REMOVED));
+
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 5.0),
+            &mut Rng::new(2),
+        ));
+        store.insert(new_thrown(
+            Kind::Snowball,
+            Vec3::new(0.5, 64.9, 0.5),
+            Vec3::new(0.0, 0.0, 1.5),
+            None,
+        ));
+        let mut landed = Vec::new();
+        for _ in 0..20 {
+            landed = tick_thrown(&mut store, &world, &[]);
+            if !landed.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(landed[0].kind, Kind::Snowball);
+        assert!(store.vel(cow).unwrap().z > 0.1, "the cow was shoved");
+        assert_eq!(
+            mob::state(&store, cow).unwrap().health,
+            MobKind::Cow.max_health(),
+            "snowballs do no damage"
+        );
     }
 
     #[test]

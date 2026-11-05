@@ -140,8 +140,17 @@ pub fn entity_command(call: &HostCall) -> Option<PlayerCommand> {
 }
 
 pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
-    if call.owner != "World"
-        || Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id()
+    // A player shoots from their own eyes (`Player#launchProjectile`); everything else is a
+    // `World` call on the default world.
+    let from_player = call.owner == "Player"
+        && matches!(
+            call.method.as_str(),
+            "spawnArrow(Location,double,double,double,String)"
+                | "launchThrown(Location,EntityType,double,double,double,String,String)"
+        );
+    if !from_player
+        && (call.owner != "World"
+            || Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id())
     {
         return None;
     }
@@ -157,7 +166,22 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
     ];
     let mut velocity = [0.0; 3];
     let uuid = Uuid::parse_str(call.args.last()?).ok()?;
+    let mut owner = None;
     let (kind, block) = match call.method.as_str() {
+        "launchThrown(Location,EntityType,double,double,double,String,String)" => {
+            let kind = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
+            ferrite_entity::arrow::Kind::thrown_from_name(&kind)?;
+            velocity = [
+                number(call.args.get(2)?)?,
+                number(call.args.get(3)?)?,
+                number(call.args.get(4)?)?,
+            ];
+            if velocity.iter().map(|v| v * v).sum::<f64>() > 10.0 * 10.0 {
+                return None;
+            }
+            owner = Uuid::parse_str(call.args.get(5)?).ok();
+            (kind, None)
+        }
         "spawnArrow(Location,double,double,double,String)" => {
             velocity = [
                 number(call.args.get(1)?)?,
@@ -173,6 +197,7 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         "spawnEntity(Location,EntityType,String)" => {
             let kind = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
             let modelled = matches!(kind.as_str(), "minecraft:tnt")
+                || ferrite_entity::arrow::Kind::thrown_from_name(&kind).is_some()
                 || ferrite_entity::mob::MobKind::from_name(&kind).is_some();
             if !modelled {
                 return None;
@@ -187,6 +212,7 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         _ => return None,
     };
     Some(PlayerCommand::SpawnEntity {
+        owner,
         center,
         kind,
         block,
@@ -282,6 +308,7 @@ mod tests {
         assert_eq!(
             spawn("spawnEntity(Location,EntityType,String)", "COW"),
             Some(PlayerCommand::SpawnEntity {
+                owner: None,
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:cow".into(),
                 block: None,
@@ -297,6 +324,7 @@ mod tests {
         assert_eq!(
             spawn("spawnFallingBlock(Location,Material,String)", "SAND"),
             Some(PlayerCommand::SpawnEntity {
+                owner: None,
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:falling_block".into(),
                 block: Some("minecraft:sand".into()),
@@ -317,6 +345,7 @@ mod tests {
         assert_eq!(
             shot,
             Some(PlayerCommand::SpawnEntity {
+                owner: None,
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:arrow".into(),
                 block: None,
@@ -324,6 +353,25 @@ mod tests {
                 uuid: Uuid::from_u128(9)
             })
         );
+        assert!(matches!(
+            spawn_command(&call(
+                "launchThrown(Location,EntityType,double,double,double,String,String)",
+                &[
+                    &at,
+                    "ENDER_PEARL",
+                    "0",
+                    "0.5",
+                    "1.5",
+                    "00000000-0000-0000-0000-0000000000aa",
+                    "00000000-0000-0000-0000-000000000009",
+                ],
+            )),
+            Some(PlayerCommand::SpawnEntity {
+                owner: Some(_),
+                velocity: [0.0, 0.5, 1.5],
+                ..
+            })
+        ));
         assert_eq!(
             spawn_command(&call(
                 "spawnArrow(Location,double,double,double,String)",

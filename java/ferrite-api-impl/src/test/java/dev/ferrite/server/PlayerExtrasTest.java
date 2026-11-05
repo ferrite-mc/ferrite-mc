@@ -644,4 +644,18 @@ class PlayerExtrasTest {
             assertEquals(io.papermc.paper.world.chunk.ChunkGenerationState.NOT_GENERATED, world.getChunkGenerationState(2, 0));
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void thrownProjectilesAreLaunchedWithTheirOwner() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(owner + "#" + method); return ""; };
+        try {
+            var pearl = player.launchProjectile(org.bukkit.entity.EnderPearl.class);
+            assertEquals(org.bukkit.entity.EntityType.ENDER_PEARL, pearl.getType());
+            player.launchProjectile(org.bukkit.entity.Snowball.class);
+            player.launchProjectile(org.bukkit.entity.Arrow.class);
+            assertTrue(calls.contains("Player#launchThrown(Location,EntityType,double,double,double,String,String)"), calls.toString());
+            assertTrue(calls.contains("Player#spawnArrow(Location,double,double,double,String)"), calls.toString());
+            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.Fireball.class));
+        } finally { HostBridge.transport = null; }
+    }
 }

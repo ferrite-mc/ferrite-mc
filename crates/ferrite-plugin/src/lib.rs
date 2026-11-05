@@ -429,6 +429,8 @@ pub enum PlayerCommand {
     },
     /// `World#spawnEntity` / `spawnFallingBlock` on the default world.
     SpawnEntity {
+        /// The shooter of a projectile.
+        owner: Option<uuid::Uuid>,
         center: [f64; 3],
         /// The `minecraft:` entity type key.
         kind: String,

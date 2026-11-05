@@ -1315,10 +1315,10 @@ async fn run(
                         }
                     }
                 }
-                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { center, kind, block, velocity, uuid }) => {
+                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { owner, center, kind, block, velocity, uuid }) => {
                     let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid); });
+                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid, owner); });
                     }
                 }
                  Some(ferrite_plugin::PlayerCommand::EntityOp { uuid, op }) => {

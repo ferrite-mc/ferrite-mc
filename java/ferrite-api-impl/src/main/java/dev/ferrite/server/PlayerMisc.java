@@ -216,16 +216,22 @@ public abstract class PlayerMisc extends PlayerStubs {
         return result;
     }
     // ---- projectiles ----------------------------------------------------------------------------
-    /** Shoots an arrow from the eyes; other projectile kinds are not modelled by the game yet. */
+    /** Shoots an arrow, snowball, egg or ender pearl from the eyes. */
     @Override public <T extends org.bukkit.entity.Projectile> T launchProjectile(Class<? extends T> projectile, org.bukkit.util.Vector velocity, java.util.function.Consumer<? super T> callback) {
         Objects.requireNonNull(projectile, "projectile");
-        if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
+        org.bukkit.entity.EntityType thrown = null;
+        if (org.bukkit.entity.Snowball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SNOWBALL;
+        else if (org.bukkit.entity.Egg.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.EGG;
+        else if (org.bukkit.entity.EnderPearl.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.ENDER_PEARL;
+        else if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
         var eye = getEyeLocation();
-        var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(3.0);
+        var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(thrown != null ? 1.5 : 3.0);
         var uuid = UUID.randomUUID();
-        @SuppressWarnings("unchecked") var handle = (T) SpawnedEntity.of(org.bukkit.entity.EntityType.ARROW, eye, getWorld(), uuid);
+        var type = thrown != null ? thrown : org.bukkit.entity.EntityType.ARROW;
+        @SuppressWarnings("unchecked") var handle = (T) SpawnedEntity.of(type, eye, getWorld(), uuid);
         if (callback != null) callback.accept(handle);
-        tellHost("spawnArrow(Location,double,double,double,String)", eye, direction.getX(), direction.getY(), direction.getZ(), uuid.toString());
+        if (thrown != null) tellHost("launchThrown(Location,EntityType,double,double,double,String,String)", eye, thrown, direction.getX(), direction.getY(), direction.getZ(), getUniqueId().toString(), uuid.toString());
+        else tellHost("spawnArrow(Location,double,double,double,String)", eye, direction.getX(), direction.getY(), direction.getZ(), uuid.toString());
         return handle;
     }
 
