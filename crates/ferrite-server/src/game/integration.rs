@@ -509,6 +509,58 @@ fn read_palette_value(data: &mut &[u8], entries: usize, max_local_bits: u8, inde
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_portal_moves_player_to_obsidian_platform() {
+    use ferrite_protocol::packets::play::Respawn;
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    loop {
+        if let Some(result) = source.get(0, 0, 0) {
+            result.expect("load spawn chunk");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let world = World::start_with(Some(source.clone()), [0, 65, 0]);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "EndTraveler").await;
+    source
+        .set_block(
+            0,
+            65,
+            0,
+            u32::from(ferrite_data::blocks::default_state("minecraft:end_portal").unwrap()),
+        )
+        .unwrap();
+    let packet = tokio::time::timeout(std::time::Duration::from_secs(60), bot.until(Respawn::ID))
+        .await
+        .expect("end portal travel");
+    let respawn = Respawn::decode(&mut packet.as_slice()).unwrap();
+    assert_eq!(respawn.dimension, "minecraft:the_end");
+    let packet = bot.until(PositionSync::ID).await;
+    let pos = PositionSync::decode(&mut packet.as_slice()).unwrap();
+    assert_eq!([pos.x, pos.y, pos.z], [100.5, 49.0, 0.5]);
+    let end = world.dimensions().source(super::Dimension::End);
+    assert_eq!(
+        end.block(100, 48, 0),
+        Some(u32::from(
+            ferrite_data::blocks::default_state("minecraft:obsidian").unwrap()
+        ))
+    );
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn operator_teleport_command_moves_player() {
     let world = World::start_configured(
         None,
