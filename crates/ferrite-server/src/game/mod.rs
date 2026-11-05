@@ -1,5 +1,6 @@
 mod anvil;
 mod attributes;
+mod ride;
 mod slot_ops;
 mod structure_template;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn};
@@ -1163,7 +1164,7 @@ async fn run(
               }}
           }},
           GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
-          GameMessage::Left{session,uuid}=>{if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
+          GameMessage::Left{session,uuid}=>{ride::forget(uuid); if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
             if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);}},
           GameMessage::Console{command,complete}=>{
               let (actions, mut received) = mpsc::unbounded_channel();
@@ -1347,6 +1348,29 @@ async fn run(
              }
              let runs = tick_control.begin_game_tick();
              let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
+             let ride_steps = ride::plan(&command_state.lock().unwrap());
+             for step in ride_steps {
+                 match step {
+                     ride::Step::Move { rider, rider_is_player, rider_pos, rider_rot, to } => {
+                         if rider_is_player {
+                             if let Some((_, mailbox, _)) = mailboxes.get(&rider) {
+                                 mailbox.lock().unwrap().push_back(Command::Teleport { pos: to, yaw: None, pitch: None });
+                             }
+                         } else {
+                             let chunk = ChunkPos((rider_pos[0].floor() as i32) >> 4, (rider_pos[2].floor() as i32) >> 4);
+                             if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                                 worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.teleport_entity(rider, to, rider_rot.0, rider_rot.1); });
+                             }
+                         }
+                     }
+                     ride::Step::Detach { vehicle } => {
+                         let packet = ride::passengers_packet(&command_state.lock().unwrap(), &online, vehicle);
+                         if let Some(bytes) = packet {
+                             for player in online.values() { let _ = player.outbound.send(Outbound::Packet(bytes.clone().into())); }
+                         }
+                     }
+                 }
+             }
              for uuid in idle { if let Some((_, _, outbound)) = mailboxes.get(&uuid) { let _ = outbound.send(Outbound::Disconnect(commands::Feedback::new("multiplayer.disconnect.idling", vec![]).text)); } }
              for function in due {
                  let (complete, _unused) = oneshot::channel();
@@ -2071,6 +2095,70 @@ impl CommandRuntime<'_> {
                 yaw: Some(yaw),
                 pitch: Some(pitch),
             });
+        }
+    }
+
+    fn run_ride(
+        &self,
+        target: &ferrite_command::arguments::EntityTarget,
+        vehicle: Option<&ferrite_command::arguments::EntityTarget>,
+    ) {
+        let first = |target| match self.selection(target) {
+            Ok(list) => list.into_iter().next().ok_or(()),
+            Err(error) => {
+                self.reply.text(&error.to_string());
+                Err(())
+            }
+        };
+        let Ok(rider) = first(target) else {
+            return;
+        };
+        let Some(vehicle) = vehicle else {
+            match ride::dismount(rider.uuid) {
+                Some(old) => {
+                    self.broadcast_passengers(old);
+                    self.reply
+                        .key("commands.ride.dismount.success", &[&rider.name]);
+                }
+                None => self.reply.key("commands.ride.not_riding", &[&rider.name]),
+            }
+            return;
+        };
+        let Ok(vehicle) = first(vehicle) else {
+            return;
+        };
+        if let Some(current) = ride::vehicle_of(rider.uuid) {
+            let _ = current;
+            self.reply.key(
+                "commands.ride.already_riding",
+                &[&rider.name, &vehicle.name],
+            );
+            return;
+        }
+        match ride::mount(rider.uuid, vehicle.uuid, vehicle.player) {
+            Ok(()) => {
+                self.broadcast_passengers(vehicle.uuid);
+                self.reply
+                    .key("commands.ride.mount.success", &[&rider.name, &vehicle.name]);
+            }
+            Err(ride::MountError::CannotRidePlayer) => self
+                .reply
+                .key("commands.ride.mount.failure.cant_ride_players", &[]),
+            Err(ride::MountError::Loop) => self.reply.key("commands.ride.mount.failure.loop", &[]),
+            Err(_) => self.reply.key(
+                "commands.ride.mount.failure.generic",
+                &[&rider.name, &vehicle.name],
+            ),
+        }
+    }
+
+    /// Tells every online player who sits on `vehicle` now.
+    fn broadcast_passengers(&self, vehicle: Uuid) {
+        let state = self.state.lock().unwrap();
+        if let Some(bytes) = ride::passengers_packet(&state, &*self.online, vehicle) {
+            for player in self.online.values() {
+                let _ = player.outbound.send(Outbound::Packet(bytes.clone().into()));
+            }
         }
     }
 
@@ -2914,6 +3002,10 @@ impl CommandRuntime<'_> {
                 source,
             } => {
                 self.run_slots(mode, target, slots, source);
+                false
+            }
+            Action::Ride { target, vehicle } => {
+                self.run_ride(&target, vehicle.as_ref());
                 false
             }
             Action::DropItems { pos, stacks } => {

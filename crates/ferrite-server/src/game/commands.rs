@@ -584,6 +584,11 @@ pub enum Action {
         pos: [f64; 3],
         stacks: Vec<ferrite_item::ItemStack>,
     },
+    /// `/ride <target> mount <vehicle>` or `dismount` (`vehicle` is `None`).
+    Ride {
+        target: EntityTarget,
+        vehicle: Option<EntityTarget>,
+    },
     /// `/swing`: arm swing animation of the targets (`Animate` action 0 or 3).
     Swing {
         targets: EntityTarget,
@@ -2595,6 +2600,14 @@ mod tests {
             assert_eq!(feedback_key(&actions), Some("commands.compute.success"));
         }
         assert!(run("waypoint modify @s style set", 2).0.is_err());
+        for (line, mount) in [("ride @s dismount", false), ("ride @s mount @s", true)] {
+            let (result, actions) = run(line, 2);
+            assert!(result.is_ok(), "{line}: {result:?}");
+            assert!(
+                matches!(actions.first(), Some(Action::Ride { vehicle, .. }) if vehicle.is_some() == mount),
+                "{line}: {actions:?}"
+            );
+        }
     }
 
     #[test]

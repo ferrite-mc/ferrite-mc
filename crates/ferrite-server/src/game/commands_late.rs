@@ -440,17 +440,23 @@ fn ride_tree() -> NodeBuilder<Source> {
         .then(
             argument::<Source>("target", ArgumentType::entity())
                 .then(literal::<Source>("dismount").executes(|ctx| {
-                    let uuids = resolved_targets(ctx, "target")?;
-                    let name = uuids.first().map(ToString::to_string).unwrap_or_default();
-                    Err(failure("commands.ride.not_riding", vec![name]))
+                    send(
+                        ctx.source(),
+                        Action::Ride {
+                            target: super::commands::entity(ctx, "target")?,
+                            vehicle: None,
+                        },
+                    )
                 }))
                 .then(literal::<Source>("mount").then(
                     argument::<Source>("vehicle", ArgumentType::entity()).executes(|ctx| {
-                        resolved_targets(ctx, "target")?;
-                        resolved_targets(ctx, "vehicle")?;
-                        Err(CommandError::failed(
-                            "Ferrite: riding entities is not supported yet",
-                        ))
+                        send(
+                            ctx.source(),
+                            Action::Ride {
+                                target: super::commands::entity(ctx, "target")?,
+                                vehicle: Some(super::commands::entity(ctx, "vehicle")?),
+                            },
+                        )
                     }),
                 )),
         )

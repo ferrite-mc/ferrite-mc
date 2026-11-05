@@ -37,8 +37,11 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   the vanilla data, so `modify` and any `<modifier>` fail with `argument.item_modifier.unknown`.
   Non-player entities have no inventory here, so only players are written. Feedback texts are
   from memory.
-- `/ride`: syntax only; `mount` fails ("not supported", no passenger model), `dismount` always
-  reports "not riding".
+- `/ride <target> mount <vehicle>|dismount`: rides live in a server-side table; the client gets
+  `set_passengers` (id 109) for everyone online, and every tick the rider is teleported to the
+  vehicle's position + 0.6 blocks. Sneaking dismounts. Not simulated: vehicle steering, per-type
+  seat offsets, riding across dimensions, riders surviving a vehicle's region hand-off smoothly.
+  Players cannot be ridden. Untested against a real client.
 - `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]` places the block
   palette of a structure template with vanilla's mirror-then-rotate transform about the
   origin, rotating/mirroring `facing`, `axis`, `rotation` and `north/east/south/west`

@@ -200,6 +200,7 @@ packet!(EntityRotation,57,Clientbound,{id:VarInt,on_ground:bool,yaw:u8,pitch:u8}
 packet!(EntityHeadRotation,85,Clientbound,{id:VarInt,yaw:u8});
 packet!(EntityTeleport,35,Clientbound,{id:VarInt,path_type:VarInt,x:f64,y:f64,z:f64,yaw:f32,pitch:f32,on_ground:bool});
 packet!(RemoveEntities,78,Clientbound,{ids:Vec<VarInt>});
+packet!(SetPassengers,109,Clientbound,{vehicle:VarInt,passengers:Vec<VarInt>});
 packet!(PlayerInfoRemove,70,Clientbound,{uuids:Vec<Uuid>});
 packet!(SystemChat,124,Clientbound,{content:crate::types::PlainText,overlay:bool});
 packet!(ChunkBatchReceived,11,Serverbound,{chunks_per_tick:f32});
@@ -1472,6 +1473,19 @@ mod interaction_tests {
         let mut bytes = Vec::new();
         ClearDialog.encode(&mut bytes);
         assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn set_passengers_roundtrips_with_the_vanilla_id() {
+        assert_eq!(SetPassengers::ID, 109);
+        roundtrip(SetPassengers {
+            vehicle: VarInt(12),
+            passengers: vec![VarInt(3), VarInt(400)],
+        });
+        roundtrip(SetPassengers {
+            vehicle: VarInt(12),
+            passengers: vec![],
+        });
     }
 
     #[test]

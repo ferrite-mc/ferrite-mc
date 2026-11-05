@@ -3046,6 +3046,10 @@ impl Player {
                 }
                 ServerboundPlay::PlayerInput(p) => {
                     crate::plugins::facts::set_input(self.uuid, p.flags);
+                    // Input bit 5 is sneak: it gets a rider off its vehicle.
+                    if p.flags & 0x20 != 0 {
+                        super::ride::request_dismount(self.uuid);
+                    }
                 }
                 ServerboundPlay::PlayerCommand(p) => {
                     // Vanilla `ServerboundPlayerCommandPacket.Action.STOP_SLEEPING` (2).
