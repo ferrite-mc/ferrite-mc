@@ -2376,7 +2376,10 @@ impl Player {
             let scaled = match (self.dimension, target) {
                 (super::Dimension::Overworld, super::Dimension::End) => super::portal::END_ARRIVAL,
                 (super::Dimension::End, super::Dimension::Overworld) => {
-                    let spawn = self.dimensions.spawn(super::Dimension::Overworld);
+                    // Leaving the end lands on the bed (respawn point), else at the world spawn.
+                    let spawn = self
+                        .spawn
+                        .unwrap_or_else(|| self.dimensions.spawn(super::Dimension::Overworld));
                     [
                         f64::from(spawn[0]) + 0.5,
                         f64::from(spawn[1]),
