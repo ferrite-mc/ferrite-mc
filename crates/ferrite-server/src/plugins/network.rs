@@ -441,6 +441,43 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
                 sb_name(arg(1)?)?
             },
         }),
+        "sbTeam(String,int,String,String)" => {
+            let name = arg(0)?;
+            if name.is_empty() || name.chars().count() > 16 || name.chars().any(char::is_control) {
+                return None;
+            }
+            let method = arg(1)?.parse::<u8>().ok().filter(|m| *m <= 3)?;
+            let params: Vec<String> = if method == 0 {
+                let parts: Vec<&str> = arg(2)?.split(PART).collect();
+                let [display, flags, tag, collision, color, prefix, suffix] = parts[..] else {
+                    return None;
+                };
+                flags.parse::<u8>().ok().filter(|f| *f <= 3)?;
+                color.parse::<i32>().ok().filter(|c| (0..=21).contains(c))?;
+                if !["always", "never", "hideForOtherTeams", "hideForOwnTeam"].contains(&tag)
+                    || !["always", "never", "pushOtherTeams", "pushOwnTeam"].contains(&collision)
+                {
+                    return None;
+                }
+                [display, flags, tag, collision, color, prefix, suffix]
+                    .iter()
+                    .map(|text| text.chars().filter(|c| !c.is_control()).take(256).collect())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let players: Vec<String> = arg(3)?
+                .split(PART)
+                .filter(|player| !player.is_empty())
+                .map(sb_owner)
+                .collect::<Option<_>>()?;
+            PluginPacket::Scoreboard(ScoreboardStep::Team {
+                name: name.to_owned(),
+                method,
+                params,
+                players,
+            })
+        }
         "bossBarAdd(String,String,float,int,int,int)" => {
             PluginPacket::BossBar(BossBarChange::Add {
                 id: Uuid::parse_str(arg(0)?).ok()?,
@@ -983,6 +1020,41 @@ mod tests {
                 objective: "kills".into(),
                 score: -4
             }))
+        );
+        let params = ["Red", "3", "never", "pushOwnTeam", "12", "[R] ", ""].join(&PART.to_string());
+        assert_eq!(
+            packet(call(
+                "sbTeam(String,int,String,String)",
+                &["red", "0", &params, "Alex"]
+            )),
+            Some(PluginPacket::Scoreboard(ScoreboardStep::Team {
+                name: "red".into(),
+                method: 0,
+                params: ["Red", "3", "never", "pushOwnTeam", "12", "[R] ", ""]
+                    .map(String::from)
+                    .to_vec(),
+                players: vec!["Alex".into()],
+            }))
+        );
+        assert_eq!(
+            packet(call(
+                "sbTeam(String,int,String,String)",
+                &["red", "1", "", ""]
+            )),
+            Some(PluginPacket::Scoreboard(ScoreboardStep::Team {
+                name: "red".into(),
+                method: 1,
+                params: vec![],
+                players: vec![],
+            }))
+        );
+        let bad = ["Red", "9", "never", "pushOwnTeam", "12", "", ""].join(&PART.to_string());
+        assert_eq!(
+            packet(call(
+                "sbTeam(String,int,String,String)",
+                &["red", "0", &bad, ""]
+            )),
+            None
         );
         let bar = Uuid::from_u128(9).to_string();
         assert_eq!(

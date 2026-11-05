@@ -826,6 +826,33 @@ impl Player {
                             display_name: None,
                         },
                     ),
+                    S::Team {
+                        name,
+                        method,
+                        params,
+                        players,
+                    } => {
+                        use ferrite_protocol::packets::play::TeamAction;
+                        let action = match method {
+                            0 => {
+                                let [display, flags, tag, collision, color, prefix, suffix] =
+                                    <[String; 7]>::try_from(params).unwrap_or_default();
+                                TeamAction::Add {
+                                    display_name: PlainText(display),
+                                    flags: flags.parse().unwrap_or(0),
+                                    nametag_visibility: tag,
+                                    collision_rule: collision,
+                                    color: VarInt(color.parse().unwrap_or(21)),
+                                    prefix: PlainText(prefix),
+                                    suffix: PlainText(suffix),
+                                }
+                            }
+                            1 => TeamAction::Remove,
+                            2 => TeamAction::Join(players),
+                            _ => TeamAction::Leave(players),
+                        };
+                        send(self, &p::PlayerTeam { name, action });
+                    }
                     S::Reset { owner, objective } => send(
                         self,
                         &p::ResetScore {

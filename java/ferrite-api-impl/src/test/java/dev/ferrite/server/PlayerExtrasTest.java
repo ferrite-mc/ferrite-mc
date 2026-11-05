@@ -457,4 +457,27 @@ class PlayerExtrasTest {
             "sbReset(String,String)|Alex,kills",
             "sbObjective(String,int,String,int)|kills,1,,0"), calls);
     }
+
+    @Test void teamsAreSentAndChangesFollow() {
+        var calls = new java.util.ArrayList<String>();
+        var part = String.valueOf(HostBridge.ITEM);
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args.replace(String.valueOf(HostBridge.ARG), ";").replace(part, ",")); return ""; };
+        try {
+            var board = org.bukkit.Bukkit.getScoreboardManager().getNewScoreboard();
+            var team = board.registerNewTeam("red");
+            team.addEntry("Alex");
+            team.color(net.kyori.adventure.text.format.NamedTextColor.RED);
+            player.setScoreboard(board);
+            team.addEntry("Bob");
+            team.setAllowFriendlyFire(false);
+            team.unregister();
+            player.setScoreboard(org.bukkit.Bukkit.getScoreboardManager().getNewScoreboard());
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of(
+            "sbTeam(String,int,String,String)|red;0;red,3,always,always,12,,;Alex",
+            "sbTeam(String,int,String,String)|red;2;;Bob",
+            "sbTeam(String,int,String,String)|red;1;;",
+            "sbTeam(String,int,String,String)|red;0;red,2,always,always,12,,;Alex,Bob",
+            "sbTeam(String,int,String,String)|red;1;;"), calls);
+    }
 }

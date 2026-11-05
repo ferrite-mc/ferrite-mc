@@ -13,6 +13,8 @@ final class ScoreboardView {
 
     private final BiConsumer<String, Object[]> sender;
     private final Map<String, Known> known = new HashMap<>();
+    private record KnownTeam(String params, java.util.Set<String> entries) { }
+    private final Map<String, KnownTeam> knownTeams = new HashMap<>();
     private Runnable stopWatching = () -> { };
 
     ScoreboardView(BiConsumer<String, Object[]> sender) { this.sender = sender; }
@@ -26,7 +28,38 @@ final class ScoreboardView {
         stopWatching = FerriteScoreboards.watch(board, () -> refresh(board));
     }
 
+    private static final String TEAM = "sbTeam(String,int,String,String)";
+
+    private static String joined(java.util.Collection<String> players) { return String.join(String.valueOf(HostBridge.ITEM), players); }
+
+    private void refreshTeams(org.bukkit.scoreboard.Scoreboard board) {
+        var wanted = new HashMap<String, FerriteScoreboards.TeamShown>();
+        for (var team : FerriteScoreboards.teams(board)) wanted.put(team.name(), team);
+        for (var name : new java.util.ArrayList<>(knownTeams.keySet())) {
+            if (wanted.containsKey(name)) continue;
+            send(TEAM, name, 1, "", "");
+            knownTeams.remove(name);
+        }
+        for (var team : wanted.values()) {
+            var old = knownTeams.get(team.name());
+            if (old == null || !old.params().equals(team.params())) {
+                // A changed team is rebuilt: removed, created again and refilled.
+                if (old != null) send(TEAM, team.name(), 1, "", "");
+                send(TEAM, team.name(), 0, team.params(), joined(team.entries()));
+            } else {
+                var joining = new java.util.TreeSet<>(team.entries());
+                joining.removeAll(old.entries());
+                var leaving = new java.util.TreeSet<>(old.entries());
+                leaving.removeAll(team.entries());
+                if (!joining.isEmpty()) send(TEAM, team.name(), 2, "", joined(joining));
+                if (!leaving.isEmpty()) send(TEAM, team.name(), 3, "", joined(leaving));
+            }
+            knownTeams.put(team.name(), new KnownTeam(team.params(), new java.util.TreeSet<>(team.entries())));
+        }
+    }
+
     synchronized void refresh(org.bukkit.scoreboard.Scoreboard board) {
+        refreshTeams(board);
         var wanted = new HashMap<String, FerriteScoreboards.Shown>();
         for (var shown : FerriteScoreboards.shown(board)) wanted.put(shown.name(), shown);
         for (var name : new java.util.ArrayList<>(known.keySet())) {
@@ -63,5 +96,7 @@ final class ScoreboardView {
         stopWatching = () -> { };
         for (var name : known.keySet()) send("sbObjective(String,int,String,int)", name, 1, "", 0);
         known.clear();
+        for (var name : knownTeams.keySet()) send(TEAM, name, 1, "", "");
+        knownTeams.clear();
     }
 }

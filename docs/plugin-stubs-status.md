@@ -30,7 +30,7 @@ CMI가 동작한다고 말할 수 없다.
 
 - `createExplosion`은 `breakBlocks=false`를 거절한다(블록 파괴를 끌 수 없음).
 - `openMerchant`의 거래 횟수가 플러그인 레시피에 반영되지 않는다.
-- 스코어보드: 접속 시 메인 스코어보드는 자동으로 보이지 않는다(`setScoreboard`를 불러야 보인다). 팀/플레이어 팀 패킷은 보내지 않는다.
+- 스코어보드: 접속 시 메인 스코어보드는 자동으로 보이지 않는다(`setScoreboard`를 불러야 보인다). 팀은 `setScoreboard` 때 클라이언트에 보내고 변경을 따라간다(이름 색·충돌·네임태그 설정, 접두/접미사는 일반 텍스트만).
 - 핸들 읽기는 소유 리전이 한 틱 뒤 공개하는 값이라, 스폰 직후에는 처음 위치를 돌려줄 수 있다.
 - 엔티티 연산은 오버월드만 지원한다.
 - 패킷 구조(보스바, 스코어보드, 쿠키 등)는 바닐라 형식에 맞춘 것이며 실제 클라이언트로 검증하지 않았다.
@@ -52,7 +52,7 @@ CMI가 동작한다고 말할 수 없다.
   청크를 실제로 로드 상태로 붙잡아 두지는 않는다.)
 - **기타:** `openBook`(아이템에 written_book 구성요소 없음),
   `sendGameEvent`, `findLightningRod/Target`,
-  `sendMap`/`sendBlockUpdate(TileState)`, 스코어보드 팀 패킷.
+  `sendMap`/`sendBlockUpdate(TileState)`.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.
 
 ## 다음 단계 제안

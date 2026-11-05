@@ -46,7 +46,7 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
         public synchronized Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
             var result = call(self, method, args);
             switch (method.getName()) {
-                case "registerNewObjective", "clearSlot", "resetScores" -> touch();
+                case "registerNewObjective", "registerNewTeam", "clearSlot", "resetScores" -> touch();
                 default -> { }
             }
             return result;
@@ -131,6 +131,17 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
             }
             return result;
         }
+    }
+
+    /** A team as a client needs it: its settings as one text, and who is in it. */
+    record TeamShown(String name, String params, java.util.Set<String> entries) { }
+
+    static java.util.List<TeamShown> teams(org.bukkit.scoreboard.Scoreboard board) {
+        var state = STATES.get(board);
+        if (state == null) return java.util.List.of();
+        var result = new java.util.ArrayList<TeamShown>();
+        for (var team : state.teams.values()) result.add(new TeamShown(team.name, team.clientParams(), new java.util.TreeSet<>(team.entries)));
+        return result;
     }
 
     /** Runs the action whenever the board changes; the returned handle stops it. */
@@ -224,8 +235,48 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
 
         private void check() { if (teams.get(name) != this) throw new IllegalStateException("Team is unregistered"); }
 
-        @SuppressWarnings("unchecked")
+        private String status(org.bukkit.scoreboard.Team.Option option, String always, String never, String other, String own) {
+            return switch (options.getOrDefault(option, org.bukkit.scoreboard.Team.OptionStatus.ALWAYS)) {
+                case ALWAYS -> always;
+                case NEVER -> never;
+                case FOR_OTHER_TEAMS -> other;
+                case FOR_OWN_TEAM -> own;
+            };
+        }
+
+        /** The team's settings in the order the host expects, as plain text (formatting is dropped). */
+        String clientParams() {
+            var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
+            int colorId = 21;
+            if (color != null) {
+                var names = java.util.List.of("black", "dark_blue", "dark_green", "dark_aqua", "dark_red", "dark_purple", "gold", "gray", "dark_gray", "blue", "green", "aqua", "red", "light_purple", "yellow", "white");
+                int index = names.indexOf(NamedTextColor.NAMES.key(color));
+                if (index >= 0) colorId = index;
+            }
+            String part = String.valueOf(HostBridge.ITEM);
+            return String.join(part, plain.serialize(display), String.valueOf((friendlyFire ? 1 : 0) | (seeInvisible ? 2 : 0)),
+                status(org.bukkit.scoreboard.Team.Option.NAME_TAG_VISIBILITY, "always", "never", "hideForOtherTeams", "hideForOwnTeam"),
+                status(org.bukkit.scoreboard.Team.Option.COLLISION_RULE, "always", "never", "pushOtherTeams", "pushOwnTeam"),
+                String.valueOf(colorId), plain.serialize(prefix), plain.serialize(suffix));
+        }
+
+        private static final java.util.Set<String> CHANGES = java.util.Set.of("prefix", "setPrefix", "suffix", "setSuffix", "displayName", "setDisplayName",
+            "color", "setColor", "setAllowFriendlyFire", "setCanSeeFriendlyInvisibles", "setOption", "addEntry", "addPlayer", "addEntries", "addEntities",
+            "removeEntry", "removePlayer", "removeEntries", "unregister");
+
+        @Override
         public Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
+            var result = call(self, method, args);
+            boolean changes = CHANGES.contains(method.getName()) && (args != null && args.length > 0 || method.getName().equals("unregister"));
+            if (changes) {
+                var state = STATES.get(board);
+                if (state != null) state.touch();
+            }
+            return result;
+        }
+
+        @SuppressWarnings("unchecked")
+        private Object call(Object self, java.lang.reflect.Method method, Object[] args) {
             boolean none = args == null || args.length == 0;
             return switch (method.getName()) {
                 case "getName" -> name;
