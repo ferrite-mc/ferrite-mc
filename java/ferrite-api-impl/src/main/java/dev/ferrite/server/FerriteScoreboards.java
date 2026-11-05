@@ -235,19 +235,19 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
 
         private void check() { if (teams.get(name) != this) throw new IllegalStateException("Team is unregistered"); }
 
-        private String status(org.bukkit.scoreboard.Team.Option option, String always, String never, String other, String own) {
+        private int status(org.bukkit.scoreboard.Team.Option option) {
             return switch (options.getOrDefault(option, org.bukkit.scoreboard.Team.OptionStatus.ALWAYS)) {
-                case ALWAYS -> always;
-                case NEVER -> never;
-                case FOR_OTHER_TEAMS -> other;
-                case FOR_OWN_TEAM -> own;
+                case ALWAYS -> 0;
+                case NEVER -> 1;
+                case FOR_OTHER_TEAMS -> 2;
+                case FOR_OWN_TEAM -> 3;
             };
         }
 
         /** The team's settings in the order the host expects, as plain text (formatting is dropped). */
         String clientParams() {
             var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
-            int colorId = 21;
+            int colorId = -1;
             if (color != null) {
                 var names = java.util.List.of("black", "dark_blue", "dark_green", "dark_aqua", "dark_red", "dark_purple", "gold", "gray", "dark_gray", "blue", "green", "aqua", "red", "light_purple", "yellow", "white");
                 int index = names.indexOf(NamedTextColor.NAMES.key(color));
@@ -255,8 +255,8 @@ final class FerriteScoreboards implements org.bukkit.scoreboard.ScoreboardManage
             }
             String part = String.valueOf(HostBridge.ITEM);
             return String.join(part, plain.serialize(display), String.valueOf((friendlyFire ? 1 : 0) | (seeInvisible ? 2 : 0)),
-                status(org.bukkit.scoreboard.Team.Option.NAME_TAG_VISIBILITY, "always", "never", "hideForOtherTeams", "hideForOwnTeam"),
-                status(org.bukkit.scoreboard.Team.Option.COLLISION_RULE, "always", "never", "pushOtherTeams", "pushOwnTeam"),
+                String.valueOf(status(org.bukkit.scoreboard.Team.Option.NAME_TAG_VISIBILITY)),
+                String.valueOf(status(org.bukkit.scoreboard.Team.Option.COLLISION_RULE)),
                 String.valueOf(colorId), plain.serialize(prefix), plain.serialize(suffix));
         }
 

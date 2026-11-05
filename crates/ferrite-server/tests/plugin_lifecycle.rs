@@ -987,3 +987,168 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         "plugin did not write its disable marker:\n{logs}"
     );
 }
+
+/// A plugin calls the client-visible API (lightning, scoreboard, team, boss bar, equipment,
+/// sent chunks); the bot must receive the matching packets over the wire.
+#[test]
+fn plugin_api_calls_reach_the_client_as_packets() {
+    use ferrite_protocol::packets::play::{
+        AddEntity, BossBar, BossBarAction, PlayerTeam, SetDisplayObjective, SetEquipment,
+        SetObjective, SetScore, SoundEffect, TeamAction,
+    };
+    let java_home = match ferrite_jvm::find_java_home(None) {
+        Ok(home) => home.root().to_owned(),
+        Err(error) => {
+            eprintln!("Java 25 unavailable; skipping packet verification: {error}");
+            return;
+        }
+    };
+    let repo = repo_root();
+    let dir = tempfile::tempdir().unwrap();
+    let (plugin_jar, dependency_jar, bridge_jar) = build_jars(&repo, &java_home, dir.path());
+    let plugins = dir.path().join("plugins");
+    fs::create_dir(&plugins).unwrap();
+    fs::copy(plugin_jar, plugins.join("test-plugin.jar")).unwrap();
+    fs::copy(dependency_jar, plugins.join("test-dependency.jar")).unwrap();
+    fs::write(dir.path().join("eula.txt"), "eula=true\n").unwrap();
+    let port = free_port();
+    fs::write(
+        dir.path().join("ferrite.toml"),
+        format!(
+            "bind-address = \"127.0.0.1:{port}\"\nonline-mode = false\nview-distance = 2\nmotd = \"Packet check\"\ngenerator = \"superflat\"\nplugins-dir = \"plugins\"\nplugin-bridge = \"{}\"\n",
+            toml_path(&bridge_jar)
+        ),
+    )
+    .unwrap();
+    let mut process = Process(
+        Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
+            .current_dir(dir.path())
+            .env("JAVA_HOME", &java_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("starting the server"),
+    );
+    let (stdout, _stdout_reader) = capture(process.0.stdout.take().unwrap());
+    let (stderr, _stderr_reader) = capture(process.0.stderr.take().unwrap());
+    let enabled = plugins.join("TestPlugin/enabled.txt");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while !enabled.exists() {
+        assert!(
+            process.0.try_wait().unwrap().is_none() && Instant::now() < deadline,
+            "plugin did not enable:\n{}\n{}",
+            stdout.lock().unwrap(),
+            stderr.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = plugins.join("TestPlugin/events.txt");
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut bot = Bot::join(addr, "Bot", &stdout, &stderr);
+    wait_for_line(&events, "join Bot", &stdout, &stderr);
+    wait_for_prefix(&events, "chunk-load ", &stdout, &stderr);
+    bot.raw(7, "verify-features");
+    wait_for_prefix(&events, "verify chunk-sent ", &stdout, &stderr);
+    let report = fs::read_to_string(&events).unwrap();
+    assert!(
+        report
+            .lines()
+            .any(|line| line == "verify chunk-sent true sent-chunks>0 true"),
+        "chunks the client was sent were not reported:\n{report}"
+    );
+
+    let mut lightning = false;
+    let mut thunder = false;
+    let mut objective = None;
+    let mut displayed = None;
+    let mut score = None;
+    let mut team_added = None;
+    let mut boss = None;
+    let mut helmet = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let Some((id, body)) = bot.next_play() else {
+            continue;
+        };
+        let mut b = body.as_slice();
+        match id {
+            AddEntity::ID => {
+                let packet = AddEntity::decode(&mut b).unwrap();
+                lightning |= packet.entity_type.0 == 78;
+            }
+            SoundEffect::ID => thunder = true,
+            SetObjective::ID => objective = Some(SetObjective::decode(&mut b).unwrap()),
+            SetDisplayObjective::ID => {
+                displayed = Some(SetDisplayObjective::decode(&mut b).unwrap());
+            }
+            SetScore::ID => score = Some(SetScore::decode(&mut b).unwrap()),
+            PlayerTeam::ID => {
+                let packet = PlayerTeam::decode(&mut b).unwrap();
+                if matches!(packet.action, TeamAction::Add { .. }) {
+                    team_added = Some(packet);
+                }
+            }
+            BossBar::ID => boss = Some(BossBar::decode(&mut b).unwrap()),
+            SetEquipment::<ItemStack>::ID => {
+                helmet = Some(SetEquipment::<ItemStack>::decode(&mut b).unwrap());
+            }
+            _ => {}
+        }
+        if lightning
+            && thunder
+            && score.is_some()
+            && team_added.is_some()
+            && boss.is_some()
+            && helmet.is_some()
+        {
+            break;
+        }
+    }
+    let logs = format!("{}\n{}", stdout.lock().unwrap(), stderr.lock().unwrap());
+    assert!(
+        lightning,
+        "no lightning bolt entity reached the client:\n{logs}"
+    );
+    assert!(thunder, "no thunder sound reached the client");
+    let objective = objective.expect("no objective packet");
+    assert_eq!((objective.name.as_str(), objective.mode), ("verify", 0));
+    let displayed = displayed.expect("no display slot packet");
+    assert_eq!(
+        (displayed.slot.0, displayed.objective.as_str()),
+        (1, "verify")
+    );
+    let score = score.expect("no score packet");
+    assert_eq!(
+        (
+            score.entity.as_str(),
+            score.objective.as_str(),
+            score.value.0
+        ),
+        ("Bot", "verify", 7)
+    );
+    let team = team_added.expect("no team packet");
+    assert_eq!(team.name, "vteam");
+    match team.action {
+        TeamAction::Add { params, players } => {
+            assert_eq!(
+                params.color.map(|c| c.0),
+                Some(10),
+                "green is team color 10"
+            );
+            assert_eq!(players, vec!["Bot".to_owned()]);
+        }
+        _ => unreachable!(),
+    }
+    match boss.expect("no boss bar packet").action {
+        BossBarAction::Add { name, progress, .. } => {
+            assert_eq!(name.0, "Boss");
+            assert!((progress - 0.5).abs() < f32::EPSILON);
+        }
+        other => panic!("expected a boss bar add, got {other:?}"),
+    }
+    let helmet = helmet.expect("no equipment packet");
+    assert_eq!(helmet.slots.len(), 1);
+    assert_eq!(helmet.slots[0].0, 5, "head slot");
+    assert!(helmet.slots[0].1.count > 0, "the helmet was sent empty");
+}

@@ -474,10 +474,9 @@ class PlayerExtrasTest {
             player.setScoreboard(org.bukkit.Bukkit.getScoreboardManager().getNewScoreboard());
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of(
-            "sbTeam(String,int,String,String)|red;0;red,3,always,always,12,,;Alex",
-            "sbTeam(String,int,String,String)|red;2;;Bob",
-            "sbTeam(String,int,String,String)|red;1;;",
-            "sbTeam(String,int,String,String)|red;0;red,2,always,always,12,,;Alex,Bob",
+            "sbTeam(String,int,String,String)|red;0;red,3,0,0,12,,;Alex",
+            "sbTeam(String,int,String,String)|red;3;;Bob",
+            "sbTeam(String,int,String,String)|red;2;red,2,0,0,12,,;",
             "sbTeam(String,int,String,String)|red;1;;"), calls);
     }
 

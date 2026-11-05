@@ -191,8 +191,10 @@ pub enum ScoreboardStep {
     },
     /// Forgets an entry's score in one objective (or all when `objective` is empty).
     Reset { owner: String, objective: String },
-    /// A team: `method` 0 creates it from `params` (display name, flags, name tag visibility,
-    /// collision rule, color, prefix, suffix), 1 removes it, 2 adds `players`, 3 removes them.
+    /// A team (the client's `set_player_team` methods): 0 creates it from `params` and `players`,
+    /// 1 removes it, 2 changes its `params`, 3 adds `players`, 4 removes them. `params` are the
+    /// display name, options bits, name tag visibility id, collision rule id, color id (-1 none),
+    /// prefix and suffix.
     Team {
         name: String,
         method: u8,

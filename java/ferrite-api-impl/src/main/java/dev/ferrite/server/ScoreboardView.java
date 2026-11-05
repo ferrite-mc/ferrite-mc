@@ -42,17 +42,16 @@ final class ScoreboardView {
         }
         for (var team : wanted.values()) {
             var old = knownTeams.get(team.name());
-            if (old == null || !old.params().equals(team.params())) {
-                // A changed team is rebuilt: removed, created again and refilled.
-                if (old != null) send(TEAM, team.name(), 1, "", "");
+            if (old == null) {
                 send(TEAM, team.name(), 0, team.params(), joined(team.entries()));
             } else {
+                if (!old.params().equals(team.params())) send(TEAM, team.name(), 2, team.params(), "");
                 var joining = new java.util.TreeSet<>(team.entries());
                 joining.removeAll(old.entries());
                 var leaving = new java.util.TreeSet<>(old.entries());
                 leaving.removeAll(team.entries());
-                if (!joining.isEmpty()) send(TEAM, team.name(), 2, "", joined(joining));
-                if (!leaving.isEmpty()) send(TEAM, team.name(), 3, "", joined(leaving));
+                if (!joining.isEmpty()) send(TEAM, team.name(), 3, "", joined(joining));
+                if (!leaving.isEmpty()) send(TEAM, team.name(), 4, "", joined(leaving));
             }
             knownTeams.put(team.name(), new KnownTeam(team.params(), new java.util.TreeSet<>(team.entries())));
         }

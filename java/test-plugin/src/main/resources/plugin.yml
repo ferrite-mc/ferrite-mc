@@ -7,6 +7,9 @@ commands:
     aliases: [ft]
     description: Test command
     permission: ferrite.test
+  verify-features:
+    description: Exercises client-visible API calls for the end-to-end check
+    usage: /verify-features
   testping:
     aliases: [tping]
     description: Replies pong

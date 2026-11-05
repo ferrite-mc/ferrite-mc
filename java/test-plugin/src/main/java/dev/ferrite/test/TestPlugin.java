@@ -70,6 +70,24 @@ public final class TestPlugin extends JavaPlugin implements Listener {
         getLogger().info("FerriteTest settings " + getServer().getMotd() + " " + getServer().getMaxPlayers() + " " + getServer().getPort() + " " + getServer().getViewDistance() + " " + getServer().hasWhitelist());
         if (!getName().equals("FerriteLegacyTest")) getLogger().info(dev.ferrite.dependency.Helper.greeting());
         getCommand("testping").setExecutor((sender, command, label, args) -> { sender.sendMessage("pong"); return true; });
+        var verify = getCommand("verify-features");
+        if (verify != null) verify.setExecutor((sender, command, label, args) -> {
+            if (!(sender instanceof org.bukkit.entity.Player player)) return false;
+            var at = player.getLocation();
+            at.getWorld().strikeLightningEffect(at.clone().add(5, 0, 0));
+            var board = getServer().getScoreboardManager().getNewScoreboard();
+            var objective = board.registerNewObjective("verify", org.bukkit.scoreboard.Criteria.DUMMY, net.kyori.adventure.text.Component.text("Verify"));
+            objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+            objective.getScore("Bot").setScore(7);
+            var team = board.registerNewTeam("vteam");
+            team.color(net.kyori.adventure.text.format.NamedTextColor.GREEN);
+            team.addEntry("Bot");
+            player.setScoreboard(board);
+            player.showBossBar(net.kyori.adventure.bossbar.BossBar.bossBar(net.kyori.adventure.text.Component.text("Boss"), 0.5f, net.kyori.adventure.bossbar.BossBar.Color.RED, net.kyori.adventure.bossbar.BossBar.Overlay.PROGRESS));
+            player.sendEquipmentChange(player, org.bukkit.inventory.EquipmentSlot.HEAD, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_HELMET));
+            appendEvent("verify chunk-sent " + player.isChunkSent(org.bukkit.Chunk.getChunkKey(0, 0)) + " sent-chunks>0 " + (player.getSentChunks().size() > 0));
+            return true;
+        });
         getCommand("ferrite-test").setTabCompleter((sender, command, alias, args) -> java.util.List.of("hello"));
         getCommand("ferrite-test").setExecutor((sender, command, label, args) -> { if (sender instanceof org.bukkit.entity.Player player) { getLogger().info("offline snapshot " + getServer().getOfflinePlayer("KnownOffline").getUniqueId().equals(java.util.UUID.fromString("00000000-0000-0000-0000-00000000002c"))); getLogger().info("player snapshot " + player.getHealth() + " " + player.getFoodLevel() + " " + player.getGameMode()); var w = getServer().getWorld("probe_world"); if (w != null) { if (player.getInventory().getItem(0).getType() != org.bukkit.Material.STONE) throw new IllegalStateException("inventory snapshot"); player.getInventory().setItem(0, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIRT, 2)); getServer().setWhitelist(false); getServer().banIP("192.0.2.2"); player.displayName(net.kyori.adventure.text.Component.text("Display")); player.sendTitle("Title", "Subtitle", 1, 2, 3); player.playSound(player.getLocation(), "minecraft:entity.player.levelup", org.bukkit.SoundCategory.PLAYERS, 1.0f, 0.5f); player.kickPlayer("bye"); player.setOp(false); player.clearActivePotionEffects(); player.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.SPEED, 200, 1)); player.setHealth(10.0); player.setFoodLevel(9); player.setGameMode(org.bukkit.GameMode.ADVENTURE); if (player.getWorld() != w || !player.teleport(new org.bukkit.Location(w, 5, 70, 6))) throw new IllegalStateException("player routing"); if (w.getHighestBlockYAt(1, 2) != 64 || w.getChunkAt(0, 0).getBlock(1, 64, 2).getType() != org.bukkit.Material.STONE) throw new IllegalStateException("chunk snapshot"); var block = w.getBlockAt(1, 64, 2); getLogger().info("world snapshot " + w.getName() + " " + block.getType()); block.setType(org.bukkit.Material.DIRT); } } var api = getServer(); getLogger().info("surface-query " + api.getCurrentTick() + " " + api.matchPlayer("Ferrite").size() + " " + (api.getOfflinePlayerIfCached("KnownOffline") != null) + " " + api.isStopping() + " " + (api.shutdownMessage() == null) + " " + api.broadcast(net.kyori.adventure.text.Component.text("surface"), "ferrite.surface")); sender.sendMessage("hello " + String.join(" ", args)); dev.ferrite.server.Native.dispatchCommand((org.bukkit.command.CommandSender) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.command.ConsoleCommandSender.class}, (p, m, a) -> null), "spoof"); dev.ferrite.server.Native.dispatchCommand(sender, "bridge-command"); return true; });
         org.bukkit.World world = (org.bukkit.World) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.World.class}, (proxy, method, args) -> {

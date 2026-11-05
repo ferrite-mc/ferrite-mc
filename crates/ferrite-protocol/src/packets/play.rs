@@ -2210,19 +2210,57 @@ impl Packet for BossBar {
     const BOUND: Bound = Bound::Clientbound;
 }
 
-/// `minecraft:set_player_team`: 26.3 has one team packet with a method selector.
+/// The settings of a team in `minecraft:set_player_team` (read from the 26.3 server's
+/// `ClientboundSetPlayerTeamPacket.Parameters` codec). Visibility and collision rule are ids
+/// (always 0, never 1, hide-for-other-teams / push-other-teams 2, own-team 3); the color is a
+/// team color id 0..=15 or absent; `options` has bit 0 friendly fire and bit 1 see invisibles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamParams {
+    pub display_name: PlainText,
+    pub prefix: PlainText,
+    pub suffix: PlainText,
+    pub nametag_visibility: VarInt,
+    pub collision_rule: VarInt,
+    pub color: Option<VarInt>,
+    pub options: u8,
+}
+
+impl Encode for TeamParams {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.display_name.encode(out);
+        self.prefix.encode(out);
+        self.suffix.encode(out);
+        self.nametag_visibility.encode(out);
+        self.collision_rule.encode(out);
+        self.color.encode(out);
+        self.options.encode(out);
+    }
+}
+
+impl Decode for TeamParams {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        Ok(Self {
+            display_name: PlainText::decode(buf)?,
+            prefix: PlainText::decode(buf)?,
+            suffix: PlainText::decode(buf)?,
+            nametag_visibility: VarInt::decode(buf)?,
+            collision_rule: VarInt::decode(buf)?,
+            color: Option::decode(buf)?,
+            options: u8::decode(buf)?,
+        })
+    }
+}
+
+/// `minecraft:set_player_team`: method 0 adds a team (with its settings and members), 1 removes
+/// it, 2 changes its settings, 3 adds members and 4 removes them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TeamAction {
     Add {
-        display_name: PlainText,
-        flags: u8,
-        nametag_visibility: String,
-        collision_rule: String,
-        color: VarInt,
-        prefix: PlainText,
-        suffix: PlainText,
+        params: TeamParams,
+        players: Vec<String>,
     },
     Remove,
+    Change(TeamParams),
     Join(Vec<String>),
     Leave(Vec<String>),
 }
@@ -2232,8 +2270,9 @@ impl TeamAction {
         match self {
             Self::Add { .. } => 0,
             Self::Remove => 1,
-            Self::Join(_) => 2,
-            Self::Leave(_) => 3,
+            Self::Change(_) => 2,
+            Self::Join(_) => 3,
+            Self::Leave(_) => 4,
         }
     }
 }
@@ -2249,24 +2288,12 @@ impl Encode for PlayerTeam {
         self.name.encode(out);
         self.action.method().encode(out);
         match &self.action {
-            TeamAction::Add {
-                display_name,
-                flags,
-                nametag_visibility,
-                collision_rule,
-                color,
-                prefix,
-                suffix,
-            } => {
-                display_name.encode(out);
-                flags.encode(out);
-                nametag_visibility.encode(out);
-                collision_rule.encode(out);
-                color.encode(out);
-                prefix.encode(out);
-                suffix.encode(out);
+            TeamAction::Add { params, players } => {
+                params.encode(out);
+                players.encode(out);
             }
             TeamAction::Remove => {}
+            TeamAction::Change(params) => params.encode(out),
             TeamAction::Join(players) | TeamAction::Leave(players) => players.encode(out),
         }
     }
@@ -2278,17 +2305,13 @@ impl Decode for PlayerTeam {
         let method = u8::decode(buf)?;
         let action = match method {
             0 => TeamAction::Add {
-                display_name: PlainText::decode(buf)?,
-                flags: u8::decode(buf)?,
-                nametag_visibility: String::decode(buf)?,
-                collision_rule: String::decode(buf)?,
-                color: VarInt::decode(buf)?,
-                prefix: PlainText::decode(buf)?,
-                suffix: PlainText::decode(buf)?,
+                params: TeamParams::decode(buf)?,
+                players: Vec::decode(buf)?,
             },
             1 => TeamAction::Remove,
-            2 => TeamAction::Join(Vec::decode(buf)?),
-            3 => TeamAction::Leave(Vec::decode(buf)?),
+            2 => TeamAction::Change(TeamParams::decode(buf)?),
+            3 => TeamAction::Join(Vec::decode(buf)?),
+            4 => TeamAction::Leave(Vec::decode(buf)?),
             _ => return Err(DecodeError::Invalid("unknown team method")),
         };
         Ok(Self { name, action })
@@ -2565,17 +2588,29 @@ mod command_feedback_tests {
                 action,
             });
         }
+        let params = TeamParams {
+            display_name: PlainText("Team".into()),
+            prefix: PlainText("[".into()),
+            suffix: PlainText("]".into()),
+            nametag_visibility: VarInt(2),
+            collision_rule: VarInt(3),
+            color: Some(VarInt(10)),
+            options: 3,
+        };
         for action in [
             TeamAction::Add {
-                display_name: PlainText("Team".into()),
-                flags: 1,
-                nametag_visibility: "always".into(),
-                collision_rule: "always".into(),
-                color: VarInt(1),
-                prefix: PlainText("[".into()),
-                suffix: PlainText("]".into()),
+                params: params.clone(),
+                players: vec!["Alice".into()],
+            },
+            TeamAction::Add {
+                params: TeamParams {
+                    color: None,
+                    ..params.clone()
+                },
+                players: vec![],
             },
             TeamAction::Remove,
+            TeamAction::Change(params),
             TeamAction::Join(vec!["Alice".into()]),
             TeamAction::Leave(vec!["Alice".into()]),
         ] {

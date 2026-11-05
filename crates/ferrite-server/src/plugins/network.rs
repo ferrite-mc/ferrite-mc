@@ -446,20 +446,20 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             if name.is_empty() || name.chars().count() > 16 || name.chars().any(char::is_control) {
                 return None;
             }
-            let method = arg(1)?.parse::<u8>().ok().filter(|m| *m <= 3)?;
-            let params: Vec<String> = if method == 0 {
+            let method = arg(1)?.parse::<u8>().ok().filter(|m| *m <= 4)?;
+            let params: Vec<String> = if method == 0 || method == 2 {
                 let parts: Vec<&str> = arg(2)?.split(PART).collect();
-                let [display, flags, tag, collision, color, prefix, suffix] = parts[..] else {
+                let [display, options, tag, collision, color, prefix, suffix] = parts[..] else {
                     return None;
                 };
-                flags.parse::<u8>().ok().filter(|f| *f <= 3)?;
-                color.parse::<i32>().ok().filter(|c| (0..=21).contains(c))?;
-                if !["always", "never", "hideForOtherTeams", "hideForOwnTeam"].contains(&tag)
-                    || !["always", "never", "pushOtherTeams", "pushOwnTeam"].contains(&collision)
-                {
-                    return None;
-                }
-                [display, flags, tag, collision, color, prefix, suffix]
+                options.parse::<u8>().ok().filter(|o| *o <= 3)?;
+                tag.parse::<u8>().ok().filter(|v| *v <= 3)?;
+                collision.parse::<u8>().ok().filter(|v| *v <= 3)?;
+                color
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|c| (-1..=15).contains(c))?;
+                [display, options, tag, collision, color, prefix, suffix]
                     .iter()
                     .map(|text| text.chars().filter(|c| !c.is_control()).take(256).collect())
                     .collect()
@@ -1021,7 +1021,7 @@ mod tests {
                 score: -4
             }))
         );
-        let params = ["Red", "3", "never", "pushOwnTeam", "12", "[R] ", ""].join(&PART.to_string());
+        let params = ["Red", "3", "1", "3", "12", "[R] ", ""].join(&PART.to_string());
         assert_eq!(
             packet(call(
                 "sbTeam(String,int,String,String)",
@@ -1030,7 +1030,7 @@ mod tests {
             Some(PluginPacket::Scoreboard(ScoreboardStep::Team {
                 name: "red".into(),
                 method: 0,
-                params: ["Red", "3", "never", "pushOwnTeam", "12", "[R] ", ""]
+                params: ["Red", "3", "1", "3", "12", "[R] ", ""]
                     .map(String::from)
                     .to_vec(),
                 players: vec!["Alex".into()],
@@ -1048,7 +1048,7 @@ mod tests {
                 players: vec![],
             }))
         );
-        let bad = ["Red", "9", "never", "pushOwnTeam", "12", "", ""].join(&PART.to_string());
+        let bad = ["Red", "9", "1", "3", "12", "", ""].join(&PART.to_string());
         assert_eq!(
             packet(call(
                 "sbTeam(String,int,String,String)",

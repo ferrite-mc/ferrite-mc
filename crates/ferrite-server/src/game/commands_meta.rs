@@ -16,7 +16,7 @@ use ferrite_protocol::{
     VarInt,
     packets::play::{
         BossBar, BossBarAction, PlayerTeam, ResetScore, SetDisplayObjective, SetObjective,
-        SetScore, TeamAction,
+        SetScore, TeamAction, TeamParams,
     },
     types::PlainText,
 };
@@ -1692,18 +1692,45 @@ enum TeamModify {
     DeathMessageVisibility(&'static str),
 }
 
-fn team_packet(name: &str, team: &TeamState) -> PlayerTeam {
+/// The wire id of a name tag visibility or collision rule (`always`, `never`, then the two
+/// team-relative values in vanilla order).
+fn rule_id(value: &str) -> i32 {
+    match value {
+        "never" => 1,
+        "hideForOtherTeams" | "pushOtherTeams" => 2,
+        "hideForOwnTeam" | "pushOwnTeam" => 3,
+        _ => 0,
+    }
+}
+
+fn team_params(team: &TeamState) -> TeamParams {
+    TeamParams {
+        display_name: PlainText(team.display_name.clone()),
+        prefix: PlainText(team.prefix.clone()),
+        suffix: PlainText(team.suffix.clone()),
+        nametag_visibility: VarInt(rule_id(&team.nametag_visibility)),
+        collision_rule: VarInt(rule_id(&team.collision_rule)),
+        color: (0..=15).contains(&team.color).then_some(VarInt(team.color)),
+        options: u8::from(team.friendly_fire) | (u8::from(team.see_friendly_invisibles) << 1),
+    }
+}
+
+/// A new, empty team; its members are sent with separate join packets.
+fn team_add_packet(name: &str, team: &TeamState) -> PlayerTeam {
     PlayerTeam {
         name: name.to_owned(),
         action: TeamAction::Add {
-            display_name: PlainText(team.display_name.clone()),
-            flags: u8::from(team.friendly_fire) | (u8::from(team.see_friendly_invisibles) << 1),
-            nametag_visibility: team.nametag_visibility.clone(),
-            collision_rule: team.collision_rule.clone(),
-            color: VarInt(team.color.max(0)),
-            prefix: PlainText(team.prefix.clone()),
-            suffix: PlainText(team.suffix.clone()),
+            params: team_params(team),
+            players: Vec::new(),
         },
+    }
+}
+
+/// New settings for a team the client already has.
+fn team_packet(name: &str, team: &TeamState) -> PlayerTeam {
+    PlayerTeam {
+        name: name.to_owned(),
+        action: TeamAction::Change(team_params(team)),
     }
 }
 
@@ -1736,7 +1763,7 @@ fn add_team(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     packets(
         ctx,
         Vec::new(),
-        PlayerPacket::PlayerTeam(team_packet(&name, &team)),
+        PlayerPacket::PlayerTeam(team_add_packet(&name, &team)),
     )?;
     feedback(ctx, "commands.team.add.success", vec![name])
 }

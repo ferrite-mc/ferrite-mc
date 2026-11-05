@@ -829,26 +829,35 @@ impl Player {
                     S::Team {
                         name,
                         method,
-                        params,
+                        params: p_params,
                         players,
                     } => {
-                        use ferrite_protocol::packets::play::TeamAction;
-                        let action = match method {
-                            0 => {
-                                let [display, flags, tag, collision, color, prefix, suffix] =
-                                    <[String; 7]>::try_from(params).unwrap_or_default();
-                                TeamAction::Add {
-                                    display_name: PlainText(display),
-                                    flags: flags.parse().unwrap_or(0),
-                                    nametag_visibility: tag,
-                                    collision_rule: collision,
-                                    color: VarInt(color.parse().unwrap_or(21)),
-                                    prefix: PlainText(prefix),
-                                    suffix: PlainText(suffix),
-                                }
+                        use ferrite_protocol::packets::play::{TeamAction, TeamParams};
+                        let params = |params: Vec<String>| {
+                            let [display, options, tag, collision, color, prefix, suffix] =
+                                <[String; 7]>::try_from(params).unwrap_or_default();
+                            TeamParams {
+                                display_name: PlainText(display),
+                                prefix: PlainText(prefix),
+                                suffix: PlainText(suffix),
+                                nametag_visibility: VarInt(tag.parse().unwrap_or(0)),
+                                collision_rule: VarInt(collision.parse().unwrap_or(0)),
+                                color: color
+                                    .parse::<i32>()
+                                    .ok()
+                                    .filter(|c| (0..=15).contains(c))
+                                    .map(VarInt),
+                                options: options.parse().unwrap_or(0),
                             }
+                        };
+                        let action = match method {
+                            0 => TeamAction::Add {
+                                params: params(p_params),
+                                players,
+                            },
                             1 => TeamAction::Remove,
-                            2 => TeamAction::Join(players),
+                            2 => TeamAction::Change(params(p_params)),
+                            3 => TeamAction::Join(players),
                             _ => TeamAction::Leave(players),
                         };
                         send(self, &p::PlayerTeam { name, action });
