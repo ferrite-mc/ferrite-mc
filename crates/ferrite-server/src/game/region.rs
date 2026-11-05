@@ -5620,6 +5620,52 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_explosion_can_preserve_blocks_and_still_push_entities() {
+        use ferrite_entity::{EntityData, EntityRecord, allocate_id, random_uuid};
+        use ferrite_math::Vec3;
+
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        let mut ready = false;
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ready, "chunk never loaded");
+        let stone = u32::from(ferrite_data::blocks::default_state("minecraft:stone").unwrap());
+        source.set_block(8, 65, 9, stone).unwrap();
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let key = region.entities.insert(EntityRecord {
+            pos: Vec3::new(10.5, 66.0, 8.5),
+            vel: Vec3::ZERO,
+            flags: Flags::default(),
+            data: EntityData::new(allocate_id(), random_uuid(), 71, 0.25, 0.25),
+        });
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = TickContext {
+            signals,
+            tracking: Default::default(),
+            source: Some(source.clone()),
+            dimension: super::super::Dimension::Overworld,
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state: Default::default(),
+            tree: None,
+        };
+        region.explode([8.5, 66.5, 8.5], 4.0, false, &ctx);
+        assert_eq!(source.block(8, 65, 9), Some(stone));
+        assert_ne!(region.entities.vel(key).unwrap(), Vec3::ZERO);
+        region.explode([8.5, 66.5, 8.5], 4.0, true, &ctx);
+        assert_ne!(source.block(8, 65, 9), Some(stone));
+    }
+
     #[test]
     fn damage_hurts_a_mob_and_queues_its_hurt_animation() {
         let mut region = Region::default();
