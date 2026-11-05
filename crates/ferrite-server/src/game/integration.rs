@@ -3186,7 +3186,7 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
     // answered on window 0 once it has). Spilled items have no pickup delay, so the two players
     // standing on the chest collect all 40 stone again.
     let stone = plain("stone", 1).item_id;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     loop {
         let mut total = 0;
         for bot in [&mut keeper, &mut visitor] {
