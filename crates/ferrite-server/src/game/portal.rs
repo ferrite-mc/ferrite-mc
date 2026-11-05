@@ -21,6 +21,7 @@ pub const COOLDOWN_TICKS: u32 = 200;
 
 const PORTAL: &str = "minecraft:nether_portal";
 const OBSIDIAN: &str = "minecraft:obsidian";
+const END_PORTAL: &str = "minecraft:end_portal";
 
 /// Block access for portal geometry. `set_block` reports whether the write landed (a chunk
 /// that is not loaded cannot be edited).
@@ -60,6 +61,41 @@ pub fn portal_state(axis: Axis) -> Option<u16> {
 
 pub fn is_portal(state: u16) -> bool {
     ferrite_data::blocks::state(state).is_some_and(|(name, _)| name == PORTAL)
+}
+
+pub fn is_end_portal(state: u16) -> bool {
+    ferrite_data::blocks::state(state).is_some_and(|(name, _)| name == END_PORTAL)
+}
+
+/// Where a player arrives in the end: the centre of the obsidian platform.
+pub const END_ARRIVAL: [f64; 3] = [100.5, 49.0, 0.5];
+
+/// The chunks the 5x5 arrival platform and the air above it touch (x 98..=102, z -2..=2).
+pub const END_PLATFORM_CHUNKS: [(i32, i32); 2] = [(6, -1), (6, 0)];
+
+/// Creates the vanilla arrival platform once every chunk it touches is available.
+pub fn create_end_platform(source: &AnvilChunkSource) -> Option<[f64; 3]> {
+    if source.dimension() != Dimension::End
+        || END_PLATFORM_CHUNKS
+            .iter()
+            .any(|&(x, z)| source.with_loaded_chunk(x, z, |_| ()).is_none())
+    {
+        return None;
+    }
+    let obsidian = ferrite_data::blocks::default_state(OBSIDIAN)?;
+    for x in 98..=102 {
+        for z in -2..=2 {
+            if !PortalWorld::set_block(source, x, 48, z, obsidian) {
+                return None;
+            }
+            for y in 49..=53 {
+                if !PortalWorld::set_block(source, x, y, z, 0) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(END_ARRIVAL)
 }
 
 fn is_obsidian(state: u16) -> bool {
@@ -194,7 +230,7 @@ pub fn counterpart(dimension: Dimension) -> Option<Dimension> {
     match dimension {
         Dimension::Overworld => Some(Dimension::Nether),
         Dimension::Nether => Some(Dimension::Overworld),
-        Dimension::End => None,
+        Dimension::End => Some(Dimension::Overworld),
     }
 }
 
@@ -386,7 +422,42 @@ mod tests {
         );
         assert_eq!(counterpart(Dimension::Overworld), Some(Dimension::Nether));
         assert_eq!(counterpart(Dimension::Nether), Some(Dimension::Overworld));
-        assert_eq!(counterpart(Dimension::End), None);
+        assert_eq!(counterpart(Dimension::End), Some(Dimension::Overworld));
+    }
+
+    #[tokio::test]
+    async fn the_end_platform_is_built_only_once_both_of_its_chunks_are_loaded() {
+        let end = AnvilChunkSource::new_memory_dimension(None, Dimension::End);
+        assert_eq!(create_end_platform(&end), None, "nothing is loaded yet");
+        for (x, z) in END_PLATFORM_CHUNKS {
+            loop {
+                if let Some(result) = end.get(x, z, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        assert_eq!(create_end_platform(&end), Some(END_ARRIVAL));
+        let obsidian = ferrite_data::blocks::default_state(OBSIDIAN).unwrap();
+        for (x, z) in [(98, -2), (102, 2), (100, 0), (98, 2), (102, -2)] {
+            assert_eq!(end.block(x, 48, z), Some(u32::from(obsidian)), "{x} {z}");
+            assert_eq!(end.block(x, 49, z), Some(0), "room to stand at {x} {z}");
+        }
+        let overworld = AnvilChunkSource::new_memory();
+        assert_eq!(
+            create_end_platform(&overworld),
+            None,
+            "only the end gets one"
+        );
+    }
+
+    #[test]
+    fn end_portal_blocks_are_distinct_and_route_back_to_overworld() {
+        let portal = ferrite_data::blocks::default_state(END_PORTAL).expect("end portal state");
+        assert!(is_end_portal(portal));
+        assert!(!is_portal(portal));
+        assert_eq!(counterpart(Dimension::End), Some(Dimension::Overworld));
     }
 
     #[test]

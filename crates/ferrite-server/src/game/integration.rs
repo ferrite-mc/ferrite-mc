@@ -2355,6 +2355,119 @@ async fn tnt_explodes_and_drops_blocks_for_tracking_bot() {
     assert!(saw_item, "the bot never saw the dirt drop");
 }
 
+/// Vanilla `EnderEyeItem.useOn`: the twelfth eye lights the end portal in the ring's 3x3 centre.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_last_eye_of_ender_lights_the_end_portal() {
+    use ferrite_protocol::{
+        packets::play::{CreativeSlot, ItemStack, MoveRotation, UseItemOn},
+        types::BlockPos,
+    };
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    loop {
+        if let Some(result) = source.get(0, 0, 0) {
+            result.unwrap();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let frame = |eye: &str, facing: &str| {
+        u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:end_portal_frame",
+                &[("eye", eye), ("facing", facing)],
+            )
+            .unwrap(),
+        )
+    };
+    let ring: [([i32; 2], &str); 12] = [
+        ([-1, -2], "north"),
+        ([0, -2], "north"),
+        ([1, -2], "north"),
+        ([-1, 2], "south"),
+        ([0, 2], "south"),
+        ([1, 2], "south"),
+        ([-2, -1], "west"),
+        ([-2, 0], "west"),
+        ([-2, 1], "west"),
+        ([2, -1], "east"),
+        ([2, 0], "east"),
+        ([2, 1], "east"),
+    ];
+    for ([dx, dz], facing) in ring {
+        let eye = if [dx, dz] == [0, -2] { "false" } else { "true" };
+        source
+            .set_block(8 + dx, 64, 8 + dz, frame(eye, facing))
+            .unwrap();
+    }
+    let world = World::start_with(Some(source.clone()), [8, 66, 6]);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "EyeTester").await;
+    bot.until(46).await;
+    let eye = ferrite_data::registries::id("minecraft:item", "minecraft:ender_eye").unwrap();
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: ItemStack {
+            count: 1,
+            item_id: eye,
+        },
+    })
+    .await;
+    bot.send(&MoveRotation {
+        yaw: 0.0,
+        pitch: 90.0,
+        flags: 1,
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    bot.send(&UseItemOn {
+        hand: VarInt(0),
+        location: BlockPos::new(8, 64, 6).pack(),
+        face: VarInt(1),
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside: false,
+        world_border_hit: false,
+        sequence: VarInt(1),
+    })
+    .await;
+    let lit = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let at_center = source
+                .block(8, 64, 8)
+                .and_then(|state| u16::try_from(state).ok());
+            if at_center.is_some_and(super::portal::is_end_portal) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    assert!(lit.is_ok(), "the portal never lit");
+    assert_eq!(source.block(8, 64, 6), Some(frame("true", "north")));
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let state = source
+                .block(8 + dx, 64, 8 + dz)
+                .and_then(|state| u16::try_from(state).ok());
+            assert!(state.is_some_and(super::portal::is_end_portal), "{dx} {dz}");
+        }
+    }
+}
+
 /// Vanilla `Level.markAndNotifyBlock` at work: breaking the block under a torch breaks the
 /// torch in the same region tick, and the tracking bot sees both block updates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

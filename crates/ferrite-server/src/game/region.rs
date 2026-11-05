@@ -1137,8 +1137,43 @@ impl Player {
             }
             return;
         }
-        // Vanilla `FlintAndSteelItem.useOn` / `FireChargeItem.useOn` on TNT: prime it.
+        // Vanilla `EnderEyeItem.useOn`: an eye fills an empty end portal frame, and a ring of
+        // twelve filled frames lights the portal.
         let held = self.inventory.get(self.hand_slot(p.hand.0)).clone();
+        if held.name() == Some("minecraft:ender_eye")
+            && let Some(filled) = super::end_frame::with_eye(clicked_state)
+        {
+            if self.change_block(
+                p.location,
+                Some(u32::from(clicked_state)),
+                u32::from(filled),
+            ) {
+                self.changed_blocks.push([clicked.x, clicked.y, clicked.z]);
+                if self.gamemode == 0 || self.gamemode == 2 {
+                    let slot = self.hand_slot(p.hand.0);
+                    self.inventory
+                        .set(slot, held.copy_with_count(held.count - 1));
+                }
+                let read = |x, y, z| {
+                    source
+                        .block(x, y, z)
+                        .and_then(|state| u16::try_from(state).ok())
+                };
+                if let Some(center) =
+                    super::end_frame::complete_ring(&read, [clicked.x, clicked.y, clicked.z])
+                    && let Some(blocks) = super::end_frame::portal_blocks(center)
+                {
+                    for (at, state) in blocks {
+                        let location = ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]);
+                        if self.change_block(location.pack(), None, u32::from(state)) {
+                            self.changed_blocks.push(at);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // Vanilla `FlintAndSteelItem.useOn` / `FireChargeItem.useOn` on TNT: prime it.
         if matches!(
             held.name(),
             Some("minecraft:flint_and_steel" | "minecraft:fire_charge")
@@ -2230,7 +2265,7 @@ impl Player {
             }
             self.portal_ticks = 0;
             let scaled = match (self.dimension, target) {
-                (super::Dimension::Overworld, super::Dimension::End) => [100.5, 49.0, 0.5],
+                (super::Dimension::Overworld, super::Dimension::End) => super::portal::END_ARRIVAL,
                 (super::Dimension::End, super::Dimension::Overworld) => {
                     let spawn = self.dimensions.spawn(super::Dimension::Overworld);
                     [
@@ -2254,6 +2289,10 @@ impl Player {
         );
         let destination = match (self.dimension, target) {
             (super::Dimension::Overworld, super::Dimension::End) => {
+                // The platform spans two chunks; both must be loaded before it is built.
+                for (x, z) in super::portal::END_PLATFORM_CHUNKS {
+                    target_source.prefetch(x, z, self.biome);
+                }
                 super::portal::create_end_platform(target_source.as_ref())
             }
             (super::Dimension::End, super::Dimension::Overworld) => Some(scaled),

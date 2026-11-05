@@ -39,6 +39,7 @@ mod chunk;
 mod command_block;
 mod commands;
 mod dimension;
+mod end_frame;
 mod portal;
 pub use dimension::{Dimension, DimensionRegistry};
 mod commands_data;
