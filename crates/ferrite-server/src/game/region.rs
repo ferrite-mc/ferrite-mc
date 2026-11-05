@@ -4684,7 +4684,13 @@ impl Region {
     /// the normal sweep drops it on this tick or the next.
     /// Hurts one mob (`/damage`) through the same path player attacks use. Returns whether the
     /// entity was found in this region.
-    pub fn damage_entity(&mut self, uuid: Uuid, amount: f32) -> bool {
+    pub fn damage_entity(
+        &mut self,
+        uuid: Uuid,
+        amount: f32,
+        origin: Option<[f64; 3]>,
+        aggro: Option<Uuid>,
+    ) -> bool {
         let key = self.entities.keys().iter().copied().find(|key| {
             self.entities
                 .data(*key)
@@ -4693,7 +4699,11 @@ impl Region {
         let Some(key) = key else {
             return false;
         };
-        if mob::hurt(&mut self.entities, key, amount, None).is_some() {
+        let source = origin.map(|p| ferrite_math::Vec3::new(p[0], p[1], p[2]));
+        if mob::hurt(&mut self.entities, key, amount, source).is_some() {
+            if let Some(player) = aggro {
+                mob::retaliate(&mut self.entities, key, player);
+            }
             self.pending_hurts.push(uuid);
         }
         true
@@ -4768,11 +4778,11 @@ mod tests {
         let uuid = record.data.uuid;
         region.add_entities(vec![record]);
         assert!(
-            !region.damage_entity(Uuid::from_u128(99), 1.0),
+            !region.damage_entity(Uuid::from_u128(99), 1.0, None, None),
             "unknown entity"
         );
         assert!(region.pending_hurts.is_empty());
-        assert!(region.damage_entity(uuid, 3.0));
+        assert!(region.damage_entity(uuid, 3.0, Some([5.5, 64.0, 0.5]), None));
         assert_eq!(region.pending_hurts, vec![uuid]);
     }
     #[test]

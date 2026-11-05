@@ -543,6 +543,11 @@ pub enum Action {
         targets: EntityTarget,
         amount: f32,
         damage_type: String,
+        /// `at <location>`: where the damage comes from, for knockback.
+        at: Option<[f64; 3]>,
+        /// `by <entity>`: the attacker; mobs hit by a player turn on them and are knocked back
+        /// from them. (`from <cause>` only matters for death messages, which are not modelled.)
+        by: Option<EntityTarget>,
     },
     /// `/forceload`: chunks to start or stop holding in a dimension.
     ForceLoad {

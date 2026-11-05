@@ -1831,12 +1831,29 @@ fn damage_tree() -> NodeBuilder<Source> {
             .string("damageType")
             .unwrap_or("minecraft:generic")
             .to_owned();
+        let at = match ctx.argument("location") {
+            Some(_) => {
+                let source = ctx.source();
+                Some(super::commands::coordinates(ctx, "location")?.resolve(
+                    source.origin,
+                    source.yaw,
+                    source.pitch,
+                ))
+            }
+            None => None,
+        };
+        let by = match ctx.argument("entity") {
+            Some(_) => Some(entity(ctx, "entity")?),
+            None => None,
+        };
         send(
             ctx.source(),
             Action::Damage {
                 targets: entity(ctx, "target")?,
                 amount,
                 damage_type,
+                at,
+                by,
             },
         )?;
         Ok(amount as i32)
@@ -2673,6 +2690,20 @@ mod tests {
                 "{input}"
             );
         }
+        let (_, actions) = run("damage @s 4 generic at 1 2 3", 2, fresh(), None);
+        assert!(matches!(
+            &actions[0],
+            Action::Damage { at: Some(p), by: None, .. } if *p == [1.5, 2.0, 3.5]
+        ));
+        let (_, actions) = run("damage @s 4 generic by @s from @s", 2, fresh(), None);
+        assert!(matches!(
+            &actions[0],
+            Action::Damage {
+                at: None,
+                by: Some(_),
+                ..
+            }
+        ));
         let (_, actions) = run("damage @s 2.5 fall", 2, fresh(), None);
         assert!(matches!(
             &actions[0],

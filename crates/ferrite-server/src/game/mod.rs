@@ -2233,7 +2233,14 @@ impl CommandRuntime<'_> {
     }
 
     /// Hurts a non-player entity on the region that owns it.
-    fn damage_entity(&self, uuid: Uuid, from: [f64; 3], amount: f32) {
+    fn damage_entity(
+        &self,
+        uuid: Uuid,
+        from: [f64; 3],
+        amount: f32,
+        origin: Option<[f64; 3]>,
+        aggro: Option<Uuid>,
+    ) {
         let from = self
             .state
             .lock()
@@ -2247,7 +2254,7 @@ impl CommandRuntime<'_> {
         if self.worlds.owner(self.dimension, chunk).is_some() {
             self.worlds
                 .schedule_at_chunk(self.dimension, chunk, move |region| {
-                    region.damage_entity(uuid, amount);
+                    region.damage_entity(uuid, amount, origin, aggro);
                 });
         }
     }
@@ -2691,6 +2698,8 @@ impl CommandRuntime<'_> {
                 targets,
                 amount,
                 damage_type,
+                at,
+                by,
             } => {
                 let targets = match self.selection(&targets) {
                     Ok(targets) => targets,
@@ -2699,6 +2708,16 @@ impl CommandRuntime<'_> {
                         return false;
                     }
                 };
+                // The attacker, when `by` names one entity, decides knockback and aggro.
+                let attacker = match by {
+                    Some(by) => self
+                        .selection(&by)
+                        .ok()
+                        .and_then(|found| found.into_iter().next()),
+                    None => None,
+                };
+                let origin = at.or_else(|| attacker.as_ref().map(|a| a.pos));
+                let aggro = attacker.as_ref().filter(|a| a.player).map(|a| a.uuid);
                 let kind = damage_kind(&damage_type);
                 let mut hurt = 0;
                 for target in &targets {
@@ -2715,7 +2734,7 @@ impl CommandRuntime<'_> {
                             );
                         }
                     } else {
-                        self.damage_entity(target.uuid, target.pos, amount);
+                        self.damage_entity(target.uuid, target.pos, amount, origin, aggro);
                         hurt += 1;
                         self.reply.key(
                             "commands.damage.success",
