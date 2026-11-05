@@ -3530,6 +3530,58 @@ async fn redstone_lever_extends_piston_and_moves_stone() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_extending_piston_carries_the_mob_in_the_way() {
+    use ferrite_protocol::packets::play::{AddEntity, EntityTeleport};
+    let lever = block_state(
+        "minecraft:lever",
+        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+    );
+    let (world, temp, addr, server) = redstone_fixture(&[
+        ([0, 64, 0], lever),
+        (
+            [1, 64, 0],
+            block_state(
+                "minecraft:piston",
+                &[("facing", "east"), ("extended", "false")],
+            ),
+        ),
+        ([2, 64, 0], block_state("minecraft:stone", &[])),
+    ])
+    .await;
+    let mut bot = Bot::join(addr, "RedstoneBot").await;
+    bot.until(46).await;
+    // A cow stands where the stone is about to be pushed.
+    world
+        .console_command("/summon minecraft:cow 3.5 64 0.5".into())
+        .await
+        .unwrap();
+    let cow = ferrite_entity::mob::MobKind::Cow.entity_type() as i32;
+    let id = loop {
+        let body = bot.until(AddEntity::ID).await;
+        let add = AddEntity::decode(&mut body.as_slice()).unwrap();
+        if add.entity_type.0 == cow {
+            break add.id.0;
+        }
+    };
+    click_block(&mut bot, [0, 64, 0]).await;
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let body = bot.until(EntityTeleport::ID).await;
+            let teleport = EntityTeleport::decode(&mut body.as_slice()).unwrap();
+            if teleport.id.0 == id && teleport.x > 4.0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the piston should push the cow to x 4.5");
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sticky_piston_pulls_stone_after_power_is_removed() {
     let lever = block_state(
         "minecraft:lever",

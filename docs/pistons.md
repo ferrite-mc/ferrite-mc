@@ -21,8 +21,11 @@ the tick also rejects edits outside the current world border.
 across loaded chunks atomically. Sticky retraction leaves its target in place if it
 cannot resolve a pull.
 
-Pistons currently move blocks immediately: there is no moving-piston block entity,
-collision movement of entities, or validated vanilla animation/timing. The server sends
+Pistons currently move blocks immediately: there is no moving-piston block entity or
+validated vanilla animation/timing. Extending pistons do carry non-player entities (mobs,
+items) standing in a cell a block is pushed into one block along, when the destination has
+room for them (test `an_extending_piston_carries_the_mob_in_the_way`); players, retraction
+and sticky pulls do not carry entities. The server sends
 a block event and final block updates, but client animation has not been verified.
 Vanilla edge cases, including interrupted movement, world borders, drops and full
 cross-region runtime behaviour, still need regression coverage and parity validation.

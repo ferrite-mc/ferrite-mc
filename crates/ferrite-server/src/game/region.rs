@@ -2187,6 +2187,21 @@ impl Player {
         if self.use_potion(slot) {
             return;
         }
+        // Snowballs, eggs and ender pearls leave the hand at once (vanilla `Item.use`).
+        if let Some(kind) = stack.name().and_then(arrow::Kind::thrown_from_name) {
+            if !matches!(self.gamemode, 1 | 3) {
+                self.inventory.remove(slot, 1);
+                send(
+                    self,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: self.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            self.menus.launched.push(kind);
+            return;
+        }
         // Vanilla `LivingEntity.startUsingItem`: a shield raises, a bow starts drawing.
         match stack.name() {
             Some("minecraft:shield") if self.shield_disabled == 0 => {
@@ -4142,6 +4157,20 @@ impl Region {
                 p.hurt(DamageKind::Arrow, hit.damage);
             }
         }
+        for landing in arrow::tick_thrown(&mut self.entities, &blocks, &players) {
+            // Vanilla ender pearl impact: the thrower arrives where the pearl landed and takes
+            // 5 fall damage.
+            if landing.kind == arrow::Kind::EnderPearl
+                && let Some(owner) = landing.owner
+                && let Some(p) = self.players.get_mut(&owner)
+            {
+                p.pos = [landing.pos.x, landing.pos.y, landing.pos.z];
+                p.teleport();
+                if !matches!(p.gamemode, 1 | 3) {
+                    p.hurt(DamageKind::Fall, 5.0);
+                }
+            }
+        }
     }
 
     /// Runs the neighbor updates of this tick's block changes (vanilla
@@ -4188,6 +4217,7 @@ impl Region {
         block: Option<&str>,
         velocity: [f64; 3],
         uuid: Uuid,
+        owner: Option<Uuid>,
     ) -> bool {
         use ferrite_math::Vec3;
         if !center
@@ -4205,6 +4235,12 @@ impl Region {
                 ferrite_entity::falling::new_falling(pos, state)
             }
             "minecraft:tnt" => ferrite_entity::tnt::new_primed_tnt(pos, 80),
+            thrown if arrow::Kind::thrown_from_name(thrown).is_some() => arrow::new_thrown(
+                arrow::Kind::thrown_from_name(thrown).unwrap(),
+                pos,
+                Vec3::new(velocity[0], velocity[1], velocity[2]),
+                owner,
+            ),
             "minecraft:arrow" => ferrite_entity::arrow::new_arrow(
                 pos,
                 Vec3::new(velocity[0], velocity[1], velocity[2]),
@@ -4554,6 +4590,61 @@ impl Region {
                 );
                 piston_changes.push(at);
             }
+            if extending {
+                // Entities standing where a block was pushed are carried one block along, when
+                // there is room for them there (vanilla `PistonMovingBlockEntity.moveCollidedEntities`).
+                let (dx, dy, dz) = facing.step();
+                let delta = ferrite_math::Vec3::new(f64::from(dx), f64::from(dy), f64::from(dz));
+                for &(at, _, state) in &operation.edits {
+                    if state == 0 {
+                        continue;
+                    }
+                    let cell = ferrite_math::AABB::new(
+                        f64::from(at[0]),
+                        f64::from(at[1]),
+                        f64::from(at[2]),
+                        f64::from(at[0] + 1),
+                        f64::from(at[1] + 1),
+                        f64::from(at[2] + 1),
+                    );
+                    for key in self.entities.query_vec(cell) {
+                        let (Some(pos), Some(bbox)) =
+                            (self.entities.pos(key), self.entities.bbox(key))
+                        else {
+                            continue;
+                        };
+                        if !bbox.intersects(cell)
+                            || self
+                                .entities
+                                .flags(key)
+                                .is_some_and(|f| f.has(ferrite_entity::Flags::REMOVED))
+                        {
+                            continue;
+                        }
+                        let moved = pos + delta;
+                        let free = |y: f64| {
+                            let state = super::redstone::RedstoneWorld::block(
+                                &world,
+                                [
+                                    moved.x.floor() as i32,
+                                    (moved.y + y).floor() as i32,
+                                    moved.z.floor() as i32,
+                                ],
+                            );
+                            state == Some(0)
+                        };
+                        // Feet and head cells must be air, or the entity stays where it is.
+                        let height = bbox.max.y - bbox.min.y;
+                        if free(0.0) && free(height.min(1.8) - 0.01) {
+                            self.entities.set_pos(key, moved);
+                            if let Some(flags) = self.entities.flags_mut(key) {
+                                flags.set(ferrite_entity::Flags::TELEPORTED, true);
+                                flags.set(ferrite_entity::Flags::NEEDS_SYNC, true);
+                            }
+                        }
+                    }
+                }
+            }
             destroyed.extend(operation.destroyed);
         }
         if !piston_changes.is_empty() {
@@ -4817,6 +4908,16 @@ impl Region {
             for record in item::drop_from_container(block, plain, &mut self.rng) {
                 self.entities.insert(record);
             }
+        }
+        for kind in p.menus.launched.drain(..) {
+            let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+            let eye = combat::eye_position(feet);
+            let direction = combat::look_vector(p.yaw, p.pitch);
+            // Vanilla `shootFromRotation(.., 1.5, 1.0)`.
+            let vel =
+                ferrite_math::Vec3::new(direction.x * 1.5, direction.y * 1.5, direction.z * 1.5);
+            self.entities
+                .insert(arrow::new_thrown(kind, eye, vel, Some(p.uuid)));
         }
         for stack in p.menus.thrown.drain(..) {
             let plain = ItemStack {
