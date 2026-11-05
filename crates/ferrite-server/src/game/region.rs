@@ -163,6 +163,16 @@ pub enum Command {
         action: u8,
         hand: u8,
     },
+    /// A plugin wrote item metadata onto the stack in an inventory slot.
+    ItemMeta {
+        slot: u8,
+        name: Option<String>,
+        lore: Vec<String>,
+        enchants: Vec<(String, i32)>,
+        unbreakable: bool,
+        model: Option<i32>,
+        repair: i32,
+    },
     /// A plugin wore the stack in an inventory slot down to `damage`.
     ItemDamage {
         slot: u8,
@@ -254,6 +264,67 @@ pub(super) fn written_book(
 
 /// The stack worn down to `damage` (never past its last point of durability); `None` for an
 /// empty stack or an item that cannot wear.
+/// The metadata a plugin writes onto a stack (name and lore are text JSON).
+pub(super) struct ItemMetaFields {
+    pub name: Option<String>,
+    pub lore: Vec<String>,
+    pub enchants: Vec<(String, i32)>,
+    pub unbreakable: bool,
+    pub model: Option<i32>,
+    pub repair: i32,
+}
+
+/// Replaces the name, lore, enchantments, unbreakable flag, model and repair cost of `stack`;
+/// text that does not parse is left out.
+pub(super) fn with_meta(
+    mut stack: ferrite_item::ItemStack,
+    meta: &ItemMetaFields,
+) -> ferrite_item::ItemStack {
+    use ferrite_item::{Component, component_ids as ids};
+    let parse = |json: &String| ferrite_text::Component::from_json(json).ok();
+    for id in [
+        ids::CUSTOM_NAME,
+        ids::LORE,
+        ids::ENCHANTMENTS,
+        ids::UNBREAKABLE,
+        ids::CUSTOM_MODEL_DATA,
+        ids::REPAIR_COST,
+    ] {
+        stack.components.remove(id);
+    }
+    let mut put = |component: Component| {
+        if let Some(id) = component.type_id() {
+            stack.components.insert(id, component);
+        }
+    };
+    if let Some(name) = meta.name.as_ref().and_then(parse) {
+        put(Component::CustomName(name));
+    }
+    if !meta.lore.is_empty() {
+        put(Component::Lore(
+            meta.lore.iter().filter_map(parse).collect(),
+        ));
+    }
+    if !meta.enchants.is_empty() {
+        let mut enchantments = ferrite_item::Enchantments::new();
+        enchantments.levels.extend(meta.enchants.iter().cloned());
+        put(Component::Enchantments(enchantments));
+    }
+    if meta.unbreakable {
+        put(Component::Unbreakable);
+    }
+    if let Some(model) = meta.model {
+        put(Component::CustomModelData(ferrite_item::CustomModelData {
+            floats: vec![model as f32],
+            ..Default::default()
+        }));
+    }
+    if meta.repair > 0 {
+        put(Component::RepairCost(meta.repair));
+    }
+    stack
+}
+
 pub(super) fn worn_stack(
     mut stack: ferrite_item::ItemStack,
     damage: i32,
@@ -1553,6 +1624,23 @@ impl Player {
                 ferrite_item::ItemStack::with_count(id, i32::from(item.amount))
             }
         };
+        self.inventory.set(slot, stack.clone());
+        send(
+            self,
+            &SetPlayerInventory {
+                slot: VarInt(slot as i32),
+                item: stack,
+            },
+        );
+        self.sync_containers();
+    }
+    /// Writes plugin item metadata onto the stack in a slot; an empty slot is ignored.
+    fn set_item_meta(&mut self, slot: u8, meta: &ItemMetaFields) {
+        let slot = usize::from(slot);
+        if slot >= ferrite_inventory::SIZE || self.inventory.get(slot).is_empty() {
+            return;
+        }
+        let stack = with_meta(self.inventory.get(slot).clone(), meta);
         self.inventory.set(slot, stack.clone());
         send(
             self,
@@ -3100,6 +3188,28 @@ impl Player {
                     }
                     continue;
                 }
+                Command::ItemMeta {
+                    slot,
+                    name,
+                    lore,
+                    enchants,
+                    unbreakable,
+                    model,
+                    repair,
+                } => {
+                    self.set_item_meta(
+                        slot,
+                        &ItemMetaFields {
+                            name,
+                            lore,
+                            enchants,
+                            unbreakable,
+                            model,
+                            repair,
+                        },
+                    );
+                    continue;
+                }
                 Command::ItemDamage { slot, damage } => {
                     self.set_item_damage(slot, damage);
                     continue;
@@ -4606,11 +4716,10 @@ impl Region {
             let Some(operation) = super::piston::operation(&world, pos, facing, extending) else {
                 continue;
             };
-            if operation
-                .edits
-                .iter()
-                .any(|(at, _, _)| !super::piston::within_border(&border, *at))
-            {
+            if operation.edits.iter().any(|(at, _, _)| {
+                !super::piston::within_border(&border, *at)
+                    || !super::piston::within_height(source.dimension(), *at)
+            }) {
                 continue;
             }
             if let Err(error) = source.compare_set_blocks(&operation.edits) {
@@ -5754,7 +5863,46 @@ fn chunk_holders_follow_region_merge_and_split() {
 
 #[cfg(test)]
 mod worn_stack_tests {
-    use super::{worn_stack, written_book};
+    use super::{ItemMetaFields, with_meta, worn_stack, written_book};
+
+    #[test]
+    fn plugin_metadata_lands_as_components() {
+        let sword = ferrite_item::item_id("diamond_sword").unwrap();
+        let meta = ItemMetaFields {
+            name: Some("{\"text\":\"Excalibur\"}".into()),
+            lore: vec!["{\"text\":\"old\"}".into()],
+            enchants: vec![("minecraft:sharpness".into(), 5)],
+            unbreakable: true,
+            model: Some(3),
+            repair: 2,
+        };
+        let stack = with_meta(ferrite_item::ItemStack::with_count(sword, 1), &meta);
+        for id in [
+            ferrite_item::component_ids::CUSTOM_NAME,
+            ferrite_item::component_ids::LORE,
+            ferrite_item::component_ids::ENCHANTMENTS,
+            ferrite_item::component_ids::UNBREAKABLE,
+            ferrite_item::component_ids::CUSTOM_MODEL_DATA,
+            ferrite_item::component_ids::REPAIR_COST,
+        ] {
+            assert!(stack.components.get(id).is_some(), "component {id}");
+        }
+        let bare = ItemMetaFields {
+            name: None,
+            lore: vec![],
+            enchants: vec![],
+            unbreakable: false,
+            model: None,
+            repair: 0,
+        };
+        let cleared = with_meta(stack, &bare);
+        assert!(
+            cleared
+                .components
+                .get(ferrite_item::component_ids::CUSTOM_NAME)
+                .is_none()
+        );
+    }
 
     #[test]
     fn books_carry_their_pages_on_the_wire() {

@@ -42,6 +42,11 @@ pub(super) fn within_border(border: &super::commands::WorldBorderState, pos: [i3
         && z < (border.center_z + half).clamp(-LIMIT, LIMIT)
 }
 
+/// Whether a block position lies inside the dimension's build height `[min_y, min_y + height)`.
+pub(super) fn within_height(dimension: super::Dimension, pos: [i32; 3]) -> bool {
+    pos[1] >= dimension.min_y() && pos[1] < dimension.min_y() + dimension.height()
+}
+
 /// Check direct and quasi-connected power using the redstone engine's directional signal.
 pub fn powered(
     pos: [i32; 3],
@@ -310,6 +315,24 @@ pub fn operation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blocks_cannot_be_pushed_out_of_the_build_height() {
+        use super::within_height;
+        use crate::game::Dimension;
+        let (min, top) = (
+            Dimension::Overworld.min_y(),
+            Dimension::Overworld.min_y() + Dimension::Overworld.height(),
+        );
+        assert!(within_height(Dimension::Overworld, [0, min, 0]));
+        assert!(within_height(Dimension::Overworld, [0, top - 1, 0]));
+        assert!(!within_height(Dimension::Overworld, [0, min - 1, 0]));
+        assert!(!within_height(Dimension::Overworld, [0, top, 0]));
+        assert!(
+            !within_height(Dimension::End, [0, -1, 0]),
+            "the end starts at 0"
+        );
+    }
+
     use super::*;
     use std::collections::HashMap;
 

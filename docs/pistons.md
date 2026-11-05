@@ -16,7 +16,8 @@ also supplies actual block-entity presence. Resolver parity across all branching
 world-border and height-limit cases is not yet established.
 
 The region adapter rejects movement plans that read an unowned or unloaded position;
-the tick also rejects edits outside the current world border.
+the tick also rejects edits outside the current world border or the dimension's build
+height (`within_height`), so nothing is pushed out of the world.
 `AnvilChunkSource::compare_set_blocks` validates and publishes the resulting batch
 across loaded chunks atomically. Sticky retraction leaves its target in place if it
 cannot resolve a pull.
