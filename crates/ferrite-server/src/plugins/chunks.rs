@@ -15,6 +15,31 @@ fn loaded() -> &'static Mutex<BTreeSet<(i32, i32)>> {
     LOADED.get_or_init(Default::default)
 }
 
+fn world_dir() -> &'static Mutex<Option<std::path::PathBuf>> {
+    static DIR: OnceLock<Mutex<Option<std::path::PathBuf>>> = OnceLock::new();
+    DIR.get_or_init(Default::default)
+}
+
+/// The world directory chunks are saved in (`None` for the in-memory world).
+pub fn set_world_dir(path: Option<std::path::PathBuf>) {
+    *world_dir().lock().unwrap() = path;
+}
+
+/// Whether the overworld chunk is saved on disk (vanilla `World#isChunkGenerated`).
+fn saved_on_disk(x: i32, z: i32) -> bool {
+    let Some(dir) = world_dir().lock().unwrap().clone() else {
+        return false;
+    };
+    let (rx, rz) = (x.div_euclid(32), z.div_euclid(32));
+    let file = dir
+        .join(crate::game::Dimension::Overworld.region_dir())
+        .join(format!("r.{rx}.{rz}.mca"));
+    file.is_file()
+        && ferrite_world::RegionFile::open(&file, rx, rz)
+            .and_then(|region| region.read_chunk(x, z))
+            .is_ok_and(|chunk| chunk.is_some())
+}
+
 pub fn set_loaded(x: i32, z: i32, is_loaded: bool) {
     let mut set = loaded().lock().unwrap();
     if is_loaded {
@@ -37,6 +62,11 @@ pub fn answer(call: &HostCall) -> Option<String> {
         ("isChunkLoaded(int,int)", [x, z]) => {
             let key = (x.parse().ok()?, z.parse().ok()?);
             Some(loaded().lock().unwrap().contains(&key).to_string())
+        }
+        ("isChunkGenerated(int,int)", [x, z]) => {
+            let key = (x.parse().ok()?, z.parse().ok()?);
+            let loaded = loaded().lock().unwrap().contains(&key);
+            Some((loaded || saved_on_disk(key.0, key.1)).to_string())
         }
         ("getLoadedChunkCoordinates()", []) => Some(
             loaded()
@@ -82,5 +112,33 @@ mod tests {
             Some("false")
         );
         assert_eq!(answer(&call("isChunkLoaded(int,int)", &["x", "1"])), None);
+    }
+
+    #[test]
+    fn generated_means_loaded_or_saved_in_a_region_file() {
+        set_loaded(9002, 9002, true);
+        assert_eq!(
+            answer(&call("isChunkGenerated(int,int)", &["9002", "9002"])).as_deref(),
+            Some("true")
+        );
+        set_loaded(9002, 9002, false);
+        // No world directory: an unloaded chunk is not generated.
+        assert_eq!(
+            answer(&call("isChunkGenerated(int,int)", &["9002", "9002"])).as_deref(),
+            Some("false")
+        );
+        // A saved chunk counts even when unloaded.
+        let dir = tempfile::tempdir().unwrap();
+        let region = dir
+            .path()
+            .join(crate::game::Dimension::Overworld.region_dir());
+        std::fs::create_dir_all(&region).unwrap();
+        let file = ferrite_world::RegionFile::open(region.join("r.0.0.mca"), 0, 0).unwrap();
+        file.write_chunk(3, 4, b"x", ferrite_world::RegionCompression::None)
+            .unwrap();
+        set_world_dir(Some(dir.path().to_path_buf()));
+        assert!(saved_on_disk(3, 4));
+        assert!(!saved_on_disk(5, 5));
+        set_world_dir(None);
     }
 }

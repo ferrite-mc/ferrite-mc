@@ -41,8 +41,12 @@ pub use dimension::{Dimension, DimensionRegistry};
 mod commands_data;
 mod commands_exec;
 mod commands_extras;
+mod commands_item;
+mod commands_late;
+mod commands_loot;
 mod commands_meta;
 mod commands_more;
+mod commands_progress;
 mod commands_server;
 mod commands_world;
 mod container;
@@ -2897,6 +2901,29 @@ impl CommandRuntime<'_> {
                             let packet = Outbound::Packet(bytes.to_vec().into());
                             region::broadcast_tracked_chunk(&tracking, dimension, (x, z), &packet);
                         }
+                    }
+                }
+                false
+            }
+            Action::SetSlot {
+                targets,
+                slot,
+                item,
+            } => {
+                for target in targets {
+                    if let Some((_, mailbox, _)) = self.mailboxes.get(&target) {
+                        mailbox
+                            .lock()
+                            .unwrap()
+                            .push_back(Command::SetInventorySlot {
+                                slot,
+                                item: item.as_ref().map(|(material, amount)| {
+                                    ferrite_plugin::ItemSnapshot {
+                                        material: material.clone(),
+                                        amount: *amount,
+                                    }
+                                }),
+                            });
                     }
                 }
                 false

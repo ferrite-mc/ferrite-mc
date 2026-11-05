@@ -298,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         [0, source.spawn_height(0, 0).unwrap_or(100), 0]
     };
+    ferrite_server::plugins::chunks::set_world_dir(config.world.clone());
     let plugin_bridge =
         ferrite_server::plugins::PluginBridge::start(ferrite_server::plugins::Settings {
             directory: config.plugins_dir.unwrap_or_else(|| "plugins".into()),

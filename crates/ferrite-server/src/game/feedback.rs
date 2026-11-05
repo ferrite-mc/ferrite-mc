@@ -16,6 +16,87 @@ fn template(key: &str) -> Option<&'static str> {
             "Too many blocks in the specified area (maximum %s, specified %s)"
         }
         "argument.pos.unloaded" => "That position is not loaded",
+        "commands.advancement.grant.one.to_one" => "Granted the advancement %s to %s",
+        "commands.advancement.grant.one.to_many" => "Granted the advancement %s to %s players",
+        "commands.advancement.grant.many.to_one" => "Granted %s advancements to %s",
+        "commands.advancement.grant.many.to_many" => "Granted %s advancements to %s players",
+        "commands.advancement.grant.criterion.to_one" => {
+            "Granted the criterion '%s' of advancement %s to %s"
+        }
+        "commands.advancement.grant.criterion.to_many" => {
+            "Granted the criterion '%s' of advancement %s to %s players"
+        }
+        "commands.advancement.grant.one.to_one.failure" => {
+            "Couldn't grant advancement %s to %s as nothing changed"
+        }
+        "commands.advancement.grant.one.to_many.failure" => {
+            "Couldn't grant advancement %s to %s players as nothing changed"
+        }
+        "commands.advancement.grant.many.to_one.failure" => {
+            "Couldn't grant %s advancements to %s as nothing changed"
+        }
+        "commands.advancement.grant.many.to_many.failure" => {
+            "Couldn't grant %s advancements to %s players as nothing changed"
+        }
+        "commands.advancement.grant.criterion.to_one.failure" => {
+            "Couldn't grant criterion '%s' of advancement %s to %s as nothing changed"
+        }
+        "commands.advancement.grant.criterion.to_many.failure" => {
+            "Couldn't grant criterion '%s' of advancement %s to %s players as nothing changed"
+        }
+        "commands.advancement.revoke.one.to_one" => "Revoked the advancement %s from %s",
+        "commands.advancement.revoke.one.to_many" => "Revoked the advancement %s from %s players",
+        "commands.advancement.revoke.many.to_one" => "Revoked %s advancements from %s",
+        "commands.advancement.revoke.many.to_many" => "Revoked %s advancements from %s players",
+        "commands.advancement.revoke.criterion.to_one" => {
+            "Revoked the criterion '%s' of advancement %s from %s"
+        }
+        "commands.advancement.revoke.criterion.to_many" => {
+            "Revoked the criterion '%s' of advancement %s from %s players"
+        }
+        "commands.advancement.revoke.one.to_one.failure" => {
+            "Couldn't revoke advancement %s from %s as nothing changed"
+        }
+        "commands.advancement.revoke.one.to_many.failure" => {
+            "Couldn't revoke advancement %s from %s players as nothing changed"
+        }
+        "commands.advancement.revoke.many.to_one.failure" => {
+            "Couldn't revoke %s advancements from %s as nothing changed"
+        }
+        "commands.advancement.revoke.many.to_many.failure" => {
+            "Couldn't revoke %s advancements from %s players as nothing changed"
+        }
+        "commands.advancement.revoke.criterion.to_one.failure" => {
+            "Couldn't revoke criterion '%s' of advancement %s from %s as nothing changed"
+        }
+        "commands.advancement.revoke.criterion.to_many.failure" => {
+            "Couldn't revoke criterion '%s' of advancement %s from %s players as nothing changed"
+        }
+        "advancement.advancementNotFound" => "Unknown advancement: %s",
+        "commands.advancement.criterionNotFound" => {
+            "The advancement %s does not contain the criterion '%s'"
+        }
+        "recipe.notFound" => "Unknown recipe: %s",
+        "commands.recipe.give.success.single" => "Successfully gave %s recipes to %s",
+        "commands.recipe.give.success.multiple" => "Successfully gave %s recipes to %s players",
+        "commands.recipe.take.success.single" => "Successfully took %s recipes from %s",
+        "commands.recipe.take.success.multiple" => "Successfully took %s recipes from %s players",
+        "commands.recipe.give.failed" => "Could not learn any new recipes",
+        "commands.recipe.take.failed" => "Could not forget any recipes",
+        "commands.compute.success" => "Computed %s: %s",
+        "commands.compute.failed" => "Could not compute %s",
+        "argument.id.unknown" => "Unknown ID: %s",
+        "commands.waypoint.list.empty" => "No waypoints found",
+        "commands.waypoint.list.success" => "%s waypoints: %s",
+        "commands.waypoint.modify.color" => "Changed waypoint color of %s to %s",
+        "commands.waypoint.modify.color.reset" => "Reset waypoint color of %s",
+        "commands.waypoint.modify.style" => "Changed waypoint style of %s",
+        "commands.ride.not_riding" => "%s is not riding any vehicle",
+        "commands.loot.unknown_table" => "Unknown loot table: %s",
+        "commands.loot.empty" => "The loot table dropped nothing",
+        "commands.item.entity.set.success.single" => "Replaced a slot on %s with %s",
+        "commands.item.entity.set.success.multiple" => "Replaced a slot on %s entities with %s",
+        "slot.unknown" => "Unknown slot '%s'",
         "commands.swing.success.single" => "Swung %s's arm",
         "commands.swing.success.multiple" => "Swung the arms of %s entities",
         "commands.attribute.value.get.success" => "Value of attribute %s for %s is %s",

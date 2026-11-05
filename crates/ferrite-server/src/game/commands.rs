@@ -545,6 +545,12 @@ pub enum Action {
         dimension: super::Dimension,
         chunks: Vec<(i32, i32)>,
     },
+    /// `/item replace entity`: puts a stack (or clears the slot) in each player's inventory slot.
+    SetSlot {
+        targets: Vec<Uuid>,
+        slot: u8,
+        item: Option<(String, u8)>,
+    },
     /// `/swing`: arm swing animation of the targets (`Animate` action 0 or 3).
     Swing {
         targets: EntityTarget,
@@ -2513,6 +2519,102 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("must not be a tag"), "{error}");
+    }
+
+    #[test]
+    fn advancement_and_recipe_check_permission_and_ids() {
+        denied("advancement grant @a everything");
+        denied("recipe give @a *");
+        assert!(run("advancement grant @a only", 2).0.is_err());
+        assert!(run("recipe take @a", 2).0.is_err());
+        if super::super::commands_progress::has_data() {
+            let error = run("advancement grant @s only minecraft:nope/none", 2)
+                .0
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Unknown advancement"), "{error}");
+            let error = run("recipe give @s minecraft:nope", 2)
+                .0
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Unknown recipe"), "{error}");
+        }
+    }
+
+    #[test]
+    fn compute_waypoint_and_ride_parse() {
+        denied("compute default integer minecraft:cooking/time_wool");
+        denied("waypoint list");
+        denied("ride @s dismount");
+        let (result, actions) = run("waypoint list", 2);
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(feedback_key(&actions), Some("commands.waypoint.list.empty"));
+        assert!(
+            run("compute default float minecraft:nope/none 2", 2)
+                .0
+                .is_err()
+        );
+        if super::super::commands_progress::has_data() {
+            let (result, actions) = run("compute default integer minecraft:cooking/time_wool", 2);
+            assert_eq!(result.unwrap(), 100);
+            assert_eq!(feedback_key(&actions), Some("commands.compute.success"));
+        }
+        assert!(run("waypoint modify @s style set", 2).0.is_err());
+    }
+
+    #[test]
+    fn loot_give_rolls_tables_and_other_targets_fail_clearly() {
+        denied("loot give @s loot minecraft:blocks/stone");
+        // No player `@s` for the test source: the table is rolled and checked first.
+        let error = run("loot give @s loot minecraft:nope/none", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown loot table"), "{error}");
+        let error = run("loot spawn 0 64 0 loot minecraft:blocks/stone", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported"), "{error}");
+        let error = run("loot insert 0 64 0 mine 0 64 0", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported"), "{error}");
+    }
+
+    #[test]
+    fn item_replace_parses_and_other_forms_fail_clearly() {
+        denied("item replace entity @s hotbar.0 with minecraft:stone");
+        let error = run("item replace entity @s hotbar.0 with minecraft:nope", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Unknown item"), "{error}");
+        for line in [
+            "item modify entity @s hotbar.0 minecraft:foo",
+            "item replace block 0 64 0 container.0 with minecraft:stone",
+            "item fill entity @s hotbar.* with minecraft:stone",
+            "item override entity @s hotbar.* from entity @s hotbar.1",
+        ] {
+            let error = run(line, 2).0.unwrap_err().to_string();
+            assert!(error.contains("not supported"), "{line}: {error}");
+        }
+    }
+
+    #[test]
+    fn place_is_registered_but_reports_unsupported() {
+        denied("place feature minecraft:oak");
+        let error = run("place feature minecraft:oak 0 64 0", 2)
+            .0
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported"), "{error}");
+        assert!(
+            run("place template minecraft:foo 0 64 0 90 none", 2)
+                .0
+                .is_err()
+        );
     }
 
     #[test]

@@ -19,6 +19,22 @@ fn tables() -> Option<&'static LootTables> {
         .as_ref()
 }
 
+/// Rolls a loot table by id for `/loot`: `(namespaced item id, count)` stacks, or `None` when
+/// the table does not exist (or the vanilla data is missing).
+pub fn roll_table(id: &str, context: &LootContext) -> Option<Vec<(String, i32)>> {
+    let id = if id.contains(':') {
+        id.to_owned()
+    } else {
+        format!("minecraft:{id}")
+    };
+    let table = tables()?.get(&id)?;
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos() as u64);
+    let mut rng = ferrite_entity::Rng::new(seed);
+    Some(table.roll(context, &mut LootRng(&mut rng)))
+}
+
 /// Loads the loot tables off the tick threads, so the first broken block does not stall its
 /// region while they parse.
 pub fn preload() {

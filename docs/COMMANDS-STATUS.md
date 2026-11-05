@@ -6,23 +6,35 @@ dispatcher compared with `vanilla/26.3/generated/reports/commands.json` (94 root
 ## Done on 2026-11-04 (all in `commands_more.rs` unless noted)
 
 version, random, setidletimeout, teammsg/tm, transfer, stopwatch, publish, unpublish, tick,
-rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers, swing, attribute, dialog, posteffect, spectate, fillbiome.
+rotate, forceload, damage, debug, perf, jfr, test, fetchprofile, spreadplayers, swing, attribute, dialog, posteffect, spectate, fillbiome, advancement, recipe, compute, waypoint, loot, item, ride, place (the last four partly, see below).
 
-## Not done: 8 commands are still missing
+## Not done: none missing from the command tree
 
-advancement, compute, item, loot, place, recipe, ride, waypoint.
-
-Notes for whoever picks these up:
-
-- `ride`: needs passenger plumbing in the region (no vehicle model yet).
-- `item`, `loot`: need slot addressing and loot tables from the extracted vanilla data.
-- `advancement`, `recipe`: need per-player progress state, packets and persistence.
-- `compute`: needs the context int/float provider registries.
-- `place`: needs new requests in the worldgen host protocol (Mojang's code stays in the host
-  process; Ferrite must not carry it).
-- `waypoint`: needs the clientbound `waypoint` packet and entity waypoint state.
+All 94 vanilla roots are registered. Several only cover part of their behavior; see the next section.
 
 ## Partly done (works, but not like vanilla yet)
+
+- `/advancement`, `/recipe`: grant/revoke/give/take with the vanilla tree (`only/from/until/
+  through/everything`, criteria) and recipe/advancement ids from the extracted data. State is in
+  memory per player (not saved) and no `update_advancements` / `recipe_book_*` packet is sent,
+  so there is no toast or recipe-book entry, and triggers never complete advancements.
+- `/compute`: evaluates `context_int_provider` / `context_float_provider` (constant, reference,
+  conditional, div, number_dispatcher, weighted_list, match_block). `entity` context carries no
+  entity data yet.
+- `/waypoint`: `list` lists online players; `modify` stores color/style per entity but sends no
+  `waypoint` packet.
+- `/loot give <players> loot|mine|fish`: rolls the extracted tables (`mine` reads the block at
+  the position; `mainhand`/`offhand` count as no tool) and gives the stacks with `/give`.
+  `kill`, `insert`, `replace`, `spawn` fail with "not supported" (no entity type in selectors, no
+  item-entity spawn, no container write path).
+- `/item replace entity <players> <slot> with <item> [count]` works for player inventories
+  (`container.N`, `hotbar.N`, `inventory.N`, `armor.*`, `weapon.offhand`, `*` wildcards;
+  components ignored). `block`, `from`, `modify`, `fill`, `override` and `weapon.mainhand`
+  fail with "not supported".
+- `/ride`: syntax only; `mount` fails ("not supported", no passenger model), `dismount` always
+  reports "not riding".
+- `/place`: syntax only; every form fails ("not supported"). Needs chunk state in the worldgen
+  host and the structure template files, which the extracted data lacks.
 
 - `/fillbiome` rewrites the 4x4x4 biome cells of loaded chunks (also fixed `biome_name` reading
   one section too high) and resends the column to tracking players. A `#tag` filter is read

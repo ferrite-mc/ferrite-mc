@@ -40,11 +40,14 @@ CMI가 동작한다고 말할 수 없다.
 - **엔티티 모델 확장 필요:** 아이템 사용 상태(`startUsingItem`, `completeUsingActiveItem`),
   내구도(`damageItemStack`, `applyMending`), 탑승·어깨 엔티티, 전투 추적기, 화살 외 발사체.
 - **지형·충돌 데이터 필요:** `rayTrace*`, `collidesAt`, `wouldCollideUsing`.
-- **바이옴·구조물 데이터 필요:** `setBiome`, `getComputedBiome`, 기온·습도, `getStructures`,
+- **바이옴·구조물 데이터 필요:** `setBiome`, `getComputedBiome`, 기온·습도, `getStructures`(구조물 영역 조회가 호스트에 없다),
   `createExplorerMap`(Server 3개), `generateTree`.
   (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
   호스트가 없으면 "not implemented"를 던진다. 호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능.)
-- **청크 관리:** `loadChunk`, `unloadChunk`, `refreshChunk`, `isChunkGenerated`, `getChunkGenerationState`.
+- **청크 관리:** `unloadChunk`, `refreshChunk`, `getChunkGenerationState`.
+  (구현됨: `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk` = 생성돼 있으면 true,
+  `generate`면 월드 뷰로 블록 하나를 읽어 생성을 유도한 뒤 true. Java 쪽은 이 환경에 Java 25가 없어 컴파일을 확인하지 못했다.
+  청크를 실제로 로드 상태로 붙잡아 두지는 않는다.)
 - **기타:** `openBook`(아이템에 written_book 구성요소 없음), `strikeLightningEffect`(피해 없는 번개),
   `sendGameEvent`, `findLightningRod/Target`, `getSentChunks`/`isChunkSent`,
   `sendEquipmentChange`/`sendMap`/`sendBlockUpdate(TileState)`, 스코어보드 팀 패킷.

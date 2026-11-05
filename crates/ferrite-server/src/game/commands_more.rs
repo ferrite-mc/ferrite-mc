@@ -40,6 +40,19 @@ pub struct MoreState {
     pub attributes: BTreeMap<(uuid::Uuid, String), super::attributes::Stored>,
     /// `/posteffect`: post-processing effects each player has, in the order they were added.
     pub post_effects: BTreeMap<uuid::Uuid, Vec<String>>,
+    /// `/advancement`: `advancement#criterion` keys each player has completed.
+    pub advancements: BTreeMap<uuid::Uuid, std::collections::BTreeSet<String>>,
+    /// `/recipe`: recipe ids each player has unlocked.
+    pub recipes: BTreeMap<uuid::Uuid, std::collections::BTreeSet<String>>,
+    /// `/waypoint modify`: color and style per entity.
+    pub waypoints: BTreeMap<uuid::Uuid, WaypointStyle>,
+}
+
+/// What `/waypoint modify` changed for one entity.
+#[derive(Debug, Clone, Default)]
+pub struct WaypointStyle {
+    pub color: Option<String>,
+    pub style: Option<String>,
 }
 
 /// What `/tick` changes: the target rate, the frozen flag and the pending steps. The game loop
@@ -2203,6 +2216,10 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(test_tree());
     tree.register(fetchprofile_tree());
     tree.register(spreadplayers_tree());
+    super::commands_progress::register(tree);
+    super::commands_late::register(tree);
+    super::commands_loot::register(tree);
+    super::commands_item::register(tree);
 }
 
 #[cfg(test)]

@@ -252,6 +252,22 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
                 return chunkLoaded(cx, cz);
             }
+            case "isChunkGenerated" -> {
+                int cx = args[0] instanceof org.bukkit.Chunk c ? c.getX() : (int) args[0];
+                int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
+                return (boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, cx, cz);
+            }
+            case "loadChunk" -> {
+                // Chunk handles are views that need no loading step. `generate` (default true)
+                // forces generation by reading one block of the chunk through the world view.
+                int cx, cz; boolean generate = true;
+                if (args[0] instanceof org.bukkit.Chunk c) { cx = c.getX(); cz = c.getZ(); if (args.length > 1) generate = (boolean) args[1]; }
+                else { cx = (int) args[0]; cz = (int) args[1]; if (args.length > 2) generate = (boolean) args[2]; }
+                if ((boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, cx, cz)) return true;
+                if (!generate) return false;
+                typeAt(new Pos(cx << 4, 64, cz << 4));
+                return true;
+            }
             case "getLoadedChunks" -> {
                 var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
                 var chunks = new java.util.ArrayList<org.bukkit.Chunk>();
