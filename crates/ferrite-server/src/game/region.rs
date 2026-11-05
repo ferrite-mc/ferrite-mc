@@ -533,6 +533,8 @@ pub struct Region {
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
+    /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
+    pending_hurts: Vec<Uuid>,
     pub players: HashMap<Uuid, Player>,
     pub entities: EntityStore,
     generator: FlatGenerator,
@@ -593,6 +595,7 @@ impl RegionData for Region {
         let mut result = Self {
             plugin_explosions: Vec::new(),
             pending_swings: Vec::new(),
+            pending_hurts: Vec::new(),
             players: HashMap::new(),
             rng: Rng::default(),
             beacon_clock: 0,
@@ -3385,6 +3388,25 @@ impl Region {
     /// strength, critical hits, sweeping, knockback and the hurt animation. A drawn bow that
     /// was released this tick fires its arrow first.
     fn resolve_attacks(&mut self, ctx: &TickContext) {
+        for uuid in std::mem::take(&mut self.pending_hurts) {
+            let key = self.entities.keys().iter().copied().find(|key| {
+                self.entities
+                    .data(*key)
+                    .is_some_and(|data| data.uuid == uuid)
+            });
+            let Some(key) = key else { continue };
+            let Some(data) = self.entities.data(key) else {
+                continue;
+            };
+            let (id, yaw) = (VarInt(data.id), data.yaw);
+            let players = &self.players;
+            tracker::broadcast(
+                &self.entities,
+                key,
+                &HurtAnimation { id, yaw },
+                &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+            );
+        }
         for (uuid, action) in std::mem::take(&mut self.pending_swings) {
             let key = self.entities.keys().iter().copied().find(|key| {
                 self.entities
@@ -4663,7 +4685,9 @@ impl Region {
         let Some(key) = key else {
             return false;
         };
-        mob::hurt(&mut self.entities, key, amount, None);
+        if mob::hurt(&mut self.entities, key, amount, None).is_some() {
+            self.pending_hurts.push(uuid);
+        }
         true
     }
 
@@ -4725,6 +4749,24 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn damage_hurts_a_mob_and_queues_its_hurt_animation() {
+        let mut region = Region::default();
+        let record = mob::new_mob(
+            mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        region.add_entities(vec![record]);
+        assert!(
+            !region.damage_entity(Uuid::from_u128(99), 1.0),
+            "unknown entity"
+        );
+        assert!(region.pending_hurts.is_empty());
+        assert!(region.damage_entity(uuid, 3.0));
+        assert_eq!(region.pending_hurts, vec![uuid]);
+    }
     #[test]
     fn chunk_updates_only_reach_the_matching_dimension() {
         let (overworld, mut overworld_rx) = OutboundSender::channel(1024);

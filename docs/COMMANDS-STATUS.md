@@ -77,8 +77,8 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   report time and ticks but write no report file.
 - `/fetchprofile` only knows players who are online (no Mojang API lookup).
 - `/rotate` assumes the target is in the command's dimension.
-- `/damage` maps the damage type to the nearest survival kind; mobs take the plain amount
-  without a hurt animation, and `at`/`by`/`from` are parsed but not used.
+- `/damage` maps the damage type to the nearest survival kind; mobs take the plain amount and play the hurt animation,
+  while `at`/`by`/`from` are parsed but not used.
 - `/locate biome|structure|poi` ask the vanilla host (ops 5, 6 and 9, need
   `generator = "vanilla"`); `poi` only finds points of interest of chunks that are stored.
 - Plugin `World#generateTree` runs the matching vanilla feature through the host and keeps block
