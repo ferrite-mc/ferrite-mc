@@ -7,8 +7,10 @@ use std::sync::{Mutex, OnceLock};
 
 use ferrite_plugin::{HOST_ITEM_SEPARATOR, HostCall};
 
-fn cache() -> &'static Mutex<HashMap<String, Option<(f64, f64)>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<(f64, f64)>>>> = OnceLock::new();
+type Climates = HashMap<String, Option<(f64, f64)>>;
+
+fn cache() -> &'static Mutex<Climates> {
+    static CACHE: OnceLock<Mutex<Climates>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
