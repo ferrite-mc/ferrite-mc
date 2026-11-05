@@ -333,6 +333,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
                 return (boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, cx, cz);
             }
+            case "getChunkGenerationState", "getChunkGenerationStateAsync" -> {
+                boolean generated = (boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, (int) args[0], (int) args[1]);
+                var state = generated ? io.papermc.paper.world.chunk.ChunkGenerationState.GENERATED : io.papermc.paper.world.chunk.ChunkGenerationState.NOT_GENERATED;
+                return method.equals("getChunkGenerationState") ? state : java.util.concurrent.CompletableFuture.completedFuture(state);
+            }
+            case "unloadChunk", "unloadChunkRequest" -> {
+                // The server unloads a chunk by itself once nobody holds it, so a request succeeds
+                // exactly when the chunk is already unloaded and fails while a player or the spawn holds it.
+                int cx = args[0] instanceof org.bukkit.Chunk c ? c.getX() : (int) args[0];
+                int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
+                return !chunkLoaded(cx, cz);
+            }
             case "loadChunk" -> {
                 // Chunk handles are views that need no loading step. `generate` (default true)
                 // forces generation by reading one block of the chunk through the world view.

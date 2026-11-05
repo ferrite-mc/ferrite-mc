@@ -629,4 +629,19 @@ class PlayerExtrasTest {
             assertEquals("sendMapData(int,int,boolean,byte[])", calls.get(0)[0]);
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void chunkUnloadsAndGenerationStateFollowTheHost() {
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "isChunkLoaded(int,int)" -> args.startsWith("1") ? "true" : "false";
+            case "isChunkGenerated(int,int)" -> args.startsWith("1") ? "true" : "false";
+            default -> "";
+        };
+        try {
+            var world = player.getWorld();
+            assertFalse(world.unloadChunk(1, 0), "a held chunk stays");
+            assertTrue(world.unloadChunk(2, 0), "an unloaded chunk counts as unloaded");
+            assertEquals(io.papermc.paper.world.chunk.ChunkGenerationState.GENERATED, world.getChunkGenerationState(1, 0));
+            assertEquals(io.papermc.paper.world.chunk.ChunkGenerationState.NOT_GENERATED, world.getChunkGenerationState(2, 0));
+        } finally { HostBridge.transport = null; }
+    }
 }
