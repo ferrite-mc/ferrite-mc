@@ -342,7 +342,21 @@ fn places_features_and_structures_through_the_host() {
         Dimension::Overworld,
         &format!("structure;minecraft:village_plains;0;{height};0"),
     );
-    eprintln!("village: {:?}", village.as_ref().map(Vec::len));
+    eprintln!("village: {:?}", village.as_ref().map(|placed| placed.len()));
+    // Structures come with their block entities: a desert pyramid has loot chests.
+    let pyramid = generator
+        .place(
+            Dimension::Overworld,
+            &format!("structure;minecraft:desert_pyramid;200;{height};200"),
+        )
+        .unwrap();
+    assert!(
+        pyramid.entities.iter().any(|(_, data)| matches!(
+            data.get("id"),
+            Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:chest"
+        )),
+        "a desert pyramid places chests with their block entities"
+    );
     // After a village exists, the host can locate its points of interest (best effort: only
     // stored chunks count, like the jar's own /locate poi).
     let poi = generator.locate_poi(Dimension::Overworld, "minecraft:bed", 0, height, 0, 256);

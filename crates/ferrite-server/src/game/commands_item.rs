@@ -320,8 +320,14 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
         }
     })?;
     let blocks: Vec<([i32; 3], u16)> = placed
+        .blocks
         .into_iter()
         .map(|([x, y, z], state)| ([x - base[0], y - base[1], z - base[2]], state))
+        .collect();
+    let entities: Vec<([i32; 3], ferrite_nbt::Compound)> = placed
+        .entities
+        .into_iter()
+        .map(|([x, y, z], data)| ([x - base[0], y - base[1], z - base[2]], data))
         .collect();
     send(
         source,
@@ -333,6 +339,7 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
             ]),
             name: label,
             blocks: std::sync::Arc::new(blocks),
+            entities: std::sync::Arc::new(entities),
         }),
     )
 }
@@ -377,6 +384,7 @@ fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             pos: *coords,
             name: id,
             blocks: std::sync::Arc::new(blocks),
+            entities: Default::default(),
         }),
     )
 }

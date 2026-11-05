@@ -173,12 +173,15 @@ mod tests {
         ) -> anyhow::Result<bool> {
             Ok(id == "minecraft:village_plains")
         }
-        fn place(&self, _: Dimension, argument: &str) -> anyhow::Result<Vec<([i32; 3], u16)>> {
+        fn place(&self, _: Dimension, argument: &str) -> anyhow::Result<crate::game::Placed> {
             if argument.starts_with("feature;minecraft:oak;") {
                 let log = ferrite_data::blocks::state_id("minecraft:oak_log", &[("axis", "y")]);
-                Ok(vec![([1, 65, -2], log.unwrap())])
+                Ok(crate::game::Placed {
+                    blocks: vec![([1, 65, -2], log.unwrap())],
+                    entities: Vec::new(),
+                })
             } else if argument.starts_with("feature;minecraft:empty;") {
-                Ok(Vec::new())
+                Ok(crate::game::Placed::default())
             } else {
                 anyhow::bail!("no such feature")
             }

@@ -10,7 +10,7 @@ mod blocks;
 mod generator;
 #[cfg(test)]
 mod persistence_tests;
-pub use generator::{ChunkGenerator, Generated};
+pub use generator::{ChunkGenerator, Generated, Placed};
 mod vanilla_gen;
 pub use vanilla_gen::{HostSettings, VanillaGenerator};
 pub mod playerdata;

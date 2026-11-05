@@ -391,7 +391,11 @@ impl ChunkGenerator for VanillaGenerator {
         parse_position(&self.request(OP_LOCATE_STRUCTURE, dimension, 0, 0, &argument)?)
     }
 
-    fn place(&self, dimension: Dimension, argument: &str) -> anyhow::Result<Vec<([i32; 3], u16)>> {
+    fn place(
+        &self,
+        dimension: Dimension,
+        argument: &str,
+    ) -> anyhow::Result<super::generator::Placed> {
         let reply = self.request(OP_PLACE, dimension, 0, 0, argument)?;
         parse_placed(&reply)
     }
@@ -429,7 +433,7 @@ impl ChunkGenerator for VanillaGenerator {
 }
 
 /// Parses the host reply of a placement: `ok` then `x y z block[props]` lines, or `fail <text>`.
-fn parse_placed(reply: &[u8]) -> anyhow::Result<Vec<([i32; 3], u16)>> {
+fn parse_placed(reply: &[u8]) -> anyhow::Result<super::generator::Placed> {
     let text = std::str::from_utf8(reply)?;
     let mut lines = text.lines();
     match lines.next() {
@@ -438,7 +442,20 @@ fn parse_placed(reply: &[u8]) -> anyhow::Result<Vec<([i32; 3], u16)>> {
         None => anyhow::bail!("the host returned nothing"),
     }
     let mut blocks = Vec::new();
+    let mut entities = Vec::new();
     for line in lines {
+        // `be x y z <snbt>`: the block entity left at a changed position.
+        if let Some(rest) = line.strip_prefix("be ") {
+            let mut fields = rest.splitn(4, ' ');
+            if let (Some(x), Some(y), Some(z), Some(snbt)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+                && let (Ok(x), Ok(y), Ok(z)) = (x.parse(), y.parse(), z.parse())
+                && let Ok(ferrite_nbt::Tag::Compound(data)) = ferrite_nbt::snbt::parse(snbt)
+            {
+                entities.push(([x, y, z], data));
+            }
+            continue;
+        }
         let mut fields = line.splitn(4, ' ');
         let (Some(x), Some(y), Some(z), Some(state)) =
             (fields.next(), fields.next(), fields.next(), fields.next())
@@ -461,7 +478,7 @@ fn parse_placed(reply: &[u8]) -> anyhow::Result<Vec<([i32; 3], u16)>> {
             blocks.push(([x, y, z], id));
         }
     }
-    Ok(blocks)
+    Ok(super::generator::Placed { blocks, entities })
 }
 
 /// Parses a host reply of `x y z[ text]`; an empty reply means nothing was found.
@@ -510,6 +527,20 @@ mod tests {
             Some(blocks[1].1),
             ferrite_data::blocks::state_id("minecraft:oak_log", &[("axis", "y")])
         );
+        let with_chest = b"ok\n3 64 4 minecraft:chest[facing=north,type=single,waterlogged=false]\nbe 3 64 4 {id:\"minecraft:chest\",Items:[{Slot:0b,id:\"minecraft:stone\",count:2}],LootTable:\"minecraft:chests/igloo_chest\"}\nbe x y z {broken\n";
+        let placed = super::parse_placed(with_chest).unwrap();
+        assert_eq!(placed.blocks.len(), 1);
+        assert_eq!(
+            placed.entities.len(),
+            1,
+            "malformed block entity lines are skipped"
+        );
+        let (pos, data) = &placed.entities[0];
+        assert_eq!(*pos, [3, 64, 4]);
+        assert!(
+            matches!(data.get("id"), Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:chest")
+        );
+        assert!(data.get("LootTable").is_some());
         let error = super::parse_placed(b"fail Could not place\n").unwrap_err();
         assert_eq!(error.to_string(), "Could not place");
         assert!(super::parse_placed(b"").is_err());

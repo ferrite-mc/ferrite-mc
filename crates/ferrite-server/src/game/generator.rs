@@ -9,6 +9,21 @@ use ferrite_world::{Chunk, LightData};
 /// Blocks a placement changed: world position and block state id.
 pub type PlacedBlocks = Vec<([i32; 3], u16)>;
 
+/// What a placement changed: the blocks, and the block entities (chest contents, signs, ...)
+/// that came with them, keyed by world position.
+#[derive(Debug, Default)]
+pub struct Placed {
+    pub blocks: PlacedBlocks,
+    pub entities: Vec<([i32; 3], ferrite_nbt::Compound)>,
+}
+
+impl std::ops::Deref for Placed {
+    type Target = PlacedBlocks;
+    fn deref(&self) -> &PlacedBlocks {
+        &self.blocks
+    }
+}
+
 /// A generated column plus the light data the wire encoder needs.
 pub struct Generated {
     pub chunk: Chunk,
@@ -60,7 +75,7 @@ pub trait ChunkGenerator: Send + Sync {
 
     /// Runs the vanilla `/place feature|jigsaw|structure` described by `argument`
     /// (`kind;...;x;y;z`) and returns the blocks it changed as `(position, state id)`.
-    fn place(&self, _dimension: super::Dimension, _argument: &str) -> anyhow::Result<PlacedBlocks> {
+    fn place(&self, _dimension: super::Dimension, _argument: &str) -> anyhow::Result<Placed> {
         anyhow::bail!("this generator cannot place features or structures")
     }
 

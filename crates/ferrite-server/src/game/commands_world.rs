@@ -100,6 +100,8 @@ pub enum WorldCommand {
         pos: Coordinates,
         name: String,
         blocks: std::sync::Arc<Vec<([i32; 3], u16)>>,
+        /// Block entities (relative position, full NBT) that belong to the blocks.
+        entities: std::sync::Arc<Vec<([i32; 3], ferrite_nbt::Compound)>>,
     },
 }
 
@@ -135,6 +137,11 @@ pub trait WorldBlocks {
     fn place_block_entity(&self, _pos: [i32; 3], _state: u32, _nbt: Option<&Tag>) -> bool {
         false
     }
+    /// Stores a block entity as saved by vanilla (its `id` names the type); false when the
+    /// world cannot hold it.
+    fn set_block_entity(&self, _pos: [i32; 3], _data: &ferrite_nbt::Compound) -> bool {
+        false
+    }
 }
 
 impl WorldBlocks for super::anvil::AnvilChunkSource {
@@ -146,6 +153,25 @@ impl WorldBlocks for super::anvil::AnvilChunkSource {
     }
     fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool {
         super::anvil::AnvilChunkSource::set_block(self, x, y, z, state).is_ok()
+    }
+    fn set_block_entity(&self, pos: [i32; 3], data: &ferrite_nbt::Compound) -> bool {
+        let Some(Tag::String(id)) = data.get("id") else {
+            return false;
+        };
+        let Some(type_id) = ferrite_data::registries::id("minecraft:block_entity_type", id)
+            .and_then(|id| u32::try_from(id).ok())
+        else {
+            return false;
+        };
+        let mut data = data.clone();
+        data.insert("x".into(), Tag::Int(pos[0]));
+        data.insert("y".into(), Tag::Int(pos[1]));
+        data.insert("z".into(), Tag::Int(pos[2]));
+        self.update_block_entity(pos[0], pos[1], pos[2], |slot| {
+            *slot = Some(ferrite_world::BlockEntity { type_id, data });
+            (true, ())
+        })
+        .is_ok()
     }
     fn place_block_entity(&self, pos: [i32; 3], state: u32, nbt: Option<&Tag>) -> bool {
         let Some((name, _)) = u16::try_from(state)
@@ -473,7 +499,12 @@ pub fn execute(
             *mode,
             world,
         ),
-        WorldCommand::Template { pos, name, blocks } => {
+        WorldCommand::Template {
+            pos,
+            name,
+            blocks,
+            entities,
+        } => {
             let [ox, oy, oz] = resolve(pos, origin);
             let mut changes = Vec::new();
             for ([x, y, z], state) in blocks.iter() {
@@ -487,6 +518,9 @@ pub fn execute(
             }
             if changes.is_empty() {
                 return Err("Chunk not loaded".into());
+            }
+            for ([x, y, z], data) in entities.iter() {
+                world.set_block_entity([ox + x, oy + y, oz + z], data);
             }
             Ok(Outcome {
                 changes,
@@ -821,12 +855,14 @@ mod tests {
 
     struct TestWorld {
         blocks: RefCell<HashMap<(i32, i32, i32), u32>>,
+        entities: RefCell<Vec<([i32; 3], ferrite_nbt::Compound)>>,
     }
 
     impl TestWorld {
         fn new() -> Self {
             Self {
                 blocks: RefCell::new(HashMap::new()),
+                entities: RefCell::new(Vec::new()),
             }
         }
         fn put(&self, x: i32, y: i32, z: i32, state: u16) {
@@ -846,6 +882,10 @@ mod tests {
         }
         fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool {
             self.blocks.borrow_mut().insert((x, y, z), state);
+            true
+        }
+        fn set_block_entity(&self, pos: [i32; 3], data: &ferrite_nbt::Compound) -> bool {
+            self.entities.borrow_mut().push((pos, data.clone()));
             true
         }
     }
@@ -1255,5 +1295,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("not a block entity"), "{error}");
+    }
+
+    #[test]
+    fn templates_place_their_block_entities_beside_the_blocks() {
+        let chest = ferrite_data::blocks::default_state("minecraft:chest").unwrap();
+        let mut data = ferrite_nbt::Compound::new();
+        data.insert(
+            "id".into(),
+            ferrite_nbt::Tag::String("minecraft:chest".into()),
+        );
+        let world = TestWorld::new();
+        execute(
+            &WorldCommand::Template {
+                pos: pos(10.0, 64.0, 10.0),
+                name: "structure minecraft:igloo".into(),
+                blocks: std::sync::Arc::new(vec![([1, 0, 2], chest)]),
+                entities: std::sync::Arc::new(vec![([1, 0, 2], data)]),
+            },
+            &origin(),
+            &world,
+        )
+        .unwrap();
+        let entities = world.entities.borrow();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(
+            entities[0].0,
+            [11, 64, 12],
+            "entity positions follow the template origin"
+        );
     }
 }

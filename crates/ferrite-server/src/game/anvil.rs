@@ -318,7 +318,7 @@ impl AnvilChunkSource {
     }
 
     /// Runs a vanilla placement in the worldgen host, when vanilla generation is enabled.
-    pub fn place(&self, argument: &str) -> Option<anyhow::Result<super::generator::PlacedBlocks>> {
+    pub fn place(&self, argument: &str) -> Option<anyhow::Result<super::generator::Placed>> {
         Some(self.terrain.as_ref()?.place(self.dimension, argument))
     }
 

@@ -7,8 +7,10 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -122,6 +124,7 @@ final class Placer {
             return out.toString().getBytes(StandardCharsets.UTF_8);
         }
         out.append("ok\n");
+        StringBuilder entities = new StringBuilder();
         int changed = 0;
         for (Snapshot snap : before) {
             LevelChunk chunk = snap.chunk();
@@ -147,12 +150,24 @@ final class Placer {
                             .append((snap.chunkZ() << 4) + lz).append(' ')
                             .append(describe(now)).append('\n');
                     changed++;
+                    // Chest contents, signs and the like travel as `be x y z <snbt>` lines.
+                    BlockPos at = new BlockPos(
+                            (snap.chunkX() << 4) + lx, baseY + ly, (snap.chunkZ() << 4) + lz);
+                    BlockEntity entity = chunk.getBlockEntity(at);
+                    if (entity != null) {
+                        entities.append("be ").append(at.getX()).append(' ').append(at.getY())
+                                .append(' ').append(at.getZ()).append(' ')
+                                .append(entity.saveWithFullMetadata(level.registryAccess()).toString()
+                                        .replace('\n', ' '))
+                                .append('\n');
+                    }
                 }
             }
         }
         if (changed == 0) {
             return "fail nothing changed\n".getBytes(StandardCharsets.UTF_8);
         }
+        out.append(entities);
         return out.toString().getBytes(StandardCharsets.UTF_8);
     }
 
