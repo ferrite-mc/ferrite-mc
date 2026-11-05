@@ -86,6 +86,8 @@ public final class Bootstrap {
     /** Fires Bukkit's {@code PlayerJoinEvent}. */
     public static void firePlayerJoin(String id, String name) {
         var player = ensurePlayer(id, name);
+        // Like vanilla, a joining player sees the main scoreboard until a plugin gives them another.
+        try { player.setScoreboard(server.getScoreboardManager().getMainScoreboard()); } catch (RuntimeException noHost) { /* nothing to show without a host */ }
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(new org.bukkit.event.player.PlayerJoinEvent(player, net.kyori.adventure.text.Component.empty())); }
     }
     /** Fires Bukkit's {@code PlayerQuitEvent} and forgets the disconnected player. */

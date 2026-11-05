@@ -480,4 +480,17 @@ class PlayerExtrasTest {
             "sbTeam(String,int,String,String)|red;0;red,2,always,always,12,,;Alex,Bob",
             "sbTeam(String,int,String,String)|red;1;;"), calls);
     }
+
+    @Test void joiningPlayersSeeTheMainScoreboard() {
+        var calls = new java.util.ArrayList<String>();
+        var main = org.bukkit.Bukkit.getScoreboardManager().getMainScoreboard();
+        var objective = main.registerNewObjective("joinboard", org.bukkit.scoreboard.Criteria.DUMMY, net.kyori.adventure.text.Component.text("Join"));
+        objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            Bootstrap.firePlayerJoin(player.getUniqueId().toString(), player.getName());
+        } finally { HostBridge.transport = null; objective.unregister(); }
+        assertTrue(calls.contains("sbObjective(String,int,String,int)"), calls.toString());
+        assertSame(main, player.getScoreboard());
+    }
 }
