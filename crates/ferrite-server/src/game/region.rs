@@ -1088,7 +1088,9 @@ impl Player {
         {
             return;
         }
-        let Some(source) = &self.source else { return };
+        let Some(source) = self.source.clone() else {
+            return;
+        };
         let Some(clicked_state) = source
             .block(clicked.x, clicked.y, clicked.z)
             .and_then(|s| u16::try_from(s).ok())
@@ -1115,6 +1117,30 @@ impl Player {
         }
         // Vanilla `FlintAndSteelItem.useOn` / `FireChargeItem.useOn` on TNT: prime it.
         let held = self.inventory.get(self.hand_slot(p.hand.0)).clone();
+        if held.name() == Some("minecraft:ender_eye")
+            && let Some(next) = super::portal::insert_eye(clicked_state)
+        {
+            if self.change_block(p.location, Some(u32::from(clicked_state)), u32::from(next)) {
+                self.changed_blocks.push([clicked.x, clicked.y, clicked.z]);
+                if self.gamemode == 0 {
+                    let slot = self.hand_slot(p.hand.0);
+                    self.inventory
+                        .set(slot, held.copy_with_count(held.count - 1));
+                }
+                if let Some(blocks) = super::portal::end_frame_blocks(
+                    source.as_ref(),
+                    [clicked.x, clicked.y, clicked.z],
+                ) {
+                    for (at, state) in blocks {
+                        let location = ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]);
+                        if self.change_block(location.pack(), None, u32::from(state)) {
+                            self.changed_blocks.push(at);
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if matches!(
             held.name(),
             Some("minecraft:flint_and_steel" | "minecraft:fire_charge")
@@ -2144,9 +2170,6 @@ impl Player {
             self.portal_ticks = 0;
             return;
         }
-        let Some(target) = super::portal::counterpart(self.dimension) else {
-            return;
-        };
         let Some(source) = self.source.clone() else {
             return;
         };
@@ -2155,25 +2178,49 @@ impl Player {
             self.pos[1].floor() as i32,
             self.pos[2].floor() as i32,
         ];
-        let in_portal = source
+        let state = source
             .block(feet[0], feet[1], feet[2])
-            .and_then(|state| u16::try_from(state).ok())
-            .is_some_and(super::portal::is_portal);
-        if !in_portal {
+            .and_then(|state| u16::try_from(state).ok());
+        let end_portal = state.is_some_and(super::portal::is_end_portal);
+        let target = if end_portal {
+            match self.dimension {
+                super::Dimension::Overworld => Some(super::Dimension::End),
+                super::Dimension::End => Some(super::Dimension::Overworld),
+                super::Dimension::Nether => None,
+            }
+        } else if state.is_some_and(super::portal::is_portal) {
+            super::portal::counterpart(self.dimension)
+        } else {
+            None
+        };
+        let Some(target) = target else {
             self.portal_ticks = 0;
             self.portal_pending = None;
             return;
-        }
+        };
         if self.portal_cooldown > 0 {
             return;
         }
         if self.portal_pending.is_none() {
             self.portal_ticks += 1;
-            if self.portal_ticks < super::portal::WAIT_TICKS {
+            if !end_portal && self.portal_ticks < super::portal::WAIT_TICKS {
                 return;
             }
             self.portal_ticks = 0;
-            let scaled = super::portal::scale(self.dimension, target, self.pos);
+            let scaled = if end_portal && target == super::Dimension::End {
+                [100.5, 49.0, 0.5]
+            } else if end_portal {
+                let spawn = self
+                    .spawn
+                    .unwrap_or_else(|| self.dimensions.spawn(super::Dimension::Overworld));
+                [
+                    f64::from(spawn[0]) + 0.5,
+                    f64::from(spawn[1]),
+                    f64::from(spawn[2]) + 0.5,
+                ]
+            } else {
+                super::portal::scale(self.dimension, target, self.pos)
+            };
             self.portal_pending = Some((target, scaled));
         }
         let Some((target, scaled)) = self.portal_pending else {
@@ -2185,12 +2232,15 @@ impl Player {
             (scaled[2].floor() as i32).div_euclid(16),
             self.biome,
         );
-        let destination = super::portal::find_portal(
-            target_source.as_ref(),
-            scaled,
-            super::portal::SEARCH_RADIUS,
-        )
-        .or_else(|| super::portal::create_portal(target_source.as_ref(), scaled));
+        let destination = if end_portal && target == super::Dimension::End {
+            target_source.prefetch(6, -1, self.biome);
+            super::portal::create_end_platform(target_source.as_ref())
+        } else if end_portal {
+            Some(scaled)
+        } else {
+            super::portal::find_portal(target_source.as_ref(), scaled, super::portal::SEARCH_RADIUS)
+                .or_else(|| super::portal::create_portal(target_source.as_ref(), scaled))
+        };
         let Some(destination) = destination else {
             // The destination chunk is still loading; retry on the next tick.
             return;

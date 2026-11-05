@@ -186,11 +186,7 @@ impl DimensionRegistry {
     ) -> Arc<Self> {
         let mut sources = HashMap::new();
         for dimension in Dimension::ALL {
-            // The end has no generator here yet (it needs the end biome source), so it stays
-            // on the flat fallback instead of failing every chunk load.
-            let dimension_terrain = (dimension != Dimension::End)
-                .then(|| terrain.clone())
-                .flatten();
+            let dimension_terrain = terrain.clone();
             let source = match world {
                 Some(world) => AnvilChunkSource::with_dimension(
                     world.to_path_buf(),

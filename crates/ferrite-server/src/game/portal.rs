@@ -21,6 +21,8 @@ pub const COOLDOWN_TICKS: u32 = 200;
 
 const PORTAL: &str = "minecraft:nether_portal";
 const OBSIDIAN: &str = "minecraft:obsidian";
+const END_PORTAL: &str = "minecraft:end_portal";
+const END_FRAME: &str = "minecraft:end_portal_frame";
 
 /// Block access for portal geometry. `set_block` reports whether the write landed (a chunk
 /// that is not loaded cannot be edited).
@@ -60,6 +62,81 @@ pub fn portal_state(axis: Axis) -> Option<u16> {
 
 pub fn is_portal(state: u16) -> bool {
     ferrite_data::blocks::state(state).is_some_and(|(name, _)| name == PORTAL)
+}
+
+pub fn is_end_portal(state: u16) -> bool {
+    ferrite_data::blocks::state(state).is_some_and(|(name, _)| name == END_PORTAL)
+}
+
+pub fn insert_eye(state: u16) -> Option<u16> {
+    let (name, properties) = ferrite_data::blocks::state(state)?;
+    if name != END_FRAME
+        || properties
+            .iter()
+            .any(|(key, value)| *key == "eye" && *value == "true")
+    {
+        return None;
+    }
+    let updated: Vec<_> = properties
+        .iter()
+        .map(|(key, value)| (*key, if *key == "eye" { "true" } else { *value }))
+        .collect();
+    ferrite_data::blocks::state_id(name, &updated)
+}
+
+/// Finds the 3x3 portal inside twelve complete, inward-facing frames.
+pub fn end_frame_blocks(world: &impl PortalWorld, frame: [i32; 3]) -> Option<Vec<([i32; 3], u16)>> {
+    for i in -1..=1 {
+        for (dx, dz) in [(-2, i), (2, i), (i, -2), (i, 2)] {
+            let [cx, y, cz] = [frame[0] - dx, frame[1], frame[2] - dz];
+            let mut valid = true;
+            for n in -1..=1 {
+                for (x, z, facing) in [
+                    (cx - 2, cz + n, "east"),
+                    (cx + 2, cz + n, "west"),
+                    (cx + n, cz - 2, "south"),
+                    (cx + n, cz + 2, "north"),
+                ] {
+                    let expected = ferrite_data::blocks::state_id(
+                        END_FRAME,
+                        &[("eye", "true"), ("facing", facing)],
+                    )?;
+                    valid &= world.block(x, y, z) == Some(expected);
+                }
+            }
+            if valid {
+                let portal = ferrite_data::blocks::default_state(END_PORTAL)?;
+                return Some(
+                    (-1..=1)
+                        .flat_map(|x| (-1..=1).map(move |z| ([cx + x, y, cz + z], portal)))
+                        .collect(),
+                );
+            }
+        }
+    }
+    None
+}
+
+/// Builds the End arrival platform once both destination chunks are loaded.
+pub fn create_end_platform(world: &impl PortalWorld) -> Option<[f64; 3]> {
+    let obsidian = ferrite_data::blocks::default_state(OBSIDIAN)?;
+    for x in 98..=102 {
+        for z in -2..=2 {
+            for y in 48..=53 {
+                world.block(x, y, z)?;
+            }
+        }
+    }
+    for x in 98..=102 {
+        for z in -2..=2 {
+            for y in 48..=53 {
+                if !world.set_block(x, y, z, if y == 48 { obsidian } else { 0 }) {
+                    return None;
+                }
+            }
+        }
+    }
+    Some([100.5, 49.0, 0.5])
 }
 
 fn is_obsidian(state: u16) -> bool {
@@ -322,6 +399,64 @@ mod tests {
 
     fn obsidian() -> u16 {
         ferrite_data::blocks::default_state(OBSIDIAN).expect("obsidian state")
+    }
+
+    #[test]
+    fn end_portal_requires_eyes_and_inward_facing_frames() {
+        let world = MapWorld::default();
+        for i in -1..=1 {
+            for (x, z, facing) in [
+                (-2, i, "east"),
+                (2, i, "west"),
+                (i, -2, "south"),
+                (i, 2, "north"),
+            ] {
+                let state = ferrite_data::blocks::state_id(
+                    "minecraft:end_portal_frame",
+                    &[("eye", "true"), ("facing", facing)],
+                )
+                .unwrap();
+                world.set_block(x, 40, z, state);
+            }
+        }
+        assert_eq!(end_frame_blocks(&world, [0, 40, -2]).unwrap().len(), 9);
+        let wrong = ferrite_data::blocks::state_id(
+            "minecraft:end_portal_frame",
+            &[("eye", "false"), ("facing", "north")],
+        )
+        .unwrap();
+        world.set_block(0, 40, 2, wrong);
+        assert!(end_frame_blocks(&world, [0, 40, -2]).is_none());
+        let filled = insert_eye(wrong).unwrap();
+        assert!(insert_eye(filled).is_none());
+        world.set_block(0, 40, 2, filled);
+        assert!(end_frame_blocks(&world, [0, 40, -2]).is_some());
+        world.set_block(
+            0,
+            40,
+            2,
+            ferrite_data::blocks::state_id(
+                "minecraft:end_portal_frame",
+                &[("eye", "true"), ("facing", "south")],
+            )
+            .unwrap(),
+        );
+        assert!(end_frame_blocks(&world, [0, 40, -2]).is_none());
+    }
+
+    #[test]
+    fn end_arrival_platform_is_five_by_five_and_clears_headroom() {
+        let world = MapWorld::default();
+        world.set_block(100, 51, 0, obsidian());
+        assert_eq!(create_end_platform(&world), Some([100.5, 49.0, 0.5]));
+        for x in 98..=102 {
+            for z in -2..=2 {
+                assert_eq!(world.block(x, 48, z), Some(obsidian()));
+                for y in 49..=53 {
+                    assert_eq!(world.block(x, y, z), Some(0));
+                }
+            }
+        }
     }
 
     fn frame_world(width: i32, height: i32) -> MapWorld {
