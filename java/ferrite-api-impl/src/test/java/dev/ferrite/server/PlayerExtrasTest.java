@@ -351,6 +351,15 @@ class PlayerExtrasTest {
         assertEquals(java.util.List.of("spawnEntity(Location,EntityType,String)", "spawnFallingBlock(Location,Material,String)"), calls);
     }
 
+    @Test void sentChunksComeFromTheHost() {
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("getSentChunkCoordinates()") ? "1,2" + HostBridge.ITEM + "-3,4" : "";
+        try {
+            var chunks = player.getSentChunks();
+            assertEquals(2, chunks.size());
+            assertTrue(chunks.stream().anyMatch(c -> c.getX() == -3 && c.getZ() == 4));
+        } finally { HostBridge.transport = null; }
+    }
+
     @Test void lightningStrikesGoToTheHost() {
         var calls = new java.util.ArrayList<String>();
         HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };

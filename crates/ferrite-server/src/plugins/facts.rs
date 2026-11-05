@@ -274,6 +274,28 @@ pub fn set_fall_distance(player: Uuid, distance: f32) {
     fall_registry().lock().unwrap().insert(player, distance);
 }
 
+type SentChunks = HashMap<Uuid, std::collections::HashSet<(i32, i32)>>;
+
+fn sent_registry() -> &'static Mutex<SentChunks> {
+    static SENT: OnceLock<Mutex<SentChunks>> = OnceLock::new();
+    SENT.get_or_init(Default::default)
+}
+
+/// Records that the player's client now has (`sent`) or has dropped a chunk.
+pub fn set_chunk_sent(player: Uuid, x: i32, z: i32, sent: bool) {
+    let mut map = sent_registry().lock().unwrap();
+    if sent {
+        map.entry(player).or_default().insert((x, z));
+    } else if let Some(chunks) = map.get_mut(&player) {
+        chunks.remove(&(x, z));
+    }
+}
+
+/// Records that the client discarded every chunk (a respawn or a dimension change).
+pub fn clear_sent_chunks(player: Uuid) {
+    sent_registry().lock().unwrap().remove(&player);
+}
+
 fn history_registry() -> &'static Mutex<HashMap<Uuid, (bool, SystemTime)>> {
     static HISTORY: OnceLock<Mutex<HashMap<Uuid, (bool, SystemTime)>>> = OnceLock::new();
     HISTORY.get_or_init(Default::default)
@@ -316,6 +338,7 @@ pub fn forget(player: Uuid) {
     ground_registry().lock().unwrap().remove(&player);
     sleeping_registry().lock().unwrap().remove(&player);
     fall_registry().lock().unwrap().remove(&player);
+    sent_registry().lock().unwrap().remove(&player);
     cookie_registry()
         .lock()
         .unwrap()
@@ -382,6 +405,20 @@ pub fn answer(call: &HostCall) -> Option<String> {
     }
     if call.owner == "Player" && call.method == "getCookieReply(NamespacedKey)" {
         return cookie_answer(call);
+    }
+    if call.owner == "Player" && call.method == "isChunkSent(long)" {
+        // Bukkit's chunk key: x in the low 32 bits, z in the high 32.
+        let player = Uuid::parse_str(&call.subject).ok()?;
+        let key: i64 = call.args.first()?.parse().ok()?;
+        let (x, z) = (key as i32, (key >> 32) as i32);
+        return Some(
+            sent_registry()
+                .lock()
+                .unwrap()
+                .get(&player)
+                .is_some_and(|chunks| chunks.contains(&(x, z)))
+                .to_string(),
+        );
     }
     if call.owner != "Player" || !call.args.is_empty() {
         return None;
@@ -453,6 +490,18 @@ pub fn answer(call: &HostCall) -> Option<String> {
             .get(&player)
             .map(|distance| distance.to_string());
     }
+    if call.method == "getSentChunkCoordinates()" {
+        let map = sent_registry().lock().unwrap();
+        let mut chunks: Vec<_> = map.get(&player).into_iter().flatten().copied().collect();
+        chunks.sort_unstable();
+        return Some(
+            chunks
+                .iter()
+                .map(|(x, z)| format!("{x},{z}"))
+                .collect::<Vec<_>>()
+                .join(&ferrite_plugin::HOST_ITEM_SEPARATOR.to_string()),
+        );
+    }
     if call.method == "getClientBrandName()" {
         return ferrite_net::settings::brand(player);
     }
@@ -508,6 +557,47 @@ mod tests {
         assert_eq!(answer(&call).as_deref(), Some("false"));
         forget(player);
         assert_eq!(answer(&call), None);
+    }
+
+    #[test]
+    fn sent_chunks_follow_what_the_client_was_given() {
+        let player = Uuid::from_u128(0x5e17);
+        let ask = |method: &str, args: Vec<String>| {
+            answer(&HostCall {
+                owner: "Player".into(),
+                subject: player.to_string(),
+                method: method.into(),
+                args,
+            })
+        };
+        let key =
+            |x: i32, z: i32| (i64::from(x) & 0xFFFF_FFFF) | ((i64::from(z) & 0xFFFF_FFFF) << 32);
+        assert_eq!(
+            ask("isChunkSent(long)", vec![key(2, -3).to_string()]).as_deref(),
+            Some("false")
+        );
+        set_chunk_sent(player, 2, -3, true);
+        set_chunk_sent(player, 0, 1, true);
+        assert_eq!(
+            ask("isChunkSent(long)", vec![key(2, -3).to_string()]).as_deref(),
+            Some("true")
+        );
+        let separator = ferrite_plugin::HOST_ITEM_SEPARATOR;
+        assert_eq!(
+            ask("getSentChunkCoordinates()", vec![]).as_deref(),
+            Some(format!("0,1{separator}2,-3").as_str())
+        );
+        set_chunk_sent(player, 2, -3, false);
+        assert_eq!(
+            ask("isChunkSent(long)", vec![key(2, -3).to_string()]).as_deref(),
+            Some("false")
+        );
+        clear_sent_chunks(player);
+        assert_eq!(
+            ask("getSentChunkCoordinates()", vec![]).as_deref(),
+            Some("")
+        );
+        forget(player);
     }
 
     #[test]

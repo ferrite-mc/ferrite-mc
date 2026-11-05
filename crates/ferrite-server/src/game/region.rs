@@ -752,6 +752,7 @@ impl Player {
         for (x, z) in forget {
             send(self, &ForgetChunk { z, x });
             self.loaded.remove(&(x, z));
+            crate::plugins::facts::set_chunk_sent(self.uuid, x, z, false);
             if let Some(plugins) = self.plugins.clone() {
                 let _ = plugins.chunk_unloaded(ferrite_plugin::default_world_id(), x, z);
             }
@@ -836,6 +837,7 @@ impl Player {
         for (x, z, packet) in chunks {
             let _ = self.outbound.send(Outbound::Packet(packet.into()));
             self.loaded.insert((x, z));
+            crate::plugins::facts::set_chunk_sent(self.uuid, x, z, true);
             if let Some(plugins) = self.plugins.clone() {
                 let _ = plugins.chunk_loaded(ferrite_plugin::default_world_id(), x, z, true);
             }
@@ -2224,6 +2226,7 @@ impl Player {
             None => spawn,
         };
         let old_loaded = std::mem::take(&mut self.loaded);
+        crate::plugins::facts::clear_sent_chunks(self.uuid);
         for (x, z) in old_loaded {
             let _ = self.signals.send(Signal::Hold {
                 dimension: self.dimension,
@@ -2335,6 +2338,7 @@ impl Player {
     ) {
         let old = self.dimension;
         let old_loaded = std::mem::take(&mut self.loaded);
+        crate::plugins::facts::clear_sent_chunks(self.uuid);
         for (x, z) in old_loaded {
             let _ = self.signals.send(Signal::Hold {
                 dimension: old,

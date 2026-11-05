@@ -9,6 +9,20 @@ import java.util.function.Predicate;
  */
 @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
 public abstract class PlayerMisc extends PlayerStubs {
+    /** The chunks the client currently has, as the host last recorded them. */
+    @Override public java.util.Set<org.bukkit.Chunk> getSentChunks() {
+        String text;
+        try { text = (String) HostBridge.call("Player", getUniqueId(), "getSentChunkCoordinates()", String.class); }
+        catch (UnsupportedOperationException | IllegalStateException noHost) { return new java.util.HashSet<>(); }
+        var chunks = new java.util.LinkedHashSet<org.bukkit.Chunk>();
+        if (text == null || text.isEmpty()) return chunks;
+        for (var pair : text.split(String.valueOf(HostBridge.ITEM))) {
+            var parts = pair.split(",");
+            chunks.add(getWorld().getChunkAt(Integer.parseInt(parts[0]), Integer.parseInt(parts[1])));
+        }
+        return chunks;
+    }
+
     // ---- allied rules ------------------------------------------------------------------------
     private final Map<net.kyori.adventure.key.Key, Predicate<org.bukkit.entity.Entity>> alliedRules = new LinkedHashMap<>();
 
