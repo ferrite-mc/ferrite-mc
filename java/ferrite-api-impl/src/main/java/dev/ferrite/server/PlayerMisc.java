@@ -9,6 +9,12 @@ import java.util.function.Predicate;
  */
 @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
 public abstract class PlayerMisc extends PlayerStubs {
+    /** Several slots at once are sent one slot at a time. */
+    @Override public void sendEquipmentChange(org.bukkit.entity.LivingEntity entity, java.util.Map<org.bukkit.inventory.EquipmentSlot, org.bukkit.inventory.ItemStack> items) {
+        java.util.Objects.requireNonNull(entity, "entity");
+        for (var entry : items.entrySet()) sendEquipmentChange(entity, entry.getKey(), entry.getValue());
+    }
+
     /** The chunks the client currently has, as the host last recorded them. */
     @Override public java.util.Set<org.bukkit.Chunk> getSentChunks() {
         String text;

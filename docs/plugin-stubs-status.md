@@ -52,7 +52,7 @@ CMI가 동작한다고 말할 수 없다.
   청크를 실제로 로드 상태로 붙잡아 두지는 않는다.)
 - **기타:** `openBook`(아이템에 written_book 구성요소 없음),
   `sendGameEvent`, `findLightningRod/Target`,
-  `sendEquipmentChange`/`sendMap`/`sendBlockUpdate(TileState)`, 스코어보드 팀 패킷.
+  `sendMap`/`sendBlockUpdate(TileState)`, 스코어보드 팀 패킷.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.
 
 ## 다음 단계 제안

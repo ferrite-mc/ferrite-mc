@@ -351,6 +351,18 @@ class PlayerExtrasTest {
         assertEquals(java.util.List.of("spawnEntity(Location,EntityType,String)", "spawnFallingBlock(Location,Material,String)"), calls);
     }
 
+    @Test void equipmentMapIsSentSlotBySlot() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var items = new java.util.LinkedHashMap<org.bukkit.inventory.EquipmentSlot, org.bukkit.inventory.ItemStack>();
+            items.put(org.bukkit.inventory.EquipmentSlot.HEAD, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_HELMET));
+            items.put(org.bukkit.inventory.EquipmentSlot.FEET, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_BOOTS));
+            player.sendEquipmentChange(player, items);
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of("sendEquipmentChange(LivingEntity,EquipmentSlot,ItemStack)", "sendEquipmentChange(LivingEntity,EquipmentSlot,ItemStack)"), calls);
+    }
+
     @Test void sentChunksComeFromTheHost() {
         HostBridge.transport = (owner, subject, method, args) -> method.equals("getSentChunkCoordinates()") ? "1,2" + HostBridge.ITEM + "-3,4" : "";
         try {
