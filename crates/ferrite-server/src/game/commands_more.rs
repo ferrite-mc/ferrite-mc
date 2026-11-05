@@ -64,6 +64,18 @@ pub struct TickControl {
     steps: std::sync::atomic::AtomicU32,
     stepping: std::sync::atomic::AtomicBool,
     mspt_micro: std::sync::atomic::AtomicU64,
+    sprint: std::sync::Mutex<Sprint>,
+}
+
+/// A running `/tick sprint`: ticks left, how many were asked for, and when it began.
+#[derive(Debug, Default)]
+struct Sprint {
+    left: u32,
+    total: u32,
+    started: Option<std::time::Instant>,
+    was_frozen: bool,
+    done: bool,
+    report: Option<(f64, f64)>,
 }
 
 impl Default for TickControl {
@@ -75,6 +87,7 @@ impl Default for TickControl {
             steps: AtomicU32::new(0),
             stepping: AtomicBool::new(false),
             mspt_micro: AtomicU64::new(0),
+            sprint: std::sync::Mutex::new(Sprint::default()),
         }
     }
 }
@@ -90,6 +103,71 @@ impl TickControl {
     pub fn set_rate(&self, rate: f32) {
         self.rate_milli
             .store((rate * 1000.0).round() as u32, Self::RELAXED);
+    }
+
+    /// The rate the clock should run at: the maximum while a sprint is running.
+    pub fn effective_rate(&self) -> f32 {
+        if self.sprint.lock().unwrap().left > 0 {
+            10_000.0
+        } else {
+            self.rate()
+        }
+    }
+
+    /// Starts a sprint of `ticks` ticks; a frozen game runs it and freezes again afterwards.
+    pub fn start_sprint(&self, ticks: u32) {
+        let mut sprint = self.sprint.lock().unwrap();
+        if sprint.left == 0 {
+            sprint.was_frozen = self.frozen();
+        }
+        sprint.left = ticks.max(1);
+        sprint.total = ticks.max(1);
+        sprint.started = None;
+        self.steps.store(0, Self::RELAXED);
+        self.frozen.store(false, Self::RELAXED);
+    }
+
+    /// Interrupts a running sprint; true when one was running.
+    pub fn stop_sprint(&self) -> bool {
+        let mut sprint = self.sprint.lock().unwrap();
+        if sprint.left == 0 {
+            return false;
+        }
+        sprint.left = 0;
+        sprint.done = false;
+        self.frozen.store(sprint.was_frozen, Self::RELAXED);
+        true
+    }
+
+    /// The finished sprint's `(ticks per second, ms per tick)`, once.
+    pub fn take_sprint_report(&self) -> Option<(f64, f64)> {
+        self.sprint.lock().unwrap().report.take()
+    }
+
+    /// Wraps up a sprint whose last tick has run: report it and put the frozen flag back.
+    fn finish_sprint(&self) {
+        let mut sprint = self.sprint.lock().unwrap();
+        if !sprint.done {
+            return;
+        }
+        sprint.done = false;
+        let seconds = sprint
+            .started
+            .map_or(1e-6, |started| started.elapsed().as_secs_f64().max(1e-6));
+        let ticks = f64::from(sprint.total);
+        sprint.report = Some((ticks / seconds, seconds * 1000.0 / ticks));
+        self.frozen.store(sprint.was_frozen, Self::RELAXED);
+    }
+
+    /// Counts a sprint tick that is about to run.
+    fn count_sprint_tick(&self) {
+        let mut sprint = self.sprint.lock().unwrap();
+        if sprint.left == 0 {
+            return;
+        }
+        sprint.started.get_or_insert_with(std::time::Instant::now);
+        sprint.left -= 1;
+        sprint.done = sprint.left == 0;
     }
 
     pub fn frozen(&self) -> bool {
@@ -115,6 +193,7 @@ impl TickControl {
     /// Called once per game tick: whether the game advances this tick (not frozen, or a step is
     /// due). Marks the tick as a stepping tick so region ticks run it.
     pub fn begin_game_tick(&self) -> bool {
+        self.finish_sprint();
         let run = if !self.frozen() {
             true
         } else {
@@ -123,6 +202,9 @@ impl TickControl {
                 .is_ok()
         };
         self.stepping.store(run, Self::RELAXED);
+        if run {
+            self.count_sprint_tick();
+        }
         run
     }
 
@@ -866,6 +948,25 @@ fn tick_tree() -> NodeBuilder<Source> {
             )?;
             Ok(target as i32)
         }))
+        .then(
+            literal::<Source>("sprint")
+                .then(literal::<Source>("stop").executes(|ctx| {
+                    if state(ctx).stop_sprint() {
+                        feedback(ctx, "commands.tick.sprint.stop.success", vec![])?;
+                        Ok(1)
+                    } else {
+                        Err(failure("commands.tick.sprint.stop.fail", vec![]))
+                    }
+                }))
+                .then(
+                    argument::<Source>("time", ArgumentType::Time { min: 1 }).executes(|ctx| {
+                        let ticks = ctx.integer("time").unwrap_or(1).max(1);
+                        state(ctx).start_sprint(ticks as u32);
+                        feedback(ctx, "commands.tick.status.sprinting", vec![])?;
+                        Ok(1)
+                    }),
+                ),
+        )
         .then(literal::<Source>("freeze").executes(|ctx| {
             state(ctx).set_frozen(true);
             feedback(ctx, "commands.tick.status.frozen", vec![])?;
@@ -2798,6 +2899,40 @@ mod tests {
                 "commands.tick.query.rate.running"
             ]
         );
+    }
+
+    #[test]
+    fn tick_sprint_runs_flat_out_then_restores_the_state_and_reports() {
+        let state = fresh();
+        let control = state.lock().unwrap().more.tick.clone();
+        assert!(run("tick sprint stop", 2, state.clone(), None).0.is_err());
+        run("tick freeze", 2, state.clone(), None).0.unwrap();
+        let (_, actions) = run("tick sprint 3", 2, state.clone(), None);
+        assert_eq!(keys(&actions), ["commands.tick.status.sprinting"]);
+        assert!(
+            !control.frozen(),
+            "a sprint unfreezes the game while it runs"
+        );
+        assert_eq!(control.effective_rate(), 10_000.0);
+        assert_eq!(control.rate(), 20.0, "the target rate is untouched");
+        for _ in 0..3 {
+            assert!(control.begin_game_tick());
+        }
+        assert!(
+            control.take_sprint_report().is_none(),
+            "the report comes on the next tick"
+        );
+        assert!(
+            !control.begin_game_tick(),
+            "a frozen game is frozen again afterwards"
+        );
+        let (ticks_per_second, ms_per_tick) = control.take_sprint_report().unwrap();
+        assert!(ticks_per_second > 0.0 && ms_per_tick >= 0.0);
+        assert_eq!(control.effective_rate(), 20.0);
+        run("tick sprint 100", 2, state.clone(), None).0.unwrap();
+        run("tick sprint stop", 2, state.clone(), None).0.unwrap();
+        assert!(control.frozen() && control.effective_rate() == 20.0);
+        assert!(run("tick sprint 5", 1, state, None).0.is_err());
     }
 
     #[test]

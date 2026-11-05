@@ -1341,7 +1341,7 @@ async fn run(
          _tick = clock.tick() => {
              let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
              let tick_control = command_state.lock().unwrap().more.tick.clone();
-             let target_rate = tick_control.rate();
+             let target_rate = tick_control.effective_rate();
              if (target_rate - applied_rate).abs() > f32::EPSILON {
                  applied_rate = target_rate;
                  let period = std::time::Duration::from_secs_f64(1.0 / f64::from(target_rate));
@@ -1350,6 +1350,10 @@ async fn run(
                  clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
              }
              let runs = tick_control.begin_game_tick();
+             if let Some((tps, mspt)) = tick_control.take_sprint_report() {
+                 let text = commands::Feedback::new("commands.tick.sprint.report", vec![format!("{tps:.0}"), format!("{mspt:.2}")]).text;
+                 for player in online.values() { chat(&player.outbound, &text); }
+             }
              let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
              let ride_steps = ride::plan(&command_state.lock().unwrap());
              for step in ride_steps {
