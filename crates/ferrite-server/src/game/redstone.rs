@@ -1216,6 +1216,23 @@ mod tests {
         blocks::default_state("air").expect("vanilla air")
     }
 
+    #[test]
+    fn piston_power_checks_quasi_connectivity_and_ignores_its_front() {
+        let mut grid = Grid::new();
+        let pos = [0, 64, 0];
+        grid.add([1, 64, 0], make("redstone_block", &[]));
+        let redstone = Redstone::default();
+        let powered = |grid: &Grid| {
+            super::super::piston::powered(pos, Direction::East, |at, side| {
+                power_from(grid, at, side, &redstone.analog) > 0
+            })
+        };
+        assert!(!powered(&grid));
+        grid.add([1, 64, 0], air());
+        grid.add([1, 65, 0], make("redstone_block", &[]));
+        assert!(powered(&grid));
+    }
+
     fn make(name: &str, changes: &[(&str, &str)]) -> u16 {
         let full = format!("minecraft:{name}");
         let base = blocks::default_state(&full).unwrap_or_else(|| panic!("vanilla {name}"));

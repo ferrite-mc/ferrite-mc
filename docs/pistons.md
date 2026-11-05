@@ -3,6 +3,9 @@
 Piston work is in progress. `game::piston` currently computes a read-only movement
 plan, with a twelve-block limit, basic sticky branching, and rejection when the world
 cannot read a needed position. It is not connected to the region tick or redstone.
+The module also prepares expected-state changes for extension and retraction and
+provides the piston-specific direct and quasi-connectivity power check. These are
+covered by unit tests, but do not animate or apply a piston in a running server.
 
 The block reaction list is incomplete and has not been validated against all 26.3
 states. In particular, the available block properties do not expose vanilla push

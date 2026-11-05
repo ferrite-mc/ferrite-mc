@@ -22,6 +22,20 @@ fn offset([x, y, z]: [i32; 3], direction: Direction) -> [i32; 3] {
     [x + dx, y + dy, z + dz]
 }
 
+/// Check direct and quasi-connected power using the redstone engine's directional signal.
+pub fn powered(
+    pos: [i32; 3],
+    facing: Direction,
+    mut signal: impl FnMut([i32; 3], Direction) -> bool,
+) -> bool {
+    Direction::ALL
+        .into_iter()
+        .any(|side| side != facing && signal(pos, side))
+        || Direction::ALL
+            .into_iter()
+            .any(|side| side != Direction::Down && signal(offset(pos, Direction::Up), side))
+}
+
 #[derive(PartialEq, Eq)]
 enum Reaction {
     Air,
@@ -174,6 +188,108 @@ pub fn resolve(
     Some(plan)
 }
 
+/// Convert a movement plan into expected-state changes for an atomic block batch.
+pub fn changes(
+    world: &impl PistonWorld,
+    base: [i32; 3],
+    facing: Direction,
+    extending: bool,
+    plan: &Plan,
+) -> Option<Vec<([i32; 3], u32, u32)>> {
+    let base_state = world.block(base)?;
+    let (base_name, props) = blocks::state(base_state)?;
+    let name = base_name.strip_prefix("minecraft:").unwrap_or(base_name);
+    if !matches!(name, "piston" | "sticky_piston") {
+        return None;
+    }
+    let facing_name = match facing {
+        Direction::Down => "down",
+        Direction::Up => "up",
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::West => "west",
+        Direction::East => "east",
+    };
+    if !props.contains(&("facing", facing_name))
+        || !props.contains(&("extended", if extending { "false" } else { "true" }))
+    {
+        return None;
+    }
+    let next_base = blocks::state_id(
+        base_name,
+        &[
+            ("facing", facing_name),
+            ("extended", if extending { "true" } else { "false" }),
+        ],
+    )?;
+    let air = blocks::default_state("air")?;
+    let head = offset(base, facing);
+    if !extending {
+        let (head_name, head_props) = blocks::state(world.block(head)?)?;
+        if head_name.strip_prefix("minecraft:").unwrap_or(head_name) != "piston_head"
+            || !head_props.contains(&("facing", facing_name))
+        {
+            return None;
+        }
+    }
+    let mut desired = std::collections::BTreeMap::new();
+    desired.insert(base, next_base);
+    desired.insert(
+        head,
+        if extending {
+            blocks::state_id(
+                "piston_head",
+                &[
+                    ("facing", facing_name),
+                    (
+                        "type",
+                        if name == "sticky_piston" {
+                            "sticky"
+                        } else {
+                            "normal"
+                        },
+                    ),
+                    ("short", "false"),
+                ],
+            )?
+        } else {
+            air
+        },
+    );
+    for &pos in plan.to_destroy.iter().chain(plan.to_move.iter()) {
+        desired.insert(pos, air);
+    }
+    let direction = if extending { facing } else { facing.opposite() };
+    for &pos in &plan.to_move {
+        desired.insert(offset(pos, direction), world.block(pos)?);
+    }
+    // The head takes precedence over a vacated source during extension.
+    if extending {
+        desired.insert(
+            head,
+            blocks::state_id(
+                "piston_head",
+                &[
+                    ("facing", facing_name),
+                    (
+                        "type",
+                        if name == "sticky_piston" {
+                            "sticky"
+                        } else {
+                            "normal"
+                        },
+                    ),
+                    ("short", "false"),
+                ],
+            )?,
+        );
+    }
+    desired
+        .into_iter()
+        .map(|(pos, next)| Some((pos, u32::from(world.block(pos)?), u32::from(next))))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +371,59 @@ mod tests {
             }
         }
         assert!(resolve(&Boundary, [0, 64, 0], Direction::East, true).is_none());
+    }
+
+    #[test]
+    fn extension_changes_move_a_line_and_create_a_head() {
+        let mut grid = Grid::default();
+        let base = [0, 64, 0];
+        let piston =
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "false")]).unwrap();
+        let stone = state("stone");
+        grid.0.insert(base, piston);
+        grid.0.insert([1, 64, 0], stone);
+        let plan = resolve(&grid, base, Direction::East, true).unwrap();
+        for (pos, _, next) in changes(&grid, base, Direction::East, true, &plan).unwrap() {
+            grid.0.insert(pos, u16::try_from(next).unwrap());
+        }
+        assert_eq!(grid.block([2, 64, 0]), Some(stone));
+        assert_eq!(
+            grid.block([1, 64, 0]),
+            blocks::state_id(
+                "piston_head",
+                &[("facing", "east"), ("type", "normal"), ("short", "false")]
+            )
+        );
+        assert_eq!(
+            grid.block(base),
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "true")])
+        );
+    }
+
+    #[test]
+    fn retraction_removes_head_and_pulls_a_block() {
+        let mut grid = Grid::default();
+        let base = [0, 64, 0];
+        let piston =
+            blocks::state_id("sticky_piston", &[("facing", "east"), ("extended", "true")]).unwrap();
+        let head =
+            blocks::state_id("piston_head", &[("facing", "east"), ("type", "sticky")]).unwrap();
+        let stone = state("stone");
+        grid.0.insert(base, piston);
+        grid.0.insert([1, 64, 0], head);
+        grid.0.insert([2, 64, 0], stone);
+        let plan = resolve(&grid, base, Direction::East, false).unwrap();
+        for (pos, _, next) in changes(&grid, base, Direction::East, false, &plan).unwrap() {
+            grid.0.insert(pos, u16::try_from(next).unwrap());
+        }
+        assert_eq!(grid.block([1, 64, 0]), Some(stone));
+        assert_eq!(grid.block([2, 64, 0]), Some(state("air")));
+        assert_eq!(
+            grid.block(base),
+            blocks::state_id(
+                "sticky_piston",
+                &[("facing", "east"), ("extended", "false")]
+            )
+        );
     }
 }
