@@ -1740,6 +1740,61 @@ async fn tracker_spawns_and_removes_entities_by_range() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ender_dragon_shows_a_boss_bar_that_goes_away_when_it_dies() {
+    use ferrite_protocol::packets::play::{BossBar, BossBarAction};
+    let world = World::start();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 4,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Slayer").await;
+    bot.until(46).await;
+    world
+        .console_command("/summon minecraft:ender_dragon 0.5 90 0.5".into())
+        .await
+        .unwrap();
+    let body = bot.until(BossBar::ID).await;
+    let bar = BossBar::decode(&mut body.as_slice()).unwrap();
+    let BossBarAction::Add { progress, .. } = bar.action else {
+        panic!("the first boss bar packet adds the bar: {:?}", bar.action);
+    };
+    assert_eq!(progress, 1.0);
+    world
+        .console_command(
+            "/damage @e[type=minecraft:ender_dragon,limit=1] 50 minecraft:generic".into(),
+        )
+        .await
+        .unwrap();
+    loop {
+        let body = bot.until(BossBar::ID).await;
+        let bar = BossBar::decode(&mut body.as_slice()).unwrap();
+        if let BossBarAction::UpdateProgress(progress) = bar.action {
+            assert!((progress - 0.75).abs() < 0.01, "progress {progress}");
+            break;
+        }
+    }
+    world
+        .console_command("/kill @e[type=minecraft:ender_dragon]".into())
+        .await
+        .unwrap();
+    loop {
+        let body = bot.until(BossBar::ID).await;
+        if BossBar::decode(&mut body.as_slice()).unwrap().action == BossBarAction::Remove {
+            break;
+        }
+    }
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summoned_cow_is_tracked_falls_dies_and_drops_loot() {
     use ferrite_protocol::packets::play::{
         AddEntity, EntityMove, EntityMoveRotation, EntityTeleport, MetaValue, RemoveEntities,

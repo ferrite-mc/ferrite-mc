@@ -20,6 +20,39 @@ pub const GATEWAY_Y: i32 = 75;
 /// How many gateways a fight can open before the ring repeats.
 pub const GATEWAY_COUNT: u32 = 20;
 
+/// What the server remembers of the fight while it runs.
+#[derive(Debug, Clone, Default)]
+pub struct FightState {
+    /// The dragon was spawned, or an earlier fight already ended with the exit portal.
+    pub started: bool,
+    /// Spike numbers whose crystal was already placed (or that have none).
+    pub crystals: std::collections::BTreeSet<u8>,
+}
+
+/// How many obsidian spikes ring the main island, and how far from the centre they stand.
+pub const SPIKE_COUNT: u8 = 10;
+pub const SPIKE_RADIUS: f64 = 42.0;
+
+/// The column of spike number `index`: ten evenly spaced around the world origin.
+pub fn spike_column(index: u8) -> [i32; 2] {
+    let angle = 2.0 * std::f64::consts::PI * f64::from(index) / f64::from(SPIKE_COUNT);
+    [
+        (SPIKE_RADIUS * angle.cos()).round() as i32,
+        (SPIKE_RADIUS * angle.sin()).round() as i32,
+    ]
+}
+
+/// The highest solid block of a column: where the exit podium or a spike top stands. `block`
+/// answers the state at a height, or `None` while the chunk is not loaded.
+pub fn podium_floor(block: impl Fn(i32) -> Option<u32>) -> Option<i32> {
+    for y in (0..=255).rev() {
+        if block(y)? != 0 {
+            return Some(y);
+        }
+    }
+    Some(63)
+}
+
 /// Squared distance of a block from the podium centre, as `Vec3i.closerThan` measures it.
 fn distance_squared(origin: [i32; 3], at: [i32; 3]) -> f64 {
     let d = [
@@ -216,6 +249,23 @@ mod tests {
         assert_eq!(blocks[&[11, 75, 20]], 0, "air beside it");
         assert_eq!(blocks[&[11, 74, 21]], 0, "air in the corners");
         assert_eq!(blocks.len(), 3 * 5 * 3);
+    }
+
+    #[test]
+    fn ten_spikes_ring_the_island_at_forty_two_blocks() {
+        let columns: Vec<_> = (0..SPIKE_COUNT).map(spike_column).collect();
+        assert_eq!(columns[0], [42, 0]);
+        assert_eq!(columns[5], [-42, 0]);
+        for c in &columns {
+            let r = f64::from(c[0]).hypot(f64::from(c[1]));
+            assert!((r - SPIKE_RADIUS).abs() < 1.0, "{c:?}");
+        }
+        assert_eq!(podium_floor(|y| Some(u32::from(y <= 60))), Some(60));
+        assert_eq!(
+            podium_floor(|_| None),
+            None,
+            "an unloaded chunk has no floor yet"
+        );
     }
 
     #[test]

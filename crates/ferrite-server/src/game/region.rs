@@ -3662,7 +3662,97 @@ impl Region {
                 self.entities.insert(record);
             }
         }
+        self.tick_end_fight(ctx);
+        ferrite_entity::dragon::heal_from_crystals(&mut self.entities);
         self.update_dragon_bar();
+    }
+    /// Starts the fight when a player is in the end, and stands the crystals on the spikes.
+    fn tick_end_fight(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        if source.dimension() != super::Dimension::End || self.players.is_empty() {
+            return;
+        }
+        let mut state = ctx.state.lock().unwrap();
+        let fight = &mut state.more.end_fight;
+        // The region that holds the chunk at the origin starts the fight.
+        if !fight.started && self.held_chunks.contains_key(&ChunkPos(0, 0)) {
+            let Some(floor) = super::end_fight::podium_floor(|y| source.block(0, y, 0)) else {
+                return;
+            };
+            fight.started = true;
+            let portal = ferrite_data::blocks::default_state("minecraft:end_portal");
+            // A portal on the podium means an earlier dragon already died.
+            if portal.is_some_and(|p| source.block(1, floor, 0) == Some(u32::from(p))) {
+                return;
+            }
+            drop(state);
+            let (spot, _) = ferrite_entity::dragon::position_at(0);
+            let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
+            self.entities.insert(dragon);
+            self.place_blocks(ctx, &super::end_fight::podium_blocks([0, floor, 0], false));
+            return;
+        }
+        if !fight.started {
+            return;
+        }
+        let mut placed = Vec::new();
+        for index in 0..super::end_fight::SPIKE_COUNT {
+            if fight.crystals.contains(&index) {
+                continue;
+            }
+            let [x, z] = super::end_fight::spike_column(index);
+            if !self
+                .held_chunks
+                .contains_key(&ChunkPos(x.div_euclid(16), z.div_euclid(16)))
+            {
+                continue;
+            }
+            let Some(top) = super::end_fight::podium_floor(|y| source.block(x, y, z)) else {
+                continue;
+            };
+            fight.crystals.insert(index);
+            let bedrock = ferrite_data::blocks::default_state("minecraft:bedrock");
+            if bedrock.is_some_and(|b| source.block(x, top, z) == Some(u32::from(b))) {
+                placed.push(ferrite_entity::dragon::new_crystal(
+                    ferrite_math::Vec3::new(
+                        f64::from(x) + 0.5,
+                        f64::from(top) + 1.0,
+                        f64::from(z) + 0.5,
+                    ),
+                ));
+            }
+        }
+        drop(state);
+        for record in placed {
+            self.entities.insert(record);
+        }
+    }
+    /// Writes blocks into the chunks this region holds and tells the viewers.
+    fn place_blocks(&mut self, ctx: &TickContext, blocks: &[([i32; 3], u16)]) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        {
+            let mut world =
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+            for (at, state) in blocks {
+                let chunk = ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16));
+                if self.held_chunks.contains_key(&chunk) {
+                    ferrite_fluid::FluidWorld::set_block(
+                        &mut world,
+                        at[0],
+                        at[1],
+                        at[2],
+                        u32::from(*state),
+                    );
+                }
+            }
+        }
+        for (at, _) in blocks {
+            self.updates.block_changed(*at);
+        }
     }
     /// Shows the living dragon's health to every player of the dimension as a boss bar, keeps
     /// it current and takes it away when the dragon is gone (vanilla `EnderDragon.bossEvent`).
@@ -3882,6 +3972,7 @@ impl Region {
                 combat::ENTITY_RANGE
             };
             let mut hurt_keys = Vec::new();
+            let mut crystals = Vec::new();
             for id in attacks {
                 let Some(key) = self.entities.key_of(id) else {
                     continue;
@@ -3891,6 +3982,14 @@ impl Region {
                     continue;
                 };
                 if !combat::within_reach(eye, bbox, range) || !combat::facing(eye, look, target) {
+                    continue;
+                }
+                if ferrite_entity::dragon::is_crystal(&self.entities, key) {
+                    // Any hit breaks an end crystal; it blows up (`EndCrystal.hurt`).
+                    if let Some(flags) = self.entities.flags_mut(key) {
+                        flags.set(ferrite_entity::Flags::REMOVED, true);
+                    }
+                    crystals.push(target);
                     continue;
                 }
                 let Some(hurt) = mob::hurt(&mut self.entities, key, damage as f32, Some(feet))
@@ -3933,6 +4032,10 @@ impl Region {
                         &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
                     );
                 }
+            }
+            // A broken end crystal explodes with power 6 and no fire.
+            for at in crystals {
+                self.explode([at.x, at.y + 1.0, at.z], 6.0, true, ctx);
             }
         }
     }

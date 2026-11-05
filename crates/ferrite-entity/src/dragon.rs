@@ -3,10 +3,11 @@
 //! This is the holding pattern of vanilla's phase machine, without strafing, charging or
 //! perching. It is a pure function of the dragon's age, so it is deterministic and cheap.
 
-use crate::id::EntityKey;
+use crate::ai::{MobEvent, Target};
+use crate::id::{EntityKey, allocate_id, random_uuid};
 use crate::mob;
-use crate::store::EntityStore;
-use ferrite_math::Vec3;
+use crate::store::{EntityData, EntityRecord, EntityStore, Flags};
+use ferrite_math::{AABB, Vec3};
 
 /// Centre of the circle: the end's world origin.
 pub const CENTER: [f64; 2] = [0.0, 0.0];
@@ -32,11 +33,93 @@ pub fn position_at(age: u32) -> (Vec3, f32) {
     (pos, yaw)
 }
 
-/// Advances one dragon by a tick. The age lives in the mob's `wander_timer`.
-pub fn fly(store: &mut EntityStore, key: EntityKey) {
+/// Players closer than this to the dragon's body are hit (wings and body, `knockBack`).
+pub const CONTACT_RANGE: f64 = 5.0;
+/// Damage of one hit and the ticks between hits.
+pub const CONTACT_DAMAGE: f32 = 6.0;
+pub const CONTACT_COOLDOWN: u16 = 20;
+/// Crystals within this many blocks heal the dragon (`EnderDragon.checkCrystals`).
+pub const HEAL_RANGE: f64 = 32.0;
+/// The dragon heals this much every [`HEAL_INTERVAL`] ticks while a crystal is in range.
+pub const HEAL_INTERVAL: u32 = 10;
+pub const HEAL_AMOUNT: f32 = 1.0;
+
+/// An end crystal standing at `pos` (the block position above its base, centred).
+pub fn new_crystal(pos: Vec3) -> EntityRecord {
+    let props = ferrite_data::entity_props::by_name("minecraft:end_crystal")
+        .expect("the vanilla data knows the end crystal");
+    EntityRecord {
+        pos,
+        vel: Vec3::ZERO,
+        flags: Flags::default(),
+        data: EntityData::new(
+            allocate_id(),
+            random_uuid(),
+            props.id,
+            f64::from(props.width),
+            f64::from(props.height),
+        ),
+    }
+}
+
+/// The entity type id of the end crystal.
+pub fn crystal_type() -> u16 {
+    ferrite_data::entity_props::by_name("minecraft:end_crystal").map_or(u16::MAX, |p| p.id)
+}
+
+/// Whether `key` is a standing end crystal.
+pub fn is_crystal(store: &EntityStore, key: EntityKey) -> bool {
+    store
+        .data(key)
+        .is_some_and(|data| data.kind == crystal_type())
+        && store
+            .flags(key)
+            .is_some_and(|flags| !flags.has(Flags::REMOVED))
+}
+
+/// Lets every living dragon of the store regain health from crystals within [`HEAL_RANGE`].
+pub fn heal_from_crystals(store: &mut EntityStore) {
+    for key in store.keys().to_vec() {
+        let Some(state) = mob::state(store, key) else {
+            continue;
+        };
+        if state.kind != mob::MobKind::EnderDragon
+            || state.is_dead()
+            || !state.wander_timer.is_multiple_of(HEAL_INTERVAL)
+        {
+            continue;
+        }
+        let Some(pos) = store.pos(key) else { continue };
+        let area = AABB::new(
+            pos.x - HEAL_RANGE,
+            pos.y - HEAL_RANGE,
+            pos.z - HEAL_RANGE,
+            pos.x + HEAL_RANGE,
+            pos.y + HEAL_RANGE,
+            pos.z + HEAL_RANGE,
+        );
+        let near = store
+            .query_vec(area)
+            .into_iter()
+            .any(|other| is_crystal(store, other));
+        if near && let Some(state) = mob::state_mut(store, key) {
+            state.health = (state.health + HEAL_AMOUNT).min(state.kind.max_health());
+        }
+    }
+}
+
+/// Advances one dragon by a tick. The age lives in the mob's `wander_timer`; hits on players
+/// that get in its way are reported as melee events.
+pub fn fly(
+    store: &mut EntityStore,
+    key: EntityKey,
+    players: &[Target],
+    events: &mut Vec<MobEvent>,
+) {
     let age = match mob::state_mut(store, key) {
         Some(state) => {
             state.wander_timer = state.wander_timer.wrapping_add(1);
+            state.attack_cooldown = state.attack_cooldown.saturating_sub(1);
             state.wander_timer
         }
         None => return,
@@ -49,6 +132,21 @@ pub fn fly(store: &mut EntityStore, key: EntityKey) {
         data.yaw = yaw;
         data.head_yaw = yaw;
         data.pitch = 0.0;
+    }
+    if mob::state(store, key).is_some_and(|state| state.attack_cooldown == 0)
+        && let Some(target) = players
+            .iter()
+            .find(|target| target.pos.distance_to_sqr(pos) <= CONTACT_RANGE * CONTACT_RANGE)
+    {
+        events.push(MobEvent::Melee {
+            player: target.uuid,
+            damage: CONTACT_DAMAGE,
+            from: pos,
+            attacker: key,
+        });
+        if let Some(state) = mob::state_mut(store, key) {
+            state.attack_cooldown = CONTACT_COOLDOWN;
+        }
     }
 }
 
@@ -83,6 +181,43 @@ mod tests {
     }
 
     #[test]
+    fn crystals_heal_the_dragon_and_a_player_in_its_way_is_hit() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let (spot, _) = position_at(1);
+        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        let mut events = Vec::new();
+        fly(&mut store, key, &[], &mut events);
+        mob::state_mut(&mut store, key).unwrap().health = 100.0;
+        // No crystal: no healing, whatever the age.
+        for _ in 0..30 {
+            fly(&mut store, key, &[], &mut events);
+            heal_from_crystals(&mut store);
+        }
+        assert_eq!(mob::state(&store, key).unwrap().health, 100.0);
+        let here = store.pos(key).unwrap();
+        store.insert(new_crystal(Vec3::new(here.x + 10.0, here.y, here.z)));
+        for _ in 0..30 {
+            fly(&mut store, key, &[], &mut events);
+            heal_from_crystals(&mut store);
+        }
+        assert_eq!(mob::state(&store, key).unwrap().health, 103.0);
+        // A player right under the dragon is hit once per cooldown.
+        for _ in 0..21 {
+            let target = Target {
+                uuid: uuid::Uuid::from_u128(7),
+                pos: store.pos(key).unwrap(),
+            };
+            fly(&mut store, key, &[target], &mut events);
+        }
+        let hits = events
+            .iter()
+            .filter(|e| matches!(e, MobEvent::Melee { damage, .. } if *damage == CONTACT_DAMAGE))
+            .count();
+        assert_eq!(hits, 2);
+    }
+
+    #[test]
     fn a_spawned_dragon_has_vanilla_health_and_moves_each_tick() {
         let mut rng = Rng::new(1);
         let mut store = EntityStore::new(4);
@@ -94,8 +229,9 @@ mod tests {
         let key = store.insert(record);
         assert_eq!(mob::state(&store, key).unwrap().health, 200.0);
         let before = store.pos(key).unwrap();
-        fly(&mut store, key);
-        fly(&mut store, key);
+        let mut events = Vec::new();
+        fly(&mut store, key, &[], &mut events);
+        fly(&mut store, key, &[], &mut events);
         let after = store.pos(key).unwrap();
         assert_ne!(before, after);
         assert!(mob::is_mob(&store, key));

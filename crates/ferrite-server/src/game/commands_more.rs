@@ -46,6 +46,8 @@ pub struct MoreState {
     pub recipes: BTreeMap<uuid::Uuid, std::collections::BTreeSet<String>>,
     /// `/waypoint modify`: color and style per entity.
     pub waypoints: BTreeMap<uuid::Uuid, WaypointStyle>,
+    /// The ender dragon fight in the end.
+    pub end_fight: super::end_fight::FightState,
 }
 
 /// What `/waypoint modify` changed for one entity.
