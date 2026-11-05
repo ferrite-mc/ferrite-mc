@@ -398,6 +398,7 @@ mod global;
 mod gravity;
 mod hopper;
 mod neighbors;
+pub mod piston;
 mod random_tick;
 mod redstone;
 mod region;

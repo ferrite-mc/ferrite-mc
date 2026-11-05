@@ -35,6 +35,7 @@ fn main() {
     let data = generated.join("data").join("minecraft");
     let tags = data.join("tags");
     let physics = generated.join("ferrite").join("block_states.json");
+    let piston_states = generated.join("ferrite").join("piston_states.json");
     // Optional: an older extraction may predate entity types, so a missing file only warns.
     let entity_types = generated.join("ferrite").join("entity_types.json");
     for path in [
@@ -45,6 +46,7 @@ fn main() {
         &data,
         &tags,
         &physics,
+        &piston_states,
     ] {
         if !path.exists() {
             missing(path);
@@ -65,6 +67,7 @@ fn main() {
         &data,
         &tags,
         &physics,
+        &piston_states,
     ] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
@@ -78,6 +81,10 @@ fn main() {
     write_file(&out_dir.join("packets.rs"), &gen_packets(&packets));
     write_file(&out_dir.join("tags.rs"), &gen_tags(&tags, &datapack));
     write_file(&out_dir.join("block_props.rs"), &gen_block_props(&physics));
+    write_file(
+        &out_dir.join("piston_props.rs"),
+        &gen_piston_props(&piston_states, &physics),
+    );
     write_file(
         &out_dir.join("entity_props.rs"),
         &gen_entity_props(&entity_types),
@@ -112,6 +119,41 @@ fn missing(path: &Path) -> ! {
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents)
         .unwrap_or_else(|err| panic!("failed to write {}: {err}", path.display()));
+}
+
+fn gen_piston_props(path: &Path, physics: &Path) -> String {
+    let data = read_json(path);
+    let states = data.as_array().expect("piston states must be an array");
+    let physics_data = read_json(physics);
+    let expected = physics_data["states"]
+        .as_array()
+        .expect("physics states must be an array")
+        .len();
+    assert_eq!(
+        states.len(),
+        expected,
+        "piston metadata does not match the block state report; rerun the vanilla extractor"
+    );
+    let mut result = header("ferrite/piston_states.json");
+    result.push_str("static PISTON_STATES: &[u8] = &[\n");
+    let values: Vec<String> = states
+        .iter()
+        .map(|state| {
+            let reaction = match state["reaction"].as_str().expect("piston reaction") {
+                "PUSH_PULL" => 0,
+                "PUSH" => 1,
+                "POPPED" => 2,
+                "IMMOVEABLE" => 3,
+                "IGNORE_ENTITY" => 4,
+                other => panic!("unknown piston reaction {other}"),
+            };
+            let entity = state["blockEntity"].as_bool().expect("block entity flag");
+            (reaction | if entity { 8 } else { 0 }).to_string()
+        })
+        .collect();
+    items(&mut result, "    ", &values);
+    result.push_str("\n];\n");
+    result
 }
 
 fn read_json(path: &Path) -> serde_json::Value {

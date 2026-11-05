@@ -3325,6 +3325,117 @@ async fn wait_for_lamp(bot: &mut Bot, pos: [i32; 3], next: u32) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redstone_lever_extends_piston_and_moves_stone() {
+    let lever = block_state(
+        "minecraft:lever",
+        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+    );
+    let (world, temp, addr, server) = redstone_fixture(&[
+        ([0, 64, 0], lever),
+        (
+            [1, 64, 0],
+            block_state(
+                "minecraft:piston",
+                &[("facing", "east"), ("extended", "false")],
+            ),
+        ),
+        ([2, 64, 0], block_state("minecraft:stone", &[])),
+    ])
+    .await;
+    let mut bot = Bot::join(addr, "RedstoneBot").await;
+    bot.until(46).await;
+    click_block(&mut bot, [0, 64, 0]).await;
+    wait_for_lamp(
+        &mut bot,
+        [0, 64, 0],
+        block_state(
+            "minecraft:lever",
+            &[("face", "floor"), ("facing", "north"), ("powered", "true")],
+        ),
+    )
+    .await;
+    wait_for_lamp(&mut bot, [3, 64, 0], block_state("minecraft:stone", &[])).await;
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sticky_piston_pulls_stone_after_power_is_removed() {
+    let lever = block_state(
+        "minecraft:lever",
+        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+    );
+    let (world, temp, addr, server) = redstone_fixture(&[
+        ([0, 64, 0], lever),
+        (
+            [1, 64, 0],
+            block_state(
+                "minecraft:sticky_piston",
+                &[("facing", "east"), ("extended", "false")],
+            ),
+        ),
+        ([2, 64, 0], block_state("minecraft:stone", &[])),
+    ])
+    .await;
+    let mut bot = Bot::join(addr, "RedstoneBot").await;
+    bot.until(46).await;
+    click_block(&mut bot, [0, 64, 0]).await;
+    wait_for_lamp(&mut bot, [3, 64, 0], block_state("minecraft:stone", &[])).await;
+    click_block(&mut bot, [0, 64, 0]).await;
+    wait_for_lamp(&mut bot, [2, 64, 0], block_state("minecraft:stone", &[])).await;
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observer_pulses_when_piston_moves_a_block_in_front_of_it() {
+    let lever = block_state(
+        "minecraft:lever",
+        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+    );
+    let (world, temp, addr, server) = redstone_fixture(&[
+        ([0, 64, 0], lever),
+        (
+            [1, 64, 0],
+            block_state(
+                "minecraft:piston",
+                &[("facing", "east"), ("extended", "false")],
+            ),
+        ),
+        ([2, 64, 0], block_state("minecraft:stone", &[])),
+        (
+            [3, 64, 1],
+            block_state(
+                "minecraft:observer",
+                &[("facing", "north"), ("powered", "false")],
+            ),
+        ),
+    ])
+    .await;
+    let mut bot = Bot::join(addr, "RedstoneBot").await;
+    bot.until(46).await;
+    click_block(&mut bot, [0, 64, 0]).await;
+    wait_for_lamp(&mut bot, [3, 64, 0], block_state("minecraft:stone", &[])).await;
+    wait_for_lamp(
+        &mut bot,
+        [3, 64, 1],
+        block_state(
+            "minecraft:observer",
+            &[("facing", "north"), ("powered", "true")],
+        ),
+    )
+    .await;
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn redstone_lever_lights_lamp_for_bot_on_fixture_world() {
     let lever = block_state(
         "minecraft:lever",

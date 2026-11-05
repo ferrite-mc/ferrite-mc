@@ -85,6 +85,55 @@ pub mod blocks {
     }
 }
 
+/// Vanilla piston reactions and block-entity flags, extracted for each block state.
+pub mod piston_props {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PushReaction {
+        PushPull,
+        PushOnly,
+        Destroy,
+        Immovable,
+        IgnoreEntity,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Properties {
+        pub reaction: PushReaction,
+        pub has_block_entity: bool,
+    }
+    include!(concat!(env!("OUT_DIR"), "/piston_props.rs"));
+    pub fn get(state: u16) -> Properties {
+        let bits = PISTON_STATES.get(usize::from(state)).copied().unwrap_or(3);
+        let reaction = match bits & 7 {
+            0 => PushReaction::PushPull,
+            1 => PushReaction::PushOnly,
+            2 => PushReaction::Destroy,
+            4 => PushReaction::IgnoreEntity,
+            _ => PushReaction::Immovable,
+        };
+        Properties {
+            reaction,
+            has_block_entity: bits & 8 != 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod piston_property_tests {
+    #[test]
+    fn vanilla_piston_properties_cover_block_entities_and_push_reactions() {
+        use super::{
+            blocks,
+            piston_props::{self, PushReaction},
+        };
+        let get = |name| piston_props::get(blocks::default_state(name).unwrap());
+        assert_eq!(get("stone").reaction, PushReaction::PushPull);
+        assert_eq!(get("obsidian").reaction, PushReaction::Immovable);
+        assert_eq!(get("redstone_wire").reaction, PushReaction::Destroy);
+        assert!(get("chest").has_block_entity);
+        assert!(!get("stone").has_block_entity);
+    }
+}
+
 pub mod block_props {
     //! Physical properties of every block state, extracted from the vanilla server by
     //! `tools/extractor` into `generated/ferrite/block_states.json`.
