@@ -85,6 +85,40 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
             action: 2,
             hand: 0,
         }),
+        "setItemMeta(int,String)" => {
+            let slot = call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?;
+            let mut fields = call.args.get(1)?.split(FIELD);
+            let name = fields.next().filter(|s| !s.is_empty()).map(str::to_owned);
+            let items = |field: Option<&str>| -> Vec<String> {
+                field
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        s.split(ferrite_plugin::HOST_ITEM_SEPARATOR)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let lore = items(fields.next());
+            let mut enchants = Vec::new();
+            for entry in items(fields.next()) {
+                let (id, level) = entry.split_once('=')?;
+                enchants.push((id.to_owned(), level.parse().ok()?));
+            }
+            Some(PlayerCommand::ItemMeta {
+                player,
+                slot,
+                name,
+                lore,
+                enchants,
+                unbreakable: fields.next()? == "1",
+                model: fields
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| s.parse().ok()),
+                repair: fields.next()?.parse().ok().filter(|r| *r >= 0)?,
+            })
+        }
         "setItemDamage(int,int)" => Some(PlayerCommand::ItemDamage {
             player,
             slot: call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?,
@@ -310,6 +344,38 @@ mod tests {
         );
         let long = format!("{}{FIELD}Me{FIELD}x", "t".repeat(33));
         assert_eq!(inventory_command(&call(&long)), None);
+    }
+
+    #[test]
+    fn item_meta_calls_become_a_slot_command() {
+        let payload = [
+            "{\"text\":\"Hi\"}",
+            "a\u{1d}b",
+            "minecraft:sharpness=3",
+            "1",
+            "7",
+            "2",
+        ]
+        .join("\u{1e}");
+        let call = HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "setItemMeta(int,String)".into(),
+            args: vec!["4".into(), payload],
+        };
+        assert_eq!(
+            inventory_command(&call),
+            Some(PlayerCommand::ItemMeta {
+                player: Uuid::parse_str(PLAYER).unwrap(),
+                slot: 4,
+                name: Some("{\"text\":\"Hi\"}".into()),
+                lore: vec!["a".into(), "b".into()],
+                enchants: vec![("minecraft:sharpness".into(), 3)],
+                unbreakable: true,
+                model: Some(7),
+                repair: 2,
+            })
+        );
     }
 
     #[test]

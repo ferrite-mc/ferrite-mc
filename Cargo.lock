@@ -871,6 +871,7 @@ dependencies = [
  "ferrite-protocol",
  "ferrite-recipe",
  "ferrite-region",
+ "ferrite-text",
  "ferrite-world",
  "md5",
  "mimalloc",

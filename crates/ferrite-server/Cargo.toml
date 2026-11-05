@@ -34,6 +34,7 @@ ferrite-profiler = { path = "../ferrite-profiler" }
 ferrite-fluid = { path = "../ferrite-fluid" }
 
 ferrite-entity = { path = "../ferrite-entity" }
+ferrite-text = { path = "../ferrite-text" }
 ferrite-item = { path = "../ferrite-item", features = ["protocol"] }
 ferrite-inventory = { path = "../ferrite-inventory" }
 ferrite-recipe = { path = "../ferrite-recipe" }

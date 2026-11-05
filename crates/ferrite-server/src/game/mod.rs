@@ -1528,6 +1528,28 @@ fn route_plugin_command(
                     .push_back(Command::ItemUse { action, hand });
             }
         }
+        PlayerCommand::ItemMeta {
+            player,
+            slot,
+            name,
+            lore,
+            enchants,
+            unbreakable,
+            model,
+            repair,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox.lock().unwrap().push_back(Command::ItemMeta {
+                    slot,
+                    name,
+                    lore,
+                    enchants,
+                    unbreakable,
+                    model,
+                    repair,
+                });
+            }
+        }
         PlayerCommand::ItemDamage {
             player,
             slot,

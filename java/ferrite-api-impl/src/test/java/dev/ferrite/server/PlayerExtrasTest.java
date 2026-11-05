@@ -567,7 +567,13 @@ class PlayerExtrasTest {
             var meta = named.getItemMeta();
             meta.displayName(net.kyori.adventure.text.Component.text("x"));
             named.setItemMeta(meta);
-            assertThrows(UnsupportedOperationException.class, () -> player.getInventory().setItem(4, named));
+            try { player.getInventory().setItem(4, named); } catch (IllegalStateException noNative) { /* no host in unit tests */ }
+            assertTrue(calls.stream().anyMatch(c -> c.startsWith("setItemMeta(int,String)[4") && c.contains("x")), calls.toString());
+            var flagged = worn.clone();
+            var flaggedMeta = flagged.getItemMeta();
+            flaggedMeta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ENCHANTS);
+            flagged.setItemMeta(flaggedMeta);
+            assertThrows(UnsupportedOperationException.class, () -> player.getInventory().setItem(5, flagged));
         } finally { HostBridge.transport = null; }
     }
 

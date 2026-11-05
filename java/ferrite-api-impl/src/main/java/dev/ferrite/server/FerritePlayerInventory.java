@@ -15,23 +15,36 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
     private org.bukkit.inventory.ItemStack read(int slot) { var item = items[slot]; return item == null ? null : item.clone(); }
     private void write(int slot, org.bukkit.inventory.ItemStack item) {
         int damage = 0;
+        String meta = null;
         if (item != null && item.hasItemMeta()) {
-            // Wear is the one piece of metadata the host can carry; anything else is refused.
-            boolean wearOnly = false;
-            if (item.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable worn) {
-                damage = worn.getDamage();
-                var plain = org.bukkit.Bukkit.getItemFactory().getItemMeta(item.getType());
-                if (plain instanceof org.bukkit.inventory.meta.Damageable fresh) {
-                    fresh.setDamage(damage);
-                    wearOnly = fresh.equals(worn);
-                }
-            }
-            if (!wearOnly) throw new UnsupportedOperationException("Ferrite: inventory metadata commands are not implemented");
+            // The host carries wear, name, lore, enchantments, unbreakable, model and repair cost;
+            // metadata beyond those is refused so nothing is silently dropped.
+            var worn = item.getItemMeta();
+            var fresh = org.bukkit.Bukkit.getItemFactory().getItemMeta(item.getType());
+            if (worn instanceof org.bukkit.inventory.meta.Damageable w && fresh instanceof org.bukkit.inventory.meta.Damageable f) { damage = w.getDamage(); f.setDamage(damage); }
+            var gson = net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson();
+            String name = worn.hasDisplayName() ? gson.serialize(worn.displayName()) : "";
+            if (worn.hasDisplayName()) fresh.displayName(worn.displayName());
+            var lore = worn.hasLore() ? worn.lore() : null;
+            if (lore != null) fresh.lore(lore);
+            var enchants = new java.util.ArrayList<String>();
+            for (var e : worn.getEnchants().entrySet()) { enchants.add(e.getKey().getKey() + "=" + e.getValue()); fresh.addEnchant(e.getKey(), e.getValue(), true); }
+            fresh.setUnbreakable(worn.isUnbreakable());
+            Integer model = worn.hasCustomModelData() ? worn.getCustomModelData() : null;
+            if (model != null) fresh.setCustomModelData(model);
+            int repair = worn instanceof org.bukkit.inventory.meta.Repairable r && r.hasRepairCost() ? r.getRepairCost() : 0;
+            if (repair > 0 && fresh instanceof org.bukkit.inventory.meta.Repairable fr) fr.setRepairCost(repair);
+            if (!fresh.equals(worn)) throw new UnsupportedOperationException("Ferrite: inventory metadata beyond name, lore, enchantments, unbreakable, model data and repair cost is not implemented");
+            meta = String.join("\u001e", name,
+                lore == null ? "" : String.join("\u001d", lore.stream().map(gson::serialize).toList()),
+                String.join("\u001d", enchants), worn.isUnbreakable() ? "1" : "0", model == null ? "" : model.toString(), Integer.toString(repair));
+            if (name.isEmpty() && lore == null && enchants.isEmpty() && !worn.isUnbreakable() && model == null && repair == 0) meta = null;
         }
         String material = item == null ? "" : item.getType().getKey().toString();
         int amount = item == null ? 0 : item.getAmount();
         if (!Native.playerInventory(player.getUniqueId().toString(), slot, material, amount)) throw new IllegalStateException("No player command handler");
         if (damage > 0) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemDamage(int,int)", slot, damage);
+        if (meta != null) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemMeta(int,String)", slot, meta);
         items[slot] = item == null ? null : item.clone();
     }
     /** An inventory index, or the index an equipment slot lives at (0 main hand, 36 boots .. 39 helmet, 40 off hand). */
