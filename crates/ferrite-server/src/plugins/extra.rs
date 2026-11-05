@@ -240,6 +240,42 @@ fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
             let (x, y, z) = location_xyz(arg(0)?)?;
             console(format!("summon lightning_bolt {x} {y} {z}"), "")
         }
+        // `Structure#place` of a vanilla template: `/place template` does the rotate/mirror/integrity.
+        "placeTemplate(Location,String,String,String,String,String)" => {
+            let (x, y, z) = location_xyz(arg(0)?)?;
+            let template = key(arg(1)?)?;
+            let rotation = ["none", "clockwise_90", "180", "counterclockwise_90"]
+                .into_iter()
+                .find(|r| Some(*r) == arg(2))?;
+            let mirror = ["none", "left_right", "front_back"]
+                .into_iter()
+                .find(|m| Some(*m) == arg(3))?;
+            let integrity = f(4)?.clamp(0.0, 1.0);
+            let seed: i32 = arg(5)?.parse().ok()?;
+            console(
+                format!(
+                    "place template {template} {} {} {} {rotation} {mirror} {integrity} {seed}",
+                    x.floor() as i64,
+                    y.floor() as i64,
+                    z.floor() as i64
+                ),
+                "",
+            )
+        }
+        // Vanilla stores biomes per 4x4x4 cell, so `/fillbiome` on one block recolors its cell.
+        "setBiome(int,int,int,Biome)" => {
+            let coord = |index: usize| {
+                arg(index)?
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|v| v.abs() < 30_000_000)
+            };
+            let (x, y, z) = (coord(0)?, coord(1)?, coord(2)?);
+            console(
+                format!("fillbiome {x} {y} {z} {x} {y} {z} {}", key(arg(3)?)?),
+                "",
+            )
+        }
         "playSound(Location,Sound,float,float)"
         | "playSound(Location,String,float,float)"
         | "playSound(Location,Sound,SoundCategory,float,float)"
@@ -457,6 +493,47 @@ mod tests {
         assert_eq!(
             line(world(&default, "strikeLightning(Location)", &[&at])).as_deref(),
             Some("summon lightning_bolt 1.5 64 -2")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "setBiome(int,int,int,Biome)",
+                &["8", "70", "-3", "minecraft:desert"]
+            ))
+            .as_deref(),
+            Some("fillbiome 8 70 -3 8 70 -3 minecraft:desert")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "setBiome(int,int,int,Biome)",
+                &["8", "70", "-3", "desert; stop"]
+            )),
+            None
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "placeTemplate(Location,String,String,String,String,String)",
+                &[
+                    &at,
+                    "minecraft:igloo/top",
+                    "clockwise_90",
+                    "left_right",
+                    "0.5",
+                    "-7"
+                ]
+            ))
+            .as_deref(),
+            Some("place template minecraft:igloo/top 1 64 -2 clockwise_90 left_right 0.5 -7")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "placeTemplate(Location,String,String,String,String,String)",
+                &[&at, "minecraft:igloo/top", "sideways", "none", "1", "0"]
+            )),
+            None
         );
         assert_eq!(
             line(world(

@@ -52,8 +52,20 @@ final class FerriteStructureManager implements StructureManager {
 
     @Override public Structure createStructure() { return new EmptyStructure(); }
 
-    @Override public Structure loadStructure(NamespacedKey key, boolean register) { throw notImplemented("loadStructure"); }
-    @Override public Structure loadStructure(NamespacedKey key) { throw notImplemented("loadStructure"); }
+    /** Reads a vanilla template file from the data directory; placing it runs {@code /place template}; a missing file gives null. */
+    @Override public Structure loadStructure(NamespacedKey key, boolean register) {
+        Objects.requireNonNull(key, "key");
+        var file = FerriteTemplate.file(key);
+        if (file == null || !file.isFile()) return null;
+        try {
+            var structure = FerriteTemplate.load(key);
+            if (register) structures.put(key, structure);
+            return structure;
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+    @Override public Structure loadStructure(NamespacedKey key) { return loadStructure(key, true); }
     @Override public void saveStructure(NamespacedKey key) { throw notImplemented("saveStructure"); }
     @Override public void saveStructure(NamespacedKey key, Structure structure) throws IOException { throw notImplemented("saveStructure"); }
     @Override public void deleteStructure(NamespacedKey key) throws IOException { throw notImplemented("deleteStructure"); }

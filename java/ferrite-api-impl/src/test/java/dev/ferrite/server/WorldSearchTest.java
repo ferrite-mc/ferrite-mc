@@ -76,6 +76,21 @@ class WorldSearchTest {
         assertEquals("minecraft:oak", FerriteWorld.treeFeature(org.bukkit.TreeType.TREE));
     }
 
+    @Test void loadedTemplatesKnowTheirSizeAndPlaceThroughThePlaceCommand() throws Exception {
+        HostBridge.transport = (owner, subject, method, args) -> { sent.add(method + "|" + args); return ""; };
+        var manager = org.bukkit.Bukkit.getStructureManager();
+        var key = NamespacedKey.fromString("minecraft:igloo/top");
+        var igloo = manager.loadStructure(key);
+        assertSame(igloo, manager.getStructure(key), "loading registers by default");
+        assertTrue(igloo.getSize().getBlockX() > 0 && igloo.getSize().getBlockY() > 0);
+        igloo.place(new Location(world, 4, 70, 5), false, org.bukkit.block.structure.StructureRotation.CLOCKWISE_90,
+            org.bukkit.block.structure.Mirror.LEFT_RIGHT, 0, 0.5f, new java.util.Random(1));
+        assertEquals(1, sent.size());
+        assertTrue(sent.get(0).startsWith("placeTemplate(Location,String,String,String,String,String)|"), sent.get(0));
+        assertTrue(sent.get(0).contains("minecraft:igloo/top") && sent.get(0).contains("clockwise_90") && sent.get(0).contains("left_right"), sent.get(0));
+        assertNull(manager.loadStructure(NamespacedKey.fromString("minecraft:nope/none")));
+    }
+
     @Test void withoutAGeneratorTheCallSaysItIsNotImplemented() {
         HostBridge.transport = (owner, subject, method, args) -> null;
         var plains = Registry.BIOME.get(NamespacedKey.fromString("minecraft:plains"));

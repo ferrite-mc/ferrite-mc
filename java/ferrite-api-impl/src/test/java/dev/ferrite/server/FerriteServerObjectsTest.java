@@ -148,8 +148,7 @@ class FerriteServerObjectsTest {
 
         assertEquals("Ferrite: not implemented: StructureManager#saveStructure",
                 assertThrows(UnsupportedOperationException.class, () -> structures.saveStructure(key)).getMessage());
-        assertEquals("Ferrite: not implemented: StructureManager#loadStructure",
-                assertThrows(UnsupportedOperationException.class, () -> structures.loadStructure(key)).getMessage());
+        assertNull(structures.loadStructure(key), "a key without a template file loads nothing");
         assertEquals("Ferrite: not implemented: Structure#place",
                 assertThrows(UnsupportedOperationException.class,
                         () -> structure.place((org.bukkit.Location) null, false, null, null, 0, 1.0f, new java.util.Random())).getMessage());
