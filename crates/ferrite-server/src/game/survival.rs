@@ -35,6 +35,7 @@ pub const STARVE_INTERVAL: i32 = 80;
 /// `Player.causeFallDamage`: `safe_fall_distance` attribute default.
 pub const SAFE_FALL_DISTANCE: f64 = 3.0;
 /// `Player.isBelowWorld`: `level.getMinBuildHeight() - 64` (min height -64 in the overworld).
+#[cfg(test)]
 pub const VOID_Y: f64 = -128.0;
 /// `minecraft:consumable` default `consume_seconds` (1.6 s) in ticks.
 pub const EAT_TICKS: i32 = 32;
@@ -348,6 +349,7 @@ impl Survival {
     ///
     /// Returns the damage to apply through the player's `hurt`, after this call updated the
     /// air supply, fire ticks and fall distance.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn environment_tick(
         &mut self,
@@ -358,6 +360,30 @@ impl Survival {
         fire_block: bool,
         gamemode: i32,
         sprinting: bool,
+    ) -> EnvironmentDamage {
+        self.environment_tick_with_void(
+            pos,
+            on_ground,
+            eye_in_water,
+            feet_in_lava,
+            fire_block,
+            gamemode,
+            sprinting,
+            VOID_Y,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn environment_tick_with_void(
+        &mut self,
+        pos: [f64; 3],
+        on_ground: bool,
+        eye_in_water: bool,
+        feet_in_lava: bool,
+        fire_block: bool,
+        gamemode: i32,
+        sprinting: bool,
+        void_y: f64,
     ) -> EnvironmentDamage {
         let mut queue = [None; 4];
         if self.dead || gamemode == 3 {
@@ -428,7 +454,7 @@ impl Survival {
         }
 
         // `Player.isBelowWorld`: 4 damage per tick below min build height - 64.
-        if pos[1] < VOID_Y {
+        if pos[1] < void_y {
             queue_damage(&mut queue, DamageKind::Void, 4.0);
         }
 
@@ -702,6 +728,16 @@ mod tests {
             false,
         );
         assert_eq!(damage(queue), [(DamageKind::Void, 4.0)]);
+    }
+
+    #[test]
+    fn void_damage_uses_dimension_build_height() {
+        let mut s = Survival::new();
+        let tick = |s: &mut Survival, y| {
+            s.environment_tick_with_void([0.0, y, 0.0], false, false, false, false, 0, false, -64.0)
+        };
+        assert!(!damage(tick(&mut s, -64.0)).contains(&(DamageKind::Void, 4.0)));
+        assert!(damage(tick(&mut s, -64.1)).contains(&(DamageKind::Void, 4.0)));
     }
 
     #[test]

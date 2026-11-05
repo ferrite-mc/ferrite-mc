@@ -121,7 +121,8 @@ impl Dimension {
 
     pub fn sea_level(self) -> i32 {
         match self {
-            Self::Overworld | Self::End => 63,
+            Self::Overworld => 63,
+            Self::End => 0,
             Self::Nether => 32,
         }
     }
@@ -393,6 +394,7 @@ mod tests {
     #[test]
     fn nether_flat_fallback_uses_netherrack_and_lava() {
         assert_eq!(Dimension::Nether.sea_level(), 32);
+        assert_eq!(Dimension::End.sea_level(), 0);
         assert_eq!(Dimension::Nether.light_sections(), 18);
         assert_eq!(Dimension::Overworld.light_sections(), 26);
     }

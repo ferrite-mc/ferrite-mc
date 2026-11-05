@@ -1937,7 +1937,7 @@ impl Player {
         if water_breathing {
             self.survival.air = super::survival::MAX_AIR;
         }
-        let damage = self.survival.environment_tick(
+        let damage = self.survival.environment_tick_with_void(
             self.pos,
             self.ground,
             eye_fluid == ferrite_fluid::FluidKind::Water,
@@ -1945,6 +1945,7 @@ impl Player {
             fire,
             self.gamemode,
             self.survival.sprinting,
+            f64::from(self.dimension.min_y() - 64),
         );
         crate::plugins::facts::set_fall_distance(self.uuid, self.survival.fall_distance as f32);
         crate::plugins::facts::set_vitals(
@@ -2324,9 +2325,9 @@ impl Player {
         send(
             self,
             &SetHealth {
-                health: MAX_HEALTH,
-                food: VarInt(MAX_FOOD),
-                saturation: 5.0,
+                health: self.survival.health,
+                food: VarInt(self.survival.food.food),
+                saturation: self.survival.food.saturation,
             },
         );
         self.survival.mark_synced();
