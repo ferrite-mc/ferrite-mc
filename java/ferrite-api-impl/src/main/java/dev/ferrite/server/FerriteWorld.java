@@ -447,6 +447,13 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 yield handle;
             }
             case "canGenerateStructures" -> true;
+            case "generateTree" -> {
+                // (Location, TreeType) | (Location, Random, TreeType); a BlockChangeDelegate cannot be honoured.
+                if (args.length < 2 || !(args[0] instanceof org.bukkit.Location at) || !(args[args.length - 1] instanceof org.bukkit.TreeType type)) yield NONE;
+                var feature = treeFeature(type);
+                if (feature == null) yield false;
+                yield Boolean.parseBoolean((String) HostBridge.call("World", id, "placeFeature(Location,String)", String.class, at, feature));
+            }
             case "getChunkCount" -> {
                 var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
                 yield text == null || text.isEmpty() ? 0 : text.split(String.valueOf(HostBridge.ITEM)).length;
@@ -459,6 +466,33 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getGenerator", "getBiomeProvider", "getEnderDragonBattle" -> null;
             case "locateNearestBiome", "locateNearestStructure", "hasStructureAt" -> locate(method, args);
             default -> NONE;
+        };
+    }
+
+    /** The vanilla configured feature that grows a tree type, or null when there is none. */
+    static String treeFeature(org.bukkit.TreeType type) {
+        return switch (type) {
+            case TREE -> "minecraft:oak";
+            case BIG_TREE -> "minecraft:fancy_oak";
+            case REDWOOD -> "minecraft:spruce";
+            case TALL_REDWOOD -> "minecraft:pine";
+            case MEGA_REDWOOD -> "minecraft:mega_spruce";
+            case BIRCH -> "minecraft:birch";
+            case TALL_BIRCH -> "minecraft:birch_tall";
+            case JUNGLE -> "minecraft:mega_jungle_tree";
+            case SMALL_JUNGLE -> "minecraft:jungle_tree_no_vine";
+            case JUNGLE_BUSH -> "minecraft:jungle_bush";
+            case SWAMP -> "minecraft:swamp_oak";
+            case ACACIA -> "minecraft:acacia";
+            case DARK_OAK -> "minecraft:dark_oak";
+            case MANGROVE -> "minecraft:mangrove";
+            case TALL_MANGROVE -> "minecraft:tall_mangrove";
+            case CHERRY -> "minecraft:cherry";
+            case AZALEA -> "minecraft:azalea_tree";
+            case RED_MUSHROOM -> "minecraft:huge_red_mushroom";
+            case BROWN_MUSHROOM -> "minecraft:huge_brown_mushroom";
+            case CHORUS_PLANT -> "minecraft:chorus_plant";
+            default -> null;
         };
     }
 

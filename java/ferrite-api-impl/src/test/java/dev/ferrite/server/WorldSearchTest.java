@@ -64,6 +64,18 @@ class WorldSearchTest {
         assertEquals(List.of("locateStructure(String,int,int,int)", "hasStructureAt(String,int,int,int)"), sent);
     }
 
+    @Test void generateTreeAsksTheHostToPlaceTheMatchingFeature() {
+        HostBridge.transport = (owner, subject, method, args) -> {
+            sent.add(method + "|" + args);
+            return "true";
+        };
+        assertTrue(world.generateTree(new Location(world, 4, 70, 5), org.bukkit.TreeType.BIG_TREE));
+        assertEquals(1, sent.size());
+        assertTrue(sent.get(0).startsWith("placeFeature(Location,String)|"), sent.get(0));
+        assertTrue(sent.get(0).endsWith("minecraft:fancy_oak"), sent.get(0));
+        assertEquals("minecraft:oak", FerriteWorld.treeFeature(org.bukkit.TreeType.TREE));
+    }
+
     @Test void withoutAGeneratorTheCallSaysItIsNotImplemented() {
         HostBridge.transport = (owner, subject, method, args) -> null;
         var plains = Registry.BIOME.get(NamespacedKey.fromString("minecraft:plains"));
