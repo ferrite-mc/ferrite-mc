@@ -492,4 +492,37 @@ class PlayerExtrasTest {
         assertTrue(calls.contains("sbObjective(String,int,String,int)"), calls.toString());
         assertSame(main, player.getScoreboard());
     }
+
+    @Test void worldRayTracesFindTheFirstBlockWithExactHitData() {
+        var world = org.bukkit.Bukkit.getWorld("extras_world");
+        for (int x = 0; x < 3; x++) world.getBlockAt(x, 80, 0).setType(org.bukkit.Material.AIR);
+        world.getBlockAt(3, 80, 0).setType(org.bukkit.Material.STONE);
+        var start = new org.bukkit.Location(world, 0.5, 80.5, 0.5);
+        var hit = world.rayTraceBlocks(start, new org.bukkit.util.Vector(1, 0, 0), 10);
+        assertNotNull(hit);
+        assertEquals(3, hit.getHitBlock().getX());
+        assertEquals(org.bukkit.block.BlockFace.WEST, hit.getHitBlockFace());
+        assertEquals(3.0, hit.getHitPosition().getX(), 1e-9);
+        assertEquals(80.5, hit.getHitPosition().getY(), 1e-9);
+        assertNull(world.rayTraceBlocks(start, new org.bukkit.util.Vector(1, 0, 0), 1.0));
+        assertThrows(IllegalArgumentException.class, () -> world.rayTraceBlocks(start, new org.bukkit.util.Vector(0, 0, 0), 5));
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("isSolid()") ? "true" : "";
+        try {
+            var all = world.rayTrace(start, new org.bukkit.util.Vector(2, 0, 0), 10, org.bukkit.FluidCollisionMode.NEVER, true, 0.0, null);
+            assertEquals(3, all.getHitBlock().getX());
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void collisionChecksUseTheSolidBlocksAroundTheBody() {
+        var world = org.bukkit.Bukkit.getWorld("extras_world");
+        for (int x = 49; x <= 50; x++) for (int y = 200; y <= 201; y++) for (int z = 49; z <= 50; z++) world.getBlockAt(x, y, z).setType(org.bukkit.Material.AIR);
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("isSolid()") ? "true" : "";
+        try {
+            var spot = new org.bukkit.Location(world, 50, 200, 50);
+            assertFalse(player.collidesAt(spot));
+            world.getBlockAt(50, 200, 50).setType(org.bukkit.Material.STONE);
+            assertTrue(player.collidesAt(spot));
+            assertTrue(player.wouldCollideUsing(new org.bukkit.util.BoundingBox(50.1, 200.1, 50.1, 50.4, 200.4, 50.4)));
+        } finally { HostBridge.transport = null; }
+    }
 }

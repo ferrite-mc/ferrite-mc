@@ -25,6 +25,7 @@ CMI가 동작한다고 말할 수 없다.
 - 엔티티 핸들: 스폰·드롭이 돌려주는 핸들은 실제 엔티티의 id를 가지며 위치·유효성·속도·체력 읽기와
   `remove`/`setVelocity`/`teleport`/`damage`가 실제 엔티티에 닿는다. `Player#attack`은 1점 피해.
 - 클라이언트가 가진 청크: `Player#isChunkSent`, `getSentChunks`는 실제로 보낸/버린 청크를 따라간다.
+- 광선 추적: `World#rayTraceBlocks`/`rayTraceEntities`/`rayTrace`는 칸 단위로 따라가 정확한 적중 위치·면을 준다. 고체 블록은 꽉 찬 정육면체로 본다(반블록·계단 모양은 모델링하지 않음). 엔티티는 접속한 플레이어만 대상이다. `Player#collidesAt`/`wouldCollideUsing`도 같은 방식이다.
 - 번개: `strikeLightning`/`strikeLightningEffect`는 번개 엔티티와 천둥 소리를 주변 오버월드 플레이어에게만 보낸다(불·피해 없음, 실제 클라이언트로 미확인).
 - 그 밖: `createExplosion`, `updateCommands`, `retrieveCookie`, `storeCookie`, `openMerchant`, `openSign`,
   `setWindowProperty`, 입력/스프린트/수면/낙하 상태 읽기, 리소스팩 상태, 날씨 지속시간 등.
@@ -50,7 +51,6 @@ CMI가 동작한다고 말할 수 없다.
 
 - **엔티티 모델 확장 필요:** 아이템 사용 상태(`startUsingItem`, `completeUsingActiveItem`),
   내구도(`damageItemStack`, `applyMending`), 탑승·어깨 엔티티, 전투 추적기, 화살 외 발사체.
-- **지형·충돌 데이터 필요:** `rayTrace*`, `collidesAt`, `wouldCollideUsing`.
 - **바이옴·구조물 데이터 필요:** `setBiome`, `getComputedBiome`, 기온·습도, `getStructures`(구조물 영역 조회가 호스트에 없다),
   `createExplorerMap`(Server 3개), `generateTree`.
   (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.

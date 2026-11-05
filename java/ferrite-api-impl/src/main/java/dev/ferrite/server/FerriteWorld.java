@@ -183,6 +183,65 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         return Math.abs(at.getX() - cx) <= dx && Math.abs(at.getY() - cy) <= dy && Math.abs(at.getZ() - cz) <= dz;
     }
 
+    @SuppressWarnings("unchecked")
+    private static java.util.function.Predicate<org.bukkit.entity.Entity> filterOf(Object[] args) {
+        return args.length > 0 && args[args.length - 1] instanceof java.util.function.Predicate<?> p ? (java.util.function.Predicate<org.bukkit.entity.Entity>) p : null;
+    }
+
+    /**
+     * Walks the ray cell by cell and returns the first block it enters. Solid blocks count as whole
+     * cubes (partial shapes such as slabs are not modelled); fluids are hit unless the mode is NEVER.
+     */
+    private org.bukkit.util.RayTraceResult traceBlocks(org.bukkit.Location start, org.bukkit.util.Vector direction, double max, org.bukkit.FluidCollisionMode mode, boolean ignorePassable) {
+        java.util.Objects.requireNonNull(start, "start");
+        java.util.Objects.requireNonNull(direction, "direction");
+        if (direction.lengthSquared() == 0) throw new IllegalArgumentException("Direction's magnitude (0.0) must be greater than 0");
+        if (max < 0) return null;
+        var dir = direction.clone().normalize();
+        double ox = start.getX(), oy = start.getY(), oz = start.getZ();
+        int x = (int) Math.floor(ox), y = (int) Math.floor(oy), z = (int) Math.floor(oz);
+        int sx = dir.getX() > 0 ? 1 : -1, sy = dir.getY() > 0 ? 1 : -1, sz = dir.getZ() > 0 ? 1 : -1;
+        double tx = dir.getX() == 0 ? Double.MAX_VALUE : ((sx > 0 ? x + 1 : x) - ox) / dir.getX();
+        double ty = dir.getY() == 0 ? Double.MAX_VALUE : ((sy > 0 ? y + 1 : y) - oy) / dir.getY();
+        double tz = dir.getZ() == 0 ? Double.MAX_VALUE : ((sz > 0 ? z + 1 : z) - oz) / dir.getZ();
+        double dx = dir.getX() == 0 ? Double.MAX_VALUE : Math.abs(1 / dir.getX());
+        double dy = dir.getY() == 0 ? Double.MAX_VALUE : Math.abs(1 / dir.getY());
+        double dz = dir.getZ() == 0 ? Double.MAX_VALUE : Math.abs(1 / dir.getZ());
+        org.bukkit.block.BlockFace face = null;
+        double t = 0;
+        while (true) {
+            var type = typeAt(new Pos(x, y, z));
+            boolean fluid = type == org.bukkit.Material.WATER || type == org.bukkit.Material.LAVA;
+            boolean hit = !type.isAir() && (fluid ? mode != org.bukkit.FluidCollisionMode.NEVER : !(ignorePassable && !type.isSolid()));
+            if (hit) return new org.bukkit.util.RayTraceResult(new org.bukkit.util.Vector(ox + dir.getX() * t, oy + dir.getY() * t, oz + dir.getZ() * t), proxy.getBlockAt(x, y, z), face);
+            if (tx <= ty && tx <= tz) { t = tx; tx += dx; x += sx; face = sx > 0 ? org.bukkit.block.BlockFace.WEST : org.bukkit.block.BlockFace.EAST; }
+            else if (ty <= tz) { t = ty; ty += dy; y += sy; face = sy > 0 ? org.bukkit.block.BlockFace.DOWN : org.bukkit.block.BlockFace.UP; }
+            else { t = tz; tz += dz; z += sz; face = sz > 0 ? org.bukkit.block.BlockFace.NORTH : org.bukkit.block.BlockFace.SOUTH; }
+            if (t > max) return null;
+        }
+    }
+
+    /** The nearest player the ray hits (the only entities this world exposes). */
+    private org.bukkit.util.RayTraceResult traceEntities(org.bukkit.Location start, org.bukkit.util.Vector direction, double max, double raySize, java.util.function.Predicate<org.bukkit.entity.Entity> filter, Object unused) {
+        if (direction.lengthSquared() == 0) throw new IllegalArgumentException("Direction's magnitude (0.0) must be greater than 0");
+        if (max < 0) return null;
+        var origin = start.toVector();
+        var dir = direction.clone().normalize();
+        org.bukkit.util.RayTraceResult best = null;
+        double bestDistance = max;
+        for (var player : playersHere()) {
+            if (filter != null && !filter.test(player)) continue;
+            var result = player.getBoundingBox().expand(Math.max(0, raySize)).rayTrace(origin, dir, max);
+            if (result == null) continue;
+            double distance = result.getHitPosition().distance(origin);
+            if (distance <= bestDistance) {
+                bestDistance = distance;
+                best = new org.bukkit.util.RayTraceResult(result.getHitPosition(), player, result.getHitBlockFace());
+            }
+        }
+        return best;
+    }
+
     private boolean solid(int x, int y, int z) {
         var type = typeAt(new Pos(x, y, z));
         return !type.isAir() && type != org.bukkit.Material.WATER && type != org.bukkit.Material.LAVA && type.isSolid();
@@ -341,6 +400,21 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                         for (int z = (int) Math.floor(box.getMinZ()); z < Math.ceil(box.getMaxZ()); z++)
                             if (solid(x, y, z)) return true;
                 return false;
+            }
+            case "rayTraceBlocks" -> { return traceBlocks((org.bukkit.Location) args[0], (org.bukkit.util.Vector) args[1], ((Number) args[2]).doubleValue(),
+                args.length > 3 ? (org.bukkit.FluidCollisionMode) args[3] : org.bukkit.FluidCollisionMode.NEVER, args.length > 4 && (boolean) args[4]); }
+            case "rayTraceEntities" -> {
+                double size = args.length > 3 && args[3] instanceof Number n ? n.doubleValue() : 0.0;
+                return traceEntities((org.bukkit.Location) args[0], (org.bukkit.util.Vector) args[1], ((Number) args[2]).doubleValue(), size, filterOf(args), null);
+            }
+            case "rayTrace" -> {
+                var start = (org.bukkit.Location) args[0];
+                var direction = (org.bukkit.util.Vector) args[1];
+                double max = ((Number) args[2]).doubleValue();
+                var block = traceBlocks(start, direction, max, (org.bukkit.FluidCollisionMode) args[3], (boolean) args[4]);
+                double limit = block == null ? max : block.getHitPosition().distance(start.toVector());
+                var entity = traceEntities(start, direction, limit, ((Number) args[5]).doubleValue(), filterOf(args), null);
+                return entity != null ? entity : block;
             }
             case "lineOfSightExists" -> {
                 var from = (org.bukkit.Location) args[0];

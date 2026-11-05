@@ -9,6 +9,12 @@ import java.util.function.Predicate;
  */
 @SuppressWarnings({"deprecation", "unchecked", "rawtypes"})
 public abstract class PlayerMisc extends PlayerStubs {
+    /** Whether the player's body, moved to the location, would overlap a solid block. */
+    @Override public boolean collidesAt(org.bukkit.Location location) {
+        return getWorld().hasCollisionsIn(getBoundingBox().shift(location.toVector().subtract(getLocation().toVector())));
+    }
+    @Override public boolean wouldCollideUsing(org.bukkit.util.BoundingBox box) { return getWorld().hasCollisionsIn(box); }
+
     /** Several slots at once are sent one slot at a time. */
     @Override public void sendEquipmentChange(org.bukkit.entity.LivingEntity entity, java.util.Map<org.bukkit.inventory.EquipmentSlot, org.bukkit.inventory.ItemStack> items) {
         java.util.Objects.requireNonNull(entity, "entity");
