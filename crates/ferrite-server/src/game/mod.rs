@@ -1321,10 +1321,10 @@ async fn run(
                         worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_drop_item(center, &item, amount, natural, uuid));
                     }
                 }
-                 Some(ferrite_plugin::PlayerCommand::Explosion { center, power, fire }) => {
+                 Some(ferrite_plugin::PlayerCommand::Explosion { center, power, fire, breaks }) => {
                     let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_explosions.push((center, power, fire)));
+                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_explosions.push((center, power, fire, breaks)));
                     }
                 }
                  Some(ferrite_plugin::PlayerCommand::Lightning { center }) => {

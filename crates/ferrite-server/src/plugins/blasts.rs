@@ -1,8 +1,7 @@
 //! `World#createExplosion`: an ordinary vanilla explosion at a point of the default world.
 //!
-//! The blast breaks blocks, hurts and pushes players and mobs like a bed explosion; a plugin
-//! asking for no block damage is left unhandled because the region's explosion always breaks
-//! blocks.
+//! The blast hurts and pushes players and mobs like a bed explosion and breaks blocks unless the
+//! plugin asked it not to.
 
 use ferrite_plugin::{HostCall, PlayerCommand};
 use uuid::Uuid;
@@ -88,13 +87,12 @@ pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
         Some(_) => None,
     };
     let fire = flag(1, false)?;
-    if !flag(2, true)? {
-        return None;
-    }
+    let breaks = flag(2, true)?;
     Some(PlayerCommand::Explosion {
         center,
         power,
         fire,
+        breaks,
     })
 }
 
@@ -415,6 +413,7 @@ mod tests {
             center: [10.5, 64.0, -3.0],
             power: 4.0,
             fire: true,
+            breaks: true,
         });
         assert_eq!(
             explosion_command(&call(
@@ -439,16 +438,22 @@ mod tests {
             Some(PlayerCommand::Explosion {
                 center: [10.5, 64.0, -3.0],
                 power: 2.0,
-                fire: false
+                fire: false,
+                breaks: true
             })
         );
-        // Block damage cannot be switched off.
+        // Block damage can be switched off.
         assert_eq!(
             explosion_command(&call(
                 "createExplosion(Location,float,boolean,boolean)",
                 &[&at(), "2", "false", "false"]
             )),
-            None
+            Some(PlayerCommand::Explosion {
+                center: [10.5, 64.0, -3.0],
+                power: 2.0,
+                fire: false,
+                breaks: false
+            })
         );
         assert_eq!(
             explosion_command(&call("createExplosion(Location,float)", &[&at(), "NaN"])),

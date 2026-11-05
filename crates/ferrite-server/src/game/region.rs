@@ -528,8 +528,9 @@ pub struct Player {
 }
 #[derive(Default)]
 pub struct Region {
-    /// Explosions plugins asked for: center, power and whether fire is left behind.
-    pub plugin_explosions: Vec<([f64; 3], f32, bool)>,
+    /// Explosions plugins asked for: center, power, whether fire is left behind and whether
+    /// blocks break.
+    pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
     pub players: HashMap<Uuid, Player>,
@@ -3330,7 +3331,7 @@ impl Region {
                     self.entities.insert(record);
                 }
                 ai::MobEvent::Explode { center, power } => {
-                    self.explode([center.x, center.y, center.z], power, ctx);
+                    self.explode([center.x, center.y, center.z], power, true, ctx);
                     if let Some(source) = ctx.source.as_deref() {
                         let mut broken = Vec::new();
                         self.apply_neighbor_updates(source, ctx, &mut broken);
@@ -4098,6 +4099,7 @@ impl Region {
             self.explode(
                 [center.x, center.y, center.z],
                 super::explosion::TNT_POWER,
+                true,
                 ctx,
             );
         }
@@ -4110,7 +4112,7 @@ impl Region {
     }
     /// Vanilla `Explosion`: entity knockback and exposure first, then the ray cast blocks and
     /// their loot-table drops.
-    fn explode(&mut self, center: [f64; 3], power: f32, ctx: &TickContext) {
+    fn explode(&mut self, center: [f64; 3], power: f32, breaks: bool, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
@@ -4180,6 +4182,9 @@ impl Region {
             if let Some(flags) = self.entities.flags_mut(key) {
                 flags.set(ferrite_entity::Flags::NEEDS_SYNC, true);
             }
+        }
+        if !breaks {
+            return;
         }
         // Destroyed blocks, with the state read before it turns into air.
         let air = u32::from(ferrite_data::blocks::default_state("air").expect("vanilla air"));
@@ -4369,7 +4374,11 @@ impl Region {
             }
             self.spawn_thrown(&mut p);
             self.spawn_primed_tnt(&mut p);
-            explosions.append(&mut p.explosions);
+            explosions.extend(
+                p.explosions
+                    .drain(..)
+                    .map(|(c, power, fire)| (c, power, fire, true)),
+            );
             for (pos, delay) in p.button_press.drain(..) {
                 self.buttons.schedule(pos, delay);
             }
@@ -4427,8 +4436,8 @@ impl Region {
             self.players.insert(id, p);
         }
         // Vanilla `BedBlock.explodeBed` runs the ordinary `Explosion` and leaves fire behind.
-        for (center, power, fire) in explosions {
-            self.explode(center, power, ctx);
+        for (center, power, fire, breaks) in explosions {
+            self.explode(center, power, breaks, ctx);
             if fire && let Some(source) = ctx.source.as_deref() {
                 let pos = [
                     center[0].floor() as i32,

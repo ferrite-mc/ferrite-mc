@@ -448,6 +448,8 @@ pub enum PlayerCommand {
         center: [f64; 3],
         power: f32,
         fire: bool,
+        /// Whether the blast breaks blocks.
+        breaks: bool,
     },
     /// Bukkit `hidePlayer`/`showPlayer`: whether `viewer` sees `target` (entity and tab list).
     Visibility {
