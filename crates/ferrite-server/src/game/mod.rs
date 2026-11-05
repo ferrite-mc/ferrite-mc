@@ -830,6 +830,17 @@ async fn run(
         world_path,
         &disabled_packs,
     ));
+    // `/forceload`ed chunks come back with the world: each dimension keeps its own tickets.
+    for dimension in Dimension::ALL {
+        for (key, x, z) in dimensions.source(dimension).load_forced_chunks() {
+            let _ = signal_tx.send(Signal::Hold {
+                dimension,
+                chunk: ChunkPos(x, z),
+                add: true,
+            });
+            initial_state.more.forced.insert((key, x, z));
+        }
+    }
     let command_state = Arc::new(Mutex::new(initial_state));
     crate::plugins::worldinfo::register({
         let state = Arc::clone(&command_state);

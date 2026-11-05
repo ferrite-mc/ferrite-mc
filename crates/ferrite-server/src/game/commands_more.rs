@@ -1590,6 +1590,18 @@ fn rotate_tree() -> NodeBuilder<Source> {
 /// Largest area `/forceload add|remove` accepts, in chunks.
 const FORCELOAD_MAX: i64 = 256;
 
+/// Writes the command source's dimension tickets to disk after `/forceload` changed them.
+fn persist_forced(ctx: &CommandContext<Source>) {
+    let source = ctx.source();
+    let Some(world) = source.world.as_ref() else {
+        return;
+    };
+    let forced = source.state.lock().unwrap().more.forced.clone();
+    if let Err(error) = world.save_forced_chunks(source.dimension.key(), &forced) {
+        tracing::warn!("could not save forced chunks: {error:#}");
+    }
+}
+
 fn chunk_label(x: i32, z: i32) -> String {
     format!("[{x}, {z}]")
 }
@@ -1641,6 +1653,9 @@ fn forceload_change(
                 }
             }
         }
+    }
+    if !changed.is_empty() {
+        persist_forced(ctx);
     }
     if changed.is_empty() {
         return Err(failure(
@@ -1726,6 +1741,9 @@ fn forceload_tree() -> NodeBuilder<Source> {
                         all.into_iter().map(|(_, x, z)| (x, z)).collect()
                     };
                     let count = removed.len() as i32;
+                    if count > 0 {
+                        persist_forced(ctx);
+                    }
                     send(
                         ctx.source(),
                         Action::ForceLoad {

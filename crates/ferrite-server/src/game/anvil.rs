@@ -370,6 +370,90 @@ impl AnvilChunkSource {
         Ok(())
     }
 
+    /// A dimension's source owns its own storage root, so its tickets live beside its other
+    /// `data/minecraft` files.
+    fn tickets_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|path| {
+            self.dimension
+                .storage_root(path)
+                .join("data/minecraft/chunk_tickets.dat")
+        })
+    }
+
+    /// The `/forceload`ed chunks stored in this dimension's `chunk_tickets.dat`.
+    pub(super) fn load_forced_chunks(&self) -> std::collections::BTreeSet<(String, i32, i32)> {
+        let mut forced = std::collections::BTreeSet::new();
+        let key = self.dimension.key();
+        'file: {
+            let Some(path) = self.tickets_path() else {
+                break 'file;
+            };
+            let Ok(bytes) = std::fs::read(path) else {
+                break 'file;
+            };
+            let Ok((_, Tag::Compound(root))) =
+                binary::read_compressed(&bytes, binary::Compression::Gzip)
+            else {
+                break 'file;
+            };
+            let Some(Tag::Compound(data)) = root.get("data") else {
+                break 'file;
+            };
+            let Some(Tag::List(List::Compound(tickets))) = data.get("tickets") else {
+                break 'file;
+            };
+            for ticket in tickets {
+                let is_forced = matches!(ticket.get("type"), Some(Tag::String(kind)) if kind == "minecraft:forced");
+                if let (true, Some(Tag::IntArray(pos))) = (is_forced, ticket.get("chunk_pos"))
+                    && let [x, z] = pos[..]
+                {
+                    forced.insert((key.to_owned(), x, z));
+                }
+            }
+        }
+        forced
+    }
+
+    /// Writes the forced chunks of one dimension to its `chunk_tickets.dat`, like vanilla's
+    /// `forced` tickets (level 31). Other ticket types are runtime state and are not kept.
+    pub(super) fn save_forced_chunks(
+        &self,
+        dimension: &str,
+        forced: &std::collections::BTreeSet<(String, i32, i32)>,
+    ) -> anyhow::Result<()> {
+        let Some(path) = self.tickets_path() else {
+            return Ok(());
+        };
+        let tickets: Vec<ferrite_nbt::Compound> = forced
+            .iter()
+            .filter(|(key, ..)| key == dimension)
+            .map(|(_, x, z)| {
+                let mut ticket = ferrite_nbt::Compound::new();
+                ticket.insert("chunk_pos".into(), Tag::IntArray(vec![*x, *z]));
+                ticket.insert("level".into(), Tag::Int(31));
+                ticket.insert("type".into(), Tag::String("minecraft:forced".into()));
+                ticket
+            })
+            .collect();
+        let mut data = ferrite_nbt::Compound::new();
+        data.insert("tickets".into(), Tag::List(List::Compound(tickets)));
+        let mut root = ferrite_nbt::Compound::new();
+        root.insert("data".into(), Tag::Compound(data));
+        root.insert(
+            "DataVersion".into(),
+            Tag::Int(
+                self.data_version()
+                    .unwrap_or(ferrite_command::gamerule::DATA_VERSION),
+            ),
+        );
+        let bytes = binary::write_compressed("", &Tag::Compound(root), binary::Compression::Gzip)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
     fn data_version(&self) -> Option<i32> {
         let bytes = std::fs::read(self.path.as_ref()?.join("level.dat")).ok()?;
         let (_, Tag::Compound(root)) =
@@ -1167,6 +1251,43 @@ fn flat_chunk(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn forced_chunks_survive_a_restart_per_dimension() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(
+            RuntimeRegistry::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../vanilla/26.3/generated"),
+            )
+            .unwrap(),
+        );
+        let open = |dimension| {
+            AnvilChunkSource::with_dimension(
+                dir.path().to_path_buf(),
+                registry.clone(),
+                None,
+                dimension,
+            )
+        };
+        let nether = open(Dimension::Nether);
+        assert!(nether.load_forced_chunks().is_empty());
+        let key = Dimension::Nether.key().to_owned();
+        let forced: std::collections::BTreeSet<_> =
+            [(key.clone(), -3, 7), (key.clone(), 0, 0)].into();
+        nether.save_forced_chunks(&key, &forced).unwrap();
+        assert!(
+            dir.path()
+                .join("DIM-1/data/minecraft/chunk_tickets.dat")
+                .exists()
+        );
+        assert_eq!(open(Dimension::Nether).load_forced_chunks(), forced);
+        assert!(open(Dimension::Overworld).load_forced_chunks().is_empty());
+        nether
+            .save_forced_chunks(&key, &Default::default())
+            .unwrap();
+        assert!(open(Dimension::Nether).load_forced_chunks().is_empty());
+    }
+
     use super::*;
 
     async fn ready(source: &Arc<AnvilChunkSource>, x: i32, z: i32, biome: i32) -> Arc<[u8]> {
