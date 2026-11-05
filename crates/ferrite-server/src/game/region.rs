@@ -3964,7 +3964,7 @@ impl Region {
 
     /// Ticks the region's redstone network after this tick's block changes, mirroring
     /// `Level.tickBlockEntities` + `Level.tickBlocks` + scheduled block ticks.
-    fn tick_redstone(&mut self, ctx: &TickContext, changed: &[[i32; 3]]) {
+    fn tick_redstone(&mut self, ctx: &TickContext, changed: &mut Vec<[i32; 3]>) {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
@@ -3973,6 +3973,68 @@ impl Region {
             super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
         self.redstone.blocks_changed(&mut world, changed);
         self.redstone.tick(&mut world, &players);
+        let actions = self.redstone.take_piston_actions(&world);
+        let mut piston_changes = Vec::new();
+        let mut destroyed = Vec::new();
+        for (pos, facing, extending) in actions {
+            let Some(operation) = super::piston::operation(&world, pos, facing, extending) else {
+                continue;
+            };
+            if let Err(error) = source.compare_set_blocks(&operation.edits) {
+                tracing::warn!(?pos, %error, "piston movement rejected");
+                continue;
+            }
+            let chunk = (pos[0].div_euclid(16), pos[2].div_euclid(16));
+            if let Some(state) = super::redstone::RedstoneWorld::block(&world, pos)
+                && let Some((name, _)) = ferrite_data::blocks::state(state)
+                && let Some(block) = ferrite_data::registries::id("minecraft:block", name)
+            {
+                let direction = match facing {
+                    ferrite_math::Direction::Down => 0,
+                    ferrite_math::Direction::Up => 1,
+                    ferrite_math::Direction::North => 2,
+                    ferrite_math::Direction::South => 3,
+                    ferrite_math::Direction::West => 4,
+                    ferrite_math::Direction::East => 5,
+                };
+                let event = BlockEvent {
+                    pos: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]),
+                    block: VarInt(block),
+                    param_a: if extending { 0 } else { 1 },
+                    param_b: direction,
+                };
+                broadcast_tracked_chunk(
+                    &ctx.tracking.lock().unwrap(),
+                    ctx.dimension,
+                    chunk,
+                    &packet(&event),
+                );
+            }
+            for &(at, _, state) in &operation.edits {
+                let update = BlockUpdate {
+                    location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+                    block_state: VarInt(state as i32),
+                };
+                broadcast_tracked_chunk(
+                    &ctx.tracking.lock().unwrap(),
+                    ctx.dimension,
+                    (at[0].div_euclid(16), at[2].div_euclid(16)),
+                    &packet(&update),
+                );
+                piston_changes.push(at);
+            }
+            destroyed.extend(operation.destroyed);
+        }
+        if !piston_changes.is_empty() {
+            self.redstone.blocks_changed(&mut world, &piston_changes);
+        }
+        for &(pos, state) in &destroyed {
+            self.spawn_block_drops(pos, state);
+        }
+        for &pos in &piston_changes {
+            self.updates.block_changed(pos);
+        }
+        changed.extend(piston_changes);
         for (pos, fuse) in self.redstone.take_primed() {
             self.spawn_tnt(pos, fuse);
         }
@@ -4501,7 +4563,7 @@ impl Region {
             self.schedule_gravity(source, &changed);
         }
         self.tick_gravity(ctx);
-        self.tick_redstone(ctx, &changed);
+        self.tick_redstone(ctx, &mut changed);
         self.tick_dispensers(ctx);
         self.tick_command_blocks(ctx, &changed);
         let blocks = TickBlocks {

@@ -10,6 +10,15 @@ pub trait PistonWorld {
     fn has_block_entity(&self, pos: [i32; 3]) -> bool;
 }
 
+impl PistonWorld for super::fluid::RegionFluidWorld<'_> {
+    fn block(&self, pos: [i32; 3]) -> Option<u16> {
+        super::redstone::RedstoneWorld::block(self, pos)
+    }
+    fn has_block_entity(&self, pos: [i32; 3]) -> bool {
+        self.source.block_entity(pos[0], pos[1], pos[2]).is_some()
+    }
+}
+
 /// A complete plan; no world mutation has happened when resolution returns.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Plan {
@@ -58,10 +67,12 @@ fn reaction(world: &impl PistonWorld, pos: [i32; 3], state: u16) -> Reaction {
     if world.has_block_entity(pos) || piston.has_block_entity || physical.hardness < 0.0 {
         return Reaction::Block;
     }
-    if matches!(name, "piston" | "sticky_piston")
-        && props.iter().any(|&(k, v)| k == "extended" && v == "true")
-    {
-        return Reaction::Block;
+    if matches!(name, "piston" | "sticky_piston") {
+        return if props.iter().any(|&(k, v)| k == "extended" && v == "true") {
+            Reaction::Block
+        } else {
+            Reaction::Move
+        };
     }
     match piston.reaction {
         piston_props::PushReaction::PushPull | piston_props::PushReaction::IgnoreEntity => {
@@ -253,6 +264,39 @@ pub fn changes(
         .collect()
 }
 
+/// Expected block changes and blocks whose drops must be spawned after commit.
+pub struct Operation {
+    pub edits: Vec<([i32; 3], u32, u32)>,
+    pub destroyed: Vec<([i32; 3], u16)>,
+}
+
+/// Prepare a complete operation without modifying the world.
+pub fn operation(
+    world: &impl PistonWorld,
+    base: [i32; 3],
+    facing: Direction,
+    extending: bool,
+) -> Option<Operation> {
+    let (name, _) = blocks::state(world.block(base)?)?;
+    let sticky = name.strip_prefix("minecraft:").unwrap_or(name) == "sticky_piston";
+    let plan = if extending {
+        resolve(world, base, facing, true)?
+    } else if sticky {
+        resolve(world, base, facing, false).unwrap_or_default()
+    } else {
+        Plan::default()
+    };
+    let destroyed = plan
+        .to_destroy
+        .iter()
+        .map(|&pos| Some((pos, world.block(pos)?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Operation {
+        edits: changes(world, base, facing, extending, &plan)?,
+        destroyed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +355,27 @@ mod tests {
                 .to_destroy,
             vec![[1, 64, 0]]
         );
+    }
+
+    #[test]
+    fn an_unextended_piston_can_move_but_an_extended_one_cannot() {
+        let mut grid = Grid::default();
+        let target = [1, 64, 0];
+        grid.0.insert(
+            target,
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "false")]).unwrap(),
+        );
+        assert_eq!(
+            resolve(&grid, [0, 64, 0], Direction::East, true)
+                .unwrap()
+                .to_move,
+            vec![target]
+        );
+        grid.0.insert(
+            target,
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "true")]).unwrap(),
+        );
+        assert!(resolve(&grid, [0, 64, 0], Direction::East, true).is_none());
     }
 
     #[test]
@@ -402,5 +467,26 @@ mod tests {
                 &[("facing", "east"), ("extended", "false")]
             )
         );
+    }
+
+    #[test]
+    fn sticky_retracts_even_when_its_target_cannot_be_pulled() {
+        let mut grid = Grid::default();
+        let base = [0, 64, 0];
+        grid.0.insert(
+            base,
+            blocks::state_id("sticky_piston", &[("facing", "east"), ("extended", "true")]).unwrap(),
+        );
+        grid.0.insert(
+            [1, 64, 0],
+            blocks::state_id("piston_head", &[("facing", "east"), ("type", "sticky")]).unwrap(),
+        );
+        grid.0.insert([2, 64, 0], state("obsidian"));
+        let operation = operation(&grid, base, Direction::East, false).unwrap();
+        for (pos, _, next) in operation.edits {
+            grid.0.insert(pos, u16::try_from(next).unwrap());
+        }
+        assert_eq!(grid.block([1, 64, 0]), Some(state("air")));
+        assert_eq!(grid.block([2, 64, 0]), Some(state("obsidian")));
     }
 }

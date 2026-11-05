@@ -512,6 +512,7 @@ pub struct Redstone {
     plates: HashSet<[i32; 3]>,
     daylights: HashSet<[i32; 3]>,
     primed: Vec<([i32; 3], i32)>,
+    piston_candidates: HashSet<[i32; 3]>,
 }
 
 impl Redstone {
@@ -532,6 +533,27 @@ impl Redstone {
 
     pub fn take_primed(&mut self) -> Vec<([i32; 3], i32)> {
         std::mem::take(&mut self.primed)
+    }
+
+    pub fn take_piston_actions(
+        &mut self,
+        world: &impl RedstoneWorld,
+    ) -> Vec<([i32; 3], Direction, bool)> {
+        let candidates = std::mem::take(&mut self.piston_candidates);
+        candidates
+            .into_iter()
+            .filter_map(|pos| {
+                let state = world.block(pos)?;
+                if !matches!(name(state), Some("piston" | "sticky_piston")) {
+                    return None;
+                }
+                let facing = facing(state)?;
+                let powered = super::piston::powered(pos, facing, |at, side| {
+                    power_from(world, at, side, &self.analog) > 0
+                });
+                (powered != property_bool(state, "extended")).then_some((pos, facing, powered))
+            })
+            .collect()
     }
 
     /// The redstone power arriving at a block (`Level.getSignal`), including comparator
@@ -654,6 +676,19 @@ impl Redstone {
     }
 
     fn after_change(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
+        // A piston can be powered by a neighbour or by quasi-connectivity above it.
+        for dx in -2..=2 {
+            for dy in -2..=1 {
+                for dz in -2..=2 {
+                    let candidate = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
+                    if world.block(candidate).is_some_and(|state| {
+                        matches!(name(state), Some("piston" | "sticky_piston"))
+                    }) {
+                        self.piston_candidates.insert(candidate);
+                    }
+                }
+            }
+        }
         if world.block(pos).is_some_and(is_wire) {
             self.wires.insert(pos);
         } else if let Some(state) = world.block(pos) {
@@ -1231,6 +1266,25 @@ mod tests {
         grid.add([1, 64, 0], air());
         grid.add([1, 65, 0], make("redstone_block", &[]));
         assert!(powered(&grid));
+    }
+
+    #[test]
+    fn changed_power_source_schedules_a_nearby_piston() {
+        let mut grid = Grid::new();
+        let pos = [0, 64, 0];
+        grid.add(
+            pos,
+            make("piston", &[("facing", "east"), ("extended", "false")]),
+        );
+        grid.add([-1, 64, 0], make("redstone_block", &[]));
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[-1, 64, 0]]);
+        redstone.tick(&mut grid, &[]);
+        assert!(
+            redstone
+                .take_piston_actions(&grid)
+                .contains(&(pos, Direction::East, true))
+        );
     }
 
     fn make(name: &str, changes: &[(&str, &str)]) -> u16 {
