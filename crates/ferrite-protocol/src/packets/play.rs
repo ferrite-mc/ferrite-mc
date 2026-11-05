@@ -262,6 +262,102 @@ impl Packet for AddEntity {
     const BOUND: Bound = Bound::Clientbound;
 }
 
+/// What the locator bar should draw for one waypoint.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaypointData {
+    Empty,
+    Position([i32; 3]),
+    Chunk([i32; 2]),
+    Azimuth(f32),
+}
+
+/// `waypoint` (locator bar). `operation`: 0 track, 1 untrack, 2 update.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackedWaypoint {
+    pub operation: VarInt,
+    pub uuid: Uuid,
+    pub style: String,
+    pub color: Option<u32>,
+    pub data: WaypointData,
+}
+impl Encode for TrackedWaypoint {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.operation.encode(out);
+        true.encode(out);
+        self.uuid.encode(out);
+        self.style.encode(out);
+        match self.color {
+            Some(rgb) => {
+                true.encode(out);
+                out.extend_from_slice(&rgb.to_be_bytes()[1..]);
+            }
+            None => false.encode(out),
+        }
+        match &self.data {
+            WaypointData::Empty => VarInt(0).encode(out),
+            WaypointData::Position(p) => {
+                VarInt(1).encode(out);
+                for v in p {
+                    VarInt(*v).encode(out);
+                }
+            }
+            WaypointData::Chunk(c) => {
+                VarInt(2).encode(out);
+                for v in c {
+                    VarInt(*v).encode(out);
+                }
+            }
+            WaypointData::Azimuth(angle) => {
+                VarInt(3).encode(out);
+                angle.encode(out);
+            }
+        }
+    }
+}
+impl Decode for TrackedWaypoint {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        let operation = VarInt::decode(buf)?;
+        if !bool::decode(buf)? {
+            return Err(DecodeError::Invalid("string waypoint id"));
+        }
+        let uuid = Uuid::decode(buf)?;
+        let style = String::decode(buf)?;
+        let color = if bool::decode(buf)? {
+            if buf.len() < 3 {
+                return Err(DecodeError::Invalid("waypoint color"));
+            }
+            let rgb = u32::from_be_bytes([0, buf[0], buf[1], buf[2]]);
+            *buf = &buf[3..];
+            Some(rgb)
+        } else {
+            None
+        };
+        let data = match VarInt::decode(buf)?.0 {
+            0 => WaypointData::Empty,
+            1 => WaypointData::Position([
+                VarInt::decode(buf)?.0,
+                VarInt::decode(buf)?.0,
+                VarInt::decode(buf)?.0,
+            ]),
+            2 => WaypointData::Chunk([VarInt::decode(buf)?.0, VarInt::decode(buf)?.0]),
+            3 => WaypointData::Azimuth(f32::decode(buf)?),
+            _ => return Err(DecodeError::Invalid("waypoint type")),
+        };
+        Ok(Self {
+            operation,
+            uuid,
+            style,
+            color,
+            data,
+        })
+    }
+}
+impl Packet for TrackedWaypoint {
+    const ID: i32 = 141;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerGameMode {
     pub uuid: Uuid,
@@ -1477,6 +1573,77 @@ mod interaction_tests {
         let mut bytes = Vec::new();
         ClearDialog.encode(&mut bytes);
         assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn tracked_waypoint_matches_the_bytes_the_vanilla_codec_writes() {
+        let hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let uuid = "0102030405060708090a0b0c0d0e0f10";
+        let style = "116d696e6563726166743a64656661756c74";
+        let uuid = Uuid::decode(&mut hex(uuid).as_slice()).unwrap();
+        let cases = [
+            (
+                0,
+                None,
+                WaypointData::Position([1, -2, 300]),
+                format!(
+                    "0001{}{style}000101feffffff0fac02",
+                    "0102030405060708090a0b0c0d0e0f10"
+                ),
+            ),
+            (
+                2,
+                Some(0x123456),
+                WaypointData::Position([1, -2, 300]),
+                format!(
+                    "0201{}{style}011234560101feffffff0fac02",
+                    "0102030405060708090a0b0c0d0e0f10"
+                ),
+            ),
+            (
+                0,
+                None,
+                WaypointData::Chunk([5, -7]),
+                format!(
+                    "0001{}{style}000205f9ffffff0f",
+                    "0102030405060708090a0b0c0d0e0f10"
+                ),
+            ),
+            (
+                0,
+                None,
+                WaypointData::Azimuth(1.5),
+                format!(
+                    "0001{}{style}00033fc00000",
+                    "0102030405060708090a0b0c0d0e0f10"
+                ),
+            ),
+            (
+                1,
+                None,
+                WaypointData::Empty,
+                format!("0101{}{style}0000", "0102030405060708090a0b0c0d0e0f10"),
+            ),
+        ];
+        for (op, color, data, bytes) in cases {
+            let packet = TrackedWaypoint {
+                operation: VarInt(op),
+                uuid,
+                style: "minecraft:default".into(),
+                color,
+                data,
+            };
+            let mut out = Vec::new();
+            packet.encode(&mut out);
+            assert_eq!(out, hex(&bytes));
+            roundtrip(packet);
+        }
+        assert_eq!(TrackedWaypoint::ID, 141);
     }
 
     #[test]

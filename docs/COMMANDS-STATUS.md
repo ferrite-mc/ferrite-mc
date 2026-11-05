@@ -21,8 +21,11 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 - `/compute`: evaluates `context_int_provider` / `context_float_provider` (constant, reference,
   conditional, div, number_dispatcher, weighted_list, match_block). `entity` context carries no
   entity data yet.
-- `/waypoint`: `list` lists online players; `modify` stores color/style per entity but sends no
-  `waypoint` packet.
+- `/waypoint`: `list` lists online players; `modify` stores color/style per entity and the locator bar
+  (`waypoints.rs`, packet 141, byte-checked against the vanilla codec) applies it. Every player is a
+  transmitter for the others in the same dimension (azimuth beyond 332 blocks, position inside the
+  view distance, chunk otherwise). Not yet: spectators/invisible/`waypoint_transmit_range` filtering,
+  non-player transmitters.
 - `/loot give|insert|replace|spawn <target> loot|mine|fish|kill ...` roll the extracted tables
   (`mine` reads the block at the position; `mainhand`/`offhand` count as no tool; `kill` rolls
   `entities/<type>` of the first selected entity with an empty context). `insert` merges into

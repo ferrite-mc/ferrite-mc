@@ -801,6 +801,8 @@ pub struct OnlinePlayer {
     pub yaw: f32,
     pub pitch: f32,
     pub dimension: super::Dimension,
+    /// The player's view distance in chunks; the locator bar uses it to pick position or chunk.
+    pub view: i32,
 }
 
 pub(crate) fn send(source: &Source, action: Action) -> Result<i32, CommandError> {
@@ -3316,6 +3318,7 @@ mod tests {
                     yaw: 0.0,
                     pitch: 0.0,
                     dimension: crate::game::Dimension::Overworld,
+                    view: 10,
                 },
             );
         }
