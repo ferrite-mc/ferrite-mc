@@ -25,6 +25,8 @@ pub const GATEWAY_COUNT: u32 = 20;
 pub struct FightState {
     /// The dragon was spawned, or an earlier fight already ended with the exit portal.
     pub started: bool,
+    /// A dragon already died in this world: later kills give less experience.
+    pub killed: bool,
     /// Spike numbers whose crystal was already placed (or that have none).
     pub crystals: std::collections::BTreeSet<u8>,
 }

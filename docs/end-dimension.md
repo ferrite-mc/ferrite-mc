@@ -35,8 +35,8 @@ What works, how it is built, and what is still missing.
 - **Respawning the dragon** (four crystals on the portal) is not implemented.
 - **Gateways.** `end_fight.rs` can lay out the 20 gateway blocks, but nothing places them and
   nothing teleports a player to the outer islands.
-- **Credits** after the first return, the first-kill advancement, and the 500 xp for later kills:
-  `dragon_experience(false)` exists but the fight does not know whether it is the first kill.
+- **Credits** after the first return and the first-kill advancement. (Later kills give 500 xp,
+  first kills 12000; the first-kill flag is remembered from the exit portal.)
 - **Persistence.** The fight state lives in memory. After a restart the dragon is respawned unless
   the podium already carries a portal; entities are not saved.
 - **Not verified with a real client.** The boss bar, dragon movement and the platform were only
