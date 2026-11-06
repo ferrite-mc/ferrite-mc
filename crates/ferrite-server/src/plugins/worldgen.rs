@@ -70,6 +70,19 @@ pub fn world_query(terrain: &dyn ChunkGenerator, call: &HostCall) -> Option<Stri
                 .ok()?;
             Some(inside.to_string())
         }
+        "getStructureStarts(int,int)" => {
+            let starts = terrain
+                .structure_starts(Dimension::Overworld, int(0)?, int(1)?)
+                .ok()?;
+            let lines: Vec<String> = starts
+                .iter()
+                .filter(|(id, _)| is_resource_key(id))
+                .map(|(id, b)| {
+                    format!("{id} {} {} {} {} {} {}", b[0], b[1], b[2], b[3], b[4], b[5])
+                })
+                .collect();
+            Some(lines.join("\n"))
+        }
         "getBiomeKey(int,int,int)" => terrain
             .biome_at(Dimension::Overworld, int(0)?, int(1)?, int(2)?)
             .ok(),
@@ -163,6 +176,18 @@ mod tests {
             }
             .into())
         }
+        fn structure_starts(
+            &self,
+            _: Dimension,
+            x: i32,
+            z: i32,
+        ) -> anyhow::Result<Vec<(String, [i32; 6])>> {
+            Ok(if (x, z) == (0, 0) {
+                vec![("minecraft:village_plains".into(), [0, 60, 0, 20, 75, 20])]
+            } else {
+                Vec::new()
+            })
+        }
         fn structure_at(
             &self,
             _: Dimension,
@@ -255,6 +280,14 @@ mod tests {
                 )
             ),
             Some("true".to_owned())
+        );
+        assert_eq!(
+            world_query(&Fake, &call("getStructureStarts(int,int)", &["0", "0"])),
+            Some("minecraft:village_plains 0 60 0 20 75 20".to_owned())
+        );
+        assert_eq!(
+            world_query(&Fake, &call("getStructureStarts(int,int)", &["5", "5"])),
+            Some(String::new())
         );
         assert_eq!(
             world_query(&Fake, &call("getBiomeKey(int,int,int)", &["0", "-10", "0"])),

@@ -57,6 +57,7 @@ public final class Host {
     private static final int OP_STRUCTURE_AT = 7;
     private static final int OP_PLACE = 8;
     private static final int OP_LOCATE_POI = 9;
+    private static final int OP_STRUCTURE_STARTS = 10;
 
     private Host() {}
 
@@ -336,6 +337,23 @@ public final class Host {
         return text(start.isValid() ? "1" : "0");
     }
 
+    /** One line per structure that starts in the chunk: `id minX minY minZ maxX maxY maxZ`. */
+    private static byte[] structureStarts(ServerLevel level, int x, int z) {
+        ChunkAccess chunk = level.getChunkSource().getChunk(x, z, ChunkStatus.FULL, true);
+        var registry = level.registryAccess().lookupOrThrow(Registries.STRUCTURE);
+        StringBuilder out = new StringBuilder();
+        chunk.getAllStarts().forEach((structure, start) -> {
+            if (!start.isValid()) return;
+            var key = registry.getKey(structure);
+            if (key == null) return;
+            var box = start.getBoundingBox();
+            out.append(key).append(' ')
+                    .append(box.minX()).append(' ').append(box.minY()).append(' ').append(box.minZ()).append(' ')
+                    .append(box.maxX()).append(' ').append(box.maxY()).append(' ').append(box.maxZ()).append('\n');
+        });
+        return text(out.toString());
+    }
+
     private static byte[] handle(
             MinecraftServer server, int op, int dim, int x, int z, String argument)
             throws Exception {
@@ -374,6 +392,9 @@ public final class Host {
             }
             case OP_STRUCTURE_AT -> {
                 return structureAt(level, argument);
+            }
+            case OP_STRUCTURE_STARTS -> {
+                return structureStarts(level, x, z);
             }
             case OP_LOCATE_POI -> {
                 return locatePoi(server, level, argument);

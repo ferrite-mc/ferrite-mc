@@ -64,6 +64,23 @@ class WorldSearchTest {
         assertEquals(List.of("locateStructure(String,int,int,int)", "hasStructureAt(String,int,int,int)"), sent);
     }
 
+    @Test void chunkStructuresComeFromTheHostStartList() {
+        HostBridge.transport = (owner, subject, method, args) -> {
+            sent.add(method + "|" + args);
+            return "minecraft:village_plains 0 60 0 20 75 20\nminecraft:not_a_structure 1 2 3 4 5 6";
+        };
+        var all = world.getStructures(0, 0);
+        assertEquals(1, all.size(), "unknown structures are skipped");
+        var start = all.iterator().next();
+        assertEquals("minecraft:village_plains", start.getStructure().getKey().toString());
+        assertEquals(21, start.getBoundingBox().getWidthX(), "bounds are inclusive block corners");
+        var village = Registry.STRUCTURE.get(NamespacedKey.fromString("minecraft:village_plains"));
+        var desert = Registry.STRUCTURE.get(NamespacedKey.fromString("minecraft:desert_pyramid"));
+        assertEquals(1, world.getStructures(0, 0, village).size());
+        assertTrue(world.getStructures(0, 0, desert).isEmpty());
+        assertTrue(sent.get(0).startsWith("getStructureStarts(int,int)|"), sent.get(0));
+    }
+
     @Test void generateTreeAsksTheHostToPlaceTheMatchingFeature() {
         HostBridge.transport = (owner, subject, method, args) -> {
             sent.add(method + "|" + args);

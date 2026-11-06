@@ -322,6 +322,19 @@ impl AnvilChunkSource {
         Some(self.terrain.as_ref()?.place(self.dimension, argument))
     }
 
+    /// The structures starting in a chunk, when vanilla generation is enabled.
+    pub fn structure_starts(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Option<anyhow::Result<Vec<super::generator::StructureStart>>> {
+        Some(
+            self.terrain
+                .as_ref()?
+                .structure_starts(self.dimension, chunk_x, chunk_z),
+        )
+    }
+
     /// Whether a piece of structure `id` covers the block, when vanilla generation is enabled.
     pub fn structure_at(&self, id: &str, x: i32, y: i32, z: i32) -> Option<anyhow::Result<bool>> {
         Some(

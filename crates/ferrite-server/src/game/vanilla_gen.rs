@@ -28,6 +28,7 @@ const OP_BIOME_AT: u8 = 4;
 const OP_LOCATE_BIOME: u8 = 5;
 const OP_LOCATE_STRUCTURE: u8 = 6;
 const OP_STRUCTURE_AT: u8 = 7;
+const OP_STRUCTURE_STARTS: u8 = 10;
 const OP_PLACE: u8 = 8;
 const OP_LOCATE_POI: u8 = 9;
 const START_TIMEOUT: Duration = Duration::from_secs(180);
@@ -413,6 +414,16 @@ impl ChunkGenerator for VanillaGenerator {
         parse_position(&self.request(OP_LOCATE_POI, dimension, 0, 0, &argument)?)
     }
 
+    fn structure_starts(
+        &self,
+        dimension: Dimension,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> anyhow::Result<Vec<super::generator::StructureStart>> {
+        let reply = self.request(OP_STRUCTURE_STARTS, dimension, chunk_x, chunk_z, "")?;
+        Ok(parse_starts(&String::from_utf8_lossy(&reply)))
+    }
+
     fn structure_at(
         &self,
         dimension: Dimension,
@@ -430,6 +441,21 @@ impl ChunkGenerator for VanillaGenerator {
         )?;
         Ok(reply == b"1")
     }
+}
+
+/// Parses `id minX minY minZ maxX maxY maxZ` lines, skipping malformed ones.
+fn parse_starts(text: &str) -> Vec<super::generator::StructureStart> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let id = fields.next()?.to_owned();
+            let mut bounds = [0; 6];
+            for slot in &mut bounds {
+                *slot = fields.next()?.parse().ok()?;
+            }
+            fields.next().is_none().then_some((id, bounds))
+        })
+        .collect()
 }
 
 /// Parses the host reply of a placement: `ok` then `x y z block[props]` lines, or `fail <text>`.
@@ -517,6 +543,20 @@ impl Drop for VanillaGenerator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn structure_starts_are_parsed_and_malformed_lines_skipped() {
+        let starts = super::parse_starts(
+            "minecraft:village_plains 0 60 0 20 75 20\nbroken 1 2\nminecraft:mansion 1 2 3 4 5 6 7\n",
+        );
+        assert_eq!(
+            starts,
+            vec![(
+                "minecraft:village_plains".to_owned(),
+                [0, 60, 0, 20, 75, 20]
+            )]
+        );
+    }
+
     #[test]
     fn placed_blocks_are_parsed_and_failures_are_reported() {
         let reply = b"ok\n10 64 -3 minecraft:stone\n11 64 -3 minecraft:oak_log[axis=y]\n12 64 -3 minecraft:not_a_block\n";

@@ -602,6 +602,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getFeatureFlags", "getListeningPluginChannels" -> java.util.Set.of();
             case "getGenerator", "getBiomeProvider", "getEnderDragonBattle" -> null;
             case "locateNearestBiome", "locateNearestStructure", "hasStructureAt" -> locate(method, args);
+            case "getStructures" -> structures(args);
             default -> NONE;
         };
     }
@@ -631,6 +632,36 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case CHORUS_PLANT -> "minecraft:chorus_plant";
             default -> null;
         };
+    }
+
+    /** `getStructures(chunkX, chunkZ[, Structure])`: the structure starts the host reports for a chunk. */
+    private Object structures(Object[] args) {
+        if (args.length < 2 || !(args[0] instanceof Integer cx) || !(args[1] instanceof Integer cz)) return NONE;
+        var only = args.length == 3 && args[2] instanceof org.bukkit.generator.structure.Structure s ? s : null;
+        if (args.length == 3 && only == null) return NONE;
+        var reply = (String) HostBridge.call("World", id, "getStructureStarts(int,int)", String.class, cx, cz);
+        var found = new java.util.ArrayList<org.bukkit.generator.structure.GeneratedStructure>();
+        if (reply == null || reply.isEmpty()) return found;
+        for (var line : reply.split("\n")) {
+            var f = line.split(" ");
+            if (f.length != 7) continue;
+            var key = org.bukkit.NamespacedKey.fromString(f[0]);
+            var structure = key == null ? null : org.bukkit.Registry.STRUCTURE.get(key);
+            if (structure == null || (only != null && !only.equals(structure))) continue;
+            var box = new org.bukkit.util.BoundingBox(Integer.parseInt(f[1]), Integer.parseInt(f[2]), Integer.parseInt(f[3]),
+                Integer.parseInt(f[4]) + 1, Integer.parseInt(f[5]) + 1, Integer.parseInt(f[6]) + 1);
+            found.add(new Generated(structure, box));
+        }
+        return found;
+    }
+
+    /** A structure start; the individual pieces are not reported by the host. */
+    private record Generated(org.bukkit.generator.structure.Structure structure, org.bukkit.util.BoundingBox box)
+            implements org.bukkit.generator.structure.GeneratedStructure {
+        @Override public org.bukkit.generator.structure.Structure getStructure() { return structure; }
+        @Override public org.bukkit.util.BoundingBox getBoundingBox() { return box; }
+        @Override public java.util.Collection<org.bukkit.generator.structure.StructurePiece> getPieces() { return java.util.List.of(); }
+        @Override public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() { return new FerriteDataContainer(); }
     }
 
     /** Biome and structure searches, answered by the vanilla world generation host. */

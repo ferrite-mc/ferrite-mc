@@ -33,6 +33,9 @@ pub struct Generated {
 /// Generates columns, spawn heights and biome lookups for newly requested chunks.
 ///
 /// Implementations run on blocking threads, never on a region tick.
+/// A structure start: its registry id and inclusive bounds `[minX, minY, minZ, maxX, maxY, maxZ]`.
+pub type StructureStart = (String, [i32; 6]);
+
 pub trait ChunkGenerator: Send + Sync {
     /// Generates the full column at chunk coordinates `(x, z)` for `dimension`.
     fn generate(&self, dimension: super::Dimension, x: i32, z: i32) -> anyhow::Result<Generated>;
@@ -90,6 +93,16 @@ pub trait ChunkGenerator: Send + Sync {
         _radius: i32,
     ) -> anyhow::Result<Option<(i32, i32, i32)>> {
         anyhow::bail!("this generator has no points of interest")
+    }
+
+    /// The structures that start in a chunk: `(id, [minX, minY, minZ, maxX, maxY, maxZ])`.
+    fn structure_starts(
+        &self,
+        _dimension: super::Dimension,
+        _chunk_x: i32,
+        _chunk_z: i32,
+    ) -> anyhow::Result<Vec<StructureStart>> {
+        anyhow::bail!("this generator has no structures")
     }
 
     /// Whether a piece of structure `id` covers the block.
