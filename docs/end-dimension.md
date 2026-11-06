@@ -32,7 +32,7 @@ What works, how it is built, and what is still missing.
   machine; it circles and dives at the nearest player every 30 seconds. It does not destroy blocks and has no separate head/wing hitboxes.
 - **Crystals.** Arrows, melee and explosions break them (a blast chains to the next crystal). No healing beam. No iron
   bar cages on the guarded spikes unless the terrain provides them.
-- **Respawning the dragon** (four crystals on the portal) is not implemented.
+- **Respawning the dragon** works in a simplified form: end crystals can be placed on obsidian or bedrock, and four of them on the bedrock ring around the exit portal (3 blocks from the centre) bring a new dragon, remove the portal and replace the spike crystals at once. Vanilla's beam animation, the ~10 second delay and the crystal explosions are missing, and this path has only unit tests (the cells are checked against the podium layout), no bot test.
 - **Gateways.** Each dragon kill opens the next gateway of the 20-ring (radius 96, y 75), when
   its chunk is loaded. Standing in one sends a player to the top of the ground 1024 blocks out
   in the same direction (or does nothing over empty void); vanilla instead searches for the

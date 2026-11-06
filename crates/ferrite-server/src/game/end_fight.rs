@@ -30,6 +30,8 @@ pub struct FightState {
     pub gateways: u32,
     /// Spike numbers whose crystal was already placed (or that have none).
     pub crystals: std::collections::BTreeSet<u8>,
+    /// A dragon is flying (spawned or respawned and not dead yet).
+    pub dragon_alive: bool,
 }
 
 /// How many obsidian spikes ring the main island, and how far from the centre they stand.
@@ -116,6 +118,17 @@ pub fn podium_blocks(origin: [i32; 3], active: bool) -> Vec<([i32; 3], u16)> {
         }
     }
     blocks
+}
+
+/// The four cells next to the exit portal where end crystals bring the dragon back
+/// (`EnderDragonFight.tryRespawn`: three blocks from the centre, one above the portal level).
+pub fn respawn_crystal_cells(level: i32) -> [[i32; 3]; 4] {
+    [
+        [3, level + 1, 0],
+        [-3, level + 1, 0],
+        [0, level + 1, 3],
+        [0, level + 1, -3],
+    ]
 }
 
 /// Where the dragon egg appears once the dragon dies.
@@ -277,5 +290,23 @@ mod tests {
         assert_eq!(named(dragon_egg().unwrap()), DRAGON_EGG);
         assert_eq!(dragon_experience(true), 12_000);
         assert_eq!(dragon_experience(false), 500);
+    }
+}
+
+#[cfg(test)]
+mod respawn_tests {
+    use super::*;
+
+    #[test]
+    fn the_respawn_crystals_stand_on_the_bedrock_ring_of_the_podium() {
+        let level = 60;
+        let ring: std::collections::HashSet<[i32; 3]> = podium_blocks([0, level, 0], true)
+            .into_iter()
+            .filter(|(_, state)| Some(*state) == default_state(BEDROCK))
+            .map(|(at, _)| at)
+            .collect();
+        for [x, y, z] in respawn_crystal_cells(level) {
+            assert!(ring.contains(&[x, y - 1, z]), "bedrock under {x} {y} {z}");
+        }
     }
 }

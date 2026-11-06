@@ -595,6 +595,8 @@ pub struct Player {
     pub changed_blocks: Vec<[i32; 3]>,
     /// TNT this player primed this tick, with the fuse length; spawned as `PrimedTnt`.
     pub primed_tnt: Vec<([i32; 3], i32)>,
+    /// Cells where this player placed end crystals this tick.
+    pub crystals: Vec<[i32; 3]>,
     /// Fire this player lit this tick; the region schedules `FireBlock` ticks for it.
     pub ignited: Vec<[i32; 3]>,
     /// The dimension this player is in; beds explode outside the overworld.
@@ -1333,6 +1335,30 @@ impl Player {
                             self.changed_blocks.push(at);
                         }
                     }
+                }
+            }
+            return;
+        }
+        // Vanilla `EndCrystalItem.useOn`: a crystal goes on obsidian or bedrock with room above.
+        if held.name() == Some("minecraft:end_crystal")
+            && ferrite_data::blocks::state(clicked_state)
+                .is_some_and(|(name, _)| matches!(name, "minecraft:obsidian" | "minecraft:bedrock"))
+        {
+            let free = |dy| {
+                source
+                    .block(clicked.x, clicked.y + dy, clicked.z)
+                    .and_then(|s| u16::try_from(s).ok())
+                    .is_some_and(|s| {
+                        usize::from(s) < ferrite_data::blocks::STATE_COUNT
+                            && ferrite_data::block_props::get(s).is_air
+                    })
+            };
+            if free(1) && free(2) {
+                self.crystals.push([clicked.x, clicked.y + 1, clicked.z]);
+                if self.gamemode != 1 {
+                    let slot = self.hand_slot(p.hand.0);
+                    self.inventory
+                        .set(slot, held.copy_with_count(held.count - 1));
                 }
             }
             return;
@@ -3968,6 +3994,7 @@ impl Region {
                 fight.killed = true;
                 return;
             }
+            fight.dragon_alive = true;
             drop(state);
             let (spot, _) = ferrite_entity::dragon::position_at(0);
             let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
@@ -3977,6 +4004,49 @@ impl Region {
         }
         if !fight.started {
             return;
+        }
+        // Four end crystals around the exit portal bring the dragon back (`tryRespawn`).
+        if fight.killed && !fight.dragon_alive && self.held_chunks.contains_key(&ChunkPos(0, 0)) {
+            let portal = ferrite_data::blocks::default_state("minecraft:end_portal").map(u32::from);
+            let level = (0..=255).find(|&y| portal.is_some() && source.block(1, y, 0) == portal);
+            if let Some(level) = level {
+                let cells = super::end_fight::respawn_crystal_cells(level);
+                let found: Vec<_> = cells
+                    .iter()
+                    .filter_map(|&[x, y, z]| {
+                        let cell = ferrite_math::AABB::new(
+                            f64::from(x),
+                            f64::from(y),
+                            f64::from(z),
+                            f64::from(x + 1),
+                            f64::from(y + 1),
+                            f64::from(z + 1),
+                        );
+                        self.entities
+                            .query_vec(cell)
+                            .into_iter()
+                            .find(|&key| ferrite_entity::dragon::is_crystal(&self.entities, key))
+                    })
+                    .collect();
+                if found.len() == cells.len() {
+                    fight.dragon_alive = true;
+                    fight.crystals.clear();
+                    drop(state);
+                    // The spike crystals are placed again, so every old one goes.
+                    for key in self.entities.keys().to_vec() {
+                        if ferrite_entity::dragon::is_crystal(&self.entities, key)
+                            && let Some(flags) = self.entities.flags_mut(key)
+                        {
+                            flags.set(ferrite_entity::Flags::REMOVED, true);
+                        }
+                    }
+                    let (spot, _) = ferrite_entity::dragon::position_at(0);
+                    let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
+                    self.entities.insert(dragon);
+                    self.place_blocks(ctx, &super::end_fight::podium_blocks([0, level, 0], false));
+                    return;
+                }
+            }
         }
         let mut placed = Vec::new();
         for index in 0..super::end_fight::SPIKE_COUNT {
@@ -4146,6 +4216,7 @@ impl Region {
             let mut state = ctx.state.lock().unwrap();
             let fight = &mut state.more.end_fight;
             first = !std::mem::replace(&mut fight.killed, true);
+            fight.dragon_alive = false;
             // The next gateway of the ring opens; chunks that are not loaded keep the old air.
             let at = super::end_fight::gateway_position(fight.gateways);
             fight.gateways += 1;
@@ -4859,6 +4930,15 @@ impl Region {
             deliver(&self.players, ctx, viewer, &bytes);
         }
     }
+    /// Spawns the end crystals players placed.
+    fn spawn_crystals(&mut self, p: &mut Player) {
+        for [x, y, z] in p.crystals.drain(..) {
+            let at = ferrite_math::Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
+            self.entities
+                .insert(ferrite_entity::dragon::new_crystal(at));
+        }
+    }
+
     /// Spawns the TNT a player lit (vanilla `PrimedTnt` at the block position).
     fn spawn_primed_tnt(&mut self, p: &mut Player) {
         for (pos, fuse) in p.primed_tnt.drain(..) {
@@ -5530,6 +5610,7 @@ impl Region {
             }
             self.spawn_thrown(&mut p);
             self.spawn_primed_tnt(&mut p);
+            self.spawn_crystals(&mut p);
             explosions.extend(
                 p.explosions
                     .drain(..)
