@@ -633,6 +633,9 @@ pub struct Player {
     pub next_teleport: i32,
     pub loaded: HashSet<(i32, i32)>,
     pub queue: VecDeque<(i32, i32)>,
+    /// How many queue-front chunks were already handed to the chunk source, so a tick does not
+    /// take the shared cache lock again for each of them.
+    pub prefetched: usize,
     pub awaiting_batch: bool,
     pub rate: f32,
     /// Vanilla `ServerPlayer` survival state: health, absorption, food, air, fire, fall.
@@ -916,6 +919,7 @@ impl Player {
             });
         }
         self.queue = new.into();
+        self.prefetched = 0;
     }
     fn teleport(&mut self) {
         let id = self.next_teleport;
@@ -944,9 +948,15 @@ impl Player {
         // Start loading the whole head of the queue at once; `get` hands back chunks that are ready
         // and spawns background loads for the rest. Without this, chunks became ready one per tick.
         if let Some(source) = &self.source {
-            for &(x, z) in self.queue.iter().take(PREFETCH_CHUNKS) {
+            for &(x, z) in self
+                .queue
+                .iter()
+                .take(PREFETCH_CHUNKS)
+                .skip(self.prefetched)
+            {
                 source.prefetch(x, z, self.biome);
             }
+            self.prefetched = self.queue.len().min(PREFETCH_CHUNKS);
         }
         let count = (self.rate.clamp(1.0, 64.0) as usize).min(self.queue.len());
         let mut chunks = Vec::new();
@@ -956,7 +966,11 @@ impl Player {
             };
             let packet = if let Some(source) = &self.source {
                 match source.get(x, z, self.biome) {
-                    None => break,
+                    None => {
+                        // The source may have refused deeper chunks while busy; ask again.
+                        self.prefetched = 0;
+                        break;
+                    }
                     // The cache shares one encoded body; the connection layer
                     // needs an owned buffer, so this is the only copy per send.
                     Some(Ok(packet)) => packet.to_vec(),
@@ -976,6 +990,7 @@ impl Player {
                 packet
             };
             self.queue.pop_front();
+            self.prefetched = self.prefetched.saturating_sub(1);
             chunks.push((x, z, packet));
         }
         if chunks.is_empty() {
@@ -2689,6 +2704,7 @@ impl Player {
         );
         let (_, new) = chunk_window((spawn_chunk.0, spawn_chunk.1), self.view, &self.loaded);
         self.queue = new.into();
+        self.prefetched = 0;
         self.awaiting_batch = false;
         self.positions.lock().unwrap().insert(self.uuid, spawn);
         let _ = self.signals.send(Signal::Update {
@@ -2739,6 +2755,7 @@ impl Player {
         );
         self.loaded.clear();
         self.queue.clear();
+        self.prefetched = 0;
         self.awaiting_batch = false;
         self.portal_ticks = 0;
         self.portal_cooldown = 200;
@@ -3185,6 +3202,7 @@ impl Player {
                         && !self.queue.contains(&(x, z))
                     {
                         self.queue.push_front((x, z));
+                        self.prefetched = 0;
                     }
                     continue;
                 }
