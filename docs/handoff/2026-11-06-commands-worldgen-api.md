@@ -43,13 +43,11 @@ piston/End note and still applies for those areas.
 
 ## CI state
 
-- Last green run: #177 (before the retracting-sticky-piston test was added). Every run since fails
-  in `cargo test` with the single test
-  `game::integration::a_retracting_sticky_piston_carries_the_mob_standing_on_the_block`
-  (Linux and Windows). fmt, clippy and everything else pass.
+- CI is green again: run #206 (Linux and Windows). Runs #178-#205 failed only in
+  `game::integration::a_retracting_sticky_piston_carries_the_mob_standing_on_the_block`.
 - Real cause (from run #205's log: no teleports seen at all): the test decoded `EntityTeleport` (id 35,
   the position-sync packet) but a piston carry sends `TeleportEntity` (id 128). Test now listens for
-  `TeleportEntity`. `NoAI` (`/summon ... {NoAI:1b}`) stays, it keeps the cow still. Confirm in the next run.
+  `TeleportEntity`. `NoAI` (`/summon ... {NoAI:1b}`) stays, it keeps the cow still. Confirmed by run #206.
 - Locally in the cloud container the 9 `game::integration::*` fixture-world tests always fail
   (no `vanilla/26.3/fixture-world`); that is expected there, not a regression.
 
