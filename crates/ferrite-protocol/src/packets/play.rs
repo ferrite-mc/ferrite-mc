@@ -410,6 +410,8 @@ pub enum MetaValue {
         profession: i32,
         level: i32,
     },
+    /// Vanilla `OPTIONAL_LIVING_ENTITY_REFERENCE`: a tamed animal's owner.
+    OptionalUuid(Option<uuid::Uuid>),
 }
 impl MetaValue {
     /// Serializer id in `EntityDataSerializers` registration order (26.3).
@@ -422,6 +424,7 @@ impl MetaValue {
             Self::String(_) => 4,
             Self::ItemStack(_) => 7,
             Self::Boolean(_) => 8,
+            Self::OptionalUuid(_) => 13,
             Self::VillagerData { .. } => 18,
             Self::Pose(_) => 20,
         }
@@ -454,6 +457,12 @@ impl Encode for MetaEntry {
                 VarInt(*profession).encode(out);
                 VarInt(*level).encode(out);
             }
+            MetaValue::OptionalUuid(owner) => {
+                owner.is_some().encode(out);
+                if let Some(owner) = owner {
+                    owner.encode(out);
+                }
+            }
         }
     }
 }
@@ -467,6 +476,11 @@ impl MetaEntry {
             4 => MetaValue::String(String::decode(buf)?),
             7 => MetaValue::ItemStack(ItemStack::decode(buf)?),
             8 => MetaValue::Boolean(bool::decode(buf)?),
+            13 => MetaValue::OptionalUuid(if bool::decode(buf)? {
+                Some(uuid::Uuid::decode(buf)?)
+            } else {
+                None
+            }),
             18 => MetaValue::VillagerData {
                 kind: VarInt::decode(buf)?.0,
                 profession: VarInt::decode(buf)?.0,
@@ -2082,6 +2096,20 @@ mod interaction_tests {
                 level: 1
             }
         );
+        // A wolf's owner: serializer 13, a presence flag and the UUID.
+        for owner in [None, Some(uuid::Uuid::from_u128(5))] {
+            let mut bytes = Vec::new();
+            MetaEntry {
+                index: 19,
+                value: MetaValue::OptionalUuid(owner),
+            }
+            .encode(&mut bytes);
+            assert_eq!(bytes[..2], [19, 13]);
+            assert_eq!(
+                MetaEntry::decode_at(19, &mut &bytes[1..]).unwrap().value,
+                MetaValue::OptionalUuid(owner)
+            );
+        }
         // A non-zero velocity survives within LpVec3 precision.
         let mut bytes = Vec::new();
         SetEntityMotion {

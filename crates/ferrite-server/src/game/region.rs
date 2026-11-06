@@ -4173,10 +4173,31 @@ impl Region {
                 }
                 let slot = p.hand_slot(hand);
                 let held = p.inventory.get(slot).clone();
-                let Some(name) = held.name() else { continue };
+                let name = held.name().unwrap_or("minecraft:air");
                 if ferrite_entity::breed::feed(&mut self.entities, key, name, uuid)
                     == ferrite_entity::breed::Fed::No
                 {
+                    // Not food: a wolf may be tamed with a bone or told to sit.
+                    let used = ferrite_entity::tame::use_on(
+                        &mut self.entities,
+                        key,
+                        name,
+                        uuid,
+                        &mut self.rng,
+                    );
+                    if used == ferrite_entity::tame::Used::Tamed {
+                        super::recipe_unlock::TAMED
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(uuid);
+                    }
+                    if used != ferrite_entity::tame::Used::Consumed
+                        && used != ferrite_entity::tame::Used::Tamed
+                    {
+                        continue;
+                    }
+                }
+                if held.is_empty() {
                     continue;
                 }
                 if p.gamemode != 1

@@ -17,7 +17,8 @@ superflat avg 6.6 ms / p99 32 ms; fixture avg 1.15 ms / p99 6.9 ms. Results vary
 ## Not done
 - Paper comparison: bots get kicked for "moved too quickly" on Paper (unresolved); abandoned at the user's request.
 - Worldgen scheduler replacement (C2ME-style; plateau ~32 chunks/s is the vanilla chunk system). 1-2 days. Do not rewrite worldgen (license); only the scheduling/hosting approach.
-- Breeding/taming, `item_used_on_block`, `seen_recipe`, shutdown pending-teleport completion, weighted-fair region scheduling, region redstone-time/global-time copy per Folia.
+- Breeding and wolf taming are implemented (`ferrite-entity` `breed.rs`/`tame.rs`, right-click in `region.rs` `resolve_uses`) and unit-tested, but not tried with a real client. Left out: love/smoke particles, baby hitbox size, wolves that fight or breed, natural wolf spawning, other tameable kinds (cats, horses, parrots), `bred_all_animals` for kinds not modelled.
+- `item_used_on_block`, `seen_recipe`, shutdown pending-teleport completion, weighted-fair region scheduling, region redstone-time/global-time copy per Folia.
 - Fixture join-storm tail (800 bots: p99 join ~116-235 ms, max 600-800 ms). The cache eviction min-scan is now batched (LRU eighth per pass); not re-measured.
 - Weighted-fair region scheduling: the scheduler is already earliest-deadline-first with lag capped (`ferrite-region` module docs); only the TPS jitter of merging/splitting regions under saturation remains. Same as Folia, so left alone.
 - `item_used_on_block`: needs waxing, lodestone, jukebox, respawn anchor and vault mechanics first.

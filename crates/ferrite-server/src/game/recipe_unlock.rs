@@ -31,6 +31,8 @@ pub enum Criterion {
     Crafts(String),
     /// `bred_animals` of one child entity type, or any child (`*`).
     Breeds(String),
+    /// `tame_animal` with no conditions.
+    Tames,
     Other,
 }
 
@@ -210,6 +212,22 @@ pub fn criteria_for_bred(child: &str) -> Vec<String> {
     out
 }
 
+/// Players who tamed an animal since the last drain.
+pub static TAMED: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
+
+/// Advancement criteria completed by taming an animal.
+pub fn criteria_for_tamed() -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Tames) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
 /// Items players finished eating or drinking since the last drain, `(player, item id)`.
 pub static CONSUMED: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
 
@@ -296,6 +314,12 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             }
             Some("minecraft:location") => {
                 location_biome(&c["conditions"]).map_or(Criterion::Other, Criterion::InBiome)
+            }
+            Some("minecraft:tame_animal")
+                if c["conditions"].is_null()
+                    || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
+            {
+                Criterion::Tames
             }
             Some("minecraft:bred_animals") => {
                 bred_child(&c["conditions"]).map_or(Criterion::Other, Criterion::Breeds)

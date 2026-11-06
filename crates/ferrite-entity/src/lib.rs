@@ -37,6 +37,7 @@ pub mod potion;
 mod rng;
 pub mod spawn;
 mod store;
+pub mod tame;
 pub mod tnt;
 pub mod tracker;
 pub mod villager;

@@ -38,6 +38,7 @@ pub enum MobKind {
     Enderman,
     Villager,
     EnderDragon,
+    Wolf,
 }
 
 impl MobKind {
@@ -52,7 +53,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 11] = [
+    pub const ALL_MOBS: [Self; 12] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -64,6 +65,7 @@ impl MobKind {
         Self::Enderman,
         Self::Villager,
         Self::EnderDragon,
+        Self::Wolf,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -80,6 +82,7 @@ impl MobKind {
             Self::Enderman => "minecraft:enderman",
             Self::Villager => "minecraft:villager",
             Self::EnderDragon => "minecraft:ender_dragon",
+            Self::Wolf => "minecraft:wolf",
         }
     }
 
@@ -157,6 +160,8 @@ impl MobKind {
             Self::Villager => "",
             // The dragon drops experience and the egg, handled by the fight.
             Self::EnderDragon => "",
+            // A wolf drops nothing.
+            Self::Wolf => "",
         }
     }
 
@@ -186,6 +191,7 @@ impl MobKind {
             Self::Enderman => "Enderman",
             Self::Villager => "Villager",
             Self::EnderDragon => "Ender Dragon",
+            Self::Wolf => "Wolf",
         }
     }
 
@@ -245,6 +251,12 @@ pub struct MobState {
     pub love_cause: Option<uuid::Uuid>,
     /// Ticks spent next to the mate.
     pub breed_timer: u16,
+    /// The player a tamed animal belongs to (`TamableAnimal.owner`).
+    pub owner: Option<uuid::Uuid>,
+    /// Whether a tamed animal was told to sit.
+    pub sitting: bool,
+    /// Whether a tamed animal is walking to its owner (`FollowOwnerGoal`).
+    pub following: bool,
 }
 
 impl MobState {
@@ -276,6 +288,9 @@ impl MobState {
             love: 0,
             love_cause: None,
             breed_timer: 0,
+            owner: None,
+            sitting: false,
+            following: false,
         }
     }
 
@@ -311,6 +326,12 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         && let Some(state) = data.mob.as_ref()
     {
         crate::breed::define_metadata(&mut data.metadata, state);
+    }
+    if kind == MobKind::Wolf
+        && let Some(state) = data.mob.as_ref()
+    {
+        crate::breed::define_metadata(&mut data.metadata, state);
+        crate::tame::define_metadata(&mut data.metadata, state);
     }
     if kind == MobKind::Villager {
         let state = crate::villager::VillagerState::new(

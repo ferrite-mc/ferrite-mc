@@ -166,6 +166,10 @@ pub fn tick_with(
 ) -> Vec<MobEvent> {
     let mut events = Vec::new();
     let player_positions: Vec<Vec3> = players.iter().map(|target| target.pos).collect();
+    let owners: Vec<(Uuid, Vec3)> = players
+        .iter()
+        .map(|target| (target.uuid, target.pos))
+        .collect();
     for key in store.keys().to_vec() {
         if !mob::is_mob(store, key) {
             continue;
@@ -177,7 +181,7 @@ pub fn tick_with(
         if kind.is_animal() {
             crate::breed::tick_age(store, key);
         }
-        let mut mating = false;
+        let mut directed = false;
         if kind == MobKind::EnderDragon {
             crate::dragon::fly(store, key, players, &mut events);
             continue;
@@ -313,8 +317,15 @@ pub fn tick_with(
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                     speed = 1.5;
                 }
+            } else if kind == MobKind::Wolf
+                && let Some(owner_pos) = crate::tame::follow_target(store, key, &owners, start)
+            {
+                directed = true;
+                walking = Some(yaw_towards(owner_pos.x - start.x, owner_pos.z - start.z));
+            } else if kind == MobKind::Wolf && mob::state(store, key).is_some_and(|s| s.sitting) {
+                directed = true;
             } else if let Some((mate, mate_pos)) = crate::breed::mate_for(store, key) {
-                mating = true;
+                directed = true;
                 walking = Some(yaw_towards(mate_pos.x - start.x, mate_pos.z - start.z));
                 if let Some(bred) = crate::breed::approach(store, key, mate, mate_pos, rng) {
                     events.push(MobEvent::Bred(bred));
@@ -343,7 +354,7 @@ pub fn tick_with(
             } else if let Some(state) = mob::state_mut(store, key) {
                 state.wander_timer = timer - 1;
             }
-            if wanting && !mating && panic_of(store, key) == 0 {
+            if wanting && !directed && panic_of(store, key) == 0 {
                 walking = Some(mob::state(store, key).map_or(0.0, |state| state.wander_yaw));
             }
         }

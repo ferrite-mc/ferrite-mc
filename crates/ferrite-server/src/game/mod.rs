@@ -1539,6 +1539,13 @@ async fn run(
                          }
                      }
                      {
+                         let tamed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::TAMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !tamed.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for who in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed()); }
+                         }
+                     }
+                     {
                          let eaten = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::CONSUMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !eaten.is_empty() {
                              let mut game = command_state.lock().unwrap();
