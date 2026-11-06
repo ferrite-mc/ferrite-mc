@@ -81,6 +81,19 @@ class WorldSearchTest {
         assertTrue(sent.get(0).startsWith("getStructureStarts(int,int)|"), sent.get(0));
     }
 
+    @Test void explorerMapsPointAtTheNearestStructureOrAreNull() {
+        var server = org.bukkit.Bukkit.getServer();
+        var village = Registry.STRUCTURE.get(NamespacedKey.fromString("minecraft:village_plains"));
+        HostBridge.transport = (owner, subject, method, args) -> method.startsWith("locateStructure") ? "-120 64 88" : "";
+        var item = server.createExplorerMap(world, new Location(world, 0, 64, 0), village, null, 50, false);
+        assertEquals(org.bukkit.Material.FILLED_MAP, item.getType());
+        var view = ((org.bukkit.inventory.meta.MapMeta) item.getItemMeta()).getMapView();
+        assertEquals(-120, view.getCenterX());
+        assertEquals(88, view.getCenterZ());
+        HostBridge.transport = (owner, subject, method, args) -> "";
+        assertNull(server.createExplorerMap(world, new Location(world, 0, 64, 0), village, null, 50, false));
+    }
+
     @Test void generateTreeAsksTheHostToPlaceTheMatchingFeature() {
         HostBridge.transport = (owner, subject, method, args) -> {
             sent.add(method + "|" + args);

@@ -496,6 +496,43 @@ public class FerriteServer extends ServerStubs {
         return view;
     }
     @Override public org.bukkit.map.MapView getMap(int id) { return maps.get(id); }
+    @Override public org.bukkit.inventory.ItemStack createExplorerMap(org.bukkit.World world, org.bukkit.Location origin, org.bukkit.StructureType type, int radius, boolean findUnexplored) {
+        var wanted = new java.util.ArrayList<org.bukkit.generator.structure.Structure>();
+        for (var structure : org.bukkit.Registry.STRUCTURE) {
+            var path = structure.getKey().getKey();
+            if (path.equals(type.getName()) || path.startsWith(type.getName() + "_")) wanted.add(structure);
+        }
+        return explorerMap(world, origin, wanted, radius, findUnexplored);
+    }
+    @Override public org.bukkit.inventory.ItemStack createExplorerMap(org.bukkit.World world, org.bukkit.Location origin, org.bukkit.generator.structure.StructureType type, org.bukkit.map.MapCursor.Type cursor, int radius, boolean findUnexplored) {
+        var wanted = new java.util.ArrayList<org.bukkit.generator.structure.Structure>();
+        for (var structure : org.bukkit.Registry.STRUCTURE) if (type.equals(structure.getStructureType())) wanted.add(structure);
+        return explorerMap(world, origin, wanted, radius, findUnexplored);
+    }
+    @Override public org.bukkit.inventory.ItemStack createExplorerMap(org.bukkit.World world, org.bukkit.Location origin, org.bukkit.generator.structure.Structure structure, org.bukkit.map.MapCursor.Type cursor, int radius, boolean findUnexplored) {
+        return explorerMap(world, origin, java.util.List.of(structure), radius, findUnexplored);
+    }
+    /** A filled map centred on the nearest of the structures, or null when the host finds none. The terrain is not rendered and no marker cursor is drawn. */
+    private org.bukkit.inventory.ItemStack explorerMap(org.bukkit.World world, org.bukkit.Location origin, java.util.List<org.bukkit.generator.structure.Structure> wanted, int radius, boolean findUnexplored) {
+        java.util.Objects.requireNonNull(world, "world");
+        java.util.Objects.requireNonNull(origin, "origin");
+        org.bukkit.Location best = null;
+        for (var structure : wanted) {
+            var found = world.locateNearestStructure(origin, structure, radius, findUnexplored);
+            if (found != null && (best == null || found.getLocation().distanceSquared(origin) < best.distanceSquared(origin))) best = found.getLocation();
+        }
+        if (best == null) return null;
+        var view = createMap(world);
+        view.setCenterX(best.getBlockX());
+        view.setCenterZ(best.getBlockZ());
+        view.setScale(org.bukkit.map.MapView.Scale.FAR);
+        view.setTrackingPosition(true);
+        var item = new org.bukkit.inventory.ItemStack(org.bukkit.Material.FILLED_MAP);
+        var meta = (org.bukkit.inventory.meta.MapMeta) item.getItemMeta();
+        meta.setMapView(view);
+        item.setItemMeta(meta);
+        return item;
+    }
     @Override public void sendPluginMessage(org.bukkit.plugin.Plugin source, String channel, byte[] message) {
         for (var player : players.values()) player.sendPluginMessage(source, channel, message);
     }
