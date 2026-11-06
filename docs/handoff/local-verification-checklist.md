@@ -29,6 +29,6 @@
 - [ ] 피스톤이 서 있는 몹/플레이어를 같이 옮기는 동작(몹은 CI 통합 테스트 통과, 플레이어는 실제 클라이언트로 확인 필요)
 
 ## 아직 구현 안 된 것 (참고)
-- `/test`, `/jfr`(의도적으로 실패), 발전과제 트리거 `recipe_crafted`/`bred_animals`/`tame_animal`/`item_used_on_block` (`location`은 바이옴 조건만 구현, 구조물/좌표 조건은 아직)
+- `/test`, `/jfr`(의도적으로 실패), 발전과제 트리거 (`recipe_crafted`는 작업대 제작만 구현: 대장간/조합기 제작과 재료 조건은 아직) `bred_animals`/`tame_animal`/`item_used_on_block` (`location`은 바이옴 조건만 구현, 구조물/좌표 조건은 아직)
 - loot_table/function 보상, `seen_recipe`, 웨이포인트 invisible/전송 범위 필터
 - Bukkit `call:` 훅, 월드젠 `process`/`remote` 모드

@@ -28,6 +28,10 @@ impl Crafter for TestCrafter {
             _ => empty(),
         }
     }
+
+    fn recipe_id(&self, grid: &[ItemStack], width: usize) -> Option<String> {
+        (!self.craft(grid, width).is_empty()).then(|| "minecraft:test_recipe".to_owned())
+    }
 }
 
 struct Fixture {
@@ -917,6 +921,19 @@ fn crafting_result_is_sent_after_a_grid_click() {
         .collect();
     // Slot 9 was taken in an unreported click, the result is new.
     assert_eq!(slots, vec![0, 9]);
+}
+
+#[test]
+fn taking_the_crafting_result_records_the_recipe() {
+    let mut inv = PlayerInventory::new();
+    inv.set(9, item("oak_log", 1));
+    let mut menu = Menu::inventory();
+    let mut p = Clicker::new(&mut inv, false, &TestCrafter);
+    menu.clicked(&mut p, 9, 0, Pickup);
+    menu.clicked(&mut p, 1, 0, Pickup);
+    assert!(p.crafted.is_empty(), "placing ingredients crafts nothing");
+    menu.clicked(&mut p, 0, 0, Pickup);
+    assert_eq!(p.crafted, vec!["minecraft:test_recipe".to_owned()]);
 }
 
 fn menu_state(menu: &Menu) -> i32 {

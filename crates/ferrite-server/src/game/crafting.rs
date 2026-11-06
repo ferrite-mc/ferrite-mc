@@ -56,6 +56,19 @@ impl Crafter for RecipeCrafter {
             .unwrap_or_default()
     }
 
+    fn recipe_id(&self, grid: &[ItemStack], width: usize) -> Option<String> {
+        if width == 0 || !grid.len().is_multiple_of(width) {
+            return None;
+        }
+        let names: Vec<Option<&str>> = grid
+            .iter()
+            .map(|stack| if stack.is_empty() { None } else { stack.name() })
+            .collect();
+        self.0
+            .match_crafting(&names, width, grid.len() / width)
+            .map(|recipe| recipe.id.clone())
+    }
+
     fn cook(&self, kind: FurnaceKind, input: &ItemStack) -> Option<CookingOutput> {
         self.cooking(kind, input)
     }

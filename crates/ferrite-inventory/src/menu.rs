@@ -304,6 +304,11 @@ pub trait Crafter {
     /// The result of a row-major grid with `width` columns, or an empty stack.
     fn craft(&self, grid: &[ItemStack], width: usize) -> ItemStack;
 
+    /// The id of the recipe `craft` matches for this grid, for the `recipe_crafted` trigger.
+    fn recipe_id(&self, _grid: &[ItemStack], _width: usize) -> Option<String> {
+        None
+    }
+
     /// The furnace-family recipe for `input`, if one exists (vanilla `RecipeManager.getRecipeFor`).
     fn cook(&self, _kind: FurnaceKind, _input: &ItemStack) -> Option<CookingOutput> {
         None
@@ -377,6 +382,8 @@ pub struct Clicker<'a> {
     pub xp: f32,
     /// Experience levels the click spends (anvil cost).
     pub levels: i32,
+    /// Ids of the recipes the click crafted, once per result taken.
+    pub crafted: Vec<String>,
 }
 
 impl<'a> Clicker<'a> {
@@ -392,6 +399,7 @@ impl<'a> Clicker<'a> {
             drops: Vec::new(),
             xp: 0.0,
             levels: 0,
+            crafted: Vec::new(),
         }
     }
 
@@ -1793,6 +1801,9 @@ impl Menu {
         }
         if self.slots[slot].rule != Rule::Result {
             return;
+        }
+        if let Some(id) = p.crafter.recipe_id(&self.grid, self.grid_width) {
+            p.crafted.push(id);
         }
         for cell in 0..self.grid.len() {
             let ingredient = self.grid[cell].clone();

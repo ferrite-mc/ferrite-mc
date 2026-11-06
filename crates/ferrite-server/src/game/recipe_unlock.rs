@@ -27,6 +27,8 @@ pub enum Criterion {
     Places(String),
     /// `location` with nothing but one plain biome id to match.
     InBiome(String),
+    /// `recipe_crafted` of one recipe id with no ingredient condition.
+    Crafts(String),
     Other,
 }
 
@@ -116,6 +118,29 @@ fn location_biome(conditions: &serde_json::Value) -> Option<String> {
     }
     let name = location.get("biomes")?.as_str()?;
     (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// Recipes players crafted since the last drain, `(player, recipe id)`.
+pub static CRAFTED: Mutex<Vec<(Uuid, String)>> = Mutex::new(Vec::new());
+
+/// Advancement criteria completed by crafting a recipe.
+pub fn criteria_for_crafted(recipe: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Crafts(wanted) if wanted == recipe) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// The recipe a `recipe_crafted` criterion asks for, when that is all it asks for.
+fn crafted_recipe(conditions: &serde_json::Value) -> Option<String> {
+    let object = conditions.as_object()?;
+    (object.len() == 1).then_some(())?;
+    Some(object.get("recipes")?.as_str()?.to_owned())
 }
 
 /// Biomes players stand in, `(player, biome id)`, pushed on every inventory scan.
@@ -230,6 +255,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                     Some(to) => Criterion::EntersDimension(to.to_owned()),
                     None => Criterion::Other,
                 }
+            }
+            Some("minecraft:recipe_crafted") => {
+                crafted_recipe(&c["conditions"]).map_or(Criterion::Other, Criterion::Crafts)
             }
             Some("minecraft:location") => {
                 location_biome(&c["conditions"]).map_or(Criterion::Other, Criterion::InBiome)
@@ -505,6 +533,27 @@ mod tests {
         let changed = apply(&held, &mut owned);
         assert_eq!(changed, !rules().is_empty());
         assert!(!apply(&held, &mut owned));
+    }
+
+    #[test]
+    fn a_recipe_crafted_criterion_is_parsed_and_one_with_ingredients_is_not() {
+        let json = |conditions| {
+            serde_json::json!({"criteria": {"c": {"trigger": "minecraft:recipe_crafted",
+                "conditions": conditions}}})
+        };
+        let rule = parse_rule(
+            "a",
+            &json(serde_json::json!({"recipes": "minecraft:stick"})),
+        )
+        .unwrap();
+        assert!(matches!(&rule.criteria["c"], Criterion::Crafts(r) if r == "minecraft:stick"));
+        let rule = parse_rule(
+            "a",
+            &json(serde_json::json!({"recipes": "minecraft:decorated_pot",
+            "ingredients": [{"items": "minecraft:brick"}]})),
+        )
+        .unwrap();
+        assert!(matches!(rule.criteria["c"], Criterion::Other));
     }
 
     #[test]

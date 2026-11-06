@@ -358,6 +358,14 @@ impl Player {
         self.menus.thrown.extend(drops);
         let xp = clicker.xp;
         let levels = clicker.levels;
+        let crafted = clicker.crafted;
+        if !crafted.is_empty() {
+            let uuid = self.uuid;
+            super::recipe_unlock::CRAFTED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(crafted.into_iter().map(|id| (uuid, id)));
+        }
         emit(self, out);
         if xp > 0.0 {
             self.add_experience(xp);
