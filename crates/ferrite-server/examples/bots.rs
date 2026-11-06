@@ -244,6 +244,20 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
     tokio::time::timeout(std::time::Duration::from_secs(120), barrier.wait())
         .await
         .expect("bots did not all join");
+    // Join storm figures first, then restart the samples so the walk is measured on its own.
+    {
+        let mut samples = world.tick_samples.lock().unwrap();
+        let mut joined = samples.clone();
+        joined.sort_by(f64::total_cmp);
+        if let Some(max) = joined.last() {
+            println!(
+                "{label} join phase: region ticks={}, p99={:.3} ms, max={max:.2} ms",
+                joined.len(),
+                joined[((joined.len() - 1) as f64 * 0.99) as usize]
+            );
+        }
+        samples.clear();
+    }
     for task in tasks {
         task.await.unwrap();
     }
