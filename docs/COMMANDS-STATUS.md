@@ -19,7 +19,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `update_advancements` (`advancement_packets.rs`; entries are encoded with the server's own codec by
   `tools/extractor/AdvancementExtractor.java`, framing checked against the vanilla packet bytes), so
   tabs and toasts work. Completion by holding items, the chat announcement, recipe rewards and
-  experience rewards work. Not done: other triggers (kills, travel, ...) never complete advancements;
+  experience rewards work. Not done: melee kills of a plain entity type (e.g. Monster Hunter) complete advancements, but sweep, arrow, fire and explosion kills and every other trigger (travel, location, consume, ...) do not;
   loot-table and function rewards are not given.
 - `/recipe`: give/take with the extracted recipe ids; recipes also unlock from play (`recipe_unlock.rs`: every
   second the held item names are scanned and matched against the `recipes/**` advancements'

@@ -1413,6 +1413,13 @@ async fn run(
                      if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
                  }
              }
+             {
+                 let kills = std::mem::take(&mut *recipe_unlock::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
+                 if !kills.is_empty() {
+                     let mut game = command_state.lock().unwrap();
+                     for (who, kind) in kills { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_kill(kind)); }
+                 }
+             }
              scan_tick = scan_tick.wrapping_add(1);
              if scan_tick.is_multiple_of(20) {
                  for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }

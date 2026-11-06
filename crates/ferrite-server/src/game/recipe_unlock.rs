@@ -17,6 +17,8 @@ pub enum Criterion {
     /// Every entry must match a held item; an entry is `(names, is_tag)` alternatives.
     Holds(Vec<Vec<String>>),
     Recipe(String),
+    /// `player_killed_entity` with nothing but a plain entity type to match.
+    Kills(String),
     Other,
 }
 
@@ -41,6 +43,40 @@ fn alternatives(value: &serde_json::Value) -> Vec<String> {
     }
 }
 
+/// The entity type a `player_killed_entity` criterion asks for, when that is all it asks for.
+fn kill_type(conditions: &serde_json::Value) -> Option<String> {
+    let object = conditions.as_object()?;
+    if object.keys().any(|k| k != "entity") {
+        return None;
+    }
+    let entity = object.get("entity")?;
+    let predicate = entity["predicate"].as_object()?;
+    if entity["type"] != "minecraft:entity_properties"
+        || entity["entity"] != "this"
+        || predicate.len() != 1
+    {
+        return None;
+    }
+    let name = predicate.get("minecraft:entity_type")?.as_str()?;
+    (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// Entity kinds players killed since the last drain, `(player, entity type id)`.
+pub static KILLS: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
+
+/// Advancement criteria (`<advancement>#<criterion>`) completed by killing an entity type.
+pub fn criteria_for_kill(entity: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Kills(kind) if kind == entity) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
 pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
     let recipes: Vec<String> = json["rewards"]["recipes"]
         .as_array()
@@ -63,6 +99,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             ),
             Some("minecraft:recipe_unlocked") => {
                 Criterion::Recipe(c["conditions"]["recipes"].as_str()?.to_owned())
+            }
+            Some("minecraft:player_killed_entity") => {
+                kill_type(&c["conditions"]).map_or(Criterion::Other, Criterion::Kills)
             }
             _ => Criterion::Other,
         };
@@ -258,6 +297,29 @@ mod tests {
                 .iter()
                 .all(|c| !c.starts_with("minecraft:recipes/"))
         );
+    }
+
+    #[test]
+    fn plain_entity_kill_criteria_are_parsed_and_extra_conditions_are_not() {
+        let plain = serde_json::json!({"entity": {"type": "minecraft:entity_properties",
+            "entity": "this", "predicate": {"minecraft:entity_type": "minecraft:blaze"}}});
+        assert_eq!(kill_type(&plain).as_deref(), Some("minecraft:blaze"));
+        let tag = serde_json::json!({"entity": {"type": "minecraft:entity_properties",
+            "entity": "this", "predicate": {"minecraft:entity_type": "#minecraft:skeletons"}}});
+        assert_eq!(kill_type(&tag), None);
+        let with_blow = serde_json::json!({"killing_blow": {}, "entity": plain["entity"]});
+        assert_eq!(kill_type(&with_blow), None);
+    }
+
+    #[test]
+    fn killing_a_zombie_completes_monster_hunter_with_the_extracted_data() {
+        let done = criteria_for_kill("minecraft:zombie");
+        // The extracted data may be absent on this machine.
+        assert_eq!(
+            done.contains(&"minecraft:adventure/kill_a_mob#minecraft:zombie".to_owned()),
+            !rules().is_empty()
+        );
+        assert!(criteria_for_kill("minecraft:cow").is_empty() || !rules().is_empty());
     }
 
     #[test]

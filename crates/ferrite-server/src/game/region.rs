@@ -4187,6 +4187,14 @@ impl Region {
                     continue;
                 };
                 mob::retaliate(&mut self.entities, key, uuid);
+                if matches!(hurt, mob::Hurt::Died)
+                    && let Some(mob) = self.entities.data(key).and_then(|d| d.mob)
+                {
+                    super::recipe_unlock::KILLS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((uuid, mob.kind.name()));
+                }
                 hurt_keys.push((key, critical));
                 // Sweeping: a sword at full charge on the ground hits everything around the
                 // target for 1.0 (`Player.attack`'s `sweepAttack`).
