@@ -345,6 +345,16 @@ pub trait Crafter {
     ) -> Option<ItemStack> {
         None
     }
+
+    /// The id of the recipe `smithing` applies, for the `recipe_crafted` trigger.
+    fn smithing_recipe_id(
+        &self,
+        _template: &ItemStack,
+        _base: &ItemStack,
+        _addition: &ItemStack,
+    ) -> Option<String> {
+        None
+    }
 }
 
 /// A [`Crafter`] that never crafts anything.
@@ -1766,6 +1776,15 @@ impl Menu {
                     self.result = ItemStack::empty();
                 }
                 MenuKind::Smithing | MenuKind::Loom => {
+                    if self.kind == MenuKind::Smithing
+                        && let Some(id) = p.crafter.smithing_recipe_id(
+                            &self.container[0],
+                            &self.container[1],
+                            &self.container[2],
+                        )
+                    {
+                        p.crafted.push(id);
+                    }
                     for cell in 0..3 {
                         let mut left = self.container[cell].clone();
                         left.count -= 1;

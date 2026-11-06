@@ -242,6 +242,16 @@ impl Crafter for StationCrafter {
             && addition.name() == Some("minecraft:netherite_ingot"))
         .then(|| item("netherite_sword", 1))
     }
+
+    fn smithing_recipe_id(
+        &self,
+        template: &ItemStack,
+        base: &ItemStack,
+        addition: &ItemStack,
+    ) -> Option<String> {
+        self.smithing(template, base, addition)
+            .map(|_| "minecraft:test_smithing".to_owned())
+    }
 }
 
 #[test]
@@ -317,6 +327,22 @@ fn stonecutter_grindstone_enchanting_smithing_and_loom_work() {
     f.menu
         .set_slot(&mut f.inv, &StationCrafter, 1, item("red_dye", 1));
     assert_eq!(f.slot(3).name(), Some("minecraft:red_banner"));
+}
+
+#[test]
+fn taking_the_smithing_result_records_the_recipe() {
+    let mut f = Fixture::new(Menu::smithing(6));
+    for (slot, name) in [
+        (0, "netherite_upgrade_smithing_template"),
+        (1, "diamond_sword"),
+        (2, "netherite_ingot"),
+    ] {
+        f.menu
+            .set_slot(&mut f.inv, &StationCrafter, slot, item(name, 1));
+    }
+    let mut p = Clicker::new(&mut f.inv, false, &StationCrafter);
+    f.menu.clicked(&mut p, 3, 0, Pickup);
+    assert_eq!(p.crafted, vec!["minecraft:test_smithing".to_owned()]);
 }
 
 #[test]

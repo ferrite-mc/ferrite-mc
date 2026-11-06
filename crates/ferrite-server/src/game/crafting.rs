@@ -130,6 +130,29 @@ impl Crafter for RecipeCrafter {
         base: &ItemStack,
         addition: &ItemStack,
     ) -> Option<ItemStack> {
+        self.smithing_match(template, base, addition)
+            .map(|(_, result)| result)
+    }
+
+    fn smithing_recipe_id(
+        &self,
+        template: &ItemStack,
+        base: &ItemStack,
+        addition: &ItemStack,
+    ) -> Option<String> {
+        self.smithing_match(template, base, addition)
+            .map(|(id, _)| id)
+    }
+}
+
+impl RecipeCrafter {
+    /// The smithing recipe that applies, with its id and result.
+    fn smithing_match(
+        &self,
+        template: &ItemStack,
+        base: &ItemStack,
+        addition: &ItemStack,
+    ) -> Option<(String, ItemStack)> {
         let base_stack = base;
         let (Some(template), Some(base), Some(addition)) =
             (template.name(), base.name(), addition.name())
@@ -164,7 +187,7 @@ impl Crafter for RecipeCrafter {
                 let mut out = base_stack.copy_with_count(1);
                 out.components
                     .insert(component_ids::TRIM, Component::Trim(trim));
-                return Some(out);
+                return Some((recipe.id.clone(), out));
             }
             let RecipeKind::SmithingTransform(transform) = &recipe.kind else {
                 continue;
@@ -177,7 +200,7 @@ impl Crafter for RecipeCrafter {
             }
             let count = i32::try_from(transform.result.count).ok()?;
             return ItemStack::from_name(&transform.result.item)
-                .map(|stack| stack.copy_with_count(count));
+                .map(|stack| (recipe.id.clone(), stack.copy_with_count(count)));
         }
         None
     }
@@ -330,6 +353,10 @@ mod tests {
             .smithing(&template, &armor, &stack("amethyst_shard", 1))
             .expect("amethyst bolt trim");
         assert_eq!(trimmed.name(), armor.name());
+        assert_eq!(
+            crafter.smithing_recipe_id(&template, &armor, &stack("amethyst_shard", 1)),
+            Some("minecraft:bolt_armor_trim_smithing_template_smithing_trim".to_owned())
+        );
         assert_eq!(
             trimmed.effective_component(component_ids::TRIM),
             Some(Component::Trim(Trim {
