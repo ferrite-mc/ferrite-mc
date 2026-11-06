@@ -93,6 +93,8 @@ use std::{
 };
 
 const CACHE_LIMIT: usize = 4096;
+/// Entries dropped by one eviction pass once the cache is full.
+const EVICT_BATCH: usize = CACHE_LIMIT / 8;
 const PENDING_LIMIT: usize = 128;
 /// Emit the cache hit rate to the debug log every this many lookups.
 const CACHE_LOG_INTERVAL: u64 = 4096;
@@ -1126,22 +1128,24 @@ impl AnvilChunkSource {
             return Lookup::Loading;
         }
         if cache.entries.len() >= CACHE_LIMIT {
-            let Some(oldest) = cache
+            // Drop the least recently used eighth in one pass, so the scan under the lock is paid
+            // once per `EVICT_BATCH` misses instead of on every miss.
+            let mut ready: Vec<_> = cache
                 .entries
                 .iter()
-                .filter_map(|(k, v)| {
-                    if let Entry::Ready(_, used) = v {
-                        Some((*k, *used))
-                    } else {
-                        None
-                    }
+                .filter_map(|(k, v)| match v {
+                    Entry::Ready(_, used) => Some((*used, *k)),
+                    Entry::Pending(_) => None,
                 })
-                .min_by_key(|(_, used)| *used)
-                .map(|(k, _)| k)
-            else {
+                .collect();
+            if ready.is_empty() {
                 return Lookup::Loading;
-            };
-            cache.entries.remove(&oldest);
+            }
+            let batch = EVICT_BATCH.min(ready.len());
+            ready.select_nth_unstable(batch - 1);
+            for (_, k) in &ready[..batch] {
+                cache.entries.remove(k);
+            }
         }
         cache.entries.insert(key, Entry::Pending(now));
         cache.pending += 1;
