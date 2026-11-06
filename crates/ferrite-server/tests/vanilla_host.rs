@@ -262,7 +262,10 @@ fn patched_jar_generates_the_same_terrain() {
             work_dir: scratch.path().join(name),
             eula: eula.clone(),
             heap_mb: 768,
-            threads: 2,
+            threads: std::env::var("FERRITE_TEST_THREADS")
+                .ok()
+                .and_then(|t| t.parse().ok())
+                .unwrap_or(2),
             seed: "424242".into(),
             patch_rules: patched
                 .then(|| root.join("java/ferrite-worldgen-host/rules/worldgen.rules")),
@@ -278,6 +281,7 @@ fn patched_jar_generates_the_same_terrain() {
     // The jar's own output varies from run to run (a control comparison of two unmodified hosts
     // differs too), so compare how much differs, not whether anything does.
     let (mut total, mut differing) = (0u64, 0u64);
+    let mut kinds = std::collections::BTreeMap::new();
     for dimension in [Dimension::Overworld, Dimension::Nether] {
         for (cx, cz) in [(0, 0), (5, -3), (-9, 12)] {
             let a = plain.generate(dimension, cx, cz).unwrap().chunk;
@@ -286,14 +290,33 @@ fn patched_jar_generates_the_same_terrain() {
                 for z in 0..16u8 {
                     for y in a.min_y()..a.min_y() + a.height_blocks() as i32 {
                         total += 1;
-                        differing += u64::from(a.block(x, y, z) != b.block(x, y, z));
+                        let (left, right) = (a.block(x, y, z), b.block(x, y, z));
+                        if left != right {
+                            differing += 1;
+                            if std::env::var("FERRITE_TEST_DIFF").is_ok() {
+                                let name = |id: Option<u32>| {
+                                    id.and_then(|id| u16::try_from(id).ok())
+                                        .and_then(ferrite_data::blocks::state)
+                                        .map_or("?", |(name, _)| name)
+                                };
+                                *kinds.entry((name(left), name(right))).or_insert(0u32) += 1;
+                            }
+                        }
                     }
                 }
             }
         }
     }
+    if !kinds.is_empty() {
+        let mut top: Vec<_> = kinds.into_iter().collect();
+        top.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        eprintln!("top differences: {:?}", &top[..top.len().min(12)]);
+    }
+    // Measured against the real 26.3 jar: two unmodified hosts differ by 0.6-0.85% of the blocks
+    // (tree, leaf and moss decoration, not terrain), the patched jar by 0.94%. 2% leaves room
+    // for that noise while still catching a patch that breaks generation.
     assert!(
-        differing * 200 < total,
+        differing * 50 < total,
         "{differing} of {total} blocks differ between the unmodified and the patched jar"
     );
 }
@@ -327,12 +350,20 @@ fn places_features_and_structures_through_the_host() {
     };
     let generator = VanillaGenerator::spawn(&settings, Arc::new(registry)).unwrap();
     let height = generator.spawn_height(Dimension::Overworld, 0, 0).unwrap();
-    let tree = generator
-        .place(
-            Dimension::Overworld,
-            &format!("feature;minecraft:oak;0;{height};0"),
-        )
-        .unwrap();
+    // A tree fails to place on a bad base (water, another tree), as in vanilla, and the jar's
+    // decoration differs between runs, so try a few spots before calling it a failure.
+    let tree = [(0, 0), (24, 8), (-24, 8), (8, -24), (40, 40)]
+        .into_iter()
+        .find_map(|(x, z)| {
+            let y = generator.spawn_height(Dimension::Overworld, x, z).ok()?;
+            generator
+                .place(
+                    Dimension::Overworld,
+                    &format!("feature;minecraft:oak;{x};{y};{z}"),
+                )
+                .ok()
+        })
+        .expect("an oak places at one of five spots");
     assert!(
         tree.len() > 10,
         "an oak changes more than {} blocks",
@@ -344,10 +375,18 @@ fn places_features_and_structures_through_the_host() {
     );
     eprintln!("village: {:?}", village.as_ref().map(|placed| placed.len()));
     // Structures come with their block entities: a desert pyramid has loot chests.
+    // A pyramid only generates in a desert, so ask the jar's biome source where the nearest one is.
+    let (dx, _, dz) = generator
+        .locate_biome(Dimension::Overworld, "minecraft:desert", 0, 0, 4096)
+        .unwrap()
+        .expect("seed 12345 has a desert within 4096 blocks of the origin");
+    let desert_height = generator
+        .spawn_height(Dimension::Overworld, dx, dz)
+        .unwrap();
     let pyramid = generator
         .place(
             Dimension::Overworld,
-            &format!("structure;minecraft:desert_pyramid;200;{height};200"),
+            &format!("structure;minecraft:desert_pyramid;{dx};{desert_height};{dz}"),
         )
         .unwrap();
     assert!(
