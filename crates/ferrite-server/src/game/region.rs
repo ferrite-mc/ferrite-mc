@@ -4624,6 +4624,12 @@ impl Region {
                 p.hurt(DamageKind::Arrow, hit.damage);
             }
         }
+        let shot: Vec<_> =
+            std::mem::take(&mut *arrow::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
+        super::recipe_unlock::KILLS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(shot);
         for landing in arrow::tick_thrown(&mut self.entities, &blocks, &players) {
             // Vanilla large fireball: a power-1 explosion that sets fires.
             if landing.kind == arrow::Kind::Fireball {

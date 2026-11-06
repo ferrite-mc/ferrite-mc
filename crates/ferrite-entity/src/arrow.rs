@@ -246,6 +246,9 @@ pub struct PlayerHit {
     pub damage: f32,
 }
 
+/// Mobs a player's arrow killed since the region last looked: shooter and entity type.
+pub static KILLS: std::sync::Mutex<Vec<(Uuid, &'static str)>> = std::sync::Mutex::new(Vec::new());
+
 fn remove(store: &mut EntityStore, key: EntityKey) {
     if let Some(flags) = store.flags_mut(key) {
         flags.set(Flags::REMOVED, true);
@@ -318,7 +321,18 @@ pub fn tick_arrows(
             .into_iter()
             .find(|other| *other != key && mob::is_mob(store, *other));
         if let Some(target) = target {
-            mob::hurt(store, target, arrow.damage, None);
+            let hurt = mob::hurt(store, target, arrow.damage, None);
+            if let Some(owner) = arrow.owner {
+                mob::retaliate(store, target, owner);
+                if matches!(hurt, Some(mob::Hurt::Died))
+                    && let Some(state) = mob::state(store, target)
+                {
+                    KILLS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((owner, state.kind.name()));
+                }
+            }
             remove(store, key);
             continue;
         }
@@ -420,6 +434,31 @@ mod tests {
             store.flags(key).unwrap().has(Flags::REMOVED),
             "an arrow flying into a floor sticks"
         );
+    }
+
+    #[test]
+    fn a_players_arrow_that_kills_a_mob_is_credited_to_the_shooter() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 6.0),
+            &mut Rng::new(2),
+        ));
+        let shooter = Uuid::from_u128(0xa11ce);
+        store.insert(new_arrow(
+            Vec3::new(0.5, 64.9, 0.5),
+            Vec3::new(0.0, 0.0, 2.0),
+            100.0,
+            Some(shooter),
+            &mut Rng::new(1),
+        ));
+        for _ in 0..40 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        assert!(mob::state(&store, cow).is_some_and(|mob| mob.is_dead()));
+        let kills = KILLS.lock().unwrap();
+        assert!(kills.contains(&(shooter, "minecraft:cow")));
     }
 
     #[test]
