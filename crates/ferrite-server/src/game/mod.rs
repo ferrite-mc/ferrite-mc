@@ -1398,6 +1398,8 @@ async fn run(
                  }
                  for (who, id) in std::mem::take(&mut advancement_sync.completed) {
                      if let Some(recipes) = Some(recipe_unlock::reward_recipes(&id)).filter(|r| !r.is_empty()) { command_state.lock().unwrap().more.recipes.entry(who).or_default().extend(recipes); }
+                     let points = recipe_unlock::reward_experience(&id);
+                     if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
                      let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
                      if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
                  }

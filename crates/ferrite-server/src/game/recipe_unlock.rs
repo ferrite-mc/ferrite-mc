@@ -24,6 +24,8 @@ pub enum Criterion {
 pub struct Rule {
     pub id: String,
     pub recipes: Vec<String>,
+    /// Experience points the advancement rewards.
+    pub experience: i32,
     pub criteria: BTreeMap<String, Criterion>,
     pub requirements: Vec<Vec<String>>,
 }
@@ -46,6 +48,10 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
         .flatten()
         .filter_map(|r| r.as_str().map(str::to_owned))
         .collect();
+    let experience = json["rewards"]["experience"]
+        .as_i64()
+        .and_then(|x| i32::try_from(x).ok())
+        .unwrap_or(0);
     let mut criteria = BTreeMap::new();
     for (name, c) in json["criteria"].as_object()? {
         let kind = match c["trigger"].as_str() {
@@ -69,6 +75,7 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
     Some(Rule {
         id: id.to_owned(),
         recipes,
+        experience,
         criteria,
         requirements,
     })
@@ -176,6 +183,14 @@ pub fn reward_recipes(advancement: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Experience points an advancement rewards when completed.
+pub fn reward_experience(advancement: &str) -> i32 {
+    rules()
+        .iter()
+        .find(|r| r.id == advancement)
+        .map_or(0, |r| r.experience)
+}
+
 /// Advancement criteria (`<advancement>#<criterion>`) that holding `held` completes, for every
 /// advancement with an `inventory_changed` criterion except the recipe ones.
 pub fn criteria_for(held: &BTreeSet<String>) -> Vec<String> {
@@ -211,7 +226,7 @@ mod tests {
                     "conditions": {"recipes": "minecraft:stick"}}
             },
             "requirements": [["has_the_recipe", "has_log", "has_planks"]],
-            "rewards": {"recipes": ["minecraft:stick"]}
+            "rewards": {"recipes": ["minecraft:stick"], "experience": 25}
         }))
         .unwrap()
     }
@@ -243,6 +258,11 @@ mod tests {
                 .iter()
                 .all(|c| !c.starts_with("minecraft:recipes/"))
         );
+    }
+
+    #[test]
+    fn experience_rewards_are_parsed() {
+        assert_eq!(rule().experience, 25);
     }
 
     #[test]

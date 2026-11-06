@@ -18,8 +18,9 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   criteria). Progress is saved per player (`playerdata/<uuid>.advancements.json`) and sent as
   `update_advancements` (`advancement_packets.rs`; entries are encoded with the server's own codec by
   `tools/extractor/AdvancementExtractor.java`, framing checked against the vanilla packet bytes), so
-  tabs and toasts work. Not done: triggers never complete advancements on their own, rewards are not
-  given, and there is no chat announcement.
+  tabs and toasts work. Completion by holding items, the chat announcement, recipe rewards and
+  experience rewards work. Not done: other triggers (kills, travel, ...) never complete advancements;
+  loot-table and function rewards are not given.
 - `/recipe`: give/take with the extracted recipe ids; recipes also unlock from play (`recipe_unlock.rs`: every
   second the held item names are scanned and matched against the `recipes/**` advancements'
   `inventory_changed` items/tags and `recipe_unlocked`, ignoring counts and components). Unlocked recipes are saved per player
