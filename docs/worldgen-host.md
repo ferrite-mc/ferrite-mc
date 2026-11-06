@@ -15,8 +15,10 @@ Done: the host (`Host.java`), the Rust client (`vanilla_gen.rs`), the shared `eu
 (`crates/ferrite-server/tests/vanilla_host.rs`). The host runs the user's jar **unmodified**.
 The patcher (`Patcher.java`, rules in `rules/worldgen.rules`, `[worldgen] patch = true`) removes the
 network listener, gameplay ticking, player and function ticks; it is off by default until it
-measurably beats the unmodified jar (see Measuring). Not done: `call:` hooks for optimisations,
-`/locate biome`, the `process`/`remote` modes.
+measurably beats the unmodified jar (see Measuring). Ops 5-10 (locate biome/structure/poi,
+structure_at, place, structure starts) are done. Not done: `call:` hooks for optimisations (no
+measured hotspot to target), the `process`/`remote` modes (`remote` would need an authenticated,
+non-loopback channel and cannot be tested on one machine).
 
 ## Rules
 
@@ -57,6 +59,9 @@ Request: `u32 id, u8 op, u8 dimension, i32 x, i32 z, u16 argument length, argume
 | 5 | locate biome (argument `spec;radius;x;y;z`, spec is an id or `#tag`) | `x y z`, or empty when not found |
 | 6 | locate structure (argument `spec;radius;x;z`, radius in chunks) | `x y z`, or empty when not found |
 | 7 | is block inside a structure (argument `id x y z`) | `1` or `0` |
+| 8 | place a feature/template (see `plugins/worldgen.rs`) | `ok` + changed blocks, or `fail <text>` |
+| 9 | locate point of interest (argument `spec;radius;x;y;z`) | `x y z`, or empty |
+| 10 | structure starts of chunk x, z | lines `id minX minY minZ maxX maxY maxZ` |
 
 Response: `u32 id, u8 status (0 ok, 1 error), u32 length, bytes` (error payload is UTF-8).
 Responses may arrive out of order; the id matches them to requests.
@@ -96,7 +101,9 @@ The patched jar is cached in `worldgen/` and never leaves the machine.
 
 - With 8 request threads the host sometimes stops answering (about 1 run in 8, unmodified jar;
   Ferrite then fails the request after its 300 s timeout). Not seen with the default 4
-  threads in 8 runs (16-39 chunks/s), which is not enough to claim it is fixed. Keep `threads` at 4 or lower.
+  threads in 8 runs (16-39 chunks/s), which is not enough to claim it is fixed. Keep `threads` at 4 or lower; Ferrite now clamps the setting to 4 (`vanilla_gen::host_threads`).
+  Likely cause (unverified): `ServerChunkCache.getChunk` from a non-main thread hops through the server
+  main thread, so concurrent requests can block each other there. Reproducing needs a run with the user's `eula=true`.
 - Dead end: replacing the blocking `getChunk` with `getChunkFuture(x, z, FULL, true)` made every
   request fail with `Unloaded chunk` on 26.3. Reverted.
 - Dead end: emptying `LevelTicks.tick` changes generated blocks (leaf distance). Kept out of the rules.

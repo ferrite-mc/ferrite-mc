@@ -230,7 +230,7 @@ impl VanillaGenerator {
             .args(["--port", &port.to_string()])
             .args(["--game-port", &game_port.to_string()])
             .args(["--seed", &settings.seed])
-            .args(["--threads", &settings.threads.to_string()])
+            .args(["--threads", &host_threads(settings.threads).to_string()])
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)
@@ -443,6 +443,20 @@ impl ChunkGenerator for VanillaGenerator {
     }
 }
 
+/// The most request threads the host is given. With 8 the host was seen to stop answering about
+/// one run in eight (likely requests blocking each other on the server's main thread); 4 was
+/// stable, so larger settings are clamped until that is understood.
+const MAX_HOST_THREADS: u32 = 4;
+
+fn host_threads(configured: u32) -> u32 {
+    if configured > MAX_HOST_THREADS {
+        tracing::warn!(
+            "worldgen threads {configured} is above {MAX_HOST_THREADS}; using {MAX_HOST_THREADS}"
+        );
+    }
+    configured.clamp(1, MAX_HOST_THREADS)
+}
+
 /// Parses `id minX minY minZ maxX maxY maxZ` lines, skipping malformed ones.
 fn parse_starts(text: &str) -> Vec<super::generator::StructureStart> {
     text.lines()
@@ -543,6 +557,13 @@ impl Drop for VanillaGenerator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_threads_are_clamped_to_the_stable_range() {
+        assert_eq!(super::host_threads(0), 1);
+        assert_eq!(super::host_threads(3), 3);
+        assert_eq!(super::host_threads(8), 4);
+    }
+
     #[test]
     fn structure_starts_are_parsed_and_malformed_lines_skipped() {
         let starts = super::parse_starts(
