@@ -676,6 +676,8 @@ pub struct Player {
     pub bow_charge: i32,
     /// Whether the player is drawing a bow.
     pub using_bow: bool,
+    /// The drawn item is a trident (thrown on release instead of an arrow).
+    pub trident_draw: bool,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
     /// The dimension registry, used to swap the chunk source on a dimension change.
@@ -699,6 +701,8 @@ pub struct Region {
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Dragon breath clouds: centre and ticks left.
     pub breath_clouds: Vec<(ferrite_math::Vec3, u32)>,
+    /// The stack of every trident in flight, by entity uuid, so it can drop as it was thrown.
+    pub thrown_tridents: HashMap<Uuid, ferrite_item::ItemStack>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
@@ -765,6 +769,7 @@ impl RegionData for Region {
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
+            thrown_tridents: HashMap::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
             dragon_bars: HashMap::new(),
@@ -2379,6 +2384,13 @@ impl Player {
             }
             Some("minecraft:bow") => {
                 self.using_bow = true;
+                self.trident_draw = false;
+                self.bow_charge = 0;
+                return;
+            }
+            Some("minecraft:trident") => {
+                self.using_bow = true;
+                self.trident_draw = true;
                 self.bow_charge = 0;
                 return;
             }
@@ -4428,6 +4440,7 @@ impl Region {
             attacks: Vec<i32>,
             ticks: i32,
             bow: Option<(f32, f32, f32)>,
+            trident: bool,
         }
         let mut pending = Vec::new();
         for (&uuid, p) in self.players.iter_mut() {
@@ -4436,6 +4449,7 @@ impl Region {
             if attacks.is_empty() && !released {
                 continue;
             }
+            let trident = released && p.trident_draw;
             let bow = released.then(|| {
                 let charge = (p.bow_charge as f32 / 20.0).clamp(0.0, 1.0);
                 (charge, p.yaw, p.pitch)
@@ -4448,6 +4462,7 @@ impl Region {
                 attacks,
                 ticks,
                 bow,
+                trident,
             });
         }
         for Pending {
@@ -4455,12 +4470,17 @@ impl Region {
             attacks,
             ticks,
             bow,
+            trident,
         } in pending
         {
-            if let Some((charge, yaw, pitch)) = bow
-                && charge >= 0.1
-            {
-                self.fire_bow(uuid, charge, yaw, pitch);
+            if let Some((charge, yaw, pitch)) = bow {
+                if trident {
+                    if charge * 20.0 >= arrow::TRIDENT_MIN_DRAW as f32 {
+                        self.throw_trident(uuid, yaw, pitch);
+                    }
+                } else if charge >= 0.1 {
+                    self.fire_bow(uuid, charge, yaw, pitch);
+                }
             }
             if attacks.is_empty() {
                 continue;
@@ -4589,6 +4609,86 @@ impl Region {
         let damage = combat::arrow_damage(charge, charge >= 1.0);
         let record = arrow::new_arrow(start, vel, damage, Some(uuid), &mut self.rng);
         self.entities.insert(record);
+    }
+
+    /// `TridentItem.releaseUsing`: the held trident leaves the hand and flies where the player
+    /// looks. shortcut: no loyalty, riptide or channeling; it drops as an item where it ends.
+    fn throw_trident(&mut self, uuid: Uuid, yaw: f32, pitch: f32) {
+        let Some(p) = self.players.get_mut(&uuid) else {
+            return;
+        };
+        let slot = p.hand_slot(0);
+        let stack = p.inventory.get(slot).clone();
+        if stack.name() != Some("minecraft:trident") {
+            return;
+        }
+        if !matches!(p.gamemode, 1 | 3) {
+            p.inventory.remove(slot, 1);
+            send(
+                p,
+                &SetPlayerInventory {
+                    slot: VarInt(slot as i32),
+                    item: p.inventory.get(slot).clone(),
+                },
+            );
+        }
+        let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+        let eye = combat::eye_position(feet);
+        let direction = combat::look_vector(yaw, pitch);
+        let vel = ferrite_math::Vec3::new(
+            direction.x * arrow::TRIDENT_SPEED,
+            direction.y * arrow::TRIDENT_SPEED,
+            direction.z * arrow::TRIDENT_SPEED,
+        );
+        let start = ferrite_math::Vec3::new(
+            eye.x + direction.x * 0.3,
+            eye.y + direction.y * 0.3 - 0.1,
+            eye.z + direction.z * 0.3,
+        );
+        let record = arrow::new_trident(start, vel, Some(uuid));
+        self.thrown_tridents
+            .insert(record.data.uuid, stack.copy_with_count(1));
+        self.entities.insert(record);
+    }
+
+    /// Drops the item of every trident that ended its flight this tick.
+    fn land_tridents(&mut self) {
+        let ended: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&key| {
+                self.entities
+                    .data(key)
+                    .is_some_and(|d| arrow::kind_of(d) == Some(arrow::Kind::Trident))
+                    && self
+                        .entities
+                        .flags(key)
+                        .is_some_and(|f| f.has(ferrite_entity::Flags::REMOVED))
+            })
+            .collect();
+        for key in ended {
+            let (Some(uuid), Some(pos)) = (
+                self.entities.data(key).map(|d| d.uuid),
+                self.entities.pos(key),
+            ) else {
+                continue;
+            };
+            if let Some(stack) = self.thrown_tridents.remove(&uuid) {
+                // Item entities hold plain stacks, like every other dropped item.
+                let plain = ItemStack {
+                    count: stack.count,
+                    item_id: i32::from(stack.item),
+                };
+                let mut record =
+                    item::new_item(pos, ferrite_math::Vec3::ZERO, plain, &mut self.rng);
+                if let Some(state) = &mut record.data.item {
+                    state.pickup_delay = 10;
+                }
+                self.entities.insert(record);
+            }
+        }
     }
 
     /// Applies damage to a player of this region, honouring a raised shield (vanilla
@@ -5921,6 +6021,7 @@ impl Region {
         self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
+            self.land_tridents();
             self.tick_dragon_effects(ctx);
             self.tick_mobs(ctx, &blocks);
         }

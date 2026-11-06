@@ -94,6 +94,8 @@ pub enum Kind {
     Fireball,
     /// `minecraft:dragon_fireball`: flies straight; the region leaves a breath cloud where it lands.
     DragonFireball,
+    /// `minecraft:trident`: flies like an arrow for 8 damage; the region drops the item where it ends.
+    Trident,
 }
 
 impl Kind {
@@ -105,6 +107,7 @@ impl Kind {
             Self::EnderPearl => "ender_pearl",
             Self::Fireball => "fireball",
             Self::DragonFireball => "dragon_fireball",
+            Self::Trident => "trident",
         }
     }
 
@@ -135,10 +138,27 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::EnderPearl,
         Kind::Fireball,
         Kind::DragonFireball,
+        Kind::Trident,
     ]
     .into_iter()
     .find(|kind| kind.entity_type() == data.kind)
 }
+
+/// A thrown trident: an arrow in flight with a bigger box and a trident damage.
+pub fn new_trident(pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> EntityRecord {
+    let mut record = new_arrow(pos, vel, TRIDENT_DAMAGE, owner, &mut Rng::new(0));
+    record.data.kind = Kind::Trident.entity_type();
+    record.data.width = 0.5;
+    record.data.height = 0.5;
+    record
+}
+
+/// Damage of a thrown trident (`ThrownTrident.BASE_DAMAGE`).
+pub const TRIDENT_DAMAGE: f32 = 8.0;
+/// A trident is thrown after being drawn this many ticks (`TridentItem.releaseUsing`).
+pub const TRIDENT_MIN_DRAW: i32 = 10;
+/// Launch speed of a thrown trident.
+pub const TRIDENT_SPEED: f64 = 2.5;
 
 /// A new snowball, egg or ender pearl at `pos` flying with `vel`.
 pub fn new_thrown(kind: Kind, pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> EntityRecord {
@@ -173,7 +193,7 @@ pub fn tick_thrown(
         let (Some(mut state), Some(kind)) = (data.arrow, kind_of(data)) else {
             continue;
         };
-        if kind == Kind::Arrow
+        if matches!(kind, Kind::Arrow | Kind::Trident)
             || store
                 .flags(key)
                 .is_some_and(|flags| flags.has(Flags::REMOVED))
@@ -273,7 +293,7 @@ pub fn tick_arrows(
     for key in keys {
         let Some(mut arrow) = store
             .data(key)
-            .filter(|data| kind_of(data) == Some(Kind::Arrow))
+            .filter(|data| matches!(kind_of(data), Some(Kind::Arrow | Kind::Trident)))
             .and_then(|data| data.arrow)
         else {
             continue;
@@ -463,6 +483,29 @@ mod tests {
         assert!(mob::state(&store, cow).is_some_and(|mob| mob.is_dead()));
         let kills = KILLS.lock().unwrap();
         assert!(kills.contains(&(shooter, "minecraft:cow")));
+    }
+
+    #[test]
+    fn a_trident_hurts_a_mob_like_an_arrow_for_eight() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 6.0),
+            &mut Rng::new(2),
+        ));
+        let trident = store.insert(new_trident(
+            Vec3::new(0.5, 64.9, 0.5),
+            Vec3::new(0.0, 0.0, 2.0),
+            None,
+        ));
+        assert_eq!(kind_of(store.data(trident).unwrap()), Some(Kind::Trident));
+        for _ in 0..40 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        let health = mob::state(&store, cow).map_or(0.0, |m| m.health);
+        assert_eq!(health, MobKind::Cow.max_health() - TRIDENT_DAMAGE);
+        assert!(store.flags(trident).unwrap().has(Flags::REMOVED));
     }
 
     #[test]
