@@ -2527,8 +2527,20 @@ impl CommandRuntime<'_> {
                 ),
             },
         }
+        // The one attribute the simulation reads for players besides attack damage and speed.
+        let max_health =
+            (path == "max_health" && target.player).then(|| stored.value(limits, limits.default));
         if stored.base.is_none() && stored.modifiers.is_empty() {
             state.more.attributes.remove(&key);
+        }
+        drop(state);
+        if let Some(value) = max_health
+            && let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid)
+        {
+            mailbox.lock().unwrap().push_back(Command::PluginSurvival {
+                stat: ferrite_plugin::SurvivalStat::MaxHealth,
+                value: value as f32,
+            });
         }
     }
 

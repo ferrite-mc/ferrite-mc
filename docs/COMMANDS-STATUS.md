@@ -75,7 +75,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 
 - `/attribute` stores base values and modifiers per entity and computes vanilla's formula, but
   nothing in the simulation reads them yet (only generic defaults plus the player overrides for
-  attack damage and movement speed; per-mob defaults and `failed.entity` are missing).
+  attack damage, movement speed and — via the survival state — max health; per-mob defaults and `failed.entity` are missing).
 - `/dialog show` takes registry ids or an inline `{type:...,title:...}` compound (checked for the fields the vanilla codec requires, so a bad one is rejected instead of kicking the client; buttons' actions are not validated). `/spectate` sends `set_camera` and the
   spectator's body follows the target every tick (sneaking ends it). Feedback texts for the new commands
   were written from memory of en_us (argument order not verified against a lang file).
