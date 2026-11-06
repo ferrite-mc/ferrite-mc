@@ -1453,6 +1453,12 @@ impl Player {
         drop(positions);
         if placed {
             self.changed_blocks.push([target.x, target.y, target.z]);
+            if let Some((name, _)) = ferrite_data::blocks::state(state) {
+                super::recipe_unlock::PLACED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((self.uuid, name));
+            }
             // Block entities are created with the block, so the menu, /data and the chunk save
             // all find the state they expect.
             match ferrite_data::blocks::state(state).map(|(name, _)| name) {

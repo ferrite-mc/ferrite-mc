@@ -18,7 +18,7 @@ piston/End note and still applies for those areas.
   spectators do not transmit.
 - Advancements (`advancement_packets.rs`, `recipe_unlock.rs`): tabs/toasts, saved progress,
   completion by `inventory_changed`, melee kills of a plain entity type, `consume_item`,
-  `changed_dimension`; chat announcement; recipe and XP rewards.
+  `changed_dimension`, `placed_block` (plain block); chat announcement; recipe and XP rewards.
 - Recipe book (`recipe_packets.rs`): update_recipes, add/remove, unlock from play, the client's
   open/filter settings are stored (`playerdata/<uuid>.recipebook.json`).
 - `/ride`, `/spectate` follow, `/debug function`, inline `/dialog show`, `/attribute max_health`,

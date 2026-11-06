@@ -23,6 +23,8 @@ pub enum Criterion {
     Consumes(String),
     /// `changed_dimension` into one dimension (no `from`).
     EntersDimension(String),
+    /// `placed_block` of exactly one block id.
+    Places(String),
     Other,
 }
 
@@ -80,6 +82,34 @@ fn consumed_item(conditions: &serde_json::Value) -> Option<String> {
     }
     let name = item.get("items")?.as_str()?;
     (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// The block a `placed_block` criterion asks for, when that is all it asks for.
+fn placed_block(conditions: &serde_json::Value) -> Option<String> {
+    let object = conditions.as_object()?;
+    let location = object.get("location")?.as_object()?;
+    if object.len() != 1 || location.len() != 2 || location.get("type")? != "minecraft:match_block"
+    {
+        return None;
+    }
+    let name = location.get("blocks")?.as_str()?;
+    (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// Blocks players placed since the last drain, `(player, block id)`.
+pub static PLACED: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
+
+/// Advancement criteria completed by placing a block.
+pub fn criteria_for_placed(block: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Places(wanted) if wanted == block) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
 }
 
 /// Items players finished eating or drinking since the last drain, `(player, item id)`.
@@ -149,6 +179,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             ),
             Some("minecraft:recipe_unlocked") => {
                 Criterion::Recipe(c["conditions"]["recipes"].as_str()?.to_owned())
+            }
+            Some("minecraft:placed_block") => {
+                placed_block(&c["conditions"]).map_or(Criterion::Other, Criterion::Places)
             }
             Some("minecraft:changed_dimension") => {
                 let conditions = c["conditions"].as_object();
@@ -406,6 +439,16 @@ mod tests {
             done.contains(&"minecraft:story/enter_the_end#entered_end".to_owned()),
             !rules().is_empty()
         );
+    }
+
+    #[test]
+    fn placed_block_criteria_match_one_plain_block() {
+        let one = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "minecraft:beetroots"}});
+        assert_eq!(placed_block(&one).as_deref(), Some("minecraft:beetroots"));
+        let tag = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "#minecraft:beds"}});
+        assert_eq!(placed_block(&tag), None);
+        let with_state = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "minecraft:x", "state": {}}});
+        assert_eq!(placed_block(&with_state), None);
     }
 
     #[test]
