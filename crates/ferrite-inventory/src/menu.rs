@@ -309,6 +309,13 @@ pub trait Crafter {
         None
     }
 
+    /// The items each cell of a `width` x `width` crafting grid must hold for recipe `id`, laid
+    /// out row-major (`None` is an empty cell), or `None` when the recipe does not fit the grid.
+    /// Names carry the `minecraft:` prefix.
+    fn recipe_layout(&self, _id: &str, _width: usize) -> Option<Vec<Option<Vec<String>>>> {
+        None
+    }
+
     /// The furnace-family recipe for `input`, if one exists (vanilla `RecipeManager.getRecipeFor`).
     fn cook(&self, _kind: FurnaceKind, _input: &ItemStack) -> Option<CookingOutput> {
         None
@@ -1564,6 +1571,75 @@ impl Menu {
             let mut p = Clicker::new(inventory, true, crafter);
             self.put(&mut p, slot, stack);
         }
+    }
+
+    /// Vanilla `ServerPlaceRecipe`: moves the crafting grid back to the inventory, then fills each
+    /// cell of `layout` (row-major, one entry per grid cell) with items from the inventory, one
+    /// craft's worth, or as many crafts as the stacks allow when `max` is set. Returns whether the
+    /// grid was filled; otherwise nothing changes.
+    pub fn place_recipe(
+        &mut self,
+        inventory: &mut PlayerInventory,
+        crafter: &dyn Crafter,
+        layout: &[Option<Vec<String>>],
+        max: bool,
+    ) -> bool {
+        if self.grid_width == 0 || layout.len() != self.grid.len() {
+            return false;
+        }
+        let (saved_inventory, saved_grid) = (inventory.clone(), self.grid.clone());
+        let mut placed = false;
+        'fill: {
+            for cell in 0..self.grid.len() {
+                let stack = std::mem::take(&mut self.grid[cell]);
+                if inventory.place_back(stack).is_some() {
+                    break 'fill;
+                }
+            }
+            let key = |name: &str| name.strip_prefix("minecraft:").unwrap_or(name).to_owned();
+            for pass in 0..if max { 64 } else { 1 } {
+                let (pass_inventory, pass_grid) = (inventory.clone(), self.grid.clone());
+                let mut filled = true;
+                for (cell, wanted) in layout.iter().enumerate() {
+                    let Some(wanted) = wanted else { continue };
+                    let have = &self.grid[cell];
+                    let source = (0..crate::inventory::ITEMS).find(|&slot| {
+                        let stack = inventory.get(slot);
+                        !stack.is_empty()
+                            && stack
+                                .name()
+                                .is_some_and(|name| wanted.iter().any(|w| key(w) == key(name)))
+                            && (have.is_empty()
+                                || (have.is_same_item_same_components(stack)
+                                    && have.count < have.max_stack_size()))
+                    });
+                    let Some(source) = source else {
+                        filled = false;
+                        break;
+                    };
+                    let taken = inventory.remove(source, 1);
+                    if self.grid[cell].is_empty() {
+                        self.grid[cell] = taken;
+                    } else {
+                        self.grid[cell].count += 1;
+                    }
+                }
+                if !filled {
+                    *inventory = pass_inventory;
+                    self.grid = pass_grid;
+                    placed = pass > 0;
+                    break 'fill;
+                }
+                placed = true;
+            }
+        }
+        if !placed {
+            *inventory = saved_inventory;
+            self.grid = saved_grid;
+            return false;
+        }
+        self.refresh_result(crafter);
+        true
     }
 
     /// Vanilla `isValidSlotIndex`.

@@ -29,6 +29,8 @@ pub enum ServerboundPlay {
     ContainerButtonClick(ContainerButtonClick),
     /// Vanilla `ServerboundRenameItemPacket` (anvil).
     RenameItem(RenameItem),
+    /// Vanilla `ServerboundPlaceRecipePacket`: fill the crafting grid from the recipe book.
+    PlaceRecipe(ferrite_protocol::packets::play::PlaceRecipe),
     /// Vanilla `ServerboundSetBeaconPacket`: the two effects chosen in a beacon screen.
     SetBeacon(SetBeacon),
     /// Vanilla `ServerboundSelectTradePacket`: the offer picked in a merchant screen.
@@ -311,6 +313,9 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
             ferrite_protocol::packets::play::ServerboundInteract::decode(&mut b)?,
         )),
         49 => Some(ServerboundPlay::RenameItem(RenameItem::decode(&mut b)?)),
+        39 => Some(ServerboundPlay::PlaceRecipe(
+            ferrite_protocol::packets::play::PlaceRecipe::decode(&mut b)?,
+        )),
         53 => Some(ServerboundPlay::SetBeacon(SetBeacon::decode(&mut b)?)),
         52 => Some(ServerboundPlay::SelectTrade(SelectTrade::decode(&mut b)?)),
         41 => Some(ServerboundPlay::PlayerAction(PlayerAction::decode(&mut b)?)),

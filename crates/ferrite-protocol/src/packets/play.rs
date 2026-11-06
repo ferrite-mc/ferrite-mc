@@ -768,6 +768,8 @@ packet!(ContainerButtonClick,17,Serverbound,{window:VarInt,button:VarInt});
 packet!(SetBeacon,53,Serverbound,{primary:Option<VarInt>,secondary:Option<VarInt>});
 // Vanilla `ServerboundRenameItemPacket` (anvil): the name field is capped at 50 by the server.
 packet!(RenameItem,49,Serverbound,{name:String});
+// Vanilla `ServerboundPlaceRecipePacket`: a click on a recipe in the recipe book.
+packet!(PlaceRecipe,39,Serverbound,{window:VarInt,display_id:VarInt,use_max:bool});
 
 /// Vanilla `ItemCost`: an item, the count of it the trade wants and the data-component predicate
 /// the stack must match. Offers generated from the vanilla trade data never carry a predicate, so
@@ -1885,6 +1887,11 @@ mod interaction_tests {
             y: 1.5,
             z: -0.5,
             using_secondary_action: true,
+        });
+        roundtrip(PlaceRecipe {
+            window: VarInt(3),
+            display_id: VarInt(412),
+            use_max: true,
         });
         roundtrip(HurtAnimation {
             id: VarInt(9),

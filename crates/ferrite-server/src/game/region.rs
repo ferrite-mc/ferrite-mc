@@ -3403,6 +3403,7 @@ impl Player {
                 ServerboundPlay::ContainerClick(p) => self.handle_container_click(p),
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
                 ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
+                ServerboundPlay::PlaceRecipe(p) => self.handle_place_recipe(p),
                 ServerboundPlay::SelectTrade(p) => self.handle_select_trade(p),
                 ServerboundPlay::RenameItem(p) => self.rename_item(p.name),
                 ServerboundPlay::ContainerClose(_) => self.close_container(),

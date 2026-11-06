@@ -134,6 +134,35 @@ impl Crafter for RecipeCrafter {
             .map(|(_, result)| result)
     }
 
+    fn recipe_layout(&self, id: &str, width: usize) -> Option<Vec<Option<Vec<String>>>> {
+        let recipe = self.0.recipe(id)?;
+        let tags = self.0.tags();
+        let items = |ingredient: &ferrite_recipe::Ingredient| ingredient.resolved_items(tags);
+        let mut cells = vec![None; width * width];
+        match &recipe.kind {
+            RecipeKind::CraftingShaped(shaped) => {
+                if shaped.width > width || shaped.height > width {
+                    return None;
+                }
+                for (row, line) in shaped.pattern.iter().enumerate() {
+                    for (column, cell) in line.iter().enumerate() {
+                        cells[row * width + column] = cell.as_ref().map(items);
+                    }
+                }
+            }
+            RecipeKind::CraftingShapeless(shapeless) => {
+                if shapeless.ingredients.len() > cells.len() {
+                    return None;
+                }
+                for (cell, ingredient) in cells.iter_mut().zip(&shapeless.ingredients) {
+                    *cell = Some(items(ingredient));
+                }
+            }
+            _ => return None,
+        }
+        Some(cells)
+    }
+
     fn smithing_recipe_id(
         &self,
         template: &ItemStack,
@@ -342,6 +371,35 @@ mod tests {
 
     fn stack(name: &str, count: i32) -> ItemStack {
         ItemStack::from_name(name).unwrap().copy_with_count(count)
+    }
+
+    #[test]
+    fn a_recipe_lays_out_on_the_grid_it_fits() {
+        let crafter = crafter();
+        // Sticks: two planks one above the other, in the top-left corner of either grid.
+        let two = crafter
+            .recipe_layout("minecraft:stick", 2)
+            .expect("fits 2x2");
+        assert_eq!(two.len(), 4);
+        assert!(
+            two[0]
+                .as_ref()
+                .is_some_and(|items| items.contains(&"minecraft:oak_planks".to_owned()))
+        );
+        assert!(two[2].is_some() && two[1].is_none() && two[3].is_none());
+        // A crafting table fits 2x2; a chest (3x3 ring) does not.
+        assert!(
+            crafter
+                .recipe_layout("minecraft:crafting_table", 2)
+                .is_some()
+        );
+        assert!(crafter.recipe_layout("minecraft:chest", 2).is_none());
+        assert!(crafter.recipe_layout("minecraft:chest", 3).is_some());
+        assert!(
+            crafter
+                .recipe_layout("minecraft:no_such_recipe", 3)
+                .is_none()
+        );
     }
 
     #[test]

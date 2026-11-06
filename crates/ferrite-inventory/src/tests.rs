@@ -346,6 +346,29 @@ fn taking_the_smithing_result_records_the_recipe() {
 }
 
 #[test]
+fn placing_a_recipe_moves_ingredients_from_the_inventory_into_the_grid() {
+    let layout = vec![Some(vec!["minecraft:oak_log".to_owned()]), None, None, None];
+    let mut inv = PlayerInventory::new();
+    inv.set(9, item("oak_log", 3));
+    inv.set(10, item("stone", 1));
+    let mut menu = Menu::inventory();
+    // One craft: a single log moves over and the result appears.
+    assert!(menu.place_recipe(&mut inv, &TestCrafter, &layout, false));
+    assert_eq!(menu.grid()[0], item("oak_log", 1));
+    assert_eq!(inv.get(9), &item("oak_log", 2));
+    assert_eq!(menu.result(), &item("oak_planks", 4));
+    // Placing again returns the grid first, then fills it again; shift takes every log.
+    assert!(menu.place_recipe(&mut inv, &TestCrafter, &layout, true));
+    assert_eq!(menu.grid()[0], item("oak_log", 3));
+    assert!(inv.get(9).is_empty());
+    // Without the ingredient nothing changes.
+    let mut bare = PlayerInventory::new();
+    let mut menu = Menu::inventory();
+    assert!(!menu.place_recipe(&mut bare, &TestCrafter, &layout, false));
+    assert!(menu.grid()[0].is_empty());
+}
+
+#[test]
 fn inventory_menu_maps_vanilla_slots() {
     let mut f = Fixture::inventory();
     f.inv.set(0, item("stone", 1));

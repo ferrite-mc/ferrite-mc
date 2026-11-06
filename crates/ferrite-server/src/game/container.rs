@@ -503,6 +503,34 @@ impl Player {
         emit(self, out);
     }
 
+    /// A click on a recipe in the recipe book (vanilla `ServerPlaceRecipe`): fills the open
+    /// crafting grid from the inventory. A recipe that cannot be filled leaves the grid as it was
+    /// (vanilla also shows a ghost recipe). Whether the player has unlocked the recipe is not
+    /// checked.
+    pub fn handle_place_recipe(&mut self, p: ferrite_protocol::packets::play::PlaceRecipe) {
+        if self.gamemode == 3 {
+            return;
+        }
+        let menu = self
+            .menus
+            .open
+            .as_mut()
+            .unwrap_or(&mut self.menus.inventory);
+        if menu.container_id() != p.window.0 {
+            return;
+        }
+        let width = menu.grid().len().isqrt();
+        let Some(layout) = super::recipe_packets::recipe_of_display(p.display_id.0)
+            .and_then(|id| crafter().recipe_layout(id, width))
+        else {
+            return;
+        };
+        if menu.place_recipe(&mut self.inventory, crafter(), &layout, p.use_max) {
+            let full = menu.broadcast_full_state(&self.inventory);
+            emit(self, vec![full]);
+        }
+    }
+
     pub fn handle_set_beacon(&mut self, p: SetBeacon) {
         let Some(menu) = self
             .menus

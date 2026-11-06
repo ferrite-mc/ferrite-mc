@@ -83,6 +83,15 @@ pub fn parse(json: &str) -> Book {
     book
 }
 
+/// The recipe id a recipe-book click (`place_recipe`) names by display id.
+pub fn recipe_of_display(index: i32) -> Option<&'static str> {
+    book()
+        .recipes
+        .iter()
+        .find(|(_, recipe)| recipe.displays.iter().any(|d| d.index == index))
+        .map(|(id, _)| id.as_str())
+}
+
 fn book() -> &'static Book {
     static ALL: OnceLock<Book> = OnceLock::new();
     ALL.get_or_init(|| {

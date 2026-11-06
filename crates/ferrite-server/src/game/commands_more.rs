@@ -254,6 +254,7 @@ pub fn counts_as_activity(packet: &ferrite_net::game::ServerboundPlay) -> bool {
             | P::RenameItem(_)
             | P::SetBeacon(_)
             | P::SelectTrade(_)
+            | P::PlaceRecipe(_)
             | P::Chat(_)
             | P::ChatCommand(_)
             | P::ChatCommandSigned(_)
