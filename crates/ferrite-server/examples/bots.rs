@@ -21,6 +21,10 @@ struct Bot {
     stream: TcpStream,
     encoder: FrameEncoder,
     decoder: FrameDecoder,
+    /// The last packet ids received, reported when the server closes the connection.
+    recent: std::collections::VecDeque<i32>,
+    /// Where the server last placed this bot.
+    placed: [f64; 3],
 }
 impl Bot {
     async fn send<P: Packet>(&mut self, p: &P) {
@@ -38,7 +42,11 @@ impl Bot {
                 }
                 let mut bytes = [0u8; 8192];
                 let n = self.stream.read(&mut bytes).await.unwrap();
-                assert_ne!(n, 0);
+                assert_ne!(
+                    n, 0,
+                    "server closed the connection; last packet ids {:?}",
+                    self.recent
+                );
                 self.decoder.feed(&bytes[..n]);
             }
         })
@@ -50,10 +58,15 @@ impl Bot {
         let mut body = bytes.as_slice();
         let id = VarInt::decode(&mut body).unwrap().0;
         let rest = body.to_vec();
+        if self.recent.len() == 12 {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(id);
         match id {
             73 => {
                 let mut b = rest.as_slice();
                 let p = PositionSync::decode(&mut b).unwrap();
+                self.placed = [p.x, p.y, p.z];
                 self.send(&ConfirmTeleport {
                     id: p.teleport_id,
                     x: p.x,
@@ -93,6 +106,8 @@ impl Bot {
             stream,
             encoder: FrameEncoder::default(),
             decoder: FrameDecoder::default(),
+            recent: Default::default(),
+            placed: [0.0; 3],
         };
         b.send(&Intention {
             protocol_version: 777,
@@ -320,14 +335,10 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
     world.shutdown().await.unwrap();
     server.abort();
 }
-/// Walks `n` bots on an already running server (`BOTS_ADDR=host:port`, `BOTS_Y` = standing height)
-/// for 30 s so another server can be compared under the same load. The server's own tick figures
+/// Walks `n` bots on an already running server (`BOTS_ADDR=host:port`)
+/// for 40 s so another server can be compared under the same load. The server's own tick figures
 /// are read from that server; this prints `WALKING` once everyone has joined.
 async fn run_external(addr: std::net::SocketAddr, n: usize) {
-    let y: f64 = std::env::var("BOTS_Y")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(-60.0);
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n + 1));
     let mut tasks = Vec::new();
     for i in 0..n {
@@ -339,7 +350,8 @@ async fn run_external(addr: std::net::SocketAddr, n: usize) {
             barrier.wait().await;
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
-            let (mut x, mut z, mut rng) = (0.5, 0.5, i as u64 + 1);
+            let [mut x, y, mut z] = bot.placed;
+            let mut rng = i as u64 + 1;
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
