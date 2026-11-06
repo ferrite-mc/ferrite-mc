@@ -253,6 +253,7 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("FallDistance".into(), Tag::Float(mob.fall_distance));
         c.insert("Despawns".into(), Tag::Byte(mob.despawns as i8));
         c.insert("LootDropped".into(), Tag::Byte(mob.loot_dropped as i8));
+        c.insert("NoAI".into(), Tag::Byte(mob.no_ai as i8));
         c.insert("WanderTimer".into(), Tag::Int(mob.wander_timer as i32));
         c.insert("WanderYaw".into(), Tag::Float(mob.wander_yaw));
         c.insert("Moving".into(), Tag::Byte(mob.moving as i8));
@@ -365,6 +366,7 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.fall_distance = float(c, "FallDistance").unwrap_or(0.0);
                 mob.despawns = boolean(c, "Despawns");
                 mob.loot_dropped = boolean(c, "LootDropped");
+                mob.no_ai = boolean(c, "NoAI");
                 mob.wander_timer = int(c, "WanderTimer").unwrap_or(0).max(0) as u32;
                 mob.wander_yaw = float(c, "WanderYaw").unwrap_or(0.0);
                 mob.moving = boolean(c, "Moving");

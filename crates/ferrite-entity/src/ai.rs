@@ -367,6 +367,10 @@ pub fn tick_with(
             data.pitch = pitch;
         }
 
+        if mob::state(store, key).is_some_and(|state| state.no_ai) {
+            walking = None;
+            look = None;
+        }
         let mut vel = store.vel(key).unwrap_or_default();
         if let Some(yaw) = walking {
             let acceleration = kind.movement_speed() * WALK_ACCELERATION * speed;
@@ -628,6 +632,22 @@ mod tests {
                 &[Vec3::new(9.5, 64.0, 0.5)]
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn a_mob_without_ai_stays_where_it_stands() {
+        let world = TestWorld::flat(64);
+        let (mut store, key) = cow(0.5, 64.0, 0.5);
+        mob::state_mut(&mut store, key).unwrap().no_ai = true;
+        let mut rng = Rng::new(8);
+        for _ in 0..400 {
+            tick(&mut store, &world, &[], &mut rng);
+        }
+        let pos = store.pos(key).unwrap();
+        assert!(
+            (pos.x - 0.5).abs() < 0.3 && (pos.z - 0.5).abs() < 0.3,
+            "{pos:?}"
         );
     }
 

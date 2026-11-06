@@ -1238,11 +1238,11 @@ async fn run(
                   commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: Some(outbound.clone()) }); } } },
                   commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: Some(outbound.clone()) }); } } },
                   commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: Some(outbound.clone()) }); } } },
-                  commands::Action::Summon { kind, pos } => {
+                  commands::Action::Summon { kind, pos, no_ai } => {
                       let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                       let dimension = runtime.dimension;
                       if worlds.owner(dimension, chunk).is_some() {
-                          worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon(kind, pos); });
+                          worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon(kind, pos, no_ai); });
                           chat(outbound, &format!("Summoned new {}", kind.display_name()));
                       } else {
                           chat(outbound, "That position is not loaded");
@@ -1312,10 +1312,10 @@ async fn run(
                   commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: None }); } } },
                   commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: None }); } } },
                   commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: None }); } } },
-                  commands::Action::Summon { kind, pos } => {
+                  commands::Action::Summon { kind, pos, no_ai } => {
                       let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                       if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                          worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.summon(kind, pos); });
+                          worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.summon(kind, pos, no_ai); });
                           tracing::info!("Summoned new {} at {pos:?}", kind.display_name());
                       } else {
                           tracing::warn!("summon target chunk is not loaded");

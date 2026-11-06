@@ -705,6 +705,8 @@ pub enum Action {
     Summon {
         kind: MobKind,
         pos: [f64; 3],
+        /// `{NoAI:1b}` in the optional data tag: the mob gets no goals.
+        no_ai: bool,
     },
     ProfileStart,
     ProfileStop,
@@ -1116,7 +1118,14 @@ fn summon_builder() -> ferrite_command::NodeBuilder<Source> {
         .then(
             argument("entity", ArgumentType::ResourceLocation)
                 .executes(|ctx| summon_action(ctx, false))
-                .then(argument("pos", ArgumentType::Vec3).executes(|ctx| summon_action(ctx, true))),
+                .then(
+                    argument("pos", ArgumentType::Vec3)
+                        .executes(|ctx| summon_action(ctx, true))
+                        .then(
+                            argument("nbt", ArgumentType::opaque("minecraft:nbt_compound_tag"))
+                                .executes(|ctx| summon_action(ctx, true)),
+                        ),
+                ),
         )
 }
 
@@ -1136,7 +1145,16 @@ fn summon_action(ctx: &CommandContext<Source>, with_pos: bool) -> Result<i32, Co
     } else {
         ctx.source().origin
     };
-    send(ctx.source(), Action::Summon { kind, pos })
+    // Only `NoAI` is understood of the data tag; a malformed tag is an error as in vanilla.
+    let no_ai = match ctx.string("nbt") {
+        Some(text) => {
+            let tag = ferrite_nbt::snbt::parse(text)
+                .map_err(|error| CommandError::failed(error.to_string()))?;
+            matches!(&tag, Tag::Compound(c) if matches!(c.get("NoAI"), Some(Tag::Byte(b)) if *b != 0))
+        }
+        None => false,
+    };
+    send(ctx.source(), Action::Summon { kind, pos, no_ai })
 }
 
 fn admin_targets_command(
@@ -3823,12 +3841,33 @@ mod tests {
     }
 
     #[test]
+    fn summon_reads_no_ai_from_the_data_tag() {
+        assert_eq!(
+            only("summon minecraft:cow 1 64 1 {NoAI:1b}", 2),
+            Action::Summon {
+                kind: MobKind::Cow,
+                pos: [1.5, 64.0, 1.5],
+                no_ai: true,
+            }
+        );
+        assert_eq!(
+            only("summon minecraft:cow 1 64 1 {Silent:1b}", 2),
+            Action::Summon {
+                kind: MobKind::Cow,
+                pos: [1.5, 64.0, 1.5],
+                no_ai: false,
+            }
+        );
+    }
+
+    #[test]
     fn summon_parses_the_vanilla_entity_and_position_arguments() {
         assert_eq!(
             only("summon minecraft:cow", 2),
             Action::Summon {
                 kind: MobKind::Cow,
                 pos: [0.0, 64.0, 0.0],
+                no_ai: false,
             }
         );
         assert_eq!(
@@ -3836,6 +3875,7 @@ mod tests {
             Action::Summon {
                 kind: MobKind::Pig,
                 pos: [10.5, 64.5, -2.5],
+                no_ai: false,
             }
         );
         assert_eq!(
@@ -3843,6 +3883,7 @@ mod tests {
             Action::Summon {
                 kind: MobKind::Sheep,
                 pos: [0.0, 66.0, 0.0],
+                no_ai: false,
             }
         );
         assert_eq!(
@@ -3850,6 +3891,7 @@ mod tests {
             Action::Summon {
                 kind: MobKind::Zombie,
                 pos: [2.5, 65.0, 0.5],
+                no_ai: false,
             }
         );
         // A vanilla entity this server cannot simulate yet, and an unknown id.
@@ -3858,6 +3900,7 @@ mod tests {
             Action::Summon {
                 kind: MobKind::Villager,
                 pos: [0.0, 64.0, 0.0],
+                no_ai: false,
             }
         );
         assert!(run("summon not_a_thing", 2).0.is_err());

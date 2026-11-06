@@ -3745,7 +3745,7 @@ impl Region {
         self.fluid_ticks.advance(&mut world);
     }
     /// Creates a mob at an absolute position (`/summon`).
-    pub fn summon(&mut self, kind: MobKind, pos: [f64; 3]) -> bool {
+    pub fn summon(&mut self, kind: MobKind, pos: [f64; 3], no_ai: bool) -> bool {
         if !pos
             .iter()
             .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
@@ -3757,7 +3757,10 @@ impl Region {
             ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
             &mut self.rng,
         );
-        self.entities.insert(record);
+        let key = self.entities.insert(record);
+        if no_ai && let Some(mob) = mob::state_mut(&mut self.entities, key) {
+            mob.no_ai = true;
+        }
         true
     }
     /// Ticks the modelled mobs: goals, movement, fall damage, despawn, natural spawning and

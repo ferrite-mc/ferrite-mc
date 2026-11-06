@@ -3688,7 +3688,7 @@ async fn a_retracting_sticky_piston_carries_the_mob_standing_on_the_block() {
     wait_for_lamp(&mut bot, [3, 64, 0], block_state("minecraft:stone", &[])).await;
     // The cow stands on the pushed stone; pulling the stone back must take it along.
     world
-        .console_command("/summon minecraft:cow 3.5 65 0.5".into())
+        .console_command("/summon minecraft:cow 3.5 65 0.5 {NoAI:1b}".into())
         .await
         .unwrap();
     let cow = ferrite_entity::mob::MobKind::Cow.entity_type() as i32;

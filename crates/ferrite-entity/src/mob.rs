@@ -210,6 +210,8 @@ pub struct MobState {
     pub despawns: bool,
     /// Whether the death loot was already rolled and spawned.
     pub loot_dropped: bool,
+    /// Vanilla `NoAI`: no goals, so the mob never walks, looks or attacks; gravity still applies.
+    pub no_ai: bool,
     /// Ticks until the wander goal picks a new direction; zero picks now.
     pub wander_timer: u32,
     /// Yaw the wander goal walks along, in degrees.
@@ -247,6 +249,7 @@ impl MobState {
             fall_distance: 0.0,
             despawns: kind.despawns_when_far(),
             loot_dropped: false,
+            no_ai: false,
             wander_timer: 0,
             wander_yaw: 0.0,
             moving: false,

@@ -47,9 +47,9 @@ piston/End note and still applies for those areas.
   in `cargo test` with the single test
   `game::integration::a_retracting_sticky_piston_carries_the_mob_standing_on_the_block`
   (Linux and Windows). fmt, clippy and everything else pass.
-- Reading the code did not show the cause (the cow should move to x 2.5). Unproven suspicion: the
-  cow wanders off the stone between summon and click. The test now reports the teleports it saw
-  for the cow when it times out — read that message in the next failing run before changing logic.
+- Suspected cause: the cow wanders off the stone between summon and click. Fix pushed: vanilla `NoAI`
+  (`mob.no_ai`, saved as `NoAI`, `/summon <entity> <pos> {NoAI:1b}`) and the test summons the cow
+  with `{NoAI:1b}`. Verify in the next CI run; if it still fails, read the "teleports seen" message.
 - Locally in the cloud container the 9 `game::integration::*` fixture-world tests always fail
   (no `vanilla/26.3/fixture-world`); that is expected there, not a regression.
 
