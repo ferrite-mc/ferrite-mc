@@ -3397,12 +3397,9 @@ impl Player {
                     }
                 }
                 ServerboundPlay::Attack(p) => self.attacks.push(p.entity_id.0),
-                ServerboundPlay::Interact(p) => {
-                    // The secondary action is a right-click; an attack is the primary hand.
-                    if !p.using_secondary_action && p.hand.0 == 0 {
-                        self.attacks.push(p.entity_id.0);
-                    }
-                }
+                // A right-click on an entity ("use"), not an attack: left-clicks arrive as `Attack`
+                // above. Nothing is usable on an entity yet (breeding, taming, saddles).
+                ServerboundPlay::Interact(_) => {}
                 ServerboundPlay::ContainerClick(p) => self.handle_container_click(p),
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
                 ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
