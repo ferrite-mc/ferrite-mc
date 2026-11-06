@@ -2,6 +2,7 @@ mod advancement_packets;
 mod anvil;
 mod attributes;
 mod recipe_packets;
+mod recipe_unlock;
 pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
@@ -964,6 +965,7 @@ async fn run(
     let mut locator = waypoints::Locator::default();
     let mut advancement_sync = advancement_packets::AdvancementSync::default();
     let mut recipe_sync = recipe_packets::RecipeSync::default();
+    let mut scan_tick: u32 = 0;
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -1392,6 +1394,15 @@ async fn run(
                  let owned = command_state.lock().unwrap().more.advancements.clone();
                  for (target, bytes) in advancement_sync.sync(&online, &owned, settings.playerdata.as_deref()) {
                      if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
+                 }
+             }
+             scan_tick = scan_tick.wrapping_add(1);
+             if scan_tick.is_multiple_of(20) {
+                 for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }
+                 let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                 let mut game = command_state.lock().unwrap();
+                 for uuid in online.keys() {
+                     if let Some(items) = held.get(uuid) { recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default()); }
                  }
              }
              {
@@ -3093,6 +3104,7 @@ impl CommandRuntime<'_> {
                             entity: VarInt(online.entity),
                         },
                     ));
+                    ride::unfollow(viewer);
                     self.reply.key("commands.spectate.success.stopped", &[]);
                     return false;
                 };
@@ -3133,6 +3145,7 @@ impl CommandRuntime<'_> {
                 let _ = online.outbound.send(ferrite_net::game::packet(
                     &ferrite_protocol::packets::play::SetCamera { entity: VarInt(id) },
                 ));
+                ride::follow(viewer, found.uuid);
                 self.reply
                     .key("commands.spectate.success.started", &[&found.name]);
                 false

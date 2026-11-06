@@ -4,7 +4,7 @@
 //! at the vehicle's position plus a fixed lift. A rider that sneaks gets off.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use ferrite_protocol::{Encode, Packet, VarInt, packets::play::SetPassengers};
 use uuid::Uuid;
@@ -84,6 +84,24 @@ pub fn request_dismount(rider: Uuid) {
 /// Forgets a player who left.
 pub fn forget(uuid: Uuid) {
     rides().retain(|rider, vehicle| *rider != uuid && *vehicle != uuid);
+    follows().retain(|viewer, target| *viewer != uuid && *target != uuid);
+}
+
+fn follows() -> std::sync::MutexGuard<'static, HashMap<Uuid, Uuid>> {
+    static FOLLOWS: OnceLock<Mutex<HashMap<Uuid, Uuid>>> = OnceLock::new();
+    FOLLOWS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// `/spectate`: the viewer's body follows the target while the camera is attached.
+pub fn follow(viewer: Uuid, target: Uuid) {
+    follows().insert(viewer, target);
+}
+
+pub fn unfollow(viewer: Uuid) -> bool {
+    follows().remove(&viewer).is_some()
 }
 
 /// What the world loop must do after [`plan`].
@@ -130,8 +148,27 @@ pub fn plan(state: &GameState) -> Vec<Step> {
     let requested: Vec<Uuid> =
         std::mem::take(&mut *DISMOUNTS.lock().unwrap_or_else(|e| e.into_inner()));
     for rider in requested {
+        unfollow(rider);
         if let Some(vehicle) = dismount(rider) {
             steps.push(Step::Detach { vehicle });
+        }
+    }
+    let followers: Vec<(Uuid, Uuid)> = follows().iter().map(|(v, t)| (*v, *t)).collect();
+    for (viewer, target) in followers {
+        let (Some((viewer_pos, _, rot)), Some((target_pos, _, _))) =
+            (position(state, viewer), position(state, target))
+        else {
+            follows().remove(&viewer);
+            continue;
+        };
+        if (0..3).any(|i| (viewer_pos[i] - target_pos[i]).abs() > 0.01) {
+            steps.push(Step::Move {
+                rider: viewer,
+                rider_is_player: true,
+                rider_pos: viewer_pos,
+                rider_rot: rot,
+                to: target_pos,
+            });
         }
     }
     let snapshot: Vec<(Uuid, Uuid)> = rides().iter().map(|(r, v)| (*r, *v)).collect();
@@ -185,6 +222,17 @@ pub fn passengers_packet(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spectator_follow_ends_on_unfollow_and_when_either_side_leaves() {
+        let (viewer, target) = (Uuid::from_u128(901), Uuid::from_u128(902));
+        follow(viewer, target);
+        assert!(unfollow(viewer));
+        assert!(!unfollow(viewer));
+        follow(viewer, target);
+        forget(target);
+        assert!(!unfollow(viewer));
+    }
+
     use super::*;
 
     /// The ride table is global, so the tests take turns.

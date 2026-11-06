@@ -190,6 +190,8 @@ pub enum Command {
         slots: Vec<i16>,
         reply: std::sync::mpsc::Sender<Vec<ferrite_item::ItemStack>>,
     },
+    /// Publishes the names of the held items to [`super::recipe_unlock::HELD`].
+    ScanInventory,
     /// A plugin's `Player#setHealth`, applied on the owning region thread.
     SetHealth {
         health: f32,
@@ -3216,6 +3218,22 @@ impl Player {
                 }
                 Command::ItemSlots { slots, fill } => {
                     self.fill_slots(&slots, fill);
+                    continue;
+                }
+                Command::ScanInventory => {
+                    let held = (0..46)
+                        .filter_map(|slot| self.resolve_slot(slot))
+                        .filter_map(|slot| {
+                            let stack = self.inventory.get(slot);
+                            (!stack.is_empty())
+                                .then(|| ferrite_item::item_name(stack.item).map(str::to_owned))
+                                .flatten()
+                        })
+                        .collect();
+                    super::recipe_unlock::HELD
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(self.uuid, held);
                     continue;
                 }
                 Command::ReadSlots { slots, reply } => {

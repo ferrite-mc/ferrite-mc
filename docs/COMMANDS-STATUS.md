@@ -20,12 +20,13 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `tools/extractor/AdvancementExtractor.java`, framing checked against the vanilla packet bytes), so
   tabs and toasts work. Not done: triggers never complete advancements on their own, rewards are not
   given, and there is no chat announcement.
-- `/recipe`: give/take with the extracted recipe ids. Unlocked recipes are saved per player
+- `/recipe`: give/take with the extracted recipe ids; recipes also unlock from play (`recipe_unlock.rs`: every
+  second the held item names are scanned and matched against the `recipes/**` advancements'
+  `inventory_changed` items/tags and `recipe_unlocked`, ignoring counts and components). Unlocked recipes are saved per player
   (`playerdata/<uuid>.recipes.json`) and sent as `recipe_book_add`/`recipe_book_remove`, plus
   `update_recipes` and `recipe_book_settings` on join (`recipe_packets.rs`; displays are encoded by
   `tools/extractor/RecipeExtractor.java`, which boots the real data-pack loader, and the framing
-  is checked against the vanilla codec bytes). Not done: recipes are not unlocked by gameplay
-  (picking up ingredients), and the client's `recipe_book_change_settings`/`seen_recipe` packets are
+  is checked against the vanilla codec bytes). Not done: the `enter_block`/`tick` recipe triggers, and the client's `recipe_book_change_settings`/`seen_recipe` packets are
   ignored.
 - `/compute`: evaluates `context_int_provider` / `context_float_provider` (constant, reference,
   conditional, div, number_dispatcher, weighted_list, match_block). `entity` context carries no
@@ -75,8 +76,8 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 - `/attribute` stores base values and modifiers per entity and computes vanilla's formula, but
   nothing in the simulation reads them yet (only generic defaults plus the player overrides for
   attack damage and movement speed; per-mob defaults and `failed.entity` are missing).
-- `/dialog show` takes registry ids only (no inline dialog). `/spectate` sends `set_camera` but
-  the server does not move the spectator with the target. Feedback texts for the new commands
+- `/dialog show` takes registry ids only (no inline dialog). `/spectate` sends `set_camera` and the
+  spectator's body follows the target every tick (sneaking ends it). Feedback texts for the new commands
   were written from memory of en_us (argument order not verified against a lang file).
 
 - `/swing` sends the arm-swing animation to viewers; the animation type and duration are
