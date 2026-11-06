@@ -1305,6 +1305,7 @@ async fn run(
             worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);r.players.insert(id,*player);});
             defer_release(&worlds,&signal_tx,from_dimension,from,false);
             if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
+            command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
             command_state.lock().unwrap().set_dimension(id,dimension);
             worlds.schedule_global(move |g| g.set_dimension(id, dimension));
           },

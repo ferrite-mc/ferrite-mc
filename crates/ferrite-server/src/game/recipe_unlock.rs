@@ -21,6 +21,8 @@ pub enum Criterion {
     Kills(String),
     /// `consume_item` of one item id, or any item (`*`).
     Consumes(String),
+    /// `changed_dimension` into one dimension (no `from`).
+    EntersDimension(String),
     Other,
 }
 
@@ -83,6 +85,19 @@ fn consumed_item(conditions: &serde_json::Value) -> Option<String> {
 /// Items players finished eating or drinking since the last drain, `(player, item id)`.
 pub static CONSUMED: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
 
+/// Advancement criteria completed by entering a dimension (`minecraft:the_end`, ...).
+pub fn criteria_for_dimension(dimension: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::EntersDimension(to) if to == dimension) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
 /// Advancement criteria completed by consuming an item.
 pub fn criteria_for_consumed(item: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -134,6 +149,16 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             ),
             Some("minecraft:recipe_unlocked") => {
                 Criterion::Recipe(c["conditions"]["recipes"].as_str()?.to_owned())
+            }
+            Some("minecraft:changed_dimension") => {
+                let conditions = c["conditions"].as_object();
+                match conditions
+                    .filter(|o| o.len() == 1)
+                    .and_then(|o| o.get("to")?.as_str())
+                {
+                    Some(to) => Criterion::EntersDimension(to.to_owned()),
+                    None => Criterion::Other,
+                }
             }
             Some("minecraft:consume_item") => {
                 consumed_item(&c["conditions"]).map_or(Criterion::Other, Criterion::Consumes)
@@ -372,6 +397,15 @@ mod tests {
         assert_eq!(consumed_item(&tag), None);
         let counted = serde_json::json!({"item": {"items": "minecraft:apple", "count": 2}});
         assert_eq!(consumed_item(&counted), None);
+    }
+
+    #[test]
+    fn entering_the_end_is_matched_with_the_extracted_data() {
+        let done = criteria_for_dimension("minecraft:the_end");
+        assert_eq!(
+            done.contains(&"minecraft:story/enter_the_end#entered_end".to_owned()),
+            !rules().is_empty()
+        );
     }
 
     #[test]
