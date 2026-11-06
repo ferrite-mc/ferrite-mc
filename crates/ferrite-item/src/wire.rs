@@ -620,6 +620,27 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
                 None => out.push(0),
             }
         }
+        Component::Trim(trim) => {
+            // A holder reference is the registry id plus one; zero would start an inline value.
+            for (registry, name, id) in [
+                (
+                    "trim_material",
+                    &trim.material,
+                    registry_ids::trim_material_id(&trim.material),
+                ),
+                (
+                    "trim_pattern",
+                    &trim.pattern,
+                    registry_ids::trim_pattern_id(&trim.pattern),
+                ),
+            ] {
+                let id = id.ok_or_else(|| WireError::UnknownRegistry {
+                    registry,
+                    name: name.clone(),
+                })?;
+                write_varint(id + 1, &mut out);
+            }
+        }
         Component::Opaque(_) => return Err(WireError::NotRepresentable(component.kind())),
         Component::Raw(bytes) => out.extend_from_slice(bytes),
     }
@@ -1264,6 +1285,24 @@ pub mod registry_ids {
     pub fn enchantment_id(name: &str) -> Option<i32> {
         let wanted = key(name);
         let index = ENCHANTMENTS
+            .binary_search_by(|candidate| key(candidate).cmp(wanted))
+            .ok()?;
+        i32::try_from(index).ok()
+    }
+
+    /// Registry id of a trim material, with or without the `minecraft:` prefix.
+    pub fn trim_material_id(name: &str) -> Option<i32> {
+        let wanted = key(name);
+        let index = TRIM_MATERIALS
+            .binary_search_by(|candidate| key(candidate).cmp(wanted))
+            .ok()?;
+        i32::try_from(index).ok()
+    }
+
+    /// Registry id of a trim pattern, with or without the `minecraft:` prefix.
+    pub fn trim_pattern_id(name: &str) -> Option<i32> {
+        let wanted = key(name);
+        let index = TRIM_PATTERNS
             .binary_search_by(|candidate| key(candidate).cmp(wanted))
             .ok()?;
         i32::try_from(index).ok()

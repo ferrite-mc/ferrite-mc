@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ferrite_inventory::{CookingOutput, Crafter, FurnaceKind, NoCrafting};
-use ferrite_item::{Component, ItemStack, PotionContents, component_ids};
+use ferrite_item::{Component, ItemStack, PotionContents, Trim, component_ids};
 use ferrite_recipe::{CookingKind, RecipeBook, RecipeKind};
 
 /// Vanilla `CraftingMenu.slotChangedCraftingGrid`: the grid's result from the recipe book.
@@ -130,6 +130,7 @@ impl Crafter for RecipeCrafter {
         base: &ItemStack,
         addition: &ItemStack,
     ) -> Option<ItemStack> {
+        let base_stack = base;
         let (Some(template), Some(base), Some(addition)) =
             (template.name(), base.name(), addition.name())
         else {
@@ -137,6 +138,34 @@ impl Crafter for RecipeCrafter {
         };
         let tags = self.0.tags();
         for recipe in self.0.recipes() {
+            if let RecipeKind::SmithingTrim(trim) = &recipe.kind {
+                if !trim.template.matches(template, tags)
+                    || !trim.base.matches(base, tags)
+                    || !trim.addition.matches(addition, tags)
+                {
+                    continue;
+                }
+                let (Some(material), Some(pattern)) =
+                    (trim_material_of(addition), trim.pattern.as_deref())
+                else {
+                    continue;
+                };
+                let trim = Trim {
+                    material: format!("minecraft:{material}"),
+                    pattern: pattern.to_owned(),
+                };
+                // Vanilla `SmithingTrimRecipe`: the same trim again does nothing.
+                if let Some(Component::Trim(old)) =
+                    base_stack.effective_component(component_ids::TRIM)
+                    && old == trim
+                {
+                    return None;
+                }
+                let mut out = base_stack.copy_with_count(1);
+                out.components
+                    .insert(component_ids::TRIM, Component::Trim(trim));
+                return Some(out);
+            }
             let RecipeKind::SmithingTransform(transform) = &recipe.kind else {
                 continue;
             };
@@ -152,6 +181,24 @@ impl Crafter for RecipeCrafter {
         }
         None
     }
+}
+
+/// The trim material an item provides (its `provides_trim_material` component in vanilla).
+fn trim_material_of(item: &str) -> Option<&'static str> {
+    Some(match item.strip_prefix("minecraft:").unwrap_or(item) {
+        "amethyst_shard" => "amethyst",
+        "copper_ingot" => "copper",
+        "diamond" => "diamond",
+        "emerald" => "emerald",
+        "gold_ingot" => "gold",
+        "iron_ingot" => "iron",
+        "lapis_lazuli" => "lapis",
+        "netherite_ingot" => "netherite",
+        "quartz" => "quartz",
+        "redstone" => "redstone",
+        "resin_brick" => "resin",
+        _ => return None,
+    })
 }
 
 /// Vanilla `FuelValues.burnDuration` for the 26.3 fuels this server knows (the generated data
@@ -272,6 +319,43 @@ mod tests {
 
     fn stack(name: &str, count: i32) -> ItemStack {
         ItemStack::from_name(name).unwrap().copy_with_count(count)
+    }
+
+    #[test]
+    fn a_smithing_table_trims_armor_and_refuses_the_same_trim_twice() {
+        let crafter = crafter();
+        let template = stack("bolt_armor_trim_smithing_template", 1);
+        let armor = stack("iron_chestplate", 1);
+        let trimmed = crafter
+            .smithing(&template, &armor, &stack("amethyst_shard", 1))
+            .expect("amethyst bolt trim");
+        assert_eq!(trimmed.name(), armor.name());
+        assert_eq!(
+            trimmed.effective_component(component_ids::TRIM),
+            Some(Component::Trim(Trim {
+                material: "minecraft:amethyst".to_owned(),
+                pattern: "minecraft:bolt".to_owned(),
+            }))
+        );
+        // The same trim again is no recipe; a different material replaces it.
+        assert!(
+            crafter
+                .smithing(&template, &trimmed, &stack("amethyst_shard", 1))
+                .is_none()
+        );
+        let copper = crafter
+            .smithing(&template, &trimmed, &stack("copper_ingot", 1))
+            .expect("copper bolt trim");
+        assert!(matches!(
+            copper.effective_component(component_ids::TRIM),
+            Some(Component::Trim(trim)) if trim.material == "minecraft:copper"
+        ));
+        // Not armor, or not a trim material: nothing.
+        assert!(
+            crafter
+                .smithing(&template, &stack("stick", 1), &stack("amethyst_shard", 1))
+                .is_none()
+        );
     }
 
     #[test]

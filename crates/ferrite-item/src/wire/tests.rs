@@ -839,3 +839,31 @@ fn optional_hashed_slot_matches_the_wire_form() {
     None::<HashedSlot>.encode(&mut bytes);
     assert_eq!(bytes, encode_empty_hashed_slot());
 }
+
+#[test]
+fn a_trim_is_sent_as_two_registry_references() {
+    let trim = Component::Trim(crate::Trim {
+        material: "minecraft:amethyst".to_owned(),
+        pattern: "minecraft:bolt".to_owned(),
+    });
+    let material = registry_ids::trim_material_id("minecraft:amethyst").expect("registered");
+    let pattern = registry_ids::trim_pattern_id("minecraft:bolt").expect("registered");
+    let mut expected = Vec::new();
+    write_varint(material + 1, &mut expected);
+    write_varint(pattern + 1, &mut expected);
+    assert_eq!(encode_component(&trim).unwrap(), expected);
+    // Sorted file names are the registry ids: amethyst is the first material.
+    assert_eq!(material, 0);
+}
+
+#[test]
+fn an_unknown_trim_material_cannot_be_sent() {
+    let trim = Component::Trim(crate::Trim {
+        material: "minecraft:nothing".to_owned(),
+        pattern: "minecraft:bolt".to_owned(),
+    });
+    assert!(matches!(
+        encode_component(&trim),
+        Err(WireError::UnknownRegistry { .. })
+    ));
+}

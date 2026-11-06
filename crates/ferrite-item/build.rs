@@ -137,6 +137,35 @@ fn gen_wire_registries(registry: &serde_json::Value, enchantment_dir: &Path) -> 
         writeln!(out, "    {},", literal(enchantment)).expect("writing to a String cannot fail");
     }
     out.push_str("];\n");
+    // Datapack registries are numbered in sorted-name order, like the enchantments above.
+    let data = enchantment_dir
+        .parent()
+        .expect("the enchantment dir has a parent");
+    for (table, dir, doc) in [
+        ("TRIM_MATERIALS", "trim_material", "trim materials"),
+        ("TRIM_PATTERNS", "trim_pattern", "trim patterns"),
+    ] {
+        let mut names: Vec<String> = fs::read_dir(data.join(dir))
+            .unwrap_or_else(|error| panic!("failed to list {}: {error}", data.join(dir).display()))
+            .filter_map(|entry| {
+                let name = entry.expect("the directory is readable").file_name();
+                let name = name.to_string_lossy().into_owned();
+                name.strip_suffix(".json")
+                    .map(|stem| format!("minecraft:{stem}"))
+            })
+            .collect();
+        names.sort_unstable();
+        assert!(!names.is_empty(), "no {dir} files");
+        writeln!(
+            out,
+            "\n/// The {doc} in registry id order (sorted by name).\nstatic {table}: &[&str] = &["
+        )
+        .expect("writing to a String cannot fail");
+        for name in &names {
+            writeln!(out, "    {},", literal(name)).expect("writing to a String cannot fail");
+        }
+        out.push_str("];\n");
+    }
     out
 }
 

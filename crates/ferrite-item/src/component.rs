@@ -589,6 +589,34 @@ impl ToolRule {
     }
 }
 
+/// The `minecraft:trim` value: which material and pattern were smithed onto the armor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trim {
+    /// Trim material id, for example `minecraft:amethyst`.
+    pub material: String,
+    /// Trim pattern id, for example `minecraft:bolt`.
+    pub pattern: String,
+}
+
+impl Trim {
+    fn to_compound(&self) -> Compound {
+        let mut compound = Compound::new();
+        compound.insert("material".into(), Tag::String(self.material.clone()));
+        compound.insert("pattern".into(), Tag::String(self.pattern.clone()));
+        compound
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        Some(Self {
+            material: as_str(compound.get("material")?)?.to_owned(),
+            pattern: as_str(compound.get("pattern")?)?.to_owned(),
+        })
+    }
+}
+
 /// The `minecraft:tool` value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tool {
@@ -722,6 +750,8 @@ pub enum Component {
     PotionContents(PotionContents),
     /// `minecraft:tool`.
     Tool(Tool),
+    /// `minecraft:trim`, an armor trim from a smithing table.
+    Trim(Trim),
     /// A component without a typed variant, or a value whose NBT shape did not match its typed
     /// variant. Kept verbatim.
     Opaque(Tag),
@@ -754,6 +784,7 @@ impl Component {
             Self::Food(_) => ids::FOOD,
             Self::PotionContents(_) => ids::POTION_CONTENTS,
             Self::Tool(_) => ids::TOOL,
+            Self::Trim(_) => ids::TRIM,
             Self::Opaque(_) | Self::Raw(_) => return None,
         })
     }
@@ -779,6 +810,7 @@ impl Component {
             Self::Food(_) => "food",
             Self::PotionContents(_) => "potion_contents",
             Self::Tool(_) => "tool",
+            Self::Trim(_) => "trim",
             Self::Opaque(_) => "opaque",
             Self::Raw(_) => "raw",
         }
@@ -818,6 +850,7 @@ impl Component {
             Self::Food(food) => Tag::Compound(food.to_compound()),
             Self::PotionContents(contents) => Tag::Compound(contents.to_compound()),
             Self::Tool(tool) => Tag::Compound(tool.to_compound()),
+            Self::Trim(trim) => Tag::Compound(trim.to_compound()),
             Self::Opaque(tag) => tag.clone(),
             Self::Raw(_) => return Err(Error::NoNbtForm("raw")),
         })
@@ -861,6 +894,7 @@ impl Component {
             ids::FOOD => Food::from_tag(tag).map(Self::Food),
             ids::POTION_CONTENTS => PotionContents::from_tag(tag).map(Self::PotionContents),
             ids::TOOL => Tool::from_tag(tag).map(Self::Tool),
+            ids::TRIM => Trim::from_tag(tag).map(Self::Trim),
             _ => None,
         };
         typed.unwrap_or_else(|| Self::Opaque(tag.clone()))
@@ -1257,6 +1291,13 @@ mod tests {
                 }),
             ),
             (ids::TOOL, Component::Tool(tool)),
+            (
+                ids::TRIM,
+                Component::Trim(Trim {
+                    material: "minecraft:amethyst".to_owned(),
+                    pattern: "minecraft:bolt".to_owned(),
+                }),
+            ),
         ];
 
         for (id, component) in cases {
