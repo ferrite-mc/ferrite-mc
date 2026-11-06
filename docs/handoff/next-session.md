@@ -58,3 +58,13 @@ on the branch only.
 - Heredocs with apostrophes break the Bash tool: write scripts with the Write tool.
 - Never accept the Minecraft EULA for the user; host integration tests are run by them.
 - Trail-Code (`@trailhq/trail-code`) would not install: node-gyp needs Visual Studio C++ build tools.
+
+## 2026-11-07 update
+
+- Done since the list above: End (credits, advancement, saving, dragon attacks, block smashing),
+  tridents, wolf pack anger, worldgen host default 8 threads, Paper/Folia comparisons
+  (`docs/handoff/2026-11-07-paper-comparison.md`; its 200-bot tables were measured with bots that
+  did not send a view distance, so read them as rough).
+- Still open: vaults (`revaulting`, `under_lock_and_key`), tamed wolves attacking for the owner
+  (mobs only target players today), other tameable kinds, piston timing and edge-case tests,
+  Moonrise-style worldgen ports (profile is flat, see `docs/worldgen-host.md`), real-client checks.

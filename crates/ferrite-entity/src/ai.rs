@@ -794,6 +794,26 @@ mod tests {
     }
 
     #[test]
+    fn hurting_one_wild_wolf_angers_the_pack_but_not_tame_or_far_wolves() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(1);
+        let mut wolf = |store: &mut EntityStore, x: f64| {
+            store.insert(new_mob(MobKind::Wolf, Vec3::new(x, 64.0, 0.5), &mut rng))
+        };
+        let hurt = wolf(&mut store, 0.5);
+        let near = wolf(&mut store, 6.5);
+        let far = wolf(&mut store, 60.5);
+        let tame = wolf(&mut store, 3.5);
+        mob::state_mut(&mut store, tame).unwrap().owner = Some(uuid::Uuid::from_u128(9));
+        let player = uuid::Uuid::from_u128(1);
+        mob::retaliate(&mut store, hurt, player);
+        let target = |store: &EntityStore, k| mob::state(store, k).unwrap().target;
+        assert_eq!(target(&store, near), Some(player));
+        assert_eq!(target(&store, far), None);
+        assert_eq!(target(&store, tame), None);
+    }
+
+    #[test]
     fn snakes_and_spiders_shoot_and_bite() {
         let world = TestWorld::flat(64);
         let mut store = EntityStore::default();

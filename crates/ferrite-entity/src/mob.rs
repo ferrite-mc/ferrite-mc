@@ -432,6 +432,7 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
         }
         mob.target = Some(player);
         mob.anger = WOLF_ANGER_TICKS;
+        alert_pack(store, key, player);
         return true;
     }
     if !mob.kind.is_hostile() {
@@ -439,6 +440,35 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
     }
     mob.target = Some(player);
     true
+}
+
+/// Wild wolves within this distance join a wolf that was attacked (`Wolf.hurt` alerts the pack).
+const PACK_ALERT_RADIUS: f64 = 16.0;
+
+/// Every other wild wolf near `key` turns on `player` as well. shortcut: vanilla uses a box
+/// around the wolf and skips wolves that cannot see the target; this is a plain radius.
+fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
+    let Some(center) = store.pos(key) else {
+        return;
+    };
+    let near: Vec<EntityKey> = store
+        .keys()
+        .iter()
+        .copied()
+        .filter(|&other| other != key)
+        .filter(|&other| {
+            store.pos(other).is_some_and(|p| {
+                let (dx, dy, dz) = (p.x - center.x, p.y - center.y, p.z - center.z);
+                dx * dx + dy * dy + dz * dz <= PACK_ALERT_RADIUS * PACK_ALERT_RADIUS
+            }) && state(store, other).is_some_and(|m| m.kind == MobKind::Wolf && m.owner.is_none())
+        })
+        .collect();
+    for other in near {
+        if let Some(mob) = state_mut(store, other) {
+            mob.target = Some(player);
+            mob.anger = WOLF_ANGER_TICKS;
+        }
+    }
 }
 
 /// Kills a mob outright (`/kill`, lethal effects), bypassing the hurt cooldown.
