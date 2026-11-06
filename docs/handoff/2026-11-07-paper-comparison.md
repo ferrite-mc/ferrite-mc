@@ -27,3 +27,26 @@ queued packet and wrote it at once, so every tracked entity move cost one syscal
 The writer now waits 2 ms after the first packet and sends everything that arrived in one write
 (`ferrite-net/src/lib.rs`), which cut system time from 187% to about 18% (total ~135-160%).
 Costs 2 ms of latency per burst.
+
+## Vanilla-terrain world (worldgen test)
+Same bots and settings, but a generated world: Paper/Folia `level-type=minecraft:normal`, seed 0;
+Ferrite `generator = "vanilla"` (`heap-mb = 2048`, 4 threads, seed 0), which runs the patched official
+jar in a separate JVM. Ferrite needs about 60 s before its first join on a fresh directory (the host
+patches and boots the jar); the other two are ready in 6 s.
+
+| | Ferrite (vanilla host) | Paper | Folia |
+|---|---|---|---|
+| Idle RSS (Ferrite: server + host JVM) | 1285 MB | 2370 MB | 2342 MB |
+| Join of 200 bots (excl. 20 s settle) | ~2.2 s | ~4.4 s | ~13.7 s |
+| CPU while joining (core-seconds, whole process tree) | 100 | 72 | 78 |
+| CPU while walking (% of one core) | 120 | 230* | 183* |
+| Peak RSS | 2908 MB | 4166 MB | 4088 MB |
+| Bots kicked "Invalid move" | 0 | 174 | 86 |
+
+\* understated for the same reason as above (most Paper bots were kicked during the walk).
+
+The bots only walk about 1 block per second around the spawn, so this measures the spawn-area
+chunks (a few hundred, generated once) and not sustained generation. Ferrite spent about 40%
+more CPU than Paper on generating them. A real worldgen throughput test needs bots flying
+outwards (not written); the earlier measurement of ~32 chunks/s is the vanilla chunk system's
+plateau (see the optimisation hand-off).
