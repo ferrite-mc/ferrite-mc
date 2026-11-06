@@ -1217,6 +1217,52 @@ fn spectate_tree() -> NodeBuilder<Source> {
         )
 }
 
+/// Parses and checks an inline dialog. The client disconnects on a dialog its codec rejects, so
+/// the fields the vanilla codec requires are checked here (verified against `Dialog.CODEC`):
+/// every dialog needs `type` and `title`, `confirmation` needs `yes` and `no`, `multi_action`
+/// needs a non-empty `actions` list, and each button needs a `label`.
+pub(super) fn inline_dialog(text: &str) -> Result<ferrite_nbt::Compound, CommandError> {
+    use ferrite_nbt::Tag;
+    let bad = |why: &str| CommandError::failed(format!("Invalid dialog: {why}"));
+    let Tag::Compound(dialog) = ferrite_nbt::snbt::parse(text).map_err(|e| bad(&e.to_string()))?
+    else {
+        return Err(bad("expected a compound"));
+    };
+    let Some(Tag::String(kind)) = dialog.get("type") else {
+        return Err(bad("missing type"));
+    };
+    if dialog.get("title").is_none() {
+        return Err(bad("missing title"));
+    }
+    let button = |tag: Option<&Tag>| match tag {
+        Some(Tag::Compound(b)) if b.get("label").is_some() => Ok(()),
+        _ => Err(bad("button needs a label")),
+    };
+    match kind.trim_start_matches("minecraft:") {
+        "notice" | "server_links" | "dialog_list" => {}
+        "confirmation" => {
+            button(dialog.get("yes"))?;
+            button(dialog.get("no"))?;
+        }
+        "multi_action" => {
+            let Some(Tag::List(actions)) = dialog.get("actions") else {
+                return Err(bad("missing actions"));
+            };
+            let ferrite_nbt::List::Compound(actions) = actions else {
+                return Err(bad("actions must be buttons"));
+            };
+            if actions.is_empty() {
+                return Err(bad("actions must not be empty"));
+            }
+            for action in actions {
+                button(Some(&Tag::Compound(action.clone())))?;
+            }
+        }
+        other => return Err(bad(&format!("unknown dialog type {other}"))),
+    }
+    Ok(dialog)
+}
+
 fn dialog_tree() -> NodeBuilder<Source> {
     fn targets(ctx: &CommandContext<Source>) -> Result<Vec<uuid::Uuid>, CommandError> {
         resolved_targets(ctx, "targets")
@@ -1277,6 +1323,27 @@ fn dialog_tree() -> NodeBuilder<Source> {
                         else {
                             return Err(CommandError::failed("missing dialog"));
                         };
+                        if name.starts_with('{') {
+                            let dialog = inline_dialog(name)?;
+                            let players = targets(ctx)?;
+                            send(
+                                ctx.source(),
+                                Action::Packets {
+                                    targets: players.clone(),
+                                    packet: PlayerPacket::ShowDialogInline(
+                                        ferrite_protocol::packets::play::ShowDialogInline {
+                                            dialog,
+                                        },
+                                    ),
+                                },
+                            )?;
+                            return report(
+                                ctx,
+                                &players,
+                                "commands.dialog.show.single",
+                                "commands.dialog.show.multiple",
+                            );
+                        }
                         let id = if name.contains(':') {
                             name.clone()
                         } else {
@@ -1978,12 +2045,22 @@ fn debug_tree() -> NodeBuilder<Source> {
         .restricted(true)
         .then(literal::<Source>("start").executes(|ctx| profiling_run(ctx, true, false)))
         .then(literal::<Source>("stop").executes(|ctx| profiling_run(ctx, false, false)))
-        .then(
-            literal::<Source>("function").then(
-                argument::<Source>("name", ArgumentType::opaque("minecraft:function"))
-                    .executes(|_| Err(failure("commands.debug.function.traceFailed", vec![]))),
+        .then(literal::<Source>("function").then(
+            argument::<Source>("name", ArgumentType::opaque("minecraft:function")).executes(
+                |ctx| {
+                    let name = ctx.string("name").unwrap_or_default().to_owned();
+                    if ctx.source().function_depth > 0 {
+                        return Err(failure("commands.debug.function.noRecursion", vec![]));
+                    }
+                    let (count, file) = super::functions::trace(ctx.source(), &name)?;
+                    feedback(
+                        ctx,
+                        "commands.debug.function.success.single",
+                        vec![count.to_string(), name, file],
+                    )
+                },
             ),
-        )
+        ))
 }
 
 fn perf_tree() -> NodeBuilder<Source> {
@@ -2713,6 +2790,29 @@ mod tests {
         ));
         assert!(run("damage @s -1", 2, fresh(), None).0.is_err());
         assert!(run("damage @s 4", 1, fresh(), None).0.is_err());
+    }
+
+    #[test]
+    fn inline_dialogs_need_what_the_vanilla_codec_requires() {
+        assert!(inline_dialog(r#"{type:"minecraft:notice",title:"Hi"}"#).is_ok());
+        assert!(inline_dialog(r#"{type:"minecraft:notice"}"#).is_err());
+        assert!(inline_dialog(r#"{type:"minecraft:confirmation",title:"Hi"}"#).is_err());
+        assert!(
+            inline_dialog(
+                r#"{type:"minecraft:confirmation",title:"Hi",yes:{label:"Y"},no:{label:"N"}}"#
+            )
+            .is_ok()
+        );
+        assert!(inline_dialog(r#"{type:"minecraft:multi_action",title:"Hi"}"#).is_err());
+        assert!(
+            inline_dialog(r#"{type:"minecraft:multi_action",title:"Hi",actions:[{label:"A"}]}"#)
+                .is_ok()
+        );
+        assert!(
+            inline_dialog(r#"{type:"minecraft:multi_action",title:"Hi",actions:[{}]}"#).is_err()
+        );
+        assert!(inline_dialog(r#"{type:"minecraft:nope",title:"Hi"}"#).is_err());
+        assert!(inline_dialog("[1]").is_err());
     }
 
     #[test]

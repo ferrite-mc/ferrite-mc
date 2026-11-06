@@ -76,7 +76,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 - `/attribute` stores base values and modifiers per entity and computes vanilla's formula, but
   nothing in the simulation reads them yet (only generic defaults plus the player overrides for
   attack damage and movement speed; per-mob defaults and `failed.entity` are missing).
-- `/dialog show` takes registry ids only (no inline dialog). `/spectate` sends `set_camera` and the
+- `/dialog show` takes registry ids or an inline `{type:...,title:...}` compound (checked for the fields the vanilla codec requires, so a bad one is rejected instead of kicking the client; buttons' actions are not validated). `/spectate` sends `set_camera` and the
   spectator's body follows the target every tick (sneaking ends it). Feedback texts for the new commands
   were written from memory of en_us (argument order not verified against a lang file).
 
@@ -87,7 +87,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   Freeze stops game time, fluid ticks, random ticks and all entity simulation except players.
 - `/forceload` marks are saved per dimension in `data/minecraft/chunk_tickets.dat` (forced
   tickets only) and held again at startup.
-- `/debug function` always fails; `/test` accepts all syntax but never runs a test (no game
+- `/debug function` runs the function line by line and writes `debug/commands-<time>.txt` (nested function calls are run, not traced separately). `/test` accepts all syntax but never runs a test (no game
   test framework); `/jfr` always fails (Ferrite is not a JVM process); `/perf` and `/debug`
   report time and ticks but write no report file.
 - `/fetchprofile` only knows players who are online (no Mojang API lookup).

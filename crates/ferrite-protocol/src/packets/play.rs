@@ -557,6 +557,39 @@ impl Packet for BlockEntityData {
     const STATE: State = State::Play;
     const BOUND: Bound = Bound::Clientbound;
 }
+/// `show_dialog` with an inline dialog: holder id 0, then the dialog as network NBT.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShowDialogInline {
+    pub dialog: ferrite_nbt::Compound,
+}
+impl Encode for ShowDialogInline {
+    fn encode(&self, out: &mut Vec<u8>) {
+        VarInt(0).encode(out);
+        match ferrite_nbt::binary::write_network(&ferrite_nbt::Tag::Compound(self.dialog.clone())) {
+            Ok(bytes) => out.extend_from_slice(&bytes),
+            Err(_) => out.push(0),
+        }
+    }
+}
+impl Decode for ShowDialogInline {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        if VarInt::decode(buf)?.0 != 0 {
+            return Err(DecodeError::Invalid("registered dialog"));
+        }
+        let tag = ferrite_nbt::binary::read_network(buf)
+            .map_err(|error| DecodeError::Nbt(error.to_string()))?;
+        *buf = &[];
+        match tag {
+            ferrite_nbt::Tag::Compound(dialog) => Ok(Self { dialog }),
+            _ => Err(DecodeError::Invalid("dialog nbt")),
+        }
+    }
+}
+impl Packet for ShowDialogInline {
+    const ID: i32 = 143;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
 // Vanilla `ServerboundSetCommandBlockPacket`: the command, the command block mode
 // (0 = impulse, 1 = chain, 2 = repeat) and the three editor toggles.
 packet!(SetCommandBlock,55,Serverbound,{location:i64,command:String,mode:VarInt,track_output:bool,conditional:bool,automatic:bool});
@@ -1570,6 +1603,13 @@ mod interaction_tests {
         roundtrip(PostEffects { effects: vec![] });
         roundtrip(ClearDialog);
         roundtrip(ShowDialog { holder: VarInt(4) });
+        let mut dialog = ferrite_nbt::Compound::new();
+        dialog.insert(
+            "type".into(),
+            ferrite_nbt::Tag::String("minecraft:notice".into()),
+        );
+        dialog.insert("title".into(), ferrite_nbt::Tag::String("Hi".into()));
+        roundtrip(ShowDialogInline { dialog });
         let mut bytes = Vec::new();
         ClearDialog.encode(&mut bytes);
         assert!(bytes.is_empty());

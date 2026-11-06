@@ -18,6 +18,12 @@ fn template(key: &str) -> Option<&'static str> {
         "chat.type.advancement.task" => "%s has made the advancement %s",
         "chat.type.advancement.goal" => "%s has reached the goal %s",
         "chat.type.advancement.challenge" => "%s has completed the challenge %s",
+        "commands.debug.function.noRecursion" => "Can't trace from inside of function",
+        "commands.debug.function.noReturnRun" => "Tracing can't be used with return run",
+        "commands.debug.function.success.single" => {
+            "Traced %s command(s) from function '%s' to output file %s"
+        }
+        "commands.debug.function.traceFailed" => "Failed to trace function",
         "argument.pos.unloaded" => "That position is not loaded",
         "commands.advancement.grant.one.to.one.success" => "Granted the advancement %s to %s",
         "commands.advancement.grant.one.to.many.success" => {

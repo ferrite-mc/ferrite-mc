@@ -60,6 +60,7 @@ pub enum PlayerPacket {
     PostEffects(PostEffects),
     ClearDialog(ClearDialog),
     ShowDialog(ShowDialog),
+    ShowDialogInline(ferrite_protocol::packets::play::ShowDialogInline),
 }
 
 impl PlayerPacket {
@@ -139,6 +140,9 @@ impl PlayerPacket {
                 let _ = outbound.send(packet(p));
             }
             Self::ShowDialog(p) => {
+                let _ = outbound.send(packet(p));
+            }
+            Self::ShowDialogInline(p) => {
                 let _ = outbound.send(packet(p));
             }
         }

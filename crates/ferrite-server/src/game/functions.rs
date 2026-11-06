@@ -432,6 +432,60 @@ pub fn run(
     Ok(result)
 }
 
+/// `/debug function`: runs the function line by line and writes each command and its result to
+/// `debug/commands-<time>.txt`. Functions called from inside are run, not traced separately.
+/// Returns (commands run, output file).
+pub fn trace(source: &Source, raw: &str) -> Result<(usize, String), CommandError> {
+    trace_into(source, raw, Path::new("debug"))
+}
+
+fn trace_into(source: &Source, raw: &str, dir: &Path) -> Result<(usize, String), CommandError> {
+    let name = namespaced(raw);
+    let function = {
+        let state = source.state.lock().unwrap();
+        state.functions.get(&name).cloned()
+    };
+    let Some(function) = function else {
+        return Err(unknown(&name));
+    };
+    let lines = function.expand(None)?;
+    let tree = source
+        .tree
+        .as_ref()
+        .ok_or_else(|| CommandError::failed("functions need a running command dispatcher"))?;
+    let mut nested = source.clone();
+    nested.function_depth = source.function_depth + 1;
+    let mut report = format!("# Tracing function {name}\n");
+    let mut count = 0;
+    for line in lines {
+        let line = line.trim_start();
+        if line == "return" || line.starts_with("return ") {
+            return Err(CommandError::failed(crate::game::feedback::render(
+                "commands.debug.function.noReturnRun",
+                &[],
+            )));
+        }
+        count += 1;
+        report.push_str(&format!("$ {line}\n"));
+        match tree.execute(line, nested.clone()) {
+            Ok(result) => report.push_str(&format!("    = {result}\n")),
+            Err(error) => report.push_str(&format!("    ! {error}\n")),
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let file = dir.join(format!("commands-{stamp}.txt"));
+    let written = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&file, report));
+    if written.is_err() {
+        return Err(CommandError::failed(crate::game::feedback::render(
+            "commands.debug.function.traceFailed",
+            &[],
+        )));
+    }
+    Ok((count, file.to_string_lossy().replace('\\', "/")))
+}
+
 fn evaluate_return(
     tree: &CommandDispatcher<Source>,
     source: &Source,
@@ -653,5 +707,20 @@ mod tests {
         assert!(
             matches!(&actions[0], Action::Broadcast(feedback) if feedback.text.contains("before"))
         );
+    }
+
+    #[test]
+    fn debug_function_writes_each_command_and_its_result() {
+        let functions = store(&[("test:two", "say a\nsay b\nnosuchcommand")]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, _received) = source(&tree, functions);
+        let dir = tempfile::tempdir().unwrap();
+        let (count, file) = trace_into(&source, "test:two", dir.path()).unwrap();
+        assert_eq!(count, 3);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("# Tracing function test:two"), "{text}");
+        assert!(text.contains("$ say a\n    = 1"), "{text}");
+        assert!(text.contains("$ nosuchcommand\n    ! "), "{text}");
+        assert!(trace_into(&source, "test:none", dir.path()).is_err());
     }
 }
