@@ -45,6 +45,46 @@ pub const CONTACT_RANGE: f64 = 5.0;
 /// Damage of one hit and the ticks between hits.
 pub const CONTACT_DAMAGE: f32 = 6.0;
 pub const CONTACT_COOLDOWN: u16 = 20;
+/// Every `PERCH_PERIOD` ticks the dragon lands on the exit portal for `PERCH_TICKS` and breathes
+/// a cloud every `BREATH_INTERVAL` ticks (vanilla perch phases, without the sitting animation).
+pub const PERCH_PERIOD: u32 = 1500;
+pub const PERCH_TICKS: u32 = 200;
+pub const PERCH_SPOT: Vec3 = Vec3::new(0.0, 68.0, 0.0);
+pub const BREATH_INTERVAL: u32 = 20;
+/// A breath cloud lasts 30 seconds, reaches 3 blocks and hurts everyone in it every 20 ticks.
+/// shortcut: the cloud keeps its radius instead of shrinking, and hurts for a flat 6.
+pub const BREATH_TICKS: u32 = 600;
+pub const BREATH_RADIUS: f64 = 3.0;
+pub const BREATH_HIT_INTERVAL: u32 = 20;
+pub const BREATH_DAMAGE: f32 = 6.0;
+/// The dragon smashes blocks every this many ticks.
+pub const SMASH_INTERVAL: u64 = 3;
+/// A fireball is spat at the nearest player in [`FIREBALL_RANGE`] every `FIREBALL_PERIOD` ticks.
+pub const FIREBALL_PERIOD: u32 = 400;
+pub const FIREBALL_RANGE: f64 = 64.0;
+pub const FIREBALL_SPEED: f64 = 1.0;
+/// The dragon smashes every block inside its body except these (`#minecraft:dragon_immune`).
+pub const IMMUNE: &[&str] = &[
+    "minecraft:barrier",
+    "minecraft:bedrock",
+    "minecraft:end_portal",
+    "minecraft:end_portal_frame",
+    "minecraft:end_gateway",
+    "minecraft:command_block",
+    "minecraft:repeating_command_block",
+    "minecraft:chain_command_block",
+    "minecraft:structure_block",
+    "minecraft:jigsaw",
+    "minecraft:moving_piston",
+    "minecraft:obsidian",
+    "minecraft:crying_obsidian",
+    "minecraft:end_stone",
+    "minecraft:iron_bars",
+    "minecraft:respawn_anchor",
+    "minecraft:reinforced_deepslate",
+    "minecraft:test_block",
+    "minecraft:test_instance_block",
+];
 /// Crystals within this many blocks heal the dragon (`EnderDragon.checkCrystals`).
 pub const HEAL_RANGE: f64 = 32.0;
 /// The dragon heals this much every [`HEAL_INTERVAL`] ticks while a crystal is in range.
@@ -159,7 +199,8 @@ pub fn fly(
     let (circle, circle_yaw) = position_at(age);
     // Every `CHARGE_PERIOD` ticks the dragon dives at the nearest player for a while, then
     // rejoins the circle; between those it never moves faster than `MAX_SPEED`.
-    let charging = age % CHARGE_PERIOD >= CHARGE_PERIOD - CHARGE_TICKS;
+    let perching = age % PERCH_PERIOD >= PERCH_PERIOD - PERCH_TICKS;
+    let charging = !perching && age % CHARGE_PERIOD >= CHARGE_PERIOD - CHARGE_TICKS;
     let target = players
         .iter()
         .filter(|target| target.pos.distance_to_sqr(previous) <= CHARGE_RANGE * CHARGE_RANGE)
@@ -169,6 +210,7 @@ pub fn fly(
                 .total_cmp(&b.pos.distance_to_sqr(previous))
         });
     let goal = match target {
+        _ if perching => PERCH_SPOT,
         Some(target) if charging => target.pos,
         _ => circle,
     };
@@ -191,6 +233,31 @@ pub fn fly(
     };
     store.set_pos(key, pos);
     store.set_vel(key, pos - previous);
+    // Strafing: a fireball at the nearest player now and then, from the head.
+    if age % FIREBALL_PERIOD == FIREBALL_PERIOD / 2
+        && !perching
+        && let Some(target) = players
+            .iter()
+            .filter(|t| t.pos.distance_to_sqr(pos) <= FIREBALL_RANGE * FIREBALL_RANGE)
+            .min_by(|a, b| {
+                a.pos
+                    .distance_to_sqr(pos)
+                    .total_cmp(&b.pos.distance_to_sqr(pos))
+            })
+    {
+        let to = target.pos - pos;
+        let length = (to.x * to.x + to.y * to.y + to.z * to.z).sqrt().max(1.0e-4);
+        events.push(MobEvent::DragonFireball {
+            from: pos,
+            direction: Vec3::new(to.x / length, to.y / length, to.z / length),
+        });
+    }
+    // Perched on the portal it breathes a cloud at its feet.
+    if perching && pos.distance_to_sqr(PERCH_SPOT) < 16.0 && age.is_multiple_of(BREATH_INTERVAL) {
+        events.push(MobEvent::Breath {
+            pos: Vec3::new(pos.x, PERCH_SPOT.y - 3.0, pos.z),
+        });
+    }
     if let Some(data) = store.data_mut(key) {
         data.yaw = yaw;
         data.head_yaw = yaw;
@@ -358,5 +425,27 @@ mod tests {
             mob::hurt(&mut store, key, 500.0, None),
             Some(mob::Hurt::Died)
         ));
+    }
+
+    #[test]
+    fn it_spits_fireballs_and_breathes_while_perched() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let (spot, _) = position_at(0);
+        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        let player = Target {
+            uuid: uuid::Uuid::from_u128(3),
+            pos: Vec3::new(30.0, 90.0, 0.0),
+        };
+        let mut events = Vec::new();
+        for _ in 0..PERCH_PERIOD {
+            fly(&mut store, key, &[player], &mut events);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MobEvent::DragonFireball { .. }))
+        );
+        assert!(events.iter().any(|e| matches!(e, MobEvent::Breath { .. })));
     }
 }

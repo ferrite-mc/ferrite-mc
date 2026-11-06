@@ -92,6 +92,8 @@ pub enum Kind {
     EnderPearl,
     /// `minecraft:fireball` (the large one): flies straight and explodes where it lands.
     Fireball,
+    /// `minecraft:dragon_fireball`: flies straight; the region leaves a breath cloud where it lands.
+    DragonFireball,
 }
 
 impl Kind {
@@ -102,6 +104,7 @@ impl Kind {
             Self::Egg => "egg",
             Self::EnderPearl => "ender_pearl",
             Self::Fireball => "fireball",
+            Self::DragonFireball => "dragon_fireball",
         }
     }
 
@@ -131,6 +134,7 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::Egg,
         Kind::EnderPearl,
         Kind::Fireball,
+        Kind::DragonFireball,
     ]
     .into_iter()
     .find(|kind| kind.entity_type() == data.kind)
@@ -183,7 +187,7 @@ pub fn tick_thrown(
         }
         let mut vel = store.vel(key).unwrap_or_default();
         // A fireball keeps its speed and ignores gravity; the rest arc like thrown items.
-        if kind != Kind::Fireball {
+        if !matches!(kind, Kind::Fireball | Kind::DragonFireball) {
             vel.y -= THROWN_GRAVITY;
             vel.x *= DRAG;
             vel.y *= DRAG;

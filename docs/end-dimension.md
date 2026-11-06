@@ -28,9 +28,12 @@ What works, how it is built, and what is still missing.
 
 ## Missing
 
-- **Dragon behaviour.** No strafing, charging, perching, breath, fireball or dragon-phase
-  machine; it circles and dives at the nearest player every 30 seconds. It does not destroy blocks and has no separate head/wing hitboxes.
-- **Crystals.** Arrows, melee and explosions break them (a blast chains to the next crystal). No healing beam. No iron
+- **Dragon behaviour.** A simplified cycle instead of vanilla's phase machine: it circles, dives
+  at the nearest player every 30 seconds, spits a `dragon_fireball` every 20 seconds (a breath
+  cloud forms where it lands) and every 75 seconds perches on the portal for 10 seconds, breathing a
+  cloud each second. The clouds keep their radius and hurt for a flat 6 every second. It smashes every
+  block in its body except `#minecraft:dragon_immune`. No separate head/wing hitboxes.
+- **Crystals.** Arrows, melee and explosions break them (a blast chains to the next crystal). The healing beam is drawn by the client. No iron
   bar cages on the guarded spikes unless the terrain provides them.
 - **Respawning the dragon** works in a simplified form: end crystals can be placed on obsidian or bedrock, and four of them on the bedrock ring around the exit portal (3 blocks from the centre) bring a new dragon, remove the portal and replace the spike crystals at once. Vanilla's beam animation, the ~10 second delay and the crystal explosions are missing, and this path has only unit tests (the cells are checked against the podium layout), no bot test.
 - **Gateways.** Each dragon kill opens the next gateway of the 20-ring (radius 96, y 75), when

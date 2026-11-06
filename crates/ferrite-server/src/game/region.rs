@@ -697,6 +697,8 @@ pub struct Region {
     /// Explosions plugins asked for: center, power, whether fire is left behind and whether
     /// blocks break.
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
+    /// Dragon breath clouds: centre and ticks left.
+    pub breath_clouds: Vec<(ferrite_math::Vec3, u32)>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
@@ -762,6 +764,7 @@ impl RegionData for Region {
             .collect();
         let mut result = Self {
             plugin_explosions: Vec::new(),
+            breath_clouds: Vec::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
             dragon_bars: HashMap::new(),
@@ -3920,6 +3923,18 @@ impl Region {
                     let record = arrow::new_arrow(from, vel, damage, None, &mut self.rng);
                     self.entities.insert(record);
                 }
+                ai::MobEvent::DragonFireball { from, direction } => {
+                    let vel = ferrite_math::Vec3::new(direction.x, direction.y, direction.z);
+                    self.entities.insert(arrow::new_thrown(
+                        arrow::Kind::DragonFireball,
+                        from,
+                        vel * ferrite_entity::dragon::FIREBALL_SPEED,
+                        None,
+                    ));
+                }
+                ai::MobEvent::Breath { pos } => self
+                    .breath_clouds
+                    .push((pos, ferrite_entity::dragon::BREATH_TICKS)),
                 ai::MobEvent::Status { key, status } => self.broadcast_status(ctx, key, status),
                 ai::MobEvent::Bred(bred) => {
                     // Vanilla gives 1-7 experience points to the breeding and counts it for the
@@ -4619,6 +4634,77 @@ impl Region {
         }
     }
 
+    /// What the dragon does to the world: it smashes the blocks inside its body and its breath
+    /// clouds burn the players standing in them.
+    fn tick_dragon_effects(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        if source.dimension() != super::Dimension::End {
+            return;
+        }
+        {
+            let mut smashed = Vec::new();
+            for key in self.entities.keys().to_vec() {
+                if !mob::state(&self.entities, key).is_some_and(|m| {
+                    m.kind == mob::MobKind::EnderDragon
+                        && !m.is_dead()
+                        && u64::from(m.wander_timer)
+                            .is_multiple_of(ferrite_entity::dragon::SMASH_INTERVAL)
+                }) {
+                    continue;
+                }
+                let Some(bbox) = self.entities.bbox(key) else {
+                    continue;
+                };
+                for x in bbox.min.x.floor() as i32..=bbox.max.x.floor() as i32 {
+                    for y in bbox.min.y.floor() as i32..=bbox.max.y.floor() as i32 {
+                        for z in bbox.min.z.floor() as i32..=bbox.max.z.floor() as i32 {
+                            let Some(state) =
+                                source.block(x, y, z).and_then(|s| u16::try_from(s).ok())
+                            else {
+                                continue;
+                            };
+                            if state != 0
+                                && ferrite_data::blocks::state(state).is_some_and(|(name, _)| {
+                                    !ferrite_entity::dragon::IMMUNE.contains(&name)
+                                        && name != "minecraft:air"
+                                })
+                            {
+                                smashed.push(([x, y, z], 0));
+                            }
+                        }
+                    }
+                }
+            }
+            if !smashed.is_empty() {
+                self.place_blocks(ctx, &smashed);
+            }
+        }
+        let radius = ferrite_entity::dragon::BREATH_RADIUS;
+        for (centre, left) in &mut self.breath_clouds {
+            *left -= 1;
+            if *left % ferrite_entity::dragon::BREATH_HIT_INTERVAL != 0 {
+                continue;
+            }
+            let hit: Vec<Uuid> = self
+                .players
+                .values()
+                .filter(|p| {
+                    (p.pos[0] - centre.x).hypot(p.pos[2] - centre.z) <= radius
+                        && (0.0..=3.0).contains(&(p.pos[1] - centre.y))
+                })
+                .map(|p| p.uuid)
+                .collect();
+            for uuid in hit {
+                if let Some(p) = self.players.get_mut(&uuid) {
+                    p.hurt(DamageKind::Magic, ferrite_entity::dragon::BREATH_DAMAGE);
+                }
+            }
+        }
+        self.breath_clouds.retain(|(_, left)| *left > 0);
+    }
+
     /// Advances arrow flight and applies arrow hits to the players of this region.
     fn tick_arrows(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
@@ -4668,6 +4754,10 @@ impl Region {
             }
             // Vanilla ender pearl impact: the thrower arrives where the pearl landed and takes
             // 5 fall damage.
+            if landing.kind == arrow::Kind::DragonFireball {
+                self.breath_clouds
+                    .push((landing.pos, ferrite_entity::dragon::BREATH_TICKS));
+            }
             if landing.kind == arrow::Kind::EnderPearl
                 && let Some(owner) = landing.owner
                 && let Some(p) = self.players.get_mut(&owner)
@@ -5831,6 +5921,7 @@ impl Region {
         self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
+            self.tick_dragon_effects(ctx);
             self.tick_mobs(ctx, &blocks);
         }
         let alive: Vec<ferrite_math::Vec3> = self
