@@ -966,6 +966,7 @@ async fn run(
     let mut advancement_sync = advancement_packets::AdvancementSync::default();
     let mut recipe_sync = recipe_packets::RecipeSync::default();
     let mut scan_tick: u32 = 0;
+    let mut last_held: HashMap<Uuid, std::collections::BTreeSet<String>> = HashMap::new();
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -1395,6 +1396,11 @@ async fn run(
                  for (target, bytes) in advancement_sync.sync(&online, &owned, settings.playerdata.as_deref()) {
                      if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
                  }
+                 for (who, id) in std::mem::take(&mut advancement_sync.completed) {
+                     if let Some(recipes) = Some(recipe_unlock::reward_recipes(&id)).filter(|r| !r.is_empty()) { command_state.lock().unwrap().more.recipes.entry(who).or_default().extend(recipes); }
+                     let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
+                     if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
+                 }
              }
              scan_tick = scan_tick.wrapping_add(1);
              if scan_tick.is_multiple_of(20) {
@@ -1402,7 +1408,11 @@ async fn run(
                  let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
                  let mut game = command_state.lock().unwrap();
                  for uuid in online.keys() {
-                     if let Some(items) = held.get(uuid) { recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default()); }
+                     if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
+                         last_held.insert(*uuid, items.clone());
+                         recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
+                         game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
+                     }
                  }
              }
              {

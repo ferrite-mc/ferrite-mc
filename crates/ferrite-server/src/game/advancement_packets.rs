@@ -24,6 +24,8 @@ pub struct Entry {
     pub id: String,
     pub parent: Option<String>,
     pub hidden: bool,
+    pub frame: String,
+    pub announce: bool,
     pub requirements: Vec<Vec<String>>,
     pub wire: Vec<u8>,
 }
@@ -45,6 +47,8 @@ pub fn parse(json: &str) -> Vec<Entry> {
                 id: item["id"].as_str()?.to_owned(),
                 parent: item["parent"].as_str().map(str::to_owned),
                 hidden: item["hidden"].as_bool().unwrap_or(false),
+                frame: item["frame"].as_str().unwrap_or("task").to_owned(),
+                announce: item["announce"].as_bool().unwrap_or(false),
                 requirements: item["requirements"]
                     .as_array()?
                     .iter()
@@ -87,7 +91,7 @@ fn entries() -> &'static BTreeMap<String, Entry> {
     })
 }
 
-fn is_done(entry: &Entry, owned: &BTreeSet<String>) -> bool {
+pub fn is_done(entry: &Entry, owned: &BTreeSet<String>) -> bool {
     !entry.requirements.is_empty()
         && entry.requirements.iter().all(|group| {
             group
@@ -180,6 +184,8 @@ pub fn save(dir: &Path, uuid: &Uuid, owned: &BTreeSet<String>) {
 
 #[derive(Default)]
 pub struct AdvancementSync {
+    /// Advancements players finished since the last drain, for announcements and rewards.
+    pub completed: Vec<(Uuid, String)>,
     sent: HashMap<Uuid, (BTreeSet<String>, BTreeSet<String>)>,
 }
 
@@ -230,6 +236,13 @@ impl AdvancementSync {
                 })
                 .map(|entry| (entry, have))
                 .collect();
+            if !reset {
+                for entry in all.values() {
+                    if is_done(entry, have) && !is_done(entry, &old_owned) {
+                        self.completed.push((*uuid, entry.id.clone()));
+                    }
+                }
+            }
             out.push((*uuid, frame(reset, &added, &removed, &progress, true, now)));
             if let (false, Some(dir)) = (reset, persist) {
                 save(dir, uuid, have);
@@ -238,6 +251,28 @@ impl AdvancementSync {
         }
         out
     }
+}
+
+/// The chat line for a finished advancement, e.g. `Alice has made the advancement [Stone Age]`.
+pub fn announcement(player: &str, id: &str) -> Option<String> {
+    let entry = entries().get(id)?;
+    if !entry.announce {
+        return None;
+    }
+    let path = id
+        .strip_prefix("minecraft:")
+        .unwrap_or(id)
+        .replace('/', ".");
+    let title = super::feedback::render(&format!("advancements.{path}.title"), &[]);
+    let key = match entry.frame.as_str() {
+        "goal" => "chat.type.advancement.goal",
+        "challenge" => "chat.type.advancement.challenge",
+        _ => "chat.type.advancement.task",
+    };
+    Some(super::feedback::render(
+        key,
+        &[player, &format!("[{title}]")],
+    ))
 }
 
 #[cfg(test)]
@@ -249,6 +284,8 @@ mod tests {
             id: id.into(),
             parent: parent.map(str::to_owned),
             hidden,
+            frame: "task".into(),
+            announce: false,
             requirements: groups
                 .iter()
                 .map(|g| g.iter().map(|c| (*c).to_owned()).collect())
@@ -347,6 +384,23 @@ mod tests {
         let changed = sync.sync(&online, &owned, None);
         assert_eq!(changed.len(), usize::from(!entries().is_empty()));
         assert!(sync.sync(&online, &owned, None).is_empty());
+    }
+
+    #[test]
+    fn announcements_use_the_frame_and_the_lang_title() {
+        // Needs the extracted data; without it nothing is announced.
+        match announcement("Alice", "minecraft:story/mine_stone") {
+            None => {
+                assert!(entries().is_empty() || !entries()["minecraft:story/mine_stone"].announce)
+            }
+            Some(text) => {
+                assert!(
+                    text.starts_with("Alice has made the advancement ["),
+                    "{text}"
+                );
+            }
+        }
+        assert_eq!(announcement("Alice", "t:unknown"), None);
     }
 
     #[test]

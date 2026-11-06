@@ -22,6 +22,7 @@ pub enum Criterion {
 
 #[derive(Debug, Clone)]
 pub struct Rule {
+    pub id: String,
     pub recipes: Vec<String>,
     pub criteria: BTreeMap<String, Criterion>,
     pub requirements: Vec<Vec<String>>,
@@ -38,10 +39,11 @@ fn alternatives(value: &serde_json::Value) -> Vec<String> {
     }
 }
 
-pub fn parse_rule(json: &serde_json::Value) -> Option<Rule> {
+pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
     let recipes: Vec<String> = json["rewards"]["recipes"]
-        .as_array()?
-        .iter()
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|r| r.as_str().map(str::to_owned))
         .collect();
     let mut criteria = BTreeMap::new();
@@ -65,6 +67,7 @@ pub fn parse_rule(json: &serde_json::Value) -> Option<Rule> {
         None => criteria.keys().map(|k| vec![k.clone()]).collect(),
     };
     Some(Rule {
+        id: id.to_owned(),
         recipes,
         criteria,
         requirements,
@@ -102,7 +105,7 @@ pub fn unlocked(rule: &Rule, held: &BTreeSet<String>, owned: &BTreeSet<String>) 
 fn rules() -> &'static Vec<Rule> {
     static ALL: OnceLock<Vec<Rule>> = OnceLock::new();
     ALL.get_or_init(|| {
-        let relative = Path::new("vanilla/26.3/generated/data/minecraft/advancement/recipes");
+        let relative = Path::new("vanilla/26.3/generated/data/minecraft/advancement");
         let Some(dir) = [
             relative.to_path_buf(),
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -114,16 +117,26 @@ fn rules() -> &'static Vec<Rule> {
             return Vec::new();
         };
         let mut out = Vec::new();
-        let mut stack = vec![dir];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let mut stack = vec![dir.clone()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(current).into_iter().flatten().flatten() {
                 let path = entry.path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if let Some(rule) = std::fs::read_to_string(&path)
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(&dir) else {
+                    continue;
+                };
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                let Some(stem) = rel.strip_suffix(".json") else {
+                    continue;
+                };
+                let id = format!("minecraft:{stem}");
+                if let Some(rule) = std::fs::read_to_string(&path)
                     .ok()
                     .and_then(|t| serde_json::from_str(&t).ok())
-                    .and_then(|j: serde_json::Value| parse_rule(&j))
+                    .and_then(|j: serde_json::Value| parse_rule(&id, &j))
                 {
                     out.push(rule);
                 }
@@ -140,7 +153,7 @@ pub fn apply(held: &BTreeSet<String>, owned: &mut BTreeSet<String>) -> bool {
     loop {
         let size = owned.len();
         for rule in rules() {
-            if rule.recipes.iter().all(|r| owned.contains(r)) {
+            if rule.recipes.is_empty() || rule.recipes.iter().all(|r| owned.contains(r)) {
                 continue;
             }
             if unlocked(rule, held, owned) {
@@ -154,12 +167,41 @@ pub fn apply(held: &BTreeSet<String>, owned: &mut BTreeSet<String>) -> bool {
     owned.len() != before
 }
 
+/// Recipes an advancement rewards when completed.
+pub fn reward_recipes(advancement: &str) -> Vec<String> {
+    rules()
+        .iter()
+        .find(|r| r.id == advancement)
+        .map(|r| r.recipes.clone())
+        .unwrap_or_default()
+}
+
+/// Advancement criteria (`<advancement>#<criterion>`) that holding `held` completes, for every
+/// advancement with an `inventory_changed` criterion except the recipe ones.
+pub fn criteria_for(held: &BTreeSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        if rule.id.starts_with("minecraft:recipes/") {
+            continue;
+        }
+        for (name, criterion) in &rule.criteria {
+            if let Criterion::Holds(entries) = criterion
+                && !entries.is_empty()
+                && entries.iter().all(|e| matches(e, held))
+            {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn rule() -> Rule {
-        parse_rule(&serde_json::json!({
+        parse_rule("t:stick", &serde_json::json!({
             "criteria": {
                 "has_log": {"trigger": "minecraft:inventory_changed",
                     "conditions": {"items": [{"items": "#minecraft:logs"}]}},
@@ -188,6 +230,19 @@ mod tests {
         assert!(unlocked(&rule, &held(&["minecraft:birch_planks"]), &none));
         assert!(unlocked(&rule, &held(&["minecraft:oak_log"]), &none));
         assert!(unlocked(&rule, &none, &held(&["minecraft:stick"])));
+    }
+
+    #[test]
+    fn criteria_for_skips_recipe_advancements() {
+        let held = BTreeSet::from([
+            "minecraft:oak_planks".to_owned(),
+            "minecraft:iron_ingot".to_owned(),
+        ]);
+        assert!(
+            criteria_for(&held)
+                .iter()
+                .all(|c| !c.starts_with("minecraft:recipes/"))
+        );
     }
 
     #[test]

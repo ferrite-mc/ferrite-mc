@@ -109,6 +109,8 @@ public final class AdvancementExtractor {
             out.append("{\"id\":\"").append(id).append("\",\"parent\":");
             out.append(node.parent() == null ? "null" : "\"" + node.parent().holder().id() + "\"");
             out.append(",\"hidden\":").append(node.advancement().display().get().hidden());
+            out.append(",\"frame\":\"").append(node.advancement().display().get().type().name().toLowerCase()).append("\"");
+            out.append(",\"announce\":").append(node.advancement().display().get().announceToChat());
             out.append(",\"requirements\":[");
             boolean f1 = true;
             for (List<String> group : reqs.get(id)) {
