@@ -444,6 +444,25 @@ pub enum PluginEventPolicy {
     Deny,
 }
 
+/// Milliseconds the coordinator task spent in each `select!` arm (events, signals, clock tick),
+/// one entry per run of the arm. Read by the load-test example to show where it is serialized.
+pub static COORDINATOR_MS: Mutex<[Vec<f64>; 3]> = Mutex::new([Vec::new(), Vec::new(), Vec::new()]);
+
+struct CoordinatorTimer(usize, std::time::Instant);
+
+impl CoordinatorTimer {
+    fn new(arm: usize) -> Self {
+        Self(arm, std::time::Instant::now())
+    }
+}
+
+impl Drop for CoordinatorTimer {
+    fn drop(&mut self) {
+        let ms = self.1.elapsed().as_secs_f64() * 1000.0;
+        COORDINATOR_MS.lock().unwrap_or_else(|e| e.into_inner())[self.0].push(ms);
+    }
+}
+
 pub struct WorldSettings {
     pub gamemode: i32,
     /// Which dimension this world is; `Dimension::Overworld` unless configured otherwise.
@@ -1045,7 +1064,7 @@ async fn run(
     let mut load_ran = false;
     loop {
         tokio::select! {
-         event=events.recv()=>{let Some(event)=event else {break};
+         event=events.recv()=>{let Some(event)=event else {break};let _timer=CoordinatorTimer::new(0);
           if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { command_state.lock().unwrap().touch(*uuid); }
           match event {
           GameMessage::Joined{session,uuid,name,properties,address,dimension_type,biome,view_distance,online_mode,secure_chat,chat_type,chat_visibility,max_players,outbound}=>{
@@ -1339,7 +1358,7 @@ async fn run(
                  tracing::error!(%error, "autosave failed");
              }
          },
-         signal=signals.recv()=>{let Some(signal)=signal else {break}; match signal {
+         signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
           Signal::Hold{dimension,chunk,add}=>if add{if dimension==Dimension::Overworld{crate::plugins::chunks::set_loaded(chunk.0,chunk.1,true);}let first={let count=holds.entry((dimension,chunk)).or_default();*count += 1;*count == 1};worlds.add_chunk(dimension,chunk);let dir=entity_world.clone();let transient=worlds.transient_entities.clone();worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);if let Some(transient)=transient {if let Some(entities)=transient.lock().unwrap().remove(&(dimension,chunk)){r.add_entities(entities);}} else if first && let Some(dir)=dir{r.add_entities(entity_save::load(&dimension.storage_root(&dir), (chunk.0, chunk.1)));}});}else{release_hold(&worlds, &mut holds, &signal_tx, dimension, chunk);},
           Signal::SaveEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world { let dir=dimension.storage_root(dir); if let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}}},
           Signal::FinishRelease{dimension,chunk,flush}=>{worlds.remove_chunk(dimension,chunk);if flush {let source=dimensions.source(dimension).clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
@@ -1441,6 +1460,7 @@ async fn run(
              }
          },
          _tick = clock.tick() => {
+             let _timer = CoordinatorTimer::new(2);
              let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
              let tick_control = command_state.lock().unwrap().more.tick.clone();
              let target_rate = tick_control.effective_rate();

@@ -214,6 +214,11 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             ..Default::default()
         },
     ));
+    ferrite_server::game::COORDINATOR_MS
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .for_each(Vec::clear);
     let start = tokio::time::Instant::now();
     let (_, cpu_start) = process_usage();
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n + 1));
@@ -257,6 +262,23 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
         cache.encodes,
         cache.lookups
     );
+    {
+        let arms = ferrite_server::game::COORDINATOR_MS.lock().unwrap();
+        for (name, runs) in ["events", "signals", "clock"].iter().zip(arms.iter()) {
+            let mut runs = runs.clone();
+            runs.sort_by(f64::total_cmp);
+            let total: f64 = runs.iter().sum();
+            if let Some(max) = runs.last() {
+                println!(
+                    "  coordinator {name}: runs={}, total={total:.0} ms ({:.1}% of the run), mean={:.4} ms, p99={:.3} ms, max={max:.2} ms",
+                    runs.len(),
+                    total / 10.0 / elapsed,
+                    total / runs.len() as f64,
+                    runs[((runs.len() - 1) as f64 * 0.99) as usize],
+                );
+            }
+        }
+    }
     world.shutdown().await.unwrap();
     server.abort();
 }
