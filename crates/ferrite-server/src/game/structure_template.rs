@@ -64,7 +64,7 @@ impl Mirror {
 pub struct Template {
     pub size: [i32; 3],
     palette: Vec<Option<u16>>,
-    blocks: Vec<([i32; 3], usize)>,
+    blocks: Vec<([i32; 3], usize, Option<Compound>)>,
 }
 
 fn data_dir() -> Option<PathBuf> {
@@ -162,13 +162,17 @@ impl Template {
                 && let Some(Tag::String(final_state)) = nbt.get("final_state")
                 && let Some(id) = parse_state(final_state)
             {
-                blocks.push((pos, usize::MAX - usize::from(id)));
+                blocks.push((pos, usize::MAX - usize::from(id), None));
                 continue;
             }
             if index >= palette_entries.len() {
                 index = usize::MAX;
             }
-            blocks.push((pos, index));
+            let nbt = match block.get("nbt") {
+                Some(Tag::Compound(nbt)) if nbt.get("id").is_some() => Some(nbt.clone()),
+                _ => None,
+            };
+            blocks.push((pos, index, nbt));
         }
         Some(Self {
             size: [*size.first()?, *size.get(1)?, *size.get(2)?],
@@ -196,6 +200,7 @@ impl Template {
 
     /// The blocks relative to the placement position, after mirror, rotation and integrity.
     /// `integrity` is the chance (0..=1) that each block is kept; `seed` drives that roll.
+    #[cfg(test)]
     pub fn place(
         &self,
         rotation: Rotation,
@@ -203,6 +208,20 @@ impl Template {
         integrity: f32,
         seed: u64,
     ) -> Vec<([i32; 3], u16)> {
+        self.place_with_entities(rotation, mirror, integrity, seed)
+            .0
+    }
+
+    /// Like [`Self::place`], plus the block entity NBT (chest contents, signs, spawners...) of the
+    /// blocks that were kept, at their transformed positions.
+    #[allow(clippy::type_complexity)]
+    pub fn place_with_entities(
+        &self,
+        rotation: Rotation,
+        mirror: Mirror,
+        integrity: f32,
+        seed: u64,
+    ) -> (Vec<([i32; 3], u16)>, Vec<([i32; 3], Compound)>) {
         let mut rng = seed ^ 0x9E37_79B9_7F4A_7C15;
         let mut next = move || {
             rng ^= rng << 13;
@@ -211,7 +230,8 @@ impl Template {
             (rng >> 11) as f64 / (1u64 << 53) as f64
         };
         let mut out = Vec::new();
-        for (pos, index) in &self.blocks {
+        let mut entities = Vec::new();
+        for (pos, index, nbt) in &self.blocks {
             let state = if *index > usize::MAX / 2 {
                 u16::try_from(usize::MAX - index).ok()
             } else {
@@ -243,8 +263,11 @@ impl Template {
                 Rotation::CounterClockwise90 => (z, -x),
             };
             out.push(([x, y, z], transform_state(state, rotation, mirror)));
+            if let Some(nbt) = nbt {
+                entities.push(([x, y, z], nbt.clone()));
+            }
         }
-        out
+        (out, entities)
     }
 }
 
@@ -396,6 +419,32 @@ mod tests {
             template.place(Rotation::None, Mirror::None, 1.0, 1).len(),
             2
         );
+    }
+
+    #[test]
+    fn block_entity_nbt_follows_its_block_through_rotation() {
+        let mut palette = Compound::new();
+        palette.insert("id".into(), Tag::String("minecraft:stone".into()));
+        let mut chest = Compound::new();
+        chest.insert("id".into(), Tag::String("minecraft:chest".into()));
+        let mut a = Compound::new();
+        a.insert("pos".into(), Tag::List(List::Int(vec![1, 0, 0])));
+        a.insert("state".into(), Tag::Int(0));
+        a.insert("nbt".into(), Tag::Compound(chest.clone()));
+        let mut b = Compound::new();
+        b.insert("pos".into(), Tag::List(List::Int(vec![0, 0, 1])));
+        b.insert("state".into(), Tag::Int(0));
+        let mut root = Compound::new();
+        root.insert("size".into(), Tag::List(List::Int(vec![2, 1, 2])));
+        root.insert("palette".into(), Tag::List(List::Compound(vec![palette])));
+        root.insert("blocks".into(), Tag::List(List::Compound(vec![a, b])));
+        let template = Template::from_nbt(&root).unwrap();
+        let (blocks, entities) =
+            template.place_with_entities(Rotation::Clockwise90, Mirror::None, 1.0, 1);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(entities, vec![([0, 0, 1], chest)]);
+        let (_, none) = template.place_with_entities(Rotation::None, Mirror::None, 0.0, 1);
+        assert!(none.is_empty());
     }
 
     #[test]

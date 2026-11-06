@@ -372,7 +372,7 @@ fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
         },
         |seed| seed as u64,
     );
-    let blocks = template.place(rotation, mirror, integrity, seed);
+    let (blocks, entities) = template.place_with_entities(rotation, mirror, integrity, seed);
     let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("pos") else {
         return Err(CommandError::failed("Missing position"));
     };
@@ -382,7 +382,7 @@ fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             pos: *coords,
             name: id,
             blocks: std::sync::Arc::new(blocks),
-            entities: Default::default(),
+            entities: std::sync::Arc::new(entities),
         }),
     )
 }

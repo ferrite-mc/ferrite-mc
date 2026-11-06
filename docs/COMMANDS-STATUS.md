@@ -60,8 +60,8 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   origin, rotating/mirroring `facing`, `axis`, `rotation` and `north/east/south/west`
   properties (stair shapes are not adjusted). Templates are read from
   `vanilla/26.3/generated/data/minecraft/structure/**.nbt`, which `tools/fetch_vanilla.py`
-  extracts from the user's own jar. Block entity data and template entities of `/place template`
-  are not placed (chests are empty), `strict` is accepted and ignored, jigsaw blocks become their `final_state`.
+  extracts from the user's own jar. Block entity data of `/place template` is placed (chests, signs); template entities
+  are not placed, `strict` is accepted and ignored, jigsaw blocks become their `final_state`.
   `/place feature|jigsaw|structure` run the jar's own `/place` in the worldgen host (op 8) on a
   force-loaded area and apply the changed blocks. Block entities (chest contents and loot
   tables, signs) come back from the host as NBT and are stored under their `id`; they need
