@@ -653,6 +653,8 @@ pub struct Player {
     pub respawn_requested: bool,
     /// Network ids of entities this player attacked this tick.
     pub attacks: Vec<i32>,
+    /// `(entity id, hand)` of the entities this player right-clicked this tick.
+    pub uses: Vec<(i32, i32)>,
     /// Ticks since the last swing, vanilla `attackStrengthTicker`.
     pub attack_ticks: i32,
     /// Whether a shield is raised (vanilla `LivingEntity.isBlocking`).
@@ -3398,8 +3400,8 @@ impl Player {
                 }
                 ServerboundPlay::Attack(p) => self.attacks.push(p.entity_id.0),
                 // A right-click on an entity ("use"), not an attack: left-clicks arrive as `Attack`
-                // above. Nothing is usable on an entity yet (breeding, taming, saddles).
-                ServerboundPlay::Interact(_) => {}
+                // above. Feeding animals is the only use so far (taming, saddles come later).
+                ServerboundPlay::Interact(p) => self.uses.push((p.entity_id.0, p.hand.0)),
                 ServerboundPlay::ContainerClick(p) => self.handle_container_click(p),
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
                 ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
@@ -3852,6 +3854,20 @@ impl Region {
                     let record = arrow::new_arrow(from, vel, damage, None, &mut self.rng);
                     self.entities.insert(record);
                 }
+                ai::MobEvent::Bred(bred) => {
+                    // Vanilla gives 1-7 experience points to the breeding and counts it for the
+                    // player who fed the parent.
+                    let amount = 1 + self.rng.next_int(7);
+                    for record in experience::award(bred.pos, amount) {
+                        self.entities.insert(record);
+                    }
+                    if let Some(player) = bred.cause {
+                        super::recipe_unlock::BRED
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push((player, bred.kind.name()));
+                    }
+                }
                 ai::MobEvent::Explode { center, power } => {
                     self.explode([center.x, center.y, center.z], power, true, ctx);
                     if let Some(source) = ctx.source.as_deref() {
@@ -3885,17 +3901,23 @@ impl Region {
                 if !mob.is_dead() || mob.loot_dropped {
                     return None;
                 }
-                Some((key, mob.kind, self.entities.pos(key)?))
+                Some((key, mob.kind, self.entities.pos(key)?, mob.age < 0))
             })
             .collect();
-        for (key, kind, pos) in dead {
+        for (key, kind, pos, baby) in dead {
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
             }
             if kind == ferrite_entity::mob::MobKind::EnderDragon {
                 self.dragon_died(ctx, pos);
             }
-            for stack in super::drops::mob_drops(kind, &mut self.rng) {
+            // A baby animal drops nothing.
+            let drops = if baby {
+                Vec::new()
+            } else {
+                super::drops::mob_drops(kind, &mut self.rng)
+            };
+            for stack in drops {
                 let block = [
                     pos.x.floor() as i32,
                     pos.y.floor() as i32,
@@ -4123,6 +4145,49 @@ impl Region {
     /// Resolves this tick's `serverbound_attack` swings: reach, weapon damage and attack
     /// strength, critical hits, sweeping, knockback and the hurt animation. A drawn bow that
     /// was released this tick fires its arrow first.
+    /// Right-clicks on entities: food puts an adult animal in love or speeds a baby up
+    /// (vanilla `Animal.mobInteract`); the item is used up outside creative mode.
+    fn resolve_uses(&mut self) {
+        let uuids: Vec<Uuid> = self.players.keys().copied().collect();
+        for uuid in uuids {
+            let Some(p) = self.players.get_mut(&uuid) else {
+                continue;
+            };
+            let uses = std::mem::take(&mut p.uses);
+            for (id, hand) in uses {
+                let Some(p) = self.players.get(&uuid) else {
+                    break;
+                };
+                if p.survival.dead || p.gamemode == 3 || !(0..=1).contains(&hand) {
+                    continue;
+                }
+                let Some(key) = self.entities.key_of(id) else {
+                    continue;
+                };
+                let Some(bbox) = self.entities.bbox(key) else {
+                    continue;
+                };
+                let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+                if !combat::within_reach(combat::eye_position(feet), bbox, combat::ENTITY_RANGE) {
+                    continue;
+                }
+                let slot = p.hand_slot(hand);
+                let held = p.inventory.get(slot).clone();
+                let Some(name) = held.name() else { continue };
+                if ferrite_entity::breed::feed(&mut self.entities, key, name, uuid)
+                    == ferrite_entity::breed::Fed::No
+                {
+                    continue;
+                }
+                if p.gamemode != 1
+                    && let Some(p) = self.players.get_mut(&uuid)
+                {
+                    p.inventory.set(slot, held.copy_with_count(held.count - 1));
+                }
+            }
+        }
+    }
+
     fn resolve_attacks(&mut self, ctx: &TickContext) {
         for uuid in std::mem::take(&mut self.pending_hurts) {
             let key = self.entities.keys().iter().copied().find(|key| {
@@ -5565,6 +5630,7 @@ impl Region {
         }
         stage!("entities");
         self.resolve_attacks(ctx);
+        self.resolve_uses();
         if entities_run {
             self.tick_arrows(ctx);
             self.tick_mobs(ctx, &blocks);

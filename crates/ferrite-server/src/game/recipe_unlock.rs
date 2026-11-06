@@ -29,6 +29,8 @@ pub enum Criterion {
     InBiome(String),
     /// `recipe_crafted` of one recipe id with no ingredient condition.
     Crafts(String),
+    /// `bred_animals` of one child entity type, or any child (`*`).
+    Breeds(String),
     Other,
 }
 
@@ -100,6 +102,23 @@ fn placed_block(conditions: &serde_json::Value) -> Option<String> {
     (!name.starts_with('#')).then(|| name.to_owned())
 }
 
+/// The child a `bred_animals` criterion asks for (`*` for any), when that is all it asks for.
+fn bred_child(conditions: &serde_json::Value) -> Option<String> {
+    let object = match conditions.as_object() {
+        None if conditions.is_null() => return Some("*".to_owned()),
+        None => return None,
+        Some(object) if object.is_empty() => return Some("*".to_owned()),
+        Some(object) => object,
+    };
+    let child = object.get("child")?;
+    let predicate = child["predicate"].as_object()?;
+    if object.len() != 1 || child["type"] != "minecraft:entity_properties" || predicate.len() != 1 {
+        return None;
+    }
+    let name = predicate.get("minecraft:entity_type")?.as_str()?;
+    (!name.starts_with('#')).then(|| name.to_owned())
+}
+
 /// The biome a `location` criterion asks for, when that is all it asks for.
 fn location_biome(conditions: &serde_json::Value) -> Option<String> {
     let object = conditions.as_object()?;
@@ -168,6 +187,22 @@ pub fn criteria_for_placed(block: &str) -> Vec<String> {
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
             if matches!(criterion, Criterion::Places(wanted) if wanted == block) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// Babies players bred since the last drain, `(player, child entity type id)`.
+pub static BRED: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
+
+/// Advancement criteria completed by breeding a child of this type.
+pub fn criteria_for_bred(child: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Breeds(wanted) if wanted == "*" || wanted == child) {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -261,6 +296,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             }
             Some("minecraft:location") => {
                 location_biome(&c["conditions"]).map_or(Criterion::Other, Criterion::InBiome)
+            }
+            Some("minecraft:bred_animals") => {
+                bred_child(&c["conditions"]).map_or(Criterion::Other, Criterion::Breeds)
             }
             Some("minecraft:consume_item") => {
                 consumed_item(&c["conditions"]).map_or(Criterion::Other, Criterion::Consumes)
@@ -526,6 +564,19 @@ mod tests {
             done.contains(&"minecraft:story/enter_the_end#entered_end".to_owned()),
             !rules().is_empty()
         );
+    }
+
+    #[test]
+    fn bred_animals_criteria_match_any_child_or_one_child_type() {
+        assert_eq!(bred_child(&serde_json::Value::Null).as_deref(), Some("*"));
+        let cow = serde_json::json!({"child": {"type": "minecraft:entity_properties",
+            "entity": "this", "predicate": {"minecraft:entity_type": "minecraft:cow"}}});
+        assert_eq!(bred_child(&cow).as_deref(), Some("minecraft:cow"));
+        let tag = serde_json::json!({"child": {"type": "minecraft:entity_properties",
+            "entity": "this", "predicate": {"minecraft:entity_type": "#minecraft:x"}}});
+        assert_eq!(bred_child(&tag), None);
+        let parent = serde_json::json!({"parent": {}});
+        assert_eq!(bred_child(&parent), None);
     }
 
     #[test]

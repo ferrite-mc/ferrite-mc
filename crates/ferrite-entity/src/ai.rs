@@ -78,6 +78,8 @@ pub enum MobEvent {
     },
     /// A creeper's fuse ran out.
     Explode { center: Vec3, power: f32 },
+    /// Two animals bred; the baby is already in the store.
+    Bred(crate::breed::Bred),
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -172,6 +174,10 @@ pub fn tick_with(
         let Some(kind) = mob::state(store, key).map(|state| state.kind) else {
             continue;
         };
+        if kind.is_animal() {
+            crate::breed::tick_age(store, key);
+        }
+        let mut mating = false;
         if kind == MobKind::EnderDragon {
             crate::dragon::fly(store, key, players, &mut events);
             continue;
@@ -307,6 +313,12 @@ pub fn tick_with(
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                     speed = 1.5;
                 }
+            } else if let Some((mate, mate_pos)) = crate::breed::mate_for(store, key) {
+                mating = true;
+                walking = Some(yaw_towards(mate_pos.x - start.x, mate_pos.z - start.z));
+                if let Some(bred) = crate::breed::approach(store, key, mate, mate_pos, rng) {
+                    events.push(MobEvent::Bred(bred));
+                }
             } else if moving {
                 walking = Some(wander_yaw);
             }
@@ -331,7 +343,7 @@ pub fn tick_with(
             } else if let Some(state) = mob::state_mut(store, key) {
                 state.wander_timer = timer - 1;
             }
-            if wanting && panic_of(store, key) == 0 {
+            if wanting && !mating && panic_of(store, key) == 0 {
                 walking = Some(mob::state(store, key).map_or(0.0, |state| state.wander_yaw));
             }
         }

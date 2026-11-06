@@ -20,6 +20,7 @@
 
 pub mod ai;
 pub mod arrow;
+pub mod breed;
 pub mod combat;
 pub mod dragon;
 pub mod effect;

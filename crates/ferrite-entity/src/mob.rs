@@ -236,6 +236,15 @@ pub struct MobState {
     pub path_index: u8,
     /// Ticks until the path is recomputed.
     pub path_timer: u16,
+    /// Vanilla `AgeableMob.age`: negative for a baby (counts up to 0), positive for the breeding
+    /// cooldown (counts down).
+    pub age: i32,
+    /// Ticks left in love (`Animal.inLove`).
+    pub love: u16,
+    /// The player who fed the animal, for the breeding advancement.
+    pub love_cause: Option<uuid::Uuid>,
+    /// Ticks spent next to the mate.
+    pub breed_timer: u16,
 }
 
 impl MobState {
@@ -263,6 +272,10 @@ impl MobState {
             path_len: 0,
             path_index: 0,
             path_timer: 0,
+            age: 0,
+            love: 0,
+            love_cause: None,
+            breed_timer: 0,
         }
     }
 
@@ -294,6 +307,11 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     );
     data.yaw = rng.next_f32() * 360.0;
     data.mob = Some(MobState::new(kind));
+    if kind.is_animal()
+        && let Some(state) = data.mob.as_ref()
+    {
+        crate::breed::define_metadata(&mut data.metadata, state);
+    }
     if kind == MobKind::Villager {
         let state = crate::villager::VillagerState::new(
             crate::villager::VillagerType::Plains,
