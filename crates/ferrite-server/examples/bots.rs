@@ -7,7 +7,10 @@ use ferrite_protocol::{
         },
         handshake::{Intent, Intention},
         login::{LoginAcknowledged, LoginStart},
-        play::{ChunkBatchReceived, ConfirmTeleport, MovePosition, PositionSync},
+        play::{
+            ChunkBatchReceived, ClientKeepAlive, ConfirmTeleport, MovePosition, PlayKeepAlive,
+            PositionSync,
+        },
     },
 };
 use tokio::{
@@ -28,7 +31,7 @@ impl Bot {
         self.stream.write_all(&wire).await.unwrap();
     }
     async fn read(&mut self) -> Vec<u8> {
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
             loop {
                 if let Some(frame) = self.decoder.next_frame().unwrap() {
                     return frame;
@@ -60,6 +63,11 @@ impl Bot {
                     pitch: p.pitch,
                 })
                 .await;
+            }
+            // Other servers kick a client that never answers (Ferrite does not ask).
+            45 => {
+                let p = PlayKeepAlive::decode(&mut rest.as_slice()).unwrap();
+                self.send(&ClientKeepAlive { id: p.id }).await;
             }
             11 => {
                 self.send(&ChunkBatchReceived {
@@ -312,12 +320,58 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
     world.shutdown().await.unwrap();
     server.abort();
 }
+/// Walks `n` bots on an already running server (`BOTS_ADDR=host:port`, `BOTS_Y` = standing height)
+/// for 30 s so another server can be compared under the same load. The server's own tick figures
+/// are read from that server; this prints `WALKING` once everyone has joined.
+async fn run_external(addr: std::net::SocketAddr, n: usize) {
+    let y: f64 = std::env::var("BOTS_Y")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(-60.0);
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n + 1));
+    let mut tasks = Vec::new();
+    for i in 0..n {
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            // Paper's accept backlog resets a burst of 800 connects at once; spread them.
+            tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 5)).await;
+            let mut bot = Bot::join(addr, &format!("Bot{i}")).await;
+            barrier.wait().await;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            let (mut x, mut z, mut rng) = (0.5, 0.5, i as u64 + 1);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    _ = interval.tick() => { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1); x += ((rng >> 32) % 3) as f64 - 1.0; z += ((rng >> 40) % 3) as f64 - 1.0; bot.send(&MovePosition {x,y,z,flags:1}).await; },
+                    _ = bot.next_play() => {},
+                }
+            }
+        }));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(300), barrier.wait())
+        .await
+        .expect("bots did not all join");
+    println!("WALKING");
+    for task in tasks {
+        task.await.unwrap();
+    }
+    println!("DONE");
+}
 #[tokio::main]
 async fn main() {
     let n = std::env::args()
         .nth(1)
         .map(|s| s.parse().unwrap())
         .unwrap_or(200);
+    if let Ok(addr) = std::env::var("BOTS_ADDR") {
+        let n = std::env::args()
+            .nth(1)
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(200);
+        run_external(addr.parse().unwrap(), n).await;
+        return;
+    }
     run_world(None, n).await;
     run_world(Some("vanilla/26.3/fixture-world/world".into()), n).await;
 }
