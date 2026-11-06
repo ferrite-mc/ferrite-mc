@@ -1149,7 +1149,7 @@ impl Player {
     }
     /// Sends one command block's NBT to every player that has its chunk loaded (vanilla
     /// `ClientboundBlockEntityDataPacket` when a command block opens or is edited).
-    fn sync_block_entity(&self, pos: [i32; 3]) {
+    pub(super) fn sync_block_entity(&self, pos: [i32; 3]) {
         let Some(source) = &self.source else {
             return;
         };

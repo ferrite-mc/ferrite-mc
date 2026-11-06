@@ -1547,6 +1547,13 @@ async fn run(
                          }
                      }
                      {
+                         let used = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::USED_ON_BLOCK.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !used.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for record in used { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_used(&record)); }
+                         }
+                     }
+                     {
                          let eaten = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::CONSUMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !eaten.is_empty() {
                              let mut game = command_state.lock().unwrap();

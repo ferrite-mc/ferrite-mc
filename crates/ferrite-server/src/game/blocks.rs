@@ -260,6 +260,250 @@ fn fill_bottle(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     true
 }
 
+/// Uses up one of the held item outside creative mode.
+fn consume_held(player: &mut Player) {
+    if player.gamemode == 1 {
+        return;
+    }
+    let slot = player.inventory.selected_slot();
+    player.inventory.remove(slot, 1);
+}
+
+/// Wears the held tool by one point outside creative mode; it breaks at its last point.
+fn wear_held(player: &mut Player) {
+    if player.gamemode == 1 {
+        return;
+    }
+    let slot = player.inventory.selected_slot();
+    let stack = player.inventory.selected_item().clone();
+    let Some(max) = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage) else {
+        return;
+    };
+    let worn = stack.damage() + 1;
+    if worn >= max {
+        player.inventory.remove(slot, 1);
+    } else if let Some(stack) = super::region::worn_stack(stack, worn) {
+        player.inventory.set(slot, stack);
+    }
+}
+
+/// Gives the player an item, dropping it into the inventory or replacing a held stack of one.
+fn give(player: &mut Player, item: &str) {
+    let Some(mut stack) = ItemStack::from_name(item) else {
+        return;
+    };
+    player.inventory.add(&mut stack, player.gamemode == 1);
+}
+
+/// A copy of `state` as the block `to`, keeping the properties both blocks have.
+fn as_block(state: u16, to: &str) -> Option<u16> {
+    let (_, props) = blocks::state(state)?;
+    blocks::state_id(to, props)
+}
+
+/// Vanilla `AxeItem` and `HoneycombItem`: honeycomb waxes copper, an axe scrapes the wax and the
+/// oxidation off and strips logs. Returns whether anything changed.
+fn wax_or_scrape(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> bool {
+    let held = player.inventory.selected_item().name();
+    let short_name = short(block);
+    let axe = held.is_some_and(|item| item.ends_with("_axe"));
+    let next = if held == Some("minecraft:honeycomb") {
+        if short_name.starts_with("waxed_") {
+            return false;
+        }
+        as_block(state, &format!("waxed_{short_name}"))
+    } else if axe {
+        if let Some(plain) = short_name.strip_prefix("waxed_") {
+            as_block(state, plain)
+        } else if let Some(previous) = scraped(short_name) {
+            as_block(state, &previous)
+        } else if (short_name.ends_with("_log")
+            || short_name.ends_with("_wood")
+            || short_name.ends_with("_stem")
+            || short_name.ends_with("_hyphae")
+            || short_name == "bamboo_block")
+            && !short_name.starts_with("stripped_")
+        {
+            as_block(state, &format!("stripped_{short_name}"))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let Some(next) = next else { return false };
+    if next == state || !change(player, pos, next) {
+        return false;
+    }
+    if axe {
+        wear_held(player);
+    } else {
+        consume_held(player);
+    }
+    true
+}
+
+/// The block one oxidation stage below `short_name` (`weathered_cut_copper` -> `exposed_cut_copper`).
+fn scraped(short_name: &str) -> Option<String> {
+    let (stage, rest) = ["oxidized_", "weathered_", "exposed_"]
+        .into_iter()
+        .find_map(|p| short_name.strip_prefix(p).map(|rest| (p, rest)))?;
+    let previous = match stage {
+        "oxidized_" => format!("weathered_{rest}"),
+        "weathered_" => format!("exposed_{rest}"),
+        _ if rest == "copper" => "copper_block".to_owned(),
+        _ => rest.to_owned(),
+    };
+    blocks::default_state(&previous).map(|_| previous)
+}
+
+/// Vanilla `SignApplicator` for glow ink: the front text starts to glow.
+fn glow_sign(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
+    if !is_sign(state) || player.inventory.selected_item().name() != Some("minecraft:glow_ink_sac")
+    {
+        return false;
+    }
+    let Some(source) = player.source.clone() else {
+        return false;
+    };
+    let Some(type_id) =
+        ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:sign")
+            .and_then(|id| u32::try_from(id).ok())
+    else {
+        return false;
+    };
+    let result = source.update_block_entity(pos[0], pos[1], pos[2], |entity| {
+        let entity = entity.get_or_insert_with(|| {
+            let mut data = ferrite_nbt::Compound::new();
+            data.insert(
+                "id".into(),
+                ferrite_nbt::Tag::String("minecraft:sign".into()),
+            );
+            data.insert("x".into(), ferrite_nbt::Tag::Int(pos[0]));
+            data.insert("y".into(), ferrite_nbt::Tag::Int(pos[1]));
+            data.insert("z".into(), ferrite_nbt::Tag::Int(pos[2]));
+            ferrite_world::BlockEntity { type_id, data }
+        });
+        let mut text = match entity.data.get("front_text") {
+            Some(ferrite_nbt::Tag::Compound(text)) => text.clone(),
+            _ => {
+                let mut text = ferrite_nbt::Compound::new();
+                text.insert(
+                    "messages".into(),
+                    ferrite_nbt::Tag::List(ferrite_nbt::List::String(vec![String::new(); 4])),
+                );
+                text.insert("color".into(), ferrite_nbt::Tag::String("black".into()));
+                text
+            }
+        };
+        if matches!(
+            text.get("has_glowing_text"),
+            Some(ferrite_nbt::Tag::Byte(1))
+        ) {
+            return (false, false);
+        }
+        text.insert("has_glowing_text".into(), ferrite_nbt::Tag::Byte(1));
+        entity
+            .data
+            .insert("front_text".into(), ferrite_nbt::Tag::Compound(text));
+        (true, true)
+    });
+    match result {
+        Ok(true) => {
+            consume_held(player);
+            player.sync_block_entity(pos);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Vanilla `RespawnAnchorBlock.useItemOn`: glowstone adds a charge, up to four.
+fn charge_anchor(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> bool {
+    if block != "minecraft:respawn_anchor"
+        || player.inventory.selected_item().name() != Some("minecraft:glowstone")
+    {
+        return false;
+    }
+    let charges: u8 = property(state, "charges")
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    if charges >= 4 {
+        return false;
+    }
+    let Some(next) = with_props(state, &[("charges", &(charges + 1).to_string())]) else {
+        return false;
+    };
+    if !change(player, pos, next) {
+        return false;
+    }
+    consume_held(player);
+    true
+}
+
+/// Whether a lit campfire sits up to five blocks below (`CampfireBlock.isSmokeyPos`).
+fn smokey(player: &Player, pos: [i32; 3]) -> bool {
+    (1..=5).any(|d| {
+        state_at(player, [pos[0], pos[1] - d, pos[2]]).is_some_and(|state| {
+            tags::contains("block", "campfires", name(state).unwrap_or(""))
+                && property(state, "lit") == Some("true")
+        })
+    })
+}
+
+/// Vanilla `BeehiveBlock.useItemOn`: a full hive gives a honey bottle for a glass bottle or
+/// three honeycombs for shears. There are no bees to anger.
+fn harvest_honey(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> bool {
+    if !tags::contains("block", "beehives", block) || property(state, "honey_level") != Some("5") {
+        return false;
+    }
+    let reward = match player.inventory.selected_item().name() {
+        Some("minecraft:glass_bottle") => ("minecraft:honey_bottle", 1),
+        Some("minecraft:shears") => ("minecraft:honeycomb", 3),
+        _ => return false,
+    };
+    let Some(next) = with_props(state, &[("honey_level", "0")]) else {
+        return false;
+    };
+    if !change(player, pos, next) {
+        return false;
+    }
+    if reward.0 == "minecraft:honey_bottle" {
+        consume_held(player);
+    } else {
+        wear_held(player);
+    }
+    for _ in 0..reward.1 {
+        give(player, reward.0);
+    }
+    true
+}
+
+/// Remembers a successful use of the held item on a block for the `item_used_on_block`
+/// advancements. `item` is what was held before the use.
+pub fn record_use(player: &Player, location: i64, item: Option<&'static str>) {
+    let pos = BlockPos::unpack(location);
+    let pos = [pos.x, pos.y, pos.z];
+    let Some((block, props)) = state_at(player, pos).and_then(blocks::state) else {
+        return;
+    };
+    let biome = player
+        .source
+        .as_ref()
+        .and_then(|source| source.biome_name(pos[0], pos[1], pos[2]));
+    super::recipe_unlock::USED_ON_BLOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(super::recipe_unlock::UsedRecord {
+            player: player.uuid,
+            block,
+            props,
+            item,
+            biome,
+            smokey: smokey(player, pos),
+        });
+}
+
 /// Vanilla `BucketItem.useOn` and the `CauldronInteraction` water/lava maps.
 fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     let held = player.inventory.selected_item().clone();
@@ -375,8 +619,17 @@ pub fn use_block(player: &mut Player, location: i64) -> bool {
     if is_bed(state) {
         return use_bed(player, pos, state);
     }
+    if glow_sign(player, pos, state) {
+        return true;
+    }
     if is_sign(state) {
         return use_sign(player, pos, state);
+    }
+    if wax_or_scrape(player, pos, state, name)
+        || charge_anchor(player, pos, state, name)
+        || harvest_honey(player, pos, state, name)
+    {
+        return true;
     }
     if fill_bottle(player, pos, state) {
         return true;
@@ -578,6 +831,26 @@ pub fn sign_messages(entity: &ferrite_world::BlockEntity, front: bool) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copper_scrapes_one_stage_and_waxes_keeping_its_state() {
+        assert_eq!(
+            scraped("weathered_cut_copper").as_deref(),
+            Some("exposed_cut_copper")
+        );
+        assert_eq!(
+            scraped("oxidized_copper_door").as_deref(),
+            Some("weathered_copper_door")
+        );
+        assert_eq!(scraped("exposed_copper").as_deref(), Some("copper_block"));
+        assert_eq!(scraped("copper_block"), None);
+        assert_eq!(scraped("stone"), None);
+        let lit = blocks::state_id("exposed_copper_bulb", &[("lit", "true")]).unwrap();
+        let waxed = as_block(lit, "waxed_exposed_copper_bulb").unwrap();
+        assert_eq!(name(waxed), Some("minecraft:waxed_exposed_copper_bulb"));
+        assert_eq!(property(waxed, "lit"), Some("true"));
+        assert!(as_block(lit, "waxed_stone").is_none());
+    }
 
     #[test]
     fn props_round_trip_and_preserve_the_other_values() {

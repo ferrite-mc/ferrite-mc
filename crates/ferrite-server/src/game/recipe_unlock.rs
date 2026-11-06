@@ -33,7 +33,134 @@ pub enum Criterion {
     Breeds(String),
     /// `tame_animal` with no conditions.
     Tames,
+    /// `item_used_on_block` with a block, optional state, tool, biome and smoke condition.
+    UsedOnBlock(UsedOnBlock),
     Other,
+}
+
+/// The conditions of an `item_used_on_block` criterion this server can check.
+#[derive(Debug, Clone, Default)]
+pub struct UsedOnBlock {
+    /// Block ids or `#tags`; empty matches any block.
+    pub blocks: Vec<String>,
+    /// Block state properties that must match.
+    pub state: Vec<(String, String)>,
+    /// Item ids or `#tags` the player must hold; empty matches any item.
+    pub items: Vec<String>,
+    pub biome: Option<String>,
+    /// A beehive with a lit campfire below it.
+    pub smokey: bool,
+}
+
+/// What a player used on a block, for [`criteria_for_used`].
+#[derive(Debug, Clone)]
+pub struct UsedRecord {
+    pub player: Uuid,
+    /// The block after the use.
+    pub block: &'static str,
+    pub props: &'static [(&'static str, &'static str)],
+    /// The item held before the use.
+    pub item: Option<&'static str>,
+    pub biome: Option<String>,
+    pub smokey: bool,
+}
+
+/// Uses of items on blocks since the last drain.
+pub static USED_ON_BLOCK: Mutex<Vec<UsedRecord>> = Mutex::new(Vec::new());
+
+fn id_matches(list: &[String], kind: &str, id: &str) -> bool {
+    let short = |s: &str| {
+        s.strip_prefix("minecraft:")
+            .map(str::to_owned)
+            .unwrap_or_else(|| s.to_owned())
+    };
+    list.iter().any(|wanted| match wanted.strip_prefix('#') {
+        Some(tag) => ferrite_data::tags::contains(kind, &short(tag), &short(id)),
+        None => short(wanted) == short(id),
+    })
+}
+
+impl UsedOnBlock {
+    fn matches(&self, used: &UsedRecord) -> bool {
+        (self.blocks.is_empty() || id_matches(&self.blocks, "block", used.block))
+            && self
+                .state
+                .iter()
+                .all(|(k, v)| used.props.iter().any(|(pk, pv)| pk == k && pv == v))
+            && (self.items.is_empty()
+                || used
+                    .item
+                    .is_some_and(|item| id_matches(&self.items, "item", item)))
+            && self
+                .biome
+                .as_ref()
+                .is_none_or(|wanted| used.biome.as_ref() == Some(wanted))
+            && (!self.smokey || used.smokey)
+    }
+}
+
+/// Parses `{"location": {"type": "all_of", "terms": [location_check, match_tool]}}`.
+fn used_on_block(conditions: &serde_json::Value) -> Option<UsedOnBlock> {
+    let object = conditions.as_object()?;
+    let location = object.get("location")?;
+    if object.len() != 1 {
+        return None;
+    }
+    let terms = match location["type"].as_str()? {
+        "minecraft:all_of" => location["terms"].as_array()?.clone(),
+        _ => vec![location.clone()],
+    };
+    let mut out = UsedOnBlock::default();
+    for term in &terms {
+        let predicate = term["predicate"].as_object()?;
+        match term["type"].as_str()? {
+            "minecraft:location_check" => {
+                for (key, value) in predicate {
+                    match key.as_str() {
+                        "block" => {
+                            let block = value.as_object()?;
+                            for (key, value) in block {
+                                match key.as_str() {
+                                    "blocks" => out.blocks = alternatives(value),
+                                    "state" => {
+                                        for (name, wanted) in value.as_object()? {
+                                            out.state
+                                                .push((name.clone(), wanted.as_str()?.to_owned()));
+                                        }
+                                    }
+                                    _ => return None,
+                                }
+                            }
+                        }
+                        "biomes" => out.biome = Some(value.as_str()?.to_owned()),
+                        "smokey" => out.smokey = value.as_bool()?,
+                        _ => return None,
+                    }
+                }
+            }
+            "minecraft:match_tool" => {
+                if predicate.len() != 1 {
+                    return None;
+                }
+                out.items = alternatives(predicate.get("items")?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Advancement criteria completed by using an item on a block.
+pub fn criteria_for_used(used: &UsedRecord) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::UsedOnBlock(wanted) if wanted.matches(used)) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +448,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             {
                 Criterion::Tames
             }
+            Some("minecraft:item_used_on_block") => {
+                used_on_block(&c["conditions"]).map_or(Criterion::Other, Criterion::UsedOnBlock)
+            }
             Some("minecraft:bred_animals") => {
                 bred_child(&c["conditions"]).map_or(Criterion::Other, Criterion::Breeds)
             }
@@ -588,6 +718,32 @@ mod tests {
             done.contains(&"minecraft:story/enter_the_end#entered_end".to_owned()),
             !rules().is_empty()
         );
+    }
+
+    #[test]
+    fn item_used_on_block_checks_block_state_tool_and_smoke() {
+        let json = serde_json::json!({"location": {"type": "minecraft:all_of", "terms": [
+            {"type": "minecraft:location_check", "predicate": {
+                "block": {"blocks": "minecraft:respawn_anchor", "state": {"charges": "4"}}}},
+            {"type": "minecraft:match_tool", "predicate": {"items": "minecraft:glowstone"}}]}});
+        let wanted = used_on_block(&json).expect("parsed");
+        let used = |charges: &'static str, item| UsedRecord {
+            player: Uuid::nil(),
+            block: "minecraft:respawn_anchor",
+            props: Box::leak(Box::new([("charges", charges)])),
+            item,
+            biome: None,
+            smokey: false,
+        };
+        assert!(wanted.matches(&used("4", Some("minecraft:glowstone"))));
+        assert!(!wanted.matches(&used("3", Some("minecraft:glowstone"))));
+        assert!(!wanted.matches(&used("4", Some("minecraft:stick"))));
+        assert!(!wanted.matches(&used("4", None)));
+        // A predicate this server cannot check is not guessed at.
+        let jukebox = serde_json::json!({"location": {"type": "minecraft:all_of", "terms": [
+            {"type": "minecraft:match_tool",
+             "predicate": {"predicates": {"minecraft:jukebox_playable": {}}}}]}});
+        assert!(used_on_block(&jukebox).is_none());
     }
 
     #[test]

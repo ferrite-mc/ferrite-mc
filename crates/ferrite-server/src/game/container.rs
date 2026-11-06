@@ -1091,7 +1091,9 @@ impl Player {
     /// whether the block was used.
     pub fn use_block(&mut self, location: i64) -> bool {
         // Doors, buttons, beds, signs, buckets and cauldrons first; menus follow.
+        let before = self.inventory.selected_item().name();
         if super::blocks::use_block(self, location) {
+            super::blocks::record_use(self, location, before);
             return true;
         }
         let pos = ferrite_protocol::types::BlockPos::unpack(location);
