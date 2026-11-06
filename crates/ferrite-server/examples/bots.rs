@@ -3,7 +3,8 @@ use ferrite_protocol::{
     Decode, FrameDecoder, FrameEncoder, Packet, VarInt, encode_packet,
     packets::{
         configuration::{
-            AcknowledgeFinishConfiguration, ClientboundKnownPacks, ServerboundKnownPacks,
+            AcknowledgeFinishConfiguration, ClientInformation, ClientboundKnownPacks,
+            ServerboundKnownPacks,
         },
         handshake::{Intent, Intention},
         login::{LoginAcknowledged, LoginStart},
@@ -128,6 +129,22 @@ impl Bot {
         let login = b.read().await;
         assert_eq!(VarInt::decode(&mut login.as_slice()).unwrap().0, 2);
         b.send(&LoginAcknowledged).await;
+        // Other servers send only as far as the client says it can see.
+        b.send(&ClientInformation {
+            locale: "en_us".into(),
+            view_distance: std::env::var("BOTS_VIEW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8),
+            chat_mode: VarInt(0),
+            chat_colors: true,
+            skin_parts: 0x7f,
+            main_hand: VarInt(1),
+            text_filtering: false,
+            server_listing: true,
+            particle_status: VarInt(0),
+        })
+        .await;
         loop {
             let frame = b.read().await;
             let mut s = frame.as_slice();
@@ -383,6 +400,33 @@ async fn run_external(addr: std::net::SocketAddr, n: usize) {
     }
     println!("DONE");
 }
+/// One bot joins a running server (`BOTS_ADDR`, `BOTS_CHUNKS=1`) and counts the chunks it
+/// receives until none arrives for 8 s: how fast the server makes and sends the area around the
+/// spawn. Prints `CHUNKS <count> <seconds to the last one> <chunks per second>`.
+async fn run_chunks(addr: std::net::SocketAddr) {
+    let mut bot = Bot::join(addr, "ChunkBot").await;
+    let start = std::time::Instant::now();
+    let mut count = 0u32;
+    let mut last = start;
+    // Other packets (time, entities) keep arriving, so the 8 s of quiet run from the last chunk
+    // and are checked on every packet, not only when the socket is idle.
+    while last.elapsed() < std::time::Duration::from_secs(8) {
+        let Ok((id, _)) =
+            tokio::time::timeout(std::time::Duration::from_secs(8), bot.next_play()).await
+        else {
+            break;
+        };
+        if id == 46 {
+            count += 1;
+            last = std::time::Instant::now();
+        }
+    }
+    let seconds = (last - start).as_secs_f64();
+    println!(
+        "CHUNKS {count} {seconds:.1} {:.1}",
+        f64::from(count) / seconds.max(0.001)
+    );
+}
 #[tokio::main]
 async fn main() {
     let n = std::env::args()
@@ -390,6 +434,10 @@ async fn main() {
         .map(|s| s.parse().unwrap())
         .unwrap_or(200);
     if let Ok(addr) = std::env::var("BOTS_ADDR") {
+        if std::env::var("BOTS_CHUNKS").is_ok() {
+            run_chunks(addr.parse().unwrap()).await;
+            return;
+        }
         let n = std::env::args()
             .nth(1)
             .map(|s| s.parse().unwrap())

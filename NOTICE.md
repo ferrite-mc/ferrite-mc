@@ -12,8 +12,9 @@ or sponsored by Mojang Studios or Microsoft. "Minecraft" is a trademark of Mojan
 - This repository contains no world generator. Vanilla world generation is done by the official
   generator inside the server jar you download yourself, run unmodified in a separate JVM process
   by our own host (`java/ferrite-worldgen-host`, see `docs/worldgen-host.md`). The host is compiled
-  on your machine against that jar and contains only our code; no Mojang code is re-implemented,
-  copied or distributed here. Ferrite never accepts the Minecraft EULA for you: you set `eula=true`
+  on your machine against that jar and contains only our code; no Mojang code is copied or distributed
+  here. Faster replacements of generator steps, if added, are our own algorithms written from
+  the observable behaviour and checked against the unmodified jar's output. Ferrite never accepts the Minecraft EULA for you: you set `eula=true`
   in `eula.txt` yourself, and the host's jar reads the same file.
 - Compatibility target for plugins is the public Bukkit/Spigot/Paper API (a separate project,
   licensed by its own authors). The Paper API artifact is downloaded by the Gradle build and not

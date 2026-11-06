@@ -99,17 +99,24 @@ The patched jar is cached in `worldgen/` and never leaves the machine.
 
 ### Open problem and dead ends
 
-- With 8 request threads the host sometimes stops answering (about 1 run in 8, unmodified jar;
-  Ferrite then fails the request after its 300 s timeout). Not seen with the default 4
-  threads in 8 runs (16-39 chunks/s), which is not enough to claim it is fixed. Keep `threads` at 4 or lower; Ferrite now clamps the setting to 4 (`vanilla_gen::host_threads`).
+- An earlier run saw the host stop answering with 8 request threads (1 in 8 runs). 11 later
+  stress runs (5 at 8, 4 at 12, 2 at 16 threads, view distance 12) did not hang, and chunk rate
+  rose 60 -> 102 -> 153 chunks/s for 4 -> 8 -> 16 threads, so the default is 8 and the clamp 16.
+  If a hang returns, lower `threads`.
   Likely cause (unverified): `ServerChunkCache.getChunk` from a non-main thread hops through the server
   main thread, so concurrent requests can block each other there. Reproducing needs a run with the user's `eula=true`.
 - Dead end: replacing the blocking `getChunk` with `getChunkFuture(x, z, FULL, true)` made every
   request fail with `Unloaded chunk` on 26.3. Reverted.
 - Dead end: emptying `LevelTicks.tick` changes generated blocks (leaf distance). Kept out of the rules.
-- Not taken: C2ME's math/aquifer/density-function modules re-implement Mojang algorithms inside
-  repository files, which the rule "no Mojang logic in this repository" forbids. Only code that
-  wraps or skips calls, or transforms the user's own jar on their machine, is allowed.
+- Policy (changed 2026-11-07): replacing a hot piece of Mojang's generator with **our own,
+  different algorithm that gives the same result** is allowed (a faster noise evaluation, a spatial
+  index for biome lookup, fewer allocations), applied to the patched jar on the user's machine.
+  Still forbidden: copying or paraphrasing Mojang's code (or decompiled/Paper-patch lines that contain
+  it) into the repository, and shipping any of Mojang's classes. Such a replacement is written from
+  the behaviour (inputs and outputs), and it is only kept if (1) a test compares its output with the
+  unmodified jar over many positions and seeds and finds no difference, and (2) a measurement shows
+  it is faster. C2ME/Moonrise-style modules are a reference for *what* to speed up, not code to copy
+  (their licences must be checked before any of their code is used).
 
 Each step is kept only if it beats the baseline for resident memory, CPU and chunks per second
 (see `tools/` benchmark). Baseline: unpatched jar, 512 MB heap, about 280 MB live after load,

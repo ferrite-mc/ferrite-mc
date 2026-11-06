@@ -55,6 +55,6 @@ forwarding-secret = ""
 # 바닐라 월드 생성 호스트 설정 (generator = "vanilla"일 때). 표는 파일 끝에 둡니다.
 # [worldgen]
 # heap-mb = 1024
-# threads = 4
+# threads = 8
 # jvm-args = []
 # seed = "0"
