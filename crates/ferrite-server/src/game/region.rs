@@ -2371,6 +2371,12 @@ impl Player {
             self.survival.eating = Some(eating);
             return;
         }
+        if let Some(name) = stack.name() {
+            super::recipe_unlock::CONSUMED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((self.uuid, name));
+        }
         if let Some(food) = food {
             self.survival.food.eat(food.nutrition, food.saturation);
         } else if let Some(effects) = potion {

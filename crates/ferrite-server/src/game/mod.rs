@@ -1420,6 +1420,13 @@ async fn run(
                      for (who, kind) in kills { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_kill(kind)); }
                  }
              }
+             {
+                 let eaten = std::mem::take(&mut *recipe_unlock::CONSUMED.lock().unwrap_or_else(|e| e.into_inner()));
+                 if !eaten.is_empty() {
+                     let mut game = command_state.lock().unwrap();
+                     for (who, item) in eaten { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_consumed(item)); }
+                 }
+             }
              scan_tick = scan_tick.wrapping_add(1);
              if scan_tick.is_multiple_of(20) {
                  for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }

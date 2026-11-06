@@ -19,6 +19,8 @@ pub enum Criterion {
     Recipe(String),
     /// `player_killed_entity` with nothing but a plain entity type to match.
     Kills(String),
+    /// `consume_item` of one item id, or any item (`*`).
+    Consumes(String),
     Other,
 }
 
@@ -61,6 +63,39 @@ fn kill_type(conditions: &serde_json::Value) -> Option<String> {
     (!name.starts_with('#')).then(|| name.to_owned())
 }
 
+/// The item a `consume_item` criterion asks for (`*` for any), when that is all it asks for.
+fn consumed_item(conditions: &serde_json::Value) -> Option<String> {
+    if conditions.is_null() {
+        return Some("*".to_owned());
+    }
+    let object = conditions.as_object()?;
+    if object.is_empty() {
+        return Some("*".to_owned());
+    }
+    let item = object.get("item")?.as_object()?;
+    if object.len() != 1 || item.len() != 1 {
+        return None;
+    }
+    let name = item.get("items")?.as_str()?;
+    (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// Items players finished eating or drinking since the last drain, `(player, item id)`.
+pub static CONSUMED: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
+
+/// Advancement criteria completed by consuming an item.
+pub fn criteria_for_consumed(item: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Consumes(wanted) if wanted == "*" || wanted == item) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
 /// Entity kinds players killed since the last drain, `(player, entity type id)`.
 pub static KILLS: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
 
@@ -99,6 +134,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             ),
             Some("minecraft:recipe_unlocked") => {
                 Criterion::Recipe(c["conditions"]["recipes"].as_str()?.to_owned())
+            }
+            Some("minecraft:consume_item") => {
+                consumed_item(&c["conditions"]).map_or(Criterion::Other, Criterion::Consumes)
             }
             Some("minecraft:player_killed_entity") => {
                 kill_type(&c["conditions"]).map_or(Criterion::Other, Criterion::Kills)
@@ -320,6 +358,20 @@ mod tests {
             !rules().is_empty()
         );
         assert!(criteria_for_kill("minecraft:cow").is_empty() || !rules().is_empty());
+    }
+
+    #[test]
+    fn consume_criteria_name_one_item_or_any() {
+        let one = serde_json::json!({"item": {"items": "minecraft:apple"}});
+        assert_eq!(consumed_item(&one).as_deref(), Some("minecraft:apple"));
+        assert_eq!(
+            consumed_item(&serde_json::Value::Null).as_deref(),
+            Some("*")
+        );
+        let tag = serde_json::json!({"item": {"items": "#minecraft:foods"}});
+        assert_eq!(consumed_item(&tag), None);
+        let counted = serde_json::json!({"item": {"items": "minecraft:apple", "count": 2}});
+        assert_eq!(consumed_item(&counted), None);
     }
 
     #[test]
