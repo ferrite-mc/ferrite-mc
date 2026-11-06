@@ -170,6 +170,30 @@ public final class Host {
         return null;
     }
 
+    /**
+     * A fully generated chunk, held by a ticket until {@link #release}. {@code
+     * ServerChunkCache.getChunk} called off the server thread parks the main thread in {@code
+     * managedBlock} until the chunk is ready, so concurrent requests nest inside each other there
+     * and finish in stack order. This only schedules the request and waits on the calling thread;
+     * the ticket keeps the chunk from being dropped while the main thread keeps running.
+     */
+    private static ChunkAccess fullChunk(MinecraftServer server, ServerLevel level, int x, int z)
+            throws Exception {
+        var pos = new net.minecraft.world.level.ChunkPos(x, z);
+        server.submit(() -> level.getChunkSource().addTicketWithRadius(
+                net.minecraft.server.level.TicketType.FORCED, pos, 0)).get();
+        return level.getChunkSource()
+                .getChunkFuture(x, z, ChunkStatus.FULL, true)
+                .join()
+                .orElseThrow(() -> new IllegalStateException("chunk " + x + "," + z + " unavailable"));
+    }
+
+    private static void release(MinecraftServer server, ServerLevel level, int x, int z) {
+        var pos = new net.minecraft.world.level.ChunkPos(x, z);
+        server.execute(() -> level.getChunkSource().removeTicketWithRadius(
+                net.minecraft.server.level.TicketType.FORCED, pos, 0));
+    }
+
     private static ResourceKey<Level> dimension(int id) {
         return switch (id) {
             case 0 -> Level.OVERWORLD;
@@ -363,9 +387,13 @@ public final class Host {
         }
         switch (op) {
             case OP_GENERATE -> {
-                ChunkAccess chunk =
-                        level.getChunkSource().getChunk(x, z, ChunkStatus.FULL, true);
-                var tag = SerializableChunkData.copyOf(level, chunk).write();
+                ChunkAccess chunk = fullChunk(server, level, x, z);
+                net.minecraft.nbt.CompoundTag tag;
+                try {
+                    tag = SerializableChunkData.copyOf(level, chunk).write();
+                } finally {
+                    release(server, level, x, z);
+                }
                 ByteArrayOutputStream bytes = new ByteArrayOutputStream(48 * 1024);
                 try (DataOutputStream data = new DataOutputStream(bytes)) {
                     NbtIo.write(tag, data);
