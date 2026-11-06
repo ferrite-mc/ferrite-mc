@@ -803,6 +803,9 @@ async fn write_loop<W: wire::BatchWriter>(
                 game::Incoming::Closed => return Ok(()),
                 game::Incoming::Message(msg) => {
                     queue_batch(&mut batch, &encoder, msg, &mut close);
+                    // Let the other tasks run once so the packets the regions push in the
+                    // meantime leave in this write instead of one write (a syscall) each.
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                     while close.is_none()
                         && let Some(msg) = queue.try_recv()
                     {

@@ -347,9 +347,22 @@ async fn run_external(addr: std::net::SocketAddr, n: usize) {
             // Paper's accept backlog resets a burst of 800 connects at once; spread them.
             tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 5)).await;
             let mut bot = Bot::join(addr, &format!("Bot{i}")).await;
+            // Let the server settle (others lag right after a join burst, and kick a client whose
+            // two moves land in one lagging tick) while answering its packets.
+            let settle = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(settle) => break,
+                    _ = bot.next_play() => {},
+                }
+            }
             barrier.wait().await;
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Other servers kick a client that sends two position packets in one tick, which a
+            // burst of missed interval ticks (after the join wait) would do.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let [mut x, y, mut z] = bot.placed;
             let mut rng = i as u64 + 1;
             loop {
