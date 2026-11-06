@@ -3700,17 +3700,25 @@ async fn a_retracting_sticky_piston_carries_the_mob_standing_on_the_block() {
         }
     };
     click_block(&mut bot, [0, 64, 0]).await;
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    // Keep what the cow did, so a timeout on a runner says where it went instead of only "elapsed".
+    let mut seen: Vec<(f64, f64, f64)> = Vec::new();
+    let carried = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let body = bot.until(EntityTeleport::ID).await;
             let teleport = EntityTeleport::decode(&mut body.as_slice()).unwrap();
-            if teleport.id.0 == id && teleport.x < 3.0 {
-                break;
+            if teleport.id.0 == id {
+                seen.push((teleport.x, teleport.y, teleport.z));
+                if teleport.x < 3.0 {
+                    break;
+                }
             }
         }
     })
-    .await
-    .expect("the sticky piston should carry the cow to x 2.5");
+    .await;
+    assert!(
+        carried.is_ok(),
+        "the sticky piston should carry the cow to x 2.5; teleports seen for the cow: {seen:?}"
+    );
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();

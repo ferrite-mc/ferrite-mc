@@ -1,5 +1,7 @@
 # Next session — where the work stands (2026-11-05)
 
+> Newer note: `docs/handoff/2026-11-06-commands-worldgen-api.md` (read it first).
+
 Branch `yxshadxw/plan1104` (worktree `plan1104`). `origin/main` is at `4feaf42`; later commits are
 on the branch only.
 
