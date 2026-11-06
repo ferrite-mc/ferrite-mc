@@ -5,6 +5,8 @@ piston/End note and still applies for those areas.
 
 ## Read first
 
+- Folia reference (not readable from the cloud session): <https://docs.papermc.io/folia/reference/overview/#_top>
+  — diff its scheduler/ownership/region rules against `ferrite-region` and `docs/BACKLOG.md`.
 - `docs/COMMANDS-STATUS.md` — what each command really does, and what it does not.
 - `docs/worldgen-host.md` — host protocol (ops 1-10), patcher, open problems.
 - `docs/plugin-stubs-status.md` — Bukkit/Paper API coverage and the gaps.

@@ -104,6 +104,9 @@ still stubs that answer "Command not implemented".
 - Profiler: `/tps` `/mspt` `/profile` exist; add a `/spark`-style sampling view and per-system
   attribution outside regions.
 - Regionizer: move deferred mutations into per-region queues (a shared queue is still scanned).
+- Folia reference: <https://docs.papermc.io/folia/reference/overview/#_top>. The cloud session could not
+  open it (`docs.papermc.io` is outside its network allow-list), so the API list below was checked against
+  the code, not against that page. Compare them when working locally.
 - Threading (checked in code): regions tick in parallel on a worker pool and Folia's Region, Entity,
   Global and Async schedulers plus `isOwnedByCurrentRegion` exist. Still serialized on the one
   coordinator task in `game/mod.rs`: join/leave, every inbound packet dispatch, the clock tick, the
