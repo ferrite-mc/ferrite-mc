@@ -3665,7 +3665,7 @@ async fn sticky_piston_pulls_stone_after_power_is_removed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retracting_sticky_piston_carries_the_mob_standing_on_the_block() {
-    use ferrite_protocol::packets::play::{AddEntity, EntityTeleport};
+    use ferrite_protocol::packets::play::{AddEntity, TeleportEntity};
     let lever = block_state(
         "minecraft:lever",
         &[("face", "floor"), ("facing", "north"), ("powered", "false")],
@@ -3704,8 +3704,8 @@ async fn a_retracting_sticky_piston_carries_the_mob_standing_on_the_block() {
     let mut seen: Vec<(f64, f64, f64)> = Vec::new();
     let carried = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
-            let body = bot.until(EntityTeleport::ID).await;
-            let teleport = EntityTeleport::decode(&mut body.as_slice()).unwrap();
+            let body = bot.until(TeleportEntity::ID).await;
+            let teleport = TeleportEntity::decode(&mut body.as_slice()).unwrap();
             if teleport.id.0 == id {
                 seen.push((teleport.x, teleport.y, teleport.z));
                 if teleport.x < 3.0 {
