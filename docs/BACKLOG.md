@@ -125,8 +125,12 @@ still stubs that answer "Command not implemented".
   405 ms per tick at 800 clustered players (about 3 TPS for the global region). It now uses a 48-block
   grid, keeps a `Copy` pose per observed pair instead of cloning the player, encodes each movement
   packet once per tick, and splits observers across up to 8 scoped threads: 13 ms per tick, global
-  region back at 20 TPS. Next: region ticks at 800 bots (mean 27 ms; the superflat run spends most of
-  it outside the `chunk-stream` and `player-update` scopes, fixture mostly in `chunk-stream`).
+  region back at 20 TPS. Region ticks: `region-tick` now has per-stage scopes. On superflat the
+  entity tracker (`ferrite_entity::tracker::track`) took 22 ms per tick because it searched each
+  entity's viewer list linearly per viewer; hashing that took it to 8.6 ms and the superflat 800-bot
+  run from mean 26.5 / p99 83.5 ms to mean 12.5 / p99 37 ms. The rest is the entity x viewer
+  pairing itself (a viewer grid would cut it) and, on the fixture world, `chunk-stream` (about
+  3 ms per tick).
 
 ## Quality and release
 

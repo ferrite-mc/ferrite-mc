@@ -155,6 +155,8 @@ fn encode<P: Packet>(packet: &P) -> Vec<u8> {
 
 /// Runs one tracker tick over every entity in `store` for the players of its region.
 pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_>) {
+    // Looked up once per pairing per entity; a linear scan made a tick quadratic in the players.
+    let present: HashSet<ViewerKey> = viewers.iter().map(|v| v.key).collect();
     let keys = store.keys().to_vec();
     for key in keys {
         let Some(i) = store.dense(key) else { continue };
@@ -187,18 +189,17 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
         }
         // Pairing (vanilla `TrackedEntity.updatePlayer`).
         let chunk = chunk_of(pos);
+        let seen_now: HashSet<ViewerKey> = data.tracker.seen_by.iter().map(|p| p.viewer).collect();
+        let mut stopped: HashSet<ViewerKey> = HashSet::new();
+        let mut kept: HashSet<ViewerKey> = HashSet::new();
+        let mut started = Vec::new();
         for viewer in viewers {
             let dx = viewer.pos.x - pos.x;
             let dz = viewer.pos.z - pos.z;
             let range = f64::from(info.range.min(viewer.view_distance * 16));
             let visible = dx * dx + dz * dz <= range * range && viewer.chunks.contains(&chunk);
-            let seen = data
-                .tracker
-                .seen_by
-                .iter()
-                .position(|p| p.viewer == viewer.key);
-            match (seen, visible) {
-                (None, true) => {
+            match (seen_now.contains(&viewer.key), visible) {
+                (false, true) => {
                     sink(
                         viewer.key,
                         &encode(&AddEntity {
@@ -229,13 +230,10 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             }),
                         );
                     }
-                    data.tracker.seen_by.push(Pairing {
-                        viewer: viewer.key,
-                        absent: 0,
-                    });
+                    started.push(viewer.key);
                 }
-                (Some(at), false) => {
-                    data.tracker.seen_by.swap_remove(at);
+                (true, false) => {
+                    stopped.insert(viewer.key);
                     sink(
                         viewer.key,
                         &encode(&RemoveEntities {
@@ -243,16 +241,33 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                         }),
                     );
                 }
-                (Some(at), true) => data.tracker.seen_by[at].absent = 0,
-                (None, false) => {}
+                (true, true) => {
+                    kept.insert(viewer.key);
+                }
+                (false, false) => {}
             }
         }
+        if !stopped.is_empty() {
+            data.tracker
+                .seen_by
+                .retain(|p| !stopped.contains(&p.viewer));
+        }
+        for pairing in &mut data.tracker.seen_by {
+            if kept.contains(&pairing.viewer) {
+                pairing.absent = 0;
+            }
+        }
+        data.tracker.seen_by.extend(
+            started
+                .into_iter()
+                .map(|viewer| Pairing { viewer, absent: 0 }),
+        );
         // Players missing from the region: keep them through a hand-off, then let go.
         let remove = encode(&RemoveEntities {
             ids: vec![VarInt(data.id)],
         });
         data.tracker.seen_by.retain_mut(|pairing| {
-            if viewers.iter().any(|v| v.key == pairing.viewer) {
+            if present.contains(&pairing.viewer) {
                 return true;
             }
             pairing.absent += 1;
@@ -262,7 +277,7 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
             }
             true
         });
-        send_changes(data, pos, vel, &mut flags, info, viewers, sink);
+        send_changes(data, pos, vel, &mut flags, info, &present, sink);
         *store.flags_mut(key).unwrap() = flags;
     }
 }
@@ -274,7 +289,7 @@ fn send_changes(
     vel: Vec3,
     flags: &mut Flags,
     info: TrackingInfo,
-    viewers: &[Viewer<'_>],
+    viewers: &HashSet<ViewerKey>,
     sink: &mut Sink<'_>,
 ) {
     let id = VarInt(data.id);
@@ -283,7 +298,7 @@ fn send_changes(
         .tracker
         .seen_by
         .iter()
-        .filter(|p| p.absent == 0 && viewers.iter().any(|v| v.key == p.viewer))
+        .filter(|p| p.absent == 0 && viewers.contains(&p.viewer))
         .map(|p| p.viewer)
         .collect();
     let mut broadcast = |packet: Vec<u8>| {

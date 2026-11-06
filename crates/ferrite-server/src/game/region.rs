@@ -5342,11 +5342,21 @@ impl Region {
         self.tick_clock = self.tick_clock.wrapping_add(1);
         let timings = self.timings.clone();
         let _tick = timings.as_ref().map(|t| t.scope("region-tick"));
+        // Closes the previous stage scope and opens the next, so the profile shows where a region
+        // tick goes; each stage is a child of `region-tick`.
+        let mut stage = None;
+        macro_rules! stage {
+            ($name:expr) => {
+                drop(stage.take());
+                stage.replace(timings.as_ref().map(|t| t.scope($name)));
+            };
+        }
         let rules = SurvivalRules::from(&ctx.rules.lock().unwrap());
         let blocks = TickBlocks {
             source: ctx.source.as_deref(),
             seen: Default::default(),
         };
+        stage!("players");
         let ids: Vec<_> = self.players.keys().copied().collect();
         let mut explosions = std::mem::take(&mut self.plugin_explosions);
         for id in ids {
@@ -5433,6 +5443,7 @@ impl Region {
             self.drop_broken_blocks(&mut p);
             self.players.insert(id, p);
         }
+        stage!("explosions");
         // Vanilla `BedBlock.explodeBed` runs the ordinary `Explosion` and leaves fire behind.
         for (center, power, fire, breaks) in explosions {
             self.explode(center, power, breaks, ctx);
@@ -5456,6 +5467,7 @@ impl Region {
                 }
             }
         }
+        stage!("buttons-and-block-updates");
         // Vanilla `ButtonBlock` scheduled release ticks.
         let mut button_changed = Vec::new();
         if let Some(source) = ctx.source.as_deref() {
@@ -5468,6 +5480,7 @@ impl Region {
         }
         let mut changed = self.tick_block_updates(ctx);
         changed.extend(button_changed);
+        stage!("hoppers");
         // Vanilla `HopperBlockEntity` ticks as a block entity; a region keeps only the
         // hoppers it has seen and ticks them every game tick (their own cooldown gates moves).
         if let Some(source) = ctx.source.as_deref() {
@@ -5481,6 +5494,7 @@ impl Region {
             } = self;
             hoppers.tick(source, entities, rng);
         }
+        stage!("fire");
         // Vanilla `FireBlock.tick` runs on scheduled ticks and changes blocks through the same
         // neighbor-update path as any other block change.
         let mut fire_changed = Vec::new();
@@ -5511,6 +5525,7 @@ impl Region {
         if let Some(source) = ctx.source.as_deref() {
             self.schedule_gravity(source, &changed);
         }
+        stage!("gravity-redstone");
         self.tick_gravity(ctx);
         self.tick_redstone(ctx, &mut changed);
         self.tick_dispensers(ctx);
@@ -5524,6 +5539,7 @@ impl Region {
         if entities_run {
             item::tick_items(&mut self.entities, &blocks, &mut self.rng);
         }
+        stage!("entities");
         self.resolve_attacks(ctx);
         if entities_run {
             self.tick_arrows(ctx);
@@ -5542,10 +5558,12 @@ impl Region {
             self.tick_falling(ctx);
             self.tick_tnt(ctx);
         }
+        stage!("containers");
         self.tick_beacons(ctx);
         for p in self.players.values_mut() {
             p.tick_containers();
         }
+        stage!("track-entities");
         self.track_entities(ctx);
         self.entities.sweep_removed();
         for entity in self.entities.take_crossing() {
@@ -5556,6 +5574,7 @@ impl Region {
                 entity: Box::new(entity),
             });
         }
+        stage!("finish");
         self.publish_command_entities(&ctx.command_entities);
     }
 
