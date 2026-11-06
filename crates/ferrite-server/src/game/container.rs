@@ -505,8 +505,7 @@ impl Player {
 
     /// A click on a recipe in the recipe book (vanilla `ServerPlaceRecipe`): fills the open
     /// crafting grid from the inventory. A recipe that cannot be filled leaves the grid as it was
-    /// (vanilla also shows a ghost recipe). Whether the player has unlocked the recipe is not
-    /// checked.
+    /// and shows the recipe as a ghost. The coordinator has already checked it is unlocked.
     pub fn handle_place_recipe(&mut self, p: ferrite_protocol::packets::play::PlaceRecipe) {
         if self.gamemode == 3 {
             return;
@@ -528,6 +527,12 @@ impl Player {
         if menu.place_recipe(&mut self.inventory, crafter(), &layout, p.use_max) {
             let full = menu.broadcast_full_state(&self.inventory);
             emit(self, vec![full]);
+        } else if let Some(ghost) = super::recipe_packets::ghost_packet(p.window.0, p.display_id.0)
+        {
+            // Missing ingredients: vanilla shows the recipe as a ghost in the grid instead.
+            let _ = self
+                .outbound
+                .send(ferrite_net::game::Outbound::Packet(ghost.into()));
         }
     }
 

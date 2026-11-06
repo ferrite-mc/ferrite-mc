@@ -5,8 +5,7 @@
 //! `tools/extractor/RecipeExtractor.java` (it boots the real data-pack loader on the user's server
 //! jar), written to `vanilla/<ver>/generated/ferrite/recipes.json`. This module only frames the
 //! packets and tracks which recipes each player has unlocked (`/recipe give|take`). Recipes are
-//! not unlocked by gameplay yet, and the client's recipe-book setting and "seen" packets are
-//! not handled.
+//! not unlocked by gameplay yet, and the client's "seen" packets are not handled.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -21,6 +20,7 @@ pub const UPDATE_RECIPES: i32 = 136;
 pub const RECIPE_BOOK_SETTINGS: i32 = 77;
 pub const RECIPE_BOOK_ADD: i32 = 75;
 pub const RECIPE_BOOK_REMOVE: i32 = 76;
+pub const PLACE_GHOST_RECIPE: i32 = 64;
 const FLAG_NOTIFICATION: u8 = 1;
 
 #[derive(Debug, Clone)]
@@ -28,6 +28,8 @@ pub struct Display {
     pub index: i32,
     /// `RecipeBookAddPacket.Entry` bytes with the flags byte last.
     pub wire: Vec<u8>,
+    /// The bare `RecipeDisplay`, for `place_ghost_recipe`; empty when the data predates it.
+    pub display: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +71,7 @@ pub fn parse(json: &str) -> Book {
                 Some(Display {
                     index: i32::try_from(e["index"].as_i64()?).ok()?,
                     wire: decode_hex(e["wire"].as_str()?),
+                    display: decode_hex(e["display"].as_str().unwrap_or_default()),
                 })
             })
             .collect();
@@ -90,6 +93,26 @@ pub fn recipe_of_display(index: i32) -> Option<&'static str> {
         .iter()
         .find(|(_, recipe)| recipe.displays.iter().any(|d| d.index == index))
         .map(|(id, _)| id.as_str())
+}
+
+/// `place_ghost_recipe`: shows the recipe in the crafting grid when the ingredients are missing.
+pub fn ghost_packet(window: i32, index: i32) -> Option<Vec<u8>> {
+    let display = book()
+        .recipes
+        .values()
+        .flat_map(|recipe| &recipe.displays)
+        .find(|display| display.index == index)
+        .map(|display| &display.display)
+        .filter(|display| !display.is_empty())?;
+    Some(packet(PLACE_GHOST_RECIPE, |out| {
+        VarInt(window).encode(out);
+        out.extend_from_slice(display);
+    }))
+}
+
+/// Whether the recipe a `place_recipe` click names is one the player has unlocked.
+pub fn display_is_unlocked(unlocked: &BTreeSet<String>, index: i32) -> bool {
+    recipe_of_display(index).is_some_and(|id| unlocked.contains(id))
 }
 
 fn book() -> &'static Book {
@@ -278,6 +301,31 @@ mod tests {
               {"id":"t:b","notify":false,"entries":[{"index":300,"wire":"cc00"},{"index":301,"wire":"dd00"}]}
             ],"update_recipes":"0102"}"#,
         )
+    }
+
+    #[test]
+    fn a_displays_bare_form_is_kept_for_the_ghost_recipe() {
+        let book = parse(
+            r#"{"recipes":[{"id":"t:a","notify":true,
+               "entries":[{"index":3,"wire":"aabb00","display":"aabb"}]}],"update_recipes":""}"#,
+        );
+        assert_eq!(book.recipes["t:a"].displays[0].display, [0xaa, 0xbb]);
+        // Without the field (older extractor output) the display is empty, so no ghost is sent.
+        assert!(sample().recipes["t:a"].displays[0].display.is_empty());
+    }
+
+    #[test]
+    fn only_unlocked_recipes_can_be_placed_and_real_recipes_have_a_ghost() {
+        // Needs `vanilla/26.3/generated/ferrite/recipes.json`; skipped without it.
+        let Some(id) = recipe_of_display(0) else {
+            return;
+        };
+        let index = book().recipes[id].displays[0].index;
+        assert!(display_is_unlocked(&BTreeSet::from([id.to_owned()]), index));
+        assert!(!display_is_unlocked(&BTreeSet::new(), index));
+        let ghost = ghost_packet(5, index).expect("a real recipe has a display");
+        assert_eq!(&ghost[..2], &[PLACE_GHOST_RECIPE as u8, 5]);
+        assert!(ghost.len() > 2);
     }
 
     #[test]

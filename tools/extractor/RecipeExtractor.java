@@ -20,6 +20,7 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.item.crafting.RecipeManager;
+import net.minecraft.world.item.crafting.display.RecipeDisplay;
 import net.minecraft.world.level.WorldDataConfiguration;
 
 public final class RecipeExtractor {
@@ -59,6 +60,7 @@ public final class RecipeExtractor {
         for (RecipeHolder<?> holder : holders) {
             List<String> wires = new ArrayList<>();
             List<Integer> ids = new ArrayList<>();
+            List<String> displays = new ArrayList<>();
             manager.listDisplaysForRecipe(holder.id(), entry -> {
                 ByteBuf buf = Unpooled.buffer();
                 ClientboundRecipeBookAddPacket.Entry.STREAM_CODEC.encode(
@@ -66,6 +68,9 @@ public final class RecipeExtractor {
                         new ClientboundRecipeBookAddPacket.Entry(entry, (byte) 0));
                 wires.add(hex(buf));
                 ids.add(entry.id().index());
+                ByteBuf shown = Unpooled.buffer();
+                RecipeDisplay.STREAM_CODEC.encode(new RegistryFriendlyByteBuf(shown, access), entry.display());
+                displays.add(hex(shown));
             });
             if (wires.isEmpty()) continue;
             if (!first) out.append(",\n");
@@ -75,7 +80,7 @@ public final class RecipeExtractor {
                 .append(",\"entries\":[");
             for (int i = 0; i < wires.size(); i++) {
                 if (i > 0) out.append(',');
-                out.append("{\"index\":").append(ids.get(i)).append(",\"wire\":\"").append(wires.get(i)).append("\"}");
+                out.append("{\"index\":").append(ids.get(i)).append(",\"wire\":\"").append(wires.get(i)).append("\",\"display\":\"").append(displays.get(i)).append("\"}");
             }
             out.append("]}");
         }
