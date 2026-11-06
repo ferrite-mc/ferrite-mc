@@ -441,6 +441,31 @@ fn charge_anchor(player: &mut Player, pos: [i32; 3], state: u16, block: &str) ->
     true
 }
 
+/// Vanilla `CompassItem.useOn`: a compass used on a lodestone is bound to it.
+fn bind_compass(player: &mut Player, pos: [i32; 3], block: &str) -> bool {
+    let held = player.inventory.selected_item().clone();
+    if block != "minecraft:lodestone" || held.name() != Some("minecraft:compass") {
+        return false;
+    }
+    let tracker = ferrite_item::Component::LodestoneTracker(ferrite_item::LodestoneTracker {
+        target: Some((player.dimension.key().to_owned(), pos)),
+        tracked: true,
+    });
+    let Some(id) = tracker.type_id() else {
+        return false;
+    };
+    let mut bound = held.copy_with_count(1);
+    bound.components.insert(id, tracker);
+    if held.count == 1 && player.gamemode != 1 {
+        let slot = player.inventory.selected_slot();
+        player.inventory.set(slot, bound);
+    } else {
+        consume_held(player);
+        player.inventory.add(&mut bound, player.gamemode == 1);
+    }
+    true
+}
+
 /// Whether a lit campfire sits up to five blocks below (`CampfireBlock.isSmokeyPos`).
 fn smokey(player: &Player, pos: [i32; 3]) -> bool {
     (1..=5).any(|d| {
@@ -627,6 +652,7 @@ pub fn use_block(player: &mut Player, location: i64) -> bool {
     }
     if wax_or_scrape(player, pos, state, name)
         || charge_anchor(player, pos, state, name)
+        || bind_compass(player, pos, name)
         || harvest_honey(player, pos, state, name)
     {
         return true;

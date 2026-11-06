@@ -617,6 +617,53 @@ impl Trim {
     }
 }
 
+/// The `minecraft:lodestone_tracker` value: where a compass points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LodestoneTracker {
+    /// The dimension id and block position of the lodestone, if the compass is bound to one.
+    pub target: Option<(String, [i32; 3])>,
+    /// Whether the compass stops pointing when the lodestone is gone.
+    pub tracked: bool,
+}
+
+impl LodestoneTracker {
+    fn to_compound(&self) -> Compound {
+        let mut compound = Compound::new();
+        if let Some((dimension, pos)) = &self.target {
+            let mut target = Compound::new();
+            target.insert("pos".into(), Tag::IntArray(pos.to_vec()));
+            target.insert("dimension".into(), Tag::String(dimension.clone()));
+            compound.insert("target".into(), Tag::Compound(target));
+        }
+        compound.insert("tracked".into(), Tag::Byte(i8::from(self.tracked)));
+        compound
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        let target = match compound.get("target") {
+            Some(Tag::Compound(target)) => {
+                let Some(Tag::IntArray(pos)) = target.get("pos") else {
+                    return None;
+                };
+                Some((
+                    as_str(target.get("dimension")?)?.to_owned(),
+                    <[i32; 3]>::try_from(pos.as_slice()).ok()?,
+                ))
+            }
+            Some(_) => return None,
+            None => None,
+        };
+        let tracked = match compound.get("tracked") {
+            Some(tag) => as_bool(tag)?,
+            None => true,
+        };
+        Some(Self { target, tracked })
+    }
+}
+
 /// The `minecraft:tool` value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tool {
@@ -752,6 +799,8 @@ pub enum Component {
     Tool(Tool),
     /// `minecraft:trim`, an armor trim from a smithing table.
     Trim(Trim),
+    /// `minecraft:lodestone_tracker`, a compass bound to a lodestone.
+    LodestoneTracker(LodestoneTracker),
     /// A component without a typed variant, or a value whose NBT shape did not match its typed
     /// variant. Kept verbatim.
     Opaque(Tag),
@@ -785,6 +834,7 @@ impl Component {
             Self::PotionContents(_) => ids::POTION_CONTENTS,
             Self::Tool(_) => ids::TOOL,
             Self::Trim(_) => ids::TRIM,
+            Self::LodestoneTracker(_) => ids::LODESTONE_TRACKER,
             Self::Opaque(_) | Self::Raw(_) => return None,
         })
     }
@@ -811,6 +861,7 @@ impl Component {
             Self::PotionContents(_) => "potion_contents",
             Self::Tool(_) => "tool",
             Self::Trim(_) => "trim",
+            Self::LodestoneTracker(_) => "lodestone_tracker",
             Self::Opaque(_) => "opaque",
             Self::Raw(_) => "raw",
         }
@@ -851,6 +902,7 @@ impl Component {
             Self::PotionContents(contents) => Tag::Compound(contents.to_compound()),
             Self::Tool(tool) => Tag::Compound(tool.to_compound()),
             Self::Trim(trim) => Tag::Compound(trim.to_compound()),
+            Self::LodestoneTracker(tracker) => Tag::Compound(tracker.to_compound()),
             Self::Opaque(tag) => tag.clone(),
             Self::Raw(_) => return Err(Error::NoNbtForm("raw")),
         })
@@ -895,6 +947,7 @@ impl Component {
             ids::POTION_CONTENTS => PotionContents::from_tag(tag).map(Self::PotionContents),
             ids::TOOL => Tool::from_tag(tag).map(Self::Tool),
             ids::TRIM => Trim::from_tag(tag).map(Self::Trim),
+            ids::LODESTONE_TRACKER => LodestoneTracker::from_tag(tag).map(Self::LodestoneTracker),
             _ => None,
         };
         typed.unwrap_or_else(|| Self::Opaque(tag.clone()))
@@ -1291,6 +1344,13 @@ mod tests {
                 }),
             ),
             (ids::TOOL, Component::Tool(tool)),
+            (
+                ids::LODESTONE_TRACKER,
+                Component::LodestoneTracker(LodestoneTracker {
+                    target: Some(("minecraft:the_nether".to_owned(), [-12, 70, 305])),
+                    tracked: false,
+                }),
+            ),
             (
                 ids::TRIM,
                 Component::Trim(Trim {

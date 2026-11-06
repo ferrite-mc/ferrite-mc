@@ -867,3 +867,24 @@ fn an_unknown_trim_material_cannot_be_sent() {
         Err(WireError::UnknownRegistry { .. })
     ));
 }
+
+#[test]
+fn a_lodestone_tracker_is_a_global_pos_and_a_flag() {
+    let tracker = Component::LodestoneTracker(crate::LodestoneTracker {
+        target: Some(("minecraft:overworld".to_owned(), [-3, 64, 7])),
+        tracked: true,
+    });
+    let bytes = encode_component(&tracker).unwrap();
+    let mut expected = vec![1];
+    write_varint("minecraft:overworld".len() as i32, &mut expected);
+    expected.extend_from_slice(b"minecraft:overworld");
+    let packed: i64 = ((-3_i64 & 0x3FF_FFFF) << 38) | ((7 & 0x3FF_FFFF) << 12) | 64;
+    expected.extend_from_slice(&packed.to_be_bytes());
+    expected.push(1);
+    assert_eq!(bytes, expected);
+    let unbound = Component::LodestoneTracker(crate::LodestoneTracker {
+        target: None,
+        tracked: false,
+    });
+    assert_eq!(encode_component(&unbound).unwrap(), [0, 0]);
+}

@@ -641,6 +641,21 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
                 write_varint(id + 1, &mut out);
             }
         }
+        Component::LodestoneTracker(tracker) => {
+            match &tracker.target {
+                Some((dimension, [x, y, z])) => {
+                    out.push(1);
+                    write_string(dimension, &mut out)?;
+                    // `BlockPos.asLong`: 26 bits of x, 26 of z, 12 of y.
+                    let packed = ((i64::from(*x) & 0x3FF_FFFF) << 38)
+                        | ((i64::from(*z) & 0x3FF_FFFF) << 12)
+                        | (i64::from(*y) & 0xFFF);
+                    out.extend_from_slice(&packed.to_be_bytes());
+                }
+                None => out.push(0),
+            }
+            out.push(u8::from(tracker.tracked));
+        }
         Component::Opaque(_) => return Err(WireError::NotRepresentable(component.kind())),
         Component::Raw(bytes) => out.extend_from_slice(bytes),
     }
