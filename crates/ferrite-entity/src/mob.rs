@@ -20,6 +20,8 @@ pub const DESPAWN_DISTANCE: f64 = 128.0;
 pub const NO_DESPAWN_DISTANCE: f64 = 32.0;
 /// Ticks without a nearby player before the random despawn roll starts.
 pub const NO_ACTION_TICKS: u32 = 600;
+/// How long a wild wolf stays angry (vanilla 20 to 39 seconds, the shorter value here).
+pub const WOLF_ANGER_TICKS: u16 = 400;
 /// Ticks a passive mob flees after being hurt (vanilla panic goal duration is 100-200).
 pub const PANIC_TICKS: u16 = 100;
 
@@ -257,6 +259,8 @@ pub struct MobState {
     pub sitting: bool,
     /// Whether a tamed animal is walking to its owner (`FollowOwnerGoal`).
     pub following: bool,
+    /// Ticks a wild wolf stays angry at its target (`NeutralMob` anger time).
+    pub anger: u16,
 }
 
 impl MobState {
@@ -291,6 +295,7 @@ impl MobState {
             owner: None,
             sitting: false,
             following: false,
+            anger: 0,
         }
     }
 
@@ -401,6 +406,7 @@ pub fn hurt(
     if let Some(source) = source
         && let Some(mob) = state_mut(store, key)
         && !mob.kind.is_hostile()
+        && mob.kind != MobKind::Wolf
     {
         mob.panic = PANIC_TICKS;
         mob.panic_from = Some(source);
@@ -419,6 +425,15 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
     let Some(mob) = state_mut(store, key) else {
         return false;
     };
+    if mob.kind == MobKind::Wolf {
+        // A wild wolf turns on whoever hurt it; a tame one never does.
+        if mob.owner.is_some() {
+            return false;
+        }
+        mob.target = Some(player);
+        mob.anger = WOLF_ANGER_TICKS;
+        return true;
+    }
     if !mob.kind.is_hostile() {
         return false;
     }

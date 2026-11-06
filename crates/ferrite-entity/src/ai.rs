@@ -207,6 +207,12 @@ pub fn tick_with(
             state.bow_timer = state.bow_timer.saturating_sub(1);
             state.panic = state.panic.saturating_sub(1);
             state.path_timer = state.path_timer.saturating_sub(1);
+            if state.kind == MobKind::Wolf {
+                state.anger = state.anger.saturating_sub(1);
+                if state.anger == 0 {
+                    state.target = None;
+                }
+            }
         }
 
         if kind.is_hostile() {
@@ -318,7 +324,38 @@ pub fn tick_with(
                         state.wander_yaw,
                     )
                 });
-            if panic > 0 {
+            let angry_at = if kind == MobKind::Wolf {
+                mob::state(store, key)
+                    .and_then(|state| state.target)
+                    .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
+                    .copied()
+            } else {
+                None
+            };
+            if let Some(target) = angry_at {
+                // A wild wolf chases and bites the player who hurt it.
+                directed = true;
+                let dx = target.pos.x - start.x;
+                let dz = target.pos.z - start.z;
+                if (dx * dx + dz * dz).sqrt() <= kind.attack_reach() {
+                    let ready =
+                        mob::state(store, key).is_some_and(|state| state.attack_cooldown == 0);
+                    if ready {
+                        events.push(MobEvent::Melee {
+                            player: target.uuid,
+                            damage: kind.attack_damage(),
+                            from: start,
+                            attacker: key,
+                        });
+                        if let Some(state) = mob::state_mut(store, key) {
+                            state.attack_cooldown = MELEE_COOLDOWN;
+                        }
+                    }
+                } else {
+                    walking = follow_path(store, key, blocks, start, target.pos);
+                    speed = CHASE_ACCELERATION;
+                }
+            } else if panic > 0 {
                 if let Some(from) = panic_from {
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                     speed = 1.5;
@@ -723,6 +760,33 @@ mod tests {
             mob::state(&store, zombie).unwrap().health,
             MobKind::Zombie.max_health()
         );
+    }
+
+    #[test]
+    fn a_wild_wolf_bites_whoever_hurt_it_and_a_tame_one_does_not() {
+        let world = TestWorld::flat(64);
+        let player = target(0.5, 0.5);
+        for tame in [false, true] {
+            let mut store = EntityStore::default();
+            let wolf = store.insert(new_mob(
+                MobKind::Wolf,
+                Vec3::new(5.5, 64.0, 0.5),
+                &mut Rng::new(1),
+            ));
+            if tame {
+                mob::state_mut(&mut store, wolf).unwrap().owner = Some(player.uuid);
+            }
+            mob::hurt(&mut store, wolf, 1.0, Some(Vec3::new(0.5, 64.0, 0.5)));
+            mob::retaliate(&mut store, wolf, player.uuid);
+            let mut rng = Rng::new(2);
+            let mut bit = false;
+            for _ in 0..200 {
+                for event in tick_with(&mut store, &world, &[player], &mut rng) {
+                    bit |= matches!(event, MobEvent::Melee { .. });
+                }
+            }
+            assert_eq!(bit, !tame, "tame: {tame}");
+        }
     }
 
     #[test]
