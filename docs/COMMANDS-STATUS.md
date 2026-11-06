@@ -36,7 +36,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
 - `/waypoint`: `list` lists online players; `modify` stores color/style per entity and the locator bar
   (`waypoints.rs`, packet 141, byte-checked against the vanilla codec) applies it. Every player is a
   transmitter for the others in the same dimension (azimuth beyond 332 blocks, position inside the
-  view distance, chunk otherwise). Not yet: spectators/invisible/`waypoint_transmit_range` filtering,
+  view distance, chunk otherwise). Spectators (via /gamemode or join) do not transmit. Not yet: invisible/`waypoint_transmit_range` filtering and spectators set by plugins,
   non-player transmitters.
 - `/loot give|insert|replace|spawn <target> loot|mine|fish|kill ...` roll the extracted tables
   (`mine` reads the block at the position; `mainhand`/`offhand` count as no tool; `kill` rolls

@@ -101,6 +101,7 @@ impl Locator {
         &mut self,
         online: &HashMap<Uuid, OnlinePlayer>,
         styles: &BTreeMap<Uuid, WaypointStyle>,
+        spectators: &std::collections::BTreeSet<Uuid>,
     ) -> Vec<(Uuid, Vec<u8>)> {
         let mut out = Vec::new();
         let packet = |op, uuid, style: &str, color, data| {
@@ -115,7 +116,7 @@ impl Locator {
         let mut keep = std::collections::HashSet::new();
         for (rid, receiver) in online {
             for (sid, source) in online {
-                if rid == sid {
+                if rid == sid || spectators.contains(sid) {
                     continue;
                 }
                 let Some(data) = desired(receiver, source) else {
@@ -207,19 +208,23 @@ mod tests {
         let mut locator = Locator::default();
         let styles = BTreeMap::new();
 
-        let first = locator.sync(&online, &styles);
+        let first = locator.sync(&online, &styles, &Default::default());
         assert_eq!(first.len(), 2);
         let seen = decode(&first.iter().find(|(r, _)| *r == a).unwrap().1);
         assert_eq!((seen.operation.0, seen.uuid), (0, b));
         assert_eq!(seen.data, WaypointData::Position([40, 70, -5]));
-        assert!(locator.sync(&online, &styles).is_empty());
+        assert!(
+            locator
+                .sync(&online, &styles, &Default::default())
+                .is_empty()
+        );
 
         online.get_mut(&b).unwrap().pos = [41.0, 70.0, -5.0];
-        let moved = locator.sync(&online, &styles);
+        let moved = locator.sync(&online, &styles, &Default::default());
         assert_eq!(decode(&moved[0].1).operation.0, 2);
 
         online.get_mut(&b).unwrap().pos = [900.0, 70.0, 0.0];
-        let far = locator.sync(&online, &styles);
+        let far = locator.sync(&online, &styles, &Default::default());
         let ops: Vec<i32> = far.iter().map(|(_, p)| decode(p).operation.0).collect();
         assert_eq!(ops.iter().filter(|op| **op == 1).count(), 2);
         assert!(
@@ -228,9 +233,13 @@ mod tests {
         );
 
         online.get_mut(&b).unwrap().dimension = Dimension::Nether;
-        let apart = locator.sync(&online, &styles);
+        let apart = locator.sync(&online, &styles, &Default::default());
         assert!(apart.iter().all(|(_, p)| decode(p).operation.0 == 1));
-        assert!(locator.sync(&online, &styles).is_empty());
+        assert!(
+            locator
+                .sync(&online, &styles, &Default::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -248,12 +257,29 @@ mod tests {
                 style: Some("minecraft:bowtie".into()),
             },
         );
-        let sent = locator.sync(&online, &styles);
+        let sent = locator.sync(&online, &styles, &Default::default());
         let packet = decode(&sent.iter().find(|(r, _)| *r == a).unwrap().1);
         assert_eq!(packet.style, "minecraft:bowtie");
         assert_eq!(packet.color, Some(0xff8800));
         assert_eq!(color_of("red"), Some(0xFF5555));
         assert_eq!(color_of("nope"), None);
+    }
+
+    #[test]
+    fn spectators_do_not_transmit_and_are_removed_when_they_become_one() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut online = HashMap::new();
+        online.insert(a, player([0.0; 3], Dimension::Overworld));
+        online.insert(b, player([5.0, 0.0, 0.0], Dimension::Overworld));
+        let mut locator = Locator::default();
+        let styles = BTreeMap::new();
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(locator.sync(&online, &styles, &none).len(), 2);
+        let spectators = std::collections::BTreeSet::from([b]);
+        let after = locator.sync(&online, &styles, &spectators);
+        assert_eq!(after.len(), 1, "only a is told that b is gone");
+        assert_eq!(after[0].0, a);
+        assert_eq!(decode(&after[0].1).operation.0, 1);
     }
 
     #[test]

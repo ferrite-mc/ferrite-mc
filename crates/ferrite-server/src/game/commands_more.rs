@@ -48,6 +48,8 @@ pub struct MoreState {
     pub recipe_settings: BTreeMap<uuid::Uuid, [u8; 8]>,
     /// `/waypoint modify`: color and style per entity.
     pub waypoints: BTreeMap<uuid::Uuid, WaypointStyle>,
+    /// Players in spectator mode; they do not transmit on the locator bar.
+    pub spectators: std::collections::BTreeSet<uuid::Uuid>,
     /// The ender dragon fight in the end.
     pub end_fight: super::end_fight::FightState,
 }

@@ -1026,6 +1026,7 @@ async fn run(
            let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
            let start_mode = saved.as_ref().map_or_else(|| command_state.lock().unwrap().default_gamemode, |s| s.gamemode);
            command_state.lock().unwrap().join(uuid, name.clone(), start_mode, max_players as i32);
+           if start_mode == 3 { command_state.lock().unwrap().more.spectators.insert(uuid); }
            command_state.lock().unwrap().set_position(uuid, start_pos, start_yaw, start_pitch);
            command_state.lock().unwrap().set_dimension(uuid, start_dimension);
            let seed = command_state.lock().unwrap().seed;
@@ -1156,7 +1157,7 @@ async fn run(
                   tracking: &tracking,
               };
               while let Ok(action) = received.try_recv() { match action {
-                  commands::Action::GameMode { mode, targets } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { target_mailbox.lock().unwrap().push_back(Command::SetMode(mode)); } worlds.schedule_global(move |g| g.set_mode(target, mode)); } },
+                  commands::Action::GameMode { mode, targets } => { for target in targets { { let more = &mut command_state.lock().unwrap().more; if mode == 3 { more.spectators.insert(target); } else { more.spectators.remove(&target); } } if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { target_mailbox.lock().unwrap().push_back(Command::SetMode(mode)); } worlds.schedule_global(move |g| g.set_mode(target, mode)); } },
                   commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
                   commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
                   commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
@@ -1307,7 +1308,7 @@ async fn run(
             command_state.lock().unwrap().set_dimension(id,dimension);
             worlds.schedule_global(move |g| g.set_dimension(id, dimension));
           },
-          Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
+          Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
             let name = names.remove(&uuid).unwrap_or_default();
             crate::plugins::facts::forget(uuid);
             if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
@@ -1394,8 +1395,8 @@ async fn run(
              }
              let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
              {
-                 let styles = command_state.lock().unwrap().more.waypoints.clone();
-                 for (receiver, bytes) in locator.sync(&online, &styles) {
+                 let (styles, spectators) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone()) };
+                 for (receiver, bytes) in locator.sync(&online, &styles, &spectators) {
                      if let Some(player) = online.get(&receiver) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
                  }
              }
