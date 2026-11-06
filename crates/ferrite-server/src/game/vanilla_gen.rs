@@ -194,7 +194,16 @@ impl VanillaGenerator {
                 .join(if cfg!(windows) { "java.exe" } else { "java" });
 
         let server_jar = match &settings.patch_rules {
-            Some(rules) => patched_jar(settings, rules, &java_bin)?,
+            Some(rules) => match patched_jar(settings, rules, &java_bin) {
+                Ok(jar) => jar,
+                Err(error) => {
+                    // A Minecraft update can move a rule's target; generation must still work.
+                    tracing::warn!(
+                        "patching the server jar failed ({error:#}); using it unmodified"
+                    );
+                    settings.server_jar.clone()
+                }
+            },
             None => settings.server_jar.clone(),
         };
         let mut classpath = vec![settings.host_jar.clone(), server_jar];

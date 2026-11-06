@@ -23,7 +23,7 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 | `jvm-args` | 문자열 배열 | `[]` | 호스트 JVM에 추가로 넘기는 옵션. GC를 따로 지정하지 않으면 `-XX:+UseParallelGC`가 붙습니다(G1보다 약 8% 빨랐습니다). 다른 GC를 지정하면 그것이 우선합니다. |
 | `java-home` | 문자열 | (자동 탐색) | 쓸 Java 25 이상 설치 경로. |
 | `seed` | 문자열 | `"0"` | 월드 시드. 숫자나 문자열(`server.properties`와 같은 규칙). |
-| `patch` | 불리언 | `false` | 사용자 PC에서 jar의 복사본을 만들어(바이트코드 패처) 네트워크·틱·플레이어 처리를 덜어 낸 것으로 실행합니다. 복사본은 `worldgen/patched/`에만 있습니다. |
+| `patch` | 불리언 | `true` | 사용자 PC에서 jar의 복사본을 만들어(바이트코드 패처) 네트워크·틱·플레이어 처리를 덜어 낸 것으로 실행합니다. 복사본은 `worldgen/patched/`에만 있습니다. 패치에 실패하면(마인크래프트 업데이트 등) 경고를 남기고 원본 jar로 실행합니다. 끄려면 `false`. |
 | `patch-rules` | 경로 | `java/ferrite-worldgen-host/rules/worldgen.rules` | `patch`가 쓰는 규칙 파일. |
 
 호스트는 `python tools/fetch_vanilla.py`로 받은 `vanilla/26.3/lib/server-26.3.jar`와

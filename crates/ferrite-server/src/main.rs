@@ -64,7 +64,7 @@ impl Default for WorldgenSettings {
             jvm_args: Vec::new(),
             java_home: None,
             seed: "0".into(),
-            patch: false,
+            patch: true,
             patch_rules: "java/ferrite-worldgen-host/rules/worldgen.rules".into(),
         }
     }

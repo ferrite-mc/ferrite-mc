@@ -14,8 +14,7 @@ Done: the host (`Host.java`), the Rust client (`vanilla_gen.rs`), the shared `eu
 `tools/build_worldgen_host.py`, `[worldgen]` settings and an end-to-end test
 (`crates/ferrite-server/tests/vanilla_host.rs`). The host runs the user's jar **unmodified**.
 The patcher (`Patcher.java`, rules in `rules/worldgen.rules`, `[worldgen] patch = true`) removes the
-network listener, gameplay ticking, player and function ticks; it is off by default until it
-measurably beats the unmodified jar (see Measuring). Ops 5-10 (locate biome/structure/poi,
+network listener, gameplay ticking, player and function ticks; it is on by default (see Measuring). Ops 5-10 (locate biome/structure/poi,
 structure_at, place, structure starts) are done. Not done: `call:` hooks for optimisations (no
 measured hotspot to target), the `process`/`remote` modes (`remote` would need an authenticated,
 non-loopback channel and cannot be tested on one machine).
@@ -89,7 +88,8 @@ The patched jar is cached in `worldgen/` and never leaves the machine.
   GC matter more than removing code: 384 MB works.
 - Idle CPU: 0.28 s per 15 s unmodified, 0.06 s with ticks removed. Throughput difference between
   the unmodified and the patched jar is inside run-to-run noise (19–39 chunks/s for the same
-  settings), so the patch is not enabled by default.
+  settings); idle CPU is lower. The patch is on by default (`[worldgen] patch = true`) and falls back
+  to the unmodified jar with a warning when patching fails.
 - Vanilla 26.3 already generates on its own worker pool (87% of CPU samples). Top costs: structure
   stages 14%, terrain noise 12%, surface 8%, chunk parse from disk 4%, block counts 4%.
 - Unmodified hosts differ from each other block by block, so comparisons use a tolerance.
