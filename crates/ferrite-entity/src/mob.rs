@@ -330,7 +330,6 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     if kind == MobKind::Wolf
         && let Some(state) = data.mob.as_ref()
     {
-        crate::breed::define_metadata(&mut data.metadata, state);
         crate::tame::define_metadata(&mut data.metadata, state);
     }
     if kind == MobKind::Villager {

@@ -61,7 +61,8 @@ pub enum Used {
     Toggled,
 }
 
-fn is_wolf_food(item: &str) -> bool {
+/// Meat, which tamed wolves eat (`#minecraft:wolf_food`).
+pub fn is_wolf_food(item: &str) -> bool {
     matches!(
         item.strip_prefix("minecraft:").unwrap_or(item),
         "beef"

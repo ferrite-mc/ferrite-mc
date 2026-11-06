@@ -80,6 +80,8 @@ pub enum MobEvent {
     Explode { center: Vec3, power: f32 },
     /// Two animals bred; the baby is already in the store.
     Bred(crate::breed::Bred),
+    /// An entity event for the players tracking `key` (hearts, smoke).
+    Status { key: crate::EntityKey, status: u8 },
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -180,6 +182,10 @@ pub fn tick_with(
         };
         if kind.is_animal() {
             crate::breed::tick_age(store, key);
+            // Vanilla `Animal.aiStep`: hearts every half second while in love (event 18).
+            if mob::state(store, key).is_some_and(|s| s.love > 0 && s.love % 10 == 0) {
+                events.push(MobEvent::Status { key, status: 18 });
+            }
         }
         let mut directed = false;
         if kind == MobKind::EnderDragon {

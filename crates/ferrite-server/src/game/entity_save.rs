@@ -387,7 +387,7 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.love = int(c, "InLove").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
                 mob.owner = uuid_field(c, "Owner");
                 mob.sitting = boolean(c, "Sitting");
-                if kind.is_animal() || kind == MobKind::Wolf {
+                if kind.is_animal() {
                     ferrite_entity::breed::define_metadata(&mut data.metadata, &mob);
                 }
                 if kind == MobKind::Wolf {

@@ -22,9 +22,9 @@ const BREED_DISTANCE_SQ: f64 = 9.0;
 const BREED_TICKS: u16 = 60;
 
 impl MobKind {
-    /// The animals that breed.
+    /// The animals that breed: the farm animals and wolves.
     pub fn is_animal(self) -> bool {
-        Self::ALL.contains(&self)
+        Self::ALL.contains(&self) || self == Self::Wolf
     }
 }
 
@@ -43,6 +43,7 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
                 | "torchflower_seeds"
                 | "pitcher_pod"
         ),
+        MobKind::Wolf => crate::tame::is_wolf_food(item),
         _ => false,
     }
 }
@@ -53,13 +54,28 @@ pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     metadata.set(BABY_INDEX, MetaValue::Boolean(state.age < 0));
 }
 
+/// Babies are half the size of their parents (`AgeableMob.getAgeScale`).
+const BABY_SCALE: f64 = 0.5;
+
 fn sync(store: &mut EntityStore, key: EntityKey) {
     let Some(data) = store.data_mut(key) else {
         return;
     };
-    if let Some(mob) = data.mob {
-        data.metadata
-            .set(BABY_INDEX, MetaValue::Boolean(mob.age < 0));
+    let Some(mob) = data.mob else { return };
+    data.metadata
+        .set(BABY_INDEX, MetaValue::Boolean(mob.age < 0));
+    let scale = if mob.age < 0 { BABY_SCALE } else { 1.0 };
+    let props = mob.kind.props();
+    let (width, height) = (
+        f64::from(props.width) * scale,
+        f64::from(props.height) * scale,
+    );
+    if data.width != width || data.height != height {
+        data.width = width;
+        data.height = height;
+        if let Some(pos) = store.pos(key) {
+            store.set_pos(key, pos);
+        }
     }
 }
 
@@ -80,6 +96,10 @@ pub fn feed(store: &mut EntityStore, key: EntityKey, item: &str, player: Uuid) -
         return Fed::No;
     };
     if !is_food(mob.kind, item) {
+        return Fed::No;
+    }
+    // A wild wolf is not fed; only a tamed one breeds.
+    if mob.kind == MobKind::Wolf && mob.owner.is_none() {
         return Fed::No;
     }
     let fed = if mob.age == 0 && mob.love == 0 {
@@ -269,6 +289,36 @@ mod tests {
             store.data(baby).unwrap().metadata.get(BABY_INDEX),
             Some(&MetaValue::Boolean(true))
         );
+    }
+
+    #[test]
+    fn a_baby_is_half_the_size_and_grows_to_full_size() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::default();
+        let (cow, _) = pair(&mut store, &mut rng);
+        let full = store.bbox(cow).unwrap();
+        mob::state_mut(&mut store, cow).unwrap().age = BABY_AGE;
+        tick_age(&mut store, cow);
+        let baby = store.bbox(cow).unwrap();
+        assert!(((baby.max.y - baby.min.y) * 2.0 - (full.max.y - full.min.y)).abs() < 1e-9);
+        mob::state_mut(&mut store, cow).unwrap().age = -1;
+        tick_age(&mut store, cow);
+        assert_eq!(store.bbox(cow).unwrap(), full);
+    }
+
+    #[test]
+    fn only_a_tamed_wolf_takes_meat() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::default();
+        let wolf = store.insert(mob::new_mob(
+            MobKind::Wolf,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let player = Uuid::from_u128(7);
+        assert_eq!(feed(&mut store, wolf, "minecraft:beef", player), Fed::No);
+        mob::state_mut(&mut store, wolf).unwrap().owner = Some(player);
+        assert_eq!(feed(&mut store, wolf, "minecraft:beef", player), Fed::Love);
     }
 
     #[test]

@@ -3854,6 +3854,7 @@ impl Region {
                     let record = arrow::new_arrow(from, vel, damage, None, &mut self.rng);
                     self.entities.insert(record);
                 }
+                ai::MobEvent::Status { key, status } => self.broadcast_status(ctx, key, status),
                 ai::MobEvent::Bred(bred) => {
                     // Vanilla gives 1-7 experience points to the breeding and counts it for the
                     // player who fed the parent.
@@ -4145,9 +4146,26 @@ impl Region {
     /// Resolves this tick's `serverbound_attack` swings: reach, weapon damage and attack
     /// strength, critical hits, sweeping, knockback and the hurt animation. A drawn bow that
     /// was released this tick fires its arrow first.
+    /// Sends an entity event (vanilla `broadcastEntityEvent`) to the players tracking `key`.
+    fn broadcast_status(&self, ctx: &TickContext, key: ferrite_entity::EntityKey, status: u8) {
+        let Some(id) = self.entities.data(key).map(|data| data.id) else {
+            return;
+        };
+        let players = &self.players;
+        tracker::broadcast(
+            &self.entities,
+            key,
+            &ferrite_protocol::packets::play::EntityEvent {
+                entity_id: id,
+                status,
+            },
+            &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+        );
+    }
+
     /// Right-clicks on entities: food puts an adult animal in love or speeds a baby up
     /// (vanilla `Animal.mobInteract`); the item is used up outside creative mode.
-    fn resolve_uses(&mut self) {
+    fn resolve_uses(&mut self, ctx: &TickContext) {
         let uuids: Vec<Uuid> = self.players.keys().copied().collect();
         for uuid in uuids {
             let Some(p) = self.players.get_mut(&uuid) else {
@@ -4185,6 +4203,12 @@ impl Region {
                         uuid,
                         &mut self.rng,
                     );
+                    // Entity events: 7 hearts when tamed, 6 smoke when the bone failed.
+                    match used {
+                        ferrite_entity::tame::Used::Tamed => self.broadcast_status(ctx, key, 7),
+                        ferrite_entity::tame::Used::Consumed => self.broadcast_status(ctx, key, 6),
+                        _ => {}
+                    }
                     if used == ferrite_entity::tame::Used::Tamed {
                         super::recipe_unlock::TAMED
                             .lock()
@@ -5651,7 +5675,7 @@ impl Region {
         }
         stage!("entities");
         self.resolve_attacks(ctx);
-        self.resolve_uses();
+        self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
             self.tick_mobs(ctx, &blocks);
