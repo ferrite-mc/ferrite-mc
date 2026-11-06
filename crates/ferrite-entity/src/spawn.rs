@@ -35,6 +35,39 @@ const MIN_SURFACE_Y: i32 = -64;
 pub trait SpawnEnv: BlockGetter {
     /// The light level at a block, as vanilla's `getMaxLocalRawBrightness`.
     fn light(&self, x: i32, y: i32, z: i32) -> u8;
+
+    /// The biome's creature spawn list at a column (`natural_mob_spawns`), or `None` when the
+    /// world has no biome data, which spawns the four farm animals everywhere.
+    fn creature_table(&self, _x: i32, _z: i32) -> Option<&[SpawnEntry]> {
+        None
+    }
+
+    /// The biome's monster spawn list, as [`Self::creature_table`].
+    fn monster_table(&self, _x: i32, _z: i32) -> Option<&[SpawnEntry]> {
+        None
+    }
+}
+
+/// One weighted entry of a biome's spawn list: the kind and the group size range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnEntry {
+    pub kind: MobKind,
+    pub weight: i32,
+    pub min: i32,
+    pub max: i32,
+}
+
+/// Picks an entry by weight (vanilla `WeightedRandomList.getRandom`).
+fn pick(table: &[SpawnEntry], rng: &mut Rng) -> Option<SpawnEntry> {
+    let total: i32 = table.iter().map(|entry| entry.weight.max(0)).sum();
+    if total <= 0 {
+        return None;
+    }
+    let mut roll = rng.next_int(total);
+    table.iter().copied().find(|entry| {
+        roll -= entry.weight.max(0);
+        roll < 0
+    })
 }
 
 /// Number of live modelled mobs in a store.
@@ -85,9 +118,23 @@ pub fn natural_spawn(
         if !can_spawn(env, x, y, z) || !far_enough(players, x, z) {
             continue;
         }
-        let kind = MobKind::ALL[rng.next_int(MobKind::ALL.len() as i32) as usize];
-        // Vanilla herds: one to three animals, spread over the neighbouring blocks.
-        for _ in 0..1 + rng.next_int(3) {
+        let (kind, herd) = match env.creature_table(x, z) {
+            Some(table) => {
+                let Some(entry) = pick(table, rng) else {
+                    continue;
+                };
+                (
+                    entry.kind,
+                    entry.min + rng.next_int(entry.max - entry.min + 1),
+                )
+            }
+            None => (
+                MobKind::ALL[rng.next_int(MobKind::ALL.len() as i32) as usize],
+                1 + rng.next_int(3),
+            ),
+        };
+        // Vanilla herds: a few animals of one kind, spread over the neighbouring blocks.
+        for _ in 0..herd {
             let ox = x + rng.next_int(3) - 1;
             let oz = z + rng.next_int(3) - 1;
             let oy = surface(env, ox, oz).unwrap_or(y);
@@ -162,9 +209,23 @@ pub fn natural_spawn_monsters(
         let Some(y) = floor else {
             continue;
         };
-        let kind = MobKind::HOSTILE[rng.next_int(MobKind::HOSTILE.len() as i32) as usize];
-        // Vanilla monster packs: one to four of the same kind around the spawn block.
-        for _ in 0..1 + rng.next_int(4) {
+        let (kind, pack) = match env.monster_table(x, z) {
+            Some(table) => {
+                let Some(entry) = pick(table, rng) else {
+                    continue;
+                };
+                (
+                    entry.kind,
+                    entry.min + rng.next_int(entry.max - entry.min + 1),
+                )
+            }
+            None => (
+                MobKind::HOSTILE[rng.next_int(MobKind::HOSTILE.len() as i32) as usize],
+                1 + rng.next_int(4),
+            ),
+        };
+        // Vanilla monster packs: a few of the same kind around the spawn block.
+        for _ in 0..pack {
             let ox = x + rng.next_int(3) - 1;
             let oz = z + rng.next_int(3) - 1;
             if !can_spawn_monster(env, ox, y, oz) || !far_enough(players, ox, oz) {
@@ -296,6 +357,58 @@ mod tests {
 
     fn player() -> Vec3 {
         Vec3::new(0.5, 64.0, 0.5)
+    }
+
+    struct Tabled(Env, Vec<SpawnEntry>);
+
+    impl BlockGetter for Tabled {
+        fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+            self.0.block_state(x, y, z)
+        }
+    }
+
+    impl SpawnEnv for Tabled {
+        fn light(&self, x: i32, y: i32, z: i32) -> u8 {
+            self.0.light(x, y, z)
+        }
+        fn creature_table(&self, _x: i32, _z: i32) -> Option<&[SpawnEntry]> {
+            Some(&self.1)
+        }
+    }
+
+    #[test]
+    fn a_biome_table_decides_the_kinds_and_herd_sizes() {
+        let mut rng = Rng::new(5);
+        let store = EntityStore::default();
+        let wolves = SpawnEntry {
+            kind: MobKind::Wolf,
+            weight: 8,
+            min: 4,
+            max: 4,
+        };
+        let env = Tabled(
+            Env {
+                floor: "grass_block",
+                light: 15,
+            },
+            vec![wolves],
+        );
+        let spawned = natural_spawn(&store, &env, &[player()], &mut rng, 64);
+        assert!(!spawned.is_empty());
+        assert!(
+            spawned
+                .iter()
+                .all(|r| r.data.mob.is_some_and(|m| m.kind == MobKind::Wolf))
+        );
+        // A biome with no spawns spawns nothing.
+        let empty = Tabled(
+            Env {
+                floor: "grass_block",
+                light: 15,
+            },
+            Vec::new(),
+        );
+        assert!(natural_spawn(&store, &empty, &[player()], &mut rng, 64).is_empty());
     }
 
     #[test]

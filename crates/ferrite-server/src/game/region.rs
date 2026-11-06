@@ -553,6 +553,15 @@ impl BlockGetter for TickBlocks<'_> {
     }
 }
 impl SpawnEnv for TickBlocks<'_> {
+    // shortcut: the biome is read at y = 64 for the whole column, so cave biomes do not count.
+    fn creature_table(&self, x: i32, z: i32) -> Option<&[ferrite_entity::spawn::SpawnEntry]> {
+        super::biome_spawns::creature(&self.source?.biome_name(x, 64, z)?)
+    }
+
+    fn monster_table(&self, x: i32, z: i32) -> Option<&[ferrite_entity::spawn::SpawnEntry]> {
+        super::biome_spawns::monster(&self.source?.biome_name(x, 64, z)?)
+    }
+
     fn light(&self, x: i32, y: i32, z: i32) -> u8 {
         if let Some(source) = self.source
             && let Some(level) = source.brightness(x, y, z)

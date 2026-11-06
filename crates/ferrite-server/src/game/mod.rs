@@ -1,6 +1,7 @@
 mod advancement_packets;
 mod anvil;
 mod attributes;
+mod biome_spawns;
 mod offload;
 mod recipe_packets;
 mod recipe_unlock;
