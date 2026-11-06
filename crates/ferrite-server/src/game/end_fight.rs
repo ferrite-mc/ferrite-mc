@@ -32,6 +32,78 @@ pub struct FightState {
     pub crystals: std::collections::BTreeSet<u8>,
     /// A dragon is flying (spawned or respawned and not dead yet).
     pub dragon_alive: bool,
+    /// The file was read (or found missing) already.
+    pub loaded: bool,
+    /// What the file holds right now, so only a change is written.
+    pub on_disk: Option<Saved>,
+}
+
+/// The part of the fight that survives a restart (`ender_dragon_fight.dat`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    pub started: bool,
+    pub killed: bool,
+    pub dragon_alive: bool,
+    pub gateways: u32,
+    pub crystals: Vec<u8>,
+}
+
+impl Saved {
+    pub fn to_nbt(&self) -> ferrite_nbt::Compound {
+        use ferrite_nbt::Tag;
+        let mut c = ferrite_nbt::Compound::new();
+        c.insert("started".into(), Tag::Byte(i8::from(self.started)));
+        c.insert("previously_killed".into(), Tag::Byte(i8::from(self.killed)));
+        c.insert(
+            "dragon_alive".into(),
+            Tag::Byte(i8::from(self.dragon_alive)),
+        );
+        c.insert("gateways_opened".into(), Tag::Int(self.gateways as i32));
+        c.insert(
+            "crystals".into(),
+            Tag::ByteArray(self.crystals.iter().map(|&n| n as i8).collect()),
+        );
+        c
+    }
+
+    pub fn from_nbt(c: &ferrite_nbt::Compound) -> Option<Self> {
+        use ferrite_nbt::Tag;
+        let flag = |key| matches!(c.get(key), Some(Tag::Byte(b)) if *b != 0);
+        Some(Self {
+            started: flag("started"),
+            killed: flag("previously_killed"),
+            dragon_alive: flag("dragon_alive"),
+            gateways: match c.get("gateways_opened") {
+                Some(Tag::Int(n)) => u32::try_from(*n).ok()?,
+                _ => 0,
+            },
+            crystals: match c.get("crystals") {
+                Some(Tag::ByteArray(list)) => list.iter().map(|&n| n as u8).collect(),
+                _ => Vec::new(),
+            },
+        })
+    }
+}
+
+impl FightState {
+    pub fn saved(&self) -> Saved {
+        Saved {
+            started: self.started,
+            killed: self.killed,
+            dragon_alive: self.dragon_alive,
+            gateways: self.gateways,
+            crystals: self.crystals.iter().copied().collect(),
+        }
+    }
+
+    pub fn restore(&mut self, saved: Saved) {
+        self.started = saved.started;
+        self.killed = saved.killed;
+        self.dragon_alive = saved.dragon_alive;
+        self.gateways = saved.gateways;
+        self.crystals = saved.crystals.iter().copied().collect();
+        self.on_disk = Some(saved);
+    }
 }
 
 /// How many obsidian spikes ring the main island, and how far from the centre they stand.
@@ -308,5 +380,21 @@ mod respawn_tests {
         for [x, y, z] in respawn_crystal_cells(level) {
             assert!(ring.contains(&[x, y - 1, z]), "bedrock under {x} {y} {z}");
         }
+    }
+
+    #[test]
+    fn the_fight_survives_a_round_trip_through_nbt() {
+        let mut fight = FightState {
+            started: true,
+            killed: true,
+            gateways: 3,
+            ..Default::default()
+        };
+        fight.crystals.extend([0, 4, 9]);
+        let back = Saved::from_nbt(&fight.saved().to_nbt()).unwrap();
+        assert_eq!(back, fight.saved());
+        let mut fresh = FightState::default();
+        fresh.restore(back);
+        assert!(fresh.started && fresh.killed && fresh.crystals.len() == 3);
     }
 }

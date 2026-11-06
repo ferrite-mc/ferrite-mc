@@ -4006,6 +4006,32 @@ impl Region {
         if source.dimension() != super::Dimension::End || self.players.is_empty() {
             return;
         }
+        {
+            let mut state = ctx.state.lock().unwrap();
+            let fight = &mut state.more.end_fight;
+            if !fight.loaded {
+                fight.loaded = true;
+                if let Some(saved) = source.load_fight() {
+                    fight.restore(saved);
+                }
+            }
+        }
+        self.run_end_fight(ctx);
+        let mut state = ctx.state.lock().unwrap();
+        let fight = &mut state.more.end_fight;
+        let now = fight.saved();
+        if fight.started && fight.on_disk.as_ref() != Some(&now) {
+            if let Err(error) = source.save_fight(&now) {
+                tracing::warn!("could not save the dragon fight: {error:#}");
+            }
+            fight.on_disk = Some(now);
+        }
+    }
+
+    fn run_end_fight(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
         let mut state = ctx.state.lock().unwrap();
         let fight = &mut state.more.end_fight;
         // The region that holds the chunk at the origin starts the fight.

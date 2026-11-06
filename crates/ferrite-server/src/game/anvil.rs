@@ -473,6 +473,50 @@ impl AnvilChunkSource {
         Ok(())
     }
 
+    fn fight_path(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|path| {
+            self.dimension
+                .storage_root(path)
+                .join("data/minecraft/ender_dragon_fight.dat")
+        })
+    }
+
+    /// The saved dragon fight of this (end) dimension, if there is one.
+    pub(super) fn load_fight(&self) -> Option<super::end_fight::Saved> {
+        let bytes = std::fs::read(self.fight_path()?).ok()?;
+        let (_, Tag::Compound(root)) =
+            binary::read_compressed(&bytes, binary::Compression::Gzip).ok()?
+        else {
+            return None;
+        };
+        let Tag::Compound(data) = root.get("data")? else {
+            return None;
+        };
+        super::end_fight::Saved::from_nbt(data)
+    }
+
+    /// Writes the dragon fight beside the other `data/minecraft` files of the end.
+    pub(super) fn save_fight(&self, saved: &super::end_fight::Saved) -> anyhow::Result<()> {
+        let Some(path) = self.fight_path() else {
+            return Ok(());
+        };
+        let mut root = ferrite_nbt::Compound::new();
+        root.insert("data".into(), Tag::Compound(saved.to_nbt()));
+        root.insert(
+            "DataVersion".into(),
+            Tag::Int(
+                self.data_version()
+                    .unwrap_or(ferrite_command::gamerule::DATA_VERSION),
+            ),
+        );
+        let bytes = binary::write_compressed("", &Tag::Compound(root), binary::Compression::Gzip)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
     fn data_version(&self) -> Option<i32> {
         let bytes = std::fs::read(self.path.as_ref()?.join("level.dat")).ok()?;
         let (_, Tag::Compound(root)) =

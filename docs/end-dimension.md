@@ -41,7 +41,8 @@ What works, how it is built, and what is still missing.
   respawn request before moving (seen-flag is in memory only, not saved). The "Free the End"
   advancement completes on a dragon kill (melee path, covered by a test). (Later kills give 500 xp,
   first kills 12000; the first-kill flag is remembered from the exit portal.)
-- **Persistence.** The fight state lives in memory. After a restart the dragon is respawned unless
-  the podium already carries a portal; entities are not saved.
+- **Persistence.** The fight (started, killed before, gateways, placed spike crystals) is written
+  to `DIM1/data/minecraft/ender_dragon_fight.dat` whenever it changes and read on the first tick
+  in the end. The dragon and crystals are saved as ordinary entities.
 - **Not verified with a real client.** The boss bar, dragon movement and the platform were only
   exercised with protocol bots, and the End terrain through the real host needs the user's EULA.
