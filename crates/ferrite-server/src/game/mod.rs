@@ -1,6 +1,7 @@
 mod advancement_packets;
 mod anvil;
 mod attributes;
+mod recipe_packets;
 pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
@@ -962,6 +963,7 @@ async fn run(
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
     let mut locator = waypoints::Locator::default();
     let mut advancement_sync = advancement_packets::AdvancementSync::default();
+    let mut recipe_sync = recipe_packets::RecipeSync::default();
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -1013,7 +1015,7 @@ async fn run(
            // Resume where the player left off; a first join (or unreadable data) uses the
            // spawn of the dimension the world is configured for.
            let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
-           if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } }
+           if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } let recipes = recipe_packets::load(dir, &uuid); if !recipes.is_empty() { command_state.lock().unwrap().more.recipes.insert(uuid, recipes); } }
            let start_dimension = saved.as_ref().map_or(settings.dimension, |s| s.dimension());
            let dimension_spawn = dimensions.spawn(start_dimension);
            let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
@@ -1389,6 +1391,12 @@ async fn run(
              {
                  let owned = command_state.lock().unwrap().more.advancements.clone();
                  for (target, bytes) in advancement_sync.sync(&online, &owned, settings.playerdata.as_deref()) {
+                     if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
+                 }
+             }
+             {
+                 let owned = command_state.lock().unwrap().more.recipes.clone();
+                 for (target, bytes) in recipe_sync.sync(&online, &owned, settings.playerdata.as_deref()) {
                      if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
                  }
              }

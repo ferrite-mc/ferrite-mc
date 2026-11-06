@@ -2,8 +2,7 @@
 //!
 //! Ids and the advancement tree (parents, criteria) come from the locally extracted vanilla
 //! data. Advancement progress is sent to the client by [`super::advancement_packets`] (tabs and
-//! toast) and saved per player; recipe state is in memory only and no `recipe_book_*` packet is
-//! sent yet, so the client shows no recipe-book entry.
+//! toast) and saved per player; unlocked recipes go through [`super::recipe_packets`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

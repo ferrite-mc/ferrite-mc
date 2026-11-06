@@ -20,8 +20,13 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `tools/extractor/AdvancementExtractor.java`, framing checked against the vanilla packet bytes), so
   tabs and toasts work. Not done: triggers never complete advancements on their own, rewards are not
   given, and there is no chat announcement.
-- `/recipe`: give/take with the extracted recipe ids; state is in memory only and no
-  `recipe_book_*` packet is sent yet.
+- `/recipe`: give/take with the extracted recipe ids. Unlocked recipes are saved per player
+  (`playerdata/<uuid>.recipes.json`) and sent as `recipe_book_add`/`recipe_book_remove`, plus
+  `update_recipes` and `recipe_book_settings` on join (`recipe_packets.rs`; displays are encoded by
+  `tools/extractor/RecipeExtractor.java`, which boots the real data-pack loader, and the framing
+  is checked against the vanilla codec bytes). Not done: recipes are not unlocked by gameplay
+  (picking up ingredients), and the client's `recipe_book_change_settings`/`seen_recipe` packets are
+  ignored.
 - `/compute`: evaluates `context_int_provider` / `context_float_provider` (constant, reference,
   conditional, div, number_dispatcher, weighted_list, match_block). `entity` context carries no
   entity data yet.
