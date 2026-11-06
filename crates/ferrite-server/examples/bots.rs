@@ -214,6 +214,7 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             ..Default::default()
         },
     ));
+    ferrite_server::game::RECORD_COORDINATOR.store(true, std::sync::atomic::Ordering::Relaxed);
     ferrite_server::game::COORDINATOR_MS
         .lock()
         .unwrap()
@@ -264,7 +265,21 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
     );
     {
         let arms = ferrite_server::game::COORDINATOR_MS.lock().unwrap();
-        for (name, runs) in ["events", "signals", "clock"].iter().zip(arms.iter()) {
+        for (name, runs) in [
+            "events",
+            "signals",
+            "clock",
+            "  head (before game.tick)",
+            "  locator",
+            "  advancements",
+            "  recipes",
+            "  scan",
+            "  ride",
+            "  rest",
+        ]
+        .iter()
+        .zip(arms.iter())
+        {
             let mut runs = runs.clone();
             runs.sort_by(f64::total_cmp);
             let total: f64 = runs.iter().sum();

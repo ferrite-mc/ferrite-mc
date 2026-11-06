@@ -313,8 +313,26 @@ pub fn unlocked(rule: &Rule, held: &BTreeSet<String>, owned: &BTreeSet<String>) 
     !rule.requirements.is_empty() && rule.requirements.iter().all(|g| g.iter().any(met))
 }
 
+/// Reads the advancement rules now, off the caller's thread. The first `criteria_for_*` call
+/// parses every advancement file, which stalled the coordinator for seconds when it did it.
+pub fn preload() {
+    std::thread::Builder::new()
+        .name("ferrite-advancement-rules".into())
+        .spawn(|| {
+            rules();
+        })
+        .ok();
+}
+
+static ALL: OnceLock<Vec<Rule>> = OnceLock::new();
+
+/// Whether the rules are loaded; the coordinator skips rule lookups until then instead of
+/// waiting seconds for the first load.
+pub fn ready() -> bool {
+    ALL.get().is_some()
+}
+
 fn rules() -> &'static Vec<Rule> {
-    static ALL: OnceLock<Vec<Rule>> = OnceLock::new();
     ALL.get_or_init(|| {
         let relative = Path::new("vanilla/26.3/generated/data/minecraft/advancement");
         let Some(dir) = [

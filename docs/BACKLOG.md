@@ -115,7 +115,13 @@ still stubs that answer "Command not implemented".
   advancement and recipe book sync including their progress files (completions return through an
   mpsc channel and are rewarded on the coordinator). Gameplay packets already go straight into the
   player's region mailbox. Next candidates: `Signal::Update` (every player's position, every tick,
-  takes the `command_state` mutex and the plugin snapshot), splitting `command_state` by concern. A run with the 200-bot load test is needed to show any gain.
+  takes the `command_state` mutex and the plugin snapshot), splitting `command_state` by concern. Measured 2026-11-06 with `cargo run --release -p ferrite-server --example bots -- N` (bots share the
+  process, 20-thread PC): the coordinator is not the bottleneck. At 200 bots it is busy about 2% of the
+  run, at 800 bots about 12% (events 2%, `Signal` handling 8%, clock arm 2% with a 1.1 ms mean tick),
+  so it would saturate near 8000 bots. Region ticks are the load at 800 bots (mean 26 ms, p99 65 ms
+  against the 50 ms budget). A 4 s coordinator stall on the first tick (the advancement rules were parsed
+  on it) is fixed by `recipe_unlock::preload` and by skipping rule lookups until `recipe_unlock::ready`.
+  Next: profile what a region tick spends at 800 bots, not the coordinator.
 
 ## Quality and release
 

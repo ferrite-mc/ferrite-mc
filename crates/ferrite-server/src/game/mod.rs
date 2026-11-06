@@ -446,7 +446,24 @@ pub enum PluginEventPolicy {
 
 /// Milliseconds the coordinator task spent in each `select!` arm (events, signals, clock tick),
 /// one entry per run of the arm. Read by the load-test example to show where it is serialized.
-pub static COORDINATOR_MS: Mutex<[Vec<f64>; 3]> = Mutex::new([Vec::new(), Vec::new(), Vec::new()]);
+/// Turns on `COORDINATOR_MS`; off by default so a long-running server does not keep growing it.
+pub static RECORD_COORDINATOR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub static COORDINATOR_MS: Mutex<[Vec<f64>; 10]> = Mutex::new([const { Vec::new() }; 10]);
+
+/// Prints the sections of a coordinator tick that took over 200 ms, to find stalls.
+struct Laps(std::time::Instant);
+
+impl Laps {
+    fn lap(&mut self, label: &str) {
+        let ms = self.0.elapsed().as_secs_f64() * 1000.0;
+        if ms > 200.0 {
+            tracing::warn!("coordinator stall: {ms:.0} ms before '{label}'");
+        }
+        self.0 = std::time::Instant::now();
+    }
+}
 
 struct CoordinatorTimer(usize, std::time::Instant);
 
@@ -458,6 +475,9 @@ impl CoordinatorTimer {
 
 impl Drop for CoordinatorTimer {
     fn drop(&mut self) {
+        if !RECORD_COORDINATOR.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let ms = self.1.elapsed().as_secs_f64() * 1000.0;
         COORDINATOR_MS.lock().unwrap_or_else(|e| e.into_inner())[self.0].push(ms);
     }
@@ -1062,572 +1082,591 @@ async fn run(
     let mut applied_rate = 20.0_f32;
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut load_ran = false;
+    recipe_unlock::preload();
     loop {
         tokio::select! {
-         event=events.recv()=>{let Some(event)=event else {break};let _timer=CoordinatorTimer::new(0);
-          if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { command_state.lock().unwrap().touch(*uuid); }
-          match event {
-          GameMessage::Joined{session,uuid,name,properties,address,dimension_type,biome,view_distance,online_mode,secure_chat,chat_type,chat_visibility,max_players,outbound}=>{
-           if let Some((_, mailbox, old)) = mailboxes.get(&uuid) {
-             let _ = old.send(Outbound::Disconnect("You logged in from another location".into()));
-             mailbox.lock().unwrap().push_back(Command::Leave);
-             if let Some(GameMessage::Joined { outbound: displaced, .. }) = pending.insert(uuid, GameMessage::Joined { session, uuid, name, properties, address, dimension_type, biome, view_distance, online_mode, secure_chat, chat_type, chat_visibility, max_players, outbound }) { let _ = displaced.send(Outbound::Disconnect("You logged in from another location".into())); }
-             continue;
-           }
-           // Vanilla checks bans before the whitelist (`PlayerList.canPlayerLogin`).
-           if let Some(ban) = admin.as_ref().and_then(|lists| lists.bans.player_ban(uuid)) {
-             // `multiplayer.disconnect.banned.reason`.
-             let _ = outbound.send(Outbound::Disconnect(format!("You are banned from this server!\nReason: {}", ban.reason)));
-             continue;
-           }
-           if let Some(ip) = address && let Some(ban) = admin.as_ref().and_then(|lists| lists.bans.ip_ban(&ip.to_string())) {
-             // `multiplayer.disconnect.banned_ip.reason`.
-             let _ = outbound.send(Outbound::Disconnect(format!("Your IP address is banned from this server!\nReason: {}", ban.reason)));
-             continue;
-           }
-           if whitelist_enabled && let Some(lists) = &admin && !lists.whitelist.contains(uuid) {
-             let _ = outbound.send(Outbound::Disconnect("You are not white-listed on this server!".into()));
-             continue;
-           }
-           let permission = settings
-             .permission(uuid)
-             .max(admin.as_ref().and_then(|lists| lists.ops.level_of(uuid)).unwrap_or(0));
-           if let Some(lists) = &admin {
-               lists.usercache.cache(&name, uuid);
-               if let Err(error) = lists.flush() { tracing::warn!(%error, "failed to save admin lists"); }
-           }
-           // Resume where the player left off; a first join (or unreadable data) uses the
-           // spawn of the dimension the world is configured for.
-           let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
-           if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } let flags = recipe_packets::load_settings(dir, &uuid); command_state.lock().unwrap().more.recipe_settings.insert(uuid, flags); let recipes = recipe_packets::load(dir, &uuid); if !recipes.is_empty() { command_state.lock().unwrap().more.recipes.insert(uuid, recipes); } }
-           let start_dimension = saved.as_ref().map_or(settings.dimension, |s| s.dimension());
-           let dimension_spawn = dimensions.spawn(start_dimension);
-           let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
-           let start_pos = saved.as_ref().map_or(default_pos, |s| s.pos);
-           let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
-           let start_mode = saved.as_ref().map_or_else(|| command_state.lock().unwrap().default_gamemode, |s| s.gamemode);
-           command_state.lock().unwrap().join(uuid, name.clone(), start_mode, max_players as i32);
-           if start_mode == 3 { command_state.lock().unwrap().more.spectators.insert(uuid); }
-           command_state.lock().unwrap().set_position(uuid, start_pos, start_yaw, start_pitch);
-           command_state.lock().unwrap().set_dimension(uuid, start_dimension);
-           let seed = command_state.lock().unwrap().seed;
-           let start_chunk = ChunkPos((start_pos[0].floor() as i32).div_euclid(16), (start_pos[2].floor() as i32).div_euclid(16));
-           let start_inventory = container::restore(saved.as_ref());
-           let start_source = dimensions.source(start_dimension).clone();
-           permissions.insert(uuid, permission);
-           let entity=ferrite_entity::allocate_id();
-           emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
-           let (actions, _) = mpsc::unbounded_channel();
-           if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
-               let mut packet = Vec::new(); VarInt(16).encode(&mut packet); packet.extend(tree.body); let _ = outbound.send(Outbound::Packet(packet.into()));
-           }
-           emit(&outbound, &SetHeldSlot { slot: VarInt(start_inventory.selected_slot() as i32) });
-           // Vanilla sends the health bar and experience right after the join position.
-           emit(&outbound, &SetHealth { health: 20.0, food: VarInt(20), saturation: 5.0 });
-           emit(&outbound, &SetExperience { progress: 0.0, level: VarInt(0), total: VarInt(0) });
-           emit(&outbound,&PositionSync{teleport_id:VarInt(1),x:start_pos[0],y:start_pos[1],z:start_pos[2],velocity_x:0.0,velocity_y:0.0,velocity_z:0.0,yaw:start_yaw,pitch:start_pitch,flags:0});
-           emit(&outbound,&DefaultSpawn{dimension:start_dimension.key().into(),position:ferrite_protocol::types::BlockPos::new(dimension_spawn[0],dimension_spawn[1],dimension_spawn[2]).pack(),yaw:0.0,pitch:0.0});emit(&outbound,&GameEvent{event:13,value:0.0});
-           let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
-           online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: view_distance as i32 });
-           positions.lock().unwrap().insert(uuid, start_pos);
-           tracking.lock().unwrap().insert(uuid, (start_dimension, HashSet::new(), outbound.clone()));
-           let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seed,flat,respawn_requested:false,attacks:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
-           worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
-           names.insert(uuid, name.clone());
-           {
-               let before = saved.is_some();
-               let first = if before { settings.playerdata.as_deref().and_then(|dir| playerdata::first_played(dir, &uuid)) } else { None };
-               crate::plugins::facts::set_history(uuid, before, first.unwrap_or_else(std::time::SystemTime::now));
-           }
-           crate::plugins::facts::record(uuid, crate::plugins::facts::PlayerFacts { entity_id: entity, joined: std::time::SystemTime::now(), address });
-           if let Some(plugins) = &settings.plugins {
-               let snapshot = ferrite_plugin::PlayerSnapshot {
-                   id: uuid,
-                   name: name.clone(),
-                   operator: permission > 0,
-                   health: 20.0,
-                   food: 20,
-                   mode: match start_mode {
-                       1 => ferrite_plugin::GameMode::Creative,
-                       2 => ferrite_plugin::GameMode::Adventure,
-                       3 => ferrite_plugin::GameMode::Spectator,
-                       _ => ferrite_plugin::GameMode::Survival,
-                   },
-                   location: ferrite_plugin::PlayerLocation {
-                       world: ferrite_plugin::default_world_id(),
-                       x: start_pos[0],
-                       y: start_pos[1],
-                       z: start_pos[2],
-                       yaw: start_yaw,
-                       pitch: start_pitch,
-                   },
-                   inventory: vec![None; 41],
-               };
-               if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
-           }
-           if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_joined(uuid, &name) { tracing::warn!(%error, "player join event failed"); }
-           let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; g.join(player)});tracing::info!(%uuid,"player joined");
-          },
-          GameMessage::Input{session,uuid,packet:ServerboundPlay::Chat(chat)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) && chat.message.chars().count()<=256 {
-              let mut chat = chat;
-              let mut deliver = true;
-              if let Some(plugins) = &settings.plugins {
-                  let name = names.get(&uuid).cloned().unwrap_or_default();
-                  match plugins.chat(uuid, &name, &chat.message) {
-                      Ok(Some(text)) => {
-                          // A plugin-edited message no longer matches the client signature.
-                          if text != chat.message { chat.message = text; chat.signature = None; }
-                      }
-                      Ok(None) => deliver = false,
-                      Err(error) => tracing::warn!(%error, "chat event failed"),
-                  }
-              }
-              if deliver { worlds.schedule_global(move |g|g.chat(uuid,&chat)); }
-          }},
-          GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeBookSettings{book,open,filtering}}=>{
-              if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
-                  let mut game = command_state.lock().unwrap();
-                  let flags = game.more.recipe_settings.entry(uuid).or_default();
-                  recipe_packets::change_settings(flags, book, open, filtering);
-                  if let Some(dir) = settings.playerdata.as_deref() { recipe_packets::save_settings(dir, &uuid, flags); }
-              }
-          }
-          GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatAck(ack)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_ack(uuid,ack.offset.0));}},
-          GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatSessionUpdate(update)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_session(uuid,update.chat_session));}},
-          GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatCommandSigned(signed)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
-              let ServerboundChatCommandSigned { command, last_seen, .. } = signed;
-              worlds.schedule_global(move |g|g.apply_chat_update(uuid,&last_seen));
-              let _ = event_tx.send(GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatCommand(ServerboundChatCommand{command})});
-          }},
-          GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatCommand(command)}=>{let command = command.command; if let Some((_, mailbox, outbound)) = mailboxes.get(&uuid).filter(|m| m.0 == session) {
-              let message = format!("/{}", command.trim_start_matches('/'));
-              if let (Some(plugins), Some(name)) = (&settings.plugins, names.get(&uuid)) {
-                  match plugins.player_command(uuid, name, &message) {
-                      Ok(true) => {}
-                      Ok(false) => continue,
-                      Err(error) => tracing::warn!(%error, "command preprocess event failed"),
-                  }
-              }
-              let (actions, mut received) = mpsc::unbounded_channel();
-              let (origin, yaw, pitch) = online.get(&uuid).map_or(([0.0; 3], 0.0, 0.0), |player| (player.pos, player.yaw, player.pitch));
-              let name = command_state.lock().unwrap().players.iter().find(|p| p.uuid == uuid).map(|p| p.name.clone());
-              let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
-              if let Err(error) = command_tree.execute(command.trim_start_matches('/'), command_source) { emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(error.to_string()), overlay:false }); }
-              let source_name = online.get(&uuid).map_or_else(|| "Server".to_owned(), |player| player.name.clone());
-              let runtime_dimension = online.get(&uuid).map_or(Dimension::Overworld, |p| p.dimension);
-              let mut runtime = CommandRuntime {
-                  reply: Reply { outbound: Some(outbound) },
-                  source_uuid: Some(uuid),
-                  source_name,
-                  origin,
-                  state: &command_state,
-                  online: &mut online,
-                  permissions: &mut permissions,
-                  admin: &mut admin,
-                  whitelist: &mut whitelist_enabled,
-                  saving: &mut saving_enabled,
-                  mailboxes: &mailboxes,
-                  positions: &positions,
-                  profiler: &profiler,
-                  source: &source,
-                  events: &event_tx,
-                  stop: &stop_tx,
-                  signals: &signal_tx,
-                  worlds: &worlds,
-                  dimension: runtime_dimension,
-                  tracking: &tracking,
-              };
-              while let Ok(action) = received.try_recv() { match action {
-                  commands::Action::GameMode { mode, targets } => { for target in targets { { let more = &mut command_state.lock().unwrap().more; if mode == 3 { more.spectators.insert(target); } else { more.spectators.remove(&target); } } if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { target_mailbox.lock().unwrap().push_back(Command::SetMode(mode)); } worlds.schedule_global(move |g| g.set_mode(target, mode)); } },
-                  commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
-                  commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
-                  commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
-                  commands::Action::TimeAdd(ticks) => tracing::info!(ticks, "time added"),
-                  commands::Action::Weather { kind, duration } => tracing::info!(?kind, ?duration, "weather changed"),
-                  commands::Action::Feedback(feedback) => emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }),
-                  commands::Action::PlayerFeedback { uuid: target, feedback } => { if let Some((_, _, target_outbound)) = mailboxes.get(&target) { emit(target_outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }); } },
-                  commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
-                  commands::Action::Plugin { name, args } => {
-                      if let Some(plugins) = &settings.plugins {
-                          let line = plugin_command_line(&name, &args);
-                          match plugins.run_plugin_command(ferrite_plugin::CommandSender::Player(uuid), &line) {
-                              Ok(result) => for message in result.messages {
-                                  if message.player == uuid { chat(outbound, &plugin_message_text(&message.content)); }
-                              },
-                              Err(error) => tracing::warn!(%error, "plugin command failed"),
-                          }
-                      }
-                  },
-                  commands::Action::GameRule(name, value) => match apply_game_rule(&game_rules, source.as_ref(), &command_speed, &name, value.as_deref()) { Ok(message) => chat(outbound, &message), Err(error) => chat(outbound, &error) },
-                  commands::Action::World(command) => { mailbox.lock().unwrap().push_back(Command::World(command)); },
-                  commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: Some(outbound.clone()) }); } } },
-                  commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: Some(outbound.clone()) }); } } },
-                  commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: Some(outbound.clone()) }); } } },
-                  commands::Action::Summon { kind, pos, no_ai } => {
-                      let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                      let dimension = runtime.dimension;
-                      if worlds.owner(dimension, chunk).is_some() {
-                          worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon(kind, pos, no_ai); });
-                          chat(outbound, &format!("Summoned new {}", kind.display_name()));
-                      } else {
-                          chat(outbound, "That position is not loaded");
-                      }
-                  },
-                  commands::Action::Enchant { targets, enchantment, level } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Enchant { target, target_name, enchantment: enchantment.clone(), level, feedback: Some(outbound.clone()) }); } } },
-                  other => { runtime.apply(other).await; }
-              }}
-          }},
-          GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
-          GameMessage::Left{session,uuid}=>{ride::forget(uuid); if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
-            if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);}},
-          GameMessage::Console{command,complete}=>{
-              let (actions, mut received) = mpsc::unbounded_channel();
-              let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
-              let result = command_tree.execute(command.trim().trim_start_matches('/'), command_source).map_err(|e| e.to_string());
-              let mut stop = false;
-              let mut runtime = CommandRuntime {
-                  reply: Reply { outbound: None },
-                  source_uuid: None,
-                  source_name: "Server".to_owned(),
-                  origin: [0.0; 3],
-                  state: &command_state,
-                  online: &mut online,
-                  permissions: &mut permissions,
-                  admin: &mut admin,
-                  whitelist: &mut whitelist_enabled,
-                  saving: &mut saving_enabled,
-                  mailboxes: &mailboxes,
-                  positions: &positions,
-                  profiler: &profiler,
-                  source: &source,
-                  events: &event_tx,
-                  stop: &stop_tx,
-                  signals: &signal_tx,
-                  worlds: &worlds,
-                  dimension: Dimension::Overworld,
-                  tracking: &tracking,
-              };
-              while let Ok(action) = received.try_recv() { match action {
-                  commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
-                  commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
-                  commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
-                  commands::Action::TimeAdd(ticks) => tracing::info!(ticks, "time added"),
-                  commands::Action::Weather { kind, duration } => tracing::info!(?kind, ?duration, "weather changed"),
-                  commands::Action::Feedback(feedback) => tracing::info!("{}", feedback.text),
-                  commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
-                  commands::Action::GameRule(name, value) => match apply_game_rule(&game_rules, source.as_ref(), &command_speed, &name, value.as_deref()) { Ok(message) => tracing::info!("{message}"), Err(error) => tracing::warn!("{error}") },
-                  commands::Action::Stop => stop = true,
-                  commands::Action::Tps => for line in profiler.tps_lines_plain() { tracing::info!("{line}"); },
-                  commands::Action::Mspt => for line in profiler.mspt_lines_plain() { tracing::info!("{line}"); },
-                  commands::Action::ProfileStart => if let Err(error) = profiler.start_profile() { tracing::warn!(%error, "profile start failed"); } else { tracing::info!("profiling started; run profile stop to dump the slowest systems"); },
-                  commands::Action::ProfileStop => match profiler.stop_profile() {
-                      Ok(report) => for line in report.lines() { tracing::info!("{line}"); },
-                      Err(error) => tracing::warn!(%error, "profile stop failed"),
-                  },
-                  commands::Action::Plugin { name, args } => {
-                      if let Some(plugins) = &settings.plugins {
-                          let line = plugin_command_line(&name, &args);
-                          match plugins.run_plugin_command(ferrite_plugin::CommandSender::Console, &line) {
-                              Ok(result) => for message in result.messages { tracing::info!("{}", plugin_message_text(&message.content)); },
-                              Err(error) => tracing::warn!(%error, "plugin command failed"),
-                          }
-                      }
-                  },
-                  commands::Action::GameMode { .. } | commands::Action::PlayerFeedback { .. } => tracing::warn!("command requires a player"),
-                  commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: None }); } } },
-                  commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: None }); } } },
-                  commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: None }); } } },
-                  commands::Action::Summon { kind, pos, no_ai } => {
-                      let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                      if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                          worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.summon(kind, pos, no_ai); });
-                          tracing::info!("Summoned new {} at {pos:?}", kind.display_name());
-                      } else {
-                          tracing::warn!("summon target chunk is not loaded");
-                      }
-                  },
-                  commands::Action::Enchant { targets, enchantment, level } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Enchant { target, target_name, enchantment: enchantment.clone(), level, feedback: None }); } } },
-                  other => { if runtime.apply(other).await { stop = true; } }
-              }}
-              let _ = complete.send(result.map(|_| stop));
-          },
-          GameMessage::Shutdown{complete}=>{let _=stop_tx.send(true);let (ack_tx,ack_rx)=oneshot::channel();worlds.schedule_global(move |g|{g.shutdown();let _=ack_tx.send(());});let _=ack_rx.await;let mut regions: Vec<Region> = worlds.shutdown().into_values().flat_map(|stopped| stopped.regions).collect();let entity_result = match &entity_world { Some(dir) => entity_save::save_regions(dir, &mut regions).map_err(|error| format!("failed to save entities during shutdown: {error:#}")), None => Ok(()) };let result = match (entity_result, &source) { (Err(error), _) => Err(error), (Ok(()), Some(source)) => source.flush_all().await.map_err(|error| format!("failed to save world chunks during shutdown: {error:#}")), (Ok(()), None) => Ok(()) }; let _=complete.send(result);break;}
-         }},
-         _=autosave.tick(), if saving_enabled => {
-             if let Some(source) = &source && let Err(error) = source.flush_all().await {
-                 tracing::error!(%error, "autosave failed");
-             }
-         },
-         signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
-          Signal::Hold{dimension,chunk,add}=>if add{if dimension==Dimension::Overworld{crate::plugins::chunks::set_loaded(chunk.0,chunk.1,true);}let first={let count=holds.entry((dimension,chunk)).or_default();*count += 1;*count == 1};worlds.add_chunk(dimension,chunk);let dir=entity_world.clone();let transient=worlds.transient_entities.clone();worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);if let Some(transient)=transient {if let Some(entities)=transient.lock().unwrap().remove(&(dimension,chunk)){r.add_entities(entities);}} else if first && let Some(dir)=dir{r.add_entities(entity_save::load(&dimension.storage_root(&dir), (chunk.0, chunk.1)));}});}else{release_hold(&worlds, &mut holds, &signal_tx, dimension, chunk);},
-          Signal::SaveEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world { let dir=dimension.storage_root(dir); if let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}}},
-          Signal::FinishRelease{dimension,chunk,flush}=>{worlds.remove_chunk(dimension,chunk);if flush {let source=dimensions.source(dimension).clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
-          Signal::FluidChange{dimension,x,y,z}=>{
-            for (dx,dy,dz) in [(0,0,0),(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
-              let (Some(x),Some(y),Some(z))=(x.checked_add(dx),y.checked_add(dy),z.checked_add(dz)) else {continue;};
-              let chunk=ChunkPos(x.div_euclid(16),z.div_euclid(16));
-              if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.schedule_fluid((x,y,z)));}
-            }
-          },
-          Signal::Update{uuid,pos,yaw,pitch,ground}=>{
-            if let Some(player)=online.get_mut(&uuid){player.pos=pos;player.yaw=yaw;player.pitch=pitch;}
-            crate::plugins::facts::set_on_ground(uuid, ground);
-            command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
-            if let Some(plugins) = &settings.plugins {
-              let location = ferrite_plugin::PlayerLocation { world: ferrite_plugin::default_world_id(), x: pos[0], y: pos[1], z: pos[2], yaw, pitch };
-              if let Err(error) = plugins.update_player_location(uuid, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
-            }
-            worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
-          },
-          Signal::Transfer{dimension,from,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;worlds.schedule_at_chunk(dimension,to,move |r|{r.hold_chunk(to);r.players.insert(id,*player);});defer_release(&worlds,&signal_tx,dimension,from,false);},
-          Signal::EntityTransfer{dimension,to,entity}=>hand_off(worlds.scheduler(dimension), to, entity),
-          Signal::ChangeDimension{from_dimension,from,player}=>{
-            let dimension=player.dimension;let chunk=player.chunk;let id=player.uuid;
-            worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);r.players.insert(id,*player);});
-            defer_release(&worlds,&signal_tx,from_dimension,from,false);
-            if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
-            command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
-            command_state.lock().unwrap().set_dimension(id,dimension);
-            worlds.schedule_global(move |g| g.set_dimension(id, dimension));
-          },
-          Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
-            let name = names.remove(&uuid).unwrap_or_default();
-            crate::plugins::facts::forget(uuid);
-            if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
-            worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
-         }},
-         command = async { match plugin_commands.as_mut() { Some(commands) => commands.recv().await, None => std::future::pending().await } }, if plugin_commands.is_some() => {
-             match command {
-                 // Chat attribution lives on the global region, so display names go there.
-                 Some(ferrite_plugin::PlayerCommand::DisplayName { player, component_json }) => {
-                     let name = component_json.as_deref().map(json_text);
-                     worlds.schedule_global(move |g| g.set_display_name(player, name));
-                 }
-                 Some(ferrite_plugin::PlayerCommand::UpdateCommands { player }) => {
-                    if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
-                        let (actions, _) = mpsc::unbounded_channel();
-                        let permission = *permissions.get(&player).unwrap_or(&0);
-                        let source_for = commands::Source { permission, origin: op.pos, yaw: op.yaw, pitch: op.pitch, uuid: Some(player), name: Some(op.name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: op.dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
-                        if let Ok(tree) = command_tree.serialize_commands(&source_for, registry) {
-                            let mut packet = Vec::new();
-                            VarInt(16).encode(&mut packet);
-                            packet.extend(tree.body);
-                            let _ = op.outbound.send(Outbound::Packet(packet.into()));
-                        }
-                    }
-                }
-                 Some(ferrite_plugin::PlayerCommand::SpawnEntity { owner, center, kind, block, velocity, uuid }) => {
-                    let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
-                    if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid, owner); });
-                    }
-                }
-                 Some(ferrite_plugin::PlayerCommand::EntityOp { uuid, op }) => {
-                    if let Some(at) = crate::plugins::facts::entity_position(uuid) {
-                        let chunk = ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
-                        if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                            worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_entity_op(uuid, &op); });
-                        }
-                    }
-                }
-                 Some(ferrite_plugin::PlayerCommand::DropItem { center, item, amount, natural, uuid }) => {
-                    let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
-                    if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_drop_item(center, &item, amount, natural, uuid));
-                    }
-                }
-                 Some(ferrite_plugin::PlayerCommand::Explosion { center, power, fire, breaks }) => {
-                    let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
-                    if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                        worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_explosions.push((center, power, fire, breaks)));
-                    }
-                }
-                 Some(ferrite_plugin::PlayerCommand::RideChanged { vehicle }) => {
-                    let packet = ride::passengers_packet(&command_state.lock().unwrap(), &online, vehicle);
-                    if let Some(bytes) = packet {
-                        for player in online.values() { let _ = player.outbound.send(Outbound::Packet(bytes.clone().into())); }
-                    }
-                }
-                 Some(ferrite_plugin::PlayerCommand::Lightning { center }) => {
-                    worlds.schedule_global(move |g| g.plugin_lightning(center));
-                }
-                 Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
-                    worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
-                }
-                Some(command) => route_plugin_command(command, &mailboxes, &mut permissions),
-                 // The plugin host dropped its sender (no plugins loaded): stop polling.
-                 None => plugin_commands = None,
-             }
-         },
-         _tick = clock.tick() => {
-             let _timer = CoordinatorTimer::new(2);
-             let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
-             let tick_control = command_state.lock().unwrap().more.tick.clone();
-             let target_rate = tick_control.effective_rate();
-             if (target_rate - applied_rate).abs() > f32::EPSILON {
-                 applied_rate = target_rate;
-                 let period = std::time::Duration::from_secs_f64(1.0 / f64::from(target_rate));
-                 worlds.set_period(period);
-                 clock = tokio::time::interval(period);
-                 clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-             }
-             let runs = tick_control.begin_game_tick();
-             if let Some((tps, mspt)) = tick_control.take_sprint_report() {
-                 let text = commands::Feedback::new("commands.tick.sprint.report", vec![format!("{tps:.0}"), format!("{mspt:.2}")]).text;
-                 for player in online.values() { chat(&player.outbound, &text); }
-             }
-             let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
-             {
-                 let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                 let (styles, spectators, ranges) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone(), online.keys().map(|uuid| (*uuid, waypoints::player_ranges(&game.more.attributes, *uuid, hidden.contains(uuid)))).collect::<HashMap<_, _>>()) };
-                 locator.submit((online.clone(), styles, spectators, ranges));
-             }
-             {
-                 let owned = command_state.lock().unwrap().more.advancements.clone();
-                 advancement_worker.submit((online.clone(), owned));
-                 for (who, id) in completed_rx.try_iter().collect::<Vec<_>>() {
-                     if let Some(recipes) = Some(recipe_unlock::reward_recipes(&id)).filter(|r| !r.is_empty()) { command_state.lock().unwrap().more.recipes.entry(who).or_default().extend(recipes); }
-                     let points = recipe_unlock::reward_experience(&id);
-                     if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
-                     let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
-                     if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
-                 }
-             }
-             {
-                 let kills = std::mem::take(&mut *recipe_unlock::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
-                 if !kills.is_empty() {
-                     let mut game = command_state.lock().unwrap();
-                     for (who, kind) in kills { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_kill(kind)); }
-                 }
-             }
-             {
-                 let eaten = std::mem::take(&mut *recipe_unlock::CONSUMED.lock().unwrap_or_else(|e| e.into_inner()));
-                 if !eaten.is_empty() {
-                     let mut game = command_state.lock().unwrap();
-                     for (who, item) in eaten { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_consumed(item)); }
-                 }
-             }
-             {
-                 let placed = std::mem::take(&mut *recipe_unlock::PLACED.lock().unwrap_or_else(|e| e.into_inner()));
-                 if !placed.is_empty() {
-                     let mut game = command_state.lock().unwrap();
-                     for (who, block) in placed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_placed(block)); }
-                 }
-             }
-             {
-                 let biomes = std::mem::take(&mut *recipe_unlock::BIOMES.lock().unwrap_or_else(|e| e.into_inner()));
-                 if !biomes.is_empty() {
-                     let mut game = command_state.lock().unwrap();
-                     for (who, biome) in biomes { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_biome(&biome)); }
-                 }
-             }
-             {
-                 let crafted = std::mem::take(&mut *recipe_unlock::CRAFTED.lock().unwrap_or_else(|e| e.into_inner()));
-                 if !crafted.is_empty() {
-                     let mut game = command_state.lock().unwrap();
-                     for (who, recipe) in crafted { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_crafted(&recipe)); }
-                 }
-             }
-             scan_tick = scan_tick.wrapping_add(1);
-             if scan_tick.is_multiple_of(20) {
-                 for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }
-                 let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                 let mut game = command_state.lock().unwrap();
-                 for uuid in online.keys() {
-                     if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
-                         last_held.insert(*uuid, items.clone());
-                         recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
-                         game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
-                     }
-                 }
-             }
-             {
-                 let owned = command_state.lock().unwrap().more.recipes.clone();
-                 let recipe_settings = command_state.lock().unwrap().more.recipe_settings.clone();
-                 recipe_worker.submit((online.clone(), owned, recipe_settings));
-             }
-             let ride_steps = ride::plan(&command_state.lock().unwrap());
-             for step in ride_steps {
-                 match step {
-                     ride::Step::Move { rider, rider_is_player, rider_pos, rider_rot, to } => {
-                         if rider_is_player {
-                             if let Some((_, mailbox, _)) = mailboxes.get(&rider) {
-                                 mailbox.lock().unwrap().push_back(Command::Teleport { pos: to, yaw: None, pitch: None });
-                             }
-                         } else {
-                             let chunk = ChunkPos((rider_pos[0].floor() as i32) >> 4, (rider_pos[2].floor() as i32) >> 4);
-                             if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                                 worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.teleport_entity(rider, to, rider_rot.0, rider_rot.1); });
-                             }
-                         }
-                     }
-                     ride::Step::Detach { vehicle } => {
-                         let packet = ride::passengers_packet(&command_state.lock().unwrap(), &online, vehicle);
-                         if let Some(bytes) = packet {
-                             for player in online.values() { let _ = player.outbound.send(Outbound::Packet(bytes.clone().into())); }
-                         }
-                     }
-                 }
-             }
-             for uuid in idle { if let Some((_, _, outbound)) = mailboxes.get(&uuid) { let _ = outbound.send(Outbound::Disconnect(commands::Feedback::new("multiplayer.disconnect.idling", vec![]).text)); } }
-             for function in due {
-                 let (complete, _unused) = oneshot::channel();
-                 let _ = event_tx.send(GameMessage::Console {
-                     command: format!("function {function}"),
-                     complete,
-                 });
-             }
-             if let Some(plugins) = &settings.plugins {
-                 if let Err(error) = plugins.tick() {
-                     tracing::warn!(%error, "plugin tick failed");
-                 }
-                 // Paper's region scheduler: run each due task on the thread owning its chunk.
-                 for task in plugins.take_region_tasks() {
-                     if task.world != ferrite_plugin::default_world_id().to_string() {
-                         tracing::debug!(world = %task.world, "plugin region task for an unknown world");
-                         continue;
-                     }
-                     let chunk = ChunkPos(task.chunk_x, task.chunk_z);
-                     let plugins = Arc::clone(plugins);                      let dimension = Dimension::from_key(&task.world).unwrap_or(Dimension::Overworld);
-                      worlds.schedule_at_chunk(dimension, chunk, move |_| {
-                         if let Err(error) = plugins.run_region_task(task) {
-                             tracing::warn!(%error, "plugin region task failed");
-                         }
-                     });
-                 }
-                 // Paper's entity scheduler: the only entities plugins hold are players, whose
-                 // mailbox is drained by whichever region owns them, hand-offs included.
-                 for task in plugins.take_entity_tasks() {
-                     route_entity_task(task, &mailboxes);
-                 }
-             }
-             // Vanilla runs `minecraft:load` once at startup and `minecraft:tick` every
-             // tick. Both go through the console command path so their actions
-             // (setblock, say, ...) are applied like any other command.
-             let tags: &[&str] = if load_ran {
-                 &[functions::TICK_TAG]
-             } else {
-                 load_ran = true;
-                 &[functions::LOAD_TAG, functions::TICK_TAG]
-             };
-             for tag in tags {
-                 let known = command_state
-                     .lock()
-                     .unwrap()
-                     .functions
-                     .tag(tag)
-                     .is_some_and(|functions| !functions.is_empty());
-                 if !known {
+                 event=events.recv()=>{let Some(event)=event else {break};let _timer=CoordinatorTimer::new(0);
+                  if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { command_state.lock().unwrap().touch(*uuid); }
+                  match event {
+                  GameMessage::Joined{session,uuid,name,properties,address,dimension_type,biome,view_distance,online_mode,secure_chat,chat_type,chat_visibility,max_players,outbound}=>{
+                   if let Some((_, mailbox, old)) = mailboxes.get(&uuid) {
+                     let _ = old.send(Outbound::Disconnect("You logged in from another location".into()));
+                     mailbox.lock().unwrap().push_back(Command::Leave);
+                     if let Some(GameMessage::Joined { outbound: displaced, .. }) = pending.insert(uuid, GameMessage::Joined { session, uuid, name, properties, address, dimension_type, biome, view_distance, online_mode, secure_chat, chat_type, chat_visibility, max_players, outbound }) { let _ = displaced.send(Outbound::Disconnect("You logged in from another location".into())); }
                      continue;
+                   }
+                   // Vanilla checks bans before the whitelist (`PlayerList.canPlayerLogin`).
+                   if let Some(ban) = admin.as_ref().and_then(|lists| lists.bans.player_ban(uuid)) {
+                     // `multiplayer.disconnect.banned.reason`.
+                     let _ = outbound.send(Outbound::Disconnect(format!("You are banned from this server!\nReason: {}", ban.reason)));
+                     continue;
+                   }
+                   if let Some(ip) = address && let Some(ban) = admin.as_ref().and_then(|lists| lists.bans.ip_ban(&ip.to_string())) {
+                     // `multiplayer.disconnect.banned_ip.reason`.
+                     let _ = outbound.send(Outbound::Disconnect(format!("Your IP address is banned from this server!\nReason: {}", ban.reason)));
+                     continue;
+                   }
+                   if whitelist_enabled && let Some(lists) = &admin && !lists.whitelist.contains(uuid) {
+                     let _ = outbound.send(Outbound::Disconnect("You are not white-listed on this server!".into()));
+                     continue;
+                   }
+                   let permission = settings
+                     .permission(uuid)
+                     .max(admin.as_ref().and_then(|lists| lists.ops.level_of(uuid)).unwrap_or(0));
+                   if let Some(lists) = &admin {
+                       lists.usercache.cache(&name, uuid);
+                       if let Err(error) = lists.flush() { tracing::warn!(%error, "failed to save admin lists"); }
+                   }
+                   // Resume where the player left off; a first join (or unreadable data) uses the
+                   // spawn of the dimension the world is configured for.
+                   let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
+                   if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } let flags = recipe_packets::load_settings(dir, &uuid); command_state.lock().unwrap().more.recipe_settings.insert(uuid, flags); let recipes = recipe_packets::load(dir, &uuid); if !recipes.is_empty() { command_state.lock().unwrap().more.recipes.insert(uuid, recipes); } }
+                   let start_dimension = saved.as_ref().map_or(settings.dimension, |s| s.dimension());
+                   let dimension_spawn = dimensions.spawn(start_dimension);
+                   let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
+                   let start_pos = saved.as_ref().map_or(default_pos, |s| s.pos);
+                   let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
+                   let start_mode = saved.as_ref().map_or_else(|| command_state.lock().unwrap().default_gamemode, |s| s.gamemode);
+                   command_state.lock().unwrap().join(uuid, name.clone(), start_mode, max_players as i32);
+                   if start_mode == 3 { command_state.lock().unwrap().more.spectators.insert(uuid); }
+                   command_state.lock().unwrap().set_position(uuid, start_pos, start_yaw, start_pitch);
+                   command_state.lock().unwrap().set_dimension(uuid, start_dimension);
+                   let seed = command_state.lock().unwrap().seed;
+                   let start_chunk = ChunkPos((start_pos[0].floor() as i32).div_euclid(16), (start_pos[2].floor() as i32).div_euclid(16));
+                   let start_inventory = container::restore(saved.as_ref());
+                   let start_source = dimensions.source(start_dimension).clone();
+                   permissions.insert(uuid, permission);
+                   let entity=ferrite_entity::allocate_id();
+                   emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
+                   let (actions, _) = mpsc::unbounded_channel();
+                   if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
+                       let mut packet = Vec::new(); VarInt(16).encode(&mut packet); packet.extend(tree.body); let _ = outbound.send(Outbound::Packet(packet.into()));
+                   }
+                   emit(&outbound, &SetHeldSlot { slot: VarInt(start_inventory.selected_slot() as i32) });
+                   // Vanilla sends the health bar and experience right after the join position.
+                   emit(&outbound, &SetHealth { health: 20.0, food: VarInt(20), saturation: 5.0 });
+                   emit(&outbound, &SetExperience { progress: 0.0, level: VarInt(0), total: VarInt(0) });
+                   emit(&outbound,&PositionSync{teleport_id:VarInt(1),x:start_pos[0],y:start_pos[1],z:start_pos[2],velocity_x:0.0,velocity_y:0.0,velocity_z:0.0,yaw:start_yaw,pitch:start_pitch,flags:0});
+                   emit(&outbound,&DefaultSpawn{dimension:start_dimension.key().into(),position:ferrite_protocol::types::BlockPos::new(dimension_spawn[0],dimension_spawn[1],dimension_spawn[2]).pack(),yaw:0.0,pitch:0.0});emit(&outbound,&GameEvent{event:13,value:0.0});
+                   let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
+                   online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: view_distance as i32 });
+                   positions.lock().unwrap().insert(uuid, start_pos);
+                   tracking.lock().unwrap().insert(uuid, (start_dimension, HashSet::new(), outbound.clone()));
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seed,flat,respawn_requested:false,attacks:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
+                   worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
+                   names.insert(uuid, name.clone());
+                   {
+                       let before = saved.is_some();
+                       let first = if before { settings.playerdata.as_deref().and_then(|dir| playerdata::first_played(dir, &uuid)) } else { None };
+                       crate::plugins::facts::set_history(uuid, before, first.unwrap_or_else(std::time::SystemTime::now));
+                   }
+                   crate::plugins::facts::record(uuid, crate::plugins::facts::PlayerFacts { entity_id: entity, joined: std::time::SystemTime::now(), address });
+                   if let Some(plugins) = &settings.plugins {
+                       let snapshot = ferrite_plugin::PlayerSnapshot {
+                           id: uuid,
+                           name: name.clone(),
+                           operator: permission > 0,
+                           health: 20.0,
+                           food: 20,
+                           mode: match start_mode {
+                               1 => ferrite_plugin::GameMode::Creative,
+                               2 => ferrite_plugin::GameMode::Adventure,
+                               3 => ferrite_plugin::GameMode::Spectator,
+                               _ => ferrite_plugin::GameMode::Survival,
+                           },
+                           location: ferrite_plugin::PlayerLocation {
+                               world: ferrite_plugin::default_world_id(),
+                               x: start_pos[0],
+                               y: start_pos[1],
+                               z: start_pos[2],
+                               yaw: start_yaw,
+                               pitch: start_pitch,
+                           },
+                           inventory: vec![None; 41],
+                       };
+                       if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
+                   }
+                   if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_joined(uuid, &name) { tracing::warn!(%error, "player join event failed"); }
+                   let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; g.join(player)});tracing::info!(%uuid,"player joined");
+                  },
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::Chat(chat)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) && chat.message.chars().count()<=256 {
+                      let mut chat = chat;
+                      let mut deliver = true;
+                      if let Some(plugins) = &settings.plugins {
+                          let name = names.get(&uuid).cloned().unwrap_or_default();
+                          match plugins.chat(uuid, &name, &chat.message) {
+                              Ok(Some(text)) => {
+                                  // A plugin-edited message no longer matches the client signature.
+                                  if text != chat.message { chat.message = text; chat.signature = None; }
+                              }
+                              Ok(None) => deliver = false,
+                              Err(error) => tracing::warn!(%error, "chat event failed"),
+                          }
+                      }
+                      if deliver { worlds.schedule_global(move |g|g.chat(uuid,&chat)); }
+                  }},
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeBookSettings{book,open,filtering}}=>{
+                      if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
+                          let mut game = command_state.lock().unwrap();
+                          let flags = game.more.recipe_settings.entry(uuid).or_default();
+                          recipe_packets::change_settings(flags, book, open, filtering);
+                          if let Some(dir) = settings.playerdata.as_deref() { recipe_packets::save_settings(dir, &uuid, flags); }
+                      }
+                  }
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatAck(ack)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_ack(uuid,ack.offset.0));}},
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatSessionUpdate(update)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_session(uuid,update.chat_session));}},
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatCommandSigned(signed)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
+                      let ServerboundChatCommandSigned { command, last_seen, .. } = signed;
+                      worlds.schedule_global(move |g|g.apply_chat_update(uuid,&last_seen));
+                      let _ = event_tx.send(GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatCommand(ServerboundChatCommand{command})});
+                  }},
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatCommand(command)}=>{let command = command.command; if let Some((_, mailbox, outbound)) = mailboxes.get(&uuid).filter(|m| m.0 == session) {
+                      let message = format!("/{}", command.trim_start_matches('/'));
+                      if let (Some(plugins), Some(name)) = (&settings.plugins, names.get(&uuid)) {
+                          match plugins.player_command(uuid, name, &message) {
+                              Ok(true) => {}
+                              Ok(false) => continue,
+                              Err(error) => tracing::warn!(%error, "command preprocess event failed"),
+                          }
+                      }
+                      let (actions, mut received) = mpsc::unbounded_channel();
+                      let (origin, yaw, pitch) = online.get(&uuid).map_or(([0.0; 3], 0.0, 0.0), |player| (player.pos, player.yaw, player.pitch));
+                      let name = command_state.lock().unwrap().players.iter().find(|p| p.uuid == uuid).map(|p| p.name.clone());
+                      let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      if let Err(error) = command_tree.execute(command.trim_start_matches('/'), command_source) { emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(error.to_string()), overlay:false }); }
+                      let source_name = online.get(&uuid).map_or_else(|| "Server".to_owned(), |player| player.name.clone());
+                      let runtime_dimension = online.get(&uuid).map_or(Dimension::Overworld, |p| p.dimension);
+                      let mut runtime = CommandRuntime {
+                          reply: Reply { outbound: Some(outbound) },
+                          source_uuid: Some(uuid),
+                          source_name,
+                          origin,
+                          state: &command_state,
+                          online: &mut online,
+                          permissions: &mut permissions,
+                          admin: &mut admin,
+                          whitelist: &mut whitelist_enabled,
+                          saving: &mut saving_enabled,
+                          mailboxes: &mailboxes,
+                          positions: &positions,
+                          profiler: &profiler,
+                          source: &source,
+                          events: &event_tx,
+                          stop: &stop_tx,
+                          signals: &signal_tx,
+                          worlds: &worlds,
+                          dimension: runtime_dimension,
+                          tracking: &tracking,
+                      };
+                      while let Ok(action) = received.try_recv() { match action {
+                          commands::Action::GameMode { mode, targets } => { for target in targets { { let more = &mut command_state.lock().unwrap().more; if mode == 3 { more.spectators.insert(target); } else { more.spectators.remove(&target); } } if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { target_mailbox.lock().unwrap().push_back(Command::SetMode(mode)); } worlds.schedule_global(move |g| g.set_mode(target, mode)); } },
+                          commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
+                          commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
+                          commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
+                          commands::Action::TimeAdd(ticks) => tracing::info!(ticks, "time added"),
+                          commands::Action::Weather { kind, duration } => tracing::info!(?kind, ?duration, "weather changed"),
+                          commands::Action::Feedback(feedback) => emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }),
+                          commands::Action::PlayerFeedback { uuid: target, feedback } => { if let Some((_, _, target_outbound)) = mailboxes.get(&target) { emit(target_outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }); } },
+                          commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
+                          commands::Action::Plugin { name, args } => {
+                              if let Some(plugins) = &settings.plugins {
+                                  let line = plugin_command_line(&name, &args);
+                                  match plugins.run_plugin_command(ferrite_plugin::CommandSender::Player(uuid), &line) {
+                                      Ok(result) => for message in result.messages {
+                                          if message.player == uuid { chat(outbound, &plugin_message_text(&message.content)); }
+                                      },
+                                      Err(error) => tracing::warn!(%error, "plugin command failed"),
+                                  }
+                              }
+                          },
+                          commands::Action::GameRule(name, value) => match apply_game_rule(&game_rules, source.as_ref(), &command_speed, &name, value.as_deref()) { Ok(message) => chat(outbound, &message), Err(error) => chat(outbound, &error) },
+                          commands::Action::World(command) => { mailbox.lock().unwrap().push_back(Command::World(command)); },
+                          commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: Some(outbound.clone()) }); } } },
+                          commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: Some(outbound.clone()) }); } } },
+                          commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: Some(outbound.clone()) }); } } },
+                          commands::Action::Summon { kind, pos, no_ai } => {
+                              let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+                              let dimension = runtime.dimension;
+                              if worlds.owner(dimension, chunk).is_some() {
+                                  worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon(kind, pos, no_ai); });
+                                  chat(outbound, &format!("Summoned new {}", kind.display_name()));
+                              } else {
+                                  chat(outbound, "That position is not loaded");
+                              }
+                          },
+                          commands::Action::Enchant { targets, enchantment, level } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Enchant { target, target_name, enchantment: enchantment.clone(), level, feedback: Some(outbound.clone()) }); } } },
+                          other => { runtime.apply(other).await; }
+                      }}
+                  }},
+                  GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
+                  GameMessage::Left{session,uuid}=>{ride::forget(uuid); if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
+                    if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);}},
+                  GameMessage::Console{command,complete}=>{
+                      let (actions, mut received) = mpsc::unbounded_channel();
+                      let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      let result = command_tree.execute(command.trim().trim_start_matches('/'), command_source).map_err(|e| e.to_string());
+                      let mut stop = false;
+                      let mut runtime = CommandRuntime {
+                          reply: Reply { outbound: None },
+                          source_uuid: None,
+                          source_name: "Server".to_owned(),
+                          origin: [0.0; 3],
+                          state: &command_state,
+                          online: &mut online,
+                          permissions: &mut permissions,
+                          admin: &mut admin,
+                          whitelist: &mut whitelist_enabled,
+                          saving: &mut saving_enabled,
+                          mailboxes: &mailboxes,
+                          positions: &positions,
+                          profiler: &profiler,
+                          source: &source,
+                          events: &event_tx,
+                          stop: &stop_tx,
+                          signals: &signal_tx,
+                          worlds: &worlds,
+                          dimension: Dimension::Overworld,
+                          tracking: &tracking,
+                      };
+                      while let Ok(action) = received.try_recv() { match action {
+                          commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
+                          commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
+                          commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
+                          commands::Action::TimeAdd(ticks) => tracing::info!(ticks, "time added"),
+                          commands::Action::Weather { kind, duration } => tracing::info!(?kind, ?duration, "weather changed"),
+                          commands::Action::Feedback(feedback) => tracing::info!("{}", feedback.text),
+                          commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
+                          commands::Action::GameRule(name, value) => match apply_game_rule(&game_rules, source.as_ref(), &command_speed, &name, value.as_deref()) { Ok(message) => tracing::info!("{message}"), Err(error) => tracing::warn!("{error}") },
+                          commands::Action::Stop => stop = true,
+                          commands::Action::Tps => for line in profiler.tps_lines_plain() { tracing::info!("{line}"); },
+                          commands::Action::Mspt => for line in profiler.mspt_lines_plain() { tracing::info!("{line}"); },
+                          commands::Action::ProfileStart => if let Err(error) = profiler.start_profile() { tracing::warn!(%error, "profile start failed"); } else { tracing::info!("profiling started; run profile stop to dump the slowest systems"); },
+                          commands::Action::ProfileStop => match profiler.stop_profile() {
+                              Ok(report) => for line in report.lines() { tracing::info!("{line}"); },
+                              Err(error) => tracing::warn!(%error, "profile stop failed"),
+                          },
+                          commands::Action::Plugin { name, args } => {
+                              if let Some(plugins) = &settings.plugins {
+                                  let line = plugin_command_line(&name, &args);
+                                  match plugins.run_plugin_command(ferrite_plugin::CommandSender::Console, &line) {
+                                      Ok(result) => for message in result.messages { tracing::info!("{}", plugin_message_text(&message.content)); },
+                                      Err(error) => tracing::warn!(%error, "plugin command failed"),
+                                  }
+                              }
+                          },
+                          commands::Action::GameMode { .. } | commands::Action::PlayerFeedback { .. } => tracing::warn!("command requires a player"),
+                          commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: None }); } } },
+                          commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: None }); } } },
+                          commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: None }); } } },
+                          commands::Action::Summon { kind, pos, no_ai } => {
+                              let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+                              if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                                  worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.summon(kind, pos, no_ai); });
+                                  tracing::info!("Summoned new {} at {pos:?}", kind.display_name());
+                              } else {
+                                  tracing::warn!("summon target chunk is not loaded");
+                              }
+                          },
+                          commands::Action::Enchant { targets, enchantment, level } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Enchant { target, target_name, enchantment: enchantment.clone(), level, feedback: None }); } } },
+                          other => { if runtime.apply(other).await { stop = true; } }
+                      }}
+                      let _ = complete.send(result.map(|_| stop));
+                  },
+                  GameMessage::Shutdown{complete}=>{let _=stop_tx.send(true);let (ack_tx,ack_rx)=oneshot::channel();worlds.schedule_global(move |g|{g.shutdown();let _=ack_tx.send(());});let _=ack_rx.await;let mut regions: Vec<Region> = worlds.shutdown().into_values().flat_map(|stopped| stopped.regions).collect();let entity_result = match &entity_world { Some(dir) => entity_save::save_regions(dir, &mut regions).map_err(|error| format!("failed to save entities during shutdown: {error:#}")), None => Ok(()) };let result = match (entity_result, &source) { (Err(error), _) => Err(error), (Ok(()), Some(source)) => source.flush_all().await.map_err(|error| format!("failed to save world chunks during shutdown: {error:#}")), (Ok(()), None) => Ok(()) }; let _=complete.send(result);break;}
+                 }},
+                 _=autosave.tick(), if saving_enabled => {
+                     if let Some(source) = &source && let Err(error) = source.flush_all().await {
+                         tracing::error!(%error, "autosave failed");
+                     }
+                 },
+                 signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
+                  Signal::Hold{dimension,chunk,add}=>if add{if dimension==Dimension::Overworld{crate::plugins::chunks::set_loaded(chunk.0,chunk.1,true);}let first={let count=holds.entry((dimension,chunk)).or_default();*count += 1;*count == 1};worlds.add_chunk(dimension,chunk);let dir=entity_world.clone();let transient=worlds.transient_entities.clone();worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);if let Some(transient)=transient {if let Some(entities)=transient.lock().unwrap().remove(&(dimension,chunk)){r.add_entities(entities);}} else if first && let Some(dir)=dir{r.add_entities(entity_save::load(&dimension.storage_root(&dir), (chunk.0, chunk.1)));}});}else{release_hold(&worlds, &mut holds, &signal_tx, dimension, chunk);},
+                  Signal::SaveEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world { let dir=dimension.storage_root(dir); if let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}}},
+                  Signal::FinishRelease{dimension,chunk,flush}=>{worlds.remove_chunk(dimension,chunk);if flush {let source=dimensions.source(dimension).clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
+                  Signal::FluidChange{dimension,x,y,z}=>{
+                    for (dx,dy,dz) in [(0,0,0),(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                      let (Some(x),Some(y),Some(z))=(x.checked_add(dx),y.checked_add(dy),z.checked_add(dz)) else {continue;};
+                      let chunk=ChunkPos(x.div_euclid(16),z.div_euclid(16));
+                      if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.schedule_fluid((x,y,z)));}
+                    }
+                  },
+                  Signal::Update{uuid,pos,yaw,pitch,ground}=>{
+                    if let Some(player)=online.get_mut(&uuid){player.pos=pos;player.yaw=yaw;player.pitch=pitch;}
+                    crate::plugins::facts::set_on_ground(uuid, ground);
+                    command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
+                    if let Some(plugins) = &settings.plugins {
+                      let location = ferrite_plugin::PlayerLocation { world: ferrite_plugin::default_world_id(), x: pos[0], y: pos[1], z: pos[2], yaw, pitch };
+                      if let Err(error) = plugins.update_player_location(uuid, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
+                    }
+                    worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
+                  },
+                  Signal::Transfer{dimension,from,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;worlds.schedule_at_chunk(dimension,to,move |r|{r.hold_chunk(to);r.players.insert(id,*player);});defer_release(&worlds,&signal_tx,dimension,from,false);},
+                  Signal::EntityTransfer{dimension,to,entity}=>hand_off(worlds.scheduler(dimension), to, entity),
+                  Signal::ChangeDimension{from_dimension,from,player}=>{
+                    let dimension=player.dimension;let chunk=player.chunk;let id=player.uuid;
+                    worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);r.players.insert(id,*player);});
+                    defer_release(&worlds,&signal_tx,from_dimension,from,false);
+                    if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
+                    command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
+                    command_state.lock().unwrap().set_dimension(id,dimension);
+                    worlds.schedule_global(move |g| g.set_dimension(id, dimension));
+                  },
+                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
+                    let name = names.remove(&uuid).unwrap_or_default();
+                    crate::plugins::facts::forget(uuid);
+                    if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
+                    worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
+                 }},
+                 command = async { match plugin_commands.as_mut() { Some(commands) => commands.recv().await, None => std::future::pending().await } }, if plugin_commands.is_some() => {
+                     match command {
+                         // Chat attribution lives on the global region, so display names go there.
+                         Some(ferrite_plugin::PlayerCommand::DisplayName { player, component_json }) => {
+                             let name = component_json.as_deref().map(json_text);
+                             worlds.schedule_global(move |g| g.set_display_name(player, name));
+                         }
+                         Some(ferrite_plugin::PlayerCommand::UpdateCommands { player }) => {
+                            if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
+                                let (actions, _) = mpsc::unbounded_channel();
+                                let permission = *permissions.get(&player).unwrap_or(&0);
+                                let source_for = commands::Source { permission, origin: op.pos, yaw: op.yaw, pitch: op.pitch, uuid: Some(player), name: Some(op.name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: op.dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                                if let Ok(tree) = command_tree.serialize_commands(&source_for, registry) {
+                                    let mut packet = Vec::new();
+                                    VarInt(16).encode(&mut packet);
+                                    packet.extend(tree.body);
+                                    let _ = op.outbound.send(Outbound::Packet(packet.into()));
+                                }
+                            }
+                        }
+                         Some(ferrite_plugin::PlayerCommand::SpawnEntity { owner, center, kind, block, velocity, uuid }) => {
+                            let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
+                            if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                                worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid, owner); });
+                            }
+                        }
+                         Some(ferrite_plugin::PlayerCommand::EntityOp { uuid, op }) => {
+                            if let Some(at) = crate::plugins::facts::entity_position(uuid) {
+                                let chunk = ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+                                if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                                    worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_entity_op(uuid, &op); });
+                                }
+                            }
+                        }
+                         Some(ferrite_plugin::PlayerCommand::DropItem { center, item, amount, natural, uuid }) => {
+                            let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
+                            if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                                worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_drop_item(center, &item, amount, natural, uuid));
+                            }
+                        }
+                         Some(ferrite_plugin::PlayerCommand::Explosion { center, power, fire, breaks }) => {
+                            let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
+                            if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                                worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_explosions.push((center, power, fire, breaks)));
+                            }
+                        }
+                         Some(ferrite_plugin::PlayerCommand::RideChanged { vehicle }) => {
+                            let packet = ride::passengers_packet(&command_state.lock().unwrap(), &online, vehicle);
+                            if let Some(bytes) = packet {
+                                for player in online.values() { let _ = player.outbound.send(Outbound::Packet(bytes.clone().into())); }
+                            }
+                        }
+                         Some(ferrite_plugin::PlayerCommand::Lightning { center }) => {
+                            worlds.schedule_global(move |g| g.plugin_lightning(center));
+                        }
+                         Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
+                            worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
+                        }
+                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions),
+                         // The plugin host dropped its sender (no plugins loaded): stop polling.
+                         None => plugin_commands = None,
+                     }
+                 },
+                 _tick = clock.tick() => {
+                     let _timer = CoordinatorTimer::new(2);
+                             let mut laps = Laps(std::time::Instant::now());
+                     let _head = CoordinatorTimer::new(3);
+                     let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
+                     let tick_control = command_state.lock().unwrap().more.tick.clone();
+                     let target_rate = tick_control.effective_rate();
+                     if (target_rate - applied_rate).abs() > f32::EPSILON {
+                         applied_rate = target_rate;
+                         let period = std::time::Duration::from_secs_f64(1.0 / f64::from(target_rate));
+                         worlds.set_period(period);
+                         clock = tokio::time::interval(period);
+                         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                     }
+                     let runs = tick_control.begin_game_tick();
+                     if let Some((tps, mspt)) = tick_control.take_sprint_report() {
+                         let text = commands::Feedback::new("commands.tick.sprint.report", vec![format!("{tps:.0}"), format!("{mspt:.2}")]).text;
+                         for player in online.values() { chat(&player.outbound, &text); }
+                     }
+        laps.lap("head");
+                     drop(_head); let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
+        laps.lap("game_tick");
+                     {
+                         let _t = CoordinatorTimer::new(4);
+                         let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                         let (styles, spectators, ranges) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone(), online.keys().map(|uuid| (*uuid, waypoints::player_ranges(&game.more.attributes, *uuid, hidden.contains(uuid)))).collect::<HashMap<_, _>>()) };
+                         locator.submit((online.clone(), styles, spectators, ranges));
+                     }
+        laps.lap("locator");
+                     {
+                         let _t = CoordinatorTimer::new(5);
+                         let owned = command_state.lock().unwrap().more.advancements.clone();
+                         advancement_worker.submit((online.clone(), owned));
+                         for (who, id) in completed_rx.try_iter().collect::<Vec<_>>() {
+                             if let Some(recipes) = Some(recipe_unlock::reward_recipes(&id)).filter(|r| !r.is_empty()) { command_state.lock().unwrap().more.recipes.entry(who).or_default().extend(recipes); }
+                             let points = recipe_unlock::reward_experience(&id);
+                             if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
+                             let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
+                             if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
+                         }
+                     }
+        laps.lap("recipes");
+                     {
+                         let kills = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::KILLS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !kills.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, kind) in kills { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_kill(kind)); }
+                         }
+                     }
+                     {
+                         let eaten = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::CONSUMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !eaten.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, item) in eaten { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_consumed(item)); }
+                         }
+                     }
+                     {
+                         let placed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::PLACED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !placed.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, block) in placed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_placed(block)); }
+                         }
+                     }
+                     {
+                         let biomes = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::BIOMES.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !biomes.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, biome) in biomes { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_biome(&biome)); }
+                         }
+                     }
+                     {
+                         let crafted = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::CRAFTED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !crafted.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, recipe) in crafted { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_crafted(&recipe)); }
+                         }
+                     }
+        laps.lap("drains");
+                     let _scan = CoordinatorTimer::new(7);
+                     scan_tick = scan_tick.wrapping_add(1);
+                     if scan_tick.is_multiple_of(20) && recipe_unlock::ready() {
+                         for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }
+                         let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                         let mut game = command_state.lock().unwrap();
+                         for uuid in online.keys() {
+                             if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
+                                 last_held.insert(*uuid, items.clone());
+                                 recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
+                                 game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
+                             }
+                         }
+                     }
+        laps.lap("advancement");
+                     {
+                         let _t = CoordinatorTimer::new(6);
+                         let owned = command_state.lock().unwrap().more.recipes.clone();
+                         let recipe_settings = command_state.lock().unwrap().more.recipe_settings.clone();
+                         recipe_worker.submit((online.clone(), owned, recipe_settings));
+                     }
+        laps.lap("scan");
+                     drop(_scan);
+                     let _ride = CoordinatorTimer::new(8);
+                     let ride_steps = ride::plan(&command_state.lock().unwrap());
+                     for step in ride_steps {
+                         match step {
+                             ride::Step::Move { rider, rider_is_player, rider_pos, rider_rot, to } => {
+                                 if rider_is_player {
+                                     if let Some((_, mailbox, _)) = mailboxes.get(&rider) {
+                                         mailbox.lock().unwrap().push_back(Command::Teleport { pos: to, yaw: None, pitch: None });
+                                     }
+                                 } else {
+                                     let chunk = ChunkPos((rider_pos[0].floor() as i32) >> 4, (rider_pos[2].floor() as i32) >> 4);
+                                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
+                                         worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.teleport_entity(rider, to, rider_rot.0, rider_rot.1); });
+                                     }
+                                 }
+                             }
+                             ride::Step::Detach { vehicle } => {
+                                 let packet = ride::passengers_packet(&command_state.lock().unwrap(), &online, vehicle);
+                                 if let Some(bytes) = packet {
+                                     for player in online.values() { let _ = player.outbound.send(Outbound::Packet(bytes.clone().into())); }
+                                 }
+                             }
+                         }
+                     }
+        laps.lap("ride");
+                     drop(_ride);
+                     let _rest = CoordinatorTimer::new(9);
+                     for uuid in idle { if let Some((_, _, outbound)) = mailboxes.get(&uuid) { let _ = outbound.send(Outbound::Disconnect(commands::Feedback::new("multiplayer.disconnect.idling", vec![]).text)); } }
+                     for function in due {
+                         let (complete, _unused) = oneshot::channel();
+                         let _ = event_tx.send(GameMessage::Console {
+                             command: format!("function {function}"),
+                             complete,
+                         });
+                     }
+                     if let Some(plugins) = &settings.plugins {
+                         if let Err(error) = plugins.tick() {
+                             tracing::warn!(%error, "plugin tick failed");
+                         }
+                         // Paper's region scheduler: run each due task on the thread owning its chunk.
+                         for task in plugins.take_region_tasks() {
+                             if task.world != ferrite_plugin::default_world_id().to_string() {
+                                 tracing::debug!(world = %task.world, "plugin region task for an unknown world");
+                                 continue;
+                             }
+                             let chunk = ChunkPos(task.chunk_x, task.chunk_z);
+                             let plugins = Arc::clone(plugins);                      let dimension = Dimension::from_key(&task.world).unwrap_or(Dimension::Overworld);
+                              worlds.schedule_at_chunk(dimension, chunk, move |_| {
+                                 if let Err(error) = plugins.run_region_task(task) {
+                                     tracing::warn!(%error, "plugin region task failed");
+                                 }
+                             });
+                         }
+                         // Paper's entity scheduler: the only entities plugins hold are players, whose
+                         // mailbox is drained by whichever region owns them, hand-offs included.
+                         for task in plugins.take_entity_tasks() {
+                             route_entity_task(task, &mailboxes);
+                         }
+                     }
+                     // Vanilla runs `minecraft:load` once at startup and `minecraft:tick` every
+                     // tick. Both go through the console command path so their actions
+                     // (setblock, say, ...) are applied like any other command.
+                     let tags: &[&str] = if load_ran {
+                         &[functions::TICK_TAG]
+                     } else {
+                         load_ran = true;
+                         &[functions::LOAD_TAG, functions::TICK_TAG]
+                     };
+                     for tag in tags {
+                         let known = command_state
+                             .lock()
+                             .unwrap()
+                             .functions
+                             .tag(tag)
+                             .is_some_and(|functions| !functions.is_empty());
+                         if !known {
+                             continue;
+                         }
+                         let (complete, _unused) = oneshot::channel();
+                         let _ = event_tx.send(GameMessage::Console {
+                             command: format!("function #{tag}"),
+                             complete,
+                         });
+                    }
                  }
-                 let (complete, _unused) = oneshot::channel();
-                 let _ = event_tx.send(GameMessage::Console {
-                     command: format!("function #{tag}"),
-                     complete,
-                 });
-            }
-         }
-        }
+                }
     }
 }
 /// Delivers a player mutation from the embedded JVM to the region that owns the player.
