@@ -38,8 +38,8 @@ What works, how it is built, and what is still missing.
   in the same direction (or does nothing over empty void); vanilla instead searches for the
   nearest outer island and plays the beam animation, which is not modelled.
 - **Credits**: the first trip home through the exit portal sends `WIN_GAME` and waits for the client's
-  respawn request before moving (seen-flag is in memory only, not saved). Still missing: the
-  first-kill advancement. (Later kills give 500 xp,
+  respawn request before moving (seen-flag is in memory only, not saved). The "Free the End"
+  advancement completes on a dragon kill (melee path, covered by a test). (Later kills give 500 xp,
   first kills 12000; the first-kill flag is remembered from the exit portal.)
 - **Persistence.** The fight state lives in memory. After a restart the dragon is respawned unless
   the podium already carries a portal; entities are not saved.

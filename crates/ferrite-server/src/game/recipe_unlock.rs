@@ -704,6 +704,16 @@ mod tests {
     }
 
     #[test]
+    fn killing_the_dragon_completes_free_the_end() {
+        let done = criteria_for_kill("minecraft:ender_dragon");
+        assert_eq!(
+            done.contains(&"minecraft:end/kill_dragon#killed_dragon".to_owned()),
+            !rules().is_empty(),
+            "{done:?}"
+        );
+    }
+
+    #[test]
     fn killing_a_zombie_completes_monster_hunter_with_the_extracted_data() {
         let done = criteria_for_kill("minecraft:zombie");
         // The extracted data may be absent on this machine.
