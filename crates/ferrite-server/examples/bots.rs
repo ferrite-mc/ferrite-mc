@@ -294,6 +294,7 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             }
         }
     }
+    println!("{}", world.profiler().timings().report_all(50.0));
     world.shutdown().await.unwrap();
     server.abort();
 }

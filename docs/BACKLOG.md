@@ -121,7 +121,12 @@ still stubs that answer "Command not implemented".
   so it would saturate near 8000 bots. Region ticks are the load at 800 bots (mean 26 ms, p99 65 ms
   against the 50 ms budget). A 4 s coordinator stall on the first tick (the advancement rules were parsed
   on it) is fixed by `recipe_unlock::preload` and by skipping rule lookups until `recipe_unlock::ready`.
-  Next: profile what a region tick spends at 800 bots, not the coordinator.
+  The real serialized cost was the global region's entity tracking (`global-tick/entity-tracking`):
+  405 ms per tick at 800 clustered players (about 3 TPS for the global region). It now uses a 48-block
+  grid, keeps a `Copy` pose per observed pair instead of cloning the player, encodes each movement
+  packet once per tick, and splits observers across up to 8 scoped threads: 13 ms per tick, global
+  region back at 20 TPS. Next: region ticks at 800 bots (mean 27 ms; the superflat run spends most of
+  it outside the `chunk-stream` and `player-update` scopes, fixture mostly in `chunk-stream`).
 
 ## Quality and release
 

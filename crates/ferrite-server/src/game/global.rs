@@ -9,6 +9,25 @@ use ferrite_protocol::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
+/// What an observer was last told about a target: just the pose, so tracking does not copy a
+/// whole player (name, skin properties, channel handle) per observed pair per tick.
+#[derive(Clone, Copy)]
+struct Pose {
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+}
+
+impl From<&GlobalPlayer> for Pose {
+    fn from(p: &GlobalPlayer) -> Self {
+        Self {
+            pos: p.pos,
+            yaw: p.yaw,
+            pitch: p.pitch,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct GlobalPlayer {
     pub uuid: Uuid,
@@ -97,7 +116,8 @@ fn now_millis() -> i64 {
 #[derive(Default)]
 pub struct GlobalRegion {
     players: HashMap<Uuid, GlobalPlayer>,
-    visible: HashMap<(Uuid, Uuid), GlobalPlayer>,
+    /// Per observer, the targets it was told about and the pose it last saw them in.
+    visible: HashMap<Uuid, HashMap<Uuid, Pose>>,
     /// `(viewer, target)` pairs a plugin hid; the target is neither tracked nor listed for the viewer.
     hidden: std::collections::HashSet<(Uuid, Uuid)>,
     /// Scope tree attached by the game loop; `None` until the first tick.
@@ -109,6 +129,70 @@ fn send<P: ferrite_protocol::Packet>(to: &GlobalPlayer, p: &P) {
 fn angle(v: f32) -> u8 {
     (v * 256.0 / 360.0).floor() as i32 as u8
 }
+/// The packets that move `old` to `target`'s pose: a relative move (with rotation if it turned),
+/// a teleport when the step does not fit, a rotation, and the head rotation when it turned.
+fn movement_packets(target: &GlobalPlayer, old: &Pose) -> Vec<Outbound> {
+    let delta: Vec<i64> = target
+        .pos
+        .iter()
+        .zip(old.pos)
+        .map(|(n, o)| (n * 4096.0).floor() as i64 - (o * 4096.0).floor() as i64)
+        .collect();
+    let moved = delta.iter().any(|v| *v != 0);
+    let rotated = old.yaw != target.yaw || old.pitch != target.pitch;
+    let mut out = Vec::new();
+    if moved {
+        if delta.iter().all(|d| i16::try_from(*d).is_ok()) {
+            let (dx, dy, dz) = (delta[0] as i16, delta[1] as i16, delta[2] as i16);
+            let properties = VarInt(i32::from(target.ground));
+            if rotated {
+                out.push(packet(&EntityMoveRotation {
+                    id: VarInt(target.entity),
+                    properties,
+                    dx,
+                    dy,
+                    dz,
+                    yaw: angle(target.yaw),
+                    pitch: angle(target.pitch),
+                }));
+            } else {
+                out.push(packet(&EntityMove {
+                    id: VarInt(target.entity),
+                    properties,
+                    dx,
+                    dy,
+                    dz,
+                }));
+            }
+        } else {
+            out.push(packet(&EntityTeleport {
+                id: VarInt(target.entity),
+                path_type: VarInt(0),
+                x: target.pos[0],
+                y: target.pos[1],
+                z: target.pos[2],
+                yaw: target.yaw,
+                pitch: target.pitch,
+                on_ground: target.ground,
+            }));
+        }
+    } else if rotated {
+        out.push(packet(&EntityRotation {
+            id: VarInt(target.entity),
+            on_ground: target.ground,
+            yaw: angle(target.yaw),
+            pitch: angle(target.pitch),
+        }));
+    }
+    if rotated {
+        out.push(packet(&EntityHeadRotation {
+            id: VarInt(target.entity),
+            yaw: angle(target.yaw),
+        }));
+    }
+    out
+}
+
 impl GlobalRegion {
     pub fn join(&mut self, p: GlobalPlayer) {
         for old in self.players.values() {
@@ -279,7 +363,11 @@ impl GlobalRegion {
         if let Some(p) = self.players.remove(&id) {
             for other in self.players.values() {
                 send(other, &PlayerInfoRemove { uuids: vec![id] });
-                if self.visible.remove(&(other.uuid, id)).is_some() {
+                if self
+                    .visible
+                    .get_mut(&other.uuid)
+                    .is_some_and(|seen| seen.remove(&id).is_some())
+                {
                     send(
                         other,
                         &RemoveEntities {
@@ -288,7 +376,7 @@ impl GlobalRegion {
                     );
                 }
             }
-            self.visible.retain(|(observer, _), _| *observer != id);
+            self.visible.remove(&id);
             self.hidden
                 .retain(|(viewer, target)| *viewer != id && *target != id);
             self.broadcast(&format!("{} left the game", p.name));
@@ -375,7 +463,11 @@ impl GlobalRegion {
             return;
         }
         if hidden {
-            if self.visible.remove(&key).is_some() {
+            if self
+                .visible
+                .get_mut(&key.0)
+                .is_some_and(|seen| seen.remove(&key.1).is_some())
+            {
                 send(
                     observer,
                     &RemoveEntities {
@@ -405,130 +497,138 @@ impl GlobalRegion {
         let _tick = timings.as_ref().map(|t| t.scope("global-tick"));
         let _tracking = timings.as_ref().map(|t| t.scope("entity-tracking"));
         let players: Vec<_> = self.players.values().cloned().collect();
-        for observer in &players {
-            for target in &players {
-                if observer.uuid == target.uuid {
-                    continue;
+        // Tracking range is 48 blocks, so with 48-block cells an observer can only see targets
+        // in its own and the eight neighbouring cells (same dimension), plus the targets it
+        // already sees, which may have moved away or changed dimension and need removing. This
+        // replaces the all-pairs scan, which cost 380 ms per tick at 800 players.
+        const CELL: f64 = 48.0;
+        let cell = |p: &GlobalPlayer| {
+            (
+                p.dimension,
+                (p.pos[0] / CELL).floor() as i32,
+                (p.pos[2] / CELL).floor() as i32,
+            )
+        };
+        let mut grid: HashMap<_, Vec<usize>> = HashMap::new();
+        let mut index = HashMap::with_capacity(players.len());
+        for (i, p) in players.iter().enumerate() {
+            grid.entry(cell(p)).or_default().push(i);
+            index.insert(p.uuid, i);
+        }
+        let hidden = &self.hidden;
+        let mut observed: Vec<HashMap<Uuid, Pose>> = players
+            .iter()
+            .map(|p| self.visible.remove(&p.uuid).unwrap_or_default())
+            .collect();
+        // Entries of observers that left are gone with them.
+        self.visible.clear();
+        // Each observer only reads shared state and writes its own `observed` map, so observers
+        // are split across threads; one thread is used for small servers.
+        let work = |first: usize, chunk: &mut [HashMap<Uuid, Pose>]| {
+            let mut moves: HashMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>> = HashMap::new();
+            for (offset, seen) in chunk.iter_mut().enumerate() {
+                let observer = &players[first + offset];
+                let (dimension, cx, cz) = cell(observer);
+                let mut candidates: Vec<usize> = seen
+                    .keys()
+                    .filter_map(|target| index.get(target).copied())
+                    .collect();
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(near) = grid.get(&(dimension, cx + dx, cz + dz)) {
+                            candidates.extend_from_slice(near);
+                        }
+                    }
                 }
-                let key = (observer.uuid, target.uuid);
-                let distance = observer
-                    .pos
-                    .iter()
-                    .zip(target.pos)
-                    .map(|(a, b)| (a - b) * (a - b))
-                    .sum::<f64>();
-                // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
-                let inside = observer.dimension == target.dimension
-                    && distance <= 48.0 * 48.0
-                    && !self.hidden.contains(&key);
-                match (self.visible.get(&key), inside) {
-                    (None, true) => {
-                        send(
-                            observer,
-                            &AddEntity {
-                                id: VarInt(target.entity),
-                                uuid: target.uuid,
-                                entity_type: VarInt(159),
-                                x: target.pos[0],
-                                y: target.pos[1],
-                                z: target.pos[2],
-                                velocity: ferrite_protocol::types::LpVec3::ZERO,
-                                pitch: angle(target.pitch),
-                                yaw: angle(target.yaw),
-                                head_yaw: angle(target.yaw),
-                                data: VarInt(0),
-                            },
-                        );
-                        self.visible.insert(key, target.clone());
+                candidates.sort_unstable();
+                candidates.dedup();
+                for target in candidates.into_iter().map(|i| &players[i]) {
+                    if observer.uuid == target.uuid {
+                        continue;
                     }
-                    (Some(_), false) => {
-                        send(
-                            observer,
-                            &RemoveEntities {
-                                ids: vec![VarInt(target.entity)],
-                            },
-                        );
-                        self.visible.remove(&key);
-                    }
-                    (Some(old), true) => {
-                        let delta: Vec<i64> = target
-                            .pos
-                            .iter()
-                            .zip(old.pos)
-                            .map(|(n, o)| (n * 4096.0).floor() as i64 - (o * 4096.0).floor() as i64)
-                            .collect();
-                        let moved = delta.iter().any(|v| *v != 0);
-                        let rotated = old.yaw != target.yaw || old.pitch != target.pitch;
-                        if moved {
-                            if delta.iter().all(|d| i16::try_from(*d).is_ok()) {
-                                let dx = delta[0] as i16;
-                                let dy = delta[1] as i16;
-                                let dz = delta[2] as i16;
-                                let properties = VarInt(i32::from(target.ground));
-                                if rotated {
-                                    send(
-                                        observer,
-                                        &EntityMoveRotation {
-                                            id: VarInt(target.entity),
-                                            properties,
-                                            dx,
-                                            dy,
-                                            dz,
-                                            yaw: angle(target.yaw),
-                                            pitch: angle(target.pitch),
-                                        },
-                                    );
-                                } else {
-                                    send(
-                                        observer,
-                                        &EntityMove {
-                                            id: VarInt(target.entity),
-                                            properties,
-                                            dx,
-                                            dy,
-                                            dz,
-                                        },
-                                    );
-                                }
-                            } else {
-                                send(
-                                    observer,
-                                    &EntityTeleport {
-                                        id: VarInt(target.entity),
-                                        path_type: VarInt(0),
-                                        x: target.pos[0],
-                                        y: target.pos[1],
-                                        z: target.pos[2],
-                                        yaw: target.yaw,
-                                        pitch: target.pitch,
-                                        on_ground: target.ground,
-                                    },
-                                );
-                            }
-                        } else if rotated {
+                    let key = (observer.uuid, target.uuid);
+                    let distance = observer
+                        .pos
+                        .iter()
+                        .zip(target.pos)
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f64>();
+                    // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
+                    let inside = observer.dimension == target.dimension
+                        && distance <= 48.0 * 48.0
+                        && !hidden.contains(&key);
+                    match (seen.get(&target.uuid), inside) {
+                        (None, true) => {
                             send(
                                 observer,
-                                &EntityRotation {
+                                &AddEntity {
                                     id: VarInt(target.entity),
-                                    on_ground: target.ground,
-                                    yaw: angle(target.yaw),
+                                    uuid: target.uuid,
+                                    entity_type: VarInt(159),
+                                    x: target.pos[0],
+                                    y: target.pos[1],
+                                    z: target.pos[2],
+                                    velocity: ferrite_protocol::types::LpVec3::ZERO,
                                     pitch: angle(target.pitch),
+                                    yaw: angle(target.yaw),
+                                    head_yaw: angle(target.yaw),
+                                    data: VarInt(0),
                                 },
                             );
+                            seen.insert(target.uuid, Pose::from(target));
                         }
-                        if rotated {
+                        (Some(_), false) => {
                             send(
                                 observer,
-                                &EntityHeadRotation {
-                                    id: VarInt(target.entity),
-                                    yaw: angle(target.yaw),
+                                &RemoveEntities {
+                                    ids: vec![VarInt(target.entity)],
                                 },
                             );
+                            seen.remove(&target.uuid);
                         }
-                        self.visible.insert(key, target.clone());
+                        (Some(old), true) => {
+                            // Observers that last saw the target in the same pose get identical
+                            // packets, so encode them once per tick.
+                            let cache_key = (
+                                target.uuid,
+                                old.pos.map(f64::to_bits),
+                                old.yaw.to_bits(),
+                                old.pitch.to_bits(),
+                            );
+                            let packets = moves
+                                .entry(cache_key)
+                                .or_insert_with(|| movement_packets(target, old));
+                            for packet in packets.iter() {
+                                let _ = observer.outbound.send(packet.clone());
+                            }
+                            seen.insert(target.uuid, Pose::from(target));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
+            }
+        };
+        let threads = if players.len() < 64 {
+            1
+        } else {
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(8)
+        };
+        if threads == 1 {
+            work(0, &mut observed);
+        } else {
+            let per = players.len().div_ceil(threads);
+            std::thread::scope(|scope| {
+                for (n, chunk) in observed.chunks_mut(per).enumerate() {
+                    let work = &work;
+                    scope.spawn(move || work(n * per, chunk));
+                }
+            });
+        }
+        for (player, seen) in players.iter().zip(observed) {
+            if !seen.is_empty() {
+                self.visible.insert(player.uuid, seen);
             }
         }
     }
@@ -559,6 +659,32 @@ mod tests {
         g.plugin_lightning([0.0, 64.0, 0.0]);
         assert!(tracked(&mut ar, AddEntity::ID));
         assert!(!tracked(&mut br, AddEntity::ID));
+    }
+
+    #[test]
+    fn entity_tracking_follows_the_48_block_range_across_grid_cells() {
+        let mut g = GlobalRegion::default();
+        let (a, mut ar) = OutboundSender::channel(1 << 20);
+        let (b, _br) = OutboundSender::channel(1 << 20);
+        let (alice, bob) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut pa = GlobalPlayer::new(alice, 1, "A".into(), vec![], a, false, 1, 0);
+        pa.pos = [47.0, 64.0, 0.5];
+        let mut pb = GlobalPlayer::new(bob, 2, "B".into(), vec![], b, false, 1, 0);
+        pb.pos = [49.0, 64.0, 0.5];
+        g.join(pa);
+        g.join(pb);
+        while ar.try_recv().is_some() {}
+        // 2 blocks apart but in different 48-block cells: still tracked.
+        g.tick();
+        assert!(tracked(&mut ar, AddEntity::ID));
+        // Far beyond the grid neighbourhood: the old pair is found through the visible set.
+        g.players.get_mut(&bob).unwrap().pos = [5000.0, 64.0, 5000.0];
+        g.tick();
+        assert!(tracked(&mut ar, RemoveEntities::ID));
+        // Exactly out of range inside neighbouring cells is not tracked.
+        g.players.get_mut(&bob).unwrap().pos = [47.0 + 48.5, 64.0, 0.5];
+        g.tick();
+        assert!(!tracked(&mut ar, AddEntity::ID));
     }
 
     #[test]
