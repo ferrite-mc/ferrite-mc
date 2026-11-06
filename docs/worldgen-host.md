@@ -121,3 +121,15 @@ The patched jar is cached in `worldgen/` and never leaves the machine.
 Each step is kept only if it beats the baseline for resident memory, CPU and chunks per second
 (see `tools/` benchmark). Baseline: unpatched jar, 512 MB heap, about 280 MB live after load,
 about 10 s start, 100–700 ms per chunk.
+
+### Profile of the host (JFR, 8 request threads, view 12, 625 chunks, 106 chunks/s)
+
+Share of execution samples whose stack contains the area (areas overlap):
+noise router / `doFill` 31%, surface (`MaterialSystem`) 22%, chunk serialisation 11%,
+features 9%, biomes 7%, lighting 4%, structures 3%. The hottest single frame is
+`GradientNoise.permute` at 6%, then `Aquifer.computeSubstance` 4%, `Climate$RTree.search` 3%.
+
+The profile is flat. 26.3 already restructured noise (`GradientNoise`, `DensityBuffer`,
+`MaterialSystem`), so Moonrise's 1.21 patches do not apply as they are, and a faster Perlin
+permutation table would win a few percent at most. Threads were the large lever
+(4 -> 8 -> 16 = 60 -> 102 -> 153 chunks/s).
