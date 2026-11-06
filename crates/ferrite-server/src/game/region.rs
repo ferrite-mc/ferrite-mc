@@ -948,7 +948,6 @@ impl Player {
                 source.prefetch(x, z, self.biome);
             }
         }
-        let mut tracking = self.tracking.lock().unwrap();
         let count = (self.rate.clamp(1.0, 64.0) as usize).min(self.queue.len());
         let mut chunks = Vec::new();
         for _ in 0..count {
@@ -984,6 +983,7 @@ impl Player {
         }
         send(self, &ChunkBatchStart);
         let count = chunks.len();
+        let sent: Vec<_> = chunks.iter().map(|&(x, z, _)| (x, z)).collect();
         for (x, z, packet) in chunks {
             let _ = self.outbound.send(Outbound::Packet(packet.into()));
             self.loaded.insert((x, z));
@@ -991,14 +991,15 @@ impl Player {
             if let Some(plugins) = self.plugins.clone() {
                 let _ = plugins.chunk_loaded(ferrite_plugin::default_world_id(), x, z, true);
             }
-            if let Some((_, loaded, _)) = tracking.get_mut(&self.uuid) {
-                loaded.insert((x, z));
-            }
             let _ = self.signals.send(Signal::Hold {
                 dimension: self.dimension,
                 chunk: ChunkPos(x, z),
                 add: true,
             });
+        }
+        // Held only for this insert: loading and encoding above must not serialize the regions.
+        if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
+            loaded.extend(sent);
         }
         send(
             self,
