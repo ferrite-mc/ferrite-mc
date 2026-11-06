@@ -72,6 +72,7 @@ pub fn default_for(path: &str, player: bool) -> Option<Range> {
         match path {
             "attack_damage" => found.default = 1.0,
             "movement_speed" => found.default = 0.1,
+            "waypoint_transmit_range" | "waypoint_receive_range" => found.default = 60_000_000.0,
             _ => {}
         }
     }

@@ -3242,6 +3242,21 @@ impl Player {
                                 .flatten()
                         })
                         .collect();
+                    {
+                        let hidden = ferrite_item::item_name(
+                            self.inventory.get(ferrite_inventory::HEAD).item,
+                        )
+                        .is_some_and(|name| super::waypoints::HIDING_HEAD_ITEMS.contains(&name))
+                            && !self.inventory.get(ferrite_inventory::HEAD).is_empty();
+                        let mut set = super::waypoints::HEAD_HIDDEN
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if hidden {
+                            set.insert(self.uuid);
+                        } else {
+                            set.remove(&self.uuid);
+                        }
+                    }
                     super::recipe_unlock::HELD
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())

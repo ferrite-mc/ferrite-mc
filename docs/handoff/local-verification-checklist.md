@@ -30,5 +30,5 @@
 
 ## 아직 구현 안 된 것 (참고)
 - `/test`, `/jfr`(의도적으로 실패), 발전과제 트리거 (`recipe_crafted`는 작업대 제작만 구현: 대장간/조합기 제작과 재료 조건은 아직) `bred_animals`/`tame_animal`/`item_used_on_block` (`location`은 바이옴 조건만 구현, 구조물/좌표 조건은 아직)
-- loot_table/function 보상, `seen_recipe`, 웨이포인트 invisible/전송 범위 필터
+- loot_table/function 보상, `seen_recipe`, 웨이포인트 invisible 필터 (전송/수신 범위와 호박·머리 숨김은 구현)
 - Bukkit `call:` 훅, 월드젠 `process`/`remote` 모드

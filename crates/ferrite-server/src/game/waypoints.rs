@@ -27,6 +27,53 @@ struct Sent {
 #[derive(Default)]
 pub struct Locator {
     sent: HashMap<(Uuid, Uuid), Sent>,
+    /// `(waypoint_transmit_range, waypoint_receive_range)` per player; a player missing here has
+    /// no limit.
+    pub ranges: HashMap<Uuid, (f64, f64)>,
+}
+
+/// Players wearing a carved pumpkin or a mob head, which hide them from the locator bar. The
+/// region threads refresh it on `Command::ScanInventory`.
+pub static HEAD_HIDDEN: std::sync::Mutex<std::collections::BTreeSet<Uuid>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Items whose `waypoint_transmit_range_hide` modifier sits on the head slot (26.3 item data).
+pub const HIDING_HEAD_ITEMS: [&str; 8] = [
+    "minecraft:carved_pumpkin",
+    "minecraft:creeper_head",
+    "minecraft:dragon_head",
+    "minecraft:piglin_head",
+    "minecraft:player_head",
+    "minecraft:skeleton_skull",
+    "minecraft:wither_skeleton_skull",
+    "minecraft:zombie_head",
+];
+
+/// The `(transmit, receive)` ranges of one player: the attribute with its stored modifiers, plus
+/// the head item's hide modifier (`add_multiplied_total` of -1) when it is worn.
+pub fn player_ranges(
+    attributes: &BTreeMap<(Uuid, String), super::attributes::Stored>,
+    uuid: Uuid,
+    hidden: bool,
+) -> (f64, f64) {
+    let value = |path: &str, hide: bool| {
+        let limits = super::attributes::default_for(path, true).expect("known attribute");
+        let mut stored = attributes
+            .get(&(uuid, path.to_owned()))
+            .cloned()
+            .unwrap_or_default();
+        if hide {
+            stored.modifiers.insert(
+                "minecraft:waypoint_transmit_range_hide".to_owned(),
+                (-1.0, super::attributes::Operation::AddMultipliedTotal),
+            );
+        }
+        stored.value(limits, limits.default)
+    };
+    (
+        value("waypoint_transmit_range", hidden),
+        value("waypoint_receive_range", false),
+    )
 }
 
 const NAMED: [(&str, u32); 16] = [
@@ -63,12 +110,16 @@ fn azimuth(receiver: [f64; 3], source: [f64; 3]) -> f32 {
     f64::atan2(dx, -dz) as f32
 }
 
-fn desired(receiver: &OnlinePlayer, source: &OnlinePlayer) -> Option<WaypointData> {
+fn desired(receiver: &OnlinePlayer, source: &OnlinePlayer, range: f64) -> Option<WaypointData> {
     if receiver.dimension != source.dimension {
         return None;
     }
     let d: Vec<f64> = (0..3).map(|i| receiver.pos[i] - source.pos[i]).collect();
-    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() > FAR {
+    let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if distance > range {
+        return None;
+    }
+    if distance > FAR {
         return Some(WaypointData::Azimuth(azimuth(receiver.pos, source.pos)));
     }
     let block = [
@@ -119,7 +170,11 @@ impl Locator {
                 if rid == sid || spectators.contains(sid) {
                     continue;
                 }
-                let Some(data) = desired(receiver, source) else {
+                let range = match (self.ranges.get(sid), self.ranges.get(rid)) {
+                    (Some((transmit, _)), Some((_, receive))) => transmit.min(*receive),
+                    _ => f64::INFINITY,
+                };
+                let Some(data) = desired(receiver, source, range) else {
                     continue;
                 };
                 keep.insert((*rid, *sid));
@@ -240,6 +295,25 @@ mod tests {
                 .sync(&online, &styles, &Default::default())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn transmit_and_receive_ranges_limit_the_locator() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut online = HashMap::new();
+        online.insert(a, player([0.0; 3], Dimension::Overworld));
+        online.insert(b, player([50.0, 0.0, 0.0], Dimension::Overworld));
+        let mut locator = Locator::default();
+        // b transmits 10 blocks only: a is out of reach.
+        locator.ranges.insert(a, (6e7, 6e7));
+        locator.ranges.insert(b, (10.0, 6e7));
+        let sent = locator.sync(&online, &BTreeMap::new(), &Default::default());
+        assert!(sent.iter().all(|(r, _)| *r != a), "a sees nobody");
+        assert_eq!(sent.len(), 1, "b still sees a");
+        // A carved pumpkin on b zeroes its range through the hide modifier.
+        let (transmit, _) = player_ranges(&BTreeMap::new(), b, true);
+        assert_eq!(transmit, 0.0);
+        assert_eq!(player_ranges(&BTreeMap::new(), b, false), (6e7, 6e7));
     }
 
     #[test]
