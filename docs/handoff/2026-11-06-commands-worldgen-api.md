@@ -5,6 +5,7 @@ piston/End note and still applies for those areas.
 
 ## Read first
 
+- `local-verification-checklist.md` (same folder) — everything that still needs a local run or a real client.
 - Folia reference (not readable from the cloud session): <https://docs.papermc.io/folia/reference/overview/#_top>
   — diff its scheduler/ownership/region rules against `ferrite-region` and `docs/BACKLOG.md`.
 - `docs/COMMANDS-STATUS.md` — what each command really does, and what it does not.
