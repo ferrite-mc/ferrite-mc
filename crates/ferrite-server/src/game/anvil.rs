@@ -147,6 +147,8 @@ struct Cache {
     entries: HashMap<(i32, i32, i32), Entry>,
     clock: u64,
     dirty: HashMap<(i32, i32), Dirty>,
+    /// Number of `Entry::Pending` in `entries`, so a miss does not count them under the lock.
+    pending: usize,
 }
 struct Dirty {
     chunk: ferrite_world::Chunk,
@@ -201,6 +203,7 @@ impl AnvilChunkSource {
                 entries: HashMap::new(),
                 clock: 0,
                 dirty: HashMap::new(),
+                pending: 0,
             }),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
@@ -241,6 +244,7 @@ impl AnvilChunkSource {
                 entries: HashMap::new(),
                 clock: 0,
                 dirty: HashMap::new(),
+                pending: 0,
             }),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
@@ -1118,13 +1122,7 @@ impl AnvilChunkSource {
                 }
             };
         }
-        if cache
-            .entries
-            .values()
-            .filter(|e| matches!(e, Entry::Pending(_)))
-            .count()
-            >= PENDING_LIMIT
-        {
+        if cache.pending >= PENDING_LIMIT {
             return Lookup::Loading;
         }
         if cache.entries.len() >= CACHE_LIMIT {
@@ -1146,6 +1144,7 @@ impl AnvilChunkSource {
             cache.entries.remove(&oldest);
         }
         cache.entries.insert(key, Entry::Pending(now));
+        cache.pending += 1;
         drop(cache);
         let source = Arc::clone(self);
         let request = now;
@@ -1201,6 +1200,7 @@ impl AnvilChunkSource {
             if matches!(cache.entries.get(&key), Some(Entry::Pending(version)) if *version == request)
             {
                 cache.entries.insert(key, Entry::Ready(result.map(Box::new), now));
+                cache.pending -= 1;
             }
         });
         Lookup::Loading
@@ -1223,7 +1223,15 @@ fn encode_column_packet(
 /// Drop every cached packet for chunk `(x, z)` after a block or light change.
 fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
     let before = cache.entries.len();
-    cache.entries.retain(|&(cx, cz, _), _| (cx, cz) != (x, z));
+    let mut dropped_pending = 0;
+    cache.entries.retain(|&(cx, cz, _), entry| {
+        let keep = (cx, cz) != (x, z);
+        if !keep && matches!(entry, Entry::Pending(_)) {
+            dropped_pending += 1;
+        }
+        keep
+    });
+    cache.pending -= dropped_pending;
     if cache.entries.len() < before {
         stats.invalidations.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(x, z, "chunk packet cache invalidated");
