@@ -37,7 +37,9 @@ What works, how it is built, and what is still missing.
   its chunk is loaded. Standing in one sends a player to the top of the ground 1024 blocks out
   in the same direction (or does nothing over empty void); vanilla instead searches for the
   nearest outer island and plays the beam animation, which is not modelled.
-- **Credits** after the first return and the first-kill advancement. (Later kills give 500 xp,
+- **Credits**: the first trip home through the exit portal sends `WIN_GAME` and waits for the client's
+  respawn request before moving (seen-flag is in memory only, not saved). Still missing: the
+  first-kill advancement. (Later kills give 500 xp,
   first kills 12000; the first-kill flag is remembered from the exit portal.)
 - **Persistence.** The fight state lives in memory. After a restart the dragon is respawned unless
   the podium already carries a portal; entities are not saved.

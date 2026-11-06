@@ -686,6 +686,11 @@ pub struct Player {
     pub portal_cooldown: u32,
     /// A portal trip waiting for its destination chunk to load.
     pub portal_pending: Option<(super::Dimension, [f64; 3])>,
+    /// Left the End once already, so the credits are not shown again (vanilla `seenCredits`).
+    /// shortcut: kept in memory only, not saved with the player data.
+    pub seen_credits: bool,
+    /// The credits are playing; the client answers with a respawn request when they end.
+    pub watching_credits: bool,
 }
 #[derive(Default)]
 pub struct Region {
@@ -2550,7 +2555,23 @@ impl Player {
             self.portal_pending = None;
             return;
         }
-        if self.portal_cooldown > 0 {
+        if self.portal_cooldown > 0 || self.watching_credits {
+            return;
+        }
+        // The first way home from the End plays the credits (`WIN_GAME`) before anything moves.
+        if self.dimension == super::Dimension::End
+            && target == super::Dimension::Overworld
+            && !self.seen_credits
+        {
+            self.seen_credits = true;
+            self.watching_credits = true;
+            send(
+                self,
+                &GameEvent {
+                    event: 4,
+                    value: 1.0,
+                },
+            );
             return;
         }
         let gateway = inside.is_some_and(super::portal::is_end_gateway);
@@ -3734,6 +3755,11 @@ impl Player {
                 // `ServerboundClientCommandPacket.Action.PERFORM_RESPAWN`.
                 ServerboundPlay::ClientCommand(p) if p.action.0 == 0 && self.survival.dead => {
                     self.respawn_requested = true;
+                }
+                // The credits ended: the portal carries on, with no wait left.
+                ServerboundPlay::ClientCommand(p) if p.action.0 == 0 && self.watching_credits => {
+                    self.watching_credits = false;
+                    self.portal_ticks = super::portal::WAIT_TICKS;
                 }
                 _ => {}
             }
