@@ -27,8 +27,9 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   (`playerdata/<uuid>.recipes.json`) and sent as `recipe_book_add`/`recipe_book_remove`, plus
   `update_recipes` and `recipe_book_settings` on join (`recipe_packets.rs`; displays are encoded by
   `tools/extractor/RecipeExtractor.java`, which boots the real data-pack loader, and the framing
-  is checked against the vanilla codec bytes). Not done: the `enter_block`/`tick` recipe triggers, and the client's `recipe_book_change_settings`/`seen_recipe` packets are
-  ignored.
+  is checked against the vanilla codec bytes). Not done: the `enter_block`/`tick` recipe triggers, the client's `seen_recipe` packet is ignored (the
+  "new" highlight is not tracked). `recipe_book_change_settings` is stored per player
+  (`playerdata/<uuid>.recipebook.json`) and sent back on join.
 - `/compute`: evaluates `context_int_provider` / `context_float_provider` (constant, reference,
   conditional, div, number_dispatcher, weighted_list, match_block). `entity` context carries no
   entity data yet.

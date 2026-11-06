@@ -1018,7 +1018,7 @@ async fn run(
            // Resume where the player left off; a first join (or unreadable data) uses the
            // spawn of the dimension the world is configured for.
            let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
-           if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } let recipes = recipe_packets::load(dir, &uuid); if !recipes.is_empty() { command_state.lock().unwrap().more.recipes.insert(uuid, recipes); } }
+           if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } let flags = recipe_packets::load_settings(dir, &uuid); command_state.lock().unwrap().more.recipe_settings.insert(uuid, flags); let recipes = recipe_packets::load(dir, &uuid); if !recipes.is_empty() { command_state.lock().unwrap().more.recipes.insert(uuid, recipes); } }
            let start_dimension = saved.as_ref().map_or(settings.dimension, |s| s.dimension());
            let dimension_spawn = dimensions.spawn(start_dimension);
            let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
@@ -1102,6 +1102,14 @@ async fn run(
               }
               if deliver { worlds.schedule_global(move |g|g.chat(uuid,&chat)); }
           }},
+          GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeBookSettings{book,open,filtering}}=>{
+              if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
+                  let mut game = command_state.lock().unwrap();
+                  let flags = game.more.recipe_settings.entry(uuid).or_default();
+                  recipe_packets::change_settings(flags, book, open, filtering);
+                  if let Some(dir) = settings.playerdata.as_deref() { recipe_packets::save_settings(dir, &uuid, flags); }
+              }
+          }
           GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatAck(ack)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_ack(uuid,ack.offset.0));}},
           GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatSessionUpdate(update)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_session(uuid,update.chat_session));}},
           GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatCommandSigned(signed)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
@@ -1419,7 +1427,8 @@ async fn run(
              }
              {
                  let owned = command_state.lock().unwrap().more.recipes.clone();
-                 for (target, bytes) in recipe_sync.sync(&online, &owned, settings.playerdata.as_deref()) {
+                 let recipe_settings = command_state.lock().unwrap().more.recipe_settings.clone();
+                 for (target, bytes) in recipe_sync.sync(&online, &owned, &recipe_settings, settings.playerdata.as_deref()) {
                      if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
                  }
              }

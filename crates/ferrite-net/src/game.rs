@@ -57,6 +57,13 @@ pub enum ServerboundPlay {
     Interact(ferrite_protocol::packets::play::ServerboundInteract),
     /// Vanilla `ServerboundSetCommandBlockPacket`: a command block editor's changes.
     SetCommandBlock(ferrite_protocol::packets::play::SetCommandBlock),
+    /// Vanilla `ServerboundRecipeBookChangeSettingsPacket`: book type (0 crafting, 1 furnace,
+    /// 2 blast furnace, 3 smoker), open, filtering.
+    RecipeBookSettings {
+        book: i32,
+        open: bool,
+        filtering: bool,
+    },
 }
 #[derive(Debug)]
 pub enum GameMessage {
@@ -262,6 +269,11 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         6 => Some(ServerboundPlay::ChatAck(ServerboundChatAck::decode(
             &mut b,
         )?)),
+        47 => Some(ServerboundPlay::RecipeBookSettings {
+            book: VarInt::decode(&mut b)?.0,
+            open: bool::decode(&mut b)?,
+            filtering: bool::decode(&mut b)?,
+        }),
         7 => Some(ServerboundPlay::ChatCommand(
             ServerboundChatCommand::decode(&mut b)?,
         )),
@@ -333,6 +345,22 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
     })
 }
 
+#[cfg(test)]
+mod recipe_book_tests {
+    use super::*;
+    #[test]
+    fn change_settings_decodes() {
+        let packet = decode_play(&[47, 2, 1, 0]).unwrap().unwrap();
+        assert!(matches!(
+            packet,
+            ServerboundPlay::RecipeBookSettings {
+                book: 2,
+                open: true,
+                filtering: false
+            }
+        ));
+    }
+}
 #[cfg(test)]
 mod queue_tests {
     use super::*;

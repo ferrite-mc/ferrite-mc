@@ -145,9 +145,37 @@ pub fn remove_packet(book: &Book, ids: &[&str]) -> Vec<u8> {
     })
 }
 
-/// Everything closed and unfiltered: the four recipe books, `[open, filtering]` each.
-pub fn settings_packet() -> Vec<u8> {
-    packet(RECIPE_BOOK_SETTINGS, |out| out.extend_from_slice(&[0; 8]))
+/// The four recipe books, `[open, filtering]` each (all closed and unfiltered by default).
+pub fn settings_packet(flags: [u8; 8]) -> Vec<u8> {
+    packet(RECIPE_BOOK_SETTINGS, |out| out.extend_from_slice(&flags))
+}
+
+/// Applies a client's `change_settings`; ignores book types the client cannot send.
+pub fn change_settings(flags: &mut [u8; 8], book: i32, open: bool, filtering: bool) {
+    if (0..4).contains(&book) {
+        flags[book as usize * 2] = u8::from(open);
+        flags[book as usize * 2 + 1] = u8::from(filtering);
+    }
+}
+
+fn settings_file(dir: &Path, uuid: &Uuid) -> std::path::PathBuf {
+    dir.join(format!("{uuid}.recipebook.json"))
+}
+
+pub fn load_settings(dir: &Path, uuid: &Uuid) -> [u8; 8] {
+    std::fs::read_to_string(settings_file(dir, uuid))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<u8>>(&text).ok())
+        .and_then(|flags| <[u8; 8]>::try_from(flags).ok())
+        .map(|flags| flags.map(|f| f.min(1)))
+        .unwrap_or_default()
+}
+
+pub fn save_settings(dir: &Path, uuid: &Uuid, flags: &[u8; 8]) {
+    if let Ok(text) = serde_json::to_string(&flags.to_vec()) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(settings_file(dir, uuid), text);
+    }
 }
 
 fn file(dir: &Path, uuid: &Uuid) -> std::path::PathBuf {
@@ -179,6 +207,7 @@ impl RecipeSync {
         &mut self,
         online: &HashMap<Uuid, OnlinePlayer>,
         owned: &BTreeMap<Uuid, BTreeSet<String>>,
+        settings: &BTreeMap<Uuid, [u8; 8]>,
         persist: Option<&Path>,
     ) -> Vec<(Uuid, Vec<u8>)> {
         self.sent.retain(|uuid, _| online.contains_key(uuid));
@@ -200,7 +229,10 @@ impl RecipeSync {
                         *uuid,
                         packet(UPDATE_RECIPES, |o| o.extend_from_slice(&book.update)),
                     ));
-                    out.push((*uuid, settings_packet()));
+                    out.push((
+                        *uuid,
+                        settings_packet(settings.get(uuid).copied().unwrap_or_default()),
+                    ));
                     let all: Vec<(&str, bool)> =
                         have.iter().map(|id| (id.as_str(), false)).collect();
                     out.push((*uuid, add_packet(book, &all, true)));
@@ -267,7 +299,11 @@ mod tests {
             remove_packet(&book, &["t:a", "t:b"]),
             [76, 3, 3, 0xac, 0x02, 0xad, 0x02]
         );
-        assert_eq!(settings_packet(), [77, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(settings_packet([0; 8]), [77, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut flags = [0; 8];
+        change_settings(&mut flags, 1, true, true);
+        change_settings(&mut flags, 9, true, true);
+        assert_eq!(settings_packet(flags), [77, 0, 0, 1, 1, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -302,14 +338,17 @@ mod tests {
         let mut sync = RecipeSync::default();
         let mut owned = BTreeMap::new();
         let loaded = !book().recipes.is_empty();
-        let first = sync.sync(&online, &owned, None);
+        let first = sync.sync(&online, &owned, &BTreeMap::new(), None);
         assert_eq!(first.len(), if loaded { 3 } else { 0 });
-        assert!(sync.sync(&online, &owned, None).is_empty());
+        assert!(
+            sync.sync(&online, &owned, &BTreeMap::new(), None)
+                .is_empty()
+        );
         if let Some(id) = book().recipes.keys().next() {
             owned.insert(uuid, BTreeSet::from([id.clone()]));
-            assert_eq!(sync.sync(&online, &owned, None).len(), 1);
+            assert_eq!(sync.sync(&online, &owned, &BTreeMap::new(), None).len(), 1);
             owned.clear();
-            assert_eq!(sync.sync(&online, &owned, None).len(), 1);
+            assert_eq!(sync.sync(&online, &owned, &BTreeMap::new(), None).len(), 1);
         }
     }
 }

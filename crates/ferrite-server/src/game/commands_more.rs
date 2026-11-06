@@ -44,6 +44,8 @@ pub struct MoreState {
     pub advancements: BTreeMap<uuid::Uuid, std::collections::BTreeSet<String>>,
     /// `/recipe`: recipe ids each player has unlocked.
     pub recipes: BTreeMap<uuid::Uuid, std::collections::BTreeSet<String>>,
+    /// Recipe book `[open, filtering]` flags per player, four books in packet order.
+    pub recipe_settings: BTreeMap<uuid::Uuid, [u8; 8]>,
     /// `/waypoint modify`: color and style per entity.
     pub waypoints: BTreeMap<uuid::Uuid, WaypointStyle>,
     /// The ender dragon fight in the end.
