@@ -25,6 +25,8 @@ pub enum Criterion {
     EntersDimension(String),
     /// `placed_block` of exactly one block id.
     Places(String),
+    /// `location` with nothing but one plain biome id to match.
+    InBiome(String),
     Other,
 }
 
@@ -94,6 +96,42 @@ fn placed_block(conditions: &serde_json::Value) -> Option<String> {
     }
     let name = location.get("blocks")?.as_str()?;
     (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// The biome a `location` criterion asks for, when that is all it asks for.
+fn location_biome(conditions: &serde_json::Value) -> Option<String> {
+    let object = conditions.as_object()?;
+    let player = object.get("player")?;
+    let predicate = player["predicate"].as_object()?;
+    if object.len() != 1
+        || player["type"] != "minecraft:entity_properties"
+        || player["entity"] != "this"
+        || predicate.len() != 1
+    {
+        return None;
+    }
+    let location = predicate.get("minecraft:location")?.as_object()?;
+    if location.len() != 1 {
+        return None;
+    }
+    let name = location.get("biomes")?.as_str()?;
+    (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// Biomes players stand in, `(player, biome id)`, pushed on every inventory scan.
+pub static BIOMES: Mutex<Vec<(Uuid, String)>> = Mutex::new(Vec::new());
+
+/// Advancement criteria completed by standing in a biome.
+pub fn criteria_for_biome(biome: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::InBiome(wanted) if wanted == biome) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
 }
 
 /// Blocks players placed since the last drain, `(player, block id)`.
@@ -192,6 +230,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                     Some(to) => Criterion::EntersDimension(to.to_owned()),
                     None => Criterion::Other,
                 }
+            }
+            Some("minecraft:location") => {
+                location_biome(&c["conditions"]).map_or(Criterion::Other, Criterion::InBiome)
             }
             Some("minecraft:consume_item") => {
                 consumed_item(&c["conditions"]).map_or(Criterion::Other, Criterion::Consumes)
@@ -464,5 +505,16 @@ mod tests {
         let changed = apply(&held, &mut owned);
         assert_eq!(changed, !rules().is_empty());
         assert!(!apply(&held, &mut owned));
+    }
+
+    #[test]
+    fn a_biome_location_criterion_is_parsed() {
+        let json = serde_json::json!({"criteria": {"badlands": {"trigger": "minecraft:location",
+            "conditions": {"player": {"type": "minecraft:entity_properties", "entity": "this",
+            "predicate": {"minecraft:location": {"biomes": "minecraft:badlands"}}}}}}});
+        let rule = parse_rule("minecraft:adventure/adventuring_time", &json).unwrap();
+        assert!(
+            matches!(&rule.criteria["badlands"], Criterion::InBiome(b) if b == "minecraft:badlands")
+        );
     }
 }

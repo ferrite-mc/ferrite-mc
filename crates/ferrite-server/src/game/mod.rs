@@ -1487,6 +1487,13 @@ async fn run(
                      for (who, block) in placed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_placed(block)); }
                  }
              }
+             {
+                 let biomes = std::mem::take(&mut *recipe_unlock::BIOMES.lock().unwrap_or_else(|e| e.into_inner()));
+                 if !biomes.is_empty() {
+                     let mut game = command_state.lock().unwrap();
+                     for (who, biome) in biomes { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_biome(&biome)); }
+                 }
+             }
              scan_tick = scan_tick.wrapping_add(1);
              if scan_tick.is_multiple_of(20) {
                  for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }

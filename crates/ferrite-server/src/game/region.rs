@@ -3246,6 +3246,18 @@ impl Player {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(self.uuid, held);
+                    if let Some(biome) = self.source.as_ref().and_then(|source| {
+                        source.biome_name(
+                            self.pos[0].floor() as i32,
+                            self.pos[1].floor() as i32,
+                            self.pos[2].floor() as i32,
+                        )
+                    }) {
+                        super::recipe_unlock::BIOMES
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push((self.uuid, biome));
+                    }
                     continue;
                 }
                 Command::ReadSlots { slots, reply } => {
