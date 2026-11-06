@@ -153,10 +153,73 @@ fn encode<P: Packet>(packet: &P) -> Vec<u8> {
     out
 }
 
+/// Below this many viewers a plain scan is cheaper than the grid.
+const GRID_MIN_VIEWERS: usize = 16;
+const GRID_CELL: f64 = 64.0;
+
+/// Viewers bucketed by position, in `GRID_CELL`-block cells.
+struct ViewerGrid {
+    all: usize,
+    cells: std::collections::HashMap<(i32, i32), Vec<usize>>,
+    index_of: std::collections::HashMap<ViewerKey, usize>,
+}
+
+impl ViewerGrid {
+    fn cell(x: f64) -> i32 {
+        (x / GRID_CELL).floor() as i32
+    }
+
+    fn new(viewers: &[Viewer<'_>]) -> Self {
+        let mut grid = Self {
+            all: viewers.len(),
+            cells: Default::default(),
+            index_of: Default::default(),
+        };
+        if viewers.len() >= GRID_MIN_VIEWERS {
+            for (i, viewer) in viewers.iter().enumerate() {
+                grid.cells
+                    .entry((Self::cell(viewer.pos.x), Self::cell(viewer.pos.z)))
+                    .or_default()
+                    .push(i);
+                grid.index_of.insert(viewer.key, i);
+            }
+        }
+        grid
+    }
+
+    /// Indexes (ascending, so packets keep the viewer order) of the viewers within `range` of
+    /// `pos` or already paired with the entity.
+    fn candidates(&self, pos: Vec3, range: i32, seen_by: &[Pairing]) -> Vec<usize> {
+        if self.cells.is_empty() {
+            return (0..self.all).collect();
+        }
+        let range = f64::from(range);
+        let mut found = Vec::new();
+        for x in Self::cell(pos.x - range)..=Self::cell(pos.x + range) {
+            for z in Self::cell(pos.z - range)..=Self::cell(pos.z + range) {
+                if let Some(cell) = self.cells.get(&(x, z)) {
+                    found.extend_from_slice(cell);
+                }
+            }
+        }
+        found.extend(
+            seen_by
+                .iter()
+                .filter_map(|pairing| self.index_of.get(&pairing.viewer).copied()),
+        );
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+}
+
 /// Runs one tracker tick over every entity in `store` for the players of its region.
 pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_>) {
     // Looked up once per pairing per entity; a linear scan made a tick quadratic in the players.
     let present: HashSet<ViewerKey> = viewers.iter().map(|v| v.key).collect();
+    // With many viewers an entity only needs the ones near it (plus those it already shows
+    // itself to, so they can be told to stop); a grid of viewers finds them without a full scan.
+    let grid = ViewerGrid::new(viewers);
     let keys = store.keys().to_vec();
     for key in keys {
         let Some(i) = store.dense(key) else { continue };
@@ -193,7 +256,8 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
         let mut stopped: HashSet<ViewerKey> = HashSet::new();
         let mut kept: HashSet<ViewerKey> = HashSet::new();
         let mut started = Vec::new();
-        for viewer in viewers {
+        for vi in grid.candidates(pos, info.range, &data.tracker.seen_by) {
+            let viewer = &viewers[vi];
             let dx = viewer.pos.x - pos.x;
             let dz = viewer.pos.z - pos.z;
             let range = f64::from(info.range.min(viewer.view_distance * 16));
@@ -587,6 +651,38 @@ mod tests {
         // A short view distance caps the range; walking out of it removes the entity.
         let viewers = [viewer(near, 8.0, 48.0, 2, &chunks)];
         assert_eq!(ids(&tick(&mut store, &viewers)), [RemoveEntities::ID]);
+    }
+
+    /// Past `GRID_MIN_VIEWERS` the grid picks the candidates; it must pair the near viewers, skip
+    /// the far ones (a cell away included) and still tell a viewer that walked off to stop.
+    #[test]
+    fn the_viewer_grid_pairs_the_same_viewers_as_a_full_scan() {
+        let mut store = EntityStore::default();
+        spawn(&mut store, Vec3::new(8.0, 64.0, 8.0));
+        let chunks = HashSet::from([(0, 0)]);
+        let key = |n: u128| (Uuid::from_u128(n), 0);
+        let mut viewers: Vec<Viewer> = (0..GRID_MIN_VIEWERS as u128)
+            .map(|n| viewer(key(n), 1000.0 + 100.0 * n as f64, 1000.0, 10, &chunks))
+            .collect();
+        viewers.push(viewer(key(100), 10.0, 10.0, 10, &chunks));
+        // Item range is 96 blocks: this one is in the next grid cell but inside the range.
+        viewers.push(viewer(key(101), 8.0, 90.0, 10, &chunks));
+        let packets = tick(&mut store, &viewers);
+        let seen: HashSet<ViewerKey> = packets
+            .iter()
+            .filter(|p| p.1 == AddEntity::ID)
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(seen, HashSet::from([key(100), key(101)]));
+        // The first viewer leaves the range; the entity still has to remove itself from them.
+        viewers[17] = viewer(key(101), 8.0, 400.0, 10, &chunks);
+        let packets = tick(&mut store, &viewers);
+        let removed: Vec<ViewerKey> = packets
+            .iter()
+            .filter(|p| p.1 == RemoveEntities::ID)
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(removed, [key(101)]);
     }
 
     #[test]
