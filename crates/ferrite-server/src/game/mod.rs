@@ -788,6 +788,13 @@ struct Channels {
     signal_tx: mpsc::UnboundedSender<Signal>,
     signals: mpsc::UnboundedReceiver<Signal>,
 }
+/// What the recipe book worker gets each tick: online players, unlocked recipes, book flags.
+type RecipeSnapshot = (
+    HashMap<Uuid, commands::OnlinePlayer>,
+    std::collections::BTreeMap<Uuid, std::collections::BTreeSet<String>>,
+    std::collections::BTreeMap<Uuid, [u8; 8]>,
+);
+
 async fn run(
     channels: Channels,
     source: Option<Arc<anvil::AnvilChunkSource>>,
@@ -977,8 +984,43 @@ async fn run(
             },
         )
     };
-    let mut advancement_sync = advancement_packets::AdvancementSync::default();
-    let mut recipe_sync = recipe_packets::RecipeSync::default();
+    // Advancement and recipe book sync (packet building and the progress files) run on their own
+    // threads; completions come back through `completed_rx` for the coordinator to reward.
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel::<(Uuid, String)>();
+    let advancement_worker = {
+        let dir = settings.playerdata.clone();
+        let mut sync = advancement_packets::AdvancementSync::default();
+        offload::Latest::spawn(
+            "ferrite-advancements",
+            move |(online, owned): (
+                HashMap<Uuid, commands::OnlinePlayer>,
+                std::collections::BTreeMap<Uuid, std::collections::BTreeSet<String>>,
+            )| {
+                for (target, bytes) in sync.sync(&online, &owned, dir.as_deref()) {
+                    if let Some(player) = online.get(&target) {
+                        let _ = player.outbound.send(Outbound::Packet(bytes.into()));
+                    }
+                }
+                for done in std::mem::take(&mut sync.completed) {
+                    let _ = completed_tx.send(done);
+                }
+            },
+        )
+    };
+    let recipe_worker = {
+        let dir = settings.playerdata.clone();
+        let mut sync = recipe_packets::RecipeSync::default();
+        offload::Latest::spawn(
+            "ferrite-recipes",
+            move |(online, owned, flags): RecipeSnapshot| {
+                for (target, bytes) in sync.sync(&online, &owned, &flags, dir.as_deref()) {
+                    if let Some(player) = online.get(&target) {
+                        let _ = player.outbound.send(Outbound::Packet(bytes.into()));
+                    }
+                }
+            },
+        )
+    };
     let mut scan_tick: u32 = 0;
     let mut last_held: HashMap<Uuid, std::collections::BTreeSet<String>> = HashMap::new();
     let mut admin = settings.admin.clone();
@@ -1415,10 +1457,8 @@ async fn run(
              }
              {
                  let owned = command_state.lock().unwrap().more.advancements.clone();
-                 for (target, bytes) in advancement_sync.sync(&online, &owned, settings.playerdata.as_deref()) {
-                     if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
-                 }
-                 for (who, id) in std::mem::take(&mut advancement_sync.completed) {
+                 advancement_worker.submit((online.clone(), owned));
+                 for (who, id) in completed_rx.try_iter().collect::<Vec<_>>() {
                      if let Some(recipes) = Some(recipe_unlock::reward_recipes(&id)).filter(|r| !r.is_empty()) { command_state.lock().unwrap().more.recipes.entry(who).or_default().extend(recipes); }
                      let points = recipe_unlock::reward_experience(&id);
                      if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
@@ -1456,9 +1496,7 @@ async fn run(
              {
                  let owned = command_state.lock().unwrap().more.recipes.clone();
                  let recipe_settings = command_state.lock().unwrap().more.recipe_settings.clone();
-                 for (target, bytes) in recipe_sync.sync(&online, &owned, &recipe_settings, settings.playerdata.as_deref()) {
-                     if let Some(player) = online.get(&target) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
-                 }
+                 recipe_worker.submit((online.clone(), owned, recipe_settings));
              }
              let ride_steps = ride::plan(&command_state.lock().unwrap());
              for step in ride_steps {

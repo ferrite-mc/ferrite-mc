@@ -24,8 +24,8 @@ piston/End note and still applies for those areas.
 - Worldgen API: `World#getStructures` (host op 10), `Server#createExplorerMap` (3 overloads,
   Java side: nearest structure -> `MapView` centred there -> FILLED_MAP with `MapMeta`),
   host threads clamped to 4, jar patcher on by default with fallback to the unmodified jar.
-- Threading: the locator bar runs on its own thread (`game/offload.rs`, `Latest<T>` one-slot
-  mailbox). Folia's Region/Entity/Global/Async schedulers and `isOwnedByCurrentRegion` exist.
+- Threading: the locator bar and the advancement/recipe book sync run on their own threads
+  (`game/offload.rs`, `Latest<T>` one-slot mailbox; completions return over an mpsc channel). Folia's Region/Entity/Global/Async schedulers and `isOwnedByCurrentRegion` exist.
 
 ## Not verified — needs you locally
 
@@ -58,8 +58,8 @@ piston/End note and still applies for those areas.
   recipe_crafted, bred_animals, tame_animal, item_used_on_block, location, ...); loot-table and
   function rewards; `seen_recipe`; waypoint invisible/`waypoint_transmit_range` filters and
   plugin-set spectators.
-- Async: still serialized on the one coordinator task in `game/mod.rs`: join/leave, every inbound
-  packet dispatch, the clock tick, advancement/recipe sync, the `command_state` mutex. Next
+- Async: still serialized on the one coordinator task in `game/mod.rs`: join/leave, packet
+  routing (cheap), the clock tick, `Signal::Update` per player per tick, the `command_state` mutex. Next
   candidates are listed in `docs/BACKLOG.md`. Re-run the 200-bot load test to measure.
 - Worldgen: host stalls with 8 request threads (likely requests blocking each other on the
   server main thread; unverified), `call:` hooks, `process`/`remote` modes (remote needs an
