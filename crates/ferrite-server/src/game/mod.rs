@@ -1,6 +1,7 @@
 mod advancement_packets;
 mod anvil;
 mod attributes;
+mod offload;
 mod recipe_packets;
 mod recipe_unlock;
 pub(crate) mod ride;
@@ -962,7 +963,20 @@ async fn run(
     let mut names: HashMap<Uuid, String> = HashMap::new();
     let mut plugin_commands = settings.plugin_commands.take();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
-    let mut locator = waypoints::Locator::default();
+    // The locator bar is O(players²); it runs on its own thread from a snapshot each tick.
+    let locator = {
+        let mut locator = waypoints::Locator::default();
+        offload::Latest::spawn(
+            "ferrite-locator",
+            move |(online, styles, spectators): (HashMap<Uuid, commands::OnlinePlayer>, _, _)| {
+                for (receiver, bytes) in locator.sync(&online, &styles, &spectators) {
+                    if let Some(player) = online.get(&receiver) {
+                        let _ = player.outbound.send(Outbound::Packet(bytes.into()));
+                    }
+                }
+            },
+        )
+    };
     let mut advancement_sync = advancement_packets::AdvancementSync::default();
     let mut recipe_sync = recipe_packets::RecipeSync::default();
     let mut scan_tick: u32 = 0;
@@ -1397,9 +1411,7 @@ async fn run(
              let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
              {
                  let (styles, spectators) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone()) };
-                 for (receiver, bytes) in locator.sync(&online, &styles, &spectators) {
-                     if let Some(player) = online.get(&receiver) { let _ = player.outbound.send(Outbound::Packet(bytes.into())); }
-                 }
+                 locator.submit((online.clone(), styles, spectators));
              }
              {
                  let owned = command_state.lock().unwrap().more.advancements.clone();

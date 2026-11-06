@@ -104,6 +104,14 @@ still stubs that answer "Command not implemented".
 - Profiler: `/tps` `/mspt` `/profile` exist; add a `/spark`-style sampling view and per-system
   attribution outside regions.
 - Regionizer: move deferred mutations into per-region queues (a shared queue is still scanned).
+- Threading (checked in code): regions tick in parallel on a worker pool and Folia's Region, Entity,
+  Global and Async schedulers plus `isOwnedByCurrentRegion` exist. Still serialized on the one
+  coordinator task in `game/mod.rs`: join/leave, every inbound packet dispatch, the clock tick, the
+  advancement/recipe sync and the `command_state` mutex. Moved off it so far: the locator bar
+  (`offload::Latest`, a one-slot snapshot mailbox that never blocks the coordinator). Next
+  candidates, in order: advancement and recipe sync (need their completions fed back through a
+  signal), per-player packet decode/dispatch into the owning region's mailbox, splitting
+  `command_state` by concern. A run with the 200-bot load test is needed to show any gain.
 
 ## Quality and release
 
