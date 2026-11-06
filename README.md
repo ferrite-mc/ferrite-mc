@@ -16,12 +16,12 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 | 구분 | 내용 |
 |---|---|
-| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·컨테이너, 생존·전투·몹, 주민 거래, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
-| 🟡 부분 구현 | 피스톤(블록 이동만, [`docs/pistons.md`](docs/pistons.md)), 엔드 차원(아래) |
-| 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API, NMS), 엔드 드래곤 전투 |
+| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·레시피북·컨테이너, 생존·전투·몹(바이옴별 자연 스폰, 번식, 늑대 길들이기), 주민 거래, 주크박스·밀랍·로드스톤 같은 블록 사용과 그 발전과제, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
+| 🟡 부분 구현 | 피스톤(블록 이동만, [`docs/pistons.md`](docs/pistons.md)), 엔드 차원과 드래곤 전투(아래, [`docs/end-dimension.md`](docs/end-dimension.md)) |
+| 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API, NMS) |
 | ⛔ 아직 없음 | 실제 클라이언트 검증 |
 
-**엔드**: 눈 끼우기로 엔드 포탈 활성화, 오버월드↔엔드 이동, 도착 플랫폼, 바닐라 지형(사용자 jar의 월드젠 호스트), 공허 판정, 출구 포탈·게이트웨이 블록 배치까지 구현. 엔더 드래곤·보스바·엔드 수정·게이트웨이 순간이동·크레딧은 아직 없습니다.
+**엔드**: 눈 끼우기로 엔드 포탈 활성화, 오버월드↔엔드 이동, 도착 플랫폼, 바닐라 지형(사용자 jar의 월드젠 호스트), 공허 판정, 엔더 드래곤(원을 돌다 다이빙하는 단순한 패턴)·보스바·엔드 수정 파괴와 회복·출구 포탈·게이트웨이 이동까지 구현. 드래곤의 돌진·숨결·화염구 같은 행동 패턴, 수정 재소환, 크레딧, 전투 상태 저장은 아직 없습니다.
 
 플러그인 API는 Paper `Server`/`Player`의 일부만 처리합니다. 처리하지 않는 호출은
 `UnsupportedOperationException("Ferrite: not implemented: …")`로 드러납니다. EssentialsX 같은
@@ -93,7 +93,7 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 
 ## 해야 할 일
 
-- 플러그인 브리지 완성(NMS 호환 포함), 피스톤 마무리(애니메이션·엔티티 밀기), 엔드 드래곤 전투, 실제 클라이언트 검증
+- 플러그인 브리지 완성(NMS 호환 포함), 피스톤 마무리(움직이는 피스톤 블록·애니메이션), 엔드 드래곤 행동 패턴·수정 재소환·저장, 고양이·말 등 나머지 동물과 볼트, 실제 클라이언트 검증
 - 최적화 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [최적화 모드팩](https://modrinth.com/modpack/server-optimizationn),
   [최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization)
