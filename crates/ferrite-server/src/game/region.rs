@@ -636,6 +636,8 @@ pub struct Player {
     /// How many queue-front chunks were already handed to the chunk source, so a tick does not
     /// take the shared cache lock again for each of them.
     pub prefetched: usize,
+    /// Ticks the queue head has been loading; the prefetch is repeated every 20th.
+    pub prefetch_wait: u8,
     pub awaiting_batch: bool,
     pub rate: f32,
     /// Vanilla `ServerPlayer` survival state: health, absorption, food, air, fire, fall.
@@ -967,8 +969,13 @@ impl Player {
             let packet = if let Some(source) = &self.source {
                 match source.get(x, z, self.biome) {
                     None => {
-                        // The source may have refused deeper chunks while busy; ask again.
-                        self.prefetched = 0;
+                        // The source may have refused deeper chunks while busy; ask again, but
+                        // not every tick: each ask takes the shared cache lock.
+                        self.prefetch_wait += 1;
+                        if self.prefetch_wait >= 20 {
+                            self.prefetch_wait = 0;
+                            self.prefetched = 0;
+                        }
                         break;
                     }
                     // The cache shares one encoded body; the connection layer
