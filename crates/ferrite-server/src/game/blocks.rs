@@ -466,6 +466,64 @@ fn bind_compass(player: &mut Player, pos: [i32; 3], block: &str) -> bool {
     true
 }
 
+/// Vanilla `JukeboxBlock`: a music disc goes in and plays; an empty hand takes it out again.
+fn use_jukebox(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> bool {
+    if block != "minecraft:jukebox" {
+        return false;
+    }
+    let Some(source) = player.source.clone() else {
+        return false;
+    };
+    if property(state, "has_record") == Some("true") {
+        let Some(disc) = super::jukebox::take(&source, pos) else {
+            return false;
+        };
+        let Some(next) = with_props(state, &[("has_record", "false")]) else {
+            return false;
+        };
+        if !change(player, pos, next) {
+            return false;
+        }
+        player.menus.spilled.push((pos, disc));
+        broadcast_level_event(player, pos, 1011, 0);
+        return true;
+    }
+    let held = player.inventory.selected_item().clone();
+    let Some(song) = held
+        .name()
+        .and_then(|name| name.strip_prefix("minecraft:music_disc_"))
+        .and_then(ferrite_item::wire::registry_ids::jukebox_song_id)
+    else {
+        return false;
+    };
+    let Some(next) = with_props(state, &[("has_record", "true")]) else {
+        return false;
+    };
+    if !super::jukebox::insert(&source, pos, &held.copy_with_count(1)) || !change(player, pos, next)
+    {
+        return false;
+    }
+    consume_held(player);
+    broadcast_level_event(player, pos, 1010, song);
+    true
+}
+
+/// Sends a world event (sounds, particles) to everyone tracking the chunk.
+fn broadcast_level_event(player: &Player, pos: [i32; 3], event: i32, data: i32) {
+    let update = packet(&ferrite_protocol::packets::play::LevelEvent {
+        event,
+        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+        data,
+        global: false,
+    });
+    super::region::broadcast_tracked_chunk(
+        &player.tracking.lock().unwrap(),
+        player.dimension,
+        (pos[0].div_euclid(16), pos[2].div_euclid(16)),
+        &update,
+    );
+}
+
 /// Whether a lit campfire sits up to five blocks below (`CampfireBlock.isSmokeyPos`).
 fn smokey(player: &Player, pos: [i32; 3]) -> bool {
     (1..=5).any(|d| {
@@ -653,6 +711,7 @@ pub fn use_block(player: &mut Player, location: i64) -> bool {
     if wax_or_scrape(player, pos, state, name)
         || charge_anchor(player, pos, state, name)
         || bind_compass(player, pos, name)
+        || use_jukebox(player, pos, state, name)
         || harvest_honey(player, pos, state, name)
     {
         return true;

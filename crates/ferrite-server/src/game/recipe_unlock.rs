@@ -50,6 +50,8 @@ pub struct UsedOnBlock {
     pub biome: Option<String>,
     /// A beehive with a lit campfire below it.
     pub smokey: bool,
+    /// The held item must be playable in a jukebox (a music disc).
+    pub playable: bool,
 }
 
 /// What a player used on a block, for [`criteria_for_used`].
@@ -96,6 +98,10 @@ impl UsedOnBlock {
                 .as_ref()
                 .is_none_or(|wanted| used.biome.as_ref() == Some(wanted))
             && (!self.smokey || used.smokey)
+            && (!self.playable
+                || used
+                    .item
+                    .is_some_and(|item| item.starts_with("minecraft:music_disc_")))
     }
 }
 
@@ -142,7 +148,18 @@ fn used_on_block(conditions: &serde_json::Value) -> Option<UsedOnBlock> {
                 if predicate.len() != 1 {
                     return None;
                 }
-                out.items = alternatives(predicate.get("items")?);
+                if let Some(components) = predicate.get("predicates") {
+                    // Only "can be played in a jukebox", which is what the music discs are.
+                    let components = components.as_object()?;
+                    if components.len() != 1
+                        || !components.contains_key("minecraft:jukebox_playable")
+                    {
+                        return None;
+                    }
+                    out.playable = true;
+                } else {
+                    out.items = alternatives(predicate.get("items")?);
+                }
             }
             _ => return None,
         }
@@ -739,11 +756,23 @@ mod tests {
         assert!(!wanted.matches(&used("3", Some("minecraft:glowstone"))));
         assert!(!wanted.matches(&used("4", Some("minecraft:stick"))));
         assert!(!wanted.matches(&used("4", None)));
-        // A predicate this server cannot check is not guessed at.
-        let jukebox = serde_json::json!({"location": {"type": "minecraft:all_of", "terms": [
-            {"type": "minecraft:match_tool",
-             "predicate": {"predicates": {"minecraft:jukebox_playable": {}}}}]}});
-        assert!(used_on_block(&jukebox).is_none());
+        // "Playable in a jukebox" means a music disc; other component predicates are not guessed.
+        let playable = |component: &str| {
+            serde_json::json!({"location": {"type": "minecraft:all_of", "terms": [
+                {"type": "minecraft:match_tool", "predicate": {"predicates": {component: {}}}}]}})
+        };
+        let jukebox = used_on_block(&playable("minecraft:jukebox_playable")).expect("parsed");
+        let disc = |item| UsedRecord {
+            player: Uuid::nil(),
+            block: "minecraft:jukebox",
+            props: &[],
+            item,
+            biome: None,
+            smokey: false,
+        };
+        assert!(jukebox.matches(&disc(Some("minecraft:music_disc_13"))));
+        assert!(!jukebox.matches(&disc(Some("minecraft:stick"))));
+        assert!(used_on_block(&playable("minecraft:damage")).is_none());
     }
 
     #[test]

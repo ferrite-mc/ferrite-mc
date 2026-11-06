@@ -1314,6 +1314,15 @@ pub mod registry_ids {
         i32::try_from(index).ok()
     }
 
+    /// Registry id of a jukebox song (`minecraft:13`), with or without the `minecraft:` prefix.
+    pub fn jukebox_song_id(name: &str) -> Option<i32> {
+        let wanted = key(name);
+        let index = JUKEBOX_SONGS
+            .binary_search_by(|candidate| key(candidate).cmp(wanted))
+            .ok()?;
+        i32::try_from(index).ok()
+    }
+
     /// Registry id of a trim pattern, with or without the `minecraft:` prefix.
     pub fn trim_pattern_id(name: &str) -> Option<i32> {
         let wanted = key(name);

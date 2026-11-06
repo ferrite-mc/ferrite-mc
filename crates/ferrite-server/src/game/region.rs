@@ -1245,6 +1245,11 @@ impl Player {
                     self.menus.spilled.push((pos, stack));
                 }
             }
+            if name == Some("minecraft:jukebox")
+                && let Some(disc) = super::jukebox::take(source, pos)
+            {
+                self.menus.spilled.push((pos, disc));
+            }
             if name == Some("minecraft:beacon") {
                 let _ = source.update_block_entity(pos[0], pos[1], pos[2], |entity| {
                     (entity.take().is_some(), ())

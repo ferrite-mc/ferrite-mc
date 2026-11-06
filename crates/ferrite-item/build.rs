@@ -144,6 +144,7 @@ fn gen_wire_registries(registry: &serde_json::Value, enchantment_dir: &Path) -> 
     for (table, dir, doc) in [
         ("TRIM_MATERIALS", "trim_material", "trim materials"),
         ("TRIM_PATTERNS", "trim_pattern", "trim patterns"),
+        ("JUKEBOX_SONGS", "jukebox_song", "jukebox songs"),
     ] {
         let mut names: Vec<String> = fs::read_dir(data.join(dir))
             .unwrap_or_else(|error| panic!("failed to list {}: {error}", data.join(dir).display()))
