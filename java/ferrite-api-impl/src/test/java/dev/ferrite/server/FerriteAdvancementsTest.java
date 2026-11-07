@@ -2,8 +2,10 @@ package dev.ferrite.server;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.papermc.paper.advancement.AdvancementDisplay;
 import java.util.List;
 import java.util.UUID;
+import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.advancement.Advancement;
 import org.junit.jupiter.api.BeforeAll;
@@ -38,8 +40,15 @@ class FerriteAdvancementsTest {
         assertEquals(NamespacedKey.minecraft("story/root"), parent.getKey());
         assertSame(parent, advancement.getRoot());
         assertTrue(parent.getChildren().contains(advancement));
-        assertEquals("Ferrite: not implemented: Advancement#getDisplay",
-                assertThrows(UnsupportedOperationException.class, advancement::getDisplay).getMessage());
+        var display = parent.getDisplay();
+        assertNotNull(display);
+        assertEquals(AdvancementDisplay.Frame.TASK, display.frame());
+        assertEquals(Material.GRASS_BLOCK, display.icon().getType());
+        assertEquals(NamespacedKey.minecraft("gui/advancements/backgrounds/stone"), display.backgroundPath());
+        assertFalse(display.doesShowToast());
+        assertFalse(display.doesAnnounceToChat());
+        assertFalse(display.isHidden());
+        assertEquals(display.title(), parent.displayName());
     }
 
     @Test void iteratorCoversTheWholeDataPack() {

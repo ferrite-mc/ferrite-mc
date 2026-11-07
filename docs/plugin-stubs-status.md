@@ -31,6 +31,24 @@ CMI가 동작한다고 말할 수 없다.
   `CraftWorld#getHandle`, `CraftMagicNumbers`는 계속 의도적 미지원이며, 비플레이어 엔티티 조회와
   구조물 엔티티는 호스트 경계가 아직 없다.
 
+## 2026-11-08 — fb-32 후속 (advancement/potion/timed bans)
+
+- **Advancement 표시 정보:** `data/minecraft/advancement`의 `display`를 읽어
+  `Advancement#getDisplay`와 `displayName`이 동작한다. frame/title/description/icon/show_toast/
+  announce_to_chat/hidden/background를 Paper `AdvancementDisplay`로 돌려준다. 표시가 없는
+  advancement는 `getDisplay()`가 null이고, `displayName`은 key 문자열을 쓴다.
+- **포션 효과:** `PotionBrewer#getEffects`가 vanilla 26.3의 base/strong/long 효과를 돌려준다.
+  `UnsafeValues#getInternalPotionData`를 `FerritePotionTypeData`가 Java에서 답하며, 46개
+  `PotionType`의 effect/duration/amplifier와 upgradeable/extendable/max level을 제공한다.
+  `PotionEffectType#isInstant`도 instant_health/instant_damage를 Java에서 판별한다.
+- **기간 지정 프로필 밴:** `Player#ban(..., Date/Instant/Duration, ...)`가
+  `FerriteProfileBanList`에 만료 시각을 저장하고, daemon 만료 스레드가 로컬 밴을 지운 뒤 호스트에
+  `pardonProfile`을 보낸다. `setExpiration`/`save`도 스케줄을 갱신하고, 명시적 `pardon`은 예약을
+  취소한다.
+- 검증: JUnit `FerriteAdvancementsTest`, `FerriteServerObjectsTest`(potion, timed ban), 전체
+  `./gradlew test` **170개 통과**. 이번 라운드에 Rust 변경은 없었다.
+- 실제 클라이언트에서 advancement 화면·포션 효과 표시·밴 만료를 확인한 것은 아니다.
+
 ## 구현됨 (게임에 실제 효과가 있는 것)
 
 - 최대 체력(`setMaxHealth`/`getMaxHealth`): 클라이언트에 `UpdateAttributes`를 보낸다.

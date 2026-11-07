@@ -8,6 +8,9 @@
 2. **코드에 남은 명시적 미지원 경로** — 구현 파일이 의도적으로 거부하는 메서드다. 소유자와 필요한
    선행 작업을 함께 적는다.
 
+2026-11-08 fb-32 후속에서 `Advancement#getDisplay`, `PotionBrewer#getEffects`,
+`Player#ban(..., Date/Instant/Duration, ...)`가 구현되어 이 표에서 제거됐다.
+
 생성 파일은 `java/ferrite-api-impl/build/catalog/`에 있고 커밋하지 않는다. 갱신:
 
 ```sh
@@ -42,7 +45,6 @@ JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot" ./gradlew tes
 | 엔티티 스냅샷 | `EntityFactory#createEntitySnapshot` | Java API + 호스트 엔티티 NBT 스냅샷 |
 | 플레이어 respawn | `Player.Spigot#respawn` | Java API + respawn 흐름 |
 | 다른 구현 인벤토리 | `Player#openInventory(Inventory)` (Ferrite 인벤토리 아님) | Java API (직렬화 불가) |
-| 기간 지정 프로필 밴 | `Player#ban(String,Duration,String,...)` | Rust 밴 목록의 만료 표현 |
 | 맵 캔버스 | `MapCanvas`의 기본 메서드 | Java `FerriteMapView` |
 | 아이템 핸들 | `DroppedItem#<미지원 Item 메서드>` | Java 핸들 |
 | HostBridge 반환 변환 | `HostBridge#call`의 미지원 반환 타입 | Java 브리지 |
@@ -50,7 +52,7 @@ JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot" ./gradlew tes
 | 청크 스냅샷/청크 데이터 | `ChunkSnapshot#getWorldKey`, `getBiome`, `getRawBiomeTemperature`, `contains`; `ChunkData#getBiome` | 호스트 청크/바이옴 데이터 |
 | 데이터팩 | `DatapackManager#refreshPacks` | Rust 데이터팩 재로드 |
 | Paper 생명주기 | `InternalAPIBridge#createPluginLifecycleEventManager` | Paper lifecycle API |
-| 포션/인챈트/레지스트리 | `PotionBrewer#getEffects`, `PotionEffectType`/`Enchantment` 속성, `RegistryAccess` 미지원 레지스트리 | `ferrite-data` 데이터 |
+| 포션/인챈트/레지스트리 | `PotionEffectType` 속성(색·카테고리·지속시간 보정·attribute), `Enchantment` 속성, `RegistryAccess` 미지원 레지스트리 | `ferrite-data` 데이터/호스트 |
 | 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Rust 루트 + 인벤토리 |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
 | 구조물 엔티티 | `Structure#place(..., EntityTransformer)` | 비플레이어 엔티티 수집/복원 |

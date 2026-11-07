@@ -90,7 +90,7 @@ public final class FerriteUnsafe implements UnsafeValues {
     @Override public boolean removeAdvancement(NamespacedKey key) { return HostBridge.callBoolean("UnsafeValues", "unsafe", "removeAdvancement(NamespacedKey)", key); }
 
     @Override public PotionType.InternalPotionData getInternalPotionData(NamespacedKey key) {
-        return (PotionType.InternalPotionData) HostBridge.call("UnsafeValues", "unsafe", "getInternalPotionData(NamespacedKey)", PotionType.InternalPotionData.class, key);
+        return FerritePotionTypeData.get(key);
     }
 
     @Override public String get(Class<?> type, String key) { return (String) HostBridge.call("UnsafeValues", "unsafe", "get(Class,String)", String.class, type, key); }
