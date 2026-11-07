@@ -14,5 +14,8 @@ commands:
     aliases: [tping]
     description: Replies pong
     usage: /testping
+  test-inventory:
+    description: Opens a plugin inventory for the lifecycle integration test
+    usage: /test-inventory
 depend: [FerriteAlias]
 folia-supported: true

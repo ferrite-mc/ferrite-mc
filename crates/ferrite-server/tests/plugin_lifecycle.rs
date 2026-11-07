@@ -19,9 +19,10 @@ use ferrite_protocol::{
         handshake::{Intent, Intention},
         login::{LoginAcknowledged, LoginStart},
         play::{
-            BlockUpdate, ChunkBatchReceived, ClientboundPlayerChat, ConfirmTeleport, CreativeSlot,
-            ItemStack, LastSeenUpdate, MovePosition, MoveRotation, PlayerAction, PositionSync,
-            ServerboundChat, SetExperience, SetHealth, SystemChat, UseItemOn,
+            BlockUpdate, ChunkBatchReceived, ClientboundPlayerChat, ConfirmTeleport,
+            ContainerClick, CreativeSlot, ItemStack, LastSeenUpdate, MovePosition, MoveRotation,
+            OpenScreen, PlayerAction, PositionSync, ServerboundChat, ServerboundContainerClose,
+            SetExperience, SetHealth, SystemChat, UseItemOn,
         },
     },
     types::BlockPos,
@@ -558,6 +559,25 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
     let pong = wait_for_chat(&mut bot, "pong", &stdout, &stderr, &events);
     assert_eq!(pong, "pong");
     wait_for_prefix(&events, "command /testping", &stdout, &stderr);
+    // A plugin-created inventory reaches the client as an open screen. A click and close from
+    // the bot must travel back through the same JVM before the server shuts down.
+    bot.raw(7, "test-inventory");
+    let open = OpenScreen::decode(&mut bot.until(OpenScreen::ID).as_slice()).unwrap();
+    wait_for_line(&events, "inventory-open Bot", &stdout, &stderr);
+    bot.send(&ContainerClick::<ferrite_item::HashedSlot> {
+        window: open.window,
+        state: VarInt(0),
+        slot: 0,
+        button: 0,
+        input: VarInt(0),
+        changed: Vec::new(),
+        carried: None,
+    });
+    wait_for_line(&events, "click 0", &stdout, &stderr);
+    bot.send(&ServerboundContainerClose {
+        window: open.window,
+    });
+    wait_for_line(&events, "close Bot", &stdout, &stderr);
     bot.move_to(2.5, 65.0, 0.5);
     wait_for_prefix(&events, "move Bot 2 65 0", &stdout, &stderr);
     bot.move_to(2.5, 100.0, 0.5);

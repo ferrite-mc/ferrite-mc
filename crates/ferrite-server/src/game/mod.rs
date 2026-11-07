@@ -1140,7 +1140,7 @@ async fn run(
                    let start_pos = saved.as_ref().map_or(default_pos, |s| s.pos);
                    let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
                    let start_mode = saved.as_ref().map_or_else(|| command_state.lock().unwrap().default_gamemode, |s| s.gamemode);
-                   command_state.lock().unwrap().join(uuid, name.clone(), start_mode, max_players as i32);
+                   command_state.lock().unwrap().join_session(uuid, session, name.clone(), start_mode, max_players as i32);
                    if start_mode == 3 { command_state.lock().unwrap().more.spectators.insert(uuid); }
                    command_state.lock().unwrap().set_position(uuid, start_pos, start_yaw, start_pitch);
                    command_state.lock().unwrap().set_dimension(uuid, start_dimension);
