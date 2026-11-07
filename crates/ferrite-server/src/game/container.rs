@@ -53,6 +53,8 @@ pub enum OpenAt {
     Anvil([i32; 3]),
     /// Any other station block: the position and the block name it must still be.
     Block([i32; 3], &'static str),
+    /// The chest of a donkey or mule, by entity uuid.
+    Animal(uuid::Uuid),
 }
 
 /// Bukkit's `ClickType` and `InventoryAction` names for a vanilla click. The action is the
@@ -231,6 +233,8 @@ impl Player {
                 block_name(source, [*x, *y, *z]) == Some("minecraft:anvil")
                     && self.within_reach([*x, *y, *z])
             }
+            // shortcut: the animal is not checked for reach or for still being there.
+            Some(OpenAt::Animal(_)) => true,
             Some(OpenAt::Block([x, y, z], block)) => {
                 block_name(source, [*x, *y, *z]) == Some(*block) && self.within_reach([*x, *y, *z])
             }
@@ -340,6 +344,10 @@ impl Player {
             let items = block_container::load(source, opened);
             menu.container_mut().clone_from_slice(&items);
         }
+        if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
+            menu.container_mut()
+                .clone_from_slice(&super::equine_chest::load(*animal));
+        }
         let mut clicker = Clicker::new(&mut self.inventory, infinite, crafter());
         let out = menu.handle_click(
             &mut clicker,
@@ -354,6 +362,9 @@ impl Player {
         if let (Some(OpenAt::Inventory(opened)), Some(source)) = (&self.menus.open_at, &self.source)
         {
             block_container::store(source, opened, menu.container());
+        }
+        if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
+            super::equine_chest::store(*animal, menu.container());
         }
         self.menus.thrown.extend(drops);
         let xp = clicker.xp;
@@ -627,6 +638,20 @@ impl Player {
                 menu.container_mut().clone_from_slice(&items);
             }
         }
+    }
+
+    /// Opens the chest of the donkey or mule the player rides (`OPEN_INVENTORY`).
+    pub fn open_animal_chest(&mut self, animal: uuid::Uuid, title: &str) {
+        self.open_menu(
+            |id| {
+                let mut menu = Menu::generic(id, super::equine_chest::ROWS);
+                menu.container_mut()
+                    .clone_from_slice(&super::equine_chest::load(animal));
+                menu
+            },
+            title,
+            Some(OpenAt::Animal(animal)),
+        );
     }
 
     /// Vanilla `doCloseContainer`: the open menu (or the inventory screen's grid and cursor)

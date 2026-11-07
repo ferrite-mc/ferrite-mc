@@ -302,6 +302,8 @@ pub struct MobState {
     pub saddled: bool,
     /// Item id of the horse armour it wears (0 for none).
     pub armor: u16,
+    /// A donkey or mule carries a chest (`AbstractChestedHorse.hasChest`).
+    pub chest: bool,
     /// Armour points of the worn horse armour (`Attributes.ARMOR`).
     pub armor_points: f32,
     /// Inherited `movement_speed` and `jump_strength` of an equine (0 when not rolled).
@@ -347,6 +349,7 @@ impl MobState {
             anger: 0,
             saddled: false,
             armor: 0,
+            chest: false,
             armor_points: 0.0,
             speed: 0.0,
             jump: 0.0,

@@ -63,6 +63,22 @@ pub fn treat(store: &mut EntityStore, key: EntityKey, item: &str) -> bool {
     true
 }
 
+/// Hangs a chest on a tame donkey or mule. `false` when it does not apply.
+pub fn add_chest(store: &mut EntityStore, key: EntityKey) -> bool {
+    match mob::state_mut(store, key) {
+        Some(s)
+            if matches!(s.kind, MobKind::Donkey | MobKind::Mule)
+                && s.owner.is_some()
+                && !s.chest =>
+        {
+            s.chest = true;
+        }
+        _ => return false,
+    }
+    sync(store, key);
+    true
+}
+
 /// Whether an item is horse armour.
 pub fn is_armor(item: &str) -> bool {
     item.ends_with("_horse_armor")
@@ -108,6 +124,9 @@ pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
 fn write_metadata(metadata: &mut Metadata, state: &MobState) {
     let flags = if state.owner.is_some() { TAME } else { 0 };
     metadata.set(FLAGS_INDEX, MetaValue::Byte(flags));
+    if state.kind != MobKind::Horse {
+        metadata.set(VARIANT_INDEX, MetaValue::Boolean(state.chest));
+    }
 }
 
 fn sync(store: &mut EntityStore, key: EntityKey) {
@@ -220,6 +239,27 @@ mod tests {
             lost < 10.0 && lost > 7.0,
             "iron armour absorbs part of a hit, lost {lost}"
         );
+    }
+
+    #[test]
+    fn only_a_tame_donkey_or_mule_takes_a_chest() {
+        let mut store = EntityStore::default();
+        let donkey = store.insert(new_mob(
+            MobKind::Donkey,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        assert!(!add_chest(&mut store, donkey), "a wild donkey takes none");
+        mob::state_mut(&mut store, donkey).unwrap().owner = Some(Uuid::from_u128(1));
+        assert!(add_chest(&mut store, donkey));
+        assert!(!add_chest(&mut store, donkey));
+        assert_eq!(
+            store.data(donkey).unwrap().metadata.get(VARIANT_INDEX),
+            Some(&MetaValue::Boolean(true))
+        );
+        let horse = horse(&mut store);
+        mob::state_mut(&mut store, horse).unwrap().owner = Some(Uuid::from_u128(1));
+        assert!(!add_chest(&mut store, horse), "horses carry no chest");
     }
 
     #[test]

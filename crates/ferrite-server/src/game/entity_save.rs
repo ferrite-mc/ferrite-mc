@@ -262,6 +262,10 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("Sitting".into(), Tag::Byte(mob.sitting as i8));
         c.insert("Saddled".into(), Tag::Byte(mob.saddled as i8));
         c.insert("Armor".into(), Tag::Int(i32::from(mob.armor)));
+        if mob.chest {
+            c.insert("ChestedHorse".into(), Tag::Byte(1));
+            c.insert("ChestItems".into(), super::equine_chest::to_nbt(data.uuid));
+        }
         c.insert("ArmorPoints".into(), Tag::Float(mob.armor_points));
         c.insert("HorseSpeed".into(), Tag::Float(mob.speed));
         c.insert("HorseJump".into(), Tag::Float(mob.jump));
@@ -395,6 +399,12 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.owner = uuid_field(c, "Owner");
                 mob.sitting = boolean(c, "Sitting");
                 mob.saddled = boolean(c, "Saddled");
+                mob.chest = boolean(c, "ChestedHorse");
+                if mob.chest
+                    && let Some(items) = c.get("ChestItems")
+                {
+                    super::equine_chest::from_nbt(data.uuid, items);
+                }
                 mob.armor_points = float(c, "ArmorPoints").unwrap_or(0.0);
                 mob.speed = float(c, "HorseSpeed").unwrap_or(0.0);
                 mob.jump = float(c, "HorseJump").unwrap_or(0.0);

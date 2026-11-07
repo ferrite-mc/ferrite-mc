@@ -681,6 +681,8 @@ pub struct Player {
     pub trident_draw: bool,
     /// Where the client moved the horse it rides since the region last looked (x, y, z, yaw).
     pub vehicle_moves: Vec<[f64; 4]>,
+    /// The rider pressed the inventory key on a donkey or mule.
+    pub open_animal_chest: bool,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
     /// The dimension registry, used to swap the chunk source on a dimension change.
@@ -3661,18 +3663,22 @@ impl Player {
                     }
                 }
                 ServerboundPlay::PlayerCommand(p) => {
-                    // Vanilla `ServerboundPlayerCommandPacket.Action.STOP_SLEEPING` (2).
-                    if p.action.0 == 2 {
+                    // 26.3 `ServerboundPlayerCommandPacket.Action` ids: 0 STOP_SLEEPING,
+                    // 1 START_SPRINTING, 2 STOP_SPRINTING, 3/4 riding jump, 5 OPEN_INVENTORY.
+                    if p.action.0 == 0 {
                         super::blocks::wake(self);
+                    }
+                    if p.action.0 == 5 {
+                        self.open_animal_chest = true;
                     }
                     // `ServerboundPlayerCommandPacket.Action.START_SPRINTING/STOP_SPRINTING`.
                     if p.entity_id.0 == self.entity {
                         match p.action.0 {
-                            3 => {
+                            1 => {
                                 self.survival.sprinting = true;
                                 crate::plugins::facts::set_sprinting(self.uuid, true);
                             }
-                            4 => {
+                            2 => {
                                 self.survival.sprinting = false;
                                 crate::plugins::facts::set_sprinting(self.uuid, false);
                             }
@@ -4448,6 +4454,21 @@ impl Region {
             self.send_saddle(ctx, key);
             return true;
         }
+        if held == "minecraft:chest" && ferrite_entity::horse::add_chest(&mut self.entities, key) {
+            if gamemode != 1
+                && let Some(p) = self.players.get_mut(&uuid)
+            {
+                p.inventory.remove(slot, 1);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            return true;
+        }
         if held == "minecraft:saddle" && ferrite_entity::horse::saddle(&mut self.entities, key) {
             if gamemode != 1
                 && let Some(p) = self.players.get_mut(&uuid)
@@ -4578,6 +4599,31 @@ impl Region {
     /// Moves ridden horses to where their riders steered them, and lets wild horses buck or
     /// accept their riders.
     fn tick_horses(&mut self, ctx: &TickContext) {
+        let askers: Vec<Uuid> = self
+            .players
+            .iter()
+            .filter(|(_, p)| p.open_animal_chest)
+            .map(|(uuid, _)| *uuid)
+            .collect();
+        for rider in askers {
+            if let Some(p) = self.players.get_mut(&rider) {
+                p.open_animal_chest = false;
+            }
+            let Some(vehicle) = super::ride::vehicle_of(rider) else {
+                continue;
+            };
+            let Some((animal, title)) = self.entities.keys().iter().copied().find_map(|k| {
+                let state = ferrite_entity::mob::state(&self.entities, k)?;
+                let data = self.entities.data(k)?;
+                (data.uuid == vehicle && state.chest)
+                    .then(|| (data.uuid, state.kind.display_name()))
+            }) else {
+                continue;
+            };
+            if let Some(p) = self.players.get_mut(&rider) {
+                p.open_animal_chest(animal, title);
+            }
+        }
         let riders: Vec<Uuid> = self.players.keys().copied().collect();
         for rider in riders {
             let moves = self
