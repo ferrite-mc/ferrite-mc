@@ -634,10 +634,7 @@ mod respawn_tests {
     #[test]
     fn the_respawn_layout_requires_all_four_cells() {
         let cells = respawn_crystal_cells(64);
-        assert_eq!(
-            require_respawn_crystals(cells, |cell| Some(cell)),
-            Some(cells)
-        );
+        assert_eq!(require_respawn_crystals(cells, Some), Some(cells));
         for missing in 0..4 {
             assert_eq!(
                 require_respawn_crystals(cells, |cell| (cell != cells[missing]).then_some(cell)),

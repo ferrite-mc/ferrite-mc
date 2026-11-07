@@ -8841,21 +8841,6 @@ mod tests {
         );
     }
 
-    async fn memory_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
-        let source = super::super::anvil::AnvilChunkSource::new_memory();
-        let mut ready = false;
-        for _ in 0..2_000 {
-            if let Some(result) = source.get(0, 0, 0) {
-                result.expect("chunk load");
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        assert!(ready, "chunk never loaded");
-        source
-    }
-
     #[test]
     fn independent_menus_count_two_sales_once_and_credit_each_player() {
         use ferrite_inventory::{ClickInput, Clicker, Menu, NoCrafting, PlayerInventory};
@@ -9796,10 +9781,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 
@@ -9881,10 +9866,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 
@@ -9935,10 +9920,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 
@@ -9988,10 +9973,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
 
         // Once the stale lead is gone, the reconnected session can attach a new lead.
@@ -10001,7 +9986,7 @@ mod tests {
             Some((ferrite_math::Vec3::new(7.5, 64.0, 0.5), 456)),
             "the new session can be leashed again"
         );
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert!(
             mob::state(&region.entities, cow).unwrap().leash.is_some(),
             "the new lead survives"
@@ -10069,14 +10054,14 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(
             dropped_leads(&region),
             1,
             "the removed holder drops one lead"
         );
-        region.tick_mobs(&ctx, &blocks, &[]);
+        region.tick_mobs_with_owner_attacks(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 

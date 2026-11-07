@@ -1,5 +1,26 @@
 # 2026-11-07 hand-off: what is not done
 
+## 2026-11-08 integration audit
+
+This audit supersedes the initial open-item snapshot below for the items explicitly listed here.
+The integration is on `yxshadxw/plan1104`; final main push and remote CI confirmation are pending.
+
+- Integrated End dragon staged respawn and saved phase (`7ad4e42`), wandering-trader lifecycle
+  (`a3a1199`), structure block transformers (`09d7963`), horse equipment/death drops and pack
+  persistence (`546f292`, `dcd4ea0`), cat/parrot taming (`6a72dfb`), and viewer riptide metadata
+  (`7677891`). Earlier commits on this branch include the map decoration, projectile, damage/death
+  event, and CI lint fixes.
+- Verified after integration: `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
+  `java/ferrite-api-impl: .\gradlew test --no-daemon --console=plain` all pass. The full Rust run
+  included the vanilla light fixture and all 638 `ferrite-server` unit tests.
+- No real Minecraft client was used. End respawn visuals/damage, riptide viewer animation, structure
+  placement visuals, and mounted-equipment screens remain client-unverified. `/test` and `/jfr`
+  still require unavailable vanilla game-test/JVM server support.
+- Separate task specs `freebuff-26` (llama caravan), `freebuff-28` (multi-world block entities),
+  and `freebuff-29` (item PDC/flags) are future implementation work; this integration audit did
+  not implement them. ASWM and Rust world generation remain deferred as requested.
+
 State: branch `yxshadxw/plan1104`, pushed to `main` at `0a85c80`. `cargo test --workspace` (91 result
 blocks ok), `cargo clippy --workspace --all-targets -- -D warnings` and `java/ferrite-api-impl`
 `gradlew test` are green. Nothing below has been checked with a real client.

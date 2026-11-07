@@ -906,7 +906,6 @@ mod tests {
                 level: 2,
             })
         );
-
     }
 
     #[test]

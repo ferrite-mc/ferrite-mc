@@ -19,3 +19,13 @@ ASWM / Advanced Slime World Manager and Rust world generation are not assigned i
 ## Current integration baseline
 
 `origin/main` includes cross-region lead reconnect fixes and CI lint corrections through `da2ea4a`. Re-check `origin/main` when you start because the coordinator may integrate more commits during the wave.
+
+## Coordinator audit — 2026-11-08
+
+The completed wave is integrated on `yxshadxw/plan1104`: End staged respawn, wandering-trader
+lifecycle, structure transformers, equine pack/death behavior, cat/parrot taming, riptide viewer
+metadata, and the earlier map/projectile/plugin-event slices. Full Rust workspace tests, workspace
+clippy with warnings denied, formatting check, and the Java API Gradle suite passed after integration.
+No real Minecraft client was available, so visual packet behavior remains unverified. Llama caravan
+parity, multi-world plugin block-entity access, and item PDC/flags remain future task specs (`26`,
+`28`, `29`). ASWM and Rust world generation remain excluded/deferred.

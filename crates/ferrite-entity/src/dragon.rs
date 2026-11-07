@@ -300,26 +300,25 @@ pub fn fly(
 ) {
     let (age, mut phase, mut phase_ticks, mut attack_cooldown, mut bow_timer, saved_target) =
         match mob::state_mut(store, key) {
-        Some(state) => {
-            state.wander_timer = state.wander_timer.wrapping_add(1);
-            state.attack_cooldown = state.attack_cooldown.saturating_sub(1);
-            state.bow_timer = state.bow_timer.saturating_sub(1);
-            (
-                state.wander_timer,
-                state.dragon_phase,
-                state.dragon_phase_ticks.saturating_add(1),
-                state.attack_cooldown,
-                state.bow_timer,
-                state.target,
-            )
-        }
-        None => return,
-    };
+            Some(state) => {
+                state.wander_timer = state.wander_timer.wrapping_add(1);
+                state.attack_cooldown = state.attack_cooldown.saturating_sub(1);
+                state.bow_timer = state.bow_timer.saturating_sub(1);
+                (
+                    state.wander_timer,
+                    state.dragon_phase,
+                    state.dragon_phase_ticks.saturating_add(1),
+                    state.attack_cooldown,
+                    state.bow_timer,
+                    state.target,
+                )
+            }
+            None => return,
+        };
     let previous = store.pos(key).unwrap_or_default();
     let selected = select_target(players, previous, saved_target);
-    let charge_target = selected.filter(|target| {
-        target.pos.distance_to_sqr(previous) <= CHARGE_RANGE * CHARGE_RANGE
-    });
+    let charge_target = selected
+        .filter(|target| target.pos.distance_to_sqr(previous) <= CHARGE_RANGE * CHARGE_RANGE);
     let combat_phase = Phase::at(age, charge_target.is_some());
     let (circle, circle_yaw) = position_at(age);
     let alive_crystals = store
