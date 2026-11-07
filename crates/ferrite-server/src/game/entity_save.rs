@@ -390,7 +390,7 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 if kind.is_animal() {
                     ferrite_entity::breed::define_metadata(&mut data.metadata, &mob);
                 }
-                if kind == MobKind::Wolf {
+                if kind.is_tameable() {
                     ferrite_entity::tame::define_metadata(&mut data.metadata, &mob);
                 }
                 data.mob = Some(mob);

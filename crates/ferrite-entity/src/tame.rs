@@ -79,7 +79,15 @@ pub fn is_wolf_food(item: &str) -> bool {
     )
 }
 
-/// Vanilla `Wolf.mobInteract`, taming and sitting only.
+/// Raw fish, which tames cats and which tamed cats breed with (`#minecraft:cat_food`).
+pub fn is_cat_food(item: &str) -> bool {
+    matches!(
+        item.strip_prefix("minecraft:").unwrap_or(item),
+        "cod" | "salmon"
+    )
+}
+
+/// Vanilla `Wolf.mobInteract` / `Cat.mobInteract`, taming and sitting only.
 pub fn use_on(
     store: &mut EntityStore,
     key: EntityKey,
@@ -90,21 +98,32 @@ pub fn use_on(
     let Some(state) = mob::state_mut(store, key) else {
         return Used::No;
     };
-    if state.kind != MobKind::Wolf {
+    if !state.kind.is_tameable() {
         return Used::No;
     }
+    let (tamer, tame_health) = match state.kind {
+        MobKind::Cat => ("minecraft:cod", 20.0),
+        _ => ("minecraft:bone", TAMED_HEALTH),
+    };
+    let cat = state.kind == MobKind::Cat;
+    let tames = item == tamer || (cat && item == "minecraft:salmon");
+    let food = if cat {
+        is_cat_food(item)
+    } else {
+        is_wolf_food(item)
+    };
     let used = match state.owner {
-        None if item == "minecraft:bone" => {
+        None if tames => {
             if rng.next_int(3) == 0 {
                 state.owner = Some(player);
                 state.sitting = true;
-                state.health = state.health.max(TAMED_HEALTH);
+                state.health = state.health.max(tame_health);
                 Used::Tamed
             } else {
                 Used::Consumed
             }
         }
-        Some(owner) if owner == player && !is_wolf_food(item) => {
+        Some(owner) if owner == player && !food => {
             state.sitting = !state.sitting;
             state.following = false;
             Used::Toggled
@@ -232,6 +251,39 @@ mod tests {
         );
         mob::state_mut(&mut store, wolf).unwrap().sitting = true;
         assert!(defend_target(&store, wolf, &owners, from).is_none());
+    }
+
+    #[test]
+    fn raw_fish_tames_a_cat_and_a_bone_does_not() {
+        let mut rng = Rng::new(3);
+        let mut store = EntityStore::default();
+        let key = store.insert(mob::new_mob(
+            MobKind::Cat,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let player = Uuid::from_u128(1);
+        assert_eq!(
+            use_on(&mut store, key, "minecraft:bone", player, &mut rng),
+            Used::No
+        );
+        let mut tries = 0;
+        while use_on(&mut store, key, "minecraft:salmon", player, &mut rng) != Used::Tamed {
+            tries += 1;
+            assert!(tries < 100);
+        }
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.owner, Some(player));
+        assert!(state.health >= 20.0);
+        // Fish now feeds it instead of toggling sitting; anything else toggles.
+        assert_eq!(
+            use_on(&mut store, key, "minecraft:cod", player, &mut rng),
+            Used::No
+        );
+        assert_eq!(
+            use_on(&mut store, key, "minecraft:air", player, &mut rng),
+            Used::Toggled
+        );
     }
 
     #[test]

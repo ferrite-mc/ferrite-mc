@@ -387,12 +387,12 @@ pub fn tick_with(
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                     speed = 1.5;
                 }
-            } else if kind == MobKind::Wolf
+            } else if kind.is_tameable()
                 && let Some(owner_pos) = crate::tame::follow_target(store, key, &owners, start)
             {
                 directed = true;
                 walking = Some(yaw_towards(owner_pos.x - start.x, owner_pos.z - start.z));
-            } else if kind == MobKind::Wolf && mob::state(store, key).is_some_and(|s| s.sitting) {
+            } else if kind.is_tameable() && mob::state(store, key).is_some_and(|s| s.sitting) {
                 directed = true;
             } else if let Some((mate, mate_pos)) = crate::breed::mate_for(store, key) {
                 directed = true;

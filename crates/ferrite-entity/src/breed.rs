@@ -24,7 +24,7 @@ const BREED_TICKS: u16 = 60;
 impl MobKind {
     /// The animals that breed: the farm animals and wolves.
     pub fn is_animal(self) -> bool {
-        Self::ALL.contains(&self) || self == Self::Wolf
+        Self::ALL.contains(&self) || self.is_tameable()
     }
 }
 
@@ -44,6 +44,7 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
                 | "pitcher_pod"
         ),
         MobKind::Wolf => crate::tame::is_wolf_food(item),
+        MobKind::Cat => crate::tame::is_cat_food(item),
         _ => false,
     }
 }
@@ -98,8 +99,8 @@ pub fn feed(store: &mut EntityStore, key: EntityKey, item: &str, player: Uuid) -
     if !is_food(mob.kind, item) {
         return Fed::No;
     }
-    // A wild wolf is not fed; only a tamed one breeds.
-    if mob.kind == MobKind::Wolf && mob.owner.is_none() {
+    // A wild wolf or cat is not fed; only a tamed one breeds.
+    if mob.kind.is_tameable() && mob.owner.is_none() {
         return Fed::No;
     }
     let fed = if mob.age == 0 && mob.love == 0 {

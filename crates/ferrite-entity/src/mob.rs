@@ -41,6 +41,7 @@ pub enum MobKind {
     Villager,
     EnderDragon,
     Wolf,
+    Cat,
 }
 
 impl MobKind {
@@ -55,7 +56,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 12] = [
+    pub const ALL_MOBS: [Self; 13] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -68,6 +69,7 @@ impl MobKind {
         Self::Villager,
         Self::EnderDragon,
         Self::Wolf,
+        Self::Cat,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -85,7 +87,13 @@ impl MobKind {
             Self::Villager => "minecraft:villager",
             Self::EnderDragon => "minecraft:ender_dragon",
             Self::Wolf => "minecraft:wolf",
+            Self::Cat => "minecraft:cat",
         }
+    }
+
+    /// Whether an owner can tame, seat and call this kind (`TamableAnimal`).
+    pub fn is_tameable(self) -> bool {
+        matches!(self, Self::Wolf | Self::Cat)
     }
 
     /// Whether this kind hunts players (vanilla `Monster`/`Enemy`).
@@ -164,6 +172,7 @@ impl MobKind {
             Self::EnderDragon => "",
             // A wolf drops nothing.
             Self::Wolf => "",
+            Self::Cat => "minecraft:entities/cat",
         }
     }
 
@@ -194,6 +203,7 @@ impl MobKind {
             Self::Villager => "Villager",
             Self::EnderDragon => "Ender Dragon",
             Self::Wolf => "Wolf",
+            Self::Cat => "Cat",
         }
     }
 
@@ -332,7 +342,7 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     {
         crate::breed::define_metadata(&mut data.metadata, state);
     }
-    if kind == MobKind::Wolf
+    if kind.is_tameable()
         && let Some(state) = data.mob.as_ref()
     {
         crate::tame::define_metadata(&mut data.metadata, state);
