@@ -145,7 +145,13 @@ fn merge_of_ticking_and_idle_region_applies_right_after_the_tick() {
     let release = block_region(&scheduler, ChunkPos(0, 0));
     scheduler.add_chunk(ChunkPos(1, 0));
     let submitted = Instant::now();
-    assert_eq!(scheduler.region_count(), 2, "merge must wait for A's tick");
+    // B may be in the middle of its own (no-op) tick right now. Then the bridge is a third,
+    // separate region until that tick ends and B merges into it, so 2 and 3 are both fine; what
+    // must not happen is the merge into one region while A's tick is still blocked.
+    assert!(
+        (2..=3).contains(&scheduler.region_count()),
+        "merge must wait for A's tick"
+    );
     let bridge = scheduler.owner(ChunkPos(1, 0)).unwrap();
     assert_eq!(
         scheduler.region_state(bridge),
