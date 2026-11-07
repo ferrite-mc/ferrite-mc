@@ -44,6 +44,8 @@ pub enum MobKind {
     Cat,
     Parrot,
     Horse,
+    Donkey,
+    Mule,
 }
 
 impl MobKind {
@@ -58,7 +60,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 15] = [
+    pub const ALL_MOBS: [Self; 17] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -74,6 +76,8 @@ impl MobKind {
         Self::Cat,
         Self::Parrot,
         Self::Horse,
+        Self::Donkey,
+        Self::Mule,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -94,12 +98,19 @@ impl MobKind {
             Self::Cat => "minecraft:cat",
             Self::Parrot => "minecraft:parrot",
             Self::Horse => "minecraft:horse",
+            Self::Donkey => "minecraft:donkey",
+            Self::Mule => "minecraft:mule",
         }
     }
 
     /// Whether an owner can tame, seat and call this kind (`TamableAnimal`).
     pub fn is_tameable(self) -> bool {
         matches!(self, Self::Wolf | Self::Cat | Self::Parrot)
+    }
+
+    /// Horses, donkeys and mules: rideable, tamed by riding and saddled (`AbstractHorse`).
+    pub fn is_equine(self) -> bool {
+        matches!(self, Self::Horse | Self::Donkey | Self::Mule)
     }
 
     /// Whether this kind hunts players (vanilla `Monster`/`Enemy`).
@@ -181,6 +192,8 @@ impl MobKind {
             Self::Cat => "minecraft:entities/cat",
             Self::Parrot => "minecraft:entities/parrot",
             Self::Horse => "minecraft:entities/horse",
+            Self::Donkey => "minecraft:entities/donkey",
+            Self::Mule => "minecraft:entities/mule",
         }
     }
 
@@ -214,6 +227,8 @@ impl MobKind {
             Self::Cat => "Cat",
             Self::Parrot => "Parrot",
             Self::Horse => "Horse",
+            Self::Donkey => "Donkey",
+            Self::Mule => "Mule",
         }
     }
 
@@ -366,10 +381,19 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     {
         crate::tame::define_metadata(&mut data.metadata, state);
     }
-    if kind == MobKind::Horse
+    if kind.is_equine()
         && let Some(state) = data.mob.as_ref()
     {
         crate::horse::define_metadata(&mut data.metadata, state);
+        if kind == MobKind::Horse {
+            // A random coat (7 colours) with a random marking (5 of them), like
+            // `Horse.finalizeSpawn`.
+            let coat = rng.next_int(7) | (rng.next_int(5) << 8);
+            data.metadata.set(
+                crate::horse::VARIANT_INDEX,
+                ferrite_protocol::packets::play::MetaValue::Int(coat),
+            );
+        }
     }
     if kind == MobKind::Villager {
         let state = crate::villager::VillagerState::new(

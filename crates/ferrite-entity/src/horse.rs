@@ -1,8 +1,7 @@
 //! Horses (`AbstractHorse`): an untamed horse can be ridden, bucks its rider off now and then
 //! and is tamed with a chance that grows with each ride (its temper); a tamed horse takes a
-//! saddle and is then steered by its rider. shortcut: only the plain horse (no coat variants or
-//! markings, no donkeys, mules or llamas), no armour, no inventory, no jump strength or speed
-//! genetics, and no eating of treats.
+//! saddle and is then steered by its rider. Horses, donkeys and mules share this. shortcut: no
+//! llamas, armour, chest or inventory, jump strength or speed genetics, or eating of treats.
 
 use crate::mob::{self, MobKind, MobState};
 use crate::{EntityKey, EntityStore, Metadata, Rng};
@@ -24,7 +23,12 @@ pub const SADDLE_SLOT: u8 = 7;
 /// Defines the horse data values and writes the current state into them.
 pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     metadata.define(FLAGS_INDEX, MetaValue::Byte(0));
-    metadata.define(VARIANT_INDEX, MetaValue::Int(0));
+    // Index 18 is a horse's coat; donkeys and mules carry a chest flag there instead.
+    if state.kind == MobKind::Horse {
+        metadata.define(VARIANT_INDEX, MetaValue::Int(0));
+    } else {
+        metadata.define(VARIANT_INDEX, MetaValue::Boolean(false));
+    }
     write_metadata(metadata, state);
 }
 
@@ -43,14 +47,13 @@ fn sync(store: &mut EntityStore, key: EntityKey) {
 
 /// Whether the horse is tame and saddled, so its rider steers it.
 pub fn is_steerable(store: &EntityStore, key: EntityKey) -> bool {
-    mob::state(store, key)
-        .is_some_and(|s| s.kind == MobKind::Horse && s.owner.is_some() && s.saddled)
+    mob::state(store, key).is_some_and(|s| s.kind.is_equine() && s.owner.is_some() && s.saddled)
 }
 
 /// Puts a saddle on a tame, unsaddled horse. `false` when it does not apply.
 pub fn saddle(store: &mut EntityStore, key: EntityKey) -> bool {
     match mob::state_mut(store, key) {
-        Some(s) if s.kind == MobKind::Horse && s.owner.is_some() && !s.saddled => {
+        Some(s) if s.kind.is_equine() && s.owner.is_some() && !s.saddled => {
             s.saddled = true;
             true
         }
@@ -76,7 +79,7 @@ pub fn tick_rider(store: &mut EntityStore, key: EntityKey, rider: Uuid, rng: &mu
     let Some(state) = mob::state_mut(store, key) else {
         return Bucked::No;
     };
-    if state.kind != MobKind::Horse || state.owner.is_some() || rng.next_int(50) != 0 {
+    if !state.kind.is_equine() || state.owner.is_some() || rng.next_int(50) != 0 {
         return Bucked::No;
     }
     if rng.next_int(MAX_TEMPER) < state.temper {

@@ -4360,7 +4360,7 @@ impl Region {
                 let name = held.name().unwrap_or("minecraft:air");
                 let gamemode = p.gamemode;
                 if ferrite_entity::mob::state(&self.entities, key)
-                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Horse)
+                    .is_some_and(|s| s.kind.is_equine())
                     && self.use_horse(ctx, uuid, key, name, slot, gamemode)
                 {
                     continue;
@@ -4529,8 +4529,7 @@ impl Region {
             .iter()
             .copied()
             .filter(|&k| {
-                ferrite_entity::mob::state(&self.entities, k)
-                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Horse)
+                ferrite_entity::mob::state(&self.entities, k).is_some_and(|s| s.kind.is_equine())
             })
             .collect();
         for key in horses {

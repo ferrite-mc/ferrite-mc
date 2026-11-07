@@ -145,6 +145,8 @@ pub struct GameState {
     pub weather_duration: i32,
     /// The weather the clients were last told about.
     pub weather_sent: Option<Weather>,
+    /// The `advance_weather` game rule, set by the world loop each tick.
+    pub advance_weather: bool,
     pub seed: i64,
     pub max_players: i32,
     pub players: Vec<PlayerEntry>,
@@ -188,6 +190,7 @@ impl GameState {
             weather: Weather::Clear,
             weather_duration: 6_000,
             weather_sent: None,
+            advance_weather: true,
             seed,
             max_players,
             players: Vec::new(),
@@ -316,7 +319,7 @@ impl GameState {
     /// that are due this tick, once per function.
     pub fn tick(&mut self, advance_time: bool) -> Vec<String> {
         self.game_time += 1;
-        if self.weather_duration > 0 {
+        if self.advance_weather && self.weather_duration > 0 {
             self.weather_duration -= 1;
             if self.weather_duration == 0 {
                 self.advance_weather();
@@ -4192,6 +4195,11 @@ mod tests {
         );
         assert!(state.weather_events(false).is_empty());
         state.weather_duration = 2;
+        state.advance_weather = false;
+        state.tick(false);
+        state.tick(false);
+        assert_eq!(state.weather_duration, 2, "the rule stops the countdown");
+        state.advance_weather = true;
         state.tick(false);
         assert_eq!(state.weather, Weather::Clear);
         state.tick(false);

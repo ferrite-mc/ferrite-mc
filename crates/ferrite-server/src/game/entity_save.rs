@@ -392,7 +392,7 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.sitting = boolean(c, "Sitting");
                 mob.saddled = boolean(c, "Saddled");
                 mob.temper = int(c, "Temper").unwrap_or(0);
-                if kind == MobKind::Horse {
+                if kind.is_equine() {
                     ferrite_entity::horse::define_metadata(&mut data.metadata, &mob);
                 }
                 if kind.is_animal() {
