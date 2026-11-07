@@ -92,6 +92,8 @@ pub enum Kind {
     EnderPearl,
     /// `minecraft:fireball` (the large one): flies straight and explodes where it lands.
     Fireball,
+    /// `minecraft:small_fireball` (blaze, fire charge): flies straight; the region burns what it hits.
+    SmallFireball,
     /// `minecraft:dragon_fireball`: flies straight; the region leaves a breath cloud where it lands.
     DragonFireball,
     /// `minecraft:trident`: flies like an arrow for 8 damage; the region drops the item where it ends.
@@ -106,6 +108,7 @@ impl Kind {
             Self::Egg => "egg",
             Self::EnderPearl => "ender_pearl",
             Self::Fireball => "fireball",
+            Self::SmallFireball => "small_fireball",
             Self::DragonFireball => "dragon_fireball",
             Self::Trident => "trident",
         }
@@ -118,6 +121,7 @@ impl Kind {
             "egg" => Some(Self::Egg),
             "ender_pearl" => Some(Self::EnderPearl),
             "fireball" => Some(Self::Fireball),
+            "small_fireball" => Some(Self::SmallFireball),
             _ => None,
         }
     }
@@ -137,6 +141,7 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::Egg,
         Kind::EnderPearl,
         Kind::Fireball,
+        Kind::SmallFireball,
         Kind::DragonFireball,
         Kind::Trident,
     ]
@@ -207,7 +212,10 @@ pub fn tick_thrown(
         }
         let mut vel = store.vel(key).unwrap_or_default();
         // A fireball keeps its speed and ignores gravity; the rest arc like thrown items.
-        if !matches!(kind, Kind::Fireball | Kind::DragonFireball) {
+        if !matches!(
+            kind,
+            Kind::Fireball | Kind::SmallFireball | Kind::DragonFireball
+        ) {
             vel.y -= THROWN_GRAVITY;
             vel.x *= DRAG;
             vel.y *= DRAG;
@@ -423,6 +431,27 @@ mod tests {
             MobKind::Cow.max_health(),
             "snowballs do no damage"
         );
+    }
+
+    #[test]
+    fn a_small_fireball_flies_level_like_a_fireball() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let ball = store.insert(new_thrown(
+            Kind::SmallFireball,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 1.0),
+            None,
+        ));
+        tick_thrown(&mut store, &world, &[]);
+        assert_eq!(store.vel(ball).unwrap().y, 0.0, "no gravity");
+        assert_eq!(
+            kind_of(store.data(ball).unwrap()),
+            Some(Kind::SmallFireball)
+        );
+        store.set_vel(ball, Vec3::new(0.0, -8.0, 0.0));
+        let landed = tick_thrown(&mut store, &world, &[]);
+        assert_eq!(landed[0].kind, Kind::SmallFireball);
     }
 
     #[test]
