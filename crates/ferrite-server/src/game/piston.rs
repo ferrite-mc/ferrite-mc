@@ -591,4 +591,34 @@ mod tests {
         assert_eq!(grid.block([1, 64, 0]), Some(state("air")));
         assert_eq!(grid.block([2, 64, 0]), Some(state("obsidian")));
     }
+
+    #[test]
+    fn a_plain_piston_leaves_the_block_behind_the_head_when_it_retracts() {
+        let mut grid = Grid::default();
+        let base = [0, 64, 0];
+        grid.0.insert(
+            base,
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "true")]).unwrap(),
+        );
+        grid.0.insert(
+            [1, 64, 0],
+            blocks::state_id("piston_head", &[("facing", "east"), ("type", "normal")]).unwrap(),
+        );
+        grid.0.insert([2, 64, 0], state("stone"));
+        let operation = operation(&grid, base, Direction::East, false).unwrap();
+        for (pos, _, next) in operation.edits {
+            grid.0.insert(pos, u16::try_from(next).unwrap());
+        }
+        assert_eq!(grid.block([1, 64, 0]), Some(state("air")));
+        assert_eq!(grid.block([2, 64, 0]), Some(state("stone")));
+    }
+
+    #[test]
+    fn a_single_block_with_air_behind_it_moves_one_cell() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("stone"));
+        let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
+        assert_eq!(plan.to_move.len(), 1);
+        assert!(plan.to_destroy.is_empty());
+    }
 }

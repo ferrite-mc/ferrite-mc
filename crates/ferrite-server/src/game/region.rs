@@ -702,7 +702,7 @@ pub struct Region {
     /// Dragon breath clouds: centre and ticks left.
     pub breath_clouds: Vec<(ferrite_math::Vec3, u32)>,
     /// The stack of every trident in flight, by entity uuid, so it can drop as it was thrown.
-    pub thrown_tridents: HashMap<Uuid, ferrite_item::ItemStack>,
+    pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
@@ -4596,7 +4596,8 @@ impl Region {
     }
 
     /// `TridentItem.releaseUsing`: the held trident leaves the hand and flies where the player
-    /// looks. shortcut: no loyalty, riptide or channeling; it drops as an item where it ends.
+    /// looks. shortcut: loyalty returns it the moment it lands (no flight back); riptide and
+    /// channeling are not modelled. Without loyalty it drops as an item where it ends.
     fn throw_trident(&mut self, uuid: Uuid, yaw: f32, pitch: f32) {
         let Some(p) = self.players.get_mut(&uuid) else {
             return;
@@ -4631,7 +4632,7 @@ impl Region {
         );
         let record = arrow::new_trident(start, vel, Some(uuid));
         self.thrown_tridents
-            .insert(record.data.uuid, stack.copy_with_count(1));
+            .insert(record.data.uuid, (uuid, stack.copy_with_count(1)));
         self.entities.insert(record);
     }
 
@@ -4659,7 +4660,29 @@ impl Region {
             ) else {
                 continue;
             };
-            if let Some(stack) = self.thrown_tridents.remove(&uuid) {
+            if let Some((owner, stack)) = self.thrown_tridents.remove(&uuid) {
+                let loyal = matches!(
+                    stack.components.get(ferrite_item::component_ids::ENCHANTMENTS),
+                    Some(ferrite_item::Component::Enchantments(e)) if e.level("minecraft:loyalty").is_some_and(|l| l > 0)
+                );
+                if loyal && let Some(p) = self.players.get_mut(&owner) {
+                    let leftover = p.inventory.place_back(stack);
+                    p.sync_containers();
+                    let Some(stack) = leftover else {
+                        continue;
+                    };
+                    let plain = ItemStack {
+                        count: stack.count,
+                        item_id: i32::from(stack.item),
+                    };
+                    self.entities.insert(item::new_item(
+                        pos,
+                        ferrite_math::Vec3::ZERO,
+                        plain,
+                        &mut self.rng,
+                    ));
+                    continue;
+                }
                 // Item entities hold plain stacks, like every other dropped item.
                 let plain = ItemStack {
                     count: stack.count,
