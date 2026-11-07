@@ -14,6 +14,8 @@
 //! - Offers with a `merchant_predicate` are skipped, and results whose data attaches item
 //!   modifiers keep their base item (see `ferrite_data::villager_trades`).
 //! - The villager type is always plains.
+//! - Gossip is only gained by trading. Attacking or killing villagers, curing them, gossip
+//!   sharing between villagers and gossip decay are not modelled.
 
 use crate::EntityKey;
 use crate::mob::MobKind;
@@ -22,6 +24,7 @@ use crate::store::EntityStore;
 use ferrite_inventory::Trade;
 use ferrite_math::Vec3;
 use ferrite_protocol::packets::play::MetaValue;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Vanilla `Villager.DATA_VILLAGER_DATA` accessor index in 26.3 (from the class-tree id
@@ -89,6 +92,29 @@ impl Profession {
             Self::Toolsmith => "minecraft:toolsmith",
             Self::Weaponsmith => "minecraft:weaponsmith",
         }
+    }
+
+    /// The profession with this registry name (`minecraft:` optional).
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        Some(match name {
+            "none" => Self::None,
+            "armorer" => Self::Armorer,
+            "butcher" => Self::Butcher,
+            "cartographer" => Self::Cartographer,
+            "cleric" => Self::Cleric,
+            "farmer" => Self::Farmer,
+            "fisherman" => Self::Fisherman,
+            "fletcher" => Self::Fletcher,
+            "leatherworker" => Self::Leatherworker,
+            "librarian" => Self::Librarian,
+            "mason" => Self::Mason,
+            "nitwit" => Self::Nitwit,
+            "shepherd" => Self::Shepherd,
+            "toolsmith" => Self::Toolsmith,
+            "weaponsmith" => Self::Weaponsmith,
+            _ => return None,
+        })
     }
 
     /// Protocol id in `minecraft:villager_profession`.
@@ -168,6 +194,145 @@ impl VillagerType {
     pub fn id(self) -> i32 {
         ferrite_data::registries::id("minecraft:villager_type", self.name()).unwrap_or(0)
     }
+
+    /// The villager type with this registry name (`minecraft:` optional).
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        Some(match name {
+            "desert" => Self::Desert,
+            "jungle" => Self::Jungle,
+            "plains" => Self::Plains,
+            "savanna" => Self::Savanna,
+            "snow" => Self::Snow,
+            "swamp" => Self::Swamp,
+            "taiga" => Self::Taiga,
+            _ => return None,
+        })
+    }
+}
+
+/// Vanilla `GossipType`: the five kinds of memory a villager keeps about a player.
+///
+/// The weight turns stored gossip points into reputation and the cap bounds the stored value,
+/// both from vanilla's 26.3 `GossipType` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GossipType {
+    MajorNegative,
+    MinorNegative,
+    MinorPositive,
+    MajorPositive,
+    Trading,
+}
+
+impl GossipType {
+    /// The NBT id, e.g. `"minor_positive"`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MajorNegative => "major_negative",
+            Self::MinorNegative => "minor_negative",
+            Self::MinorPositive => "minor_positive",
+            Self::MajorPositive => "major_positive",
+            Self::Trading => "trading",
+        }
+    }
+
+    /// Parses [`Self::name`], with or without a `minecraft:` prefix.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        Some(match name {
+            "major_negative" => Self::MajorNegative,
+            "minor_negative" => Self::MinorNegative,
+            "minor_positive" => Self::MinorPositive,
+            "major_positive" => Self::MajorPositive,
+            "trading" => Self::Trading,
+            _ => return None,
+        })
+    }
+
+    /// Reputation per stored gossip point (vanilla `GossipType.weight`).
+    pub const fn weight(self) -> i32 {
+        match self {
+            Self::MajorNegative => -5,
+            Self::MinorNegative => -1,
+            Self::MinorPositive | Self::Trading => 1,
+            Self::MajorPositive => 5,
+        }
+    }
+
+    /// Cap on the stored gossip value (vanilla `GossipType.max`).
+    pub const fn max(self) -> i32 {
+        match self {
+            Self::MajorNegative => 100,
+            Self::MinorNegative => 200,
+            Self::MinorPositive | Self::Trading => 25,
+            Self::MajorPositive => 20,
+        }
+    }
+}
+
+/// Gossip points a completed sale adds (vanilla gives two trading points per trade).
+pub const TRADING_GOSSIP: i32 = 2;
+
+/// The gossip a villager remembers about players, keyed by player UUID (vanilla `Gossips`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Gossips {
+    entries: BTreeMap<Uuid, BTreeMap<GossipType, i32>>,
+}
+
+impl Gossips {
+    /// Adds gossip points, capped at the type's maximum (vanilla `Gossips.add`).
+    pub fn add(&mut self, player: Uuid, kind: GossipType, points: i32) {
+        if points > 0 {
+            self.set(player, kind, self.get(player, kind).saturating_add(points));
+        }
+    }
+
+    /// Sets one type's stored value, clamped to `0..=kind.max()`. Used when loading a save.
+    pub fn set(&mut self, player: Uuid, kind: GossipType, value: i32) {
+        let value = value.clamp(0, kind.max());
+        if value == 0 {
+            if let Some(values) = self.entries.get_mut(&player) {
+                values.remove(&kind);
+                if values.is_empty() {
+                    self.entries.remove(&player);
+                }
+            }
+        } else {
+            self.entries.entry(player).or_default().insert(kind, value);
+        }
+    }
+
+    /// The stored value of one gossip type for a player.
+    pub fn get(&self, player: Uuid, kind: GossipType) -> i32 {
+        self.entries
+            .get(&player)
+            .and_then(|values| values.get(&kind))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// A player's reputation with this villager: every stored value times its type's weight
+    /// (vanilla `Gossips.getReputation`).
+    pub fn reputation(&self, player: Uuid) -> i32 {
+        self.entries
+            .get(&player)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|(kind, value)| kind.weight() * value)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Every stored entry, in a stable order for saving.
+    pub fn entries(&self) -> impl Iterator<Item = (Uuid, GossipType, i32)> + '_ {
+        self.entries.iter().flat_map(|(player, values)| {
+            values
+                .iter()
+                .map(move |(kind, value)| (*player, *kind, *value))
+        })
+    }
 }
 
 /// A villager's living trade state; travels with the entity across region hand-offs.
@@ -184,6 +349,8 @@ pub struct VillagerState {
     pub workstation: Option<[i32; 3]>,
     /// The villager's offers, with their uses and demand.
     pub offers: Vec<Trade>,
+    /// What this villager remembers about each player (vanilla `Gossips`).
+    pub gossips: Gossips,
     /// Ticks until the next restock.
     pub restock_timer: u32,
     /// Ticks until the next workstation search.
@@ -202,6 +369,7 @@ impl VillagerState {
             xp: 0,
             workstation: None,
             offers: Vec::new(),
+            gossips: Gossips::default(),
             restock_timer: RESTOCK_TICKS,
             search_timer: 0,
             home,
@@ -212,6 +380,38 @@ impl VillagerState {
     pub fn generate_offers(&self, uuid: Uuid) -> Vec<Trade> {
         offers_for(self.profession, self.level, uuid)
     }
+
+    /// The player's reputation with this villager (vanilla `Villager.getPlayerReputation`).
+    pub fn reputation(&self, player: Uuid) -> i32 {
+        self.gossips.reputation(player)
+    }
+
+    /// The offers as this player sees them, with the reputation adjustment applied to a copy
+    /// (vanilla `AbstractVillager.updateSpecialPrices`). The stored offers keep their base
+    /// special price, so another player's screen is unaffected.
+    pub fn offers_for_player(&self, player: Uuid) -> Vec<Trade> {
+        let reputation = self.gossips.reputation(player);
+        let mut offers = self.offers.clone();
+        if reputation != 0 {
+            for offer in &mut offers {
+                offer.special_price +=
+                    reputation_price_adjustment(reputation, offer.price_multiplier);
+            }
+        }
+        offers
+    }
+
+    /// Records one completed sale for `player` (vanilla's trading gossip).
+    pub fn record_trade(&mut self, player: Uuid) {
+        self.gossips
+            .add(player, GossipType::Trading, TRADING_GOSSIP);
+    }
+}
+
+/// Vanilla `AbstractVillager.updateSpecialPrices`: a positive reputation lowers the price by
+/// `floor(reputation * priceMultiplier)`, a negative one raises it by the same amount.
+pub fn reputation_price_adjustment(reputation: i32, price_multiplier: f32) -> i32 {
+    -((reputation as f32 * price_multiplier).floor() as i32)
 }
 
 /// Defines the villager's synched data values and writes the current state into them.
@@ -658,5 +858,197 @@ mod tests {
         assert_eq!(offers.len(), 9, "5 common, 2 uncommon and 2 buying");
         assert_eq!(offers, trader_offers(uuid), "the draw is deterministic");
         assert_ne!(offers, trader_offers(Uuid::from_u128(78)));
+    }
+
+    fn priced_trade(base: i32) -> Trade {
+        let wants = ferrite_item::ItemStack::from_name("emerald")
+            .expect("emerald")
+            .copy_with_count(base);
+        let gives = ferrite_item::ItemStack::from_name("bread")
+            .expect("bread")
+            .copy_with_count(1);
+        let mut trade = Trade::new(wants, gives, 12, 2);
+        trade.price_multiplier = 0.05;
+        trade
+    }
+
+    fn emeralds(count: i32) -> ferrite_item::ItemStack {
+        ferrite_item::ItemStack::from_name("emerald")
+            .expect("emerald")
+            .copy_with_count(count)
+    }
+
+    #[test]
+    fn registry_names_round_trip_for_saving() {
+        for profession in [
+            Profession::None,
+            Profession::Farmer,
+            Profession::Librarian,
+            Profession::Weaponsmith,
+        ] {
+            assert_eq!(Profession::from_name(profession.name()), Some(profession));
+        }
+        assert_eq!(Profession::from_name("farmer"), Some(Profession::Farmer));
+        assert_eq!(
+            VillagerType::from_name("minecraft:snow"),
+            Some(VillagerType::Snow)
+        );
+        assert_eq!(VillagerType::from_name("minecraft:moon"), None);
+        assert_eq!(
+            GossipType::from_name("major_negative"),
+            Some(GossipType::MajorNegative)
+        );
+        assert_eq!(
+            GossipType::from_name("minecraft:trading"),
+            Some(GossipType::Trading)
+        );
+        assert_eq!(GossipType::from_name("unknown"), None);
+    }
+
+    #[test]
+    fn gossip_is_weighted_capped_and_kept_per_player() {
+        let mut gossips = Gossips::default();
+        let player = Uuid::from_u128(7);
+        gossips.add(player, GossipType::Trading, 100);
+        assert_eq!(
+            gossips.get(player, GossipType::Trading),
+            GossipType::Trading.max(),
+            "trading gossip is capped at 25"
+        );
+        assert_eq!(gossips.reputation(player), 25);
+        gossips.add(player, GossipType::MinorPositive, 25);
+        gossips.add(player, GossipType::MinorNegative, 25);
+        gossips.add(player, GossipType::MajorPositive, 20);
+        gossips.add(player, GossipType::MajorNegative, 20);
+        // 5*20 + 25 + 25 - 25 - 5*20 = 25
+        assert_eq!(gossips.reputation(player), 25);
+        assert_eq!(gossips.reputation(Uuid::from_u128(8)), 0);
+        assert_eq!(gossips.entries().count(), 5);
+        assert_eq!(GossipType::MajorPositive.weight(), 5);
+        assert_eq!(GossipType::MajorNegative.weight(), -5);
+        assert_eq!(GossipType::MajorPositive.max(), 20);
+        assert_eq!(GossipType::MinorNegative.max(), 200);
+    }
+
+    #[test]
+    fn reputation_discounts_and_surcharges_are_per_player() {
+        let (mut store, key, _) = villager();
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        state_mut(&mut store, key).unwrap().offers = vec![priced_trade(32)];
+
+        // Neutral reputation leaves the base price.
+        let neutral = state(&store, key).unwrap().offers_for_player(bob);
+        assert_eq!(neutral[0].price(), 32);
+        assert_eq!(neutral[0].special_price, 0);
+
+        // A cure's major positive gossip: 20 points x weight 5 = 100 reputation, and
+        // floor(100 x 0.05) is a five-emerald discount.
+        {
+            let villager = state_mut(&mut store, key).unwrap();
+            villager.gossips.add(alice, GossipType::MajorPositive, 20);
+            assert_eq!(villager.reputation(alice), 100);
+        }
+        let discounted = state(&store, key).unwrap().offers_for_player(alice);
+        assert_eq!(discounted[0].special_price, -5);
+        assert_eq!(discounted[0].price(), 27);
+
+        // Killing a villager's major negative gossip raises bob's price by the same amount.
+        state_mut(&mut store, key)
+            .unwrap()
+            .gossips
+            .add(bob, GossipType::MajorNegative, 20);
+        assert_eq!(state(&store, key).unwrap().reputation(bob), -100);
+        let surcharged = state(&store, key).unwrap().offers_for_player(bob);
+        assert_eq!(surcharged[0].special_price, 5);
+        assert_eq!(surcharged[0].price(), 37);
+
+        // The stored offer is untouched, so a third player still sees the base price.
+        assert_eq!(state(&store, key).unwrap().offers[0].special_price, 0);
+        assert_eq!(
+            state(&store, key).unwrap().offers_for_player(alice)[0].price(),
+            27
+        );
+    }
+
+    #[test]
+    fn every_completed_trade_adds_trading_gossip_up_to_the_cap() {
+        let (mut store, key, _) = villager();
+        let player = Uuid::from_u128(3);
+        for _ in 0..3 {
+            state_mut(&mut store, key).unwrap().record_trade(player);
+        }
+        assert_eq!(
+            state(&store, key)
+                .unwrap()
+                .gossips
+                .get(player, GossipType::Trading),
+            6
+        );
+        for _ in 0..20 {
+            state_mut(&mut store, key).unwrap().record_trade(player);
+        }
+        assert_eq!(
+            state(&store, key)
+                .unwrap()
+                .gossips
+                .get(player, GossipType::Trading),
+            GossipType::Trading.max()
+        );
+        assert_eq!(
+            state(&store, key)
+                .unwrap()
+                .gossips
+                .get(Uuid::from_u128(4), GossipType::Trading),
+            0,
+            "gossip is per player"
+        );
+    }
+
+    #[test]
+    fn a_trade_validates_against_the_displayed_reputation_price() {
+        let (mut store, key, _) = villager();
+        let player = Uuid::from_u128(4);
+        let mut trade = priced_trade(32);
+        trade.price_multiplier = 0.1;
+        state_mut(&mut store, key).unwrap().offers = vec![trade];
+        state_mut(&mut store, key)
+            .unwrap()
+            .gossips
+            .add(player, GossipType::MajorPositive, 20);
+        let offers = state(&store, key).unwrap().offers_for_player(player);
+        let shown = offers[0].price();
+        assert_eq!(shown, 22, "100 reputation x 0.1 is ten emeralds off");
+        assert!(
+            !offers[0].satisfied_by(&emeralds(shown - 1), &ferrite_item::ItemStack::empty()),
+            "paying less than the shown price must not complete the trade"
+        );
+        assert!(offers[0].satisfied_by(&emeralds(shown), &ferrite_item::ItemStack::empty()));
+    }
+
+    #[test]
+    fn trade_state_and_reputation_move_with_the_entity_record() {
+        let (mut store, key, _) = villager();
+        tick(&mut store, key, &Flat::with("composter", [1, 64, 0]));
+        let player = Uuid::from_u128(5);
+        {
+            let villager = state_mut(&mut store, key).unwrap();
+            villager.offers = vec![priced_trade(32)];
+            villager.gossips.add(player, GossipType::MajorPositive, 20);
+            villager.record_trade(player);
+        }
+        let record = store.remove(key).expect("the villager record");
+        let mut other = EntityStore::default();
+        let moved = other.insert(record);
+        let villager = state(&other, moved).expect("the villager state moved");
+        assert_eq!(villager.profession, Profession::Farmer);
+        assert_eq!(villager.offers.len(), 1);
+        assert_eq!(villager.gossips.get(player, GossipType::MajorPositive), 20);
+        assert_eq!(
+            villager.gossips.get(player, GossipType::Trading),
+            TRADING_GOSSIP
+        );
+        assert_eq!(villager.reputation(player), 102);
+        assert_eq!(villager.offers_for_player(player)[0].price(), 27);
     }
 }

@@ -4487,10 +4487,15 @@ impl Region {
             return false;
         };
         let village = state.kind == MobKind::Villager;
+        let offers = if village {
+            villager.offers_for_player(player)
+        } else {
+            villager.offers
+        };
         if let Some(p) = self.players.get_mut(&player) {
             p.open_merchant_offers(
                 state.kind.display_name(),
-                villager.offers,
+                offers,
                 if village {
                     i32::from(villager.level)
                 } else {
@@ -4505,14 +4510,18 @@ impl Region {
         true
     }
 
-    /// What players buy in an open trading screen counts against the merchant's offers.
+    /// Copies what players bought in an open trading screen back into the merchant and records
+    /// the trading gossip that earns reputation (vanilla adds two points per completed sale).
     fn sync_trades(&mut self) {
         let open: Vec<_> = self
             .players
-            .values()
-            .filter_map(|p| p.open_trader())
+            .iter()
+            .filter_map(|(player, p)| {
+                p.open_trader()
+                    .map(|(trader, trades)| (*player, trader, trades))
+            })
             .collect();
-        for (trader, trades) in open {
+        for (player, trader, trades) in open {
             let Some(key) = self
                 .entities
                 .keys()
@@ -4522,19 +4531,33 @@ impl Region {
             else {
                 continue;
             };
-            let Some(villager) = self
-                .entities
-                .data_mut(key)
-                .and_then(|d| d.villager.as_mut())
-            else {
+            let Some(data) = self.entities.data_mut(key) else {
+                continue;
+            };
+            let village = data
+                .mob
+                .as_ref()
+                .is_some_and(|mob| mob.kind == ferrite_entity::mob::MobKind::Villager);
+            let Some(villager) = data.villager.as_mut() else {
                 continue;
             };
             if villager.offers.len() != trades.len() {
                 continue;
             }
+            let sold: i32 = villager
+                .offers
+                .iter()
+                .zip(&trades)
+                .map(|(offer, trade)| (trade.uses - offer.uses).max(0))
+                .sum();
             for (offer, trade) in villager.offers.iter_mut().zip(trades) {
                 offer.uses = trade.uses;
                 offer.demand = trade.demand;
+            }
+            if village {
+                for _ in 0..sold {
+                    villager.record_trade(player);
+                }
             }
         }
     }

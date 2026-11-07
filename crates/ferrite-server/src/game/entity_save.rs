@@ -186,6 +186,178 @@ fn uuid_field(c: &Compound, key: &str) -> Option<Uuid> {
     }
 }
 
+/// Writes a villager stack as an item compound; `None` for an empty or unencodable stack.
+fn item_stack_compound(stack: &ferrite_item::ItemStack) -> Option<Compound> {
+    (!stack.is_empty()).then(|| stack.to_nbt().ok()).flatten()
+}
+
+/// One merchant offer of a saved villager.
+fn offer_to_nbt(offer: &ferrite_inventory::Trade) -> Option<Compound> {
+    let mut c = Compound::new();
+    c.insert(
+        "wants".into(),
+        Tag::Compound(item_stack_compound(&offer.wants)?),
+    );
+    c.insert(
+        "gives".into(),
+        Tag::Compound(item_stack_compound(&offer.gives)?),
+    );
+    if let Some(second) = &offer.second_wants {
+        c.insert(
+            "second_wants".into(),
+            Tag::Compound(item_stack_compound(second)?),
+        );
+    }
+    c.insert("uses".into(), Tag::Int(offer.uses));
+    c.insert("max_uses".into(), Tag::Int(offer.max_uses));
+    c.insert("xp".into(), Tag::Int(offer.xp));
+    c.insert("special_price".into(), Tag::Int(offer.special_price));
+    c.insert(
+        "price_multiplier".into(),
+        Tag::Float(offer.price_multiplier),
+    );
+    c.insert("demand".into(), Tag::Int(offer.demand));
+    Some(c)
+}
+
+fn offer_from_nbt(c: &Compound) -> Option<ferrite_inventory::Trade> {
+    let stack = |key: &str| match c.get(key) {
+        Some(Tag::Compound(tag)) => ferrite_item::ItemStack::from_nbt(tag).ok(),
+        _ => None,
+    };
+    let wants = stack("wants")?;
+    let gives = stack("gives")?;
+    if wants.is_empty() || gives.is_empty() {
+        return None;
+    }
+    let max_uses = int(c, "max_uses").unwrap_or(12).max(1);
+    let mut trade =
+        ferrite_inventory::Trade::new(wants, gives, max_uses, int(c, "xp").unwrap_or(0));
+    trade.second_wants = stack("second_wants");
+    trade.uses = int(c, "uses").unwrap_or(0).clamp(0, max_uses);
+    trade.special_price = int(c, "special_price").unwrap_or(0);
+    trade.price_multiplier = float(c, "price_multiplier").unwrap_or(0.05);
+    trade.demand = int(c, "demand").unwrap_or(0).max(0);
+    Some(trade)
+}
+
+/// Writes the villager-specific fields of an entity compound: profession, offers and the
+/// gossip/reputation this villager holds about players.
+fn villager_to_nbt(state: &ferrite_entity::villager::VillagerState, c: &mut Compound) {
+    let mut data = Compound::new();
+    data.insert(
+        "type".into(),
+        Tag::String(state.villager_type.name().to_owned()),
+    );
+    data.insert(
+        "profession".into(),
+        Tag::String(state.profession.name().to_owned()),
+    );
+    data.insert("level".into(), Tag::Int(i32::from(state.level)));
+    c.insert("VillagerData".into(), Tag::Compound(data));
+    c.insert("Xp".into(), Tag::Int(state.xp));
+    if let Some([x, y, z]) = state.workstation {
+        c.insert("Workstation".into(), Tag::IntArray(vec![x, y, z]));
+    }
+    c.insert("RestockTimer".into(), Tag::Int(state.restock_timer as i32));
+    c.insert(
+        "SearchTimer".into(),
+        Tag::Int(i32::from(state.search_timer)),
+    );
+    c.insert("Home".into(), Tag::List(List::Double(state.home.to_vec())));
+    c.insert(
+        "Offers".into(),
+        Tag::List(List::Compound(
+            state.offers.iter().filter_map(offer_to_nbt).collect(),
+        )),
+    );
+    let gossips: Vec<Compound> = state
+        .gossips
+        .entries()
+        .map(|(player, kind, value)| {
+            let mut entry = Compound::new();
+            entry.insert("Target".into(), Tag::IntArray(uuid_words(player)));
+            entry.insert("Type".into(), Tag::String(kind.name().to_owned()));
+            entry.insert("Value".into(), Tag::Int(value));
+            entry
+        })
+        .collect();
+    c.insert("Gossips".into(), Tag::List(List::Compound(gossips)));
+}
+
+fn gossips_from_nbt(c: &Compound) -> ferrite_entity::villager::Gossips {
+    use ferrite_entity::villager::{GossipType, Gossips};
+    let mut gossips = Gossips::default();
+    let Some(Tag::List(List::Compound(entries))) = c.get("Gossips") else {
+        return gossips;
+    };
+    for entry in entries {
+        let (Some(target), Some(Tag::String(kind)), Some(value)) = (
+            uuid_field(entry, "Target"),
+            entry.get("Type"),
+            int(entry, "Value"),
+        ) else {
+            continue;
+        };
+        if let Some(kind) = GossipType::from_name(kind) {
+            gossips.set(target, kind, value);
+        }
+    }
+    gossips
+}
+
+/// Reads a villager's trade state; `None` when the record has no `VillagerData`.
+fn villager_from_nbt(
+    c: &Compound,
+    uuid: Uuid,
+    pos: Vec3,
+) -> Option<ferrite_entity::villager::VillagerState> {
+    use ferrite_entity::villager::{self, Profession, VillagerState, VillagerType};
+    let Tag::Compound(data) = c.get("VillagerData")? else {
+        return None;
+    };
+    let name = |key: &str| match data.get(key) {
+        Some(Tag::String(name)) => Some(name.as_str()),
+        _ => None,
+    };
+    let mut state = VillagerState::new(
+        name("type")
+            .and_then(VillagerType::from_name)
+            .unwrap_or_default(),
+        [pos.x, pos.y, pos.z],
+    );
+    state.profession = name("profession")
+        .and_then(Profession::from_name)
+        .unwrap_or_default();
+    state.level = int(data, "level")
+        .unwrap_or(1)
+        .clamp(1, i32::from(villager::MAX_LEVEL)) as u8;
+    state.xp = int(c, "Xp").unwrap_or(0);
+    state.workstation = match c.get("Workstation") {
+        Some(Tag::IntArray(words)) if words.len() == 3 => Some([words[0], words[1], words[2]]),
+        _ => None,
+    };
+    state.restock_timer = int(c, "RestockTimer")
+        .unwrap_or(villager::RESTOCK_TICKS as i32)
+        .max(0) as u32;
+    state.search_timer = int(c, "SearchTimer")
+        .unwrap_or(0)
+        .clamp(0, i32::from(u16::MAX)) as u16;
+    if let Some(home) = vec3(c, "Home") {
+        state.home = [home.x, home.y, home.z];
+    }
+    if let Some(Tag::List(List::Compound(offers))) = c.get("Offers") {
+        state.offers = offers.iter().filter_map(offer_from_nbt).collect();
+    }
+    state.gossips = gossips_from_nbt(c);
+    // A record saved before offers were persisted gets the same deterministic draw back.
+    if state.offers.is_empty() && !matches!(state.profession, Profession::None | Profession::Nitwit)
+    {
+        state.offers = villager::offers_for(state.profession, state.level, uuid);
+    }
+    Some(state)
+}
+
 fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     let data = &record.data;
     let props = ferrite_data::entity_props::get(data.kind);
@@ -286,6 +458,10 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if let Some(target) = mob.target {
             c.insert("Target".into(), Tag::IntArray(uuid_words(target)));
         }
+    }
+
+    if let Some(villager) = &data.villager {
+        villager_to_nbt(villager, &mut c);
     }
 
     if let Some(orb) = &data.orb {
@@ -428,6 +604,23 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             }
             None => tracing::warn!(kind, "ignoring an unknown mob kind"),
         }
+    }
+
+    if let Some(kind @ (MobKind::Villager | MobKind::WanderingTrader)) =
+        data.mob.as_ref().map(|mob| mob.kind)
+    {
+        let state = villager_from_nbt(c, data.uuid, pos).unwrap_or_else(|| {
+            let mut state = ferrite_entity::villager::VillagerState::new(
+                ferrite_entity::villager::VillagerType::Plains,
+                [pos.x, pos.y, pos.z],
+            );
+            if kind == MobKind::WanderingTrader {
+                state.offers = ferrite_entity::villager::trader_offers(data.uuid);
+            }
+            state
+        });
+        ferrite_entity::villager::define_metadata(&mut data.metadata, &state);
+        data.villager = Some(state);
     }
 
     if c.contains_key("OrbCount") {
@@ -579,6 +772,69 @@ mod tests {
             "the entity id is set again on load"
         );
         assert_eq!(state.armor, 4);
+    }
+
+    #[test]
+    fn a_villagers_trade_state_and_gossip_survive_a_save() {
+        let mut record = ferrite_entity::mob::new_mob(
+            MobKind::Villager,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        let uuid = record.data.uuid;
+        let alice = Uuid::from_u128(0xa11ce);
+        let bob = Uuid::from_u128(0xb0b);
+        {
+            let state = record.data.villager.as_mut().unwrap();
+            state.profession = ferrite_entity::villager::Profession::Farmer;
+            state.level = 2;
+            state.xp = 30;
+            state.workstation = Some([2, 64, 3]);
+            state.restock_timer = 1234;
+            state.offers =
+                ferrite_entity::villager::offers_for(state.profession, state.level, uuid);
+            state.offers[0].uses = 3;
+            state.offers[0].demand = 2;
+            state
+                .gossips
+                .add(alice, ferrite_entity::villager::GossipType::Trading, 20);
+            state.gossips.add(
+                alice,
+                ferrite_entity::villager::GossipType::MajorPositive,
+                20,
+            );
+            state
+                .gossips
+                .add(bob, ferrite_entity::villager::GossipType::MinorNegative, 25);
+        }
+
+        let loaded = from_nbt(&to_nbt(&[record]));
+        assert_eq!(loaded.len(), 1);
+        let state = loaded[0].data.villager.as_ref().expect("villager state");
+        assert_eq!(
+            state.profession,
+            ferrite_entity::villager::Profession::Farmer
+        );
+        assert_eq!(state.level, 2);
+        assert_eq!(state.xp, 30);
+        assert_eq!(state.workstation, Some([2, 64, 3]));
+        assert_eq!(state.restock_timer, 1234);
+        assert_eq!(state.offers.len(), 4, "level 1 and 2 offers are restored");
+        assert_eq!(state.offers[0].uses, 3);
+        assert_eq!(state.offers[0].demand, 2);
+        assert_eq!(state.reputation(alice), 120);
+        assert_eq!(state.reputation(bob), -25);
+        assert_eq!(
+            loaded[0]
+                .data
+                .metadata
+                .get(ferrite_entity::villager::VILLAGER_DATA_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::VillagerData {
+                kind: ferrite_entity::villager::VillagerType::Plains.id(),
+                profession: ferrite_entity::villager::Profession::Farmer.id(),
+                level: 2,
+            })
+        );
     }
 
     #[test]
