@@ -146,15 +146,10 @@ class FerriteServerObjectsTest {
         assertSame(replacement, structures.unregisterStructure(key));
         assertNull(structures.getStructure(key));
 
-        assertEquals("Ferrite: not implemented: StructureManager#saveStructure",
-                assertThrows(UnsupportedOperationException.class, () -> structures.saveStructure(key)).getMessage());
+        assertThrows(IllegalStateException.class, () -> structures.saveStructure(key), "an unregistered key cannot be saved");
         assertNull(structures.loadStructure(key), "a key without a template file loads nothing");
-        assertEquals("Ferrite: not implemented: Structure#place",
-                assertThrows(UnsupportedOperationException.class,
-                        () -> structure.place((org.bukkit.Location) null, false, null, null, 0, 1.0f, new java.util.Random())).getMessage());
-        assertEquals("Ferrite: not implemented: Structure#fill",
-                assertThrows(UnsupportedOperationException.class,
-                        () -> structure.fill((org.bukkit.Location) null, (org.bukkit.Location) null, false)).getMessage());
+        assertThrows(NullPointerException.class,
+                () -> structure.place((org.bukkit.Location) null, false, org.bukkit.block.structure.StructureRotation.NONE, org.bukkit.block.structure.Mirror.NONE, 0, 1.0f, new java.util.Random()));
     }
 
     @Test void entityFactoryRejectsSnapshotsUntilTheHostParsesThem() {

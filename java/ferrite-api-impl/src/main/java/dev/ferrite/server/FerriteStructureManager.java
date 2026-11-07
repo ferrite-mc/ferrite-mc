@@ -50,7 +50,7 @@ final class FerriteStructureManager implements StructureManager {
         return structures.remove(key);
     }
 
-    @Override public Structure createStructure() { return new EmptyStructure(); }
+    @Override public Structure createStructure() { return new CapturedStructure(); }
 
     /** Reads a vanilla template file from the data directory; placing it runs {@code /place template}; a missing file gives null. */
     @Override public Structure loadStructure(NamespacedKey key, boolean register) {
@@ -66,41 +66,61 @@ final class FerriteStructureManager implements StructureManager {
         }
     }
     @Override public Structure loadStructure(NamespacedKey key) { return loadStructure(key, true); }
-    @Override public void saveStructure(NamespacedKey key) { throw notImplemented("saveStructure"); }
-    @Override public void saveStructure(NamespacedKey key, Structure structure) throws IOException { throw notImplemented("saveStructure"); }
-    @Override public void deleteStructure(NamespacedKey key) throws IOException { throw notImplemented("deleteStructure"); }
-    @Override public void deleteStructure(NamespacedKey key, boolean unregister) throws IOException { throw notImplemented("deleteStructure"); }
-    @Override public File getStructureFile(NamespacedKey key) { throw notImplemented("getStructureFile"); }
-    @Override public Structure loadStructure(File file) throws IOException { throw notImplemented("loadStructure"); }
-    @Override public Structure loadStructure(InputStream inputStream) throws IOException { throw notImplemented("loadStructure"); }
-    @Override public void saveStructure(File file, Structure structure) throws IOException { throw notImplemented("saveStructure"); }
-    @Override public void saveStructure(OutputStream outputStream, Structure structure) throws IOException { throw notImplemented("saveStructure"); }
-    @Override public Structure copy(Structure structure) { throw notImplemented("copy"); }
+    @Override public void saveStructure(NamespacedKey key) {
+        var structure = structures.get(Objects.requireNonNull(key, "key"));
+        if (structure == null) throw new IllegalStateException("Structure " + key + " is not registered");
+        try {
+            saveStructure(key, structure);
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+    @Override public void saveStructure(NamespacedKey key, Structure structure) throws IOException {
+        saveStructure(getStructureFile(key), structure);
+    }
+    @Override public void deleteStructure(NamespacedKey key) throws IOException { deleteStructure(key, true); }
+    @Override public void deleteStructure(NamespacedKey key, boolean unregister) throws IOException {
+        var file = getStructureFile(key);
+        if (unregister) structures.remove(key);
+        java.nio.file.Files.deleteIfExists(file.toPath());
+    }
+    /** {@code <data>/data/<namespace>/structure/<key>.nbt}, where vanilla looks for templates. */
+    @Override public File getStructureFile(NamespacedKey key) {
+        Objects.requireNonNull(key, "key");
+        var file = FerriteTemplate.file(key);
+        if (file == null) throw new IllegalStateException("Ferrite: no data directory to keep structure " + key);
+        return file;
+    }
+    @Override public Structure loadStructure(File file) throws IOException {
+        try (var in = new java.io.FileInputStream(Objects.requireNonNull(file, "file"))) {
+            return StructureNbt.read(in);
+        }
+    }
+    @Override public Structure loadStructure(InputStream inputStream) throws IOException {
+        return StructureNbt.read(Objects.requireNonNull(inputStream, "inputStream"));
+    }
+    @Override public void saveStructure(File file, Structure structure) throws IOException {
+        Objects.requireNonNull(file, "file");
+        var parent = file.getParentFile();
+        if (parent != null) java.nio.file.Files.createDirectories(parent.toPath());
+        try (var out = new java.io.FileOutputStream(file)) {
+            saveStructure(out, structure);
+        }
+    }
+    @Override public void saveStructure(OutputStream outputStream, Structure structure) throws IOException {
+        StructureNbt.write(Objects.requireNonNull(outputStream, "outputStream"), captured(structure));
+    }
+    @Override public Structure copy(Structure structure) { return captured(structure).copy(); }
+
+    /** The in-memory form of a structure this implementation made or loaded. */
+    private static CapturedStructure captured(Structure structure) {
+        Objects.requireNonNull(structure, "structure");
+        if (structure instanceof CapturedStructure captured) return captured;
+        if (structure instanceof FerriteTemplate template) return template.captured();
+        throw notImplemented("a structure from another implementation");
+    }
 
     private static UnsupportedOperationException notImplemented(String method) {
         return new UnsupportedOperationException("Ferrite: not implemented: StructureManager#" + method);
-    }
-
-    /** An empty structure: no palettes, no entities and a zero size until the world fills it. */
-    private static final class EmptyStructure implements Structure {
-        private final PersistentDataContainer data = new FerriteDataContainer();
-
-        @Override public BlockVector getSize() { return new BlockVector(0, 0, 0); }
-        @Override public List<Palette> getPalettes() { return List.of(); }
-        @Override public int getPaletteCount() { return 0; }
-        @Override public List<Entity> getEntities() { return List.of(); }
-        @Override public int getEntityCount() { return 0; }
-        @Override public PersistentDataContainer getPersistentDataContainer() { return data; }
-
-        @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) { throw notImplemented("place"); }
-        @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, java.util.Collection<BlockTransformer> blockTransformers, java.util.Collection<EntityTransformer> entityTransformers) { throw notImplemented("place"); }
-        @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) { throw notImplemented("place"); }
-        @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, java.util.Collection<BlockTransformer> blockTransformers, java.util.Collection<EntityTransformer> entityTransformers) { throw notImplemented("place"); }
-        @Override public void fill(Location corner1, Location corner2, boolean includeEntities) { throw notImplemented("fill"); }
-        @Override public void fill(Location corner, BlockVector size, boolean includeEntities) { throw notImplemented("fill"); }
-
-        private static UnsupportedOperationException notImplemented(String method) {
-            return new UnsupportedOperationException("Ferrite: not implemented: Structure#" + method);
-        }
     }
 }

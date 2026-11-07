@@ -43,9 +43,9 @@ on the branch only.
 4. **Pistons, still missing:** moving-piston block entity and animation timing, retraction/sticky
    pulls carrying entities, pushing players, interrupted movement, cross-region behaviour,
    resolver parity tests.
-5. Other known gaps: plugin Structure API (`saveStructure`, `fill`, `getPalettes`), `/place
-   template` block entities, `/damage from`, `/debug function`, `/test`, `/jfr`
-   (see `docs/COMMANDS-STATUS.md`).
+5. Other known gaps: `/place template` block entities, `/test` (no game-test framework) and
+   `/jfr` (not a JVM) -- `/damage` and `/debug function` are already implemented
+   (see `docs/COMMANDS-STATUS.md`). The plugin Structure API is done (2026-11-07 below).
 
 ## Gotchas
 
@@ -69,3 +69,22 @@ on the branch only.
 - Still open: tamed wolves attacking for the owner
   (mobs only target players today), other tameable kinds, piston timing and edge-case tests,
   Moonrise-style worldgen ports (profile is flat, see `docs/worldgen-host.md`), real-client checks.
+- Horses, donkeys, mules and llamas: taming by riding (temper roll), saddle, steering by the
+  client (`move_vehicle`), rolled speed/jump/health, horse armour absorbing damage, llama carpets,
+  treats, chest on donkey/mule/llama, llama spit when hurt. Shortcuts: the chest menu is 18 slots
+  (vanilla 15 or 3 x strength) and is not dropped on death; no llama caravans or trader llama;
+  horse inventory uses the generic chest screen.
+- Weather cycle (clear/rain/thunder, `advance_weather` rule, game_event packets), trident riptide /
+  loyalty / channeling, piston block updates delayed two ticks. Shortcuts: single weather timer,
+  no riptide spin pose, vault state/animation ignored.
+- 26.3 `PlayerCommand` ids were wrong (wake/sprint) and are fixed: 0 stop sleeping, 1/2 sprint,
+  5 open inventory.
+- Plugin Structure API (`java/ferrite-api-impl`): `createStructure()` + `fill`, `place` with
+  rotation/mirror/integrity/palette, `getPalettes`, `saveStructure`/`loadStructure` (file, stream,
+  key), `deleteStructure`, `getStructureFile`, `copy`. Shortcuts: no entities or block entity data;
+  only `facing`/`axis` turn with rotation; the Java world snapshot only knows materials, so `fill`
+  captures materials without state properties; templates loaded by key still place through the
+  server (`/place template`) and cannot be `fill`ed.
+- Not verifiable here: any of the above against a real client.
+- Order the user gave: Rust worldgen last; Moonrise-style optimisations are done while writing the
+  Rust version, not as a Java patch port.

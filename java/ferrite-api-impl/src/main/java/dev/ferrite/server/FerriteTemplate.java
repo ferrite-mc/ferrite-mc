@@ -91,8 +91,22 @@ final class FerriteTemplate implements Structure {
     }
 
     @Override public BlockVector getSize() { return new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()); }
-    @Override public List<Palette> getPalettes() { throw notImplemented("getPalettes"); }
-    @Override public int getPaletteCount() { throw notImplemented("getPaletteCount"); }
+    private CapturedStructure parsed;
+
+    /** The template file read into memory (palettes, block states), once. */
+    synchronized CapturedStructure captured() {
+        if (parsed == null) {
+            try (var in = new java.io.FileInputStream(file(key))) {
+                parsed = StructureNbt.read(in);
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        }
+        return parsed;
+    }
+
+    @Override public List<Palette> getPalettes() { return captured().getPalettes(); }
+    @Override public int getPaletteCount() { return captured().getPaletteCount(); }
     @Override public List<Entity> getEntities() { return List.of(); }
     @Override public int getEntityCount() { return 0; }
     @Override public PersistentDataContainer getPersistentDataContainer() { return data; }
@@ -111,8 +125,10 @@ final class FerriteTemplate implements Structure {
         if (!blockTransformers.isEmpty() || !entityTransformers.isEmpty()) throw notImplemented("place with transformers");
         placeAt(at(region, location), rotation, mirror, integrity, random);
     }
-    @Override public void fill(Location corner1, Location corner2, boolean includeEntities) { throw notImplemented("fill"); }
-    @Override public void fill(Location corner, BlockVector size, boolean includeEntities) { throw notImplemented("fill"); }
+    // A template read from the data directory is placed by the server; refilling it would make it
+    // differ from its file, so plugins fill a structure from createStructure() instead.
+    @Override public void fill(Location corner1, Location corner2, boolean includeEntities) { throw notImplemented("fill on a loaded template; use createStructure()"); }
+    @Override public void fill(Location corner, BlockVector size, boolean includeEntities) { throw notImplemented("fill on a loaded template; use createStructure()"); }
 
     private static Location at(RegionAccessor region, BlockVector location) {
         if (!(region instanceof org.bukkit.World world)) throw notImplemented("place into a non-world region");

@@ -82,3 +82,4 @@ CMI가 동작한다고 말할 수 없다.
 - 실제 마인크래프트 클라이언트에서 렌더링은 한 번도 확인하지 못했다(단위·Gradle 테스트만).
 - 전체 `cargo test --workspace`에서 `chest_contents_are_shared_saved_and_spilled_when_broken`가 부하 시 한 번 실패했고 단독 실행은 통과했다(불안정 테스트로 의심, 원인 미조사).
 - 엔드, 피스톤은 아직 남아 있다.
+- **구조물 API:** `StructureManager.createStructure()`가 메모리 구조물을 돌려준다. `fill`(영역 복사), `place`(회전·반전·무결성·팔레트; `facing`/`axis`만 같이 돈다), `getPalettes`, `saveStructure`/`loadStructure`(파일·스트림·키), `deleteStructure`, `getStructureFile`, `copy` 구현됨. 엔티티·블록 엔티티 데이터는 담지 않고, Java 월드 스냅샷이 재질만 알아서 `fill`은 상태 속성 없이 재질만 담는다. 키로 읽은 템플릿은 그대로 서버(`/place template`)가 놓으며 `fill`은 할 수 없다.
