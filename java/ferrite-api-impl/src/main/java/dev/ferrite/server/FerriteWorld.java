@@ -14,6 +14,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.Map<Pos, String> states = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<Column, Integer> heights = new java.util.concurrent.ConcurrentHashMap<>();
     private org.bukkit.World proxy;
+    private final WorldEntities entities = new WorldEntities();
     // Remembered for the plugin; no server rule reads these (players cannot hurt each other yet, hardcore needs a respawn rule).
     private volatile boolean hardcore, pvp = true, autoSave = true;
     private FerriteWorld(FerriteServer server, java.util.UUID id, String name, long time, Pos spawn) { this.server = server; this.id = id; this.name = name; this.time = time; this.spawn = spawn; }
@@ -131,7 +132,9 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getBlockAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield block(new Pos(l.getBlockX(), l.getBlockY(), l.getBlockZ())); yield block(new Pos((int) args[0], (int) args[1], (int) args[2])); }
             case "getEmptyChunkSnapshot" -> new FerriteChunkSnapshot((int) args[0], (int) args[1], name, ((org.bukkit.World) proxy).getMinHeight(), ((org.bukkit.World) proxy).getMaxHeight(), hostLong("getFullTime()", time));
             case "getChunkAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield chunk(l.getBlockX() >> 4, l.getBlockZ() >> 4); yield chunk((int) args[0], (int) args[1]); }
-            case "getPlayers", "getEntities", "getLivingEntities" -> server.getOnlinePlayers().stream().filter(p -> { try { return p.getWorld() == proxy; } catch (UnsupportedOperationException | IllegalStateException e) { return false; } }).toList();
+            case "getPlayers" -> playersHere();
+            case "getEntities" -> entitiesHere();
+            case "getLivingEntities" -> livingHere();
             case "hashCode" -> id.hashCode();
             case "equals" -> self == args[0];
             case "toString" -> "World[" + id + "]";
@@ -196,6 +199,26 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
 
     private java.util.List<org.bukkit.entity.Player> playersHere() {
         return server.getOnlinePlayers().stream().filter(p -> { try { return p.getWorld() == proxy; } catch (UnsupportedOperationException | IllegalStateException | IllegalArgumentException e) { return false; } }).map(p -> (org.bukkit.entity.Player) p).toList();
+    }
+
+    private java.util.List<org.bukkit.entity.Entity> hostEntities() {
+        String reply;
+        try { reply = (String) HostBridge.call("World", id, "getEntities()", String.class); }
+        catch (UnsupportedOperationException | IllegalStateException noHost) { return java.util.List.of(); }
+        return WorldEntities.decode(reply, proxy, entities);
+    }
+
+    private java.util.List<org.bukkit.entity.Entity> entitiesHere() {
+        var out = new java.util.LinkedHashMap<java.util.UUID, org.bukkit.entity.Entity>();
+        for (var player : playersHere()) out.put(player.getUniqueId(), player);
+        for (var entity : hostEntities()) out.putIfAbsent(entity.getUniqueId(), entity);
+        return java.util.List.copyOf(out.values());
+    }
+
+    private java.util.List<org.bukkit.entity.LivingEntity> livingHere() {
+        var out = new java.util.ArrayList<org.bukkit.entity.LivingEntity>();
+        for (var entity : entitiesHere()) if (entity instanceof org.bukkit.entity.LivingEntity living) out.add(living);
+        return out;
     }
 
     private static boolean inBox(org.bukkit.Location at, double cx, double cy, double cz, double dx, double dy, double dz) {
@@ -429,27 +452,27 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 for (var player : playersHere()) player.sendPluginMessage((org.bukkit.plugin.Plugin) args[0], (String) args[1], (byte[]) args[2]);
                 return null;
             }
-            case "getEntity" -> { for (var player : playersHere()) if (player.getUniqueId().equals(args[0])) return player; return null; }
+            case "getEntity" -> { for (var entity : entitiesHere()) if (entity.getUniqueId().equals(args[0])) return entity; return null; }
             case "getEntitiesByClass" -> {
                 var types = args.length == 1 && args[0] instanceof Class<?>[] array ? array : new Class<?>[]{(Class<?>) args[0]};
                 var out = new java.util.ArrayList<org.bukkit.entity.Entity>();
-                for (var player : playersHere()) for (var type : types) if (type.isInstance(player)) { out.add(player); break; }
+                for (var entity : entitiesHere()) for (var type : types) if (type.isInstance(entity)) { out.add(entity); break; }
                 return out;
             }
             case "getEntitiesByClasses" -> {
                 var out = new java.util.ArrayList<org.bukkit.entity.Entity>();
-                for (var player : playersHere()) for (var type : (Class<?>[]) args[0]) if (type.isInstance(player)) { out.add(player); break; }
+                for (var entity : entitiesHere()) for (var type : (Class<?>[]) args[0]) if (type.isInstance(entity)) { out.add(entity); break; }
                 return out;
             }
             case "getNearbyEntities" -> {
                 var out = new java.util.ArrayList<org.bukkit.entity.Entity>();
                 java.util.function.Predicate<org.bukkit.entity.Entity> filter = args[args.length - 1] instanceof java.util.function.Predicate<?> f ? (java.util.function.Predicate<org.bukkit.entity.Entity>) f : e -> true;
-                for (var player : playersHere()) {
-                    var at = player.getLocation();
+                for (var entity : entitiesHere()) {
+                    var at = entity.getLocation();
                     boolean hit;
                     if (args[0] instanceof org.bukkit.util.BoundingBox box) hit = box.contains(at.getX(), at.getY(), at.getZ());
                     else { var c = (org.bukkit.Location) args[0]; hit = inBox(at, c.getX(), c.getY(), c.getZ(), (double) args[1], (double) args[2], (double) args[3]); }
-                    if (hit && filter.test(player)) out.add(player);
+                    if (hit && filter.test(entity)) out.add(entity);
                 }
                 return out;
             }
@@ -546,7 +569,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "hasBonusChest" -> false;
             case "key" -> net.kyori.adventure.key.Key.key("minecraft", nether ? "the_nether" : end ? "the_end" : "overworld");
             case "getKey" -> new org.bukkit.NamespacedKey("minecraft", nether ? "the_nether" : end ? "the_end" : "overworld");
-            case "getPlayerCount", "getEntityCount" -> playersHere().size();
+            case "getPlayerCount" -> playersHere().size();
+            case "getEntityCount" -> entitiesHere().size();
             case "getViewDistance", "getSendViewDistance" -> server.getViewDistance();
             case "getSimulationDistance" -> server.getSimulationDistance();
             case "getPersistentDataContainer" -> data;

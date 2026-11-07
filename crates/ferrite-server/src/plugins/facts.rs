@@ -5,6 +5,7 @@
 //! threads only read. A query about a player who is not recorded gets no answer, so the plugin
 //! sees the usual "not implemented" error instead of an invented value.
 
+use crate::game::Dimension;
 use ferrite_plugin::HostCall;
 use std::{
     collections::HashMap,
@@ -190,6 +191,8 @@ pub struct EntityFact {
     pub yaw: f32,
     pub pitch: f32,
     pub health: Option<f32>,
+    /// The plugin world this entity belongs to; `None` for dimensions plugins cannot address.
+    pub world: Option<Uuid>,
 }
 
 fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
@@ -201,7 +204,9 @@ fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
 pub fn publish_entities(
     owned: &mut std::collections::HashSet<Uuid>,
     store: &ferrite_entity::EntityStore,
+    dimension: Dimension,
 ) {
+    let world = (dimension == Dimension::Overworld).then(ferrite_plugin::default_world_id);
     let mut registry = entity_registry().lock().unwrap();
     for uuid in owned.drain() {
         registry.remove(&uuid);
@@ -228,8 +233,18 @@ pub fn publish_entities(
                 yaw: data.yaw,
                 pitch: data.pitch,
                 health: data.mob.as_ref().map(|mob| mob.health),
+                world,
             },
         );
+    }
+}
+
+/// Removes entities a region no longer owns from the plugin view immediately (chunk unload,
+/// shutdown) instead of waiting for its next tick.
+pub fn forget_entities(uuids: impl IntoIterator<Item = Uuid>) {
+    let mut registry = entity_registry().lock().unwrap();
+    for uuid in uuids {
+        registry.remove(&uuid);
     }
 }
 
@@ -240,6 +255,32 @@ pub fn entity_position(uuid: Uuid) -> Option<[f64; 3]> {
         .unwrap()
         .get(&uuid)
         .map(|fact| fact.pos)
+}
+
+/// The entities visible in `world`, as `uuid FIELD kind FIELD x FIELD y FIELD z FIELD yaw FIELD pitch`.
+///
+/// Records are separated by [`ferrite_plugin::HOST_ITEM_SEPARATOR`] and sorted by UUID so repeated
+/// queries are stable. Only the overworld has a plugin world id today; other dimensions stay out
+/// instead of leaking into the default world's list.
+fn world_entities(world: Uuid) -> String {
+    const FIELD: char = '\u{1e}';
+    let registry = entity_registry().lock().unwrap();
+    let mut facts: Vec<_> = registry
+        .iter()
+        .filter(|(_, fact)| fact.world == Some(world))
+        .map(|(uuid, fact)| (*uuid, fact))
+        .collect();
+    facts.sort_by_key(|(uuid, _)| *uuid);
+    facts
+        .iter()
+        .map(|(uuid, fact)| {
+            format!(
+                "{uuid}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}{FIELD}{}",
+                fact.kind, fact.pos[0], fact.pos[1], fact.pos[2], fact.yaw, fact.pitch
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(&ferrite_plugin::HOST_ITEM_SEPARATOR.to_string())
 }
 
 fn entity_answer(call: &HostCall) -> Option<String> {
@@ -433,6 +474,9 @@ fn client_setting(
 
 /// The answer to `call`, or `None` when it is not one of these queries or the player is unknown.
 pub fn answer(call: &HostCall) -> Option<String> {
+    if call.owner == "World" && call.method == "getEntities()" && call.args.is_empty() {
+        return Some(world_entities(Uuid::parse_str(&call.subject).ok()?));
+    }
     if call.owner == "Entity" && call.args.is_empty() {
         return entity_answer(call);
     }
@@ -849,7 +893,7 @@ mod tests {
             data: EntityData::new(ferrite_entity::allocate_id(), uuid, 71, 0.25, 0.25),
         });
         let mut owned = std::collections::HashSet::new();
-        publish_entities(&mut owned, &store);
+        publish_entities(&mut owned, &store, Dimension::Overworld);
         let ask = |method: &str| {
             answer(&HostCall {
                 owner: "Entity".into(),
@@ -863,9 +907,101 @@ mod tests {
         assert!(ask("getVelocity()").unwrap().contains("0.5"));
         let mut empty = EntityStore::new(3);
         let _ = &mut empty;
-        publish_entities(&mut owned, &empty);
+        publish_entities(&mut owned, &empty, Dimension::Overworld);
         assert_eq!(ask("isValid()").as_deref(), Some("false"));
         assert_eq!(ask("getVelocity()"), None);
+    }
+
+    #[test]
+    fn world_entity_queries_are_filtered_and_forget_removed_entities() {
+        use ferrite_entity::{EntityData, EntityRecord, EntityStore, Flags};
+        use ferrite_math::Vec3;
+        let overworld_uuid = Uuid::from_u128(0xe172);
+        let nether_uuid = Uuid::from_u128(0xe173);
+        let mut overworld = EntityStore::new(3);
+        overworld.insert(EntityRecord {
+            pos: Vec3::new(4.0, 65.0, 1.0),
+            vel: Vec3::ZERO,
+            flags: Flags::default(),
+            data: EntityData::new(
+                ferrite_entity::allocate_id(),
+                overworld_uuid,
+                71,
+                0.25,
+                0.25,
+            ),
+        });
+        let mut owned = std::collections::HashSet::new();
+        publish_entities(&mut owned, &overworld, Dimension::Overworld);
+        let ask = |world: Uuid| {
+            answer(&HostCall {
+                owner: "World".into(),
+                subject: world.to_string(),
+                method: "getEntities()".into(),
+                args: vec![],
+            })
+        };
+        let reply = ask(ferrite_plugin::default_world_id()).expect("world query");
+        assert!(
+            reply
+                .split(ferrite_plugin::HOST_ITEM_SEPARATOR)
+                .any(|record| record.starts_with(&format!("{overworld_uuid}\u{1e}"))),
+            "overworld entity missing: {reply}"
+        );
+        assert_eq!(ask(Uuid::from_u128(0x1234)).as_deref(), Some(""));
+
+        // A nether region publishes into the same registry but must not appear in the overworld.
+        let mut nether = EntityStore::new(3);
+        nether.insert(EntityRecord {
+            pos: Vec3::new(8.0, 70.0, 8.0),
+            vel: Vec3::ZERO,
+            flags: Flags::default(),
+            data: EntityData::new(ferrite_entity::allocate_id(), nether_uuid, 71, 0.25, 0.25),
+        });
+        let mut nether_owned = std::collections::HashSet::new();
+        publish_entities(&mut nether_owned, &nether, Dimension::Nether);
+        assert!(
+            !ask(ferrite_plugin::default_world_id())
+                .expect("world query")
+                .contains(&nether_uuid.to_string())
+        );
+
+        let empty = EntityStore::new(3);
+        publish_entities(&mut owned, &empty, Dimension::Overworld);
+        publish_entities(&mut nether_owned, &empty, Dimension::Nether);
+        assert!(
+            !ask(ferrite_plugin::default_world_id())
+                .expect("world query")
+                .contains(&overworld_uuid.to_string())
+        );
+    }
+
+    #[test]
+    fn forgetting_entities_removes_them_immediately() {
+        use ferrite_entity::{EntityData, EntityRecord, EntityStore, Flags};
+        use ferrite_math::Vec3;
+        let uuid = Uuid::from_u128(0xe174);
+        let mut store = EntityStore::new(3);
+        store.insert(EntityRecord {
+            pos: Vec3::new(1.0, 65.0, 1.0),
+            vel: Vec3::ZERO,
+            flags: Flags::default(),
+            data: EntityData::new(ferrite_entity::allocate_id(), uuid, 71, 0.25, 0.25),
+        });
+        let mut owned = std::collections::HashSet::new();
+        publish_entities(&mut owned, &store, Dimension::Overworld);
+        let ask = || {
+            answer(&HostCall {
+                owner: "World".into(),
+                subject: ferrite_plugin::default_world_id().to_string(),
+                method: "getEntities()".into(),
+                args: vec![],
+            })
+            .expect("world query")
+        };
+        assert!(ask().contains(&uuid.to_string()));
+        forget_entities([uuid]);
+        assert!(!ask().contains(&uuid.to_string()));
     }
 
     #[test]
