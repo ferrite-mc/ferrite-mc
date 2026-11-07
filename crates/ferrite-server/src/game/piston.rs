@@ -2,6 +2,7 @@
 
 use ferrite_data::{block_props, blocks, piston_props};
 use ferrite_math::Direction;
+use ferrite_nbt::{Compound, Tag};
 use std::collections::HashSet;
 
 /// Read-only view of blocks owned by the current region. None means unavailable.
@@ -29,6 +30,74 @@ pub struct Plan {
 fn offset([x, y, z]: [i32; 3], direction: Direction) -> [i32; 3] {
     let (dx, dy, dz) = direction.step();
     [x + dx, y + dy, z + dz]
+}
+
+fn facing_name(facing: Direction) -> &'static str {
+    match facing {
+        Direction::Down => "down",
+        Direction::Up => "up",
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::West => "west",
+        Direction::East => "east",
+    }
+}
+
+fn facing_id(facing: Direction) -> i8 {
+    match facing {
+        Direction::Down => 0,
+        Direction::Up => 1,
+        Direction::North => 2,
+        Direction::South => 3,
+        Direction::West => 4,
+        Direction::East => 5,
+    }
+}
+
+/// The block state a moving block entity is attached to (`MovingPistonBlock`).
+pub fn moving_state(facing: Direction, sticky: bool) -> Option<u16> {
+    blocks::state_id(
+        "moving_piston",
+        &[
+            ("facing", facing_name(facing)),
+            ("type", if sticky { "sticky" } else { "normal" }),
+        ],
+    )
+}
+
+/// Vanilla's `BlockState.CODEC` representation used by `PistonMovingBlockEntity.blockState`.
+/// A default state is the block name; a state with property changes uses `id`/`properties`.
+pub fn block_state_tag(state: u16) -> Option<Tag> {
+    let (name, properties) = blocks::state(state)?;
+    if blocks::default_state(name) == Some(state) {
+        return Some(Tag::String(name.into()));
+    }
+    let mut tag = Compound::new();
+    tag.insert("id".into(), Tag::String(name.into()));
+    let mut values = Compound::new();
+    for &(key, value) in properties {
+        values.insert(key.into(), Tag::String(value.into()));
+    }
+    tag.insert("properties".into(), Tag::Compound(values));
+    Some(Tag::Compound(tag))
+}
+
+/// The custom data of a `PistonMovingBlockEntity`, as sent by
+/// `ClientboundBlockEntityDataPacket` for `minecraft:piston`.
+pub fn moving_entity_nbt(
+    moved_state: u16,
+    facing: Direction,
+    extending: bool,
+    progress: f32,
+    source_piston: bool,
+) -> Option<Compound> {
+    let mut data = Compound::new();
+    data.insert("blockState".into(), block_state_tag(moved_state)?);
+    data.insert("facing".into(), Tag::Byte(facing_id(facing)));
+    data.insert("progress".into(), Tag::Float(progress.clamp(0.0, 1.0)));
+    data.insert("extending".into(), Tag::Byte(i8::from(extending)));
+    data.insert("source".into(), Tag::Byte(i8::from(source_piston)));
+    Some(data)
 }
 
 pub(super) fn within_border(border: &super::commands::WorldBorderState, pos: [i32; 3]) -> bool {
@@ -107,6 +176,17 @@ fn sticky(state: u16) -> Option<&'static str> {
         "honey_block" => Some("honey"),
         _ => None,
     }
+}
+
+fn head_state(facing: Direction, sticky: bool) -> Option<u16> {
+    blocks::state_id(
+        "piston_head",
+        &[
+            ("facing", facing_name(facing)),
+            ("type", if sticky { "sticky" } else { "normal" }),
+            ("short", "false"),
+        ],
+    )
 }
 
 /// Resolve an extension or a sticky retraction without mutating the world.
@@ -192,14 +272,7 @@ pub fn changes(
     if !matches!(name, "piston" | "sticky_piston") {
         return None;
     }
-    let facing_name = match facing {
-        Direction::Down => "down",
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
-    };
+    let facing_name = facing_name(facing);
     if !props.contains(&("facing", facing_name))
         || !props.contains(&("extended", if extending { "false" } else { "true" }))
     {
@@ -227,21 +300,7 @@ pub fn changes(
     desired.insert(
         head,
         if extending {
-            blocks::state_id(
-                "piston_head",
-                &[
-                    ("facing", facing_name),
-                    (
-                        "type",
-                        if name == "sticky_piston" {
-                            "sticky"
-                        } else {
-                            "normal"
-                        },
-                    ),
-                    ("short", "false"),
-                ],
-            )?
+            head_state(facing, name == "sticky_piston")?
         } else {
             air
         },
@@ -255,24 +314,7 @@ pub fn changes(
     }
     // The head takes precedence over a vacated source during extension.
     if extending {
-        desired.insert(
-            head,
-            blocks::state_id(
-                "piston_head",
-                &[
-                    ("facing", facing_name),
-                    (
-                        "type",
-                        if name == "sticky_piston" {
-                            "sticky"
-                        } else {
-                            "normal"
-                        },
-                    ),
-                    ("short", "false"),
-                ],
-            )?,
-        );
+        desired.insert(head, head_state(facing, name == "sticky_piston")?);
     }
     desired
         .into_iter()
@@ -280,10 +322,136 @@ pub fn changes(
         .collect()
 }
 
+/// One moved block, from the cell it occupied to the cell it will occupy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MovedBlock {
+    pub source: [i32; 3],
+    pub destination: [i32; 3],
+    pub state: u16,
+}
+
+/// A client-facing moving-piston animation, with the same state a vanilla
+/// `PistonMovingBlockEntity` keeps while the move settles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovingBlock {
+    pub source: [i32; 3],
+    pub destination: [i32; 3],
+    pub moved_state: u16,
+    pub facing: Direction,
+    pub extending: bool,
+    pub progress: f32,
+    /// True for the moving piston head, whose two-cell movement starts at the base.
+    pub source_piston: bool,
+}
+impl MovingBlock {
+    pub fn new(
+        source: [i32; 3],
+        destination: [i32; 3],
+        moved_state: u16,
+        facing: Direction,
+        extending: bool,
+        source_piston: bool,
+    ) -> Self {
+        Self {
+            source,
+            destination,
+            moved_state,
+            facing,
+            extending,
+            progress: 0.0,
+            source_piston,
+        }
+    }
+
+    /// One server tick of a two-tick movement.
+    pub fn tick(&mut self) {
+        self.progress = (self.progress + 0.5).min(1.0);
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.progress >= 1.0
+    }
+
+    pub fn overlaps(&self, affected: &HashSet<[i32; 3]>) -> bool {
+        affected.contains(&self.source) || affected.contains(&self.destination)
+    }
+
+    /// The `moving_piston` state the client puts at the destination.
+    pub fn moving_state(&self) -> Option<u16> {
+        let (name, properties) = blocks::state(self.moved_state)?;
+        let sticky = name.strip_prefix("minecraft:").unwrap_or(name) == "piston_head"
+            && properties
+                .iter()
+                .any(|&(key, value)| key == "type" && value == "sticky");
+        moving_state(self.facing, sticky)
+    }
+
+    pub fn entity_nbt(&self) -> Option<Compound> {
+        moving_entity_nbt(
+            self.moved_state,
+            self.facing,
+            self.extending,
+            self.progress,
+            self.source_piston,
+        )
+    }
+}
+
+/// Moving blocks that still need their client animation. The final world state is committed
+/// atomically before this overlay is sent; the overlay never changes collision or drops.
+#[derive(Debug, Default)]
+pub struct Animations {
+    blocks: Vec<MovingBlock>,
+}
+impl Animations {
+    /// Replaces any animation that shares a source or destination with the new movement.
+    pub fn start(&mut self, blocks: Vec<MovingBlock>, affected: &HashSet<[i32; 3]>) {
+        self.blocks.retain(|block| !block.overlaps(affected));
+        self.blocks.extend(blocks);
+    }
+
+    pub fn advance(&mut self) {
+        for block in &mut self.blocks {
+            block.tick();
+        }
+        self.blocks.retain(|block| !block.is_complete());
+    }
+
+    pub fn active(&self) -> &[MovingBlock] {
+        &self.blocks
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        for block in other.blocks {
+            self.blocks
+                .retain(|old| old.destination != block.destination);
+            self.blocks.push(block);
+        }
+    }
+
+    /// Splits out animations whose destination is in the moving section set.
+    pub fn split(&mut self, keep: impl Fn([i32; 3]) -> bool) -> Self {
+        let mut moved = Vec::new();
+        self.blocks.retain(|block| {
+            if keep(block.destination) {
+                moved.push(block.clone());
+                false
+            } else {
+                true
+            }
+        });
+        Self { blocks: moved }
+    }
+}
+
 /// Expected block changes and blocks whose drops must be spawned after commit.
 pub struct Operation {
     pub edits: Vec<([i32; 3], u32, u32)>,
     pub destroyed: Vec<([i32; 3], u16)>,
+    /// Blocks that move together with the head (not including the head itself).
+    pub moves: Vec<MovedBlock>,
+    /// The extension head, which travels from the base to the head cell.
+    pub head: Option<MovedBlock>,
 }
 
 /// Prepare a complete operation without modifying the world.
@@ -307,9 +475,32 @@ pub fn operation(
         .iter()
         .map(|&pos| Some((pos, world.block(pos)?)))
         .collect::<Option<Vec<_>>>()?;
+    let direction = if extending { facing } else { facing.opposite() };
+    let moves = plan
+        .to_move
+        .iter()
+        .map(|&source| {
+            Some(MovedBlock {
+                source,
+                destination: offset(source, direction),
+                state: world.block(source)?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let head = if extending {
+        Some(MovedBlock {
+            source: base,
+            destination: offset(base, facing),
+            state: head_state(facing, sticky)?,
+        })
+    } else {
+        None
+    };
     Some(Operation {
         edits: changes(world, base, facing, extending, &plan)?,
         destroyed,
+        moves,
+        head,
     })
 }
 
@@ -620,5 +811,179 @@ mod tests {
         let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
         assert_eq!(plan.to_move.len(), 1);
         assert!(plan.to_destroy.is_empty());
+    }
+
+    #[test]
+    fn moving_block_progresses_and_completes_after_two_ticks() {
+        let mut block = MovingBlock::new(
+            [1, 64, 0],
+            [2, 64, 0],
+            state("stone"),
+            Direction::East,
+            true,
+            false,
+        );
+        assert_eq!(block.progress, 0.0);
+        block.tick();
+        assert_eq!(block.progress, 0.5);
+        assert!(!block.is_complete());
+        block.tick();
+        assert_eq!(block.progress, 1.0);
+        assert!(block.is_complete());
+    }
+
+    #[test]
+    fn moving_entity_nbt_uses_vanilla_fields_and_state_encoding() {
+        let nbt = moving_entity_nbt(state("stone"), Direction::East, true, 0.0, true).unwrap();
+        assert!(matches!(
+            nbt.get("blockState"),
+            Some(Tag::String(name)) if name == "minecraft:stone"
+        ));
+        assert!(matches!(nbt.get("facing"), Some(Tag::Byte(5))));
+        assert!(matches!(nbt.get("progress"), Some(Tag::Float(progress)) if *progress == 0.0));
+        assert!(matches!(nbt.get("extending"), Some(Tag::Byte(1))));
+        assert!(matches!(nbt.get("source"), Some(Tag::Byte(1))));
+
+        let stairs = blocks::state_id("oak_stairs", &[("facing", "east")]).unwrap();
+        let Some(Tag::Compound(encoded)) = block_state_tag(stairs) else {
+            panic!("non-default state must use the id/properties encoding");
+        };
+        assert!(matches!(
+            encoded.get("id"),
+            Some(Tag::String(name)) if name == "minecraft:oak_stairs"
+        ));
+        assert!(matches!(encoded.get("properties"), Some(Tag::Compound(_))));
+    }
+
+    #[test]
+    fn moving_head_keeps_the_sticky_type() {
+        let head = blocks::state_id(
+            "piston_head",
+            &[("facing", "east"), ("type", "sticky"), ("short", "false")],
+        )
+        .unwrap();
+        let block = MovingBlock::new([0, 64, 0], [1, 64, 0], head, Direction::East, true, true);
+        let state = block.moving_state().unwrap();
+        let (name, properties) = blocks::state(state).unwrap();
+        assert_eq!(name, "minecraft:moving_piston");
+        assert!(properties.contains(&("facing", "east")));
+        assert!(properties.contains(&("type", "sticky")));
+        assert!(moving_state(Direction::East, false).is_some());
+    }
+
+    #[test]
+    fn animations_advance_to_completion_without_duplicates() {
+        let mut animations = Animations::default();
+        let block = MovingBlock::new(
+            [1, 64, 0],
+            [2, 64, 0],
+            state("stone"),
+            Direction::East,
+            true,
+            false,
+        );
+        animations.start(vec![block], &HashSet::from([[1, 64, 0], [2, 64, 0]]));
+        animations.advance();
+        assert_eq!(animations.active().len(), 1);
+        assert_eq!(animations.active()[0].progress, 0.5);
+        animations.advance();
+        assert!(animations.active().is_empty());
+    }
+
+    #[test]
+    fn overlapping_animation_is_replaced() {
+        let mut animations = Animations::default();
+        let first = MovingBlock::new(
+            [1, 64, 0],
+            [2, 64, 0],
+            state("stone"),
+            Direction::East,
+            true,
+            false,
+        );
+        animations.start(vec![first], &HashSet::from([[2, 64, 0]]));
+        let second = MovingBlock::new(
+            [1, 64, 0],
+            [2, 64, 0],
+            state("stone"),
+            Direction::East,
+            false,
+            false,
+        );
+        animations.start(vec![second.clone()], &HashSet::from([[1, 64, 0]]));
+        assert_eq!(animations.active(), &[second]);
+    }
+
+    #[test]
+    fn interrupted_extension_is_replaced_by_retraction() {
+        let mut animations = Animations::default();
+        let extension = MovingBlock::new(
+            [0, 64, 0],
+            [1, 64, 0],
+            state("stone"),
+            Direction::East,
+            true,
+            true,
+        );
+        animations.start(vec![extension], &HashSet::from([[0, 64, 0], [1, 64, 0]]));
+        let retraction = MovingBlock::new(
+            [2, 64, 0],
+            [1, 64, 0],
+            state("stone"),
+            Direction::East,
+            false,
+            false,
+        );
+        animations.start(
+            vec![retraction.clone()],
+            &HashSet::from([[1, 64, 0], [2, 64, 0]]),
+        );
+        assert_eq!(animations.active(), &[retraction]);
+    }
+
+    #[test]
+    fn extension_then_retraction_restores_the_world_state() {
+        let mut grid = Grid::default();
+        let base = [0, 64, 0];
+        let sticky = blocks::state_id(
+            "sticky_piston",
+            &[("facing", "east"), ("extended", "false")],
+        )
+        .unwrap();
+        let stone = state("stone");
+        grid.0.insert(base, sticky);
+        grid.0.insert([1, 64, 0], stone);
+
+        let extension = operation(&grid, base, Direction::East, true).unwrap();
+        assert_eq!(extension.head.unwrap().destination, [1, 64, 0]);
+        assert!(
+            extension
+                .moves
+                .iter()
+                .any(|moved| moved.source == [1, 64, 0] && moved.destination == [2, 64, 0])
+        );
+        for &(pos, _, next) in &extension.edits {
+            grid.0.insert(pos, u16::try_from(next).unwrap());
+        }
+
+        let retraction = operation(&grid, base, Direction::East, false).unwrap();
+        assert!(
+            retraction
+                .moves
+                .iter()
+                .any(|moved| moved.source == [2, 64, 0] && moved.destination == [1, 64, 0])
+        );
+        for &(pos, _, next) in &retraction.edits {
+            grid.0.insert(pos, u16::try_from(next).unwrap());
+        }
+        assert_eq!(grid.block([1, 64, 0]), Some(stone));
+        assert_eq!(grid.block([2, 64, 0]), Some(state("air")));
+        assert_eq!(
+            grid.block(base),
+            blocks::state_id(
+                "sticky_piston",
+                &[("facing", "east"), ("extended", "false")]
+            )
+        );
     }
 }
