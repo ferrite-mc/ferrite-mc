@@ -23,7 +23,8 @@ use ferrite_protocol::{
     Packet, VarInt, encode_packet,
     packets::play::{
         AddEntity, EntityHeadRotation, EntityMove, EntityMoveRotation, EntityRotation,
-        EntityTeleport, RemoveEntities, SetEntityData, SetEntityMotion, TeleportEntity,
+        EntityTeleport, RemoveEntities, SetEntityData, SetEntityLink, SetEntityMotion,
+        SetEquipment, TeleportEntity,
     },
     types::LpVec3,
 };
@@ -293,6 +294,42 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                                 values,
                             }),
                         );
+                    }
+                    if let Some(state) = data.mob {
+                        // What a horse wears and the lead it hangs on, for a viewer who just
+                        // started tracking it.
+                        if state.saddled || state.armor != 0 {
+                            let saddle = if state.saddled {
+                                ferrite_item::ItemStack::from_name("minecraft:saddle")
+                                    .unwrap_or_default()
+                            } else {
+                                ferrite_item::ItemStack::empty()
+                            };
+                            let armor = if state.armor != 0 {
+                                ferrite_item::ItemStack::with_count(state.armor, 1)
+                            } else {
+                                ferrite_item::ItemStack::empty()
+                            };
+                            sink(
+                                viewer.key,
+                                &encode(&SetEquipment {
+                                    entity_id: VarInt(data.id),
+                                    slots: vec![
+                                        (crate::horse::SADDLE_SLOT, saddle),
+                                        (crate::horse::BODY_SLOT, armor),
+                                    ],
+                                }),
+                            );
+                        }
+                        if let Some((_, holder)) = state.leash {
+                            sink(
+                                viewer.key,
+                                &encode(&SetEntityLink {
+                                    attached: data.id,
+                                    holder,
+                                }),
+                            );
+                        }
                     }
                     started.push(viewer.key);
                 }

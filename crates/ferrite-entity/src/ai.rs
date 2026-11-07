@@ -52,6 +52,101 @@ pub const REPATH_TICKS: u16 = 20;
 /// Hostile mobs move a little faster than their wander gait while chasing.
 const CHASE_ACCELERATION: f64 = 1.35;
 
+/// Distance at which a lead starts to pull (`Leashable.ELASTIC_DISTANCE_START`).
+const LEASH_PULL: f64 = 6.0;
+/// Distance at which a lead snaps (`Leashable.LEASH_TOO_FAR_DIST`).
+const LEASH_SNAP: f64 = 12.0;
+/// Caravan llamas hurry after their head (`LlamaFollowCaravanGoal` speed modifier 2.1).
+const CARAVAN_SPEED: f64 = 2.1;
+
+/// Where the holder of a leashed animal is when it is more than six blocks away; a lead that
+/// stretches past twelve snaps. `None` when the animal is not on a lead, the holder is not in
+/// this region, or the lead is slack.
+fn leash_pull(
+    store: &mut EntityStore,
+    key: crate::EntityKey,
+    players: &[Target],
+    start: Vec3,
+    events: &mut Vec<MobEvent>,
+) -> Option<Vec3> {
+    let (holder, _) = mob::state(store, key)?.leash?;
+    let target = players.iter().find(|t| t.uuid == holder)?;
+    let dx = target.pos.x - start.x;
+    let dz = target.pos.z - start.z;
+    let distance = (dx * dx + dz * dz).sqrt();
+    if distance > LEASH_SNAP {
+        mob::state_mut(store, key)?.leash = None;
+        events.push(MobEvent::LeashBroke { key });
+        return None;
+    }
+    (distance > LEASH_PULL).then_some(target.pos)
+}
+
+/// Where a llama in a caravan walks to: its head, once it is more than three blocks behind.
+/// A free adult llama within nine blocks of a led or trailing llama with nobody behind it joins
+/// the line; the line lets go past sixteen blocks.
+fn caravan_target(store: &mut EntityStore, key: crate::EntityKey, start: Vec3) -> Option<Vec3> {
+    let state = mob::state(store, key)?;
+    if state.kind != MobKind::Llama || state.leash.is_some() {
+        return None;
+    }
+    let uuid = store.data(key)?.uuid;
+    if let Some(head) = state.caravan {
+        let head_key = store
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| store.data(k).is_some_and(|d| d.uuid == head));
+        let head_pos = head_key
+            .filter(|&k| mob::state(store, k).is_some_and(|s| !s.is_dead()))
+            .and_then(|k| store.pos(k));
+        let Some(pos) = head_pos else {
+            mob::state_mut(store, key)?.caravan = None;
+            return None;
+        };
+        let (dx, dz) = (pos.x - start.x, pos.z - start.z);
+        let distance = (dx * dx + dz * dz).sqrt();
+        if distance > 16.0 {
+            mob::state_mut(store, key)?.caravan = None;
+            return None;
+        }
+        return (distance > 3.0).then_some(pos);
+    }
+    if state.age < 0 {
+        return None;
+    }
+    // Look for the end of a line.
+    let found = store.keys().iter().copied().find_map(|k| {
+        if k == key {
+            return None;
+        }
+        let other = mob::state(store, k)?;
+        if other.kind != MobKind::Llama || other.is_dead() {
+            return None;
+        }
+        if other.leash.is_none() && other.caravan.is_none() {
+            return None;
+        }
+        let data = store.data(k)?;
+        let pos = store.pos(k)?;
+        let (dx, dz) = (pos.x - start.x, pos.z - start.z);
+        if dx * dx + dz * dz > 81.0 {
+            return None;
+        }
+        let has_tail = store
+            .keys()
+            .iter()
+            .any(|&t| mob::state(store, t).is_some_and(|s| s.caravan == Some(data.uuid)));
+        (!has_tail).then_some(data.uuid)
+    });
+    if let Some(head) = found
+        && head != uuid
+    {
+        mob::state_mut(store, key)?.caravan = Some(head);
+    }
+    None
+}
+
 /// A player as the goals see it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Target {
@@ -76,6 +171,8 @@ pub enum MobEvent {
         direction: Vec3,
         damage: f32,
     },
+    /// A lead stretched too far and snapped.
+    LeashBroke { key: crate::EntityKey },
     /// A llama spits at a player.
     Spit { from: Vec3, direction: Vec3 },
     /// The ender dragon spits a fireball (`dragon_fireball`) at a player.
@@ -409,6 +506,14 @@ pub fn tick_with(
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                     speed = 1.5;
                 }
+            } else if let Some(holder) = leash_pull(store, key, players, start, &mut events) {
+                // A lead pulls its animal along once it is more than six blocks from the holder.
+                directed = true;
+                walking = Some(yaw_towards(holder.x - start.x, holder.z - start.z));
+            } else if let Some(head) = caravan_target(store, key, start) {
+                directed = true;
+                walking = Some(yaw_towards(head.x - start.x, head.z - start.z));
+                speed = CARAVAN_SPEED;
             } else if kind.is_tameable()
                 && let Some(owner_pos) = crate::tame::follow_target(store, key, &owners, start)
             {
@@ -914,6 +1019,72 @@ mod tests {
             }
         }
         assert!(spat);
+    }
+
+    #[test]
+    fn a_lead_pulls_its_animal_and_snaps_when_stretched() {
+        let world = TestWorld::flat(64);
+        let player = target(0.5, 0.5);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(9.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::state_mut(&mut store, cow).unwrap().leash = Some((player.uuid, 1));
+        let mut rng = Rng::new(2);
+        let before = store.pos(cow).unwrap().x;
+        for _ in 0..40 {
+            tick_with(&mut store, &world, &[player], &mut rng);
+        }
+        assert!(
+            store.pos(cow).unwrap().x < before,
+            "the lead drags the cow closer"
+        );
+        // Far past twelve blocks it breaks.
+        let far = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(30.5, 64.0, 0.5),
+            &mut Rng::new(3),
+        ));
+        mob::state_mut(&mut store, far).unwrap().leash = Some((player.uuid, 1));
+        let events = tick_with(&mut store, &world, &[player], &mut rng);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MobEvent::LeashBroke { key } if *key == far))
+        );
+        assert!(mob::state(&store, far).unwrap().leash.is_none());
+    }
+
+    #[test]
+    fn a_free_llama_joins_a_caravan_and_follows_its_head() {
+        let world = TestWorld::flat(64);
+        let player = target(0.5, 0.5);
+        let mut store = EntityStore::default();
+        let head = store.insert(new_mob(
+            MobKind::Llama,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::state_mut(&mut store, head).unwrap().leash = Some((player.uuid, 1));
+        let tail = store.insert(new_mob(
+            MobKind::Llama,
+            Vec3::new(6.5, 64.0, 0.5),
+            &mut Rng::new(2),
+        ));
+        let mut rng = Rng::new(3);
+        tick_with(&mut store, &world, &[player], &mut rng);
+        let head_uuid = store.data(head).unwrap().uuid;
+        assert_eq!(mob::state(&store, tail).unwrap().caravan, Some(head_uuid));
+        let before = store.pos(tail).unwrap().x;
+        for _ in 0..30 {
+            tick_with(&mut store, &world, &[player], &mut rng);
+        }
+        assert!(
+            store.pos(tail).unwrap().x < before,
+            "the tail llama trails its head"
+        );
     }
 
     #[test]

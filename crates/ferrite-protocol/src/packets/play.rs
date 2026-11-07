@@ -777,6 +777,8 @@ packet!(SetHeldSlot,107,Clientbound,{slot:VarInt});
 packet!(OpenScreen,60,Clientbound,{window:VarInt,menu:VarInt,title:crate::types::Translatable});
 // `mount_screen_open`: the horse inventory screen for entity `entity` with `columns` chest columns.
 packet!(MountScreenOpen,42,Clientbound,{window:VarInt,columns:VarInt,entity:i32});
+// `set_entity_link`: a lead from `attached` to `holder`; holder 0 takes it off.
+packet!(SetEntityLink,102,Clientbound,{attached:i32,holder:i32});
 // Vanilla `ClientboundContainerSetDataPacket`: one menu property (furnace lit/progress, anvil
 // cost, enchanting costs and seed, stonecutter selection).
 packet!(ContainerSetData,19,Clientbound,{window:VarInt,id:i16,value:i16});
@@ -1800,6 +1802,10 @@ mod interaction_tests {
             window: VarInt(1),
             menu: VarInt(12),
             title: crate::types::Translatable("container.crafting".into()),
+        });
+        roundtrip(SetEntityLink {
+            attached: 4,
+            holder: 9,
         });
         roundtrip(MountScreenOpen {
             window: VarInt(1),

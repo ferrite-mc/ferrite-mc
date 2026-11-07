@@ -297,6 +297,10 @@ pub struct MobState {
     pub breed_timer: u16,
     /// The player a tamed animal belongs to (`TamableAnimal.owner`).
     pub owner: Option<uuid::Uuid>,
+    /// The player holding this animal on a lead, and that player's entity id for the client.
+    pub leash: Option<(uuid::Uuid, i32)>,
+    /// The llama this one trails in a caravan (`Llama.caravanHead`).
+    pub caravan: Option<uuid::Uuid>,
     /// Whether a tamed animal was told to sit.
     pub sitting: bool,
     /// Whether a tamed animal is walking to its owner (`FollowOwnerGoal`).
@@ -355,6 +359,8 @@ impl MobState {
             saddled: false,
             armor: 0,
             chest: false,
+            leash: None,
+            caravan: None,
             armor_points: 0.0,
             speed: 0.0,
             jump: 0.0,

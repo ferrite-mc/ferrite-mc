@@ -3929,8 +3929,28 @@ impl Region {
                 pos: ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             })
             .collect();
+        // A lead loaded from disk knows only its holder's uuid; give it the client's entity id.
+        let holders: std::collections::HashMap<Uuid, i32> =
+            self.players.values().map(|p| (p.uuid, p.entity)).collect();
+        for key in self.entities.keys().to_vec() {
+            let Some((holder, id)) = mob::state(&self.entities, key).and_then(|s| s.leash) else {
+                continue;
+            };
+            if let Some(&real) = holders.get(&holder)
+                && real != id
+            {
+                if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                    state.leash = Some((holder, real));
+                }
+                self.send_link(ctx, key, real);
+            }
+        }
         for event in ai::tick_with(&mut self.entities, blocks, &targets, &mut self.rng) {
             match event {
+                ai::MobEvent::LeashBroke { key } => {
+                    self.send_link(ctx, key, 0);
+                    self.drop_lead(key);
+                }
                 ai::MobEvent::Melee {
                     player,
                     damage,
@@ -4023,6 +4043,12 @@ impl Region {
             })
             .collect();
         for (key, kind, pos, baby) in dead {
+            if mob::state(&self.entities, key).is_some_and(|s| s.leash.is_some()) {
+                self.drop_lead(key);
+                if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                    state.leash = None;
+                }
+            }
             // A donkey, mule or llama drops its chest, what is in it, and its saddle.
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
@@ -4350,6 +4376,102 @@ impl Region {
     /// strength, critical hits, sweeping, knockback and the hurt animation. A drawn bow that
     /// was released this tick fires its arrow first.
     /// Sends an entity event (vanilla `broadcastEntityEvent`) to the players tracking `key`.
+    /// Tells the players tracking `key` which entity holds its lead (0 for none).
+    fn send_link(&self, ctx: &TickContext, key: ferrite_entity::EntityKey, holder: i32) {
+        let Some(id) = self.entities.data(key).map(|data| data.id) else {
+            return;
+        };
+        let players = &self.players;
+        tracker::broadcast(
+            &self.entities,
+            key,
+            &ferrite_protocol::packets::play::SetEntityLink {
+                attached: id,
+                holder,
+            },
+            &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+        );
+    }
+
+    /// A snapped lead falls where the animal stands.
+    fn drop_lead(&mut self, key: ferrite_entity::EntityKey) {
+        let (Some(pos), Some(item_id)) = (
+            self.entities.pos(key),
+            ferrite_item::item_id("minecraft:lead"),
+        ) else {
+            return;
+        };
+        let stack = ferrite_protocol::packets::play::ItemStack {
+            count: 1,
+            item_id: i32::from(item_id),
+        };
+        let block = [
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ];
+        let record = item::pop_resource(block, stack, &mut self.rng);
+        self.entities.insert(record);
+    }
+
+    /// Right-click with a lead on a leashable animal ties it to the player; the holder's right
+    /// click takes it off again and gets the lead back. `true` when the click was used.
+    fn use_lead(
+        &mut self,
+        ctx: &TickContext,
+        uuid: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
+            return false;
+        };
+        if state.leash.is_some_and(|(holder, _)| holder == uuid) {
+            if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                state.leash = None;
+            }
+            self.send_link(ctx, key, 0);
+            if gamemode != 1 {
+                let lead = ferrite_item::ItemStack::from_name("minecraft:lead");
+                if let (Some(lead), Some(p)) = (lead, self.players.get_mut(&uuid)) {
+                    if let Some(rest) = p.inventory.place_back(lead) {
+                        p.menus.thrown.push(rest);
+                    }
+                    p.sync_containers();
+                }
+            }
+            return true;
+        }
+        if held != "minecraft:lead"
+            || state.leash.is_some()
+            || !(state.kind.is_animal() || state.kind.is_equine())
+        {
+            return false;
+        }
+        let Some(holder_id) = self.players.get(&uuid).map(|p| p.entity) else {
+            return false;
+        };
+        if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+            state.leash = Some((uuid, holder_id));
+        }
+        self.send_link(ctx, key, holder_id);
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&uuid)
+        {
+            p.inventory.remove(slot, 1);
+            send(
+                p,
+                &SetPlayerInventory {
+                    slot: VarInt(slot as i32),
+                    item: p.inventory.get(slot).clone(),
+                },
+            );
+        }
+        true
+    }
+
     fn broadcast_status(&self, ctx: &TickContext, key: ferrite_entity::EntityKey, status: u8) {
         let Some(id) = self.entities.data(key).map(|data| data.id) else {
             return;
@@ -4397,6 +4519,9 @@ impl Region {
                 let name = held.name().unwrap_or("minecraft:air");
                 let gamemode = p.gamemode;
                 let sneaking = p.sneaking;
+                if self.use_lead(ctx, uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
                 if sneaking
                     && ferrite_entity::mob::state(&self.entities, key)

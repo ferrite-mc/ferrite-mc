@@ -262,6 +262,9 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("Sitting".into(), Tag::Byte(mob.sitting as i8));
         c.insert("Saddled".into(), Tag::Byte(mob.saddled as i8));
         c.insert("Armor".into(), Tag::Int(i32::from(mob.armor)));
+        if let Some((holder, _)) = mob.leash {
+            c.insert("Leash".into(), Tag::IntArray(uuid_words(holder)));
+        }
         if mob.chest {
             c.insert("ChestedHorse".into(), Tag::Byte(1));
             c.insert("ChestItems".into(), super::equine_chest::to_nbt(data.uuid));
@@ -399,6 +402,8 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.owner = uuid_field(c, "Owner");
                 mob.sitting = boolean(c, "Sitting");
                 mob.saddled = boolean(c, "Saddled");
+                // The holder's entity id is filled in by the region once the player is there.
+                mob.leash = uuid_field(c, "Leash").map(|holder| (holder, 0));
                 mob.chest = boolean(c, "ChestedHorse");
                 if mob.chest
                     && let Some(items) = c.get("ChestItems")
@@ -553,6 +558,27 @@ mod tests {
             Some(Uuid::from_u128(7))
         );
         assert_eq!(loaded[3].data.fuse, Some(80));
+    }
+
+    #[test]
+    fn a_lead_and_a_saddle_survive_a_save() {
+        let mut record = ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Llama,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        let holder = Uuid::from_u128(5);
+        let state = record.data.mob.as_mut().unwrap();
+        state.leash = Some((holder, 12));
+        state.armor = 4;
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let state = loaded[0].data.mob.as_ref().unwrap();
+        assert_eq!(
+            state.leash,
+            Some((holder, 0)),
+            "the entity id is set again on load"
+        );
+        assert_eq!(state.armor, 4);
     }
 
     #[test]
