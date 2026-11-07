@@ -525,6 +525,9 @@ pub enum Signal {
         entity: Box<EntityRecord>,
     },
 }
+/// A queued explosion: center, power, fire, block damage, player credit.
+type PendingExplosion = ([f64; 3], f32, bool, bool, Option<Uuid>);
+
 /// What a region tick needs from the world loop.
 #[derive(Clone)]
 pub struct TickContext {
@@ -841,8 +844,8 @@ pub struct Region {
     /// Explosions plugins asked for: center, power, whether fire is left behind and whether
     /// blocks break.
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
-    /// Dragon breath clouds: centre and ticks left.
-    pub breath_clouds: Vec<(ferrite_math::Vec3, u32)>,
+    /// Dragon breath clouds: vanilla growth, wait and damage schedule.
+    pub breath_clouds: Vec<ferrite_entity::dragon::BreathCloud>,
     /// Chance in percent that a wandering trader turns up at the next daily roll
     /// (`WanderingTraderSpawner`: starts at 25, grows by 25 per miss, caps at 75).
     pub trader_chance: u32,
@@ -4434,6 +4437,18 @@ impl Region {
         }
         true
     }
+
+    /// Creates an end crystal at an absolute position (`/summon minecraft:end_crystal`).
+    pub fn summon_end_crystal(&mut self, pos: [f64; 3]) {
+        if pos
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+        {
+            self.entities.insert(ferrite_entity::dragon::new_crystal(
+                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+            ));
+        }
+    }
     /// The current position of a lead holder, and its client entity id when this region or a
     /// world-visible snapshot knows it. Another region's entity store is never touched directly.
     /// A holder that is known to be in another dimension is rejected immediately; only a holder
@@ -4734,7 +4749,7 @@ impl Region {
                 }
                 ai::MobEvent::Breath { pos } => self
                     .breath_clouds
-                    .push((pos, ferrite_entity::dragon::BREATH_TICKS)),
+                    .push(ferrite_entity::dragon::BreathCloud::perched(pos)),
                 ai::MobEvent::Status { key, status } => self.broadcast_status(ctx, key, status),
                 ai::MobEvent::Bred(bred) => {
                     // Vanilla gives 1-7 experience points to the breeding and counts it for the
@@ -4795,10 +4810,22 @@ impl Region {
                 if !mob.is_dead() || mob.loot_dropped {
                     return None;
                 }
-                Some((key, mob.kind, self.entities.pos(key)?, mob.age < 0))
+                Some((
+                    key,
+                    mob.kind,
+                    self.entities.pos(key)?,
+                    mob.age < 0,
+                    mob.last_killer,
+                ))
             })
             .collect();
-        for (key, kind, pos, baby) in dead {
+        for (key, kind, pos, baby, killer) in dead {
+            if let Some(killer) = killer {
+                super::recipe_unlock::KILLS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((killer, kind.name()));
+            }
             if mob::state(&self.entities, key).is_some_and(|s| s.leash.is_some()) {
                 self.drop_lead(key);
                 if let Some(state) = mob::state_mut(&mut self.entities, key) {
@@ -4970,12 +4997,31 @@ impl Region {
         }
     }
 
+    fn guarded_spikes(&self, source: &super::anvil::AnvilChunkSource) -> Vec<u8> {
+        let tops: Vec<_> = (0..super::end_fight::SPIKE_COUNT)
+            .map(|index| {
+                let [x, z] = super::end_fight::spike_column(index);
+                if !self
+                    .held_chunks
+                    .contains_key(&ChunkPos(x.div_euclid(16), z.div_euclid(16)))
+                {
+                    return None;
+                }
+                super::end_fight::podium_floor(|y| source.block(x, y, z))
+            })
+            .collect();
+        super::end_fight::guarded_spike_indices(&tops)
+    }
+
     fn run_end_fight(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
         let mut state = ctx.state.lock().unwrap();
         let fight = &mut state.more.end_fight;
+        if fight.guarded.is_empty() {
+            fight.guarded = self.guarded_spikes(source).into_iter().collect();
+        }
         // The region that holds the chunk at the origin starts the fight.
         if !fight.started && self.held_chunks.contains_key(&ChunkPos(0, 0)) {
             let Some(floor) = super::end_fight::podium_floor(|y| source.block(0, y, 0)) else {
@@ -5056,6 +5102,7 @@ impl Region {
             }
         }
         let mut placed = Vec::new();
+        let mut cages = Vec::new();
         for index in 0..super::end_fight::SPIKE_COUNT {
             if fight.crystals.contains(&index) {
                 continue;
@@ -5080,9 +5127,15 @@ impl Region {
                         f64::from(z) + 0.5,
                     ),
                 ));
+                if fight.guarded.contains(&index) {
+                    cages.extend(super::end_fight::spike_cage_blocks([x, top, z]));
+                }
             }
         }
         drop(state);
+        if !cages.is_empty() {
+            self.place_blocks(ctx, &cages);
+        }
         for record in placed {
             self.entities.insert(record);
         }
@@ -5163,6 +5216,14 @@ impl Region {
                     }) else {
                         continue;
                     };
+                    let guarded = ctx
+                        .state
+                        .lock()
+                        .unwrap()
+                        .more
+                        .end_fight
+                        .guarded
+                        .contains(&index);
                     // A respawn resumed after a restart may already have this spike's crystal.
                     if self.crystal_at([x, top + 1, z]).is_none() {
                         self.entities.insert(ferrite_entity::dragon::new_crystal(
@@ -5180,8 +5241,24 @@ impl Region {
                         .end_fight
                         .crystals
                         .insert(index);
+                    if guarded {
+                        self.place_blocks(ctx, &super::end_fight::spike_cage_blocks([x, top, z]));
+                    }
                 }
                 RespawnAction::SpawnDragon => {
+                    let explosions = ctx
+                        .state
+                        .lock()
+                        .unwrap()
+                        .more
+                        .end_fight
+                        .exit_portal_level
+                        .map(|level| {
+                            super::end_fight::respawn_crystal_explosions(
+                                super::end_fight::respawn_crystal_cells(level),
+                            )
+                        })
+                        .unwrap_or_default();
                     for &key in keys {
                         if let Some(data) = self.entities.data_mut(key) {
                             super::end_fight::set_crystal_beam(data, None);
@@ -5189,6 +5266,12 @@ impl Region {
                         if let Some(flags) = self.entities.flags_mut(key) {
                             flags.set(ferrite_entity::Flags::REMOVED, true);
                         }
+                    }
+                    // Vanilla SUMMONING_DRAGON: each crystal explodes with power 6 and no block
+                    // damage before the dragon appears. The crystals are already removed so the
+                    // blast cannot chain into them again.
+                    for at in explosions {
+                        self.explode_by(at, 6.0, false, None, ctx);
                     }
                     let (spot, _) = ferrite_entity::dragon::position_at(0);
                     let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
@@ -6229,6 +6312,26 @@ impl Region {
                 if !combat::within_reach(eye, bbox, range) || !combat::facing(eye, look, target) {
                     continue;
                 }
+                let mut hit_damage = damage as f32;
+                if self
+                    .entities
+                    .data(key)
+                    .and_then(|data| data.mob)
+                    .is_some_and(|mob| mob.kind == mob::MobKind::EnderDragon)
+                {
+                    let yaw = self.entities.data(key).map_or(0.0, |data| data.yaw);
+                    let Some(part) = ferrite_entity::dragon::part_boxes(target, yaw)
+                        .iter()
+                        .find(|(_, part_box)| {
+                            combat::within_reach(eye, *part_box, range)
+                                && combat::facing(eye, look, part_box.center())
+                        })
+                        .map(|(part, _)| *part)
+                    else {
+                        continue;
+                    };
+                    hit_damage = ferrite_entity::dragon::damage_on_part(part, hit_damage);
+                }
                 if ferrite_entity::dragon::is_crystal(&self.entities, key) {
                     // Any hit breaks an end crystal; it blows up (`EndCrystal.hurt`).
                     if let Some(flags) = self.entities.flags_mut(key) {
@@ -6237,20 +6340,12 @@ impl Region {
                     crystals.push(target);
                     continue;
                 }
-                let Some(hurt) = mob::hurt(&mut self.entities, key, damage as f32, Some(feet))
-                else {
+                let Some(hurt) = mob::hurt(&mut self.entities, key, hit_damage, Some(feet)) else {
                     continue;
                 };
                 owner_attacks.push((uuid, key));
+                mob::credit(&mut self.entities, key, uuid);
                 mob::retaliate(&mut self.entities, key, uuid);
-                if matches!(hurt, mob::Hurt::Died)
-                    && let Some(mob) = self.entities.data(key).and_then(|d| d.mob)
-                {
-                    super::recipe_unlock::KILLS
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push((uuid, mob.kind.name()));
-                }
                 hurt_keys.push((key, critical));
                 // Sweeping: a sword at full charge on the ground hits everything around the
                 // target for 1.0 (`Player.attack`'s `sweepAttack`).
@@ -6262,6 +6357,7 @@ impl Region {
                             continue;
                         }
                         mob::hurt(&mut self.entities, other, combat::SWEEP_DAMAGE, Some(feet));
+                        mob::credit(&mut self.entities, other, uuid);
                     }
                 }
             }
@@ -6289,7 +6385,7 @@ impl Region {
             }
             // A broken end crystal explodes with power 6 and no fire.
             for at in crystals {
-                self.explode([at.x, at.y + 1.0, at.z], 6.0, true, ctx);
+                self.explode_by([at.x, at.y + 1.0, at.z], 6.0, true, Some(uuid), ctx);
             }
         }
         owner_attacks
@@ -6577,12 +6673,15 @@ impl Region {
                 self.place_blocks(ctx, &smashed);
             }
         }
-        let radius = ferrite_entity::dragon::BREATH_RADIUS;
-        for (centre, left) in &mut self.breath_clouds {
-            *left -= 1;
-            if *left % ferrite_entity::dragon::BREATH_HIT_INTERVAL != 0 {
+        for cloud in &mut self.breath_clouds {
+            let Some(damage) = cloud.advance() else {
+                continue;
+            };
+            if damage <= 0.0 {
                 continue;
             }
+            let centre = cloud.center;
+            let radius = cloud.radius();
             let hit: Vec<Uuid> = self
                 .players
                 .values()
@@ -6594,11 +6693,12 @@ impl Region {
                 .collect();
             for uuid in hit {
                 if let Some(p) = self.players.get_mut(&uuid) {
-                    p.hurt(DamageKind::Magic, ferrite_entity::dragon::BREATH_DAMAGE);
+                    p.hurt(DamageKind::Magic, damage);
                 }
             }
         }
-        self.breath_clouds.retain(|(_, left)| *left > 0);
+        self.breath_clouds
+            .retain(|cloud| cloud.age < cloud.duration);
     }
 
     /// Advances arrow flight and applies arrow hits to the players of this region.
@@ -6679,7 +6779,26 @@ impl Region {
                 )
             })
             .collect();
-        for hit in arrow::tick_arrows(&mut self.entities, &blocks, &players) {
+        let dragon_parts: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| {
+                let data = self.entities.data(key)?;
+                let mob = data.mob?;
+                if mob.kind != mob::MobKind::EnderDragon || mob.is_dead() {
+                    return None;
+                }
+                let pos = self.entities.pos(key)?;
+                Some((
+                    key,
+                    ferrite_entity::dragon::part_boxes(pos, data.yaw).to_vec(),
+                ))
+            })
+            .collect();
+        for hit in
+            arrow::tick_arrows_with_parts(&mut self.entities, &blocks, &players, &dragon_parts)
+        {
             if let Some(p) = self.players.get_mut(&hit.uuid) {
                 p.hurt(DamageKind::Arrow, hit.damage);
             }
@@ -6706,7 +6825,7 @@ impl Region {
             // 5 fall damage.
             if landing.kind == arrow::Kind::DragonFireball {
                 self.breath_clouds
-                    .push((landing.pos, ferrite_entity::dragon::BREATH_TICKS));
+                    .push(ferrite_entity::dragon::BreathCloud::fireball(landing.pos));
             }
             // Vanilla small fireball: 5 damage to what it hits.
             if landing.kind == arrow::Kind::SmallFireball {
@@ -7539,9 +7658,21 @@ impl Region {
             self.spawn_block_drops(pos, state);
         }
     }
-    /// Vanilla `Explosion`: entity knockback and exposure first, then the ray cast blocks and
-    /// their loot-table drops.
+    /// Vanilla `Explosion` with no player to credit.
     fn explode(&mut self, center: [f64; 3], power: f32, breaks: bool, ctx: &TickContext) {
+        self.explode_by(center, power, breaks, None, ctx);
+    }
+
+    /// Vanilla `Explosion`: entity knockback and exposure first, then the ray cast blocks and
+    /// their loot-table drops. `killer` receives credit for mobs the blast kills.
+    fn explode_by(
+        &mut self,
+        center: [f64; 3],
+        power: f32,
+        breaks: bool,
+        killer: Option<Uuid>,
+        ctx: &TickContext,
+    ) {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
@@ -7605,6 +7736,9 @@ impl Region {
             let damage = super::explosion::damage(source, center, power, pos, bbox);
             if damage > 0.0 {
                 mob::hurt(&mut self.entities, key, damage, None);
+                if let Some(killer) = killer {
+                    mob::credit(&mut self.entities, key, killer);
+                }
             }
             if let Some(impulse) = super::explosion::impulse(source, center, power, pos, bbox) {
                 let vel = self.entities.vel(key).unwrap_or_default();
@@ -7629,7 +7763,7 @@ impl Region {
             }
         }
         for pos in chained {
-            self.explode([pos.x, pos.y + 1.0, pos.z], 6.0, true, ctx);
+            self.explode_by([pos.x, pos.y + 1.0, pos.z], 6.0, true, killer, ctx);
         }
         if !breaks {
             return;
@@ -7854,7 +7988,10 @@ impl Region {
         };
         stage!("players");
         let ids: Vec<_> = self.players.keys().copied().collect();
-        let mut explosions = std::mem::take(&mut self.plugin_explosions);
+        let mut explosions: Vec<PendingExplosion> = std::mem::take(&mut self.plugin_explosions)
+            .into_iter()
+            .map(|(center, power, fire, breaks)| (center, power, fire, breaks, None))
+            .collect();
         for id in ids {
             let mut p = self.players.remove(&id).unwrap();
             let updated = {
@@ -7888,10 +8025,11 @@ impl Region {
             self.spawn_thrown(&mut p);
             self.spawn_primed_tnt(&mut p);
             self.spawn_crystals(&mut p);
+            let uuid = p.uuid;
             explosions.extend(
                 p.explosions
                     .drain(..)
-                    .map(|(c, power, fire)| (c, power, fire, true)),
+                    .map(move |(c, power, fire)| (c, power, fire, true, Some(uuid))),
             );
             for (pos, delay) in p.button_press.drain(..) {
                 self.buttons.schedule(pos, delay);
@@ -7951,8 +8089,8 @@ impl Region {
         }
         stage!("explosions");
         // Vanilla `BedBlock.explodeBed` runs the ordinary `Explosion` and leaves fire behind.
-        for (center, power, fire, breaks) in explosions {
-            self.explode(center, power, breaks, ctx);
+        for (center, power, fire, breaks, killer) in explosions {
+            self.explode_by(center, power, breaks, killer, ctx);
             if fire && let Some(source) = ctx.source.as_deref() {
                 let pos = [
                     center[0].floor() as i32,
@@ -8335,8 +8473,12 @@ impl Region {
         let Some(key) = key else {
             return false;
         };
+        // `/kill` is lethal damage, not just a tracker removal: the death pass must still run
+        // loot, the dragon fight, and advancements.
+        if !mob::kill(&mut self.entities, key) {
+            return false;
+        }
         if let Some(flags) = self.entities.flags_mut(key) {
-            flags.set(Flags::REMOVED, true);
             flags.set(Flags::NEEDS_SYNC, true);
         }
         true

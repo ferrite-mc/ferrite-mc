@@ -561,6 +561,111 @@ async fn end_portal_moves_player_to_obsidian_platform() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
+    use ferrite_protocol::packets::play::{BossBar, BossBarAction, Respawn};
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    loop {
+        if let Some(result) = source.get(0, 0, 0) {
+            result.expect("load spawn chunk");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let world = World::start_with(Some(source.clone()), [0, 65, 0]);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Respawner").await;
+    source
+        .set_block(
+            0,
+            65,
+            0,
+            u32::from(ferrite_data::blocks::default_state("minecraft:end_portal").unwrap()),
+        )
+        .unwrap();
+    let packet = tokio::time::timeout(std::time::Duration::from_secs(60), bot.until(Respawn::ID))
+        .await
+        .expect("end portal travel");
+    let respawn = Respawn::decode(&mut packet.as_slice()).unwrap();
+    assert_eq!(respawn.dimension, "minecraft:the_end");
+    bot.until(PositionSync::ID).await;
+    // The fight is owned by the region holding the origin; stand there so it ticks.
+    world
+        .console_command("/execute in minecraft:the_end run tp Respawner 0.5 65 0.5".into())
+        .await
+        .unwrap();
+    bot.until(PositionSync::ID).await;
+    // Wait for the origin region's first tick and its dragon bar before killing it.
+    let body = tokio::time::timeout(std::time::Duration::from_secs(30), bot.until(BossBar::ID))
+        .await
+        .expect("the initial dragon bar");
+    assert!(matches!(
+        BossBar::decode(&mut body.as_slice()).unwrap().action,
+        BossBarAction::Add { .. }
+    ));
+    world
+        .console_command(
+            "/execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]".into(),
+        )
+        .await
+        .unwrap();
+    let end = world.dimensions().source(super::Dimension::End);
+    let portal =
+        u32::from(ferrite_data::blocks::default_state("minecraft:end_portal").expect("end portal"));
+    let mut level = None;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(y) = (0..=255).find(|&y| end.block(1, y, 0) == Some(portal)) {
+                level = Some(y);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the exit portal appears");
+    let level = level.unwrap();
+    for [x, y, z] in super::end_fight::respawn_crystal_cells(level) {
+        world
+            .console_command(format!(
+                "/execute in minecraft:the_end run summon minecraft:end_crystal {}.5 {} {}.5",
+                x, y, z
+            ))
+            .await
+            .unwrap();
+    }
+    world
+        .console_command("/tick sprint 650".into())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let body = bot.until(BossBar::ID).await;
+            if matches!(
+                BossBar::decode(&mut body.as_slice()).unwrap().action,
+                BossBarAction::Add { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the respawned dragon gets a boss bar");
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn operator_teleport_command_moves_player() {
     let world = World::start_configured(
         None,

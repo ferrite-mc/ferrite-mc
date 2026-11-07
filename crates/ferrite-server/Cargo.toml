@@ -26,6 +26,7 @@ rsa = { version = "0.9", features = ["sha2"] }
 sha2 = "0.10"
 
 ferrite-command = { path = "../ferrite-command" }
+ferrite-config = { path = "../ferrite-config" }
 ferrite-admin = { path = "../ferrite-admin" }
 ferrite-data.workspace = true
 ferrite-math = { path = "../ferrite-math" }

@@ -315,6 +315,17 @@ pub fn tick_arrows(
     blocks: &impl BlockGetter,
     players: &[(Uuid, AABB)],
 ) -> Vec<PlayerHit> {
+    tick_arrows_with_parts(store, blocks, players, &[])
+}
+
+/// [`tick_arrows`] with the eight vanilla dragon sub-hitboxes. Arrows only hit a dragon on one of
+/// these parts, and non-head parts reduce the damage exactly like `EnderDragon.hurt`.
+pub fn tick_arrows_with_parts(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[(Uuid, AABB)],
+    parts: &[(EntityKey, Vec<(crate::dragon::DragonPart, AABB)>)],
+) -> Vec<PlayerHit> {
     let keys = store.keys().to_vec();
     let mut hits = Vec::new();
     for key in keys {
@@ -372,18 +383,39 @@ pub fn tick_arrows(
             remove(store, key);
             continue;
         }
-        let target = store
-            .query_vec(bbox)
-            .into_iter()
-            .find(|other| *other != key && mob::is_mob(store, *other));
-        if let Some(target) = target {
-            let hurt = mob::hurt(store, target, arrow.damage, None);
+        let part_hit = parts.iter().find_map(|(target, boxes)| {
+            boxes
+                .iter()
+                .find(|(_, part_box)| part_box.intersects(bbox))
+                .map(|(part, _)| (*target, *part))
+        });
+        let target = part_hit.or_else(|| {
+            store
+                .query_vec(bbox)
+                .into_iter()
+                .find(|other| {
+                    *other != key
+                        && mob::is_mob(store, *other)
+                        && !parts.iter().any(|(target, _)| target == other)
+                })
+                .map(|target| {
+                    let part = crate::dragon::DragonPart::Body;
+                    (target, part)
+                })
+        });
+        if let Some((target, _part)) = target {
+            let part = part_hit.map(|(_, part)| part);
+            let damage = part.map_or(arrow.damage, |part| {
+                crate::dragon::damage_on_part(part, arrow.damage)
+            });
+            let hurt = mob::hurt(store, target, damage, None);
             if arrow.channeling
                 && let Some(at) = store.pos(target)
             {
                 CHANNELED.lock().unwrap_or_else(|e| e.into_inner()).push(at);
             }
             if let Some(owner) = arrow.owner {
+                mob::credit(store, target, owner);
                 mob::retaliate(store, target, owner);
                 if matches!(hurt, Some(mob::Hurt::Died))
                     && let Some(state) = mob::state(store, target)
@@ -538,6 +570,33 @@ mod tests {
             store.flags(key).unwrap().has(Flags::REMOVED),
             "an arrow flying into a floor sticks"
         );
+    }
+
+    #[test]
+    fn arrows_hit_dragon_parts_and_scale_non_head_damage() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let dragon = store.insert(new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 64.0, 0.0),
+            &mut Rng::new(2),
+        ));
+        store.data_mut(dragon).unwrap().yaw = 0.0;
+        let parts = crate::dragon::part_boxes(Vec3::new(0.0, 64.0, 0.0), 0.0).to_vec();
+        spawn_arrow(&mut store, Vec3::new(0.0, 67.0, 5.0), Vec3::ZERO);
+        tick_arrows_with_parts(&mut store, &world, &[], &[(dragon, parts.clone())]);
+        assert_eq!(mob::state(&store, dragon).unwrap().health, 196.0);
+
+        let body = parts
+            .iter()
+            .find(|(part, _)| *part == crate::dragon::DragonPart::Body)
+            .unwrap()
+            .1
+            .center();
+        mob::state_mut(&mut store, dragon).unwrap().hurt_time = 0;
+        spawn_arrow(&mut store, body, Vec3::ZERO);
+        tick_arrows_with_parts(&mut store, &world, &[], &[(dragon, parts)]);
+        assert_eq!(mob::state(&store, dragon).unwrap().health, 194.0);
     }
 
     #[test]

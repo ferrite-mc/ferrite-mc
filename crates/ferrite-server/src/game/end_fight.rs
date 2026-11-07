@@ -13,6 +13,7 @@ const END_STONE: &str = "minecraft:end_stone";
 const END_PORTAL: &str = "minecraft:end_portal";
 const END_GATEWAY: &str = "minecraft:end_gateway";
 const DRAGON_EGG: &str = "minecraft:dragon_egg";
+const IRON_BARS: &str = "minecraft:iron_bars";
 const WALL_TORCH: &str = "minecraft:wall_torch";
 
 /// Radius of the circle of end gateways around the main island, and their height.
@@ -64,6 +65,9 @@ pub struct FightState {
     pub gateways: u32,
     /// Spike numbers whose crystal was already placed (or that have none).
     pub crystals: std::collections::BTreeSet<u8>,
+    /// Spike numbers that get a guarded iron-bar cage. Recomputed by the origin region; not
+    /// persisted because it follows the generated spike heights.
+    pub guarded: std::collections::BTreeSet<u8>,
     /// A dragon is flying (spawned or respawned and not dead yet).
     pub dragon_alive: bool,
     /// The staged four-crystal respawn in flight, if any.
@@ -287,6 +291,65 @@ pub fn spike_column(index: u8) -> [i32; 2] {
     ]
 }
 
+/// Vanilla's default spike sizes are shuffled per world; the two shortest after the 76-block
+/// spike are guarded by an iron-bar cage. `tops` must contain a height for all ten columns;
+/// `None` means the chunk is not loaded and no decision is made yet.
+pub fn guarded_spike_indices(tops: &[Option<i32>]) -> Vec<u8> {
+    if tops.len() != usize::from(SPIKE_COUNT) || tops.iter().any(Option::is_none) {
+        return Vec::new();
+    }
+    let mut heights: Vec<(i32, u8)> = tops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, top)| Some(((*top)?, u8::try_from(index).ok()?)))
+        .collect();
+    heights.sort_by_key(|&(height, index)| (height, index));
+    heights
+        .into_iter()
+        .skip(1)
+        .take(2)
+        .map(|(_, index)| index)
+        .collect()
+}
+
+/// Vanilla `SpikeFeature`: the 73 iron bars around a guarded spike's crystal. The cage is a
+/// 5x5 ring from the spike top to three blocks above it, with a solid lid.
+pub fn spike_cage_blocks([x, top, z]: [i32; 3]) -> Vec<([i32; 3], u16)> {
+    let mut blocks = Vec::new();
+    for dx in -2_i32..=2 {
+        for dz in -2_i32..=2 {
+            for dy in 0_i32..=3 {
+                let x_edge = dx.abs() == 2 || dy == 3;
+                let z_edge = dz.abs() == 2 || dy == 3;
+                if !x_edge && !z_edge {
+                    continue;
+                }
+                let north = x_edge && dz != -2;
+                let south = x_edge && dz != 2;
+                let west = z_edge && dx != -2;
+                let east = z_edge && dx != 2;
+                let Some(state) = state_id(
+                    IRON_BARS,
+                    &[
+                        ("north", bool_name(north)),
+                        ("south", bool_name(south)),
+                        ("west", bool_name(west)),
+                        ("east", bool_name(east)),
+                    ],
+                ) else {
+                    return Vec::new();
+                };
+                blocks.push(([x + dx, top + dy, z + dz], state));
+            }
+        }
+    }
+    blocks
+}
+
+fn bool_name(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
 /// The highest non-air block of a column, or `None` for a column that is all air (the void).
 /// `block` answers the state at a height, or `None` while the chunk is not loaded.
 pub fn highest_solid(mut block: impl FnMut(i32) -> Option<u32>) -> Option<i32> {
@@ -403,6 +466,12 @@ pub fn respawn_crystal_cells(level: i32) -> [[i32; 3]; 4] {
         [0, level + 1, 3],
         [0, level + 1, -3],
     ]
+}
+
+/// Centers of the four explosions vanilla spawns when the respawn sequence finishes
+/// (`DragonRespawnAnimation.SUMMONING_DRAGON`, power 6, no block destruction).
+pub fn respawn_crystal_explosions(cells: [[i32; 3]; 4]) -> [[f64; 3]; 4] {
+    cells.map(|[x, y, z]| [f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5])
 }
 
 /// Vanilla `DragonRespawnStage` timings: 100 ticks preparing, one spike every 40 ticks for ten
@@ -704,6 +773,62 @@ mod tests {
         );
         let mut void = |_: i32, _: i32, _: i32| Some(0);
         assert_eq!(gateway_landing([0, 0], &mut void), None);
+    }
+
+    #[test]
+    fn the_two_shortest_pillars_are_guarded() {
+        let tops = [
+            Some(100),
+            Some(20),
+            Some(30),
+            Some(40),
+            Some(50),
+            Some(60),
+            Some(70),
+            Some(80),
+            Some(90),
+            Some(110),
+        ];
+        assert_eq!(guarded_spike_indices(&tops), vec![2, 3]);
+        assert!(guarded_spike_indices(&tops[..9]).is_empty());
+        let mut unloaded = tops;
+        unloaded[4] = None;
+        assert!(guarded_spike_indices(&unloaded).is_empty());
+    }
+
+    #[test]
+    fn a_guarded_spike_is_wrapped_in_seventy_three_iron_bars() {
+        let bars = spike_cage_blocks([10, 60, 20]);
+        assert_eq!(bars.len(), 73);
+        let blocks = layout(bars.clone());
+        assert_eq!(named(blocks[&[12, 60, 20]]), IRON_BARS, "ring bottom");
+        assert_eq!(named(blocks[&[12, 62, 20]]), IRON_BARS, "ring side");
+        assert_eq!(named(blocks[&[10, 63, 20]]), IRON_BARS, "lid");
+        assert!(
+            !blocks.contains_key(&[10, 61, 20]),
+            "the crystal stays clear"
+        );
+        assert!(!blocks.contains_key(&[10, 60, 20]), "the spike stays clear");
+        assert_eq!(
+            bars.iter()
+                .filter(|(_, state)| named(*state) == IRON_BARS)
+                .count(),
+            73
+        );
+    }
+
+    #[test]
+    fn summoning_explodes_the_four_crystals_at_their_centres() {
+        let cells = respawn_crystal_cells(64);
+        assert_eq!(
+            respawn_crystal_explosions(cells),
+            [
+                [3.5, 65.0, 0.5],
+                [-2.5, 65.0, 0.5],
+                [0.5, 65.0, 3.5],
+                [0.5, 65.0, -2.5],
+            ]
+        );
     }
 
     #[test]

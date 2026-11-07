@@ -72,6 +72,12 @@ fn default_dimension() -> String {
     super::Dimension::Overworld.key().to_owned()
 }
 
+/// Whether the End credits must not be shown: either this world disables them, or this player
+/// already saw them.
+pub fn credits_seen(saved: Option<&Saved>, disabled: bool) -> bool {
+    disabled || saved.is_some_and(|saved| saved.seen_credits)
+}
+
 impl Saved {
     pub fn capture(
         pos: [f64; 3],
@@ -255,6 +261,9 @@ mod tests {
         )
         .unwrap();
         assert!(!saved.seen_credits, "older saves have not seen the credits");
+        assert!(credits_seen(Some(&saved), true));
+        assert!(!credits_seen(Some(&saved), false));
+        assert!(credits_seen(None, true));
         let inventory = saved.inventory();
         assert_eq!(inventory.get(0).count, 5);
         assert_eq!(inventory.get(ferrite_inventory::HEAD).count, 1);

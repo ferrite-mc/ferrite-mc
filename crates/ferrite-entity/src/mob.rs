@@ -294,6 +294,8 @@ pub struct MobState {
     pub moving: bool,
     /// Player this mob is hunting, for hostile kinds (vanilla `Mob.target`).
     pub target: Option<uuid::Uuid>,
+    /// The last player to damage this mob, used to credit the kill after its death tick.
+    pub last_killer: Option<uuid::Uuid>,
     /// Ticks until the next melee attack (`Mob.attackStrengthTicker`-like cooldown).
     pub attack_cooldown: u16,
     /// Ticks of panic left after being hurt (vanilla `PanicGoal`).
@@ -367,6 +369,7 @@ impl MobState {
             wander_yaw: 0.0,
             moving: false,
             target: None,
+            last_killer: None,
             attack_cooldown: 0,
             panic: 0,
             panic_from: None,
@@ -626,6 +629,14 @@ fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
     }
 }
 
+/// Records `player` as the latest attacker, so a kill that happens on this or a later tick can be
+/// credited by the region's death handling.
+pub fn credit(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
+    if let Some(mob) = state_mut(store, key) {
+        mob.last_killer = Some(player);
+    }
+}
+
 /// Kills a mob outright (`/kill`, lethal effects), bypassing the hurt cooldown.
 pub fn kill(store: &mut EntityStore, key: EntityKey) -> bool {
     if !is_mob(store, key) {
@@ -792,6 +803,15 @@ mod tests {
         assert_eq!(MobKind::Villager.max_health(), 20.0);
         // Vanilla files villagers under `MobCategory.MISC`, not `CREATURE`.
         assert_eq!(MobKind::Villager.props().category, "misc");
+    }
+
+    #[test]
+    fn a_killer_survives_the_mob_death_tick() {
+        let (mut store, key) = spawn(MobKind::Cow);
+        let player = uuid::Uuid::from_u128(0xc0ffee);
+        credit(&mut store, key, player);
+        assert_eq!(hurt(&mut store, key, 100.0, None), Some(Hurt::Died));
+        assert_eq!(state(&store, key).unwrap().last_killer, Some(player));
     }
 
     #[test]

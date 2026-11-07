@@ -857,6 +857,7 @@ dependencies = [
  "crossbeam",
  "ferrite-admin",
  "ferrite-command",
+ "ferrite-config",
  "ferrite-data",
  "ferrite-entity",
  "ferrite-fluid",
