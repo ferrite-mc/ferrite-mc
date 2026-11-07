@@ -167,6 +167,42 @@ biome and feature generation, not a complete block-level terrain generator; chec
 version coverage and license before relying on it. Do not copy its code into Ferrite without a
 separate license and provenance review.
 
+For the final Rust implementation, also study [C2ME](https://github.com/RelativityMC/C2ME-fabric),
+[Moonrise](https://github.com/Tuinity/Moonrise), and [Noisium](https://github.com/Steveplays28/noisium)
+for parallel chunk stages, scheduling, caches, chunk I/O, and noise/worldgen hot paths. Treat them as
+optimization research references: implement independently, verify against the local vanilla 26.3
+host, and measure on the same workload. The [C2ME OpenCL acceleration module](https://github.com/RelativityMC/C2ME-fabric/tree/dev/26.3.0/c2me-opts-accel-opencl)
+and [wgaccel](https://github.com/Arona74/wgaccel) are optional GPU/OpenCL research references only;
+evaluate device/driver support, transfer overhead, deterministic parity, and a CPU fallback before
+considering an accelerator path. Neither may become a required runtime dependency by assumption.
+
+### Parallel work breakdown for the final Rust phase
+
+The coordinator first freezes the vanilla-host baseline: Minecraft version, seeds, coordinates,
+generated NBT, throughput, allocations, and peak memory. Workers then implement independent
+algorithm boundaries concurrently, each with its own module and fixture set. The coordinator owns
+public traits, shared chunk types, benchmark harnesses, and final integration points.
+
+| Track | Candidate ownership | Contract and merge gate |
+|---|---|---|
+| Noise/density evaluation | Density-function and noise evaluator modules | Immutable inputs and per-request context; compare sampled values and final chunks against the local 26.3 host over many seeds. |
+| Surface rules | Surface-rule evaluator | Consume computed density/biome inputs; avoid shared RNG; compare block columns and final chunk NBT. |
+| Biome lookup | Biome-source sampling/index module | Deterministic coordinate-to-biome results; compare points, quart boundaries, and transitions. |
+| Features and structures | Placement algorithms split by feature/structure family | Stable per-chunk random streams and declared read/write footprints; test placement parity and chunk-border cases. |
+| Lighting and serialization | Ferrite-owned light/chunk output modules | Preserve palettes, block entities, light arrays, and NBT round-trip; benchmark CPU and allocation cost separately. |
+| Scheduling and chunk I/O | Request scheduler, cache, and storage adapters | Bounded queues, cancellation/error propagation, deterministic result association, and load/save stress tests. |
+
+Parallel safety is an acceptance condition: scheduling order cannot change output; mutable random
+state, palettes, or registries need explicit ownership; chunk-border reads declare their footprint;
+failed or cancelled work cannot publish partial chunks. Shared interfaces are frozen before workers
+start, and only the coordinator edits shared integration interfaces unless ownership is reassigned.
+
+An OpenCL/GPU backend is a later optional track after the CPU Rust implementation is correct and
+measured. Give it a narrow backend interface, device capability checks, a CPU fallback, deterministic
+parity tests, and benchmarks that include host/device transfer overhead. Reject it if it only
+accelerates a micro-kernel while reducing end-to-end chunk throughput or if it cannot reproduce the
+reference output.
+
 Per piece, the definition of done is the same as for patches: (1) a test compares the Rust output
 with the unmodified jar over many positions and seeds and finds **no difference**, (2) a
 measurement shows it is faster, (3) it runs behind a `[worldgen]` switch that falls back to the host.

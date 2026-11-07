@@ -17,7 +17,11 @@ Minecraft Java 26.3 동작과 플러그인 API 계약을 보존하고, 성능 �
 | [PatchBukkit](https://github.com/Pumpkin-MC/PatchBukkit) | Pumpkin의 Bukkit/Paper 플러그인 호환 계층 | JVM 임베딩, Rust↔Java 브리지, API 표면과 호환 한계를 조사해 Ferrite 플러그인 브리지/NMS 로드맵에 반영한다. NMS·CraftBukkit 내부 의존성이 동작한다고 미리 가정하지 않는다. |
 | [PatchBukkit 아키텍처 문서](https://github.com/Pumpkin-MC/PatchBukkit/blob/master/ARCHITECTURE.md) | 플러그인 브리지 구조 | Rust 네이티브 부분, Java API 구현, JNI 및 FFI 통신 경계를 비교한다. Ferrite의 현재 `HostBridge`와 실제 구현 가능한 API 범위를 기준으로 평가한다. |
 | [Cubiomes](https://github.com/Cubitect/cubiomes) | C 기반 바이옴·일부 피처 생성 참고 라이브러리 | 독립 알고리즘 설계 시 버전 범위, 공개 동작, 비교용 테스트 입력을 조사한다. 블록 단위 지형 생성 전체를 제공하는 것은 아니므로 전체 월드젠 대체재로 보지 않는다. 코드 재사용 전 라이선스와 출처를 별도 검토한다. |
-| [C2ME](https://github.com/RelativityMC/C2ME) | Minecraft 청크 로딩·월드젠 최적화 모드 | 병렬 월드젠, 청크 I/O·캐시·스케줄링 최적화 아이디어와 적용 가능한 버전 범위를 조사한다. Ferrite에는 설계 참고만 하며 코드를 복사하지 않는다. 라이선스와 각 기능의 동작 영향은 적용 전에 확인한다. |
+| [C2ME](https://github.com/RelativityMC/C2ME-fabric) | Minecraft 청크 로딩·월드젠 최적화 모드 | 병렬 월드젠, 청크 I/O·캐시·스케줄링 최적화 아이디어와 적용 가능한 버전 범위를 조사한다. Ferrite에는 설계 참고만 하며 코드를 복사하지 않는다. 라이선스와 각 기능의 동작 영향은 적용 전에 확인한다. |
+| [Moonrise](https://github.com/Tuinity/Moonrise) | 서버 청크·월드젠 최적화 프로젝트 | 청크 생성·로딩·저장, 스케줄링, 캐시의 병목과 최적화 경계를 조사한다. Paper에 포함된 변경도 있으므로 버전·라이선스를 확인하고, Ferrite의 region/ownership 모델에 맞춰 독립 구현한다. |
+| [Noisium](https://github.com/Steveplays28/noisium) | 월드젠 최적화 모드 | 노이즈·지형 생성 경로의 최적화 후보와 버전별 적용 범위를 확인한다. 바닐라와 결과가 같다는 주장은 Ferrite의 다중 seed/좌표 대조 테스트로 다시 검증한다. |
+| [C2ME OpenCL 가속 모듈](https://github.com/RelativityMC/C2ME-fabric/tree/dev/26.3.0/c2me-opts-accel-opencl) | 실험적 GPU/OpenCL 월드젠 가속 참고 | CPU↔GPU 데이터 이동 비용, 지원 장치·드라이버, 재현성, CPU fallback을 조사한다. OpenCL을 필수 경로로 두지 않고, CPU 구현과 결과가 일치하며 실제 측정 이득이 있을 때 선택적으로 검토한다. |
+| [wgaccel](https://github.com/Arona74/wgaccel) | OpenCL/CUDA/HIP 기반 GPU 월드젠 실험 | 특정 월드젠의 GPU 오프로딩과 결과 대조 방식을 연구 참고로만 확인한다. 지원 Minecraft/모드 버전이 Ferrite와 다르며, 코드·알고리즘을 가져오지 않는다. |
 | [Folia 기술 개요](https://docs.papermc.io/folia/reference/overview/) | region 단위 병렬 tick 설계 참고 | 서로 인접하지 않는 ticking region, region 소유 데이터의 단일 쓰기 소유권, 지역/엔티티/global task queue, 교차 region 작업 경계를 참고한다. Folia의 Java 구현을 복사하지 않고 Ferrite의 regionizer와 API 계약에 맞춰 설계한다. |
 | [Advanced Slime World Manager (ASWM)](https://github.com/Paul19988/Advanced-Slime-World-Manager) | Slime Region Format 월드 매니저 플러그인 | 포맷, 월드 로드/저장 수명주기, 압축·직렬화, 호환성 경계를 조사한다. |
 | [Advanced Slime Paper](https://github.com/InfernalSuite/AdvancedSlimePaper) | ASWM 관련 서버 구현/후속 프로젝트 참고 | ASWM과의 역할 관계, 서버 측 통합이 필요한 영역, 포맷 호환 테스트 방법을 확인한다. |
@@ -69,7 +73,9 @@ Minecraft Java 26.3 동작과 플러그인 API 계약을 보존하고, 성능 �
 
 플러그인/NMS 브리지, 피스톤, 엔드, 동물·볼트, 실제 클라이언트 검증은 서로 다른 파일 소유권과
 수용 기준을 두고 병렬 진행한다. ASWM 월드 관리와 **Rust 월드젠은 현재 작업에서 제외**한다.
-Rust 월드젠은 나머지 게임 작업 뒤 마지막 단계에서 알고리즘 경계별 병렬 워커로 독립 구현하며,
-Moonrise식 최적화 기법은 그 단계에서 관련 알고리즘과 함께 적용·측정한다. ASWM/Slime 형식의
+Rust 월드젠은 나머지 게임 작업 뒤 마지막 단계에서 알고리즘 경계별 병렬 워커로 독립 구현한다.
+C2ME·Moonrise·Noisium의 병렬 청크 단계, 스케줄링, 캐시, I/O, 노이즈 계산 등 최적화 지점을
+조사하고, OpenCL 같은 가속 확장은 CPU fallback·바닐라 결과 대조·장치 호환성·동일 조건 성능
+측정을 통과한 후보만 별도로 평가한다. 외부 구현 코드는 복사하지 않는다. ASWM/Slime 형식의
 압축 월드와 메모리 상주 청크 접근은 구현 후보로 기록하되, 대규모 월드의 메모리 상한과 저장
 복구 비용을 평가한 뒤 적용 범위를 정한다.

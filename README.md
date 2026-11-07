@@ -112,7 +112,11 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
   [Advanced Slime Paper](https://github.com/InfernalSuite/AdvancedSlimePaper) 참고해 Slime Region Format
   월드 로드·저장·전환 및 플러그인 연동을 구현한다.
 - **마지막 단계:** Java 호스트를 대체할 Rust 월드젠을 구현한다. 바닐라 26.3 대조와 기존 사용자
-  월드젠 호스트 병행을 완료한 뒤 진행한다.
+  월드젠 호스트 병행을 완료한 뒤 진행한다. 성능 조사에는 [C2ME](https://github.com/RelativityMC/C2ME-fabric),
+  [Moonrise](https://github.com/Tuinity/Moonrise), [Noisium](https://github.com/Steveplays28/noisium),
+  C2ME의 실험적 [OpenCL 가속 모듈](https://github.com/RelativityMC/C2ME-fabric/tree/dev/26.3.0/c2me-opts-accel-opencl)
+  등 월드젠 최적화 프로젝트를 참고한다. 기법과 병목을 조사해 Ferrite에 독립 구현하고, 바닐라 대조·성능
+  측정으로 검증한다. OpenCL은 CPU 경로와 결과 동등성 및 장치 호환성을 확인한 뒤 선택적으로 평가한다.
 
 Rust 월드젠을 제외한 작업은 독립된 파일 소유권과 명시적인 인수 조건을 정해 병렬 처리한다.
 현재 세션과 다음 독립 트랙: [`parallel-work-plan.md`](docs/handoff/2026-11-07-game-systems/parallel-work-plan.md).
