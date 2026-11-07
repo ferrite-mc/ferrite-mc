@@ -284,6 +284,10 @@ pub struct MobState {
     pub fire: u16,
     /// Ticks until the wander goal picks a new direction; zero picks now.
     pub wander_timer: u32,
+    /// The ender dragon's landing-cycle phase; unused by other mobs.
+    pub dragon_phase: crate::dragon::DragonPhase,
+    /// Ticks spent in [`Self::dragon_phase`].
+    pub dragon_phase_ticks: u32,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -358,6 +362,8 @@ impl MobState {
             no_ai: false,
             fire: 0,
             wander_timer: 0,
+            dragon_phase: crate::dragon::DragonPhase::Holding,
+            dragon_phase_ticks: 0,
             wander_yaw: 0.0,
             moving: false,
             target: None,

@@ -414,6 +414,8 @@ pub enum MetaValue {
     },
     /// Vanilla `OPTIONAL_LIVING_ENTITY_REFERENCE`: a tamed animal's owner.
     OptionalUuid(Option<uuid::Uuid>),
+    /// Vanilla `OPTIONAL_BLOCK_POS`: an End crystal's beam target.
+    OptionalBlockPos(Option<i64>),
 }
 impl MetaValue {
     /// Serializer id in `EntityDataSerializers` registration order (26.3).
@@ -426,6 +428,7 @@ impl MetaValue {
             Self::String(_) => 4,
             Self::ItemStack(_) => 7,
             Self::Boolean(_) => 8,
+            Self::OptionalBlockPos(_) => 11,
             Self::OptionalUuid(_) => 13,
             Self::VillagerData { .. } => 18,
             Self::Pose(_) => 20,
@@ -465,6 +468,12 @@ impl Encode for MetaEntry {
                     owner.encode(out);
                 }
             }
+            MetaValue::OptionalBlockPos(pos) => {
+                pos.is_some().encode(out);
+                if let Some(pos) = pos {
+                    pos.encode(out);
+                }
+            }
         }
     }
 }
@@ -478,6 +487,11 @@ impl MetaEntry {
             4 => MetaValue::String(String::decode(buf)?),
             7 => MetaValue::ItemStack(ItemStack::decode(buf)?),
             8 => MetaValue::Boolean(bool::decode(buf)?),
+            11 => MetaValue::OptionalBlockPos(if bool::decode(buf)? {
+                Some(i64::decode(buf)?)
+            } else {
+                None
+            }),
             13 => MetaValue::OptionalUuid(if bool::decode(buf)? {
                 Some(uuid::Uuid::decode(buf)?)
             } else {
@@ -2276,6 +2290,20 @@ mod interaction_tests {
             assert_eq!(
                 MetaEntry::decode_at(19, &mut &bytes[1..]).unwrap().value,
                 MetaValue::OptionalUuid(owner)
+            );
+        }
+        // An End crystal's beam target: serializer 11, a presence flag and the packed position.
+        for target in [None, Some(crate::types::BlockPos::new(0, 128, 0).pack())] {
+            let mut bytes = Vec::new();
+            MetaEntry {
+                index: 8,
+                value: MetaValue::OptionalBlockPos(target),
+            }
+            .encode(&mut bytes);
+            assert_eq!(bytes[..2], [8, 11]);
+            assert_eq!(
+                MetaEntry::decode_at(8, &mut &bytes[1..]).unwrap().value,
+                MetaValue::OptionalBlockPos(target)
             );
         }
         // A non-zero velocity survives within LpVec3 precision.
