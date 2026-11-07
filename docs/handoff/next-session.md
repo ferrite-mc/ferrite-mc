@@ -72,7 +72,7 @@ on the branch only.
 - Horses, donkeys, mules and llamas: taming by riding (temper roll), saddle, steering by the
   client (`move_vehicle`), rolled speed/jump/health, horse armour absorbing damage, llama carpets,
   treats, chest on donkey/mule/llama, llama spit when hurt. Shortcuts: the chest menu is 18 slots
-  (vanilla 15 or 3 x strength) and is not dropped on death; no llama caravans or trader llama;
+  (vanilla 15 or 3 x strength) and a dead animal drops chest, items and saddle; no llama caravans or trader llama;
   horse inventory uses the generic chest screen.
 - Weather cycle (clear/rain/thunder, `advance_weather` rule, game_event packets), trident riptide /
   loyalty / channeling, piston block updates delayed two ticks. Shortcuts: single weather timer,
@@ -82,8 +82,8 @@ on the branch only.
 - Plugin Structure API (`java/ferrite-api-impl`): `createStructure()` + `fill`, `place` with
   rotation/mirror/integrity/palette, `getPalettes`, `saveStructure`/`loadStructure` (file, stream,
   key), `deleteStructure`, `getStructureFile`, `copy`. Shortcuts: no entities or block entity data;
-  only `facing`/`axis` turn with rotation; the Java world snapshot only knows materials, so `fill`
-  captures materials without state properties; templates loaded by key still place through the
+  only `facing`/`axis` turn with rotation; the Java world now carries full block states (host
+  sends `name[props]`, `setBlockData` keeps them); templates loaded by key still place through the
   server (`/place template`) and cannot be `fill`ed.
 - Not verifiable here: any of the above against a real client.
 - Order the user gave: Rust worldgen last; Moonrise-style optimisations are done while writing the

@@ -37,6 +37,20 @@ pub fn store(animal: Uuid, items: &[ItemStack]) {
         .insert(animal, items.to_vec());
 }
 
+/// What a dead donkey, mule or llama drops besides its loot table: the chest, its items and the saddle.
+pub fn gear(animal: Uuid, chest: bool, saddled: bool) -> Vec<ItemStack> {
+    let mut gear = Vec::new();
+    if chest {
+        gear.extend(load(animal));
+        gear.extend(ItemStack::from_name("minecraft:chest"));
+    }
+    if saddled {
+        gear.extend(ItemStack::from_name("minecraft:saddle"));
+    }
+    gear.retain(|stack| !stack.is_empty());
+    gear
+}
+
 /// The chest as an NBT list of `{Slot, ...item}` compounds (empty slots left out).
 pub fn to_nbt(animal: Uuid) -> Tag {
     let list = load(animal)
@@ -72,6 +86,25 @@ pub fn from_nbt(animal: Uuid, tag: &Tag) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_pack_animal_drops_its_chest_items_and_saddle() {
+        let a = Uuid::from_u128(81);
+        let mut items = load(a);
+        items[0] = ItemStack::from_name("minecraft:bread")
+            .unwrap()
+            .copy_with_count(2);
+        store(a, &items);
+        let names: Vec<_> = gear(a, true, true)
+            .iter()
+            .map(|s| s.name().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["minecraft:bread", "minecraft:chest", "minecraft:saddle"]
+        );
+        assert!(gear(Uuid::from_u128(82), false, false).is_empty());
+    }
 
     #[test]
     fn a_chest_keeps_its_items_through_nbt() {

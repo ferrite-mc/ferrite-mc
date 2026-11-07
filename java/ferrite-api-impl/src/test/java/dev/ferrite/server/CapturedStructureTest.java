@@ -108,4 +108,15 @@ class CapturedStructureTest {
         assertNull(manager.getStructure(key));
         assertThrows(IllegalStateException.class, () -> manager.saveStructure(key));
     }
+
+    @Test void blockStatePropertiesSurviveFillAndPlace() {
+        world.getBlockAt(600, 70, 600).setBlockData(FerriteBlockData.create("minecraft:oak_stairs[facing=east,half=top]"));
+        var structure = org.bukkit.Bukkit.getStructureManager().createStructure();
+        structure.fill(new Location(world, 600, 70, 600), new BlockVector(1, 1, 1), false);
+        assertEquals("minecraft:oak_stairs[facing=east,half=top]", structure.getPalettes().get(0).getBlocks().get(0).getBlockData().getAsString());
+        structure.place(new Location(world, 610, 70, 610), false, StructureRotation.CLOCKWISE_90, Mirror.NONE, 0, 1f, new Random(1));
+        assertEquals("minecraft:oak_stairs[facing=south,half=top]", world.getBlockAt(610, 70, 610).getBlockData().getAsString());
+        world.getBlockAt(600, 70, 600).setType(Material.STONE);
+        assertEquals("minecraft:stone", world.getBlockAt(600, 70, 600).getBlockData().getAsString());
+    }
 }

@@ -4020,9 +4020,16 @@ impl Region {
             })
             .collect();
         for (key, kind, pos, baby) in dead {
+            // A donkey, mule or llama drops its chest, what is in it, and its saddle.
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
             }
+            let gear = match (self.entities.data(key), mob::state(&self.entities, key)) {
+                (Some(data), Some(state)) => {
+                    super::equine_chest::gear(data.uuid, state.chest, state.saddled)
+                }
+                _ => Vec::new(),
+            };
             if kind == ferrite_entity::mob::MobKind::EnderDragon {
                 self.dragon_died(ctx, pos);
             }
@@ -4032,7 +4039,15 @@ impl Region {
             } else {
                 super::drops::mob_drops(kind, &mut self.rng)
             };
-            for stack in drops {
+            for stack in drops
+                .into_iter()
+                .chain(gear.into_iter().filter(|s| !s.is_empty()).map(|s| {
+                    ferrite_protocol::packets::play::ItemStack {
+                        count: s.count,
+                        item_id: i32::from(s.item),
+                    }
+                }))
+            {
                 let block = [
                     pos.x.floor() as i32,
                     pos.y.floor() as i32,

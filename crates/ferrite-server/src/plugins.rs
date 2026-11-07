@@ -393,7 +393,13 @@ impl ferrite_plugin::WorldView for SourceWorldView {
             return None;
         }
         let state = u16::try_from(self.source.block(x, y, z)?).ok()?;
-        ferrite_data::blocks::state(state).map(|(name, _)| name.to_owned())
+        ferrite_data::blocks::state(state).map(|(name, props)| {
+            if props.is_empty() {
+                return name.to_owned();
+            }
+            let props: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            format!("{name}[{}]", props.join(","))
+        })
     }
     fn sky_light(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<u8> {
         self.known(world)

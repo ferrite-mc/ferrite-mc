@@ -10,6 +10,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final long time;
     private final Pos spawn;
     private final java.util.Map<Pos, org.bukkit.Material> blocks = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Full state strings for blocks a plugin placed with {@code setBlockData}; {@link #blocks} holds their material. */
+    private final java.util.Map<Pos, String> states = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<Column, Integer> heights = new java.util.concurrent.ConcurrentHashMap<>();
     private org.bukkit.World proxy;
     // Remembered for the plugin; no server rule reads these (players cannot hurt each other yet, hardcore needs a respawn rule).
@@ -41,13 +43,28 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         if (material != null) return material;
         var key = Native.blockType(id.toString(), pos.x(), pos.y(), pos.z());
         if (key == null) throw new UnsupportedOperationException("Ferrite: no block data at " + pos);
+        if (key.indexOf('[') >= 0) key = key.substring(0, key.indexOf('['));
         var resolved = org.bukkit.Material.matchMaterial(key);
         if (resolved == null) throw new IllegalStateException("Unknown block material " + key);
         return resolved;
     }
+    /** The vanilla state string at {@code pos}, with its properties when the host reports them. */
+    private String stateAt(Pos pos) {
+        if (blocks.containsKey(pos)) return states.getOrDefault(pos, blocks.get(pos).getKey().toString());
+        var state = Native.blockType(id.toString(), pos.x(), pos.y(), pos.z());
+        return state != null ? state : typeAt(pos).getKey().toString();
+    }
+    private void setState(Pos pos, org.bukkit.block.data.BlockData data) {
+        var state = data.getAsString();
+        if (!Native.worldSetBlock(id.toString(), pos.x(), pos.y(), pos.z(), state)) throw new IllegalStateException("No world command handler");
+        blocks.put(pos, data.getMaterial());
+        if (state.indexOf('[') >= 0) states.put(pos, state); else states.remove(pos);
+        heights.remove(new Column(pos.x(), pos.z()));
+    }
     private void setType(Pos pos, org.bukkit.Material material) {
         if (!Native.worldSetBlock(id.toString(), pos.x(), pos.y(), pos.z(), material.getKey().toString())) throw new IllegalStateException("No world command handler");
         blocks.put(pos, material);
+        states.remove(pos);
         heights.remove(new Column(pos.x(), pos.z()));
     }
     private org.bukkit.block.Block relative(Pos pos, org.bukkit.block.BlockFace face) {
@@ -70,8 +87,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getHumidity" -> climate(false, pos.x(), pos.y(), pos.z());
             case "getLightFromSky" -> { int level = Native.skyLight(id.toString(), pos.x(), pos.y(), pos.z()); if (level < 0) throw new UnsupportedOperationException("Ferrite: no light data at " + pos); yield (byte) level; }
             case "setType" -> { setType(pos, java.util.Objects.requireNonNull((org.bukkit.Material) args[0])); yield null; }
-            case "getBlockData" -> FerriteBlockData.create(typeAt(pos));
-            case "setBlockData" -> { setType(pos, ((org.bukkit.block.data.BlockData) args[0]).getMaterial()); yield null; }
+            case "getBlockData" -> FerriteBlockData.create(stateAt(pos));
+            case "setBlockData" -> { setState(pos, (org.bukkit.block.data.BlockData) args[0]); yield null; }
             case "isEmpty" -> typeAt(pos).isAir();
             case "isLiquid" -> { var type = typeAt(pos); yield type == org.bukkit.Material.WATER || type == org.bukkit.Material.LAVA; }
             case "getRelative" -> relative(pos, (org.bukkit.block.BlockFace) args[0]);
