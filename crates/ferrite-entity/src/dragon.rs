@@ -720,4 +720,116 @@ mod tests {
             Some(beyond_fireball_range.uuid)
         );
     }
+
+    #[test]
+    fn target_selection_breaks_equal_distance_ties_by_uuid() {
+        let from = Vec3::ZERO;
+        let higher = Target {
+            uuid: uuid::Uuid::from_u128(2),
+            pos: Vec3::new(10.0, 0.0, 0.0),
+        };
+        let lower = Target {
+            uuid: uuid::Uuid::from_u128(1),
+            pos: Vec3::new(0.0, 0.0, 10.0),
+        };
+        assert_eq!(
+            select_target(&[higher, lower], from, None).unwrap().uuid,
+            lower.uuid
+        );
+        assert_eq!(
+            select_target(&[lower, higher], from, None).unwrap().uuid,
+            lower.uuid
+        );
+        // A remembered target that is no longer present falls back to the nearest valid one.
+        assert_eq!(
+            select_target(&[higher], from, Some(uuid::Uuid::from_u128(3)),)
+                .unwrap()
+                .uuid,
+            higher.uuid
+        );
+    }
+
+    #[test]
+    fn losing_the_target_during_a_charge_returns_to_the_circle() {
+        let mut store = EntityStore::new(4);
+        let key = dragon_at(&mut store, position_at(0).0);
+        let player = Target {
+            uuid: uuid::Uuid::from_u128(9),
+            pos: Vec3::new(10.0, 70.0, 10.0),
+        };
+        let charge_start = CHARGE_PERIOD - CHARGE_TICKS;
+        set_age(&mut store, key, charge_start - 1);
+        let mut events = Vec::new();
+        fly(&mut store, key, &[player], &mut events);
+        for _ in 0..CHARGE_TELEGRAPH_TICKS {
+            fly(&mut store, key, &[player], &mut events);
+        }
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.target, Some(player.uuid));
+        assert_eq!(Phase::at(state.wander_timer, true), Phase::Charging);
+
+        let mut lost = Vec::new();
+        fly(&mut store, key, &[], &mut lost);
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.target, None);
+        assert_eq!(Phase::at(state.wander_timer, false), Phase::Circling);
+        assert!(
+            !lost.iter().any(|event| matches!(
+                event,
+                MobEvent::Melee { .. } | MobEvent::DragonFireball { .. } | MobEvent::Breath { .. }
+            )),
+            "losing the target ends the attack without a parting hit"
+        );
+    }
+
+    #[test]
+    fn breath_cooldown_survives_a_reload_and_blocks_the_next_scheduled_cloud() {
+        let mut store = EntityStore::new(4);
+        let key = dragon_at(&mut store, PERCH_SPOT);
+        let start = PERCH_PERIOD - PERCH_TICKS;
+        set_age(&mut store, key, start - 1);
+        let mut events = Vec::new();
+        fly(&mut store, key, &[], &mut events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, MobEvent::Breath { .. }))
+                .count(),
+            1
+        );
+        let saved = *mob::state(&store, key).unwrap();
+        assert_eq!(saved.bow_timer, BREATH_INTERVAL as u16);
+
+        // Reload the persisted state, then jump to the next scheduled breath while the
+        // saved cooldown is still running. It must not emit the same cloud again.
+        let mut reloaded = EntityStore::new(4);
+        let mut rng = Rng::new(2);
+        let reloaded_key = reloaded.insert(mob::new_mob(
+            mob::MobKind::EnderDragon,
+            PERCH_SPOT,
+            &mut rng,
+        ));
+        *mob::state_mut(&mut reloaded, reloaded_key).unwrap() = saved;
+        set_age(&mut reloaded, reloaded_key, start + BREATH_INTERVAL - 1);
+        let mut after_reload = Vec::new();
+        fly(&mut reloaded, reloaded_key, &[], &mut after_reload);
+        assert!(
+            !after_reload
+                .iter()
+                .any(|event| matches!(event, MobEvent::Breath { .. })),
+            "the persisted cooldown blocks the next scheduled cloud"
+        );
+
+        // Once the cooldown has run out, the next scheduled cloud is allowed again.
+        for _ in 0..(BREATH_INTERVAL - 1) {
+            fly(&mut reloaded, reloaded_key, &[], &mut after_reload);
+        }
+        fly(&mut reloaded, reloaded_key, &[], &mut after_reload);
+        assert!(
+            after_reload
+                .iter()
+                .any(|event| matches!(event, MobEvent::Breath { .. })),
+            "the cloud resumes after the cooldown"
+        );
+    }
 }
