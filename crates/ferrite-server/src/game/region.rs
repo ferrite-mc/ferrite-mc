@@ -4460,7 +4460,7 @@ impl Region {
             if let Some((charge, yaw, pitch)) = bow {
                 if trident {
                     if charge * 20.0 >= arrow::TRIDENT_MIN_DRAW as f32 {
-                        self.throw_trident(uuid, yaw, pitch);
+                        self.throw_trident(uuid, yaw, pitch, ctx.raining);
                     }
                 } else if charge >= 0.1 {
                     self.fire_bow(uuid, charge, yaw, pitch);
@@ -4596,15 +4596,69 @@ impl Region {
     }
 
     /// `TridentItem.releaseUsing`: the held trident leaves the hand and flies where the player
-    /// looks. shortcut: loyalty returns it the moment it lands (no flight back); riptide and
-    /// channeling are not modelled. Without loyalty it drops as an item where it ends.
-    fn throw_trident(&mut self, uuid: Uuid, yaw: f32, pitch: f32) {
+    /// looks. shortcut: loyalty returns it the moment it lands (no flight back); riptide launches the
+    /// player without the spin pose; channeling is not modelled. Without loyalty it drops as an item where it ends.
+    fn throw_trident(&mut self, uuid: Uuid, yaw: f32, pitch: f32, raining: bool) {
         let Some(p) = self.players.get_mut(&uuid) else {
             return;
         };
         let slot = p.hand_slot(0);
         let stack = p.inventory.get(slot).clone();
         if stack.name() != Some("minecraft:trident") {
+            return;
+        }
+        let riptide = match stack
+            .components
+            .get(ferrite_item::component_ids::ENCHANTMENTS)
+        {
+            Some(ferrite_item::Component::Enchantments(e)) => {
+                e.level("minecraft:riptide").unwrap_or(0)
+            }
+            _ => 0,
+        };
+        if riptide > 0 {
+            // `TridentItem.releaseUsing`: only in water or rain; the player is launched along
+            // the look direction and keeps the trident (one point of wear).
+            let (x, y, z) = (
+                p.pos[0].floor() as i32,
+                p.pos[1].floor() as i32,
+                p.pos[2].floor() as i32,
+            );
+            let in_water = p
+                .source
+                .as_ref()
+                .and_then(|s| s.block(x, y, z))
+                .and_then(|s| u16::try_from(s).ok())
+                .and_then(ferrite_data::blocks::state)
+                .is_some_and(|(name, _)| name == "minecraft:water");
+            if !(in_water || raining) {
+                return;
+            }
+            let direction = combat::look_vector(yaw, pitch);
+            let scale = 3.0 * (1.0 + f64::from(riptide)) / 4.0;
+            send(
+                p,
+                &SetEntityMotion {
+                    id: VarInt(p.entity),
+                    velocity: ferrite_protocol::types::LpVec3([
+                        direction.x * scale,
+                        direction.y * scale + if in_water { 0.0 } else { 1.2 },
+                        direction.z * scale,
+                    ]),
+                },
+            );
+            if p.gamemode != 1
+                && let Some(worn) = worn_stack(stack.clone(), stack.damage() + 1)
+            {
+                p.inventory.set(slot, worn);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
             return;
         }
         if !matches!(p.gamemode, 1 | 3) {
