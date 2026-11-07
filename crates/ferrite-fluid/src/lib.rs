@@ -352,11 +352,10 @@ pub fn place_water(world: &mut impl FluidWorld, pos: Position) -> bool {
         .ok()
         .and_then(blocks::state)
         .is_some_and(|(name, _)| name == "minecraft:cauldron" || name == "cauldron")
+        && let Some(full) = blocks::state_id("water_cauldron", &[("level", "3")])
     {
-        if let Some(full) = blocks::state_id("water_cauldron", &[("level", "3")]) {
-            world.set_block(pos.0, pos.1, pos.2, u32::from(full));
-            return true;
-        }
+        world.set_block(pos.0, pos.1, pos.2, u32::from(full));
+        return true;
     }
     if let Some(new) = waterlogged_variant(old, true) {
         world.set_block(pos.0, pos.1, pos.2, new);
