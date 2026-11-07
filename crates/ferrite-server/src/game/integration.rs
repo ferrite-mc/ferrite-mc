@@ -2732,9 +2732,23 @@ async fn op_world(
     std::net::SocketAddr,
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
+    op_world_at(source, gamemode, names, [0, 65, 0]).await
+}
+
+/// [`op_world`] with the spawn point chosen by the caller.
+async fn op_world_at(
+    source: Option<std::sync::Arc<super::anvil::AnvilChunkSource>>,
+    gamemode: i32,
+    names: &[&str],
+    spawn: [i32; 3],
+) -> (
+    World,
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
     let world = World::start_configured(
         source,
-        [0, 65, 0],
+        spawn,
         super::WorldSettings {
             gamemode,
             ops: names
@@ -3242,11 +3256,26 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
         types::BlockPos,
     };
     let source = super::anvil::AnvilChunkSource::new_memory();
-    let (world, addr, server) = op_world(Some(source.clone()), 1, &[]).await;
+    let (world, addr, server) = op_world_at(Some(source.clone()), 1, &[], [8, 64, 8]).await;
     let mut keeper = join_with_inventory(addr, "Keeper").await;
     keeper.until(46).await;
     let chest = u32::from(ferrite_data::blocks::default_state("chest").unwrap());
-    source.set_block(0, 64, 0, chest).unwrap();
+    // The chest sits on a stone floor, and the players stand in the chest's block, so once it is
+    // broken they stand on the floor. Players do not fall in this test, so a spawn above the
+    // floor would leave resting items below the pickup box (feet - 0.5) and make the test flaky;
+    // without a floor the spilled stacks fall into the void.
+    let floor = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+    for x in 4..=12 {
+        for z in 4..=12 {
+            // The chunk next to the spawn may still be streaming in.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while source.set_block(x, 63, z, floor).is_err() {
+                assert!(std::time::Instant::now() < deadline, "chunk never loaded");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+    source.set_block(8, 64, 8, chest).unwrap();
     keeper
         .send(&CreativeSlot {
             slot: 36,
@@ -3255,7 +3284,7 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
         .await;
     let open = |sequence: i32| UseItemOn {
         hand: VarInt(0),
-        location: BlockPos::new(0, 64, 0).pack(),
+        location: BlockPos::new(8, 64, 8).pack(),
         face: VarInt(1),
         cursor_x: 0.5,
         cursor_y: 0.875,
@@ -3295,7 +3324,7 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
         (slots[0], slots[54]),
         (plain("stone", 40), ItemStack::default())
     );
-    let entity = source.block_entity(0, 64, 0).expect("chest block entity");
+    let entity = source.block_entity(8, 64, 8).expect("chest block entity");
     assert!(matches!(
         entity.data.get("Items"),
         Some(ferrite_nbt::Tag::List(ferrite_nbt::List::Compound(items))) if items.len() == 1
@@ -3327,14 +3356,14 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
     keeper
         .send(&PlayerAction {
             status: VarInt(0),
-            location: BlockPos::new(0, 64, 0).pack(),
+            location: BlockPos::new(8, 64, 8).pack(),
             face: 1,
             sequence: VarInt(2),
         })
         .await;
     keeper.until(4).await;
-    assert_eq!(source.block(0, 64, 0), Some(0));
-    assert!(source.block_entity(0, 64, 0).is_none());
+    assert_eq!(source.block(8, 64, 8), Some(0));
+    assert!(source.block_entity(8, 64, 8).is_none());
     // The chest is gone, so the visitor's screen closes (the inventory clicks below are only
     // answered on window 0 once it has). Spilled items have no pickup delay, so the two players
     // standing on the chest collect all 40 stone again.

@@ -157,3 +157,38 @@ with the unmodified jar over many positions and seeds and finds **no difference*
 measurement shows it is faster, (3) it runs behind a `[worldgen]` switch that falls back to the host.
 The host stays the reference and the fallback; nothing of Mojang's is copied into the repository.
 Needs the user's `eula=true` on the dev machine to produce the reference output.
+
+### Storage idea for the Rust world: ASWM / Slime-style single blob (note only, not implemented)
+
+Requested 2026-11-07 as a **note to remember** for the new Rust worldgen. Nothing here is built, and
+**no database is being added** (no MySQL/Mongo/Redis); like the rest of this section it is the user's
+local work.
+
+The technique (as in Advanced Slime World Manager's Slime format):
+
+- A world is **one compact, compressed blob** (chunks, block entities, entities and world data
+  together, e.g. zstd) instead of a directory of per-chunk Anvil region files.
+- The blob is **read once and kept whole in memory**. Chunk access is a lookup in that in-memory
+  structure: no per-chunk file open/seek/decompress, no region-file locking.
+- Saving writes the blob back as a unit (or only the changed parts, then re-packs). That keeps
+  start-up and world cloning cheap: copy or load one buffer, e.g. one world per minigame or per
+  instance, spawned in milliseconds.
+- Best for small or bounded worlds. A huge, ever-growing survival map does not fit in memory, so
+  Anvil stays for those and the blob format is for generated/bounded worlds.
+
+Plan for Ferrite:
+
+1. Put it behind the existing chunk-source seam (`ChunkSource`, today `AnvilChunkSource`, with
+   `new_memory()` for tests), as another source, e.g. `BlobChunkSource`. The world code does not
+   change, only where chunks come from and go to.
+2. The **place the blob is stored must stay swappable**: a local file first; a different backend
+   (network, object store, a database) can be added later behind a small `load()` / `store()` trait
+   without touching the format or the world code.
+3. The Rust worldgen writes its output straight into the in-memory blob, so freshly generated
+   chunks never go through region files.
+4. Define the blob layout with its own version number, and test round trip (write, read, equal) and
+   that a clone is independent of the original.
+
+What the speed-up really is: the format and keeping it in RAM, not the choice of Redis. A networked
+store would only add latency; Ferrite's in-process memory mode (`new_memory()`) is the closest
+equivalent and is what this idea builds on.

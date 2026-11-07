@@ -21,6 +21,9 @@ Rust client, shared `eula.txt` gate, end-to-end test. Open:
 - Rust worldgen: port the hot terrain pieces (noise/surface, biomes, features, structures) to Rust,
   piece by piece, behaviour-compatible with the user's jar and verified against it
   (`docs/worldgen-host.md`, section "Rust worldgen").
+- Rust world storage (note only, no database): ASWM/Slime-style single compressed blob loaded wholly
+  into memory as another chunk source, with a swappable storage backend
+  (`docs/worldgen-host.md`, "Storage idea for the Rust world").
 - `worldgen.mode = embedded | process | remote` so large deployments can run several hosts.
 - Chunk loading and encoding optimizations (baseline in `crates/ferrite-world/benches`).
 
