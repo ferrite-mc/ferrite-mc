@@ -4350,7 +4350,12 @@ impl Region {
 
     /// Ticks the modelled mobs: goals, movement, fall damage, despawn, natural spawning and
     /// death loot.
-    fn tick_mobs(
+    #[cfg(test)]
+    fn tick_mobs(&mut self, ctx: &TickContext, blocks: &TickBlocks<'_>) {
+        self.tick_mobs_with_owner_attacks(ctx, blocks, &[]);
+    }
+
+    fn tick_mobs_with_owner_attacks(
         &mut self,
         ctx: &TickContext,
         blocks: &TickBlocks<'_>,
@@ -7589,7 +7594,7 @@ impl Region {
             self.sync_trades();
             self.land_tridents();
             self.tick_dragon_effects(ctx);
-            self.tick_mobs(ctx, &blocks, &owner_attacks);
+            self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
         }
         let alive: Vec<ferrite_math::Vec3> = self
             .players
