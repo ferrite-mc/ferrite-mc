@@ -46,18 +46,21 @@ entity pushes, block-entity contents and drops continue to use the committed wor
 drops exactly once. Region split/merge carries pending animations and delayed updates with their
 section, and overlapping animations are replaced rather than duplicated.
 
-The committed world state persists, but the moving overlay does not: a player who starts tracking
-a chunk mid-animation sees the committed final block, not a moving-piston block entity. That is
-the deliberate cost of committing the final state immediately; persisting a moving block entity
-would require staging the movement instead. Interrupted movement at a region boundary, resolver
-parity for a real client, and full cross-region runtime load behaviour still need client/runtime
-coverage. The local vanilla extractor records push reactions and block-entity capability for every
-state in `vanilla/26.3/generated/ferrite/piston_states.json`; existing vanilla extractions need to
-be regenerated with `python tools/fetch_vanilla.py`.
+The committed world state persists, and the live two-tick overlay travels with a region split or
+merge. A player who starts tracking a chunk while the animation is still active receives the
+current moving block and piston block entity when the chunk batch is sent, then the scheduled
+final block update when it is due. The overlay itself is not written to chunk NBT, so a server
+restart during the two-tick window leaves the committed final state; persisting that transient
+entity would require staging the movement instead. Resolver parity for a real client and full
+cross-region runtime load behaviour still need client/runtime coverage. The local vanilla
+extractor records push reactions and block-entity capability for every state in
+`vanilla/26.3/generated/ferrite/piston_states.json`; existing vanilla extractions need to be
+regenerated with `python tools/fetch_vanilla.py`.
 
 Focused coverage includes the twelve/thirteen-block limit, immovable and block-entity refusals,
 `PUSH` extension/retraction, slime/honey branching, glazed terracotta, sticky pull and push-only
 targets, head removal, collision-shape entity clearance, animation progression and replacement,
-delayed-update coalescing, region split/merge, unowned main lines and side branches, and
+delayed-update coalescing, region split/merge (including a moving block crossing a section
+boundary and a late tracker receiving its overlay), unowned main lines and side branches, and
 cross-boundary retraction. The animation timing and packet sequence have not been checked with a
 real Minecraft client.
