@@ -7382,6 +7382,105 @@ mod tests {
     }
 
     #[test]
+    fn a_refreshed_second_menu_cannot_take_an_already_sold_offer() {
+        use ferrite_inventory::{ClickInput, Clicker, Menu, NoCrafting, PlayerInventory};
+
+        let mut store = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        let key = store.insert(record);
+        let alice = Uuid::from_u128(21);
+        let bob = Uuid::from_u128(22);
+        let emeralds = |count| {
+            ferrite_item::ItemStack::from_name("emerald")
+                .expect("emerald")
+                .copy_with_count(count)
+        };
+        let bread = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(emeralds(2), bread.clone(), 1, 1);
+        offer.price_multiplier = 0.05;
+        store
+            .data_mut(key)
+            .unwrap()
+            .villager
+            .as_mut()
+            .unwrap()
+            .offers = vec![offer];
+
+        let snapshot = |store: &EntityStore, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
+        };
+        let bob_stale = snapshot(&store, bob);
+
+        // Alice buys the only use through her copy of the menu.
+        let mut alice_menu = Menu::merchant(1, snapshot(&store, alice));
+        alice_menu.container_mut()[0] = emeralds(2);
+        assert!(alice_menu.select_trade(0));
+        assert_eq!(alice_menu.result(), &bread);
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            alice_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert!(alice_menu.trades()[0].is_out_of_stock());
+        assert_eq!(
+            merge_trader_trades(&mut store, alice, uuid, alice_menu.trades()),
+            1
+        );
+
+        // Bob's screen was opened before Alice bought; it still shows the offer.
+        let mut bob_menu = Menu::merchant(2, bob_stale);
+        bob_menu.container_mut()[0] = emeralds(2);
+        assert!(bob_menu.select_trade(0));
+        assert_eq!(
+            bob_menu.result(),
+            &bread,
+            "the stale snapshot still shows the offer"
+        );
+
+        // The region refreshes it before the click, so the result disappears.
+        bob_menu.set_trades(snapshot(&store, bob));
+        assert!(bob_menu.result().is_empty());
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            bob_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+            assert_eq!(clicker.xp, 0.0, "no sale, no trade experience");
+        }
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, bob_menu.trades()),
+            0
+        );
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (1, 1));
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            0,
+            "Bob did not complete a sale"
+        );
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+    }
+
+    #[test]
     fn player_metadata_broadcast_stays_in_dimension_and_excludes_source() {
         let source = Uuid::from_u128(1);
         let viewer = Uuid::from_u128(2);
