@@ -733,6 +733,7 @@ pub struct Region {
     gravity: super::gravity::Gravity,
     fire: super::fire::FireTicks,
     buttons: super::blocks::ButtonTicks,
+    vaults: super::vault::Vaults,
     dispensers: super::dispenser::Dispensers,
     hoppers: super::hopper::Hoppers,
     redstone: super::redstone::Redstone,
@@ -763,6 +764,7 @@ impl RegionData for Region {
         self.gravity.merge(other.gravity);
         self.fire.merge(other.fire);
         self.buttons.merge(other.buttons);
+        self.vaults.merge(other.vaults);
         self.dispensers.merge(other.dispensers);
         self.hoppers.merge(other.hoppers);
         self.redstone.merge(other.redstone);
@@ -808,6 +810,9 @@ impl RegionData for Region {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
             }),
             buttons: self.buttons.split(|x, z| {
+                sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
+            }),
+            vaults: self.vaults.split(|x, z| {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
             }),
             dispensers: self.dispensers.split(|x, z| {
@@ -6884,6 +6889,90 @@ impl Region {
         }
         let mut changed = self.tick_block_updates(ctx);
         changed.extend(button_changed);
+        stage!("vaults");
+        // Vanilla `VaultBlockEntity.Server.tick`: a vault wakes up near players and runs its
+        // unlocking/ejecting timers. Only vaults in chunks this region holds are ticked.
+        let mut vault_changed = Vec::new();
+        if let Some(source) = ctx.source.as_deref() {
+            self.vaults.discover(source, &self.held_chunks);
+            self.vaults
+                .blocks_changed(source, &changed, &self.held_chunks);
+            let players: Vec<super::vault::VaultPlayer> = self
+                .players
+                .values()
+                .map(|p| super::vault::VaultPlayer {
+                    pos: p.pos,
+                    spectator: p.gamemode == 3,
+                })
+                .collect();
+            for update in self.vaults.tick(source, &players, &self.held_chunks) {
+                let super::vault::VaultUpdate {
+                    pos,
+                    block_state,
+                    events,
+                    items,
+                } = update;
+                if let Some(state) = block_state {
+                    {
+                        let mut world = super::fluid::RegionFluidWorld::new(
+                            source,
+                            &self.held_chunks,
+                            &ctx.tracking,
+                        );
+                        ferrite_fluid::FluidWorld::set_block(
+                            &mut world,
+                            pos[0],
+                            pos[1],
+                            pos[2],
+                            u32::from(state),
+                        );
+                    }
+                    self.updates.block_changed(pos);
+                    vault_changed.push(pos);
+                }
+                for event in events {
+                    let update = packet(&LevelEvent {
+                        event: event.event,
+                        location: ferrite_protocol::types::BlockPos::new(
+                            event.pos[0],
+                            event.pos[1],
+                            event.pos[2],
+                        )
+                        .pack(),
+                        data: event.data,
+                        global: false,
+                    });
+                    let tracking = ctx.tracking.lock().unwrap();
+                    broadcast_tracked_chunk(
+                        &tracking,
+                        source.dimension(),
+                        (event.pos[0].div_euclid(16), event.pos[2].div_euclid(16)),
+                        &update,
+                    );
+                }
+                for stack in items {
+                    let record = ferrite_entity::item::new_item(
+                        ferrite_math::Vec3::new(
+                            f64::from(pos[0]) + 0.5,
+                            f64::from(pos[1]) + 1.0,
+                            f64::from(pos[2]) + 0.5,
+                        ),
+                        ferrite_math::Vec3::new(
+                            self.rng.range(-0.05, 0.05),
+                            0.2,
+                            self.rng.range(-0.05, 0.05),
+                        ),
+                        ferrite_protocol::packets::play::ItemStack {
+                            count: stack.count,
+                            item_id: i32::from(stack.item),
+                        },
+                        &mut self.rng,
+                    );
+                    self.entities.insert(record);
+                }
+            }
+        }
+        changed.extend(vault_changed);
         stage!("hoppers");
         // Vanilla `HopperBlockEntity` ticks as a block entity; a region keeps only the
         // hoppers it has seen and ticks them every game tick (their own cooldown gates moves).

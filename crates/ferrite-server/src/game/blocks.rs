@@ -508,33 +508,28 @@ fn use_jukebox(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> b
     true
 }
 
-/// Vanilla `VaultBlock.useItemOn`: the matching trial key is used up and the vault ejects its
-/// rewards, once per player.
+/// Vanilla `VaultBlock.useItemOn`: the matching trial key is used up and the vault starts
+/// unlocking its rolled rewards once per player. Only a started unlock consumes the key; an
+/// inactive, busy or already-rewarded vault leaves the held stack untouched.
 fn use_vault(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> bool {
     if block != "minecraft:vault" {
-        return false;
-    }
-    let (key, table) = super::vault::key_and_table(property(state, "ominous") == Some("true"));
-    if player.inventory.selected_item().name() != Some(key) {
         return false;
     }
     let Some(source) = player.source.clone() else {
         return false;
     };
-    if !super::vault::reward_once(&source, pos, player.uuid) {
+    let Some(held) = player.inventory.selected_item().name() else {
+        return false;
+    };
+    let ominous = property(state, "ominous") == Some("true");
+    let outcome = super::vault::try_unlock(&source, pos, player.uuid, Some(held), ominous);
+    if !super::vault::unlock_consumes_key(outcome) {
         return false;
     }
     consume_held(player);
-    let context = ferrite_loot::LootContext::default();
-    for (item, count) in super::drops::roll_table(table, &context).unwrap_or_default() {
-        if let Some(stack) = ItemStack::from_name(&item).map(|s| s.copy_with_count(count))
-            && count > 0
-        {
-            player
-                .menus
-                .spilled
-                .push(([pos[0], pos[1] + 1, pos[2]], stack));
-        }
+    // The region tick owns the later transitions; this makes the unlock visible immediately.
+    if let Some(next) = with_props(state, &[("vault_state", "unlocking")]) {
+        change(player, pos, next);
     }
     true
 }
