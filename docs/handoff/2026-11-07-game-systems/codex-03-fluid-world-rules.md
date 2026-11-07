@@ -11,15 +11,19 @@ world's configured gamerule. Preserve current unloaded/unowned-chunk no-load beh
 
 ## Ownership and constraints
 
-Own `crates/ferrite-server/src/game/fluid.rs` and its module-local tests. If the production
-callsite in `game/region.rs` needs a change, touch only the fluid-update adapter/callsite and tell
-the coordinator exactly which function changed. Do not alter general fluid-cauldron semantics or
-redstone behavior.
+Own `crates/ferrite-server/src/game/fluid.rs` and its module-local tests, only the fluid tick
+closure in `crates/ferrite-server/src/game/mod.rs` that calls `Region::tick_fluids` (the current
+production callsite passes no world rules), and the narrow fluid source-conversion API/logic/tests
+in `crates/ferrite-fluid/src/lib.rs`, `src/tick.rs`, and `tests/interactions.rs`. Pass the
+`TickContext` gamerule values through that call; do not edit other `mod.rs` behavior. `region.rs`
+is not the production rules callsite and is out of scope. Do not alter general fluid-cauldron
+semantics or redstone behavior.
 
 ## Acceptance
 
 - Tests cover Overworld vs Nether lava scheduling/flow and water/lava source-conversion rules in
-  both enabled and disabled states.
+  both enabled and disabled states; disabling water-source conversion must prevent two-source
+  water generation while preserving ordinary source flow.
 - Existing region-boundary/no-load tests stay green.
 - Run focused server fluid tests, format check, and scoped clippy. Do not stage or commit; this
   subagent shares the coordinator checkout.
