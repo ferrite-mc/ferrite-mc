@@ -273,6 +273,12 @@ impl Player {
         }
     }
 
+    /// Closes the open menu and tells the client. Used when a trade menu's merchant is no
+    /// longer owned by this region, so its snapshot cannot be used across a hand-off.
+    pub fn close_open_menu(&mut self) {
+        self.close_open_container();
+    }
+
     /// Vanilla `handleContainerClick`.
     pub fn handle_container_click(&mut self, p: ContainerClick<HashedSlot>) {
         let infinite = self.infinite_materials();

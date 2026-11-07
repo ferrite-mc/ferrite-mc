@@ -948,18 +948,24 @@ struct TraderSync<'a> {
 impl TraderSync<'_> {
     /// Refreshes the player's open trade menu from the villager, so the next click validates
     /// against newer uses/demand and the player's current reputation instead of a stale copy.
-    fn refresh(&self, player: &mut Player) {
+    ///
+    /// Returns whether a click may be handled. A trader menu whose entity is no longer in this
+    /// region is closed instead: its snapshot must not keep selling after a region hand-off.
+    fn refresh(&self, player: &mut Player) -> bool {
         let Some((trader, _)) = player.open_trader() else {
-            return;
+            return true;
         };
         let Some(key) = trader_key(self.entities, trader) else {
-            return;
+            player.close_open_menu();
+            return false;
         };
         let Some(data) = self.entities.data(key) else {
-            return;
+            player.close_open_menu();
+            return false;
         };
         let Some(villager) = &data.villager else {
-            return;
+            player.close_open_menu();
+            return false;
         };
         let offers = if data
             .mob
@@ -971,6 +977,7 @@ impl TraderSync<'_> {
             villager.offers.clone()
         };
         player.set_trader_offers(offers);
+        true
     }
 
     /// Merges the sales the player made since the last refresh into the merchant and applies
@@ -979,6 +986,10 @@ impl TraderSync<'_> {
         let Some((trader, trades)) = player.open_trader() else {
             return;
         };
+        if trader_key(self.entities, trader).is_none() {
+            player.close_open_menu();
+            return;
+        }
         let xp = player.take_trader_xp();
         let sold = merge_trader_trades(self.entities, player.uuid, trader, &trades);
         if sold > 0 || xp > 0 {
@@ -3591,10 +3602,13 @@ impl Player {
                 ServerboundPlay::Interact(p) => self.uses.push((p.entity_id.0, p.hand.0)),
                 ServerboundPlay::ContainerClick(p) => {
                     // Another viewer may have bought this offer since our menu was opened, so
-                    // validate the click against the current uses and this player's price.
-                    trader.refresh(self);
-                    self.handle_container_click(p);
-                    trader.commit(self);
+                    // validate the click against the current uses and this player's price. A
+                    // trader menu whose entity left this region is closed without handling the
+                    // click, so a region hand-off cannot leave a live stale snapshot behind.
+                    if trader.refresh(self) {
+                        self.handle_container_click(p);
+                        trader.commit(self);
+                    }
                 }
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
                 ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
@@ -6884,8 +6898,9 @@ impl Region {
                     entities: &mut self.entities,
                 };
                 // A restock or another viewer's sale may have changed the merchant since this
-                // menu was last looked at.
-                trader.refresh(&mut p);
+                // menu was last looked at. A menu whose merchant moved to another region is
+                // closed here before any queued click is processed.
+                let _ = trader.refresh(&mut p);
                 match &timings {
                     Some(timings) => {
                         let _scope = timings.scope("player-update");
@@ -7530,6 +7545,216 @@ mod tests {
         assert_eq!(villager.level, 2);
         assert_eq!(villager.xp, ferrite_entity::villager::NEXT_LEVEL_XP[0]);
         assert_eq!(villager.offers.len(), 4);
+    }
+
+    #[test]
+    fn independent_menus_count_two_sales_once_and_credit_each_player() {
+        use ferrite_inventory::{ClickInput, Clicker, Menu, NoCrafting, PlayerInventory};
+
+        let mut store = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        let key = store.insert(record);
+        let alice = Uuid::from_u128(31);
+        let bob = Uuid::from_u128(32);
+        let emeralds = |count| {
+            ferrite_item::ItemStack::from_name("emerald")
+                .expect("emerald")
+                .copy_with_count(count)
+        };
+        let bread = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(emeralds(32), bread.clone(), 2, 1);
+        offer.price_multiplier = 0.05;
+        {
+            let villager = store.data_mut(key).unwrap().villager.as_mut().unwrap();
+            villager.offers = vec![offer];
+            villager.gossips.add(
+                alice,
+                ferrite_entity::villager::GossipType::MajorPositive,
+                20,
+            );
+        }
+
+        let snapshot = |store: &EntityStore, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
+        };
+        let mut alice_menu = Menu::merchant(1, snapshot(&store, alice));
+        let mut bob_menu = Menu::merchant(2, snapshot(&store, bob));
+        assert_eq!(alice_menu.trades()[0].price(), 27);
+        assert_eq!(bob_menu.trades()[0].price(), 32);
+
+        // Both menus were opened independently. Alice buys one of two uses first.
+        alice_menu.container_mut()[0] = emeralds(27);
+        assert!(alice_menu.select_trade(0));
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            alice_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(alice_menu.trades()[0].uses, 1);
+        assert_eq!(
+            merge_trader_trades(&mut store, alice, uuid, alice_menu.trades()),
+            1
+        );
+
+        // Bob's screen still has the old uses; refreshing it before the click shows the one
+        // remaining use at Bob's neutral price, and the sale must count exactly once.
+        bob_menu.container_mut()[0] = emeralds(32);
+        assert!(bob_menu.select_trade(0));
+        assert_eq!(bob_menu.result(), &bread);
+        bob_menu.set_trades(snapshot(&store, bob));
+        assert_eq!(bob_menu.trades()[0].uses, 1);
+        assert_eq!(bob_menu.trades()[0].price(), 32);
+        assert_eq!(bob_menu.result(), &bread);
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            bob_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(bob_menu.trades()[0].uses, 2);
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, bob_menu.trades()),
+            1
+        );
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, bob_menu.trades()),
+            0,
+            "reconciling the same accepted snapshot twice must be a no-op"
+        );
+
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (2, 2));
+        assert!(villager.offers[0].is_out_of_stock());
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+    }
+
+    #[test]
+    fn a_region_handoff_reconciles_sales_in_the_new_owner_once() {
+        use ferrite_inventory::{ClickInput, Clicker, Menu, NoCrafting, PlayerInventory};
+
+        let mut old = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        let key = old.insert(record);
+        let alice = Uuid::from_u128(41);
+        let bob = Uuid::from_u128(42);
+        let emeralds = |count| {
+            ferrite_item::ItemStack::from_name("emerald")
+                .expect("emerald")
+                .copy_with_count(count)
+        };
+        let bread = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(emeralds(2), bread.clone(), 2, 1);
+        offer.price_multiplier = 0.05;
+        old.data_mut(key).unwrap().villager.as_mut().unwrap().offers = vec![offer];
+
+        let snapshot = |store: &EntityStore, key, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
+        };
+        let mut alice_menu = Menu::merchant(1, snapshot(&old, key, alice));
+        alice_menu.container_mut()[0] = emeralds(2);
+        assert!(alice_menu.select_trade(0));
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            alice_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(
+            merge_trader_trades(&mut old, alice, uuid, alice_menu.trades()),
+            1
+        );
+
+        // The region hands the entity to another store. A stale reconciliation against the old
+        // owner must not count or credit anything; the new owner has the authoritative uses.
+        let record = old.remove(key).expect("villager record");
+        let mut new = EntityStore::default();
+        let new_key = new.insert(record);
+        assert!(old.keys().is_empty());
+        assert!(trader_key(&old, uuid).is_none());
+        assert!(trader_key(&new, uuid).is_some());
+        assert_eq!(
+            merge_trader_trades(&mut old, alice, uuid, alice_menu.trades()),
+            0,
+            "a late commit against the old owner must not count"
+        );
+        assert_eq!(
+            merge_trader_trades(&mut new, alice, uuid, alice_menu.trades()),
+            0,
+            "the sale was already merged before the hand-off"
+        );
+
+        // Bob's menu is refreshed from the new owner. The remaining use is accepted there and
+        // counts exactly once, with Bob's own gossip.
+        let mut bob_menu = Menu::merchant(3, snapshot(&new, new_key, bob));
+        assert_eq!(bob_menu.trades()[0].uses, 1);
+        bob_menu.container_mut()[0] = emeralds(2);
+        assert!(bob_menu.select_trade(0));
+        assert_eq!(bob_menu.result(), &bread);
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            bob_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(
+            merge_trader_trades(&mut new, bob, uuid, bob_menu.trades()),
+            1
+        );
+        assert_eq!(
+            merge_trader_trades(&mut new, bob, uuid, bob_menu.trades()),
+            0,
+            "the same accepted snapshot must not be counted twice after a hand-off"
+        );
+
+        let villager = new.data(new_key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (2, 2));
+        assert!(villager.offers[0].is_out_of_stock());
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
     }
 
     #[test]
