@@ -11,13 +11,17 @@ world's configured gamerule. Preserve current unloaded/unowned-chunk no-load beh
 
 ## Ownership and constraints
 
-Own `crates/ferrite-server/src/game/fluid.rs` and its module-local tests, only the fluid tick
-closure in `crates/ferrite-server/src/game/mod.rs` that calls `Region::tick_fluids` (the current
-production callsite passes no world rules), and the narrow fluid source-conversion API/logic/tests
+Own `crates/ferrite-server/src/game/fluid.rs` and its module-local tests; only the fluid tick
+closure in `crates/ferrite-server/src/game/mod.rs`; only `Region::tick_fluids` in
+`crates/ferrite-server/src/game/region.rs`; and the narrow fluid source-conversion API/logic/tests
 in `crates/ferrite-fluid/src/lib.rs`, `src/tick.rs`, and `tests/interactions.rs`. Pass the
-`TickContext` gamerule values through that call; do not edit other `mod.rs` behavior. `region.rs`
-is not the production rules callsite and is out of scope. Do not alter general fluid-cauldron
-semantics or redstone behavior.
+`TickContext` gamerule values through the production call; do not edit other `mod.rs` or
+`region.rs` behavior. Do not alter general fluid-cauldron semantics or redstone behavior.
+
+Also fix the current CI clippy failure in `ferrite-fluid/src/lib.rs` (`clippy::collapsible_if` in
+the cauldron conversion branch) without changing behavior or weakening lints. This CI issue is
+inside the owned fluid files and must be clean under `cargo clippy --workspace --all-targets -- -D
+warnings`.
 
 ## Acceptance
 
