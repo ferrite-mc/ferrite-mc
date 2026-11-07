@@ -3994,6 +3994,11 @@ impl Region {
     /// that no owner currently reports may be served from the last sighting.
     fn leash_holder(&self, ctx: &TickContext, holder: Uuid) -> LeashHolderLookup {
         if let Some(player) = self.players.values().find(|player| player.uuid == holder) {
+            // A player whose dimension changed is only waiting for the world loop to hand it
+            // over; it is never a local target for this dimension's leads.
+            if player.dimension != ctx.dimension {
+                return LeashHolderLookup::Elsewhere;
+            }
             return LeashHolderLookup::Here {
                 pos: ferrite_math::Vec3::new(player.pos[0], player.pos[1], player.pos[2]),
                 id: Some(player.entity),
@@ -4155,11 +4160,13 @@ impl Region {
         let positions: Vec<_> = self
             .players
             .values()
+            .filter(|p| p.dimension == ctx.dimension)
             .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]))
             .collect();
         let targets: Vec<_> = self
             .players
             .values()
+            .filter(|p| p.dimension == ctx.dimension)
             .map(|p| ai::Target {
                 uuid: p.uuid,
                 pos: ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
@@ -7907,6 +7914,40 @@ mod tests {
         assert!(
             !region.leash_holders(&ctx).contains_key(&holder),
             "a Nether holder is not a local target"
+        );
+
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_mobs(&ctx, &blocks);
+        assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
+        assert_eq!(dropped_leads(&region), 1, "the lead drops once");
+        region.tick_mobs(&ctx, &blocks);
+        assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
+    }
+
+    #[test]
+    fn a_lead_rejects_a_player_holder_that_moved_to_another_dimension() {
+        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let holder = Uuid::from_u128(0x1ea5_1008);
+        let ctx = leash_context(Default::default());
+        {
+            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.join(holder, "Holder".into(), 0, 20);
+            state.set_position(holder, [0.5, 64.0, 0.5], 0.0, 0.0);
+            state.set_dimension(holder, super::super::Dimension::Nether);
+        }
+        let mut region = Region::default();
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(9.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, cow).unwrap().leash = Some((holder, 123));
+        assert!(
+            !region.leash_holders(&ctx).contains_key(&holder),
+            "a player in the Nether is not a local leash target"
         );
 
         let blocks = TickBlocks {
