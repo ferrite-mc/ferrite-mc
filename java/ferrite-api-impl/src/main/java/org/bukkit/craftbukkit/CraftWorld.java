@@ -20,6 +20,11 @@ public class CraftWorld {
     public String getName() { return world.getName(); }
     public org.bukkit.Location getSpawnLocation() { return world.getSpawnLocation(); }
     public org.bukkit.block.Block getBlockAt(int x, int y, int z) { return world.getBlockAt(x, y, z); }
+    /** Spawns a dropped item through the live world's normal drop path. */
+    public org.bukkit.entity.Item dropItem(org.bukkit.Location location, org.bukkit.inventory.ItemStack item) { return world.dropItem(location, item); }
+    public org.bukkit.entity.Item dropItem(org.bukkit.Location location, org.bukkit.inventory.ItemStack item, java.util.function.Consumer<org.bukkit.entity.Item> function) { return world.dropItem(location, item, function); }
+    public org.bukkit.entity.Item dropItemNaturally(org.bukkit.Location location, org.bukkit.inventory.ItemStack item) { return world.dropItemNaturally(location, item); }
+    public org.bukkit.entity.Item dropItemNaturally(org.bukkit.Location location, org.bukkit.inventory.ItemStack item, java.util.function.Consumer<org.bukkit.entity.Item> function) { return world.dropItemNaturally(location, item, function); }
     public java.util.List<org.bukkit.entity.Player> getPlayers() { return world.getPlayers(); }
     public java.util.List<org.bukkit.entity.Entity> getEntities() { return world.getEntities(); }
     public java.util.List<org.bukkit.entity.LivingEntity> getLivingEntities() { return world.getLivingEntities(); }

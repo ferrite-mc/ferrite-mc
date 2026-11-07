@@ -22,6 +22,8 @@ CMI가 동작한다고 말할 수 없다.
 - 스코어보드 표시: `setScoreboard`로 list/sidebar/below-name을 클라이언트에 보낸다(변경분만 전송).
 - 아이템 드롭/스폰: `World#dropItem`, `dropItemNaturally`, `Player#dropItem` 변형, `give(dropIfFull)`,
   `spawnEntity`(TNT와 게임이 아는 몹), `spawnFallingBlock`, `launchProjectile`(화살만).
+  CraftBukkit 호환 캐스트 경로의 `CraftWorld#dropItem`/`dropItemNaturally`(콜백 포함)도 같은
+  라이브 월드 드롭 경로로 위임한다 — Java 테스트로 호스트 호출까지 확인했다.
 - 엔티티 핸들: 스폰·드롭이 돌려주는 핸들은 실제 엔티티의 id를 가지며 위치·유효성·속도·체력 읽기와
   `remove`/`setVelocity`/`teleport`/`damage`가 실제 엔티티에 닿는다. `Player#attack`은 1점 피해.
 - 클라이언트가 가진 청크: `Player#isChunkSent`, `getSentChunks`는 실제로 보낸/버린 청크를 따라간다.

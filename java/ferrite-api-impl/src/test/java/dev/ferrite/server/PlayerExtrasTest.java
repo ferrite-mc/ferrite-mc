@@ -324,6 +324,26 @@ class PlayerExtrasTest {
         assertEquals(java.util.List.of("dropItemNaturally(Location,ItemStack,String)", "dropItem(Location,ItemStack,String)"), calls);
     }
 
+    @Test void craftWorldDropMethodsUseTheLiveWorldPath() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        try {
+            var at = new org.bukkit.Location(player.getWorld(), 3, 70, 4);
+            var craft = new org.bukkit.craftbukkit.CraftWorld(player.getWorld());
+            var stone = new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 1);
+            var diamond = new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 2);
+            assertNotNull(craft.dropItem(at, stone));
+            assertNotNull(craft.dropItem(at, stone, item -> {}));
+            assertNotNull(craft.dropItemNaturally(at, diamond));
+            assertNotNull(craft.dropItemNaturally(at, diamond, item -> {}));
+        } finally { HostBridge.transport = null; }
+        assertEquals(java.util.List.of(
+                "dropItem(Location,ItemStack,String)",
+                "dropItem(Location,ItemStack,String)",
+                "dropItemNaturally(Location,ItemStack,String)",
+                "dropItemNaturally(Location,ItemStack,String)"), calls);
+    }
+
     @Test void playersThrowItemsThroughTheHost() {
         var calls = new java.util.ArrayList<String>();
         HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
