@@ -34,6 +34,7 @@ public class ServerGamePacketListenerImpl {
         if (packet instanceof net.minecraft.network.protocol.game.ClientboundTabListPacket tab) { target.sendPlayerListHeaderAndFooter(tab.header().adventure(), tab.footer().adventure()); return; }
         if (packet instanceof net.minecraft.network.protocol.game.ClientboundContainerClosePacket) { target.closeInventory(); return; }
         if (packet instanceof net.minecraft.network.protocol.game.ClientboundSetExperiencePacket exp) { target.sendExperienceChange(exp.experienceProgress(), exp.experienceLevel()); return; }
+        if (packet instanceof net.minecraft.network.protocol.game.ClientboundSetHealthPacket health) { target.sendHealthUpdate(health.getHealth(), health.getFood(), health.getSaturation()); return; }
         dev.ferrite.server.HostBridge.callVoid("NMS", target.getUniqueId().toString(), "send(" + packet.getClass().getSimpleName() + ")", packet.toString());
     }
     public void disconnect(net.minecraft.network.chat.Component reason) { player.getBukkitEntity().kick(reason.adventure()); }
