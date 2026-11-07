@@ -136,6 +136,9 @@ permutation table would win a few percent at most. Threads were the large lever
 
 ## Rust worldgen (planned, requested 2026-11-07)
 
+**Who does this: the user, locally, on their own machine (needs their `eula=true`). Cloud/agent sessions
+must not start or change Rust worldgen code; this section is the plan only.**
+
 Goal: move the hot parts of terrain generation out of the JVM host into Rust (`ferrite-world` /
 `ferrite-server::game::vanilla_gen`), one piece at a time, until the host is only needed for what is
 not yet ported. The policy above applies: each Rust piece is written **from the behaviour** (inputs
