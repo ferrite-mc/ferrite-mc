@@ -5,7 +5,9 @@
 //! (world event 3015, vanilla `WorldEvents.VAULT_ACTIVATES`). Using the matching trial key
 //! starts `unlocking` for `UNLOCKING_DELAY_TICKS`, then `ejecting` releases the rolled loot
 //! over `EJECTING_DELAY_TICKS` (world event 3017 per item), and the vault returns to `active`
-//! for the next player. Walking away turns it off again (event 3016).
+//! for the next player. Walking away turns it off again (event 3016). Vanilla 26.3
+//! `VaultState.ejectResultItem` sends 3017 with data 0; the item id travels on the spawned
+//! item entity, not in the level event.
 //!
 //! The server data keeps `state`, `state_timer`, `items_to_eject`, `rewarded_players` and
 //! `failed_unlock_cooldown`. The reward is claimed when unlocking starts, so one player gets
@@ -16,7 +18,9 @@
 //! when the shutter closes.
 
 use super::anvil::AnvilChunkSource;
+use ferrite_entity::{EntityRecord, Rng};
 use ferrite_item::ItemStack;
+use ferrite_math::Vec3;
 use ferrite_nbt::{Compound, List, Tag};
 use ferrite_region::ChunkPos;
 use ferrite_world::BlockEntity;
@@ -327,12 +331,39 @@ pub struct VaultUpdate {
     pub events: Vec<VaultEvent>,
     /// Rewards leaving the vault this tick.
     pub items: Vec<ItemStack>,
+    /// The reward ledger to write after `items` have been spawned. [`tick_vault`] deliberately
+    /// leaves this out of its block-entity write, so a crash before the spawn leaves the reward
+    /// pending instead of losing it.
+    pub pending_items: Option<Vec<ItemStack>>,
 }
 
 impl VaultUpdate {
     fn changed(&self) -> bool {
-        self.block_state.is_some() || !self.events.is_empty() || !self.items.is_empty()
+        self.block_state.is_some()
+            || !self.events.is_empty()
+            || !self.items.is_empty()
+            || self.pending_items.is_some()
     }
+}
+
+/// The stack a client sees on an ejected reward item entity. Vault rewards are stored with
+/// protocol item ids already, so the wire id is the stored id and no name lookup is needed.
+pub fn ejected_item_stack(stack: &ItemStack) -> ferrite_protocol::packets::play::ItemStack {
+    ferrite_protocol::packets::play::ItemStack {
+        count: stack.count,
+        item_id: i32::from(stack.item),
+    }
+}
+
+/// The item entity for one reward leaving the vault (vanilla
+/// `VaultBlockEntity.Server.tryEjectItem`): above the block with a small random push and yaw.
+pub fn ejected_item([x, y, z]: [i32; 3], stack: &ItemStack, rng: &mut Rng) -> EntityRecord {
+    ferrite_entity::item::new_item(
+        Vec3::new(f64::from(x) + 0.5, f64::from(y) + 1.0, f64::from(z) + 0.5),
+        Vec3::new(rng.range(-0.05, 0.05), 0.2, rng.range(-0.05, 0.05)),
+        ejected_item_stack(stack),
+        rng,
+    )
 }
 
 fn event(pos: [i32; 3], event: i32, data: i32) -> VaultEvent {
@@ -442,12 +473,15 @@ pub fn tick_vault(
         update.block_state = Some(desired);
     }
 
+    if items_dirty {
+        // The caller writes this after the ejected item entities exist; see
+        // [`commit_ejection`]. Writing it here would lose the reward in a crash between the
+        // block-entity save and the entity spawn.
+        update.pending_items = Some(items.clone());
+    }
     if dirty {
         server.insert(STATE.into(), Tag::String(state));
         server.insert(TIMER.into(), Tag::Int(timer as i32));
-        if items_dirty {
-            server.insert(ITEMS.into(), item_tags(&items));
-        }
         entity.data.insert(DATA.into(), Tag::Compound(server));
         if let Err(error) = source.update_block_entity(x, y, z, |current| {
             if current.is_some() {
@@ -462,6 +496,26 @@ pub fn tick_vault(
         }
     }
     Some(update)
+}
+
+/// Writes the pending reward ledger after the caller has spawned [`VaultUpdate::items`].
+/// Keeping this separate from [`tick_vault`] means a crash before the spawn leaves the reward
+/// pending; a crash after the spawn but before this write re-ejects an item whose entity was
+/// never persisted, so the reward is still delivered once.
+pub fn commit_ejection(source: &AnvilChunkSource, [x, y, z]: [i32; 3], items: &[ItemStack]) {
+    let Some(type_id) = vault_type_id() else {
+        return;
+    };
+    let result = source.update_block_entity(x, y, z, |entity| {
+        let Some(entity) = entity.as_mut().filter(|entity| entity.type_id == type_id) else {
+            return (false, ());
+        };
+        server_data(entity).insert(ITEMS.into(), item_tags(items));
+        (true, ())
+    });
+    if let Err(error) = result {
+        tracing::warn!(x, y, z, %error, "could not store the vault reward ledger");
+    }
 }
 
 /// The vaults one region ticks, discovered from loaded block entities and block changes.
@@ -656,6 +710,13 @@ mod tests {
         items_to_eject(server)
     }
 
+    /// The reward ledger as a multiset of `(item id, count)`, for restart accounting.
+    fn id_counts(items: &[ItemStack]) -> Vec<(u16, i32)> {
+        let mut counts: Vec<_> = items.iter().map(|item| (item.item, item.count)).collect();
+        counts.sort_unstable();
+        counts
+    }
+
     fn player(pos: [f64; 3], spectator: bool) -> VaultPlayer {
         VaultPlayer { pos, spectator }
     }
@@ -664,10 +725,19 @@ mod tests {
         player([4.5, 64.5, 4.5], false)
     }
 
-    fn apply(source: &AnvilChunkSource, update: &VaultUpdate) {
+    fn apply_block_state(source: &AnvilChunkSource, update: &VaultUpdate) {
         if let Some(state) = update.block_state {
             let [x, y, z] = update.pos;
             source.set_block(x, y, z, u32::from(state)).unwrap();
+        }
+    }
+
+    /// What a region does after ticking: apply the block state, spawn `items`, then write the
+    /// reward ledger that no longer contains them.
+    fn apply(source: &AnvilChunkSource, update: &VaultUpdate) {
+        apply_block_state(source, update);
+        if let Some(items) = &update.pending_items {
+            commit_ejection(source, update.pos, items);
         }
     }
 
@@ -921,5 +991,325 @@ mod tests {
         let elsewhere = HashMap::from([(ChunkPos(9, 9), 1)]);
         let updates = vaults.tick(&source, &[near()], &elsewhere);
         assert!(updates.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ejected_rewards_use_registry_item_ids_and_emit_one_event_each() {
+        let source = loaded().await;
+        let pos = [4, 64, 4];
+        put_vault(&source, pos, "inactive", false);
+        let (a, b) = (Uuid::from_u128(21), Uuid::from_u128(22));
+
+        // Activation by proximity: one block-state change and one 3015 event.
+        let activation = tick_vault(&source, pos, &[near()]).expect("vault tick");
+        assert_eq!(activation.block_state, Some(vault_state("active", false)));
+        assert_eq!(
+            activation.events,
+            vec![VaultEvent {
+                pos,
+                event: VAULT_ACTIVATES,
+                data: 0,
+            }]
+        );
+        apply(&source, &activation);
+
+        // A wrong key is rejected without consuming it; the matching key starts the unlock.
+        assert_eq!(
+            try_unlock(&source, pos, a, Some("minecraft:stick"), false),
+            Unlock::WrongKey
+        );
+        assert!(!unlock_consumes_key(Unlock::WrongKey));
+        assert_eq!(
+            try_unlock(&source, pos, a, Some("minecraft:trial_key"), false),
+            Unlock::Started
+        );
+        assert!(unlock_consumes_key(Unlock::Started));
+        // A duplicate interaction while the shutter is busy claims and consumes nothing.
+        assert_eq!(
+            try_unlock(&source, pos, a, Some("minecraft:trial_key"), false),
+            Unlock::Busy
+        );
+        assert!(!unlock_consumes_key(Unlock::Busy));
+
+        let reward = stored_items(&source, pos);
+        assert!(!reward.is_empty(), "the vault rolled a reward");
+        for _ in 0..UNLOCKING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            apply(&source, &update);
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        let mut ejected = Vec::new();
+        let mut ejection_events = 0;
+        for _ in 0..EJECTING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            for event in &update.events {
+                if event.event == VAULT_EJECTS_ITEM {
+                    assert_eq!(event.pos, pos);
+                    assert_eq!(event.data, 0);
+                    ejection_events += 1;
+                }
+            }
+            apply(&source, &update);
+            ejected.extend(update.items);
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        assert!(stored_items(&source, pos).is_empty());
+        assert_eq!(ejection_events, ejected.len());
+        assert_eq!(id_counts(&ejected), id_counts(&reward));
+
+        let mut rng = Rng::new(7);
+        for stack in &ejected {
+            let name = stack
+                .name()
+                .unwrap_or_else(|| panic!("unknown item id {}", stack.item));
+            assert_ne!(stack.item, ferrite_item::AIR);
+            assert_eq!(ferrite_item::item_id(name), Some(stack.item));
+            assert_eq!(
+                ferrite_data::registries::id("minecraft:item", name),
+                Some(i32::from(stack.item))
+            );
+            let protocol = ejected_item_stack(stack);
+            assert_eq!(protocol.item_id, i32::from(stack.item));
+            assert_eq!(protocol.count, stack.count);
+
+            let record = ejected_item(pos, stack, &mut rng);
+            let spawned = ferrite_entity::item::stack(&record.data);
+            assert_eq!(spawned.item_id, i32::from(stack.item));
+            assert_eq!(spawned.count, stack.count);
+            assert_eq!(record.pos.x, f64::from(pos[0]) + 0.5);
+            assert_eq!(record.pos.y, f64::from(pos[1]) + 1.0);
+            assert_eq!(record.pos.z, f64::from(pos[2]) + 0.5);
+        }
+
+        // A second player is independently eligible for the same, already-ejected vault.
+        assert_eq!(
+            try_unlock(&source, pos, a, Some("minecraft:trial_key"), false),
+            Unlock::AlreadyRewarded
+        );
+        assert!(!unlock_consumes_key(Unlock::AlreadyRewarded));
+        assert_eq!(
+            try_unlock(&source, pos, b, Some("minecraft:trial_key"), false),
+            Unlock::Started
+        );
+        assert!(unlock_consumes_key(Unlock::Started));
+        assert!(rewarded(&source, pos, b));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_mid_ejection_keeps_each_reward_exactly_once() {
+        let Some(root) = vanilla_root() else {
+            eprintln!("SKIP vault ejection reload test: vanilla/26.3/generated is absent");
+            return;
+        };
+        let world = temp_dir("ejection-reload");
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let pos = [4, 64, 4];
+        let (a, b) = (Uuid::from_u128(31), Uuid::from_u128(32));
+        put_vault(&source, pos, "active", true);
+        assert_eq!(
+            try_unlock(&source, pos, a, Some("minecraft:ominous_trial_key"), true),
+            Unlock::Started
+        );
+        let reward = stored_items(&source, pos);
+        assert!(!reward.is_empty());
+
+        for _ in 0..UNLOCKING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            apply(&source, &update);
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        // Let a few rewards leave the vault before the save/restart.
+        let mut ejected_before = Vec::new();
+        for _ in 0..6 {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            apply(&source, &update);
+            ejected_before.extend(update.items);
+        }
+        assert!(
+            !ejected_before.is_empty(),
+            "some rewards were ejected before the restart"
+        );
+        assert_eq!(
+            try_unlock(&source, pos, b, Some("minecraft:ominous_trial_key"), true),
+            Unlock::Busy
+        );
+        assert!(!rewarded(&source, pos, b));
+
+        source.flush_chunk(0, 0).await.unwrap();
+        drop(source);
+
+        // Restart over the same directory: the shutter resumes and the ledger is intact.
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+        assert!(rewarded(&source, pos, a));
+        assert!(!rewarded(&source, pos, b));
+        let remaining = stored_items(&source, pos);
+        let mut ledger = ejected_before.clone();
+        ledger.extend(remaining.clone());
+        assert_eq!(
+            id_counts(&ledger),
+            id_counts(&reward),
+            "reload duplicates or loses pending rewards"
+        );
+
+        let mut ejected_after = Vec::new();
+        let mut ejection_events = 0;
+        for _ in 0..EJECTING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            ejection_events += update
+                .events
+                .iter()
+                .filter(|event| event.event == VAULT_EJECTS_ITEM)
+                .count();
+            apply(&source, &update);
+            ejected_after.extend(update.items);
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        assert!(stored_items(&source, pos).is_empty());
+        assert_eq!(
+            id_counts(&ejected_after),
+            id_counts(&remaining),
+            "resuming re-ejects exactly the pending rewards"
+        );
+        assert_eq!(ejection_events, ejected_after.len());
+        let mut total = ejected_before;
+        total.extend(ejected_after);
+        assert_eq!(
+            id_counts(&total),
+            id_counts(&reward),
+            "every reward spawns exactly once across the restart"
+        );
+
+        // The claim survives a second restart and the next player still gets their own reward.
+        assert_eq!(
+            try_unlock(&source, pos, a, Some("minecraft:ominous_trial_key"), true),
+            Unlock::AlreadyRewarded
+        );
+        assert!(!unlock_consumes_key(Unlock::AlreadyRewarded));
+        source.flush_chunk(0, 0).await.unwrap();
+        drop(source);
+
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        assert!(stored_items(&source, pos).is_empty());
+        assert!(rewarded(&source, pos, a));
+        assert!(!rewarded(&source, pos, b));
+        assert_eq!(
+            try_unlock(&source, pos, b, Some("minecraft:ominous_trial_key"), true),
+            Unlock::Started
+        );
+        assert!(unlock_consumes_key(Unlock::Started));
+        assert!(rewarded(&source, pos, b));
+
+        drop(source);
+        let _ = std::fs::remove_dir_all(world);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crash_before_spawn_keeps_the_reward_pending() {
+        let Some(root) = vanilla_root() else {
+            eprintln!("SKIP vault crash test: vanilla/26.3/generated is absent");
+            return;
+        };
+        let world = temp_dir("ejection-crash");
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let pos = [4, 64, 4];
+        let player = Uuid::from_u128(41);
+        put_vault(&source, pos, "active", true);
+        assert_eq!(
+            try_unlock(
+                &source,
+                pos,
+                player,
+                Some("minecraft:ominous_trial_key"),
+                true
+            ),
+            Unlock::Started
+        );
+        let reward = stored_items(&source, pos);
+        assert!(!reward.is_empty());
+
+        for _ in 0..UNLOCKING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            apply(&source, &update);
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        // This tick popped a reward and handed the new ledger to the region. Simulate a crash
+        // before the region spawned the item entity: only the block state is applied and the
+        // ledger is never written.
+        let crash = tick_vault(&source, pos, &[near()]).expect("vault tick");
+        assert_eq!(crash.items.len(), 1, "one reward left the vault this tick");
+        let pending = crash.pending_items.as_deref().expect("new reward ledger");
+        assert_eq!(pending.len(), reward.len() - 1);
+        apply_block_state(&source, &crash);
+
+        source.flush_chunk(0, 0).await.unwrap();
+        drop(source);
+
+        // The reward was never spawned, so after the restart it must still be pending and the
+        // resumed vault must deliver the whole reward exactly once.
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+        assert_eq!(
+            id_counts(&stored_items(&source, pos)),
+            id_counts(&reward),
+            "the unspawned reward is lost across the restart"
+        );
+
+        let mut ejected = Vec::new();
+        let mut ejection_events = 0;
+        for _ in 0..EJECTING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            ejection_events += update
+                .events
+                .iter()
+                .filter(|event| event.event == VAULT_EJECTS_ITEM)
+                .count();
+            apply(&source, &update);
+            ejected.extend(update.items);
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        assert_eq!(ejection_events, ejected.len());
+        assert_eq!(
+            id_counts(&ejected),
+            id_counts(&reward),
+            "the resumed vault re-ejects the whole reward once"
+        );
+        assert_eq!(
+            try_unlock(
+                &source,
+                pos,
+                player,
+                Some("minecraft:ominous_trial_key"),
+                true
+            ),
+            Unlock::AlreadyRewarded
+        );
+
+        drop(source);
+        let _ = std::fs::remove_dir_all(world);
     }
 }

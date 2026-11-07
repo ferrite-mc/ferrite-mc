@@ -6911,6 +6911,7 @@ impl Region {
                     block_state,
                     events,
                     items,
+                    pending_items,
                 } = update;
                 if let Some(state) = block_state {
                     {
@@ -6951,24 +6952,13 @@ impl Region {
                     );
                 }
                 for stack in items {
-                    let record = ferrite_entity::item::new_item(
-                        ferrite_math::Vec3::new(
-                            f64::from(pos[0]) + 0.5,
-                            f64::from(pos[1]) + 1.0,
-                            f64::from(pos[2]) + 0.5,
-                        ),
-                        ferrite_math::Vec3::new(
-                            self.rng.range(-0.05, 0.05),
-                            0.2,
-                            self.rng.range(-0.05, 0.05),
-                        ),
-                        ferrite_protocol::packets::play::ItemStack {
-                            count: stack.count,
-                            item_id: i32::from(stack.item),
-                        },
-                        &mut self.rng,
-                    );
+                    let record = super::vault::ejected_item(pos, &stack, &mut self.rng);
                     self.entities.insert(record);
+                }
+                // The vault's ledger is written only after its item entities exist, so a
+                // crash in between re-ejects a reward instead of losing it.
+                if let Some(items) = pending_items {
+                    super::vault::commit_ejection(source, pos, &items);
                 }
             }
         }
