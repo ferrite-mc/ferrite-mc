@@ -4420,7 +4420,12 @@ impl Region {
         let item = ferrite_item::item_id(held);
         let wear = item.is_some_and(|id| {
             ferrite_entity::horse::is_armor(held)
-                && ferrite_entity::horse::wear_armor(&mut self.entities, key, id)
+                && ferrite_entity::horse::wear_armor(
+                    &mut self.entities,
+                    key,
+                    id,
+                    ferrite_entity::horse::armor_points(held),
+                )
         });
         if wear || ferrite_entity::horse::treat(&mut self.entities, key, held) {
             if gamemode != 1

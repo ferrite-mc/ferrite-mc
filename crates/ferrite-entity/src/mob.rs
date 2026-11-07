@@ -302,6 +302,8 @@ pub struct MobState {
     pub saddled: bool,
     /// Item id of the horse armour it wears (0 for none).
     pub armor: u16,
+    /// Armour points of the worn horse armour (`Attributes.ARMOR`).
+    pub armor_points: f32,
     /// Inherited `movement_speed` and `jump_strength` of an equine (0 when not rolled).
     pub speed: f32,
     pub jump: f32,
@@ -345,6 +347,7 @@ impl MobState {
             anger: 0,
             saddled: false,
             armor: 0,
+            armor_points: 0.0,
             speed: 0.0,
             jump: 0.0,
             temper: 0,
@@ -466,6 +469,15 @@ pub fn hurt(
     if state.hurt_time > 0 {
         return Some(Hurt::Immune);
     }
+    // `CombatRules.getDamageAfterAbsorb`: armour takes away up to 80% of a hit.
+    let amount = if state.armor_points > 0.0 {
+        let reduction = (state.armor_points / 5.0)
+            .max(state.armor_points - amount / 2.0)
+            .clamp(0.0, 20.0);
+        amount * (1.0 - reduction / 25.0)
+    } else {
+        amount
+    };
     let health = (state.health - amount).max(0.0);
     {
         let mob = state_mut(store, key)?;

@@ -68,11 +68,25 @@ pub fn is_armor(item: &str) -> bool {
     item.ends_with("_horse_armor")
 }
 
+/// Armour points of a horse armour item (`Items.*_HORSE_ARMOR` armor attribute).
+pub fn armor_points(item: &str) -> f32 {
+    match item {
+        "minecraft:leather_horse_armor" => 3.0,
+        "minecraft:copper_horse_armor" => 4.0,
+        "minecraft:iron_horse_armor" => 5.0,
+        "minecraft:golden_horse_armor" => 7.0,
+        "minecraft:diamond_horse_armor" => 11.0,
+        "minecraft:netherite_horse_armor" => 19.0,
+        _ => 0.0,
+    }
+}
+
 /// Puts armour (an item id) on a tame horse that wears none. `false` when it does not apply.
-pub fn wear_armor(store: &mut EntityStore, key: EntityKey, item: u16) -> bool {
+pub fn wear_armor(store: &mut EntityStore, key: EntityKey, item: u16, points: f32) -> bool {
     match mob::state_mut(store, key) {
         Some(s) if s.kind == MobKind::Horse && s.owner.is_some() && s.armor == 0 => {
             s.armor = item;
+            s.armor_points = points;
             true
         }
         _ => false,
@@ -189,10 +203,22 @@ mod tests {
         assert!(saddle(&mut store, key));
         assert!(!saddle(&mut store, key));
         assert!(is_steerable(&store, key));
-        assert!(wear_armor(&mut store, key, 7));
+        assert!(wear_armor(
+            &mut store,
+            key,
+            7,
+            armor_points("minecraft:iron_horse_armor")
+        ));
         assert!(
-            !wear_armor(&mut store, key, 8),
+            !wear_armor(&mut store, key, 8, 3.0),
             "one set of armour at a time"
+        );
+        let before = mob::state(&store, key).unwrap().health;
+        mob::hurt(&mut store, key, 10.0, None);
+        let lost = before - mob::state(&store, key).unwrap().health;
+        assert!(
+            lost < 10.0 && lost > 7.0,
+            "iron armour absorbs part of a hit, lost {lost}"
         );
     }
 
