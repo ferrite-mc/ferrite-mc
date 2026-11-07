@@ -3868,6 +3868,81 @@ async fn a_retracting_sticky_piston_carries_the_mob_standing_on_the_block() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retracting_sticky_piston_pulls_a_player_standing_on_the_block() {
+    use ferrite_protocol::packets::play::{BlockUpdate, PositionSync};
+    use ferrite_protocol::types::BlockPos;
+    let lever = block_state(
+        "minecraft:lever",
+        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+    );
+    let (world, temp, addr, server) = redstone_fixture(&[
+        ([0, 64, 0], lever),
+        (
+            [1, 64, 0],
+            block_state(
+                "minecraft:sticky_piston",
+                &[("facing", "east"), ("extended", "false")],
+            ),
+        ),
+        ([2, 64, 0], block_state("minecraft:stone", &[])),
+    ])
+    .await;
+    let mut bot = Bot::join(addr, "RedstoneBot").await;
+    bot.until(46).await;
+    let mut trigger = Bot::join(addr, "TriggerBot").await;
+    trigger.until(46).await;
+    click_block(&mut trigger, [0, 64, 0]).await;
+    let stone = i32::try_from(block_state("minecraft:stone", &[])).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (id, body) = bot.next_play().await;
+            if id == BlockUpdate::ID {
+                let update = BlockUpdate::decode(&mut body.as_slice()).unwrap();
+                let pos = BlockPos::unpack(update.location);
+                if (pos.x, pos.y, pos.z) == (3, 64, 0) && update.block_state.0 == stone {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the piston should extend the stone to x 3");
+    // Stand on the extended stone; the retraction pulls that block and its rider back.
+    bot.send(&MovePosition {
+        x: 3.5,
+        y: 65.0,
+        z: 0.5,
+        flags: 0,
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    click_block(&mut trigger, [0, 64, 0]).await;
+    let mut seen = Vec::new();
+    let pulled = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let (id, body) = bot.next_play().await;
+            if id == PositionSync::ID {
+                let sync = PositionSync::decode(&mut body.as_slice()).unwrap();
+                seen.push(sync.x);
+                if sync.x < 3.0 {
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        pulled.is_ok(),
+        "the sticky piston should pull the player to x 2.5; positions seen: {seen:?}"
+    );
+    drop(trigger);
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn observer_pulses_when_piston_moves_a_block_in_front_of_it() {
     let lever = block_state(
         "minecraft:lever",

@@ -7285,20 +7285,18 @@ impl Region {
                             continue;
                         }
                         let moved = pos + delta;
-                        let free = |y: f64| {
-                            let state = super::redstone::RedstoneWorld::block(
-                                &world,
-                                [
-                                    moved.x.floor() as i32,
-                                    (moved.y + y).floor() as i32,
-                                    moved.z.floor() as i32,
-                                ],
-                            );
-                            state == Some(0)
-                        };
-                        // Feet and head cells must be air, or the entity stays where it is.
-                        let height = bbox.max.y - bbox.min.y;
-                        if free(0.0) && free(height.min(1.8) - 0.01) {
+                        // Vanilla `PistonMovingBlockEntity.moveCollidedEntities`: only a
+                        // destination with no collision shape for the entity's full box moves
+                        // it. Water and plants are replaceable and do not block the push.
+                        let moved_bbox = ferrite_math::AABB::new(
+                            bbox.min.x + delta.x,
+                            bbox.min.y + delta.y,
+                            bbox.min.z + delta.z,
+                            bbox.max.x + delta.x,
+                            bbox.max.y + delta.y,
+                            bbox.max.z + delta.z,
+                        );
+                        if super::piston::entity_space_clear(&world, moved_bbox) {
                             self.entities.set_pos(key, moved);
                             if let Some(flags) = self.entities.flags_mut(key) {
                                 flags.set(ferrite_entity::Flags::TELEPORTED, true);
@@ -7324,17 +7322,15 @@ impl Region {
                             player.pos[1] + delta.y,
                             player.pos[2] + delta.z,
                         ];
-                        let free = |y: f64| {
-                            super::redstone::RedstoneWorld::block(
-                                &world,
-                                [
-                                    moved[0].floor() as i32,
-                                    (moved[1] + y).floor() as i32,
-                                    moved[2].floor() as i32,
-                                ],
-                            ) == Some(0)
-                        };
-                        if free(0.0) && free(1.79) {
+                        let moved_bbox = ferrite_math::AABB::new(
+                            moved[0] - 0.3,
+                            moved[1],
+                            moved[2] - 0.3,
+                            moved[0] + 0.3,
+                            moved[1] + 1.8,
+                            moved[2] + 0.3,
+                        );
+                        if super::piston::entity_space_clear(&world, moved_bbox) {
                             player.pos = moved;
                             player.teleport();
                         }
@@ -9364,6 +9360,21 @@ mod tests {
         region.queue_delayed_update(update(7));
         assert_eq!(region.delayed_updates.len(), 1);
         assert_eq!(region.delayed_updates[0].due, 7);
+    }
+
+    #[test]
+    fn delayed_piston_updates_for_different_positions_are_kept() {
+        let mut region = Region::default();
+        let update = |pos, due| DelayedUpdate {
+            pos,
+            due,
+            chunk: (0, 0),
+            expected_state: 1,
+            packet: Outbound::Packet(vec![42].into()),
+        };
+        region.queue_delayed_update(update([1, 64, 2], 5));
+        region.queue_delayed_update(update([2, 64, 2], 6));
+        assert_eq!(region.delayed_updates.len(), 2);
     }
 
     #[test]
