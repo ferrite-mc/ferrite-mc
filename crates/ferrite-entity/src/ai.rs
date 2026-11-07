@@ -17,6 +17,7 @@ use crate::physics::{self, BlockGetter};
 use crate::rng::Rng;
 use crate::store::{EntityStore, Flags};
 use ferrite_math::Vec3;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 /// Vanilla `LivingEntity` gravity per tick.
@@ -58,6 +59,18 @@ const LEASH_PULL: f64 = 6.0;
 const LEASH_SNAP: f64 = 12.0;
 /// Caravan llamas hurry after their head (`LlamaFollowCaravanGoal` speed modifier 2.1).
 const CARAVAN_SPEED: f64 = 2.1;
+/// Speed lost for every extra link behind the head, so a long line does not bunch up.
+const CARAVAN_SPEED_PER_LINK: f64 = 0.1;
+/// Floor for the long-line speed penalty.
+const CARAVAN_MIN_SPEED: f64 = 1.5;
+/// A follower walks once it is more than three blocks behind its head.
+const CARAVAN_FOLLOW_DISTANCE: f64 = 3.0;
+/// Closer than this, a follower steps back instead of bumping the llama ahead.
+const CARAVAN_BUMP_DISTANCE: f64 = 1.5;
+/// A line lets go past sixteen blocks.
+const CARAVAN_LEAVE_DISTANCE: f64 = 16.0;
+/// A free llama joins a line within nine blocks.
+const CARAVAN_JOIN_DISTANCE: f64 = 9.0;
 /// Maximum number of llamas in one caravan, including its head.
 const CARAVAN_LIMIT: usize = 10;
 
@@ -113,93 +126,211 @@ fn leash_pull(
     (distance > LEASH_PULL).then_some(holder_pos)
 }
 
+/// What a caravan llama does this tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CaravanAction {
+    /// Close enough to the llama ahead: stand still instead of bumping into it.
+    Hold,
+    /// Walk toward the target; `speed` multiplies the llama's walk acceleration.
+    Walk { target: Vec3, speed: f64 },
+}
+
 /// Where a llama in a caravan walks to: its head, once it is more than three blocks behind.
 /// A free adult llama within nine blocks of a led or trailing llama with nobody behind it joins
-/// the line; the line lets go past sixteen blocks.
-fn caravan_target(store: &mut EntityStore, key: crate::EntityKey, start: Vec3) -> Option<Vec3> {
-    let state = mob::state(store, key)?;
-    if !state.kind.is_llama() || state.leash.is_some() {
+/// the line; the line lets go past sixteen blocks. A follower that lost its head (death, another
+/// region or a broken chain) looks for a new line in the same tick; a line that would close into
+/// a loop is never joined.
+fn caravan_action(
+    store: &mut EntityStore,
+    key: crate::EntityKey,
+    start: Vec3,
+) -> Option<CaravanAction> {
+    let (kind, leashed, caravan, age, uuid) = {
+        let state = mob::state(store, key)?;
+        (
+            state.kind,
+            state.leash.is_some(),
+            state.caravan,
+            state.age,
+            store.data(key)?.uuid,
+        )
+    };
+    if !kind.is_llama() || leashed {
         return None;
     }
-    let uuid = store.data(key)?.uuid;
-    if let Some(head) = state.caravan {
-        let head_key = store
-            .keys()
-            .iter()
-            .copied()
-            .find(|&k| store.data(k).is_some_and(|d| d.uuid == head));
+    if let Some(head) = caravan {
+        let head_key = entity_by_uuid(store, head);
         let head_pos = head_key
             .filter(|&k| mob::state(store, k).is_some_and(|s| !s.is_dead()))
             .and_then(|k| store.pos(k));
-        let Some(pos) = head_pos else {
+        if let Some(pos) = head_pos {
+            let (dx, dz) = (pos.x - start.x, pos.z - start.z);
+            let distance = (dx * dx + dz * dz).sqrt();
+            let looped = head_key.is_some_and(|head_key| caravan_contains(store, head_key, uuid));
+            if distance > CARAVAN_LEAVE_DISTANCE || looped {
+                mob::state_mut(store, key)?.caravan = None;
+            } else {
+                return Some(caravan_action_for(store, key, start, pos, distance));
+            }
+        } else {
+            // The head died, left the store or changed region.
             mob::state_mut(store, key)?.caravan = None;
-            return None;
-        };
-        let (dx, dz) = (pos.x - start.x, pos.z - start.z);
-        let distance = (dx * dx + dz * dz).sqrt();
-        if distance > 16.0 {
-            mob::state_mut(store, key)?.caravan = None;
-            return None;
         }
-        return (distance > 3.0).then_some(pos);
     }
-    if state.age < 0 {
+    if age < 0 {
         return None;
     }
-    // Look for the end of a line.
-    let found = store.keys().iter().copied().find_map(|k| {
-        if k == key {
-            return None;
-        }
-        let other = mob::state(store, k)?;
-        if !other.kind.is_llama() || other.is_dead() {
-            return None;
-        }
-        if other.leash.is_none() && other.caravan.is_none() {
-            return None;
-        }
-        let data = store.data(k)?;
-        // Count this candidate and each llama it follows back to the line's head.
-        let line_len = caravan_chain_len(store, k);
-        if line_len >= CARAVAN_LIMIT {
-            return None;
-        }
-        let pos = store.pos(k)?;
-        let (dx, dz) = (pos.x - start.x, pos.z - start.z);
-        if dx * dx + dz * dz > 81.0 {
-            return None;
-        }
-        let has_tail = store
-            .keys()
-            .iter()
-            .any(|&t| mob::state(store, t).is_some_and(|s| s.caravan == Some(data.uuid)));
-        (!has_tail).then_some(data.uuid)
-    });
-    if let Some(head) = found
-        && head != uuid
-    {
-        mob::state_mut(store, key)?.caravan = Some(head);
+    let found = nearest_caravan_head(store, key, start, uuid)?;
+    mob::state_mut(store, key)?.caravan = Some(found);
+    let pos = store.pos(entity_by_uuid(store, found)?)?;
+    let (dx, dz) = (pos.x - start.x, pos.z - start.z);
+    let distance = (dx * dx + dz * dz).sqrt();
+    Some(caravan_action_for(store, key, start, pos, distance))
+}
+
+fn caravan_action_for(
+    store: &EntityStore,
+    key: crate::EntityKey,
+    start: Vec3,
+    head: Vec3,
+    distance: f64,
+) -> CaravanAction {
+    if distance > CARAVAN_FOLLOW_DISTANCE {
+        return CaravanAction::Walk {
+            target: head,
+            speed: caravan_speed(caravan_depth(store, key)),
+        };
     }
-    None
+    if distance < CARAVAN_BUMP_DISTANCE {
+        // Keep a body width between the llamas instead of walking into the one ahead.
+        return CaravanAction::Walk {
+            target: Vec3::new(
+                start.x + (start.x - head.x),
+                start.y,
+                start.z + (start.z - head.z),
+            ),
+            speed: 1.0,
+        };
+    }
+    CaravanAction::Hold
+}
+
+/// Nearest llama with nobody behind it that this free llama may join. The scan is ordered by
+/// distance and then UUID, so the same line is chosen regardless of entity-store order.
+fn nearest_caravan_head(
+    store: &EntityStore,
+    key: crate::EntityKey,
+    start: Vec3,
+    uuid: Uuid,
+) -> Option<Uuid> {
+    store
+        .keys()
+        .iter()
+        .copied()
+        .filter_map(|candidate| {
+            if candidate == key {
+                return None;
+            }
+            let other = mob::state(store, candidate)?;
+            if !other.kind.is_llama() || other.is_dead() {
+                return None;
+            }
+            if other.leash.is_none() && other.caravan.is_none() {
+                return None;
+            }
+            let data = store.data(candidate)?;
+            if data.uuid == uuid || caravan_contains(store, candidate, uuid) {
+                return None;
+            }
+            // Count this candidate and each llama it follows back to the line's head.
+            if caravan_chain_len(store, candidate) >= CARAVAN_LIMIT {
+                return None;
+            }
+            let pos = store.pos(candidate)?;
+            let (dx, dz) = (pos.x - start.x, pos.z - start.z);
+            let distance = dx * dx + dz * dz;
+            if distance > CARAVAN_JOIN_DISTANCE * CARAVAN_JOIN_DISTANCE {
+                return None;
+            }
+            let has_tail = store
+                .keys()
+                .iter()
+                .any(|&tail| mob::state(store, tail).is_some_and(|s| s.caravan == Some(data.uuid)));
+            if has_tail {
+                return None;
+            }
+            Some((data.uuid, distance))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+        .map(|(head, _)| head)
+}
+
+fn entity_by_uuid(store: &EntityStore, uuid: Uuid) -> Option<crate::EntityKey> {
+    store
+        .keys()
+        .iter()
+        .copied()
+        .find(|&candidate| store.data(candidate).is_some_and(|data| data.uuid == uuid))
+}
+
+/// Whether following `key` upwards reaches `uuid` or an existing loop.
+fn caravan_contains(store: &EntityStore, key: crate::EntityKey, uuid: Uuid) -> bool {
+    let mut seen = HashSet::new();
+    let mut current = Some(key);
+    while let Some(key) = current {
+        let Some(data) = store.data(key) else {
+            return false;
+        };
+        if data.uuid == uuid || !seen.insert(data.uuid) {
+            return true;
+        }
+        current = mob::state(store, key)
+            .and_then(|state| state.caravan)
+            .and_then(|next| entity_by_uuid(store, next));
+    }
+    false
 }
 
 fn caravan_chain_len(store: &EntityStore, key: crate::EntityKey) -> usize {
     let mut length = 1;
-    let mut next = mob::state(store, key).and_then(|state| state.caravan);
-    for _ in 0..CARAVAN_LIMIT {
-        let Some(uuid) = next else { return length };
-        let Some(parent) = store
-            .keys()
-            .iter()
-            .copied()
-            .find(|&candidate| store.data(candidate).is_some_and(|data| data.uuid == uuid))
-        else {
+    let mut seen = HashSet::new();
+    let mut current = key;
+    while let Some(uuid) = mob::state(store, current).and_then(|state| state.caravan) {
+        if length >= CARAVAN_LIMIT || !seen.insert(uuid) {
+            return CARAVAN_LIMIT;
+        }
+        let Some(parent) = entity_by_uuid(store, uuid) else {
             return length;
         };
         length += 1;
-        next = mob::state(store, parent).and_then(|state| state.caravan);
+        current = parent;
     }
     length
+}
+
+/// Number of links between `key` and the head of its line (0 for a free llama or head).
+fn caravan_depth(store: &EntityStore, key: crate::EntityKey) -> usize {
+    let mut depth = 0;
+    let mut seen = HashSet::new();
+    let mut current = key;
+    while let Some(uuid) = mob::state(store, current).and_then(|state| state.caravan) {
+        if depth >= CARAVAN_LIMIT || !seen.insert(uuid) {
+            break;
+        }
+        let Some(parent) = entity_by_uuid(store, uuid) else {
+            break;
+        };
+        depth += 1;
+        current = parent;
+    }
+    depth
+}
+
+/// `CARAVAN_SPEED` for a llama directly behind its head, slowed for each extra link so a long
+/// line does not bunch up into the head.
+fn caravan_speed(depth: usize) -> f64 {
+    let ahead = depth.saturating_sub(1) as f64;
+    (CARAVAN_SPEED - ahead * CARAVAN_SPEED_PER_LINK).max(CARAVAN_MIN_SPEED)
 }
 
 /// A player as the goals see it.
@@ -619,10 +750,16 @@ pub fn tick_with_owner_attacks_and_holders(
                 // A lead pulls its animal along once it is more than six blocks from the holder.
                 directed = true;
                 walking = Some(yaw_towards(holder.x - start.x, holder.z - start.z));
-            } else if let Some(head) = caravan_target(store, key, start) {
+            } else if let Some(action) = caravan_action(store, key, start) {
                 directed = true;
-                walking = Some(yaw_towards(head.x - start.x, head.z - start.z));
-                speed = CARAVAN_SPEED;
+                if let CaravanAction::Walk {
+                    target,
+                    speed: multiplier,
+                } = action
+                {
+                    walking = Some(yaw_towards(target.x - start.x, target.z - start.z));
+                    speed = multiplier;
+                }
             } else if kind.is_tameable()
                 && let Some(owner_pos) = crate::tame::follow_target(store, key, &owners, start)
             {
@@ -1386,8 +1523,148 @@ mod tests {
         ));
 
         let extra_pos = store.pos(extra).unwrap();
-        assert_eq!(caravan_target(&mut store, extra, extra_pos), None);
+        assert_eq!(caravan_action(&mut store, extra, extra_pos), None);
         assert_eq!(mob::state(&store, extra).unwrap().caravan, None);
+    }
+
+    fn llama_at(store: &mut EntityStore, x: f64, seed: u64) -> crate::EntityKey {
+        let mut rng = Rng::new(seed);
+        store.insert(new_mob(MobKind::Llama, Vec3::new(x, 64.0, 0.5), &mut rng))
+    }
+
+    #[test]
+    fn caravan_speed_slows_longer_lines() {
+        assert_eq!(caravan_speed(1), CARAVAN_SPEED);
+        assert!(caravan_speed(4) < caravan_speed(1));
+        assert!(caravan_speed(9) < caravan_speed(4));
+        assert_eq!(caravan_speed(20), CARAVAN_MIN_SPEED);
+    }
+
+    #[test]
+    fn a_caravan_follower_keeps_its_gap_instead_of_bumping_its_head() {
+        let mut store = EntityStore::default();
+        let head = llama_at(&mut store, 0.5, 1);
+        let head_uuid = store.data(head).unwrap().uuid;
+
+        let close = llama_at(&mut store, 1.4, 2);
+        mob::state_mut(&mut store, close).unwrap().caravan = Some(head_uuid);
+        let start = store.pos(close).unwrap();
+        match caravan_action(&mut store, close, start) {
+            Some(CaravanAction::Walk { target, .. }) => {
+                assert!(target.x > start.x, "steps away from the head: {target:?}");
+            }
+            other => panic!("expected a separation step, got {other:?}"),
+        }
+
+        let hold = llama_at(&mut store, 2.0, 3);
+        mob::state_mut(&mut store, hold).unwrap().caravan = Some(head_uuid);
+        let start = store.pos(hold).unwrap();
+        assert_eq!(
+            caravan_action(&mut store, hold, start),
+            Some(CaravanAction::Hold)
+        );
+
+        let far = llama_at(&mut store, 6.5, 4);
+        mob::state_mut(&mut store, far).unwrap().caravan = Some(head_uuid);
+        let start = store.pos(far).unwrap();
+        match caravan_action(&mut store, far, start) {
+            Some(CaravanAction::Walk { target, speed }) => {
+                assert_eq!(target.x, 0.5);
+                assert_eq!(speed, CARAVAN_SPEED);
+            }
+            other => panic!("expected a follow step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_caravan_releases_a_head_that_died_or_left_the_region() {
+        let mut store = EntityStore::default();
+        let head = llama_at(&mut store, 0.5, 1);
+        let head_uuid = store.data(head).unwrap().uuid;
+        let tail = llama_at(&mut store, 2.0, 2);
+        mob::state_mut(&mut store, tail).unwrap().caravan = Some(head_uuid);
+        store.remove(head);
+        let start = store.pos(tail).unwrap();
+        assert_eq!(caravan_action(&mut store, tail, start), None);
+        assert_eq!(mob::state(&store, tail).unwrap().caravan, None);
+
+        let mut store = EntityStore::default();
+        let head = llama_at(&mut store, 0.5, 1);
+        let head_uuid = store.data(head).unwrap().uuid;
+        let tail = llama_at(&mut store, 2.0, 2);
+        mob::state_mut(&mut store, tail).unwrap().caravan = Some(head_uuid);
+        mob::kill(&mut store, head);
+        assert!(mob::state(&store, head).unwrap().is_dead());
+        let start = store.pos(tail).unwrap();
+        assert_eq!(caravan_action(&mut store, tail, start), None);
+        assert_eq!(mob::state(&store, tail).unwrap().caravan, None);
+    }
+
+    #[test]
+    fn a_caravan_tail_reattaches_when_a_middle_member_is_removed() {
+        let mut store = EntityStore::default();
+        let head = llama_at(&mut store, 0.5, 1);
+        let head_uuid = store.data(head).unwrap().uuid;
+        mob::state_mut(&mut store, head).unwrap().leash = Some((Uuid::nil(), 1));
+        let middle = llama_at(&mut store, 3.5, 2);
+        let middle_uuid = store.data(middle).unwrap().uuid;
+        mob::state_mut(&mut store, middle).unwrap().caravan = Some(head_uuid);
+        let tail = llama_at(&mut store, 6.5, 3);
+        mob::state_mut(&mut store, tail).unwrap().caravan = Some(middle_uuid);
+
+        store.remove(middle);
+        let start = store.pos(tail).unwrap();
+        let action = caravan_action(&mut store, tail, start);
+
+        assert_eq!(mob::state(&store, tail).unwrap().caravan, Some(head_uuid));
+        assert!(matches!(
+            action,
+            Some(CaravanAction::Walk { target, speed })
+                if target.x == 0.5 && speed == CARAVAN_SPEED
+        ));
+    }
+
+    #[test]
+    fn a_caravan_never_closes_a_loop() {
+        let mut store = EntityStore::default();
+        let head = llama_at(&mut store, 0.5, 1);
+        let head_uuid = store.data(head).unwrap().uuid;
+        let follower = llama_at(&mut store, 3.5, 2);
+        let follower_uuid = store.data(follower).unwrap().uuid;
+        mob::state_mut(&mut store, follower).unwrap().caravan = Some(head_uuid);
+
+        // Joining its own follower would close a two-llama loop.
+        let start = store.pos(head).unwrap();
+        assert_eq!(caravan_action(&mut store, head, start), None);
+        assert_eq!(mob::state(&store, head).unwrap().caravan, None);
+
+        // A chain already stored as a loop is detected and released.
+        mob::state_mut(&mut store, head).unwrap().caravan = Some(follower_uuid);
+        assert_eq!(caravan_chain_len(&store, head), CARAVAN_LIMIT);
+        assert_eq!(caravan_action(&mut store, head, start), None);
+        assert_eq!(mob::state(&store, head).unwrap().caravan, None);
+    }
+
+    #[test]
+    fn a_caravan_joins_the_nearest_line_whatever_the_store_order() {
+        for near_first in [true, false] {
+            let mut store = EntityStore::default();
+            let (near, far) = if near_first {
+                (llama_at(&mut store, 4.5, 1), llama_at(&mut store, 8.0, 2))
+            } else {
+                let far = llama_at(&mut store, 8.0, 2);
+                let near = llama_at(&mut store, 4.5, 1);
+                (near, far)
+            };
+            for key in [near, far] {
+                mob::state_mut(&mut store, key).unwrap().leash = Some((Uuid::nil(), 1));
+            }
+            let expected = store.data(near).unwrap().uuid;
+            let joiner = llama_at(&mut store, 0.5, 3);
+            let start = store.pos(joiner).unwrap();
+            let _ = caravan_action(&mut store, joiner, start);
+            assert_eq!(mob::state(&store, joiner).unwrap().caravan, Some(expected));
+        }
     }
 
     #[test]
