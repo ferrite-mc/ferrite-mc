@@ -43,6 +43,8 @@ impl Weather {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerEntry {
     pub uuid: Uuid,
+    /// Login session; a reconnect gets a new one, so old leads are not revived.
+    pub session: u64,
     pub name: String,
     pub game_mode: i32,
     /// `/spawnpoint`: block position, yaw and pitch; `None` until the player sets one.
@@ -156,6 +158,8 @@ pub struct GameState {
     weather_rng: u64,
     pub seed: i64,
     pub max_players: i32,
+    /// Next synthetic session for `join`; the game loop passes the real login session instead.
+    next_session: u64,
     pub players: Vec<PlayerEntry>,
     /// World spawn (`/setworldspawn`), its yaw and pitch.
     pub world_spawn: [i32; 3],
@@ -203,6 +207,7 @@ impl GameState {
             weather_rng: (seed as u64) ^ 0x5DEE_CE66_D1CE_4E5B | 1,
             seed,
             max_players,
+            next_session: 0,
             players: Vec::new(),
             world_spawn: [0, 64, 0],
             world_spawn_yaw: 0.0,
@@ -222,10 +227,27 @@ impl GameState {
         }
     }
 
+    #[cfg(test)]
     pub fn join(&mut self, uuid: Uuid, name: String, game_mode: i32, max_players: i32) {
+        let session = self.next_session.max(1);
+        self.join_session(uuid, session, name, game_mode, max_players);
+    }
+
+    /// Joins a player with the login session assigned by the network layer. A reconnect
+    /// therefore replaces the old holder session instead of reviving its leads.
+    pub(crate) fn join_session(
+        &mut self,
+        uuid: Uuid,
+        session: u64,
+        name: String,
+        game_mode: i32,
+        max_players: i32,
+    ) {
         self.leave(uuid);
+        self.next_session = self.next_session.max(session.saturating_add(1));
         self.players.push(PlayerEntry {
             uuid,
+            session,
             name,
             game_mode,
             spawn: None,
