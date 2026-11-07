@@ -82,4 +82,4 @@ CMI가 동작한다고 말할 수 없다.
 - 실제 마인크래프트 클라이언트에서 렌더링은 한 번도 확인하지 못했다(단위·Gradle 테스트만).
 - 전체 `cargo test --workspace`에서 `chest_contents_are_shared_saved_and_spilled_when_broken`가 부하 시 한 번 실패했고 단독 실행은 통과했다(불안정 테스트로 의심, 원인 미조사).
 - 엔드, 피스톤은 아직 남아 있다.
-- **구조물 API:** `StructureManager.createStructure()`가 메모리 구조물을 돌려준다. `fill`(영역 복사), `place`(회전·반전·무결성·팔레트; `facing`/`axis`만 같이 돈다), `getPalettes`, `saveStructure`/`loadStructure`(파일·스트림·키), `deleteStructure`, `getStructureFile`, `copy` 구현됨. 엔티티·블록 엔티티 데이터는 담지 않고, 월드가 블록 상태 속성까지 주고받아 `fill`/`place`가 상태를 보존한다. 키로 읽은 템플릿은 그대로 서버(`/place template`)가 놓으며 `fill`은 할 수 없다.
+- **구조물 API:** `StructureManager.createStructure()`가 메모리 구조물을 돌려준다. `fill`(영역 복사), `place`(회전·반전·무결성·팔레트; `facing`/`axis`만 같이 돈다), `getPalettes`, `saveStructure`/`loadStructure`(파일·스트림·키), `deleteStructure`, `getStructureFile`, `copy` 구현됨. 블록 엔티티 데이터(상자·표지판 등)는 호스트에서 한 번에 읽어 `/data merge block`으로 되돌리며, 엔티티는 담지 않고(플러그인이 플레이어 외 엔티티를 못 본다), 월드가 블록 상태 속성까지 주고받아 `fill`/`place`가 상태를 보존한다. 키로 읽은 템플릿은 그대로 서버(`/place template`)가 놓으며 `fill`은 할 수 없다.

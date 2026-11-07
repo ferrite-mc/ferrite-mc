@@ -136,6 +136,21 @@ pub trait WorldView: Send + Sync {
     fn highest_block(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<i32>;
     /// The biome key at a position, for example `minecraft:plains`.
     fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String>;
+    /// The block entities inside the box `min..=max` of the loaded chunks, each as its position
+    /// and binary NBT (a named root compound).
+    fn block_entities(
+        &self,
+        _world: uuid::Uuid,
+        _min: [i32; 3],
+        _max: [i32; 3],
+    ) -> Vec<([i32; 3], Vec<u8>)> {
+        Vec::new()
+    }
+}
+
+/// The live world view the host registered, for queries that do not have their own native.
+pub fn world_view() -> Option<std::sync::Arc<dyn WorldView>> {
+    WORLD_VIEW.get().and_then(Option::as_ref).cloned()
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerLocation {

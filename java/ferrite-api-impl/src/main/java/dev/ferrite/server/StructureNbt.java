@@ -107,7 +107,62 @@ final class StructureNbt {
             data.writeInt(cell.x());
             data.writeInt(cell.y());
             data.writeInt(cell.z());
+            if (cell.nbt() != null) {
+                named(data, 10, "nbt");
+                writePayload(data, cell.nbt());
+            }
             data.writeByte(0);
+        }
+    }
+
+    /** Writes the payload of a compound, list or array of the plain values {@link #payload} reads. */
+    @SuppressWarnings("unchecked")
+    private static void writePayload(DataOutputStream data, Object value) throws IOException {
+        if (value instanceof Map<?, ?> map) {
+            for (var entry : ((Map<String, Object>) map).entrySet()) {
+                data.writeByte(typeOf(entry.getValue()));
+                data.writeUTF(entry.getKey());
+                writePayload(data, entry.getValue());
+            }
+            data.writeByte(0);
+        } else if (value instanceof List<?> list) {
+            data.writeByte(list.isEmpty() ? 0 : typeOf(list.get(0)));
+            data.writeInt(list.size());
+            for (var item : list) writePayload(data, item);
+        } else if (value instanceof Byte b) data.writeByte(b);
+        else if (value instanceof Short s) data.writeShort(s);
+        else if (value instanceof Integer i) data.writeInt(i);
+        else if (value instanceof Long l) data.writeLong(l);
+        else if (value instanceof Float f) data.writeFloat(f);
+        else if (value instanceof Double d) data.writeDouble(d);
+        else if (value instanceof String s) data.writeUTF(s);
+        else if (value instanceof byte[] bytes) { data.writeInt(bytes.length); data.write(bytes); }
+        else if (value instanceof int[] ints) { data.writeInt(ints.length); for (int i : ints) data.writeInt(i); }
+        else if (value instanceof long[] longs) { data.writeInt(longs.length); for (long l : longs) data.writeLong(l); }
+        else throw new IOException("Not an NBT value: " + value);
+    }
+
+    private static int typeOf(Object value) throws IOException {
+        return switch (value) {
+            case Byte b -> 1; case Short s -> 2; case Integer i -> 3; case Long l -> 4;
+            case Float f -> 5; case Double d -> 6; case byte[] b -> 7; case String s -> 8;
+            case List<?> l -> 9; case Map<?, ?> m -> 10; case int[] i -> 11; case long[] l -> 12;
+            default -> throw new IOException("Not an NBT value: " + value);
+        };
+    }
+
+    /** A block entity from the host: hex of binary NBT (a named root compound). */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> compound(String hex) {
+        try {
+            var bytes = new byte[hex.length() / 2];
+            for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
+            var in = new DataInputStream(new java.io.ByteArrayInputStream(bytes));
+            if (in.readByte() != 10) return null;
+            in.skipBytes(in.readUnsignedShort());
+            return (Map<String, Object>) payload(in, 10);
+        } catch (IOException | NumberFormatException e) {
+            return null;
         }
     }
 
@@ -142,7 +197,8 @@ final class StructureNbt {
                 var pos = list(b.get("pos"));
                 int state = ((Number) b.get("state")).intValue();
                 if (pos == null || pos.size() != 3 || state < 0 || state >= states.size()) throw new IOException("Bad block entry");
-                cells.add(new CapturedStructure.Cell(((Number) pos.get(0)).intValue(), ((Number) pos.get(1)).intValue(), ((Number) pos.get(2)).intValue(), states.get(state)));
+                @SuppressWarnings("unchecked") var nbt = b.get("nbt") instanceof Map<?, ?> m ? (Map<String, Object>) m : null;
+                cells.add(new CapturedStructure.Cell(((Number) pos.get(0)).intValue(), ((Number) pos.get(1)).intValue(), ((Number) pos.get(2)).intValue(), states.get(state), nbt));
             }
             result.add(cells);
         }

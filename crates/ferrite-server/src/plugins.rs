@@ -1,6 +1,7 @@
 //! Loading plugins into the embedded JVM at server startup.
 mod appearance;
 mod blasts;
+mod blockdata;
 mod blocks;
 pub mod chunks;
 mod climate;
@@ -144,6 +145,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = craft::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = blockdata::answer(call) {
                                 return Some(reply);
                             }
                             if let Some(reply) = chunks::answer(call) {
@@ -415,6 +419,27 @@ impl ferrite_plugin::WorldView for SourceWorldView {
         self.known(world)
             .then(|| self.source.biome_name(x, y, z))
             .flatten()
+    }
+    fn block_entities(
+        &self,
+        world: uuid::Uuid,
+        min: [i32; 3],
+        max: [i32; 3],
+    ) -> Vec<([i32; 3], Vec<u8>)> {
+        if !self.known(world) {
+            return Vec::new();
+        }
+        self.source
+            .block_entities()
+            .into_iter()
+            .filter(|(at, _)| (0..3).all(|axis| at[axis] >= min[axis] && at[axis] <= max[axis]))
+            .filter_map(|(at, entity)| {
+                let bytes =
+                    ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(entity.data))
+                        .ok()?;
+                Some((at, bytes))
+            })
+            .collect()
     }
 }
 

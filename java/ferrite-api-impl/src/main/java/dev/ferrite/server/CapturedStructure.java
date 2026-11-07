@@ -3,6 +3,7 @@ package dev.ferrite.server;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import org.bukkit.Location;
 import org.bukkit.RegionAccessor;
@@ -22,12 +23,15 @@ import org.bukkit.util.EntityTransformer;
  * string for each. {@link #fill} copies a world region into it, {@link #place} writes it back
  * with rotation, mirroring and integrity, and {@link StructureNbt} saves and loads the file.
  *
- * <p>shortcut: entities and block entity data are not captured, and rotating or mirroring turns
+ * <p>shortcut: entities are not captured (plugins cannot list non-player entities yet), block
+ * entity data goes through the host, and rotating or mirroring turns
  * only the {@code facing} and {@code axis} properties (not stair shapes, rails or hinges).
  */
 final class CapturedStructure implements Structure {
     /** A block of the structure: its offset from the origin and its vanilla state string. */
-    record Cell(int x, int y, int z, String state) {}
+    record Cell(int x, int y, int z, String state, Map<String, Object> nbt) {
+        Cell(int x, int y, int z, String state) { this(x, y, z, state, null); }
+    }
 
     private BlockVector size;
     private List<List<Cell>> palettes;
@@ -84,6 +88,27 @@ final class CapturedStructure implements Structure {
             var block = world.getBlockAt(x0 + x, y0 + y, z0 + z);
             cells.add(new Cell(x, y, z, block.getBlockData().getAsString()));
         }
+        // One host call per capture brings the block entities in the box (chests, signs, ...).
+        List<String> entities;
+        try {
+            @SuppressWarnings("unchecked") var reply = (List<String>) HostBridge.call("World", world.getUID(), "ferriteBlockEntities(int,int,int,int,int,int)", List.class,
+                x0, y0, z0, x0 + sx - 1, y0 + sy - 1, z0 + sz - 1);
+            entities = reply == null ? List.of() : reply;
+        } catch (UnsupportedOperationException | IllegalStateException e) {
+            entities = List.of(); // no host: the blocks are captured without their data
+        }
+        for (var item : entities) {
+            var parts = item.split(",", 4);
+            if (parts.length != 4) continue;
+            int x = Integer.parseInt(parts[0]) - x0, y = Integer.parseInt(parts[1]) - y0, z = Integer.parseInt(parts[2]) - z0;
+            if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz) continue;
+            int index = (y * sz + z) * sx + x;
+            var nbt = StructureNbt.compound(parts[3]);
+            if (nbt == null) continue;
+            nbt.remove("x"); nbt.remove("y"); nbt.remove("z");
+            var cell = cells.get(index);
+            cells.set(index, new Cell(cell.x(), cell.y(), cell.z(), cell.state(), nbt));
+        }
         size = new BlockVector(sx, sy, sz);
         palettes = new ArrayList<>(List.of(cells));
     }
@@ -126,8 +151,9 @@ final class CapturedStructure implements Structure {
                 case COUNTERCLOCKWISE_90 -> { rx = z; rz = -x; }
                 default -> { }
             }
-            world.getBlockAt(ox + rx, oy + cell.y(), oz + rz)
-                .setBlockData(FerriteBlockData.create(turn(cell.state(), rotation, mirror)));
+            int wx = ox + rx, wy = oy + cell.y(), wz = oz + rz;
+            world.getBlockAt(wx, wy, wz).setBlockData(FerriteBlockData.create(turn(cell.state(), rotation, mirror)));
+            if (cell.nbt() != null) HostBridge.callVoid("World", world.getUID(), "ferriteDataMerge(int,int,int,String)", wx, wy, wz, Snbt.of(cell.nbt()));
         }
     }
 

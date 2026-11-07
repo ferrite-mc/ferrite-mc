@@ -71,9 +71,15 @@ on the branch only.
   Moonrise-style worldgen ports (profile is flat, see `docs/worldgen-host.md`), real-client checks.
 - Horses, donkeys, mules and llamas: taming by riding (temper roll), saddle, steering by the
   client (`move_vehicle`), rolled speed/jump/health, horse armour absorbing damage, llama carpets,
-  treats, chest on donkey/mule/llama, llama spit when hurt. Shortcuts: the chest menu is 18 slots
-  (vanilla 15 or 3 x strength) and a dead animal drops chest, items and saddle; no llama caravans or trader llama;
-  horse inventory uses the generic chest screen.
+  treats, llama spit when hurt. The inventory screen is vanilla's (`mount_screen_open`, saddle +
+  body armour + 5 or `strength` chest columns of 3), opened by sneak-use or the inventory key while
+  riding; a dead animal drops chest, items and saddle. Leads (`set_entity_link`) work on animals
+  and horses, pull past 6 blocks and snap past 12; free llamas join a led llama as a caravan.
+  Wandering trader (daily roll near a player, 25% rising to 75%, gone after 48000 ticks) with two
+  trader llamas on leads, trade sets from the data generator; right-click opens the trading screen
+  for traders and employed villagers and keeps the uses. Shortcuts: no trader invisibility/milk
+  vanish, no caravan speed penalties or llama-bump behaviour, a lead holder who left the region
+  keeps the lead, trader spawn ignores the `spawn_wandering_traders` rule and light/biome checks.
 - Weather cycle (clear/rain/thunder, `advance_weather` rule, game_event packets), trident riptide /
   loyalty / channeling, piston block updates delayed two ticks. Shortcuts: single weather timer,
   no riptide spin pose, vault state/animation ignored.
@@ -81,9 +87,11 @@ on the branch only.
   5 open inventory.
 - Plugin Structure API (`java/ferrite-api-impl`): `createStructure()` + `fill`, `place` with
   rotation/mirror/integrity/palette, `getPalettes`, `saveStructure`/`loadStructure` (file, stream,
-  key), `deleteStructure`, `getStructureFile`, `copy`. Shortcuts: no entities or block entity data;
-  only `facing`/`axis` turn with rotation; the Java world now carries full block states (host
-  sends `name[props]`, `setBlockData` keeps them); templates loaded by key still place through the
+  key), `deleteStructure`, `getStructureFile`, `copy`. Block entity data (chests, signs, ...) is
+  read from the host in one call per `fill` and written back with `/data merge block`. Shortcuts:
+  no entities (plugins cannot list non-player entities yet); only `facing`/`axis` turn with
+  rotation; the Java world now carries full block states (host sends `name[props]`,
+  `setBlockData` keeps them); templates loaded by key still place through the
   server (`/place template`) and cannot be `fill`ed.
 - Not verifiable here: any of the above against a real client.
 - Order the user gave: Rust worldgen last; Moonrise-style optimisations are done while writing the

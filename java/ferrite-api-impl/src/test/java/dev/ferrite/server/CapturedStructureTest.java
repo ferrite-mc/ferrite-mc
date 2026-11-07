@@ -25,6 +25,10 @@ class CapturedStructureTest {
         world = org.bukkit.Bukkit.getWorld("structure_world");
     }
 
+    @org.junit.jupiter.api.AfterAll static void stop() {
+        if (world != null) ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(world.getUID());
+    }
+
     private static void build() {
         for (int x = 0; x < 2; x++) for (int y = 0; y < 2; y++) for (int z = 0; z < 3; z++) world.getBlockAt(100 + x, 70 + y, 100 + z).setType(Material.AIR);
         world.getBlockAt(100, 70, 100).setType(Material.STONE);
@@ -118,5 +122,59 @@ class CapturedStructureTest {
         assertEquals("minecraft:oak_stairs[facing=south,half=top]", world.getBlockAt(610, 70, 610).getBlockData().getAsString());
         world.getBlockAt(600, 70, 600).setType(Material.STONE);
         assertEquals("minecraft:stone", world.getBlockAt(600, 70, 600).getBlockData().getAsString());
+    }
+
+    /** Binary NBT of {id:"minecraft:chest", x:100, y:70, z:100, Items:[{Slot:0b, id:"minecraft:bread", count:2}]}. */
+    private static String chestHex() throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        var out = new java.io.DataOutputStream(bytes);
+        out.writeByte(10); out.writeUTF("");
+        out.writeByte(8); out.writeUTF("id"); out.writeUTF("minecraft:chest");
+        out.writeByte(3); out.writeUTF("x"); out.writeInt(100);
+        out.writeByte(3); out.writeUTF("y"); out.writeInt(70);
+        out.writeByte(3); out.writeUTF("z"); out.writeInt(100);
+        out.writeByte(9); out.writeUTF("Items"); out.writeByte(10); out.writeInt(1);
+        out.writeByte(1); out.writeUTF("Slot"); out.writeByte(0);
+        out.writeByte(8); out.writeUTF("id"); out.writeUTF("minecraft:bread");
+        out.writeByte(3); out.writeUTF("count"); out.writeInt(2);
+        out.writeByte(0);
+        out.writeByte(0);
+        var hex = new StringBuilder();
+        for (byte b : bytes.toByteArray()) hex.append(String.format("%02x", b));
+        return hex.toString();
+    }
+
+    @Test void blockEntityDataIsCapturedSavedAndWrittenBack() throws Exception {
+        build();
+        world.getBlockAt(100, 70, 100).setType(Material.CHEST);
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> {
+            calls.add(method + " " + args);
+            try {
+                return method.startsWith("ferriteBlockEntities") ? "100,70,100," + chestHex() : "";
+            } catch (Exception e) { throw new IllegalStateException(e); }
+        };
+        try {
+            var manager = org.bukkit.Bukkit.getStructureManager();
+            var structure = manager.createStructure();
+            structure.fill(new Location(world, 100, 70, 100), new BlockVector(2, 2, 3), false);
+            var out = new ByteArrayOutputStream();
+            manager.saveStructure(out, structure);
+            var back = manager.loadStructure(new ByteArrayInputStream(out.toByteArray()));
+            calls.clear();
+            back.place(new Location(world, 700, 70, 700), false, StructureRotation.NONE, Mirror.NONE, 0, 1f, new Random(1));
+            var merge = calls.stream().filter(c -> c.startsWith("ferriteDataMerge")).findFirst().orElseThrow();
+            assertTrue(merge.contains("700") && merge.contains("70"), merge);
+            assertTrue(merge.contains("Items:[{Slot:0b,id:\"minecraft:bread\",count:2}]"), merge);
+            assertFalse(merge.contains("x:"), "the old position is not written back: " + merge);
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void snbtWritesEveryTagType() {
+        var map = new java.util.LinkedHashMap<String, Object>();
+        map.put("b", (byte) 1); map.put("s", (short) 2); map.put("i", 3); map.put("l", 4L);
+        map.put("f", 1.5f); map.put("d", 2.5d); map.put("t", "a\"b");
+        map.put("ints", new int[] {1, 2}); map.put("list", java.util.List.of(1, 2));
+        assertEquals("{b:1b,s:2s,i:3,l:4L,f:1.5f,d:2.5d,t:\"a\\\"b\",ints:[I;1,2],list:[1,2]}", Snbt.of(map));
     }
 }

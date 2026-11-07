@@ -262,6 +262,21 @@ fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
                 "",
             )
         }
+        // A captured block entity written back after its block was placed.
+        "ferriteDataMerge(int,int,int,String)" => {
+            let coord = |index: usize| {
+                arg(index)?
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|v| v.abs() < 30_000_000)
+            };
+            let (x, y, z) = (coord(0)?, coord(1)?, coord(2)?);
+            let snbt = arg(3)?;
+            if !snbt.starts_with('{') || snbt.contains(['\n', '\r']) {
+                return None;
+            }
+            console(format!("data merge block {x} {y} {z} {snbt}"), "")
+        }
         // Vanilla stores biomes per 4x4x4 cell, so `/fillbiome` on one block recolors its cell.
         "setBiome(int,int,int,Biome)" => {
             let coord = |index: usize| {
@@ -532,6 +547,31 @@ mod tests {
                 &default,
                 "placeTemplate(Location,String,String,String,String,String)",
                 &[&at, "minecraft:igloo/top", "sideways", "none", "1", "0"]
+            )),
+            None
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "ferriteDataMerge(int,int,int,String)",
+                &[
+                    "1",
+                    "64",
+                    "-2",
+                    "{Items:[{Slot:0b,id:\"minecraft:bread\",count:2}]}"
+                ]
+            ))
+            .as_deref(),
+            Some("data merge block 1 64 -2 {Items:[{Slot:0b,id:\"minecraft:bread\",count:2}]}")
+        );
+        assert_eq!(
+            line(world(
+                &default,
+                "ferriteDataMerge(int,int,int,String)",
+                &[
+                    "1", "64", "-2", "{}
+stop"
+                ]
             )),
             None
         );
