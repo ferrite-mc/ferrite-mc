@@ -38,7 +38,12 @@ pub struct ArrowState {
     pub owner: Option<Uuid>,
     pub critical: bool,
     pub age: u32,
+    /// A channeling trident calls lightning on the mob it hits during a thunderstorm.
+    pub channeling: bool,
 }
+
+/// Where channeling tridents hit a mob since the region last looked.
+pub static CHANNELED: std::sync::Mutex<Vec<Vec3>> = std::sync::Mutex::new(Vec::new());
 
 /// Entity type id of `minecraft:arrow`.
 pub fn arrow_type() -> u16 {
@@ -68,6 +73,7 @@ pub fn new_arrow(
         owner,
         critical: false,
         age: 0,
+        channeling: false,
     });
     // Vanilla arrows do not randomise their start inside the block.
     EntityRecord {
@@ -354,6 +360,11 @@ pub fn tick_arrows(
             .find(|other| *other != key && mob::is_mob(store, *other));
         if let Some(target) = target {
             let hurt = mob::hurt(store, target, arrow.damage, None);
+            if arrow.channeling
+                && let Some(at) = store.pos(target)
+            {
+                CHANNELED.lock().unwrap_or_else(|e| e.into_inner()).push(at);
+            }
             if let Some(owner) = arrow.owner {
                 mob::retaliate(store, target, owner);
                 if matches!(hurt, Some(mob::Hurt::Died))
@@ -535,6 +546,36 @@ mod tests {
         let health = mob::state(&store, cow).map_or(0.0, |m| m.health);
         assert_eq!(health, MobKind::Cow.max_health() - TRIDENT_DAMAGE);
         assert!(store.flags(trident).unwrap().has(Flags::REMOVED));
+    }
+
+    #[test]
+    fn a_channeling_trident_reports_where_it_hit_a_mob() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 6.0),
+            &mut Rng::new(2),
+        ));
+        let trident = store.insert(new_trident(
+            Vec3::new(0.5, 64.9, 0.5),
+            Vec3::new(0.0, 0.0, 2.0),
+            None,
+        ));
+        store
+            .data_mut(trident)
+            .unwrap()
+            .arrow
+            .as_mut()
+            .unwrap()
+            .channeling = true;
+        CHANNELED.lock().unwrap().clear();
+        for _ in 0..40 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        let hits = CHANNELED.lock().unwrap().clone();
+        assert_eq!(hits.len(), 1);
+        assert!((hits[0].z - 6.0).abs() < 1.0);
     }
 
     #[test]

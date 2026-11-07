@@ -359,6 +359,7 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             owner: uuid_field(c, "owner"),
             critical: boolean(c, "crit"),
             age: int(c, "life").unwrap_or(0).max(0) as u32,
+            channeling: boolean(c, "channeling"),
         });
     }
 

@@ -4460,7 +4460,11 @@ impl Region {
             if let Some((charge, yaw, pitch)) = bow {
                 if trident {
                     if charge * 20.0 >= arrow::TRIDENT_MIN_DRAW as f32 {
-                        self.throw_trident(uuid, yaw, pitch, ctx.raining);
+                        let wet = ctx
+                            .state
+                            .lock()
+                            .is_ok_and(|s| s.weather != super::commands::Weather::Clear);
+                        self.throw_trident(uuid, yaw, pitch, wet);
                     }
                 } else if charge >= 0.1 {
                     self.fire_bow(uuid, charge, yaw, pitch);
@@ -4597,7 +4601,7 @@ impl Region {
 
     /// `TridentItem.releaseUsing`: the held trident leaves the hand and flies where the player
     /// looks. shortcut: loyalty returns it the moment it lands (no flight back); riptide launches the
-    /// player without the spin pose; channeling is not modelled. Without loyalty it drops as an item where it ends.
+    /// player without the spin pose; channeling calls lightning on a mob during thunder. Without loyalty it drops as an item where it ends.
     fn throw_trident(&mut self, uuid: Uuid, yaw: f32, pitch: f32, raining: bool) {
         let Some(p) = self.players.get_mut(&uuid) else {
             return;
@@ -4684,7 +4688,14 @@ impl Region {
             eye.y + direction.y * 0.3 - 0.1,
             eye.z + direction.z * 0.3,
         );
-        let record = arrow::new_trident(start, vel, Some(uuid));
+        let mut record = arrow::new_trident(start, vel, Some(uuid));
+        if let Some(state) = &mut record.data.arrow {
+            state.channeling = matches!(
+                stack.components.get(ferrite_item::component_ids::ENCHANTMENTS),
+                Some(ferrite_item::Component::Enchantments(e))
+                    if e.level("minecraft:channeling").is_some_and(|l| l > 0)
+            );
+        }
         self.thrown_tridents
             .insert(record.data.uuid, (uuid, stack.copy_with_count(1)));
         self.entities.insert(record);
@@ -4867,6 +4878,58 @@ impl Region {
     }
 
     /// Advances arrow flight and applies arrow hits to the players of this region.
+    /// Channeling: a trident that hit a mob during a thunderstorm calls a lightning bolt on it
+    /// (`ThrownTrident.onHitEntity`). shortcut: the bolt hurts mobs within three blocks for 5
+    /// and does not set fires or need open sky.
+    fn strike_channeled(&mut self, ctx: &TickContext) {
+        let hits: Vec<_> =
+            std::mem::take(&mut *arrow::CHANNELED.lock().unwrap_or_else(|e| e.into_inner()));
+        let thunder = ctx.dimension == super::Dimension::Overworld
+            && ctx
+                .state
+                .lock()
+                .is_ok_and(|s| s.weather == super::commands::Weather::Thunder);
+        if !thunder {
+            return;
+        }
+        for at in hits {
+            let near = self.entities.query_vec(ferrite_math::AABB::new(
+                at.x - 3.0,
+                at.y - 3.0,
+                at.z - 3.0,
+                at.x + 3.0,
+                at.y + 3.0,
+                at.z + 3.0,
+            ));
+            for key in near {
+                if mob::is_mob(&self.entities, key) {
+                    mob::hurt(&mut self.entities, key, 5.0, None);
+                }
+            }
+            static NEXT: std::sync::atomic::AtomicI32 =
+                std::sync::atomic::AtomicI32::new(1_800_000_000);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for p in self.players.values() {
+                send(
+                    p,
+                    &AddEntity {
+                        id: VarInt(id),
+                        uuid: Uuid::from_u128(u128::from(id as u32)),
+                        entity_type: VarInt(78),
+                        x: at.x,
+                        y: at.y,
+                        z: at.z,
+                        velocity: ferrite_protocol::types::LpVec3::ZERO,
+                        pitch: 0,
+                        yaw: 0,
+                        head_yaw: 0,
+                        data: VarInt(0),
+                    },
+                );
+            }
+        }
+    }
+
     fn tick_arrows(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
             return;
@@ -4897,6 +4960,7 @@ impl Region {
                 p.hurt(DamageKind::Arrow, hit.damage);
             }
         }
+        self.strike_channeled(ctx);
         let shot: Vec<_> =
             std::mem::take(&mut *arrow::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
         super::recipe_unlock::KILLS
