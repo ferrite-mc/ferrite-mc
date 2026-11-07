@@ -445,6 +445,12 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("HorseSpeed".into(), Tag::Float(mob.speed));
         c.insert("HorseJump".into(), Tag::Float(mob.jump));
         c.insert("Temper".into(), Tag::Int(mob.temper));
+        if mob.kind.is_llama() {
+            c.insert(
+                "Strength".into(),
+                Tag::Int(ferrite_entity::horse::strength(data)),
+            );
+        }
         c.insert("InLove".into(), Tag::Int(i32::from(mob.love)));
         c.insert("WanderYaw".into(), Tag::Float(mob.wander_yaw));
         c.insert("Moving".into(), Tag::Byte(mob.moving as i8));
@@ -593,6 +599,9 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.temper = int(c, "Temper").unwrap_or(0);
                 if kind.is_equine() {
                     ferrite_entity::horse::define_metadata(&mut data.metadata, &mob);
+                }
+                if kind.is_llama() {
+                    ferrite_entity::horse::set_strength(&mut data, int(c, "Strength").unwrap_or(0));
                 }
                 if kind.is_animal() {
                     ferrite_entity::breed::define_metadata(&mut data.metadata, &mob);
@@ -772,6 +781,30 @@ mod tests {
             "the entity id is set again on load"
         );
         assert_eq!(state.armor, 4);
+    }
+
+    #[test]
+    fn horse_attributes_and_llama_strength_survive_a_save() {
+        let mut rng = Rng::default();
+        let mut horse = mob::new_mob(MobKind::Horse, Vec3::new(0.5, 64.0, 0.5), &mut rng);
+        let horse_state = horse.data.mob.as_mut().unwrap();
+        horse_state.speed = 0.2;
+        horse_state.jump = 0.7;
+        let mut llama = mob::new_mob(MobKind::Llama, Vec3::new(1.5, 64.0, 0.5), &mut rng);
+        llama.data.mob.as_mut().unwrap().chest = true;
+        ferrite_entity::horse::set_strength(&mut llama.data, 4);
+
+        let loaded = from_nbt(&to_nbt(&[horse, llama]));
+        let loaded_horse = loaded[0].data.mob.as_ref().unwrap();
+        assert_eq!((loaded_horse.speed, loaded_horse.jump), (0.2, 0.7));
+        assert_eq!(ferrite_entity::horse::strength(&loaded[1].data), 4);
+        assert_eq!(
+            loaded[1]
+                .data
+                .metadata
+                .get(ferrite_entity::horse::STRENGTH_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::Int(4))
+        );
     }
 
     #[test]

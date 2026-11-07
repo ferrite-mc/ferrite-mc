@@ -184,6 +184,8 @@ pub fn approach(
     mate_pos: Vec3,
     rng: &mut Rng,
 ) -> Option<Bred> {
+    let parent = *mob::state(store, key)?;
+    let mate_state = *mob::state(store, mate)?;
     let from = store.pos(key)?;
     let close = (mate_pos.x - from.x).powi(2) + (mate_pos.z - from.z).powi(2) < BREED_DISTANCE_SQ;
     let state = mob::state_mut(store, key)?;
@@ -212,11 +214,28 @@ pub fn approach(
         (from.z + mate_pos.z) / 2.0,
     );
     let mut baby = mob::new_mob(kind, pos, rng);
+    if let Some((speed, jump)) = crate::horse::offspring_stats(&parent, &mate_state, rng)
+        && let Some(state) = baby.data.mob.as_mut()
+    {
+        state.speed = speed;
+        state.jump = jump;
+    }
+    let strength = kind.is_llama().then(|| {
+        crate::horse::offspring_strength(
+            crate::horse::llama_strength(store, key),
+            crate::horse::llama_strength(store, mate),
+            rng,
+        )
+    });
     if let Some(state) = baby.data.mob.as_mut() {
         state.age = BABY_AGE;
     }
     if let Some(state) = baby.data.mob {
         define_metadata(&mut baby.data.metadata, &state);
+    }
+    // `define_metadata` writes the default strength, so the inherited value goes in afterwards.
+    if let Some(strength) = strength {
+        crate::horse::set_strength(&mut baby.data, strength);
     }
     store.insert(baby);
     Some(Bred { kind, cause, pos })

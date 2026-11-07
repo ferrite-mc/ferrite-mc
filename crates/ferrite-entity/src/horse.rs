@@ -1,10 +1,12 @@
 //! Equines (`AbstractHorse`): wild animals can be tamed by riding; tame equines support saddles,
 //! horse armour, pack chests, llama carpets and treats. Horse movement speed, jump strength and
-//! health are randomized at spawn. Bucking follows `RunAroundLikeCrazyGoal`: while a wild equine
-//! carries a rider it rolls on the mob goal phase, every other game tick.
+//! health are randomized at spawn, and a foal inherits its speed and jump strength from both
+//! parents. A llama's pack chest has three slots for every point of its synched strength. Bucking
+//! follows `RunAroundLikeCrazyGoal`: while a wild equine carries a rider it rolls on the mob goal
+//! phase, every other game tick.
 
 use crate::mob::{self, MobKind, MobState};
-use crate::{EntityKey, EntityStore, Metadata, Rng};
+use crate::{EntityData, EntityKey, EntityStore, Metadata, Rng};
 use ferrite_protocol::packets::play::MetaValue;
 use uuid::Uuid;
 
@@ -29,6 +31,21 @@ pub const SADDLE_SLOT: u8 = 7;
 const MAX_HEALTH: f32 = 30.0;
 /// The `EquipmentSlot` index of body armour (horse armour).
 pub const BODY_SLOT: u8 = 6;
+/// `AbstractHorse.BREEDING_CROSS_FACTOR`.
+const BREEDING_CROSS_FACTOR: f64 = 0.15;
+/// `AbstractHorse.MIN_MOVEMENT_SPEED` and `MAX_MOVEMENT_SPEED` (`generateSpeed` extremes).
+const MIN_SPEED: f32 = 0.1125;
+const MAX_SPEED: f32 = 0.3375;
+/// `AbstractHorse.MIN_JUMP_STRENGTH` and `MAX_JUMP_STRENGTH` (`generateJumpStrength` extremes).
+const MIN_JUMP: f32 = 0.4;
+const MAX_JUMP: f32 = 1.0;
+/// `Llama.MIN_STRENGTH` and `MAX_STRENGTH`.
+pub const MIN_STRENGTH: i32 = 1;
+pub const MAX_STRENGTH: i32 = 5;
+/// `Llama.setRandomStrength`: a roll below this gives the wider 1 to 5 range.
+const RARE_STRENGTH: f32 = 0.04;
+/// `Llama.getBreedOffspring`: chance that a foal gains one strength above the roll.
+const STRENGTH_BONUS: f32 = 0.03;
 
 /// `(health, temper)` a treat gives (`AbstractHorse.handleEating`).
 fn treat_values(item: &str) -> Option<(f32, i32)> {
@@ -97,6 +114,94 @@ pub fn wears(store: &EntityStore, key: EntityKey, item: &str) -> bool {
     }
 }
 
+/// The llama's synched strength, clamped to vanilla's 1 to 5 range.
+pub fn strength(data: &EntityData) -> i32 {
+    match data.metadata.get(STRENGTH_INDEX) {
+        Some(MetaValue::Int(strength)) => (*strength).clamp(MIN_STRENGTH, MAX_STRENGTH),
+        _ => MIN_STRENGTH,
+    }
+}
+
+/// Writes a llama's synched strength. Callers use this only for llamas.
+pub fn set_strength(data: &mut EntityData, strength: i32) {
+    data.metadata.set(
+        STRENGTH_INDEX,
+        MetaValue::Int(strength.clamp(MIN_STRENGTH, MAX_STRENGTH)),
+    );
+}
+
+/// The llama's synched strength read through a store.
+pub fn llama_strength(store: &EntityStore, key: EntityKey) -> i32 {
+    store.data(key).map(strength).unwrap_or(MIN_STRENGTH)
+}
+
+/// `Llama.setRandomStrength`: normally 1 to 3, but a 4% roll allows the full 1 to 5 range.
+pub fn random_strength(rng: &mut Rng) -> i32 {
+    let bound = if rng.next_f32() < RARE_STRENGTH {
+        MAX_STRENGTH
+    } else {
+        3
+    };
+    MIN_STRENGTH + rng.next_int(bound)
+}
+
+/// `Llama.getBreedOffspring`: one plus a roll below the stronger parent, with a 3% chance of one
+/// extra point (clamped at 5).
+pub fn offspring_strength(parent_a: i32, parent_b: i32, rng: &mut Rng) -> i32 {
+    let stronger = parent_a.max(parent_b).clamp(MIN_STRENGTH, MAX_STRENGTH);
+    let strength = MIN_STRENGTH + rng.next_int(stronger);
+    if rng.next_f32() < STRENGTH_BONUS {
+        (strength + 1).min(MAX_STRENGTH)
+    } else {
+        strength
+    }
+}
+
+/// `AbstractHorse.createOffspringAttribute`: the foal's value is drawn around the parents'
+/// midpoint, with `0.15 * (max - min)` extra spread. A value outside the attribute range is
+/// reflected back inside instead of clamped, so the distribution stays symmetric.
+fn create_offspring_attribute(
+    parent_a: f32,
+    parent_b: f32,
+    min: f32,
+    max: f32,
+    rng: &mut Rng,
+) -> f32 {
+    assert!(max > min, "incorrect range for an attribute");
+    let parent_a = f64::from(parent_a.clamp(min, max));
+    let parent_b = f64::from(parent_b.clamp(min, max));
+    let (min, max) = (f64::from(min), f64::from(max));
+    let spread = BREEDING_CROSS_FACTOR * (max - min);
+    let width = (parent_a - parent_b).abs() + spread * 2.0;
+    let midpoint = (parent_a + parent_b) / 2.0;
+    let deviation = (rng.next_f64() + rng.next_f64() + rng.next_f64()) / 3.0 - 0.5;
+    let value = midpoint + width * deviation;
+    if value > max {
+        (max - (value - max)) as f32
+    } else if value < min {
+        (min + (min - value)) as f32
+    } else {
+        value as f32
+    }
+}
+
+/// A horse foal's inherited speed and jump strength. Vanilla only passes these between two horse
+/// parents; donkeys, mules and llamas have no such inheritance.
+pub fn offspring_stats(
+    parent_a: &MobState,
+    parent_b: &MobState,
+    rng: &mut Rng,
+) -> Option<(f32, f32)> {
+    if parent_a.kind != MobKind::Horse || parent_b.kind != MobKind::Horse {
+        return None;
+    }
+    // Vanilla draws jump before speed. Health is randomized separately by this server.
+    let jump = create_offspring_attribute(parent_a.jump, parent_b.jump, MIN_JUMP, MAX_JUMP, rng);
+    let speed =
+        create_offspring_attribute(parent_a.speed, parent_b.speed, MIN_SPEED, MAX_SPEED, rng);
+    Some((speed, jump))
+}
+
 /// How many chest columns the animal's inventory screen has: 5 for a donkey or mule with a chest,
 /// the llama's strength for a llama with one, none otherwise.
 pub fn chest_columns(store: &EntityStore, key: EntityKey) -> u8 {
@@ -108,14 +213,14 @@ pub fn chest_columns(store: &EntityStore, key: EntityKey) -> u8 {
     }
     match s.kind {
         MobKind::Donkey | MobKind::Mule => 5,
-        MobKind::Llama | MobKind::TraderLlama => {
-            match store.data(key).and_then(|d| d.metadata.get(STRENGTH_INDEX)) {
-                Some(MetaValue::Int(strength)) => (*strength).clamp(1, 5) as u8,
-                _ => 3,
-            }
-        }
+        MobKind::Llama | MobKind::TraderLlama => llama_strength(store, key) as u8,
         _ => 0,
     }
+}
+
+/// Chest slots of the animal: three per column (`AbstractMountInventoryMenu.getInventorySize`).
+pub fn chest_slots(store: &EntityStore, key: EntityKey) -> u8 {
+    chest_columns(store, key).saturating_mul(3)
 }
 
 /// Sets what a tame animal wears from its inventory screen: the saddle (not a llama's) and the
@@ -471,29 +576,188 @@ mod tests {
         assert!(!add_chest(&mut store, horse), "horses carry no chest");
     }
 
+    fn llama(store: &mut EntityStore, kind: MobKind) -> EntityKey {
+        store.insert(new_mob(kind, Vec3::new(0.5, 64.0, 0.5), &mut Rng::new(1)))
+    }
+
     #[test]
-    fn llama_pack_columns_follow_strength_metadata() {
+    fn llama_and_trader_llama_pack_shape_follows_strength() {
         let mut store = EntityStore::default();
-        let llama = store.insert(new_mob(
-            MobKind::Llama,
-            Vec3::new(0.5, 64.0, 0.5),
-            &mut Rng::new(1),
-        ));
-        let state = mob::state_mut(&mut store, llama).unwrap();
-        state.owner = Some(Uuid::from_u128(3));
-        state.chest = true;
+        for kind in [MobKind::Llama, MobKind::TraderLlama] {
+            let key = llama(&mut store, kind);
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.owner = Some(Uuid::from_u128(3));
+            state.chest = true;
 
-        for strength in 1..=5 {
-            store
-                .data_mut(llama)
-                .unwrap()
-                .metadata
-                .set(STRENGTH_INDEX, MetaValue::Int(strength));
-            assert_eq!(chest_columns(&store, llama), strength as u8);
+            for strength in 1..=5 {
+                store
+                    .data_mut(key)
+                    .unwrap()
+                    .metadata
+                    .set(STRENGTH_INDEX, MetaValue::Int(strength));
+                assert_eq!(chest_columns(&store, key), strength as u8);
+                assert_eq!(chest_slots(&store, key), strength as u8 * 3);
+            }
+            // `Llama.setStrength` clamps out-of-range synched values.
+            for (stored, columns) in [(0, 1), (9, 5)] {
+                store
+                    .data_mut(key)
+                    .unwrap()
+                    .metadata
+                    .set(STRENGTH_INDEX, MetaValue::Int(stored));
+                assert_eq!(chest_columns(&store, key), columns);
+                assert_eq!(chest_slots(&store, key), columns * 3);
+            }
+
+            mob::state_mut(&mut store, key).unwrap().chest = false;
+            assert_eq!(chest_columns(&store, key), 0);
+            assert_eq!(chest_slots(&store, key), 0);
         }
+    }
 
-        mob::state_mut(&mut store, llama).unwrap().chest = false;
-        assert_eq!(chest_columns(&store, llama), 0);
+    #[test]
+    fn donkey_and_mule_pack_shape_is_five_columns() {
+        let mut store = EntityStore::default();
+        for kind in [MobKind::Donkey, MobKind::Mule] {
+            let key = llama(&mut store, kind);
+            mob::state_mut(&mut store, key).unwrap().owner = Some(Uuid::from_u128(3));
+            assert!(add_chest(&mut store, key));
+            assert_eq!(chest_columns(&store, key), 5);
+            assert_eq!(chest_slots(&store, key), 15);
+        }
+    }
+
+    fn horse_with(speed: f32, jump: f32) -> MobState {
+        let mut state = MobState::new(MobKind::Horse);
+        state.speed = speed;
+        state.jump = jump;
+        state
+    }
+
+    #[test]
+    fn llama_strength_spawn_roll_and_offspring_are_bounded() {
+        let mut counts = [0usize; 6];
+        for seed in 0..20_000 {
+            let strength = random_strength(&mut Rng::new(seed));
+            assert!((MIN_STRENGTH..=MAX_STRENGTH).contains(&strength));
+            assert_eq!(strength, random_strength(&mut Rng::new(seed)));
+            counts[usize::try_from(strength).unwrap()] += 1;
+        }
+        assert!(counts[5] > 0, "the 4% wide roll is reachable");
+        assert!(counts[5] < counts[1], "a 5-point llama is rare");
+
+        for (parent_a, parent_b) in [(1, 1), (1, 5), (3, 4), (5, 5)] {
+            for seed in 0..1_000 {
+                let strength = offspring_strength(parent_a, parent_b, &mut Rng::new(seed));
+                assert!((MIN_STRENGTH..=MAX_STRENGTH).contains(&strength));
+                assert_eq!(
+                    strength,
+                    offspring_strength(parent_a, parent_b, &mut Rng::new(seed))
+                );
+            }
+        }
+        assert!(
+            (0..100_000)
+                .map(|seed| offspring_strength(1, 1, &mut Rng::new(seed)))
+                .any(|strength| strength == 2),
+            "the 3% bonus can raise a foal above its parents"
+        );
+    }
+
+    #[test]
+    fn horse_foal_stats_stay_in_the_attribute_bounds() {
+        let pairs = [
+            (MIN_SPEED, MIN_JUMP, MIN_SPEED, MIN_JUMP),
+            (MAX_SPEED, MAX_JUMP, MAX_SPEED, MAX_JUMP),
+            (MIN_SPEED, MIN_JUMP, MAX_SPEED, MAX_JUMP),
+            (0.2, 0.6, 0.31, 0.8),
+        ];
+        for (a_speed, a_jump, b_speed, b_jump) in pairs {
+            let a = horse_with(a_speed, a_jump);
+            let b = horse_with(b_speed, b_jump);
+            for seed in 0..200 {
+                let (speed, jump) = offspring_stats(&a, &b, &mut Rng::new(seed)).unwrap();
+                assert!(
+                    (MIN_SPEED..=MAX_SPEED).contains(&speed),
+                    "speed {speed} from {a_speed} and {b_speed}"
+                );
+                assert!(
+                    (MIN_JUMP..=MAX_JUMP).contains(&jump),
+                    "jump {jump} from {a_jump} and {b_jump}"
+                );
+            }
+        }
+        assert!(
+            offspring_stats(
+                &horse_with(0.2, 0.6),
+                &MobState::new(MobKind::Donkey),
+                &mut Rng::new(1)
+            )
+            .is_none(),
+            "donkeys do not inherit horse attributes"
+        );
+    }
+
+    #[test]
+    fn horse_foal_stats_are_deterministic_and_symmetric() {
+        let a = horse_with(MIN_SPEED, MIN_JUMP);
+        let b = horse_with(MAX_SPEED, MAX_JUMP);
+        let first = offspring_stats(&a, &b, &mut Rng::new(1234)).unwrap();
+        assert_eq!(first, offspring_stats(&a, &b, &mut Rng::new(1234)).unwrap());
+        assert_eq!(
+            first,
+            offspring_stats(&b, &a, &mut Rng::new(1234)).unwrap(),
+            "the parents' order does not change the roll"
+        );
+        let different: Vec<_> = (2..10)
+            .map(|seed| offspring_stats(&a, &b, &mut Rng::new(seed)).unwrap())
+            .collect();
+        assert!(different.iter().any(|stats| *stats != first));
+    }
+
+    #[test]
+    fn a_bred_foal_inherits_speed_and_jump_from_both_parents() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(77);
+        let mut a = new_mob(MobKind::Horse, Vec3::new(0.5, 64.0, 0.5), &mut rng);
+        let mut b = new_mob(MobKind::Horse, Vec3::new(1.5, 64.0, 0.5), &mut rng);
+        a.data.mob.as_mut().unwrap().speed = 0.15;
+        a.data.mob.as_mut().unwrap().jump = 0.5;
+        b.data.mob.as_mut().unwrap().speed = 0.30;
+        b.data.mob.as_mut().unwrap().jump = 0.9;
+        let a_key = store.insert(a);
+        let b_key = store.insert(b);
+        for key in [a_key, b_key] {
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.love = 1;
+            state.age = 0;
+        }
+        let parent_a = *mob::state(&store, a_key).unwrap();
+        let parent_b = *mob::state(&store, b_key).unwrap();
+        // `approach` rolls the baby first and then draws the inherited attributes; replay that
+        // sequence so the expected values are exact rather than merely in range.
+        let mut expected_rng = Rng::new(1234);
+        let _ = new_mob(MobKind::Horse, Vec3::new(1.0, 64.0, 0.5), &mut expected_rng);
+        let expected = offspring_stats(&parent_a, &parent_b, &mut expected_rng).unwrap();
+
+        let mut breeding_rng = Rng::new(1234);
+        let (mate, mate_pos) = crate::breed::mate_for(&store, a_key).unwrap();
+        assert_eq!(mate, b_key);
+        let mut bred = None;
+        for _ in 0..100 {
+            if let Some(result) =
+                crate::breed::approach(&mut store, a_key, mate, mate_pos, &mut breeding_rng)
+            {
+                bred = Some(result);
+                break;
+            }
+        }
+        let bred = bred.expect("the horses bred");
+        assert_eq!(bred.kind, MobKind::Horse);
+        let baby = store.keys()[2];
+        let state = mob::state(&store, baby).unwrap();
+        assert_eq!(state.age, crate::breed::BABY_AGE);
+        assert_eq!((state.speed, state.jump), expected);
     }
 
     #[test]

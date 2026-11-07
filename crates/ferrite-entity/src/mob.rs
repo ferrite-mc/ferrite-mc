@@ -442,10 +442,11 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
             mob.health = 15.0 + rng.next_int(8) as f32 + rng.next_int(9) as f32;
         }
         if kind.is_llama() {
-            // `Llama.finalizeSpawn`: a random strength (1 to 5) and one of four coats.
+            // `Llama.finalizeSpawn`: mostly strength 1 to 3, with a 4% chance of 1 to 5, and one
+            // of four coats.
             data.metadata.set(
                 crate::horse::STRENGTH_INDEX,
-                ferrite_protocol::packets::play::MetaValue::Int(1 + rng.next_int(5)),
+                ferrite_protocol::packets::play::MetaValue::Int(crate::horse::random_strength(rng)),
             );
             data.metadata.set(
                 crate::horse::LLAMA_VARIANT_INDEX,
