@@ -4,7 +4,7 @@ Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레
 Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **상태**: 프로토콜 봇과 Java 대조 테스트로 검증한 생존 기본기. **실제 26.3 클라이언트 접속은 아직 검증하지 않았습니다.**
+- **상태 (2026-11-08, `main` `dd4d4e1`)**: 생존·게임 시스템을 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 전체 Rust 테스트, clippy, fmt, Java Gradle 테스트와 Linux/Windows CI가 통과했습니다. **실제 26.3 클라이언트 접속은 아직 검증하지 않았습니다.**
 - **라이선스**: GPL-3.0-or-later
 
 > **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
@@ -17,11 +17,11 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 | 구분 | 내용 |
 |---|---|
 | ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·레시피북·컨테이너, 생존·전투·몹(바이옴별 자연 스폰, 번식, 늑대 길들이기), 주민 거래, 주크박스·밀랍·로드스톤 같은 블록 사용과 그 발전과제, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
-| 🟡 부분 구현 | 피스톤(블록 이동만, [`docs/pistons.md`](docs/pistons.md)), 엔드 차원과 드래곤 전투(아래, [`docs/end-dimension.md`](docs/end-dimension.md)) |
-| 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API, NMS) |
+| 🟡 부분 구현 | 피스톤(움직이는 블록·엔티티 이동과 클라이언트 오버레이; 애니메이션은 실제 클라이언트 미검증, [`docs/pistons.md`](docs/pistons.md)), 엔드 전투(아래, [`docs/end-dimension.md`](docs/end-dimension.md)) |
+| 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API 일부, NMS 일부; 미지원 호출은 명시적으로 실패) |
 | ⛔ 아직 없음 | 실제 클라이언트 검증 |
 
-**엔드**: 눈 끼우기로 엔드 포탈 활성화, 오버월드↔엔드 이동, 도착 플랫폼, 바닐라 지형(사용자 jar의 월드젠 호스트), 공허 판정, 엔더 드래곤(원을 돌다 다이빙하는 단순한 패턴)·보스바·엔드 수정 파괴와 회복·출구 포탈·게이트웨이 이동까지 구현. 드래곤의 돌진·숨결·화염구 같은 행동 패턴, 수정 재소환, 크레딧, 전투 상태 저장은 아직 없습니다.
+**엔드**: 포탈 활성화와 차원 이동, 도착 플랫폼, 바닐라 월드젠 호스트, 공허 판정, 드래곤 보스바·전투·수정 회복/파괴, 출구 포탈과 게이트웨이를 구현했습니다. 드래곤의 단순화된 선회·돌진·숨결·화염구 행동, 4개 수정 기반 단계별 재소환과 전투/단계 저장·복원도 들어갔습니다. 크레딧과 완전한 바닐라 전투 동작은 없으며, 실제 클라이언트 화면은 확인하지 않았습니다.
 
 플러그인 API는 Paper `Server`/`Player`의 일부만 처리합니다. 처리하지 않는 호출은
 `UnsupportedOperationException("Ferrite: not implemented: …")`로 드러납니다. EssentialsX 같은
@@ -52,8 +52,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. CI는 Linux/Windows에서
-fmt·clippy·test를 돌리고 바닐라 데이터가 커밋되지 않았는지도 확인합니다.
+서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. 2026-11-08 기준
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `java/ferrite-api-impl`의 `./gradlew test`가 통과했습니다.
+[main CI run 42398148054](https://github.com/yxshadxw/ferrite-mc/actions/runs/42398148054)도 Linux와
+Windows에서 fmt·clippy·전체 Rust 테스트를 통과했습니다. 봇 테스트 성공은 실제 Minecraft 클라이언트
+화면 검증을 의미하지 않습니다.
 
 ## 로드맵
 
@@ -93,9 +97,8 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 
 ## 해야 할 일
 
-- 다음 게임·호환성 작업은 파일 소유권을 분리해 병렬 진행: 플러그인 브리지 완성(NMS 호환 포함),
-  움직이는 피스톤 블록·애니메이션, 엔드 드래곤 행동·수정 재소환·크레딧·전투 상태 저장 점검,
-  고양이·말 등 나머지 동물과 볼트.
+- 남은 게임·플러그인 작업: llama caravan 이동 세부 동작, 여러 월드의 플러그인 블록 엔티티 접근,
+  아이템 PDC/플래그 전달, Paper/Bukkit 및 NMS 호환 범위 확대.
 - 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
   피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI, 플러그인 동작을 통합 서버에서 확인.
 - 최적화 조사 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
