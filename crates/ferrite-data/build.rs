@@ -1630,6 +1630,47 @@ struct SetOut {
     trades: Vec<String>,
 }
 
+/// Reads one trade file into a definition; `None` for offers that need a merchant predicate.
+fn parse_trade(
+    file: &Path,
+    context: String,
+    name: String,
+    item_table: &BTreeMap<String, u16>,
+) -> Option<TradeOut> {
+    let json = read_json(file);
+    if json.get("merchant_predicate").is_some() {
+        return None;
+    }
+    let (wants, wants_count) = trade_cost(&json["wants"], item_table, &context);
+    let (gives, gives_count) = trade_cost(&json["gives"], item_table, &context);
+    let second_wants = json
+        .get("additional_wants")
+        .map(|wanted| trade_cost(wanted, item_table, &context));
+    let max_uses = json
+        .get("max_uses")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(12) as i32;
+    let xp = json
+        .get("xp")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    let price_multiplier = json
+        .get("reputation_discount")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.05) as f32;
+    Some(TradeOut {
+        name,
+        wants,
+        wants_count,
+        gives,
+        gives_count,
+        second_wants,
+        max_uses,
+        xp,
+        price_multiplier,
+    })
+}
+
 /// Compiles `villager_trade/**`, `trade_set/**` and the `villager_trade` tags into static tables.
 ///
 /// Offers that need a `merchant_predicate` (a villager variant the offer depends on) are
@@ -1667,41 +1708,27 @@ fn gen_villager_trades(
                     .file_stem()
                     .and_then(|stem| stem.to_str())
                     .unwrap_or_else(|| panic!("{}: no file name", file.display()));
-                let json = read_json(&file);
-                let context = format!("{profession}/{level}/{stem}");
-                if json.get("merchant_predicate").is_some() {
-                    continue;
-                }
-                let (wants, wants_count) = trade_cost(&json["wants"], &item_table, &context);
-                let (gives, gives_count) = trade_cost(&json["gives"], &item_table, &context);
-                let second_wants = json
-                    .get("additional_wants")
-                    .map(|wanted| trade_cost(wanted, &item_table, &context));
-                let max_uses = json
-                    .get("max_uses")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(12) as i32;
-                let xp = json
-                    .get("xp")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let price_multiplier = json
-                    .get("reputation_discount")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.05) as f32;
-                defs.push(TradeOut {
-                    name: format!("minecraft:{profession}/{level}/{stem}"),
-                    wants,
-                    wants_count,
-                    gives,
-                    gives_count,
-                    second_wants,
-                    max_uses,
-                    xp,
-                    price_multiplier,
-                });
+                defs.extend(parse_trade(
+                    &file,
+                    format!("{profession}/{level}/{stem}"),
+                    format!("minecraft:{profession}/{level}/{stem}"),
+                    &item_table,
+                ));
             }
         }
+    }
+    // The wandering trader keeps its offers in one flat folder.
+    for file in json_files(&trades_root.join("wandering_trader")) {
+        let stem = file
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_else(|| panic!("{}: no file name", file.display()));
+        defs.extend(parse_trade(
+            &file,
+            format!("wandering_trader/{stem}"),
+            format!("minecraft:wandering_trader/{stem}"),
+            &item_table,
+        ));
     }
     defs.sort_by(|left, right| left.name.cmp(&right.name));
 
@@ -1754,6 +1781,44 @@ fn gen_villager_trades(
             }
             sets.push(SetOut {
                 profession: format!("minecraft:{profession}"),
+                level,
+                amount,
+                trades,
+            });
+        }
+    }
+    // `common`, `uncommon` and `buying` become levels 1, 2 and 3 of the wandering trader.
+    for (stem, level) in [("common", 1u8), ("uncommon", 2), ("buying", 3)] {
+        let tag = tags_root
+            .join("wandering_trader")
+            .join(format!("{stem}.json"));
+        let amount = read_json(
+            &sets_root
+                .join("wandering_trader")
+                .join(format!("{stem}.json")),
+        )
+        .get("amount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1) as usize;
+        let mut trades: Vec<String> = read_json(&tag)
+            .get("values")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .filter(|name| {
+                        defs.binary_search_by(|def| def.name.as_str().cmp(name))
+                            .is_ok()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        trades.sort();
+        trades.dedup();
+        if !trades.is_empty() {
+            sets.push(SetOut {
+                profession: "minecraft:wandering_trader".into(),
                 level,
                 amount,
                 trades,

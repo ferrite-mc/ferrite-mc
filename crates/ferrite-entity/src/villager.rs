@@ -315,6 +315,10 @@ pub fn tick(store: &mut EntityStore, key: EntityKey, blocks: &impl BlockGetter) 
     let Some(current) = data.villager.clone() else {
         return;
     };
+    // A wandering trader keeps its offers and never takes a job.
+    if crate::mob::state(store, key).is_some_and(|s| s.kind != MobKind::Villager) {
+        return;
+    }
     let uuid = data.uuid;
     let pos = store.pos(key).unwrap_or(Vec3::ZERO);
     let mut state = current;
@@ -388,11 +392,24 @@ fn level_offers(profession: Profession, level: u8, uuid: Uuid) -> Vec<Trade> {
     if matches!(profession, Profession::None | Profession::Nitwit) {
         return Vec::new();
     }
-    let Some(set) = ferrite_data::villager_trades::set(profession.name(), level) else {
+    draw(profession.name(), level, seed(uuid, profession.id(), level))
+}
+
+/// The wandering trader's offers: the `common`, `uncommon` and `buying` trade sets of the
+/// data (5, 2 and 2 offers), drawn deterministically from its uuid.
+pub fn trader_offers(uuid: Uuid) -> Vec<Trade> {
+    (1..=3u8)
+        .flat_map(|level| draw("wandering_trader", level, seed(uuid, 99, level)))
+        .collect()
+}
+
+/// `set.amount` distinct offers drawn from the pool named `set_name` at `level`.
+fn draw(set_name: &str, level: u8, seed: u64) -> Vec<Trade> {
+    let Some(set) = ferrite_data::villager_trades::set(set_name, level) else {
         return Vec::new();
     };
     let mut pool: Vec<&'static str> = set.trades.to_vec();
-    let mut rng = seed(uuid, profession.id(), level);
+    let mut rng = seed;
     let mut out = Vec::new();
     for _ in 0..set.amount.min(pool.len()) {
         let pick = (next(&mut rng) % pool.len() as u64) as usize;
@@ -632,5 +649,14 @@ mod tests {
         assert_eq!(MobKind::Villager.max_health(), 20.0);
         assert!(!MobKind::Villager.is_hostile());
         assert_eq!(MobKind::from_name("villager"), Some(MobKind::Villager));
+    }
+
+    #[test]
+    fn a_wandering_trader_draws_its_offers_from_the_three_pools() {
+        let uuid = Uuid::from_u128(77);
+        let offers = trader_offers(uuid);
+        assert_eq!(offers.len(), 9, "5 common, 2 uncommon and 2 buying");
+        assert_eq!(offers, trader_offers(uuid), "the draw is deterministic");
+        assert_ne!(offers, trader_offers(Uuid::from_u128(78)));
     }
 }

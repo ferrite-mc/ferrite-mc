@@ -47,6 +47,10 @@ pub enum MobKind {
     Donkey,
     Mule,
     Llama,
+    /// `minecraft:trader_llama`: a llama led by a wandering trader.
+    TraderLlama,
+    /// `minecraft:wandering_trader`.
+    WanderingTrader,
 }
 
 impl MobKind {
@@ -61,7 +65,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 18] = [
+    pub const ALL_MOBS: [Self; 20] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -80,6 +84,8 @@ impl MobKind {
         Self::Donkey,
         Self::Mule,
         Self::Llama,
+        Self::TraderLlama,
+        Self::WanderingTrader,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -103,6 +109,8 @@ impl MobKind {
             Self::Donkey => "minecraft:donkey",
             Self::Mule => "minecraft:mule",
             Self::Llama => "minecraft:llama",
+            Self::TraderLlama => "minecraft:trader_llama",
+            Self::WanderingTrader => "minecraft:wandering_trader",
         }
     }
 
@@ -113,7 +121,15 @@ impl MobKind {
 
     /// Horses, donkeys and mules: rideable, tamed by riding and saddled (`AbstractHorse`).
     pub fn is_equine(self) -> bool {
-        matches!(self, Self::Horse | Self::Donkey | Self::Mule | Self::Llama)
+        matches!(
+            self,
+            Self::Horse | Self::Donkey | Self::Mule | Self::Llama | Self::TraderLlama
+        )
+    }
+
+    /// A llama or a trader llama.
+    pub fn is_llama(self) -> bool {
+        matches!(self, Self::Llama | Self::TraderLlama)
     }
 
     /// Whether this kind hunts players (vanilla `Monster`/`Enemy`).
@@ -198,6 +214,8 @@ impl MobKind {
             Self::Donkey => "minecraft:entities/donkey",
             Self::Mule => "minecraft:entities/mule",
             Self::Llama => "minecraft:entities/llama",
+            Self::TraderLlama => "minecraft:entities/trader_llama",
+            Self::WanderingTrader => "minecraft:entities/wandering_trader",
         }
     }
 
@@ -234,6 +252,8 @@ impl MobKind {
             Self::Donkey => "Donkey",
             Self::Mule => "Mule",
             Self::Llama => "Llama",
+            Self::TraderLlama => "Trader Llama",
+            Self::WanderingTrader => "Wandering Trader",
         }
     }
 
@@ -301,6 +321,8 @@ pub struct MobState {
     pub leash: Option<(uuid::Uuid, i32)>,
     /// The llama this one trails in a caravan (`Llama.caravanHead`).
     pub caravan: Option<uuid::Uuid>,
+    /// Ticks until the mob vanishes without loot (a wandering trader and its llamas); 0 for never.
+    pub lifetime: u32,
     /// Whether a tamed animal was told to sit.
     pub sitting: bool,
     /// Whether a tamed animal is walking to its owner (`FollowOwnerGoal`).
@@ -361,6 +383,7 @@ impl MobState {
             chest: false,
             leash: None,
             caravan: None,
+            lifetime: 0,
             armor_points: 0.0,
             speed: 0.0,
             jump: 0.0,
@@ -418,7 +441,7 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
             mob.jump = 0.4 + rng.next_f32() * 0.2 + rng.next_f32() * 0.2 + rng.next_f32() * 0.2;
             mob.health = 15.0 + rng.next_int(8) as f32 + rng.next_int(9) as f32;
         }
-        if kind == MobKind::Llama {
+        if kind.is_llama() {
             // `Llama.finalizeSpawn`: a random strength (1 to 5) and one of four coats.
             data.metadata.set(
                 crate::horse::STRENGTH_INDEX,
@@ -445,6 +468,14 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
             [pos.x, pos.y, pos.z],
         );
         crate::villager::define_metadata(&mut data.metadata, &state);
+        data.villager = Some(state);
+    }
+    if kind == MobKind::WanderingTrader {
+        let mut state = crate::villager::VillagerState::new(
+            crate::villager::VillagerType::Plains,
+            [pos.x, pos.y, pos.z],
+        );
+        state.offers = crate::villager::trader_offers(data.uuid);
         data.villager = Some(state);
     }
     EntityRecord {
@@ -537,7 +568,10 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
         return false;
     };
     let kind_is_wolf = mob.kind == MobKind::Wolf;
-    if matches!(mob.kind, MobKind::Wolf | MobKind::Llama) {
+    if matches!(
+        mob.kind,
+        MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama
+    ) {
         // A wild wolf (or llama) turns on whoever hurt it; a tame one never does.
         if mob.owner.is_some() {
             return false;

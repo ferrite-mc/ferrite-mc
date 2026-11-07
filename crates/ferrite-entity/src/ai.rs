@@ -70,16 +70,28 @@ fn leash_pull(
     events: &mut Vec<MobEvent>,
 ) -> Option<Vec3> {
     let (holder, _) = mob::state(store, key)?.leash?;
-    let target = players.iter().find(|t| t.uuid == holder)?;
-    let dx = target.pos.x - start.x;
-    let dz = target.pos.z - start.z;
+    // The holder is a player in this region, or another mob (a wandering trader).
+    let holder_pos = players
+        .iter()
+        .find(|t| t.uuid == holder)
+        .map(|t| t.pos)
+        .or_else(|| {
+            let k = store
+                .keys()
+                .iter()
+                .copied()
+                .find(|&k| store.data(k).is_some_and(|d| d.uuid == holder))?;
+            store.pos(k)
+        })?;
+    let dx = holder_pos.x - start.x;
+    let dz = holder_pos.z - start.z;
     let distance = (dx * dx + dz * dz).sqrt();
     if distance > LEASH_SNAP {
         mob::state_mut(store, key)?.leash = None;
         events.push(MobEvent::LeashBroke { key });
         return None;
     }
-    (distance > LEASH_PULL).then_some(target.pos)
+    (distance > LEASH_PULL).then_some(holder_pos)
 }
 
 /// Where a llama in a caravan walks to: its head, once it is more than three blocks behind.
@@ -87,7 +99,7 @@ fn leash_pull(
 /// the line; the line lets go past sixteen blocks.
 fn caravan_target(store: &mut EntityStore, key: crate::EntityKey, start: Vec3) -> Option<Vec3> {
     let state = mob::state(store, key)?;
-    if state.kind != MobKind::Llama || state.leash.is_some() {
+    if !state.kind.is_llama() || state.leash.is_some() {
         return None;
     }
     let uuid = store.data(key)?.uuid;
@@ -121,7 +133,7 @@ fn caravan_target(store: &mut EntityStore, key: crate::EntityKey, start: Vec3) -
             return None;
         }
         let other = mob::state(store, k)?;
-        if other.kind != MobKind::Llama || other.is_dead() {
+        if !other.kind.is_llama() || other.is_dead() {
             return None;
         }
         if other.leash.is_none() && other.caravan.is_none() {
@@ -310,7 +322,16 @@ pub fn tick_with(
             state.bow_timer = state.bow_timer.saturating_sub(1);
             state.panic = state.panic.saturating_sub(1);
             state.path_timer = state.path_timer.saturating_sub(1);
-            if matches!(state.kind, MobKind::Wolf | MobKind::Llama) {
+            if state.lifetime == 1 {
+                // Gone without a trace and without loot.
+                state.loot_dropped = true;
+                state.health = 0.0;
+            }
+            state.lifetime = state.lifetime.saturating_sub(1);
+            if matches!(
+                state.kind,
+                MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama
+            ) {
                 state.anger = state.anger.saturating_sub(1);
                 if state.anger == 0 {
                     state.target = None;
@@ -427,7 +448,8 @@ pub fn tick_with(
                         state.wander_yaw,
                     )
                 });
-            let angry_at = if matches!(kind, MobKind::Wolf | MobKind::Llama) {
+            let angry_at = if matches!(kind, MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama)
+            {
                 mob::state(store, key)
                     .and_then(|state| state.target)
                     .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
@@ -463,7 +485,7 @@ pub fn tick_with(
                 directed = true;
                 let dx = target.pos.x - start.x;
                 let dz = target.pos.z - start.z;
-                if kind == MobKind::Llama {
+                if kind.is_llama() {
                     // `LlamaSpit`: a wild llama spits at whoever hurt it from up to 10 blocks.
                     if (dx * dx + dz * dz).sqrt() <= 10.0
                         && mob::state(store, key).is_some_and(|state| state.bow_timer == 0)
@@ -1019,6 +1041,43 @@ mod tests {
             }
         }
         assert!(spat);
+    }
+
+    #[test]
+    fn a_trader_llama_follows_the_trader_that_leads_it_and_vanishes_when_its_time_is_up() {
+        let world = TestWorld::flat(64);
+        let player = target(0.5, 0.5);
+        let mut store = EntityStore::default();
+        let trader = store.insert(new_mob(
+            MobKind::WanderingTrader,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let llama = store.insert(new_mob(
+            MobKind::TraderLlama,
+            Vec3::new(9.5, 64.0, 0.5),
+            &mut Rng::new(2),
+        ));
+        let holder = store.data(trader).unwrap().uuid;
+        let state = mob::state_mut(&mut store, llama).unwrap();
+        state.leash = Some((holder, 1));
+        state.lifetime = 50;
+        let mut rng = Rng::new(3);
+        for _ in 0..40 {
+            tick_with(&mut store, &world, &[player], &mut rng);
+        }
+        assert!(
+            store.pos(llama).unwrap().x < 9.5,
+            "the led llama is pulled to its trader"
+        );
+        for _ in 0..20 {
+            tick_with(&mut store, &world, &[player], &mut rng);
+        }
+        assert!(mob::state(&store, llama).unwrap().is_dead());
+        assert!(
+            mob::state(&store, llama).unwrap().loot_dropped,
+            "it leaves no loot"
+        );
     }
 
     #[test]

@@ -708,6 +708,9 @@ pub struct Region {
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Dragon breath clouds: centre and ticks left.
     pub breath_clouds: Vec<(ferrite_math::Vec3, u32)>,
+    /// Chance in percent that a wandering trader turns up at the next daily roll
+    /// (`WanderingTraderSpawner`: starts at 25, grows by 25 per miss, caps at 75).
+    pub trader_chance: u32,
     /// Piston block updates held back until the client finished the push animation: the tick
     /// they are due, their chunk and the packet (`PistonMovingBlockEntity` lasts two ticks).
     pub delayed_updates: Vec<(i64, (i32, i32), Outbound)>,
@@ -780,6 +783,7 @@ impl RegionData for Region {
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
+            trader_chance: 25,
             delayed_updates: Vec::new(),
             thrown_tridents: HashMap::new(),
             pending_swings: Vec::new(),
@@ -3936,7 +3940,15 @@ impl Region {
             let Some((holder, id)) = mob::state(&self.entities, key).and_then(|s| s.leash) else {
                 continue;
             };
-            if let Some(&real) = holders.get(&holder)
+            let real = holders.get(&holder).copied().or_else(|| {
+                self.entities.keys().iter().find_map(|&k| {
+                    self.entities
+                        .data(k)
+                        .filter(|d| d.uuid == holder)
+                        .map(|d| d.id)
+                })
+            });
+            if let Some(real) = real
                 && real != id
             {
                 if let Some(state) = mob::state_mut(&mut self.entities, key) {
@@ -4018,6 +4030,7 @@ impl Region {
                 }
             }
         }
+        self.tick_trader_spawn(blocks);
         for record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1) {
             self.entities.insert(record);
         }
@@ -4414,6 +4427,131 @@ impl Region {
         self.entities.insert(record);
     }
 
+    /// Right-click on an employed villager or a wandering trader opens its trading screen.
+    fn use_trader(&mut self, player: Uuid, key: ferrite_entity::EntityKey) -> bool {
+        use ferrite_entity::mob::MobKind;
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
+            return false;
+        };
+        if !matches!(state.kind, MobKind::Villager | MobKind::WanderingTrader) || state.age < 0 {
+            return false;
+        }
+        let Some(data) = self.entities.data(key) else {
+            return false;
+        };
+        let (uuid, villager) = (data.uuid, data.villager.clone());
+        let Some(villager) = villager.filter(|v| !v.offers.is_empty()) else {
+            return false;
+        };
+        let village = state.kind == MobKind::Villager;
+        if let Some(p) = self.players.get_mut(&player) {
+            p.open_merchant_offers(
+                state.kind.display_name(),
+                villager.offers,
+                if village {
+                    i32::from(villager.level)
+                } else {
+                    1
+                },
+                villager.xp,
+                village,
+                village,
+                Some(super::container::OpenAt::Trader(uuid)),
+            );
+        }
+        true
+    }
+
+    /// What players buy in an open trading screen counts against the merchant's offers.
+    fn sync_trades(&mut self) {
+        let open: Vec<_> = self
+            .players
+            .values()
+            .filter_map(|p| p.open_trader())
+            .collect();
+        for (trader, trades) in open {
+            let Some(key) = self
+                .entities
+                .keys()
+                .iter()
+                .copied()
+                .find(|&k| self.entities.data(k).is_some_and(|d| d.uuid == trader))
+            else {
+                continue;
+            };
+            let Some(villager) = self
+                .entities
+                .data_mut(key)
+                .and_then(|d| d.villager.as_mut())
+            else {
+                continue;
+            };
+            if villager.offers.len() != trades.len() {
+                continue;
+            }
+            for (offer, trade) in villager.offers.iter_mut().zip(trades) {
+                offer.uses = trade.uses;
+                offer.demand = trade.demand;
+            }
+        }
+    }
+
+    /// The daily wandering trader roll (`WanderingTraderSpawner`): near a random player, with two
+    /// trader llamas on leads, gone after 48000 ticks.
+    fn tick_trader_spawn(&mut self, blocks: &TickBlocks<'_>) {
+        use ferrite_entity::mob::{MobKind, new_mob};
+        if self.tick_clock <= 0 || self.tick_clock % 24_000 != 0 || self.players.is_empty() {
+            return;
+        }
+        if (self.rng.next_int(100) as u32) >= self.trader_chance {
+            self.trader_chance = (self.trader_chance + 25).min(75);
+            return;
+        }
+        let anchors: Vec<_> = self.players.values().map(|p| p.pos).collect();
+        let anchor = anchors[self.rng.next_int(anchors.len() as i32) as usize];
+        let air = ferrite_data::blocks::default_state("air");
+        let angle = f64::from(self.rng.next_f32()) * std::f64::consts::TAU;
+        let distance = 24.0 + f64::from(self.rng.next_f32()) * 24.0;
+        let (x, z) = (
+            (anchor[0] + angle.cos() * distance).floor() as i32,
+            (anchor[2] + angle.sin() * distance).floor() as i32,
+        );
+        // Stand on the first solid block under the player's height with two air blocks above.
+        let top = anchor[1].floor() as i32 + 16;
+        let ground = (top - 48..=top).rev().find(|&y| {
+            let solid = |y: i32| blocks.block_state(x, y, z).is_some_and(|s| Some(s) != air);
+            solid(y) && !solid(y + 1) && !solid(y + 2)
+        });
+        let Some(ground) = ground else {
+            return;
+        };
+        self.trader_chance = 25;
+        let at = ferrite_math::Vec3::new(
+            f64::from(x) + 0.5,
+            f64::from(ground) + 1.0,
+            f64::from(z) + 0.5,
+        );
+        let mut trader = new_mob(MobKind::WanderingTrader, at, &mut self.rng);
+        if let Some(state) = trader.data.mob.as_mut() {
+            state.lifetime = 48_000;
+        }
+        let (trader_uuid, trader_id) = (trader.data.uuid, trader.data.id);
+        self.entities.insert(trader);
+        for _ in 0..2 {
+            let offset = ferrite_math::Vec3::new(
+                f64::from(self.rng.next_f32()) * 4.0 - 2.0,
+                0.0,
+                f64::from(self.rng.next_f32()) * 4.0 - 2.0,
+            );
+            let mut llama = new_mob(MobKind::TraderLlama, at + offset, &mut self.rng);
+            if let Some(state) = llama.data.mob.as_mut() {
+                state.lifetime = 48_000;
+                state.leash = Some((trader_uuid, trader_id));
+            }
+            self.entities.insert(llama);
+        }
+    }
+
     /// Right-click with a lead on a leashable animal ties it to the player; the holder's right
     /// click takes it off again and gets the lead back. `true` when the click was used.
     fn use_lead(
@@ -4520,6 +4658,9 @@ impl Region {
                 let gamemode = p.gamemode;
                 let sneaking = p.sneaking;
                 if self.use_lead(ctx, uuid, key, name, slot, gamemode) {
+                    continue;
+                }
+                if self.use_trader(uuid, key) {
                     continue;
                 }
                 // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
@@ -6721,6 +6862,7 @@ impl Region {
         if entities_run {
             self.tick_arrows(ctx);
             self.tick_horses(ctx);
+            self.sync_trades();
             self.land_tridents();
             self.tick_dragon_effects(ctx);
             self.tick_mobs(ctx, &blocks);

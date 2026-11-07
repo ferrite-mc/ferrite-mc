@@ -70,8 +70,10 @@ pub fn treat(store: &mut EntityStore, key: EntityKey, item: &str) -> bool {
 pub fn add_chest(store: &mut EntityStore, key: EntityKey) -> bool {
     match mob::state_mut(store, key) {
         Some(s)
-            if matches!(s.kind, MobKind::Donkey | MobKind::Mule | MobKind::Llama)
-                && s.owner.is_some()
+            if matches!(
+                s.kind,
+                MobKind::Donkey | MobKind::Mule | MobKind::Llama | MobKind::TraderLlama
+            ) && s.owner.is_some()
                 && !s.chest =>
         {
             s.chest = true;
@@ -87,7 +89,7 @@ pub fn add_chest(store: &mut EntityStore, key: EntityKey) -> bool {
 pub fn wears(store: &EntityStore, key: EntityKey, item: &str) -> bool {
     match mob::state(store, key).map(|s| s.kind) {
         Some(MobKind::Horse) => is_armor(item),
-        Some(MobKind::Llama) => item.ends_with("_carpet"),
+        Some(MobKind::Llama | MobKind::TraderLlama) => item.ends_with("_carpet"),
         _ => false,
     }
 }
@@ -103,10 +105,12 @@ pub fn chest_columns(store: &EntityStore, key: EntityKey) -> u8 {
     }
     match s.kind {
         MobKind::Donkey | MobKind::Mule => 5,
-        MobKind::Llama => match store.data(key).and_then(|d| d.metadata.get(STRENGTH_INDEX)) {
-            Some(MetaValue::Int(strength)) => (*strength).clamp(1, 5) as u8,
-            _ => 3,
-        },
+        MobKind::Llama | MobKind::TraderLlama => {
+            match store.data(key).and_then(|d| d.metadata.get(STRENGTH_INDEX)) {
+                Some(MetaValue::Int(strength)) => (*strength).clamp(1, 5) as u8,
+                _ => 3,
+            }
+        }
         _ => 0,
     }
 }
@@ -122,7 +126,7 @@ pub fn set_gear(
 ) -> bool {
     let changed = match mob::state_mut(store, key) {
         Some(s) if s.kind.is_equine() && s.owner.is_some() => {
-            let saddled = saddled && s.kind != MobKind::Llama;
+            let saddled = saddled && !s.kind.is_llama();
             let changed = s.saddled != saddled || s.armor != armor;
             s.saddled = saddled;
             s.armor = armor;
@@ -159,8 +163,10 @@ pub fn armor_points(item: &str) -> f32 {
 pub fn wear_armor(store: &mut EntityStore, key: EntityKey, item: u16, points: f32) -> bool {
     match mob::state_mut(store, key) {
         Some(s)
-            if matches!(s.kind, MobKind::Horse | MobKind::Llama)
-                && s.owner.is_some()
+            if matches!(
+                s.kind,
+                MobKind::Horse | MobKind::Llama | MobKind::TraderLlama
+            ) && s.owner.is_some()
                 && s.armor == 0 =>
         {
             s.armor = item;
@@ -180,7 +186,7 @@ pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     } else {
         metadata.define(VARIANT_INDEX, MetaValue::Boolean(false));
     }
-    if state.kind == MobKind::Llama {
+    if state.kind.is_llama() {
         metadata.define(STRENGTH_INDEX, MetaValue::Int(1));
         metadata.define(LLAMA_VARIANT_INDEX, MetaValue::Int(0));
     }
@@ -205,20 +211,14 @@ fn sync(store: &mut EntityStore, key: EntityKey) {
 
 /// Whether the horse is tame and saddled, so its rider steers it.
 pub fn is_steerable(store: &EntityStore, key: EntityKey) -> bool {
-    mob::state(store, key).is_some_and(|s| {
-        s.kind.is_equine() && s.kind != MobKind::Llama && s.owner.is_some() && s.saddled
-    })
+    mob::state(store, key)
+        .is_some_and(|s| s.kind.is_equine() && !s.kind.is_llama() && s.owner.is_some() && s.saddled)
 }
 
 /// Puts a saddle on a tame, unsaddled horse. `false` when it does not apply.
 pub fn saddle(store: &mut EntityStore, key: EntityKey) -> bool {
     match mob::state_mut(store, key) {
-        Some(s)
-            if s.kind.is_equine()
-                && s.kind != MobKind::Llama
-                && s.owner.is_some()
-                && !s.saddled =>
-        {
+        Some(s) if s.kind.is_equine() && !s.kind.is_llama() && s.owner.is_some() && !s.saddled => {
             s.saddled = true;
             true
         }

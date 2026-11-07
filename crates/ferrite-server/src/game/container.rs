@@ -55,6 +55,8 @@ pub enum OpenAt {
     Block([i32; 3], &'static str),
     /// The chest of a donkey or mule, by entity uuid.
     Animal(uuid::Uuid),
+    /// A villager or wandering trader, by entity uuid; its offers' uses are copied back.
+    Trader(uuid::Uuid),
 }
 
 /// Bukkit's `ClickType` and `InventoryAction` names for a vanilla click. The action is the
@@ -234,7 +236,7 @@ impl Player {
                     && self.within_reach([*x, *y, *z])
             }
             // shortcut: the animal is not checked for reach or for still being there.
-            Some(OpenAt::Animal(_)) => true,
+            Some(OpenAt::Animal(_) | OpenAt::Trader(_)) => true,
             Some(OpenAt::Block([x, y, z], block)) => {
                 block_name(source, [*x, *y, *z]) == Some(*block) && self.within_reach([*x, *y, *z])
             }
@@ -451,8 +453,23 @@ impl Player {
         if offers.is_empty() {
             return;
         }
+        self.open_merchant_offers(title, offers, 1, 0, false, false, None);
+    }
+
+    /// The trading screen for `offers`, with the merchant's level and experience bar.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_merchant_offers(
+        &mut self,
+        title: &str,
+        offers: Vec<ferrite_inventory::Trade>,
+        level: i32,
+        xp: i32,
+        show_progress: bool,
+        can_restock: bool,
+        at: Option<OpenAt>,
+    ) {
         let menu_offers = offers.clone();
-        self.open_menu(|id| Menu::merchant(id, menu_offers), title, None);
+        self.open_menu(|id| Menu::merchant(id, menu_offers), title, at);
         let Some(window) = self
             .menus
             .open
@@ -488,12 +505,22 @@ impl Player {
                         demand: offer.demand,
                     })
                     .collect(),
-                level: VarInt(1),
-                xp: VarInt(0),
-                show_progress: false,
-                can_restock: false,
+                level: VarInt(level),
+                xp: VarInt(xp),
+                show_progress,
+                can_restock,
             },
         );
+    }
+
+    /// The offers of the villager or trader whose trading screen is open, with its uuid.
+    pub fn open_trader(&self) -> Option<(uuid::Uuid, Vec<ferrite_inventory::Trade>)> {
+        let Some(OpenAt::Trader(trader)) = &self.menus.open_at else {
+            return None;
+        };
+        let menu = self.menus.open.as_ref()?;
+        (menu.kind() == ferrite_inventory::MenuKind::Merchant)
+            .then(|| (*trader, menu.trades().to_vec()))
     }
 
     /// The offer picked in a merchant screen (vanilla `MerchantMenu.setSelectionHint`).
