@@ -1801,4 +1801,59 @@ mod tests {
         }
         assert!(moved, "the enderman teleported");
     }
+
+    #[test]
+    fn a_cat_in_love_shows_hearts_but_a_parrot_never_does() {
+        let world = TestWorld::flat(64);
+        let owner = Uuid::from_u128(1);
+        let mut store = EntityStore::default();
+        let cat = store.insert(new_mob(
+            MobKind::Cat,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let parrot = store.insert(new_mob(
+            MobKind::Parrot,
+            Vec3::new(2.5, 64.0, 0.5),
+            &mut Rng::new(2),
+        ));
+        for key in [cat, parrot] {
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.owner = Some(owner);
+            state.sitting = false;
+        }
+        assert_eq!(
+            crate::breed::feed(&mut store, cat, "minecraft:cod", owner),
+            crate::breed::Fed::Love
+        );
+        assert_eq!(
+            crate::breed::feed(&mut store, parrot, "minecraft:wheat_seeds", owner),
+            crate::breed::Fed::No,
+            "parrots are tameable but not breedable"
+        );
+
+        let player = Target {
+            uuid: owner,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+        };
+        let mut rng = Rng::new(3);
+        let mut cat_hearts = 0;
+        let mut parrot_hearts = 0;
+        for _ in 0..11 {
+            for event in tick_with(&mut store, &world, &[player], &mut rng) {
+                if let MobEvent::Status { key, status } = event
+                    && status == 18
+                {
+                    if key == cat {
+                        cat_hearts += 1;
+                    } else if key == parrot {
+                        parrot_hearts += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cat_hearts, 1, "one heart event per ten love ticks");
+        assert_eq!(parrot_hearts, 0, "a parrot cannot fall in love");
+        assert_eq!(mob::state(&store, parrot).unwrap().love, 0);
+    }
 }

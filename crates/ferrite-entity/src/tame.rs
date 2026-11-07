@@ -48,17 +48,29 @@ fn sync(store: &mut EntityStore, key: EntityKey) {
     }
 }
 
-/// What a right-click on a wolf did.
+/// What a right-click on a tamable animal did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Used {
     /// Nothing; the item is not used up.
     No,
-    /// A bone was used and the wolf stayed wild.
+    /// A taming item was used and the animal stayed wild.
     Consumed,
-    /// A bone was used and the wolf is tame now.
+    /// A taming item was used and the animal is tame now.
     Tamed,
-    /// The owner made the wolf sit or stand.
+    /// The owner made the animal sit or stand.
     Toggled,
+}
+
+impl Used {
+    /// The vanilla entity event the client needs after this use: 7 hearts when taming worked and
+    /// 6 smoke when it failed. Sitting and ordinary uses have no event.
+    pub fn status(self) -> Option<u8> {
+        match self {
+            Self::Tamed => Some(7),
+            Self::Consumed => Some(6),
+            Self::No | Self::Toggled => None,
+        }
+    }
 }
 
 /// Meat, which tamed wolves eat (`#minecraft:wolf_food`).
@@ -115,8 +127,17 @@ pub fn use_on(
         return Used::No;
     }
     let (tame_health, tames, food) = match state.kind {
-        MobKind::Cat => (20.0, is_cat_food(item), is_cat_food(item)),
-        MobKind::Parrot => (6.0, is_parrot_food(item), is_parrot_food(item)),
+        // `Cat.setTame` and `Parrot.setTame` restore the entity's data-driven maximum health.
+        MobKind::Cat => (
+            MobKind::Cat.max_health(),
+            is_cat_food(item),
+            is_cat_food(item),
+        ),
+        MobKind::Parrot => (
+            MobKind::Parrot.max_health(),
+            is_parrot_food(item),
+            is_parrot_food(item),
+        ),
         _ => (TAMED_HEALTH, item == "minecraft:bone", is_wolf_food(item)),
     };
     let used = match state.owner {
@@ -424,7 +445,8 @@ mod tests {
         }
         let state = mob::state(&store, key).unwrap();
         assert_eq!(state.owner, Some(player));
-        assert!(state.health >= 20.0);
+        assert_eq!(state.health, MobKind::Cat.max_health());
+        assert_eq!(MobKind::Cat.max_health(), 10.0);
         // Fish now feeds it instead of toggling sitting; anything else toggles.
         assert_eq!(
             use_on(&mut store, key, "minecraft:cod", player, &mut rng),
@@ -434,6 +456,154 @@ mod tests {
             use_on(&mut store, key, "minecraft:air", player, &mut rng),
             Used::Toggled
         );
+    }
+
+    #[test]
+    fn failed_taming_uses_the_item_and_leaves_cats_and_parrots_wild() {
+        for (kind, item) in [
+            (MobKind::Cat, "minecraft:cod"),
+            (MobKind::Parrot, "minecraft:wheat_seeds"),
+        ] {
+            let mut spawn_rng = Rng::new(3);
+            let mut store = EntityStore::default();
+            let key = store.insert(mob::new_mob(
+                kind,
+                Vec3::new(0.5, 64.0, 0.5),
+                &mut spawn_rng,
+            ));
+            let player = Uuid::from_u128(1);
+            // Find a seed that fails on its first roll, so the failure path is exact.
+            let seed = (0u64..)
+                .find(|&seed| {
+                    let mut rng = Rng::new(seed);
+                    rng.next_int(3) != 0
+                })
+                .unwrap();
+            let mut rng = Rng::new(seed);
+            let failed = use_on(&mut store, key, item, player, &mut rng);
+            assert_eq!(failed, Used::Consumed);
+            assert_eq!(failed.status(), Some(6));
+            assert_eq!(mob::state(&store, key).unwrap().owner, None);
+
+            let mut tries = 0;
+            while use_on(&mut store, key, item, player, &mut rng) != Used::Tamed {
+                tries += 1;
+                assert!(tries < 100);
+            }
+            assert_eq!(Used::Tamed.status(), Some(7));
+            let state = mob::state(&store, key).unwrap();
+            assert_eq!(state.owner, Some(player));
+            assert_eq!(state.health, kind.max_health());
+            assert!(state.sitting);
+        }
+    }
+
+    #[test]
+    fn tamed_cats_and_parrots_sit_and_follow_only_their_owner() {
+        for (kind, item) in [
+            (MobKind::Cat, "minecraft:salmon"),
+            (MobKind::Parrot, "minecraft:pumpkin_seeds"),
+        ] {
+            let mut rng = Rng::new(3);
+            let mut store = EntityStore::default();
+            let key = store.insert(mob::new_mob(kind, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+            let owner = Uuid::from_u128(1);
+            let other = Uuid::from_u128(2);
+            let mut tries = 0;
+            while use_on(&mut store, key, item, owner, &mut rng) != Used::Tamed {
+                tries += 1;
+                assert!(tries < 100);
+            }
+            let from = store.pos(key).unwrap();
+            assert!(mob::state(&store, key).unwrap().sitting);
+            assert_eq!(mob::state(&store, key).unwrap().owner, Some(owner));
+            let far = [(owner, Vec3::new(11.0, 64.0, 0.5))];
+            assert_eq!(follow_target(&mut store, key, &far, from), None);
+
+            // Only the owner can stand it up; another player has no effect.
+            assert_eq!(
+                use_on(&mut store, key, "minecraft:air", other, &mut rng),
+                Used::No
+            );
+            assert!(mob::state(&store, key).unwrap().sitting);
+            assert_eq!(
+                use_on(&mut store, key, "minecraft:air", owner, &mut rng),
+                Used::Toggled
+            );
+            assert!(!mob::state(&store, key).unwrap().sitting);
+            assert_eq!(
+                store.data(key).unwrap().metadata.get(FLAGS_INDEX),
+                Some(&MetaValue::Byte(TAMED))
+            );
+            assert_eq!(
+                store.data(key).unwrap().metadata.get(OWNER_INDEX),
+                Some(&MetaValue::OptionalUuid(Some(owner)))
+            );
+
+            assert!(follow_target(&mut store, key, &far, from).is_some());
+            let near = [(owner, Vec3::new(2.0, 64.0, 0.5))];
+            assert_eq!(follow_target(&mut store, key, &near, near[0].1), None);
+            let very_far = [(owner, Vec3::new(50.0, 64.0, 0.5))];
+            assert_eq!(follow_target(&mut store, key, &very_far, from), None);
+            assert!((store.pos(key).unwrap().x - 51.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn cat_breeding_needs_taming_and_fish_while_parrots_never_breed() {
+        let owner = Uuid::from_u128(1);
+        for (kind, food) in [
+            (MobKind::Cat, "minecraft:cod"),
+            (MobKind::Parrot, "minecraft:wheat_seeds"),
+        ] {
+            let mut rng = Rng::new(3);
+            let mut store = EntityStore::default();
+            let key = store.insert(mob::new_mob(kind, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+            assert_eq!(
+                crate::breed::feed(&mut store, key, food, owner),
+                crate::breed::Fed::No,
+                "a wild {kind:?} is not fed"
+            );
+            let mut tries = 0;
+            while use_on(&mut store, key, food, owner, &mut rng) != Used::Tamed {
+                tries += 1;
+                assert!(tries < 100);
+            }
+            let fed = crate::breed::feed(&mut store, key, food, owner);
+            if kind == MobKind::Cat {
+                assert_eq!(fed, crate::breed::Fed::Love);
+                assert_eq!(
+                    crate::breed::feed(&mut store, key, food, owner),
+                    crate::breed::Fed::No,
+                    "one fish starts one love timer"
+                );
+                let mate = store.insert(mob::new_mob(
+                    MobKind::Cat,
+                    Vec3::new(1.5, 64.0, 0.5),
+                    &mut rng,
+                ));
+                mob::state_mut(&mut store, mate).unwrap().owner = Some(owner);
+                assert_eq!(
+                    crate::breed::feed(&mut store, mate, food, owner),
+                    crate::breed::Fed::Love
+                );
+                assert_eq!(
+                    crate::breed::mate_for(&store, key).map(|(mate, _)| mate),
+                    Some(mate)
+                );
+            } else {
+                assert_eq!(fed, crate::breed::Fed::No);
+                assert_eq!(crate::breed::mate_for(&store, key), None);
+            }
+        }
+    }
+
+    #[test]
+    fn taming_results_map_to_the_vanilla_entity_events() {
+        assert_eq!(Used::Tamed.status(), Some(7));
+        assert_eq!(Used::Consumed.status(), Some(6));
+        assert_eq!(Used::Toggled.status(), None);
+        assert_eq!(Used::No.status(), None);
     }
 
     #[test]

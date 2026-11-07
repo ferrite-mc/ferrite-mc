@@ -5593,11 +5593,9 @@ impl Region {
                         uuid,
                         &mut self.rng,
                     );
-                    // Entity events: 7 hearts when tamed, 6 smoke when the bone failed.
-                    match used {
-                        ferrite_entity::tame::Used::Tamed => self.broadcast_status(ctx, key, 7),
-                        ferrite_entity::tame::Used::Consumed => self.broadcast_status(ctx, key, 6),
-                        _ => {}
+                    // Entity events: 7 hearts when tamed, 6 smoke when a taming attempt failed.
+                    if let Some(status) = used.status() {
+                        self.broadcast_status(ctx, key, status);
                     }
                     if used == ferrite_entity::tame::Used::Tamed {
                         super::recipe_unlock::TAMED
@@ -8756,6 +8754,55 @@ mod tests {
         let names = dropped_items(&region);
         assert!(names.contains(&"minecraft:bread"));
         assert!(names.contains(&"minecraft:chest"));
+    }
+
+    #[test]
+    fn cat_and_parrot_ownership_survives_an_entity_save() {
+        let owner = Uuid::from_u128(9);
+        for kind in [MobKind::Cat, MobKind::Parrot] {
+            let mut record = mob::new_mob(
+                kind,
+                ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+                &mut ferrite_entity::Rng::new(1),
+            );
+            let uuid = record.data.uuid;
+            if let Some(state) = record.data.mob.as_mut() {
+                state.owner = Some(owner);
+                state.sitting = true;
+            }
+            // `use_on` writes the same metadata while the entity is alive.
+            ferrite_entity::tame::define_metadata(
+                &mut record.data.metadata,
+                record.data.mob.as_ref().unwrap(),
+            );
+            let loaded =
+                super::super::entity_save::from_nbt(&super::super::entity_save::to_nbt(&[record]));
+            assert_eq!(loaded.len(), 1, "{kind:?}");
+            let record = &loaded[0];
+            assert_eq!(record.data.uuid, uuid, "{kind:?}");
+            let state = record.data.mob.as_ref().unwrap();
+            assert_eq!(state.owner, Some(owner), "{kind:?}");
+            assert!(state.sitting, "{kind:?}");
+            assert_eq!(
+                record.data.metadata.get(ferrite_entity::tame::FLAGS_INDEX),
+                Some(&ferrite_protocol::packets::play::MetaValue::Byte(1 | 4)),
+                "{kind:?}"
+            );
+            assert_eq!(
+                record.data.metadata.get(ferrite_entity::tame::OWNER_INDEX),
+                Some(&ferrite_protocol::packets::play::MetaValue::OptionalUuid(
+                    Some(owner)
+                )),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn taming_outcomes_route_the_vanilla_tame_and_failure_events() {
+        assert_eq!(ferrite_entity::tame::Used::Tamed.status(), Some(7));
+        assert_eq!(ferrite_entity::tame::Used::Consumed.status(), Some(6));
+        assert_eq!(ferrite_entity::tame::Used::Toggled.status(), None);
     }
 
     #[test]
