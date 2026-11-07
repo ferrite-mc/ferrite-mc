@@ -4417,6 +4417,27 @@ impl Region {
         slot: usize,
         gamemode: i32,
     ) -> bool {
+        let item = ferrite_item::item_id(held);
+        let wear = item.is_some_and(|id| {
+            ferrite_entity::horse::is_armor(held)
+                && ferrite_entity::horse::wear_armor(&mut self.entities, key, id)
+        });
+        if wear || ferrite_entity::horse::treat(&mut self.entities, key, held) {
+            if gamemode != 1
+                && let Some(p) = self.players.get_mut(&uuid)
+            {
+                p.inventory.remove(slot, 1);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            self.send_saddle(ctx, key);
+            return true;
+        }
         if held == "minecraft:saddle" && ferrite_entity::horse::saddle(&mut self.entities, key) {
             if gamemode != 1
                 && let Some(p) = self.players.get_mut(&uuid)
@@ -4444,29 +4465,42 @@ impl Region {
         if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
             state.no_ai = true;
         }
-        if steerable {
-            self.send_saddle(ctx, key);
-        }
+        self.send_saddle(ctx, key);
         self.send_passengers(ctx, key);
         true
     }
 
-    /// Tells everyone tracking the horse it wears a saddle (the client only lets the rider
-    /// steer a saddled horse).
+    /// Tells everyone tracking the horse what it wears: the saddle (the client only lets the
+    /// rider steer a saddled horse) and its armour.
     fn send_saddle(&self, ctx: &TickContext, key: ferrite_entity::EntityKey) {
         let Some(id) = self.entities.data(key).map(|d| d.id) else {
             return;
         };
-        let Some(saddle) = ferrite_item::ItemStack::from_name("minecraft:saddle") else {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
             return;
         };
+        let mut slots = Vec::new();
+        if state.saddled
+            && let Some(saddle) = ferrite_item::ItemStack::from_name("minecraft:saddle")
+        {
+            slots.push((ferrite_entity::horse::SADDLE_SLOT, saddle));
+        }
+        if state.armor != 0 {
+            slots.push((
+                ferrite_entity::horse::BODY_SLOT,
+                ferrite_item::ItemStack::with_count(state.armor, 1),
+            ));
+        }
+        if slots.is_empty() {
+            return;
+        }
         let players = &self.players;
         tracker::broadcast(
             &self.entities,
             key,
             &SetEquipment {
                 entity_id: VarInt(id),
-                slots: vec![(ferrite_entity::horse::SADDLE_SLOT, saddle)],
+                slots,
             },
             &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
         );

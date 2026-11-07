@@ -19,6 +19,63 @@ const MAX_TEMPER: i32 = 100;
 const TEMPER_STEP: i32 = 5;
 /// The `EquipmentSlot` index of the saddle in a `set_equipment` packet.
 pub const SADDLE_SLOT: u8 = 7;
+/// The `EquipmentSlot` index of body armour (horse armour).
+pub const BODY_SLOT: u8 = 6;
+
+/// `(health, temper)` a treat gives (`AbstractHorse.handleEating`).
+fn treat_values(item: &str) -> Option<(f32, i32)> {
+    Some(match item {
+        "minecraft:sugar" => (1.0, 3),
+        "minecraft:wheat" => (2.0, 3),
+        "minecraft:apple" | "minecraft:golden_carrot" => (
+            if item == "minecraft:apple" { 3.0 } else { 4.0 },
+            if item == "minecraft:apple" { 3 } else { 5 },
+        ),
+        "minecraft:golden_apple" | "minecraft:enchanted_golden_apple" => (10.0, 10),
+        "minecraft:hay_block" => (20.0, 3),
+        _ => return None,
+    })
+}
+
+/// Feeds a treat: heals the horse and makes a wild one trust riders more. `true` when it did
+/// something, so the item is used up.
+pub fn treat(store: &mut EntityStore, key: EntityKey, item: &str) -> bool {
+    let Some((heal, temper)) = treat_values(item) else {
+        return false;
+    };
+    let Some(state) = mob::state_mut(store, key) else {
+        return false;
+    };
+    if !state.kind.is_equine() {
+        return false;
+    }
+    let max = state.kind.max_health();
+    let wild = state.owner.is_none() && state.temper < MAX_TEMPER;
+    if state.health >= max && !wild {
+        return false;
+    }
+    state.health = (state.health + heal).min(max);
+    if state.owner.is_none() {
+        state.temper = (state.temper + temper).min(MAX_TEMPER);
+    }
+    true
+}
+
+/// Whether an item is horse armour.
+pub fn is_armor(item: &str) -> bool {
+    item.ends_with("_horse_armor")
+}
+
+/// Puts armour (an item id) on a tame horse that wears none. `false` when it does not apply.
+pub fn wear_armor(store: &mut EntityStore, key: EntityKey, item: u16) -> bool {
+    match mob::state_mut(store, key) {
+        Some(s) if s.kind == MobKind::Horse && s.owner.is_some() && s.armor == 0 => {
+            s.armor = item;
+            true
+        }
+        _ => false,
+    }
+}
 
 /// Defines the horse data values and writes the current state into them.
 pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
@@ -130,5 +187,27 @@ mod tests {
         assert!(saddle(&mut store, key));
         assert!(!saddle(&mut store, key));
         assert!(is_steerable(&store, key));
+        assert!(wear_armor(&mut store, key, 7));
+        assert!(
+            !wear_armor(&mut store, key, 8),
+            "one set of armour at a time"
+        );
+    }
+
+    #[test]
+    fn treats_heal_and_raise_the_temper_of_a_wild_horse_only_while_useful() {
+        let mut store = EntityStore::default();
+        let key = horse(&mut store);
+        assert!(!treat(&mut store, key, "minecraft:stone"));
+        assert!(treat(&mut store, key, "minecraft:golden_apple"));
+        assert_eq!(mob::state(&store, key).unwrap().temper, 10);
+        mob::state_mut(&mut store, key).unwrap().owner = Some(Uuid::from_u128(1));
+        assert!(
+            !treat(&mut store, key, "minecraft:wheat"),
+            "a tame horse at full health"
+        );
+        mob::state_mut(&mut store, key).unwrap().health = 5.0;
+        assert!(treat(&mut store, key, "minecraft:wheat"));
+        assert_eq!(mob::state(&store, key).unwrap().health, 7.0);
     }
 }

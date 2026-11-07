@@ -147,6 +147,8 @@ pub struct GameState {
     pub weather_sent: Option<Weather>,
     /// The `advance_weather` game rule, set by the world loop each tick.
     pub advance_weather: bool,
+    /// State of the weather's random sequence.
+    weather_rng: u64,
     pub seed: i64,
     pub max_players: i32,
     pub players: Vec<PlayerEntry>,
@@ -191,6 +193,7 @@ impl GameState {
             weather_duration: 6_000,
             weather_sent: None,
             advance_weather: true,
+            weather_rng: (seed as u64) ^ 0x5DEE_CE66_D1CE_4E5B | 1,
             seed,
             max_players,
             players: Vec::new(),
@@ -287,9 +290,15 @@ impl GameState {
 
     /// The weather cycle when the current spell ends (vanilla `ServerLevel.advanceWeatherCycle`,
     /// shortened): clear weather turns to rain, rain to thunder one time in three, and both
-    /// clear up again. shortcut: durations come from the tick count, not a random sequence.
+    /// clear up again. shortcut: vanilla's separate rain and thunder timers are one spell here.
     fn advance_weather(&mut self) {
-        let r = ((self.game_time as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33) as i32;
+        // xorshift64: a seeded random sequence, so each world gets its own weather.
+        let mut x = self.weather_rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.weather_rng = x;
+        let r = ((x >> 33) & 0x7fff_ffff) as i32;
         let (weather, duration) = match self.weather {
             Weather::Clear => (Weather::Rain, 12_000 + r % 12_000),
             Weather::Rain if r % 3 == 0 => (Weather::Thunder, 3_600 + r % 12_000),

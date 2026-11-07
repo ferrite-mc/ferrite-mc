@@ -300,6 +300,8 @@ pub struct MobState {
     pub anger: u16,
     /// A tame horse wears a saddle and can be steered.
     pub saddled: bool,
+    /// Item id of the horse armour it wears (0 for none).
+    pub armor: u16,
     /// How much a wild horse has come to accept riders (`AbstractHorse.temper`).
     pub temper: i32,
 }
@@ -339,6 +341,7 @@ impl MobState {
             following: false,
             anger: 0,
             saddled: false,
+            armor: 0,
             temper: 0,
         }
     }
