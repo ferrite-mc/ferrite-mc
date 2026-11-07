@@ -938,6 +938,92 @@ fn level_and_progress(total: i32) -> (i32, f32) {
     };
     (level, progress)
 }
+
+/// The authoritative merchant state an open trade menu is synchronized against. The entity
+/// store belongs to the region; a player's menu is only a snapshot of its offers.
+struct TraderSync<'a> {
+    entities: &'a mut EntityStore,
+}
+
+impl TraderSync<'_> {
+    /// Refreshes the player's open trade menu from the villager, so the next click validates
+    /// against newer uses/demand and the player's current reputation instead of a stale copy.
+    fn refresh(&self, player: &mut Player) {
+        let Some((trader, _)) = player.open_trader() else {
+            return;
+        };
+        let Some(key) = trader_key(self.entities, trader) else {
+            return;
+        };
+        let Some(data) = self.entities.data(key) else {
+            return;
+        };
+        let Some(villager) = &data.villager else {
+            return;
+        };
+        let offers = if data
+            .mob
+            .as_ref()
+            .is_some_and(|mob| mob.kind == MobKind::Villager)
+        {
+            villager.offers_for_player(player.uuid)
+        } else {
+            villager.offers.clone()
+        };
+        player.set_trader_offers(offers);
+    }
+
+    /// Merges the sales the player made since the last refresh into the merchant.
+    fn commit(&mut self, player: &mut Player) {
+        let Some((trader, trades)) = player.open_trader() else {
+            return;
+        };
+        if merge_trader_trades(self.entities, player.uuid, trader, &trades) > 0 {
+            self.refresh(player);
+        }
+    }
+}
+
+/// The entity holding `trader`'s uuid.
+fn trader_key(entities: &EntityStore, trader: Uuid) -> Option<ferrite_entity::EntityKey> {
+    entities
+        .keys()
+        .iter()
+        .copied()
+        .find(|&key| entities.data(key).is_some_and(|data| data.uuid == trader))
+}
+
+/// Merges one player's trade snapshot into the merchant. Only new uses are applied, so a stale
+/// second screen cannot rewind another player's sale or go past `max_uses`; each applied sale
+/// credits trading gossip to the player whose menu made it.
+fn merge_trader_trades(
+    entities: &mut EntityStore,
+    player: Uuid,
+    trader: Uuid,
+    trades: &[ferrite_inventory::Trade],
+) -> i32 {
+    let Some(key) = trader_key(entities, trader) else {
+        return 0;
+    };
+    let Some(data) = entities.data_mut(key) else {
+        return 0;
+    };
+    let village = data
+        .mob
+        .as_ref()
+        .is_some_and(|mob| mob.kind == MobKind::Villager);
+    let Some(villager) = data.villager.as_mut() else {
+        return 0;
+    };
+    let sold = villager.merge_trades(trades);
+    if village {
+        for _ in 0..sold {
+            villager.record_trade(player);
+        }
+    }
+    sold
+}
+
 impl Player {
     pub fn refresh_chunks(&mut self) {
         send(
@@ -2925,7 +3011,7 @@ impl Player {
         });
     }
 
-    fn update(&mut self) -> bool {
+    fn update(&mut self, trader: &mut TraderSync<'_>) -> bool {
         if let Some((_, _, elapsed)) = &mut self.breaking {
             *elapsed = elapsed.saturating_add(1);
         }
@@ -2956,6 +3042,7 @@ impl Player {
             }
             let msg = match command {
                 Command::Leave => {
+                    trader.commit(self);
                     self.save_on_exit();
                     return false;
                 }
@@ -3480,13 +3567,22 @@ impl Player {
                 // A right-click on an entity ("use"), not an attack: left-clicks arrive as `Attack`
                 // above. Feeding animals is the only use so far (taming, saddles come later).
                 ServerboundPlay::Interact(p) => self.uses.push((p.entity_id.0, p.hand.0)),
-                ServerboundPlay::ContainerClick(p) => self.handle_container_click(p),
+                ServerboundPlay::ContainerClick(p) => {
+                    // Another viewer may have bought this offer since our menu was opened, so
+                    // validate the click against the current uses and this player's price.
+                    trader.refresh(self);
+                    self.handle_container_click(p);
+                    trader.commit(self);
+                }
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
                 ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
                 ServerboundPlay::PlaceRecipe(p) => self.handle_place_recipe(p),
                 ServerboundPlay::SelectTrade(p) => self.handle_select_trade(p),
                 ServerboundPlay::RenameItem(p) => self.rename_item(p.name),
-                ServerboundPlay::ContainerClose(_) => self.close_container(),
+                ServerboundPlay::ContainerClose(_) => {
+                    trader.commit(self);
+                    self.close_container();
+                }
                 ServerboundPlay::PlayerAction(p) => {
                     let pos = ferrite_protocol::types::BlockPos::unpack(p.location);
                     match p.status.0 {
@@ -4510,8 +4606,9 @@ impl Region {
         true
     }
 
-    /// Copies what players bought in an open trading screen back into the merchant and records
-    /// the trading gossip that earns reputation (vanilla adds two points per completed sale).
+    /// Applies sales left in open trade screens after the player loop. A click normally commits
+    /// its own sale immediately; this is the once-per-tick safety net. Merging only forward
+    /// deltas keeps a stale second screen from rewinding another viewer's uses or demand.
     fn sync_trades(&mut self) {
         let open: Vec<_> = self
             .players
@@ -4522,43 +4619,7 @@ impl Region {
             })
             .collect();
         for (player, trader, trades) in open {
-            let Some(key) = self
-                .entities
-                .keys()
-                .iter()
-                .copied()
-                .find(|&k| self.entities.data(k).is_some_and(|d| d.uuid == trader))
-            else {
-                continue;
-            };
-            let Some(data) = self.entities.data_mut(key) else {
-                continue;
-            };
-            let village = data
-                .mob
-                .as_ref()
-                .is_some_and(|mob| mob.kind == ferrite_entity::mob::MobKind::Villager);
-            let Some(villager) = data.villager.as_mut() else {
-                continue;
-            };
-            if villager.offers.len() != trades.len() {
-                continue;
-            }
-            let sold: i32 = villager
-                .offers
-                .iter()
-                .zip(&trades)
-                .map(|(offer, trade)| (trade.uses - offer.uses).max(0))
-                .sum();
-            for (offer, trade) in villager.offers.iter_mut().zip(trades) {
-                offer.uses = trade.uses;
-                offer.demand = trade.demand;
-            }
-            if village {
-                for _ in 0..sold {
-                    villager.record_trade(player);
-                }
-            }
+            merge_trader_trades(&mut self.entities, player, trader, &trades);
         }
     }
 
@@ -6787,12 +6848,20 @@ impl Region {
         let mut explosions = std::mem::take(&mut self.plugin_explosions);
         for id in ids {
             let mut p = self.players.remove(&id).unwrap();
-            let updated = match &timings {
-                Some(timings) => {
-                    let _scope = timings.scope("player-update");
-                    p.update()
+            let updated = {
+                let mut trader = TraderSync {
+                    entities: &mut self.entities,
+                };
+                // A restock or another viewer's sale may have changed the merchant since this
+                // menu was last looked at.
+                trader.refresh(&mut p);
+                match &timings {
+                    Some(timings) => {
+                        let _scope = timings.scope("player-update");
+                        p.update(&mut trader)
+                    }
+                    None => p.update(&mut trader),
                 }
-                None => p.update(),
             };
             if updated {
                 p.tick_portal();
@@ -7206,6 +7275,110 @@ mod tests {
 
         rules.set("spawn_wandering_traders", "false").unwrap();
         assert!(!trader_spawning_enabled(&rules));
+    }
+
+    #[test]
+    fn stale_second_merchant_snapshot_cannot_rewind_or_oversell() {
+        let mut store = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        let key = store.insert(record);
+        let alice = Uuid::from_u128(11);
+        let bob = Uuid::from_u128(12);
+        let wants = ferrite_item::ItemStack::from_name("emerald")
+            .expect("emerald")
+            .copy_with_count(32);
+        let gives = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(wants, gives, 2, 1);
+        offer.price_multiplier = 0.05;
+        let villager = store.data_mut(key).unwrap().villager.as_mut().unwrap();
+        villager.offers = vec![offer];
+        villager.gossips.add(
+            alice,
+            ferrite_entity::villager::GossipType::MajorPositive,
+            20,
+        );
+
+        let snapshot = |store: &EntityStore, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
+        };
+        let mut alice_menu = snapshot(&store, alice);
+        let bob_menu = snapshot(&store, bob);
+        assert_eq!(
+            alice_menu[0].price(),
+            27,
+            "Alice's cure reputation gives her a lower price"
+        );
+        assert_eq!(bob_menu[0].price(), 32, "Bob has neutral reputation");
+
+        // Alice's screen completes one sale; only Alice gets the trading gossip.
+        alice_menu[0].on_sale();
+        assert_eq!(merge_trader_trades(&mut store, alice, uuid, &alice_menu), 1);
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (1, 1));
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+
+        // Bob's old snapshot still says uses = 0 and demand = 0. It must neither rewind the
+        // villager nor credit Alice's sale to Bob.
+        assert_eq!(merge_trader_trades(&mut store, bob, uuid, &bob_menu), 0);
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (1, 1));
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            0
+        );
+
+        // The region refreshes Bob's screen before his next click. One use is left, and a
+        // second merge cannot push the offer past max_uses or duplicate the gossip.
+        let mut bob_refreshed = snapshot(&store, bob);
+        assert_eq!(bob_refreshed[0].uses, 1);
+        assert_eq!(
+            bob_refreshed[0].price(),
+            32,
+            "refreshing must not copy Alice's reputation price"
+        );
+        bob_refreshed[0].on_sale();
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, &bob_refreshed),
+            1
+        );
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, &bob_refreshed),
+            0
+        );
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (2, 2));
+        assert!(
+            villager
+                .offers_for_player(alice)
+                .first()
+                .is_some_and(ferrite_inventory::Trade::is_out_of_stock)
+        );
+        assert_eq!(villager.offers_for_player(alice)[0].special_price, -5);
+        assert_eq!(villager.offers_for_player(bob)[0].special_price, 0);
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
     }
 
     #[test]

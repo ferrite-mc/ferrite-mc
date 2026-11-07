@@ -401,6 +401,29 @@ impl VillagerState {
         offers
     }
 
+    /// Merges the sales made through one player's menu snapshot into the authoritative offers.
+    ///
+    /// Only uses above the current value are applied, so a stale second screen cannot rewind a
+    /// sale or push an offer past `max_uses`; demand rises with each applied sale. Returns the
+    /// number of sales applied.
+    pub fn merge_trades(&mut self, trades: &[Trade]) -> i32 {
+        if self.offers.len() != trades.len() {
+            return 0;
+        }
+        let mut sold = 0;
+        for (offer, trade) in self.offers.iter_mut().zip(trades) {
+            let available = (offer.max_uses - offer.uses).max(0);
+            let used = (trade.uses - offer.uses).clamp(0, available);
+            if used == 0 {
+                continue;
+            }
+            offer.uses += used;
+            offer.demand = offer.demand.saturating_add(used);
+            sold += used;
+        }
+        sold
+    }
+
     /// Records one completed sale for `player` (vanilla's trading gossip).
     pub fn record_trade(&mut self, player: Uuid) {
         self.gossips

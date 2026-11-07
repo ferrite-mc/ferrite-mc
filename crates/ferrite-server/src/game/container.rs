@@ -523,6 +523,18 @@ impl Player {
             .then(|| (*trader, menu.trades().to_vec()))
     }
 
+    /// Replaces an open merchant screen's offers with the merchant's current state, so a click
+    /// made after another viewer's purchase validates against newer uses and prices.
+    pub fn set_trader_offers(&mut self, offers: Vec<ferrite_inventory::Trade>) {
+        let Some(menu) = self.menus.open.as_mut() else {
+            return;
+        };
+        if menu.kind() != ferrite_inventory::MenuKind::Merchant {
+            return;
+        }
+        menu.set_trades(offers);
+    }
+
     /// The offer picked in a merchant screen (vanilla `MerchantMenu.setSelectionHint`).
     pub fn handle_select_trade(&mut self, p: ferrite_protocol::packets::play::SelectTrade) {
         let Some(menu) = self
