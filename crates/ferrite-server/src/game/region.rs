@@ -683,6 +683,8 @@ pub struct Player {
     pub vehicle_moves: Vec<[f64; 4]>,
     /// The rider pressed the inventory key on a donkey or mule.
     pub open_animal_chest: bool,
+    /// Whether the player holds sneak (input bit 5).
+    pub sneaking: bool,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
     /// The dimension registry, used to swap the chunk source on a dimension change.
@@ -3643,6 +3645,7 @@ impl Player {
                 ServerboundPlay::PlayerInput(p) => {
                     crate::plugins::facts::set_input(self.uuid, p.flags);
                     // Input bit 5 is sneak: it gets a rider off its vehicle.
+                    self.sneaking = p.flags & 0x20 != 0;
                     if p.flags & 0x20 != 0 {
                         super::ride::request_dismount(self.uuid);
                     }
@@ -4393,6 +4396,15 @@ impl Region {
                 let held = p.inventory.get(slot).clone();
                 let name = held.name().unwrap_or("minecraft:air");
                 let gamemode = p.gamemode;
+                let sneaking = p.sneaking;
+                // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
+                if sneaking
+                    && ferrite_entity::mob::state(&self.entities, key)
+                        .is_some_and(|s| s.kind.is_equine() && s.owner.is_some())
+                {
+                    self.open_mount(uuid, key);
+                    continue;
+                }
                 if ferrite_entity::mob::state(&self.entities, key)
                     .is_some_and(|s| s.kind.is_equine())
                     && self.use_horse(ctx, uuid, key, name, slot, gamemode)
@@ -4442,6 +4454,32 @@ impl Region {
 
     /// A right-click on a horse: a saddle goes on a tame horse; anything else mounts it.
     /// Returns whether the click was used up.
+    /// Opens the inventory screen of a tame horse, donkey, mule or llama for `player`.
+    fn open_mount(&mut self, player: Uuid, key: ferrite_entity::EntityKey) {
+        let (Some(data), Some(state)) = (
+            self.entities.data(key),
+            ferrite_entity::mob::state(&self.entities, key),
+        ) else {
+            return;
+        };
+        let (uuid, id) = (data.uuid, data.id);
+        let columns = ferrite_entity::horse::chest_columns(&self.entities, key);
+        let saddle = if state.saddled {
+            ferrite_item::ItemStack::from_name("minecraft:saddle").unwrap_or_default()
+        } else {
+            ferrite_item::ItemStack::empty()
+        };
+        let armor = if state.armor != 0 {
+            ferrite_item::ItemStack::with_count(state.armor, 1)
+        } else {
+            ferrite_item::ItemStack::empty()
+        };
+        let llama = state.kind == ferrite_entity::mob::MobKind::Llama;
+        if let Some(p) = self.players.get_mut(&player) {
+            p.open_mount(uuid, id, columns, llama, saddle, armor);
+        }
+    }
+
     fn use_horse(
         &mut self,
         ctx: &TickContext,
@@ -4571,21 +4609,20 @@ impl Region {
         let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
             return;
         };
-        let mut slots = Vec::new();
-        if state.saddled
-            && let Some(saddle) = ferrite_item::ItemStack::from_name("minecraft:saddle")
-        {
-            slots.push((ferrite_entity::horse::SADDLE_SLOT, saddle));
-        }
-        if state.armor != 0 {
-            slots.push((
-                ferrite_entity::horse::BODY_SLOT,
-                ferrite_item::ItemStack::with_count(state.armor, 1),
-            ));
-        }
-        if slots.is_empty() {
-            return;
-        }
+        let saddle = if state.saddled {
+            ferrite_item::ItemStack::from_name("minecraft:saddle").unwrap_or_default()
+        } else {
+            ferrite_item::ItemStack::empty()
+        };
+        let armor = if state.armor != 0 {
+            ferrite_item::ItemStack::with_count(state.armor, 1)
+        } else {
+            ferrite_item::ItemStack::empty()
+        };
+        let slots = vec![
+            (ferrite_entity::horse::SADDLE_SLOT, saddle),
+            (ferrite_entity::horse::BODY_SLOT, armor),
+        ];
         let players = &self.players;
         tracker::broadcast(
             &self.entities,
@@ -4635,16 +4672,40 @@ impl Region {
             let Some(vehicle) = super::ride::vehicle_of(rider) else {
                 continue;
             };
-            let Some((animal, title)) = self.entities.keys().iter().copied().find_map(|k| {
-                let state = ferrite_entity::mob::state(&self.entities, k)?;
-                let data = self.entities.data(k)?;
-                (data.uuid == vehicle && state.chest)
-                    .then(|| (data.uuid, state.kind.display_name()))
+            let Some(key) = self.entities.keys().iter().copied().find(|&k| {
+                self.entities.data(k).is_some_and(|d| d.uuid == vehicle)
+                    && ferrite_entity::mob::state(&self.entities, k)
+                        .is_some_and(|s| s.kind.is_equine() && s.owner.is_some())
             }) else {
                 continue;
             };
-            if let Some(p) = self.players.get_mut(&rider) {
-                p.open_animal_chest(animal, title);
+            self.open_mount(rider, key);
+        }
+        // What a player moved in an open mount screen reaches the animal.
+        let viewers: Vec<(Uuid, ferrite_item::ItemStack, ferrite_item::ItemStack)> = self
+            .players
+            .values()
+            .filter_map(|p| p.mount_gear())
+            .collect();
+        for (animal, saddle, armor) in viewers {
+            let Some(key) = self
+                .entities
+                .keys()
+                .iter()
+                .copied()
+                .find(|&k| self.entities.data(k).is_some_and(|d| d.uuid == animal))
+            else {
+                continue;
+            };
+            let name = armor.name().unwrap_or("");
+            if ferrite_entity::horse::set_gear(
+                &mut self.entities,
+                key,
+                !saddle.is_empty(),
+                if armor.is_empty() { 0 } else { armor.item },
+                ferrite_entity::horse::armor_points(name),
+            ) {
+                self.send_saddle(ctx, key);
             }
         }
         let riders: Vec<Uuid> = self.players.keys().copied().collect();

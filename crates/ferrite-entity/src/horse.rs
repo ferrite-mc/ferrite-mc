@@ -92,6 +92,51 @@ pub fn wears(store: &EntityStore, key: EntityKey, item: &str) -> bool {
     }
 }
 
+/// How many chest columns the animal's inventory screen has: 5 for a donkey or mule with a chest,
+/// the llama's strength for a llama with one, none otherwise.
+pub fn chest_columns(store: &EntityStore, key: EntityKey) -> u8 {
+    let Some(s) = mob::state(store, key) else {
+        return 0;
+    };
+    if !s.chest {
+        return 0;
+    }
+    match s.kind {
+        MobKind::Donkey | MobKind::Mule => 5,
+        MobKind::Llama => match store.data(key).and_then(|d| d.metadata.get(STRENGTH_INDEX)) {
+            Some(MetaValue::Int(strength)) => (*strength).clamp(1, 5) as u8,
+            _ => 3,
+        },
+        _ => 0,
+    }
+}
+
+/// Sets what a tame animal wears from its inventory screen: the saddle (not a llama's) and the
+/// body armour item id (0 for none) with its armour points. `true` when anything changed.
+pub fn set_gear(
+    store: &mut EntityStore,
+    key: EntityKey,
+    saddled: bool,
+    armor: u16,
+    points: f32,
+) -> bool {
+    let changed = match mob::state_mut(store, key) {
+        Some(s) if s.kind.is_equine() && s.owner.is_some() => {
+            let saddled = saddled && s.kind != MobKind::Llama;
+            let changed = s.saddled != saddled || s.armor != armor;
+            s.saddled = saddled;
+            s.armor = armor;
+            s.armor_points = if armor == 0 { 0.0 } else { points };
+            changed
+        }
+        _ => false,
+    };
+    if changed {
+        sync(store, key);
+    }
+    changed
+}
+
 /// Whether an item is horse armour.
 pub fn is_armor(item: &str) -> bool {
     item.ends_with("_horse_armor")

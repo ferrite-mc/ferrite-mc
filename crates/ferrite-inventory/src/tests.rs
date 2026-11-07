@@ -865,6 +865,32 @@ fn chest_quick_move_goes_to_the_inventory_end_first() {
     assert_eq!((f.slot(62), f.slot(0)), (empty(), item("stone", 10)));
 }
 
+#[test]
+fn a_mount_menu_takes_the_saddle_armour_and_chest_slots_in_order() {
+    // A donkey with a chest: saddle, armour, then 5 x 3 chest slots, then the inventory.
+    let mut f = Fixture::new(Menu::horse(3, 5, false));
+    let first = 2 + 15;
+    assert_eq!(f.menu.len(), first + 36);
+    f.inv.set(0, item("saddle", 1));
+    f.click(i16::try_from(first + 27).unwrap(), 0, QuickMove);
+    assert_eq!(
+        f.slot(0),
+        item("saddle", 1),
+        "a saddle goes to the saddle slot"
+    );
+    f.inv.set(1, item("iron_horse_armor", 1));
+    f.click(i16::try_from(first + 28).unwrap(), 0, QuickMove);
+    assert_eq!(f.slot(1), item("iron_horse_armor", 1));
+    f.inv.set(2, item("bread", 3));
+    f.click(i16::try_from(first + 29).unwrap(), 0, QuickMove);
+    assert_eq!(f.slot(2), item("bread", 3), "anything else fills the chest");
+    // A carpet is wrong for a horse's armour slot but right for a llama's.
+    let mut llama = Fixture::new(Menu::horse(4, 3, true));
+    llama.inv.set(0, item("white_carpet", 1));
+    llama.click(i16::try_from(2 + 9 + 27).unwrap(), 0, QuickMove);
+    assert_eq!(llama.slot(1), item("white_carpet", 1));
+}
+
 fn hashed(stack: &ItemStack) -> Option<HashedSlot> {
     (!stack.is_empty()).then(|| HashedSlot {
         item: stack.item,

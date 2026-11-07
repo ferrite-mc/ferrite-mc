@@ -187,6 +187,10 @@ pub enum MenuKind {
     Beacon,
     /// A villager's merchant screen (vanilla `MerchantMenu`).
     Merchant,
+    /// A horse, donkey, mule or llama inventory (vanilla `HorseInventoryMenu`): saddle, body
+    /// armour, then three rows of `columns` chest slots. Opened with `mount_screen_open`, so it has
+    /// no menu type.
+    Horse { columns: u8, llama: bool },
 }
 
 impl MenuKind {
@@ -206,6 +210,7 @@ impl MenuKind {
             Self::BrewingStand => Some("minecraft:brewing_stand".into()),
             Self::Beacon => Some("minecraft:beacon".into()),
             Self::Merchant => Some("minecraft:merchant".into()),
+            Self::Horse { .. } => None,
         }
     }
 }
@@ -467,6 +472,14 @@ enum Store {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rule {
     Plain,
+    /// A mount's saddle slot.
+    MountSaddle {
+        llama: bool,
+    },
+    /// A mount's body-armour slot: a carpet for a llama, horse armour otherwise.
+    MountArmor {
+        llama: bool,
+    },
     Armor(&'static str),
     Result,
     /// A furnace input slot (vanilla `AbstractFurnaceMenu` slot 0).
@@ -617,7 +630,8 @@ impl Menu {
             | MenuKind::Loom
             | MenuKind::BrewingStand
             | MenuKind::Beacon
-            | MenuKind::Merchant => 0,
+            | MenuKind::Merchant
+            | MenuKind::Horse { .. } => 0,
         };
         let container = match kind {
             MenuKind::Generic { rows } => vec![ItemStack::empty(); usize::from(rows) * 9],
@@ -629,6 +643,9 @@ impl Menu {
             MenuKind::Smithing | MenuKind::Loom => vec![ItemStack::empty(); 3],
             MenuKind::BrewingStand => vec![ItemStack::empty(); 5],
             MenuKind::Beacon => vec![ItemStack::empty(); 1],
+            MenuKind::Horse { columns, .. } => {
+                vec![ItemStack::empty(); 2 + usize::from(columns) * 3]
+            }
             MenuKind::Merchant => vec![ItemStack::empty(); 3],
             _ => Vec::new(),
         };
@@ -732,6 +749,29 @@ impl Menu {
             .collect();
         standard_inventory_slots(&mut slots);
         Self::with_slots(container_id, MenuKind::Generic { rows }, slots)
+    }
+
+    /// A mount inventory (vanilla `HorseInventoryMenu`): 0 saddle, 1 body armour, then three rows
+    /// of `columns` chest slots, then the player's inventory.
+    pub fn horse(container_id: i32, columns: u8, llama: bool) -> Self {
+        let mut slots = vec![
+            SlotDef {
+                store: Store::Container(0),
+                rule: Rule::MountSaddle { llama },
+            },
+            SlotDef {
+                store: Store::Container(1),
+                rule: Rule::MountArmor { llama },
+            },
+        ];
+        for i in 0..usize::from(columns) * 3 {
+            slots.push(SlotDef {
+                store: Store::Container(2 + i),
+                rule: Rule::Plain,
+            });
+        }
+        standard_inventory_slots(&mut slots);
+        Self::with_slots(container_id, MenuKind::Horse { columns, llama }, slots)
     }
 
     /// A furnace-family menu (vanilla `FurnaceMenu`, `BlastFurnaceMenu`, `SmokerMenu`):
@@ -1686,6 +1726,14 @@ impl Menu {
             Rule::Plain => true,
             Rule::Armor(name) => equipment_slot(stack) == name,
             Rule::Result | Rule::Output => false,
+            Rule::MountSaddle { llama } => !llama && stack.name() == Some("minecraft:saddle"),
+            Rule::MountArmor { llama } => stack.name().is_some_and(|name| {
+                if llama {
+                    name.ends_with("_carpet")
+                } else {
+                    name.ends_with("_horse_armor")
+                }
+            }),
             // Vanilla furnace input and fuel slots accept any stack; the recipe and fuel checks
             // happen when the block ticks, as in `AbstractFurnaceBlockEntity`.
             Rule::FurnaceInput | Rule::Fuel => true,
@@ -1726,7 +1774,11 @@ impl Menu {
     /// `Slot.getMaxStackSize(stack)`: armor, potion and beacon payment slots hold one item.
     fn slot_max(&self, slot: usize, stack: &ItemStack) -> i32 {
         match self.slots[slot].rule {
-            Rule::Armor(_) | Rule::Potion | Rule::BeaconPayment => 1.min(max_in_slot(stack)),
+            Rule::Armor(_)
+            | Rule::Potion
+            | Rule::BeaconPayment
+            | Rule::MountSaddle { .. }
+            | Rule::MountArmor { .. } => 1.min(max_in_slot(stack)),
             _ => max_in_slot(stack),
         }
     }
@@ -2362,6 +2414,27 @@ impl Menu {
                         || self.move_item_stack_to(p, &mut stack, 0, 2, false)
                 } else {
                     self.move_item_stack_to(p, &mut stack, 3, 39, false)
+                }
+            }
+            MenuKind::Horse { columns, .. } => {
+                let size = 2 + usize::from(columns) * 3;
+                let len = self.slots.len();
+                if i < size {
+                    self.move_item_stack_to(p, &mut stack, size, len, true)
+                } else {
+                    let free = |menu: &Self, p: &Clicker, slot: usize| {
+                        menu.may_place(slot, &original) && menu.slot(p.inventory, slot).is_empty()
+                    };
+                    if free(self, p, 1) && self.move_item_stack_to(p, &mut stack, 1, 2, false)
+                        || free(self, p, 0) && self.move_item_stack_to(p, &mut stack, 0, 1, false)
+                        || columns > 0 && self.move_item_stack_to(p, &mut stack, 2, size, false)
+                    {
+                        true
+                    } else if i < size + 27 {
+                        self.move_item_stack_to(p, &mut stack, size + 27, len, false)
+                    } else {
+                        self.move_item_stack_to(p, &mut stack, size, size + 27, false)
+                    }
                 }
             }
             MenuKind::BrewingStand => {

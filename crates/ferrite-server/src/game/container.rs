@@ -345,8 +345,10 @@ impl Player {
             menu.container_mut().clone_from_slice(&items);
         }
         if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
-            menu.container_mut()
-                .clone_from_slice(&super::equine_chest::load(*animal));
+            // Slots 0 and 1 are the saddle and armour; the chest follows.
+            let chest = menu.container_mut();
+            let len = chest.len();
+            chest[2..].clone_from_slice(&super::equine_chest::load(*animal, len - 2));
         }
         let mut clicker = Clicker::new(&mut self.inventory, infinite, crafter());
         let out = menu.handle_click(
@@ -364,7 +366,7 @@ impl Player {
             block_container::store(source, opened, menu.container());
         }
         if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
-            super::equine_chest::store(*animal, menu.container());
+            super::equine_chest::store(*animal, &menu.container()[2..]);
         }
         self.menus.thrown.extend(drops);
         let xp = clicker.xp;
@@ -640,18 +642,48 @@ impl Player {
         }
     }
 
-    /// Opens the chest of the donkey or mule the player rides (`OPEN_INVENTORY`).
-    pub fn open_animal_chest(&mut self, animal: uuid::Uuid, title: &str) {
-        self.open_menu(
-            |id| {
-                let mut menu = Menu::generic(id, super::equine_chest::ROWS);
-                menu.container_mut()
-                    .clone_from_slice(&super::equine_chest::load(animal));
-                menu
+    /// Opens the inventory screen of a horse, donkey, mule or llama (`mount_screen_open`): saddle,
+    /// body armour and the chest columns.
+    pub fn open_mount(
+        &mut self,
+        animal: uuid::Uuid,
+        entity_id: i32,
+        columns: u8,
+        llama: bool,
+        saddle: ItemStack,
+        armor: ItemStack,
+    ) {
+        self.close_open_container();
+        let id = self.menus.next_id();
+        let mut menu = Menu::horse(id, columns, llama);
+        let chest = menu.container_mut();
+        let len = chest.len();
+        chest[0] = saddle;
+        chest[1] = armor;
+        chest[2..].clone_from_slice(&super::equine_chest::load(animal, len - 2));
+        send(
+            self,
+            &ferrite_protocol::packets::play::MountScreenOpen {
+                window: VarInt(id),
+                columns: VarInt(i32::from(columns)),
+                entity: entity_id,
             },
-            title,
-            Some(OpenAt::Animal(animal)),
         );
+        let full = menu.broadcast_full_state(&self.inventory);
+        let data = menu.broadcast_changes(&self.inventory);
+        self.menus.open = Some(menu);
+        self.menus.open_at = Some(OpenAt::Animal(animal));
+        emit(self, std::iter::once(full).chain(data).collect());
+    }
+
+    /// The saddle and armour slots of the mount screen this player has open, with the animal.
+    pub fn mount_gear(&self) -> Option<(uuid::Uuid, ItemStack, ItemStack)> {
+        let Some(OpenAt::Animal(animal)) = &self.menus.open_at else {
+            return None;
+        };
+        let menu = self.menus.open.as_ref()?;
+        let c = menu.container();
+        Some((*animal, c.first()?.clone(), c.get(1)?.clone()))
     }
 
     /// Vanilla `doCloseContainer`: the open menu (or the inventory screen's grid and cursor)
