@@ -415,6 +415,7 @@ mod redstone;
 mod region;
 mod selectors;
 mod survival;
+mod wandering_trader;
 
 use self::{
     global::{GlobalPlayer, GlobalRegion},

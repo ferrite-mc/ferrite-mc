@@ -595,6 +595,15 @@ impl BlockGetter for TickBlocks<'_> {
             .or_insert_with(|| source.block(x, y, z).and_then(|s| u16::try_from(s).ok()))
     }
 }
+impl super::wandering_trader::SpawnWorld for TickBlocks<'_> {
+    fn light(&self, x: i32, y: i32, z: i32) -> u8 {
+        SpawnEnv::light(self, x, y, z)
+    }
+
+    fn biome_name(&self, x: i32, y: i32, z: i32) -> Option<String> {
+        self.source?.biome_name(x, y, z)
+    }
+}
 impl SpawnEnv for TickBlocks<'_> {
     // shortcut: the biome is read at y = 64 for the whole column, so cave biomes do not count.
     fn creature_table(&self, x: i32, z: i32) -> Option<&[ferrite_entity::spawn::SpawnEntry]> {
@@ -4120,6 +4129,8 @@ impl Region {
                 }
             }
         }
+        let day_time = ctx.state.lock().unwrap().clock_time;
+        self.tick_trader_drinks(day_time, ctx);
         let trader_spawning = {
             let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
             trader_spawning_enabled(&rules)
@@ -4593,60 +4604,118 @@ impl Region {
     /// The daily wandering trader roll (`WanderingTraderSpawner`): near a random player, with two
     /// trader llamas on leads, gone after 48000 ticks.
     fn tick_trader_spawn(&mut self, blocks: &TickBlocks<'_>, enabled: bool) {
+        use super::wandering_trader;
         use ferrite_entity::mob::{MobKind, new_mob};
-        if !enabled
-            || self.tick_clock <= 0
-            || self.tick_clock % 24_000 != 0
-            || self.players.is_empty()
+        if self.players.is_empty()
+            || !wandering_trader::roll_spawn(
+                enabled,
+                self.tick_clock,
+                &mut self.trader_chance,
+                &mut self.rng,
+            )
         {
-            return;
-        }
-        if (self.rng.next_int(100) as u32) >= self.trader_chance {
-            self.trader_chance = (self.trader_chance + 25).min(75);
             return;
         }
         let anchors: Vec<_> = self.players.values().map(|p| p.pos).collect();
         let anchor = anchors[self.rng.next_int(anchors.len() as i32) as usize];
-        let air = ferrite_data::blocks::default_state("air");
-        let angle = f64::from(self.rng.next_f32()) * std::f64::consts::TAU;
-        let distance = 24.0 + f64::from(self.rng.next_f32()) * 24.0;
-        let (x, z) = (
-            (anchor[0] + angle.cos() * distance).floor() as i32,
-            (anchor[2] + angle.sin() * distance).floor() as i32,
-        );
-        // Stand on the first solid block under the player's height with two air blocks above.
-        let top = anchor[1].floor() as i32 + 16;
-        let ground = (top - 48..=top).rev().find(|&y| {
-            let solid = |y: i32| blocks.block_state(x, y, z).is_some_and(|s| Some(s) != air);
-            solid(y) && !solid(y + 1) && !solid(y + 2)
-        });
-        let Some(ground) = ground else {
+        let Some(pos) = wandering_trader::find_spawn(blocks, anchor, &mut self.rng) else {
             return;
         };
-        self.trader_chance = 25;
+        wandering_trader::spawn_succeeded(&mut self.trader_chance);
         let at = ferrite_math::Vec3::new(
-            f64::from(x) + 0.5,
-            f64::from(ground) + 1.0,
-            f64::from(z) + 0.5,
+            f64::from(pos[0]) + 0.5,
+            f64::from(pos[1]),
+            f64::from(pos[2]) + 0.5,
         );
         let mut trader = new_mob(MobKind::WanderingTrader, at, &mut self.rng);
         if let Some(state) = trader.data.mob.as_mut() {
-            state.lifetime = 48_000;
+            state.lifetime = wandering_trader::DESPAWN_DELAY;
         }
         let (trader_uuid, trader_id) = (trader.data.uuid, trader.data.id);
         self.entities.insert(trader);
         for _ in 0..2 {
-            let offset = ferrite_math::Vec3::new(
-                f64::from(self.rng.next_f32()) * 4.0 - 2.0,
-                0.0,
-                f64::from(self.rng.next_f32()) * 4.0 - 2.0,
+            let Some(llama_pos) =
+                wandering_trader::find_llama_spawn(blocks, [at.x, at.y, at.z], &mut self.rng)
+            else {
+                continue;
+            };
+            let llama_at = ferrite_math::Vec3::new(
+                f64::from(llama_pos[0]) + 0.5,
+                f64::from(llama_pos[1]),
+                f64::from(llama_pos[2]) + 0.5,
             );
-            let mut llama = new_mob(MobKind::TraderLlama, at + offset, &mut self.rng);
+            let mut llama = new_mob(MobKind::TraderLlama, llama_at, &mut self.rng);
             if let Some(state) = llama.data.mob.as_mut() {
-                state.lifetime = 48_000;
+                state.lifetime = wandering_trader::DESPAWN_DELAY;
                 state.leash = Some((trader_uuid, trader_id));
             }
             self.entities.insert(llama);
+        }
+    }
+
+    /// Night makes a trader drink invisibility; daylight makes it drink milk. The transition
+    /// changes only its effects, never its villager offers or trade uses.
+    fn tick_trader_drinks(&mut self, day_time: i64, ctx: &TickContext) {
+        use super::wandering_trader;
+        let trading: HashSet<Uuid> = self
+            .players
+            .values()
+            .filter_map(|p| p.open_trader().map(|(trader, _)| trader))
+            .collect();
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|key| {
+                self.entities.flags(*key).is_some_and(|flags| {
+                    !flags.has(Flags::REMOVED)
+                        && self.entities.data(*key).is_some_and(|data| {
+                            data.mob
+                                .as_ref()
+                                .is_some_and(|mob| mob.kind == MobKind::WanderingTrader)
+                        })
+                })
+            })
+            .collect();
+        for key in keys {
+            let Some(data) = self.entities.data_mut(key) else {
+                continue;
+            };
+            let id = data.id;
+            let ticks = data.effects.tick();
+            let invisible = data.effects.has(Effect::Invisibility);
+            let trading = trading.contains(&data.uuid);
+            let applied = wandering_trader::drink_for(day_time, invisible, trading)
+                .map(|drink| wandering_trader::apply_drink(data, drink))
+                .unwrap_or_default();
+            let removed: Vec<_> = ticks.expired.into_iter().chain(applied.removed).collect();
+            let players = &self.players;
+            for instance in &removed {
+                tracker::broadcast(
+                    &self.entities,
+                    key,
+                    &RemoveMobEffect {
+                        entity_id: VarInt(id),
+                        effect: VarInt(instance.effect),
+                    },
+                    &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+                );
+            }
+            if let Some(instance) = applied.added {
+                tracker::broadcast(
+                    &self.entities,
+                    key,
+                    &UpdateMobEffect {
+                        entity_id: VarInt(id),
+                        effect: VarInt(instance.effect),
+                        amplifier: VarInt(instance.amplifier),
+                        duration: VarInt(instance.duration),
+                        flags: instance.flags(),
+                    },
+                    &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+                );
+            }
         }
     }
 

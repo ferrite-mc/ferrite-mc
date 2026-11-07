@@ -24,7 +24,7 @@ use ferrite_protocol::{
     packets::play::{
         AddEntity, EntityHeadRotation, EntityMove, EntityMoveRotation, EntityRotation,
         EntityTeleport, RemoveEntities, SetEntityData, SetEntityLink, SetEntityMotion,
-        SetEquipment, TeleportEntity,
+        SetEquipment, TeleportEntity, UpdateMobEffect,
     },
     types::LpVec3,
 };
@@ -292,6 +292,20 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             &encode(&SetEntityData {
                                 id: VarInt(data.id),
                                 values,
+                            }),
+                        );
+                    }
+                    // A viewer that starts tracking later still needs the entity's active
+                    // effects; the trader's night invisibility is one of them.
+                    for effect in data.effects.iter() {
+                        sink(
+                            viewer.key,
+                            &encode(&UpdateMobEffect {
+                                entity_id: VarInt(data.id),
+                                effect: VarInt(effect.effect),
+                                amplifier: VarInt(effect.amplifier),
+                                duration: VarInt(effect.duration),
+                                flags: effect.flags(),
                             }),
                         );
                     }
@@ -590,12 +604,13 @@ pub fn broadcast<P: Packet>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effect::{Effect, MobEffectInstance};
     use crate::id::{allocate_id, random_uuid};
     use crate::metadata::item::ITEM;
     use crate::store::{EntityData, EntityRecord};
     use ferrite_protocol::{
         Decode,
-        packets::play::{ItemStack, MetaValue},
+        packets::play::{ItemStack, MetaValue, UpdateMobEffect},
     };
 
     fn item_kind() -> u16 {
@@ -764,6 +779,33 @@ mod tests {
         store.set_pos(key, Vec3::new(9.0, 70.0, 9.0));
         store.flags_mut(key).unwrap().set(Flags::TELEPORTED, true);
         assert_eq!(ids(&tick(&mut store, &viewers)), [TeleportEntity::ID]);
+    }
+
+    #[test]
+    fn active_effects_reach_a_viewer_that_starts_tracking() {
+        use crate::mob::{MobKind, new_mob};
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut crate::Rng::new(1),
+        ));
+        store
+            .data_mut(key)
+            .unwrap()
+            .effects
+            .add(MobEffectInstance::new(Effect::Invisibility.id(), 3600, 0));
+        let chunks = HashSet::from([(0, 0)]);
+        let viewers = [viewer((Uuid::from_u128(1), 0), 8.0, 8.0, 10, &chunks)];
+        let packets = tick(&mut store, &viewers);
+        let effect = packets
+            .iter()
+            .find(|packet| packet.1 == UpdateMobEffect::ID)
+            .expect("new viewer receives the active effect");
+        let effect = UpdateMobEffect::decode(&mut effect.2.as_slice()).unwrap();
+        assert_eq!(effect.entity_id.0, store.data(key).unwrap().id);
+        assert_eq!(effect.effect.0, Effect::Invisibility.id());
+        assert_eq!(effect.duration.0, 3600);
     }
 
     #[test]
