@@ -116,15 +116,27 @@ final class FerriteTemplate implements Structure {
         placeAt(location, rotation, mirror, integrity, random);
     }
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
-        if (!blockTransformers.isEmpty() || !entityTransformers.isEmpty()) throw notImplemented("place with transformers");
+        java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
+        java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
+        if (!entityTransformers.isEmpty()) throw CapturedStructure.entityTransformersNotSupported();
+        if (refilled || !blockTransformers.isEmpty()) {
+            captured().place(location, includeEntities, rotation, mirror, palette, integrity, random, blockTransformers, entityTransformers);
+            return;
+        }
         place(location, includeEntities, rotation, mirror, palette, integrity, random);
     }
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
         place(at(region, location), includeEntities, rotation, mirror, palette, integrity, random);
     }
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
-        if (!blockTransformers.isEmpty() || !entityTransformers.isEmpty()) throw notImplemented("place with transformers");
-        place(at(region, location), includeEntities, rotation, mirror, palette, integrity, random);
+        java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
+        java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
+        if (!entityTransformers.isEmpty()) throw CapturedStructure.entityTransformersNotSupported();
+        if (refilled || !blockTransformers.isEmpty()) {
+            captured().place(region, location, includeEntities, rotation, mirror, palette, integrity, random, blockTransformers, entityTransformers);
+            return;
+        }
+        place(region, location, includeEntities, rotation, mirror, palette, integrity, random);
     }
     // An untouched template is placed by the server (`/place template`). Refilling it from the
     // world makes the in-memory copy the structure, and that copy is placed block by block.

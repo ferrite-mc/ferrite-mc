@@ -4,13 +4,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.util.List;
 import java.util.Random;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.block.structure.Mirror;
 import org.bukkit.block.structure.StructureRotation;
+import org.bukkit.util.BlockTransformer;
 import org.bukkit.util.BlockVector;
+import org.bukkit.util.EntityTransformer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -78,6 +81,145 @@ class CapturedStructureTest {
         assertEquals("minecraft:oak_stairs[facing=south]", CapturedStructure.turn("minecraft:oak_stairs[facing=north]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
         assertEquals("minecraft:oak_log[axis=z]", CapturedStructure.turn("minecraft:oak_log[axis=x]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
         assertEquals("minecraft:stone", CapturedStructure.turn("minecraft:stone", StructureRotation.CLOCKWISE_180, Mirror.NONE));
+    }
+
+    @Test void everyRotationAndMirrorTurnsFacing() {
+        var stairs = "minecraft:oak_stairs[facing=north,half=top]";
+        assertEquals(stairs, CapturedStructure.turn(stairs, StructureRotation.NONE, Mirror.NONE));
+        assertEquals("minecraft:oak_stairs[facing=east,half=top]", CapturedStructure.turn(stairs, StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:oak_stairs[facing=south,half=top]", CapturedStructure.turn(stairs, StructureRotation.CLOCKWISE_180, Mirror.NONE));
+        assertEquals("minecraft:oak_stairs[facing=west,half=top]", CapturedStructure.turn(stairs, StructureRotation.COUNTERCLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:oak_stairs[facing=south,half=top]", CapturedStructure.turn(stairs, StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals(stairs, CapturedStructure.turn(stairs, StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_stairs[facing=west,half=top]", CapturedStructure.turn(stairs, StructureRotation.CLOCKWISE_90, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_stairs[facing=east,half=top]", CapturedStructure.turn(stairs, StructureRotation.CLOCKWISE_90, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_stairs[facing=north,half=top]", CapturedStructure.turn(stairs, StructureRotation.CLOCKWISE_180, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_stairs[facing=south,half=top]", CapturedStructure.turn(stairs, StructureRotation.CLOCKWISE_180, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_stairs[facing=east,half=top]", CapturedStructure.turn(stairs, StructureRotation.COUNTERCLOCKWISE_90, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_stairs[facing=west,half=top]", CapturedStructure.turn(stairs, StructureRotation.COUNTERCLOCKWISE_90, Mirror.FRONT_BACK));
+    }
+
+    @Test void axisTurnsOnlyForQuarterRotations() {
+        var log = "minecraft:oak_log[axis=x]";
+        assertEquals("minecraft:oak_log[axis=z]", CapturedStructure.turn(log, StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals(log, CapturedStructure.turn(log, StructureRotation.CLOCKWISE_180, Mirror.NONE));
+        assertEquals("minecraft:oak_log[axis=z]", CapturedStructure.turn(log, StructureRotation.COUNTERCLOCKWISE_90, Mirror.NONE));
+        assertEquals(log, CapturedStructure.turn(log, StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals(log, CapturedStructure.turn(log, StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_log[axis=z]", CapturedStructure.turn(log, StructureRotation.CLOCKWISE_90, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_log[axis=z]", CapturedStructure.turn(log, StructureRotation.CLOCKWISE_90, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_log[axis=x]", CapturedStructure.turn("minecraft:oak_log[axis=z]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+    }
+
+    @Test void stairsTurnFacingAndMirrorTheirInnerAndOuterShapes() {
+        assertEquals("minecraft:oak_stairs[facing=south,shape=inner_right]", CapturedStructure.turn("minecraft:oak_stairs[facing=north,shape=inner_left]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_stairs[facing=south,shape=outer_right]", CapturedStructure.turn("minecraft:oak_stairs[facing=north,shape=outer_left]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_stairs[facing=south,shape=straight]", CapturedStructure.turn("minecraft:oak_stairs[facing=north,shape=straight]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_stairs[facing=west,shape=outer_right]", CapturedStructure.turn("minecraft:oak_stairs[facing=east,shape=outer_left]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_stairs[facing=west,shape=inner_left]", CapturedStructure.turn("minecraft:oak_stairs[facing=east,shape=inner_left]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_stairs[facing=east,shape=inner_left]", CapturedStructure.turn("minecraft:oak_stairs[facing=north,shape=inner_left]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:oak_stairs[facing=west,shape=inner_right]", CapturedStructure.turn("minecraft:oak_stairs[facing=north,shape=inner_left]", StructureRotation.CLOCKWISE_90, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_stairs[facing=east,shape=inner_left]", CapturedStructure.turn("minecraft:oak_stairs[facing=east,shape=inner_left]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+    }
+
+    @Test void railsTurnAndMirrorTheirShapes() {
+        assertEquals("minecraft:rail[shape=east_west]", CapturedStructure.turn("minecraft:rail[shape=north_south]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:rail[shape=north_south]", CapturedStructure.turn("minecraft:rail[shape=east_west]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:rail[shape=ascending_south]", CapturedStructure.turn("minecraft:rail[shape=ascending_east]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:rail[shape=ascending_west]", CapturedStructure.turn("minecraft:rail[shape=ascending_north]", StructureRotation.COUNTERCLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:rail[shape=north_west]", CapturedStructure.turn("minecraft:rail[shape=south_east]", StructureRotation.CLOCKWISE_180, Mirror.NONE));
+        assertEquals("minecraft:rail[shape=north_east]", CapturedStructure.turn("minecraft:rail[shape=south_east]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:rail[shape=ascending_south]", CapturedStructure.turn("minecraft:rail[shape=ascending_north]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:rail[shape=north_east]", CapturedStructure.turn("minecraft:rail[shape=north_west]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:rail[shape=ascending_west]", CapturedStructure.turn("minecraft:rail[shape=ascending_east]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:rail[shape=ascending_north]", CapturedStructure.turn("minecraft:rail[shape=ascending_north]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:rail[shape=north_south]", CapturedStructure.turn("minecraft:rail[shape=north_south]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+    }
+
+    @Test void doorHingesFlipWithEitherMirrorButNotWithRotation() {
+        assertEquals("minecraft:oak_door[facing=south,hinge=right]", CapturedStructure.turn("minecraft:oak_door[facing=north,hinge=left]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_door[facing=east,hinge=right]", CapturedStructure.turn("minecraft:oak_door[facing=east,hinge=left]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_door[facing=north,hinge=right]", CapturedStructure.turn("minecraft:oak_door[facing=north,hinge=left]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_door[facing=west,hinge=right]", CapturedStructure.turn("minecraft:oak_door[facing=east,hinge=left]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_door[facing=east,hinge=left]", CapturedStructure.turn("minecraft:oak_door[facing=north,hinge=left]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+    }
+
+    @Test void signRotationTurnsAndMirrorsBySixteenths() {
+        assertEquals("minecraft:oak_sign[rotation=7]", CapturedStructure.turn("minecraft:oak_sign[rotation=1]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_sign[rotation=15]", CapturedStructure.turn("minecraft:oak_sign[rotation=1]", StructureRotation.NONE, Mirror.FRONT_BACK));
+        assertEquals("minecraft:oak_sign[rotation=5]", CapturedStructure.turn("minecraft:oak_sign[rotation=1]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:oak_sign[rotation=0]", CapturedStructure.turn("minecraft:oak_sign[rotation=12]", StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:oak_sign[rotation=8]", CapturedStructure.turn("minecraft:oak_sign[rotation=0]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_sign[rotation=12]", CapturedStructure.turn("minecraft:oak_sign[rotation=12]", StructureRotation.NONE, Mirror.LEFT_RIGHT));
+    }
+
+    @Test void horizontalConnectionKeysMoveWithTheBlock() {
+        var fence = "minecraft:oak_fence[east=true,north=false,south=false,waterlogged=false,west=true]";
+        assertEquals("minecraft:oak_fence[south=true,east=false,west=false,waterlogged=false,north=true]", CapturedStructure.turn(fence, StructureRotation.CLOCKWISE_90, Mirror.NONE));
+        assertEquals("minecraft:oak_fence[east=true,south=false,north=false,waterlogged=false,west=true]", CapturedStructure.turn(fence, StructureRotation.NONE, Mirror.LEFT_RIGHT));
+        assertEquals("minecraft:oak_fence[west=true,north=false,south=false,waterlogged=false,east=true]", CapturedStructure.turn(fence, StructureRotation.NONE, Mirror.FRONT_BACK));
+    }
+
+    @Test void blockTransformerRunsOnTurnedStateAndKeepsBlockEntityDataAtTarget() throws Exception {
+        build();
+        world.getBlockAt(100, 70, 100).setBlockData(FerriteBlockData.create("minecraft:oak_stairs[facing=east]"));
+        world.getBlockAt(101, 70, 100).setType(Material.CHEST);
+        world.getBlockAt(700, 70, 700).setType(Material.AIR);
+        world.getBlockAt(700, 70, 701).setType(Material.AIR);
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> {
+            calls.add(method + " " + args);
+            try {
+                return method.startsWith("ferriteBlockEntities") ? "101,70,100," + chestHex() : "";
+            } catch (Exception e) { throw new IllegalStateException(e); }
+        };
+        try {
+            var structure = org.bukkit.Bukkit.getStructureManager().createStructure();
+            structure.fill(new Location(world, 100, 70, 100), new BlockVector(2, 1, 1), false);
+            calls.clear();
+            var seen = new java.util.ArrayList<String>();
+            BlockTransformer transformer = (region, x, y, z, current, state) -> {
+                seen.add(x + "," + y + "," + z + "=" + current.getBlockData().getAsString() + " <- " + state.getOriginal().getBlockData().getAsString());
+                if (current.getType() == Material.OAK_STAIRS) current.setBlockData(FerriteBlockData.create("minecraft:oak_slab[type=top]"));
+                return current;
+            };
+            structure.place(new Location(world, 700, 70, 700), false, StructureRotation.CLOCKWISE_90, Mirror.NONE, 0, 1f, new Random(1), List.of(transformer), List.of());
+            assertTrue(seen.contains("700,70,700=minecraft:oak_stairs[facing=south] <- minecraft:oak_stairs[facing=east]"), seen.toString());
+            assertEquals("minecraft:oak_slab[type=top]", world.getBlockAt(700, 70, 700).getBlockData().getAsString());
+            assertEquals(Material.CHEST, world.getBlockAt(700, 70, 701).getType());
+            var merge = calls.stream().filter(c -> c.startsWith("ferriteDataMerge")).findFirst().orElseThrow();
+            assertTrue(merge.contains("700") && merge.contains("701"), merge);
+            assertTrue(merge.contains("Items:[{Slot:0b,id:\"minecraft:bread\",count:2}]"), merge);
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void aRefilledTemplateRunsBlockTransformers() {
+        build();
+        var template = org.bukkit.Bukkit.getStructureManager().loadStructure(new NamespacedKey("minecraft", "igloo/top"), false);
+        template.fill(new Location(world, 100, 70, 100), new BlockVector(2, 2, 3), false);
+        BlockTransformer transformer = (region, x, y, z, current, state) -> {
+            if (current.getType() == Material.STONE) current.setType(Material.DIRT);
+            return current;
+        };
+        template.place(new Location(world, 810, 70, 810), false, StructureRotation.NONE, Mirror.NONE, 0, 1f, new Random(1), List.of(transformer), List.of());
+        assertEquals(Material.DIRT, world.getBlockAt(810, 70, 810).getType());
+    }
+
+    @Test void entityTransformersAreRejectedExplicitly() {
+        build();
+        var structure = org.bukkit.Bukkit.getStructureManager().createStructure();
+        structure.fill(new Location(world, 100, 70, 100), new BlockVector(1, 1, 1), false);
+        List<EntityTransformer> transformers = List.of((region, x, y, z, entity, allowed) -> true);
+        var error = assertThrows(UnsupportedOperationException.class, () -> structure.place(new Location(world, 900, 70, 900), false, StructureRotation.NONE, Mirror.NONE, 0, 1f, new Random(1), List.of(), transformers));
+        assertTrue(error.getMessage().contains("EntityTransformer"), error.getMessage());
+    }
+
+    @Test void nullBlockTransformerResultsAreRejected() {
+        build();
+        var structure = org.bukkit.Bukkit.getStructureManager().createStructure();
+        structure.fill(new Location(world, 100, 70, 100), new BlockVector(1, 1, 1), false);
+        var error = assertThrows(IllegalArgumentException.class, () -> structure.place(new Location(world, 910, 70, 910), false, StructureRotation.NONE, Mirror.NONE, 0, 1f, new Random(1), List.of((region, x, y, z, current, state) -> null), List.of()));
+        assertTrue(error.getMessage().contains("null"), error.getMessage());
     }
 
     @Test void saveAndLoadKeepSizeAndBlocks() throws Exception {
