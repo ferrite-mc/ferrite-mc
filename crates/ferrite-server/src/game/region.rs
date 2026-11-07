@@ -6905,7 +6905,16 @@ impl Region {
                     spectator: p.gamemode == 3,
                 })
                 .collect();
-            for update in self.vaults.tick(source, &players, &self.held_chunks) {
+            let vault_updates =
+                self.vaults
+                    .tick_with_delivered(source, &players, &self.held_chunks, |token| {
+                        self.entities.keys().iter().any(|&key| {
+                            self.entities
+                                .data(key)
+                                .is_some_and(|data| data.uuid == token)
+                        })
+                    });
+            for update in vault_updates {
                 let super::vault::VaultUpdate {
                     pos,
                     block_state,
@@ -6951,14 +6960,20 @@ impl Region {
                         &update,
                     );
                 }
-                for stack in items {
-                    let record = super::vault::ejected_item(pos, &stack, &mut self.rng);
-                    self.entities.insert(record);
+                let mut spawned = Vec::new();
+                for reward in items {
+                    let record = super::vault::ejected_item(pos, &reward, &mut self.rng);
+                    spawned.push(self.entities.insert(record));
                 }
                 // The vault's ledger is written only after its item entities exist, so a
-                // crash in between re-ejects a reward instead of losing it.
-                if let Some(items) = pending_items {
-                    super::vault::commit_ejection(source, pos, &items);
+                // crash in between re-ejects a reward instead of losing it. A failed write
+                // rolls the new entities back to keep the reward pending.
+                if let Some(items) = pending_items
+                    && !super::vault::commit_ejection(source, pos, &items)
+                {
+                    for key in spawned {
+                        let _ = self.entities.remove(key);
+                    }
                 }
             }
         }
