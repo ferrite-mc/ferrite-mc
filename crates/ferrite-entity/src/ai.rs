@@ -773,6 +773,26 @@ pub fn tick_with_owner_attacks_and_holders(
                 if let Some(bred) = crate::breed::approach(store, key, mate, mate_pos, rng) {
                     events.push(MobEvent::Bred(bred));
                 }
+            } else if kind == MobKind::Villager
+                && let Some((activity, destination)) = store.data(key).and_then(|data| {
+                    let villager = data.villager.as_ref()?;
+                    Some((villager.activity, villager.destination?))
+                })
+                && activity != crate::villager::Activity::Idle
+            {
+                directed = true;
+                let target = Vec3::new(
+                    f64::from(destination[0]) + 0.5,
+                    f64::from(destination[1]),
+                    f64::from(destination[2]) + 0.5,
+                );
+                let dx = target.x - start.x;
+                let dz = target.z - start.z;
+                if dx * dx + dz * dz > 4.0 {
+                    walking = follow_path(store, key, blocks, start, target)
+                        .or_else(|| Some(yaw_towards(dx, dz)));
+                    speed = VILLAGER_SPEED;
+                }
             } else if moving {
                 walking = Some(wander_yaw);
             }
@@ -802,15 +822,23 @@ pub fn tick_with_owner_attacks_and_holders(
             }
         }
 
-        // Villagers stay within sight of home and refuse to walk into water or lava.
+        // Villagers stay within sight of home and refuse to walk into water or lava. A
+        // scheduled destination (workstation, bed or bell) is allowed outside the home radius.
         if kind == MobKind::Villager {
             let home = store
                 .data(key)
                 .and_then(|data| data.villager.as_ref().map(|villager| villager.home));
+            let directed_activity = store.data(key).is_some_and(|data| {
+                data.villager.as_ref().is_some_and(|villager| {
+                    villager.activity != crate::villager::Activity::Idle
+                        && villager.destination.is_some()
+                })
+            });
             if let Some(home) = home {
                 let dx = home[0] - start.x;
                 let dz = home[2] - start.z;
-                if dx * dx + dz * dz > crate::villager::WANDER_RADIUS.powi(2) {
+                if !directed_activity && dx * dx + dz * dz > crate::villager::WANDER_RADIUS.powi(2)
+                {
                     walking = Some(yaw_towards(dx, dz));
                 } else if let Some(yaw) = walking
                     && crate::villager::ahead_is_liquid(blocks, start, yaw)
@@ -894,6 +922,9 @@ pub fn tick_with_owner_attacks_and_holders(
     }
     events
 }
+
+/// Walk speed multiplier for a villager moving to a scheduled destination.
+const VILLAGER_SPEED: f64 = 0.8;
 
 fn panic_of(store: &EntityStore, key: crate::EntityKey) -> u16 {
     mob::state(store, key).map_or(0, |state| state.panic)
@@ -1002,6 +1033,32 @@ mod tests {
             uuid: Uuid::from_u128(9),
             pos: Vec3::new(x, 64.0, z),
         }
+    }
+
+    #[test]
+    fn a_villager_walks_to_its_scheduled_destination() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Villager,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(11),
+        ));
+        {
+            let villager = store.data_mut(key).unwrap().villager.as_mut().unwrap();
+            villager.activity = crate::villager::Activity::Work;
+            villager.destination = Some([8, 64, 0]);
+        }
+        let start = store.pos(key).unwrap();
+        let mut rng = Rng::new(12);
+        for _ in 0..120 {
+            tick(&mut store, &world, &[], &mut rng);
+        }
+        let end = store.pos(key).unwrap();
+        assert!(
+            end.x > start.x + 2.0,
+            "villager should walk toward work: {start:?} -> {end:?}"
+        );
     }
 
     #[test]

@@ -1087,6 +1087,125 @@ fn level_and_progress(total: i32) -> (i32, f32) {
     };
     (level, progress)
 }
+
+/// The authoritative merchant state an open trade menu is synchronized against. The entity
+/// store belongs to the region; a player's menu is only a snapshot of its offers.
+struct TraderSync<'a> {
+    entities: &'a mut EntityStore,
+}
+
+impl TraderSync<'_> {
+    /// Refreshes the player's open trade menu from the villager, so the next click validates
+    /// against newer uses/demand and the player's current reputation instead of a stale copy.
+    ///
+    /// Returns whether a click may be handled. A trader menu whose entity is no longer in this
+    /// region is closed instead: its snapshot must not keep selling after a region hand-off.
+    fn refresh(&self, player: &mut Player) -> bool {
+        let Some((trader, _)) = player.open_trader() else {
+            return true;
+        };
+        let Some(key) = trader_key(self.entities, trader) else {
+            player.close_open_menu();
+            return false;
+        };
+        let Some(data) = self.entities.data(key) else {
+            player.close_open_menu();
+            return false;
+        };
+        let Some(villager) = &data.villager else {
+            player.close_open_menu();
+            return false;
+        };
+        let offers = if data
+            .mob
+            .as_ref()
+            .is_some_and(|mob| mob.kind == MobKind::Villager)
+        {
+            villager.offers_for_player(player.uuid)
+        } else {
+            villager.offers.clone()
+        };
+        player.set_trader_offers(offers);
+        true
+    }
+
+    /// Merges the sales the player made since the last refresh into the merchant and applies
+    /// the villager XP those sales earned.
+    fn commit(&mut self, player: &mut Player) {
+        let Some((trader, trades)) = player.open_trader() else {
+            return;
+        };
+        if trader_key(self.entities, trader).is_none() {
+            player.close_open_menu();
+            return;
+        }
+        let xp = player.take_trader_xp();
+        let sold = merge_trader_trades(self.entities, player.uuid, trader, &trades);
+        if sold > 0 || xp > 0 {
+            add_trader_xp(self.entities, trader, xp);
+            self.refresh(player);
+        }
+    }
+}
+
+/// The entity holding `trader`'s uuid.
+fn trader_key(entities: &EntityStore, trader: Uuid) -> Option<ferrite_entity::EntityKey> {
+    entities
+        .keys()
+        .iter()
+        .copied()
+        .find(|&key| entities.data(key).is_some_and(|data| data.uuid == trader))
+}
+
+/// Merges one player's trade snapshot into the merchant. Only new uses are applied, so a stale
+/// second screen cannot rewind another player's sale or go past `max_uses`; each applied sale
+/// credits trading gossip to the player whose menu made it.
+fn merge_trader_trades(
+    entities: &mut EntityStore,
+    player: Uuid,
+    trader: Uuid,
+    trades: &[ferrite_inventory::Trade],
+) -> i32 {
+    let Some(key) = trader_key(entities, trader) else {
+        return 0;
+    };
+    let Some(data) = entities.data_mut(key) else {
+        return 0;
+    };
+    let village = data
+        .mob
+        .as_ref()
+        .is_some_and(|mob| mob.kind == MobKind::Villager);
+    let Some(villager) = data.villager.as_mut() else {
+        return 0;
+    };
+    let sold = villager.merge_trades(trades);
+    if village {
+        for _ in 0..sold {
+            villager.record_trade(player);
+        }
+    }
+    sold
+}
+
+/// Adds trade XP to a villager after its menu sales were merged. Wandering traders do not
+/// level up, so only `MobKind::Villager` records receive the XP.
+fn add_trader_xp(entities: &mut EntityStore, trader: Uuid, xp: i32) {
+    if xp <= 0 {
+        return;
+    }
+    let Some(key) = trader_key(entities, trader) else {
+        return;
+    };
+    if entities.data(key).is_some_and(|data| {
+        data.mob
+            .as_ref()
+            .is_some_and(|mob| mob.kind == MobKind::Villager)
+    }) {
+        ferrite_entity::villager::add_trade_xp(entities, key, xp);
+    }
+}
+
 impl Player {
     pub fn refresh_chunks(&mut self) {
         send(
@@ -3080,7 +3199,7 @@ impl Player {
         });
     }
 
-    fn update(&mut self) -> bool {
+    fn update(&mut self, trader: &mut TraderSync<'_>) -> bool {
         if let Some((_, _, elapsed)) = &mut self.breaking {
             *elapsed = elapsed.saturating_add(1);
         }
@@ -3111,6 +3230,7 @@ impl Player {
             }
             let msg = match command {
                 Command::Leave => {
+                    trader.commit(self);
                     self.save_on_exit();
                     return false;
                 }
@@ -3639,13 +3759,25 @@ impl Player {
                 // A right-click on an entity ("use"), not an attack: left-clicks arrive as `Attack`
                 // above. Feeding animals is the only use so far (taming, saddles come later).
                 ServerboundPlay::Interact(p) => self.uses.push((p.entity_id.0, p.hand.0)),
-                ServerboundPlay::ContainerClick(p) => self.handle_container_click(p),
+                ServerboundPlay::ContainerClick(p) => {
+                    // Another viewer may have bought this offer since our menu was opened, so
+                    // validate the click against the current uses and this player's price. A
+                    // trader menu whose entity left this region is closed without handling the
+                    // click, so a region hand-off cannot leave a live stale snapshot behind.
+                    if trader.refresh(self) {
+                        self.handle_container_click(p);
+                        trader.commit(self);
+                    }
+                }
                 ServerboundPlay::ContainerButtonClick(p) => self.handle_container_button(p),
                 ServerboundPlay::SetBeacon(p) => self.handle_set_beacon(p),
                 ServerboundPlay::PlaceRecipe(p) => self.handle_place_recipe(p),
                 ServerboundPlay::SelectTrade(p) => self.handle_select_trade(p),
                 ServerboundPlay::RenameItem(p) => self.rename_item(p.name),
-                ServerboundPlay::ContainerClose(_) => self.close_container(),
+                ServerboundPlay::ContainerClose(_) => {
+                    trader.commit(self);
+                    self.close_container();
+                }
                 ServerboundPlay::PlayerAction(p) => {
                     let pos = ferrite_protocol::types::BlockPos::unpack(p.location);
                     match p.status.0 {
@@ -4398,15 +4530,13 @@ impl Region {
     /// death loot.
     #[cfg(test)]
     fn tick_mobs(&mut self, ctx: &TickContext, blocks: &TickBlocks<'_>) {
-        self.tick_mobs_with_owner_attacks(ctx, blocks, &[]);
-    }
-
-    fn tick_mobs_with_owner_attacks(
-        &mut self,
-        ctx: &TickContext,
-        blocks: &TickBlocks<'_>,
-        owner_attacks: &[(Uuid, ferrite_entity::EntityKey)],
-    ) {
+        // The villager schedule runs before AI so each villager has this tick's activity and
+        // destination. `/tick freeze` already guards this call at the region level.
+        let (day_time, game_time) = {
+            let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            (state.clock_time, state.game_time)
+        };
+        ferrite_entity::villager::tick_all(&mut self.entities, blocks, day_time, game_time);
         let positions: Vec<_> = self
             .players
             .values()
@@ -4981,43 +5111,22 @@ impl Region {
         true
     }
 
-    /// Copies what players bought in an open trading screen back into the merchant and records
-    /// the trading gossip that earns reputation (vanilla adds two points per completed sale).
+    /// Applies sales left in open trade screens after the player loop. A click normally commits
+    /// its own sale immediately; this is the once-per-tick safety net. Merging only forward
+    /// deltas keeps a stale second screen from rewinding another viewer's uses or demand.
     fn sync_trades(&mut self) {
         let open: Vec<_> = self
             .players
-            .iter()
+            .iter_mut()
             .filter_map(|(player, p)| {
-                p.open_trader().map(|(trader, trades)| {
-                    (*player, trader, trades, p.dimension, p.signals.clone())
-                })
+                let (trader, trades) = p.open_trader()?;
+                let xp = p.take_trader_xp();
+                Some((*player, trader, trades, xp))
             })
             .collect();
-        for (player, trader, trades, dimension, signals) in open {
-            let Some(key) = self
-                .entities
-                .keys()
-                .iter()
-                .copied()
-                .find(|&k| self.entities.data(k).is_some_and(|d| d.uuid == trader))
-            else {
-                let offers = trades
-                    .iter()
-                    .map(|trade| (trade.uses, trade.demand))
-                    .collect();
-                let _ = signals.send(Signal::TradeSync {
-                    dimension,
-                    trader,
-                    player,
-                    offers,
-                });
-                continue;
-            };
-            let offers: Vec<_> = trades
-                .iter()
-                .map(|trade| (trade.uses, trade.demand))
-                .collect();
-            apply_trade_sync(&mut self.entities, key, player, &offers);
+        for (player, trader, trades, xp) in open {
+            merge_trader_trades(&mut self.entities, player, trader, &trades);
+            add_trader_xp(&mut self.entities, trader, xp);
         }
     }
 
@@ -7374,12 +7483,21 @@ impl Region {
         let mut explosions = std::mem::take(&mut self.plugin_explosions);
         for id in ids {
             let mut p = self.players.remove(&id).unwrap();
-            let updated = match &timings {
-                Some(timings) => {
-                    let _scope = timings.scope("player-update");
-                    p.update()
+            let updated = {
+                let mut trader = TraderSync {
+                    entities: &mut self.entities,
+                };
+                // A restock or another viewer's sale may have changed the merchant since this
+                // menu was last looked at. A menu whose merchant moved to another region is
+                // closed here before any queued click is processed.
+                let _ = trader.refresh(&mut p);
+                match &timings {
+                    Some(timings) => {
+                        let _scope = timings.scope("player-update");
+                        p.update(&mut trader)
+                    }
+                    None => p.update(&mut trader),
                 }
-                None => p.update(),
             };
             if updated {
                 p.tick_portal();
@@ -7962,276 +8080,437 @@ mod tests {
     }
 
     #[test]
-    fn trader_spawn_candidates_check_biome_and_light() {
-        assert!(trader_spawn_biome_allows(Some("minecraft:plains")));
-        assert!(!trader_spawn_biome_allows(Some("minecraft:the_void")));
-        assert!(trader_spawn_biome_allows(None));
-        assert!(trader_spawn_light_allows(15));
-        assert!(trader_spawn_light_allows(ferrite_entity::spawn::MIN_LIGHT));
-        assert!(!trader_spawn_light_allows(
-            ferrite_entity::spawn::MIN_LIGHT - 1
-        ));
-    }
-
-    #[test]
-    fn trader_drinks_follow_vanillas_day_and_night_windows() {
-        assert!(trader_bright_outside(0));
-        assert!(trader_bright_outside(6_000));
-        assert!(!trader_bright_outside(13_000));
-        assert!(trader_bright_outside(23_500));
-        assert!(trader_bright_outside(24_000 + 1_000));
-    }
-
-    fn tick_blocks() -> TickBlocks<'static> {
-        TickBlocks {
-            source: None,
-            seen: Default::default(),
-        }
-    }
-
-    #[test]
-    fn a_failed_spawn_candidate_keeps_the_roll_and_creates_nothing() {
-        let mut region = Region {
-            trader_chance: 75,
-            ..Region::default()
-        };
-        assert!(!region.try_spawn_trader(&tick_blocks(), [0.5, 64.0, 0.5], 0, 0));
-        assert_eq!(
-            region.trader_chance, 75,
-            "a rejected candidate is not a successful roll"
-        );
-        assert!(
-            region.entities.keys().is_empty(),
-            "no partial trader or llama"
-        );
-        assert!(region.trader_drinks.is_empty());
-    }
-
-    #[test]
-    fn an_eligible_candidate_creates_a_trader_and_two_leashed_llamas() {
-        assert!(trader_spawn_biome_allows(Some("minecraft:plains")));
-        assert!(trader_spawn_light_allows(15));
-        let mut region = Region::default();
-        let trader = region.insert_trader_with_llamas(ferrite_math::Vec3::new(0.5, 65.0, 0.5));
-        assert_eq!(region.entities.keys().len(), 3);
-        let trader_data = region.entities.data(trader).unwrap();
-        let trader_uuid = trader_data.uuid;
-        let trader_state = trader_data.mob.unwrap();
-        assert_eq!(trader_state.lifetime, 48_000);
-        assert_eq!(trader_state.kind, MobKind::WanderingTrader);
-        let llamas: Vec<_> = region
-            .entities
-            .keys()
-            .iter()
-            .copied()
-            .filter(|&key| {
-                region.entities.data(key).is_some_and(|data| {
-                    data.mob.is_some_and(|mob| mob.kind == MobKind::TraderLlama)
-                })
-            })
-            .collect();
-        assert_eq!(llamas.len(), 2);
-        for llama in llamas {
-            let state = mob::state(&region.entities, llama).unwrap();
-            assert_eq!(state.lifetime, 48_000);
-            assert_eq!(state.leash.map(|(holder, _)| holder), Some(trader_uuid));
-        }
-        assert!(region.trader_drinks.is_empty());
-    }
-
-    #[test]
-    fn trader_spawning_disabled_does_not_raise_the_chance_or_spawn() {
-        let mut region = Region {
-            tick_clock: 24_000,
-            trader_chance: 100,
-            ..Region::default()
-        };
-        region.tick_trader_spawn(&tick_blocks(), false, 6_000);
-        assert_eq!(region.trader_chance, 100);
-        assert!(region.entities.keys().is_empty());
-    }
-
-    #[test]
-    fn trader_drink_state_follows_the_trader_when_a_region_splits() {
-        let mut region = Region::default();
-        let trader = region.insert_trader_with_llamas(ferrite_math::Vec3::new(0.5, 64.0, 0.5));
-        let uuid = region.entities.data(trader).unwrap().uuid;
-        region
-            .trader_drinks
-            .insert(uuid, (TraderDrink::Invisibility, 12));
-
-        let moved = region.split(&HashSet::from([SectionPos(0, 0)]));
-
-        assert_eq!(
-            moved.trader_drinks.get(&uuid),
-            Some(&(TraderDrink::Invisibility, 12))
-        );
-        assert!(!region.trader_drinks.contains_key(&uuid));
-    }
-
-    /// A wandering trader with two trader llamas on its leads and one unleashed llama.
-    fn trader_and_llamas(
-        region: &mut Region,
-    ) -> (
-        ferrite_entity::EntityKey,
-        Vec<ferrite_entity::EntityKey>,
-        ferrite_entity::EntityKey,
-    ) {
-        let mut rng = Rng::new(7);
-        let mut trader = mob::new_mob(
-            MobKind::WanderingTrader,
+    fn stale_second_merchant_snapshot_cannot_rewind_or_oversell() {
+        let mut store = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
             ferrite_math::Vec3::new(0.5, 64.0, 0.5),
-            &mut rng,
+            &mut Rng::new(1),
         );
-        if let Some(state) = trader.data.mob.as_mut() {
-            state.lifetime = 48_000;
-        }
-        let (trader_uuid, trader_id) = (trader.data.uuid, trader.data.id);
-        let trader_key = region.entities.insert(trader);
-        let mut leashed = Vec::new();
-        for offset in [-1.0, 1.0] {
-            let mut llama = mob::new_mob(
-                MobKind::TraderLlama,
-                ferrite_math::Vec3::new(0.5 + offset, 64.0, 0.5),
-                &mut rng,
-            );
-            if let Some(state) = llama.data.mob.as_mut() {
-                state.lifetime = 48_000;
-                state.leash = Some((trader_uuid, trader_id));
-            }
-            leashed.push(region.entities.insert(llama));
-        }
-        let free = region.entities.insert(mob::new_mob(
-            MobKind::TraderLlama,
-            ferrite_math::Vec3::new(5.5, 64.0, 0.5),
-            &mut rng,
-        ));
-        (trader_key, leashed, free)
-    }
+        let uuid = record.data.uuid;
+        let key = store.insert(record);
+        let alice = Uuid::from_u128(11);
+        let bob = Uuid::from_u128(12);
+        let wants = ferrite_item::ItemStack::from_name("emerald")
+            .expect("emerald")
+            .copy_with_count(32);
+        let gives = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(wants, gives, 2, 1);
+        offer.price_multiplier = 0.05;
+        let villager = store.data_mut(key).unwrap().villager.as_mut().unwrap();
+        villager.offers = vec![offer];
+        villager.gossips.add(
+            alice,
+            ferrite_entity::villager::GossipType::MajorPositive,
+            20,
+        );
 
-    #[test]
-    fn a_trader_drinking_invisibility_despawns_with_its_leashed_llamas() {
-        let mut region = Region::default();
-        let (trader, leashed, free) = trader_and_llamas(&mut region);
-        // Night starts the invisibility potion; the vanilla use duration is 32 ticks.
-        for _ in 0..=TRADER_DRINK_TICKS {
-            region.tick_trader_spawn(&tick_blocks(), true, 13_000);
-        }
-        assert!(region.entities.flags(trader).unwrap().has(Flags::REMOVED));
-        for key in leashed {
-            assert!(
-                region.entities.flags(key).unwrap().has(Flags::REMOVED),
-                "a leashed llama follows the trader"
-            );
-        }
+        let snapshot = |store: &EntityStore, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
+        };
+        let mut alice_menu = snapshot(&store, alice);
+        let bob_menu = snapshot(&store, bob);
+        assert_eq!(
+            alice_menu[0].price(),
+            27,
+            "Alice's cure reputation gives her a lower price"
+        );
+        assert_eq!(bob_menu[0].price(), 32, "Bob has neutral reputation");
+
+        // Alice's screen completes one sale; only Alice gets the trading gossip.
+        alice_menu[0].on_sale();
+        assert_eq!(merge_trader_trades(&mut store, alice, uuid, &alice_menu), 1);
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (1, 1));
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+
+        // Bob's old snapshot still says uses = 0 and demand = 0. It must neither rewind the
+        // villager nor credit Alice's sale to Bob.
+        assert_eq!(merge_trader_trades(&mut store, bob, uuid, &bob_menu), 0);
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (1, 1));
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            0
+        );
+
+        // The region refreshes Bob's screen before his next click. One use is left, and a
+        // second merge cannot push the offer past max_uses or duplicate the gossip.
+        let mut bob_refreshed = snapshot(&store, bob);
+        assert_eq!(bob_refreshed[0].uses, 1);
+        assert_eq!(
+            bob_refreshed[0].price(),
+            32,
+            "refreshing must not copy Alice's reputation price"
+        );
+        bob_refreshed[0].on_sale();
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, &bob_refreshed),
+            1
+        );
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, &bob_refreshed),
+            0
+        );
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (2, 2));
         assert!(
-            !region.entities.flags(free).unwrap().has(Flags::REMOVED),
-            "an unleashed llama stays"
+            villager
+                .offers_for_player(alice)
+                .first()
+                .is_some_and(ferrite_inventory::Trade::is_out_of_stock)
         );
-        assert!(region.trader_drinks.is_empty());
+        assert_eq!(villager.offers_for_player(alice)[0].special_price, -5);
+        assert_eq!(villager.offers_for_player(bob)[0].special_price, 0);
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
     }
 
     #[test]
-    fn a_trader_drinking_milk_despawns_with_its_leashed_llamas() {
-        let mut region = Region::default();
-        let (trader, leashed, free) = trader_and_llamas(&mut region);
-        // A splash potion or plugin made it invisible; the morning milk clears it and despawns.
-        region
-            .entities
-            .data_mut(trader)
+    fn a_refreshed_second_menu_cannot_take_an_already_sold_offer() {
+        use ferrite_inventory::{ClickInput, Clicker, Menu, NoCrafting, PlayerInventory};
+
+        let mut store = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        let key = store.insert(record);
+        let alice = Uuid::from_u128(21);
+        let bob = Uuid::from_u128(22);
+        let emeralds = |count| {
+            ferrite_item::ItemStack::from_name("emerald")
+                .expect("emerald")
+                .copy_with_count(count)
+        };
+        let bread = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(emeralds(2), bread.clone(), 1, 1);
+        offer.price_multiplier = 0.05;
+        store
+            .data_mut(key)
             .unwrap()
-            .effects
-            .add(MobEffectInstance::new(Effect::Invisibility.id(), 200, 0));
-        for _ in 0..=TRADER_DRINK_TICKS {
-            region.tick_trader_spawn(&tick_blocks(), true, 6_000);
+            .villager
+            .as_mut()
+            .unwrap()
+            .offers = vec![offer];
+
+        let snapshot = |store: &EntityStore, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
+        };
+        let bob_stale = snapshot(&store, bob);
+
+        // Alice buys the only use through her copy of the menu.
+        let mut alice_menu = Menu::merchant(1, snapshot(&store, alice));
+        alice_menu.container_mut()[0] = emeralds(2);
+        assert!(alice_menu.select_trade(0));
+        assert_eq!(alice_menu.result(), &bread);
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            alice_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
         }
-        assert!(region.entities.flags(trader).unwrap().has(Flags::REMOVED));
-        assert!(region.entities.data(trader).unwrap().effects.is_empty());
-        for key in leashed {
-            assert!(
-                region.entities.flags(key).unwrap().has(Flags::REMOVED),
-                "a leashed llama follows the trader"
-            );
+        assert!(alice_menu.trades()[0].is_out_of_stock());
+        assert_eq!(
+            merge_trader_trades(&mut store, alice, uuid, alice_menu.trades()),
+            1
+        );
+
+        // Bob's screen was opened before Alice bought; it still shows the offer.
+        let mut bob_menu = Menu::merchant(2, bob_stale);
+        bob_menu.container_mut()[0] = emeralds(2);
+        assert!(bob_menu.select_trade(0));
+        assert_eq!(
+            bob_menu.result(),
+            &bread,
+            "the stale snapshot still shows the offer"
+        );
+
+        // The region refreshes it before the click, so the result disappears.
+        bob_menu.set_trades(snapshot(&store, bob));
+        assert!(bob_menu.result().is_empty());
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            bob_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+            assert_eq!(clicker.xp, 0.0, "no sale, no trade experience");
         }
-        assert!(
-            !region.entities.flags(free).unwrap().has(Flags::REMOVED),
-            "an unleashed llama stays"
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, bob_menu.trades()),
+            0
+        );
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (1, 1));
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            0,
+            "Bob did not complete a sale"
+        );
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
         );
     }
 
     #[test]
-    fn a_trader_still_expires_on_its_normal_lifetime() {
-        let mut region = Region::default();
-        let trader = region.entities.insert(mob::new_mob(
-            MobKind::WanderingTrader,
+    fn merchant_trade_xp_levels_the_villager() {
+        let mut store = ferrite_entity::EntityStore::default();
+        let key = store.insert(mob::new_mob(
+            mob::MobKind::Villager,
             ferrite_math::Vec3::new(0.5, 64.0, 0.5),
-            &mut region.rng,
+            &mut ferrite_entity::Rng::new(1),
         ));
-        if let Some(state) = mob::state_mut(&mut region.entities, trader) {
-            state.lifetime = 1;
+        let uuid = store.data(key).unwrap().uuid;
+        {
+            let villager = store.data_mut(key).unwrap().villager.as_mut().unwrap();
+            villager.profession = ferrite_entity::villager::Profession::Farmer;
+            villager.offers = ferrite_entity::villager::offers_for(villager.profession, 1, uuid);
         }
-        ai::tick_with(&mut region.entities, &tick_blocks(), &[], &mut region.rng);
-        let state = mob::state(&region.entities, trader).unwrap();
-        assert!(state.is_dead());
-        assert!(state.loot_dropped);
-        assert!(!region.entities.flags(trader).unwrap().has(Flags::REMOVED));
-        assert!(region.trader_drinks.is_empty());
+        add_trader_xp(&mut store, uuid, ferrite_entity::villager::NEXT_LEVEL_XP[0]);
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!(villager.level, 2);
+        assert_eq!(villager.xp, ferrite_entity::villager::NEXT_LEVEL_XP[0]);
+        assert_eq!(villager.offers.len(), 4);
     }
 
-    async fn memory_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
-        let source = super::super::anvil::AnvilChunkSource::new_memory();
-        let mut ready = false;
-        for _ in 0..2_000 {
-            if let Some(result) = source.get(0, 0, 0) {
-                result.expect("chunk load");
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    #[test]
+    fn independent_menus_count_two_sales_once_and_credit_each_player() {
+        use ferrite_inventory::{ClickInput, Clicker, Menu, NoCrafting, PlayerInventory};
+
+        let mut store = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        let key = store.insert(record);
+        let alice = Uuid::from_u128(31);
+        let bob = Uuid::from_u128(32);
+        let emeralds = |count| {
+            ferrite_item::ItemStack::from_name("emerald")
+                .expect("emerald")
+                .copy_with_count(count)
+        };
+        let bread = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(emeralds(32), bread.clone(), 2, 1);
+        offer.price_multiplier = 0.05;
+        {
+            let villager = store.data_mut(key).unwrap().villager.as_mut().unwrap();
+            villager.offers = vec![offer];
+            villager.gossips.add(
+                alice,
+                ferrite_entity::villager::GossipType::MajorPositive,
+                20,
+            );
         }
-        assert!(ready, "chunk never loaded");
-        source
+
+        let snapshot = |store: &EntityStore, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
+        };
+        let mut alice_menu = Menu::merchant(1, snapshot(&store, alice));
+        let mut bob_menu = Menu::merchant(2, snapshot(&store, bob));
+        assert_eq!(alice_menu.trades()[0].price(), 27);
+        assert_eq!(bob_menu.trades()[0].price(), 32);
+
+        // Both menus were opened independently. Alice buys one of two uses first.
+        alice_menu.container_mut()[0] = emeralds(27);
+        assert!(alice_menu.select_trade(0));
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            alice_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(alice_menu.trades()[0].uses, 1);
+        assert_eq!(
+            merge_trader_trades(&mut store, alice, uuid, alice_menu.trades()),
+            1
+        );
+
+        // Bob's screen still has the old uses; refreshing it before the click shows the one
+        // remaining use at Bob's neutral price, and the sale must count exactly once.
+        bob_menu.container_mut()[0] = emeralds(32);
+        assert!(bob_menu.select_trade(0));
+        assert_eq!(bob_menu.result(), &bread);
+        bob_menu.set_trades(snapshot(&store, bob));
+        assert_eq!(bob_menu.trades()[0].uses, 1);
+        assert_eq!(bob_menu.trades()[0].price(), 32);
+        assert_eq!(bob_menu.result(), &bread);
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            bob_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(bob_menu.trades()[0].uses, 2);
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, bob_menu.trades()),
+            1
+        );
+        assert_eq!(
+            merge_trader_trades(&mut store, bob, uuid, bob_menu.trades()),
+            0,
+            "reconciling the same accepted snapshot twice must be a no-op"
+        );
+
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (2, 2));
+        assert!(villager.offers[0].is_out_of_stock());
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_flat_candidate_without_light_is_rejected_whole() {
-        let source = memory_source().await;
-        let blocks = TickBlocks {
-            source: Some(source.as_ref()),
-            seen: Default::default(),
-        };
-        let mut region = Region {
-            trader_chance: 75,
-            ..Region::default()
-        };
-        assert!(
-            !region.try_spawn_trader(&blocks, [0.5, 64.0, 0.5], 0, 0),
-            "the flat test world has no stored light"
-        );
-        assert_eq!(region.trader_chance, 75);
-        assert!(
-            region.entities.keys().is_empty(),
-            "no partial trader or llama"
-        );
-    }
+    #[test]
+    fn a_region_handoff_reconciles_sales_in_the_new_owner_once() {
+        use ferrite_inventory::{ClickInput, Clicker, Menu, NoCrafting, PlayerInventory};
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_void_biome_candidate_is_rejected() {
-        let source = memory_source().await;
-        source
-            .fill_biome([0, -64, 0], [0, 100, 0], "minecraft:the_void", &|_| true)
-            .expect("biome fill");
-        let blocks = TickBlocks {
-            source: Some(source.as_ref()),
-            seen: Default::default(),
+        let mut old = EntityStore::default();
+        let record = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        let key = old.insert(record);
+        let alice = Uuid::from_u128(41);
+        let bob = Uuid::from_u128(42);
+        let emeralds = |count| {
+            ferrite_item::ItemStack::from_name("emerald")
+                .expect("emerald")
+                .copy_with_count(count)
         };
-        let mut region = Region {
-            trader_chance: 75,
-            ..Region::default()
+        let bread = ferrite_item::ItemStack::from_name("bread").expect("bread");
+        let mut offer = ferrite_inventory::Trade::new(emeralds(2), bread.clone(), 2, 1);
+        offer.price_multiplier = 0.05;
+        old.data_mut(key).unwrap().villager.as_mut().unwrap().offers = vec![offer];
+
+        let snapshot = |store: &EntityStore, key, player| {
+            store
+                .data(key)
+                .unwrap()
+                .villager
+                .as_ref()
+                .unwrap()
+                .offers_for_player(player)
         };
-        assert!(!region.try_spawn_trader(&blocks, [0.5, 64.0, 0.5], 0, 0));
-        assert_eq!(region.trader_chance, 75);
-        assert!(region.entities.keys().is_empty());
+        let mut alice_menu = Menu::merchant(1, snapshot(&old, key, alice));
+        alice_menu.container_mut()[0] = emeralds(2);
+        assert!(alice_menu.select_trade(0));
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            alice_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(
+            merge_trader_trades(&mut old, alice, uuid, alice_menu.trades()),
+            1
+        );
+
+        // The region hands the entity to another store. A stale reconciliation against the old
+        // owner must not count or credit anything; the new owner has the authoritative uses.
+        let record = old.remove(key).expect("villager record");
+        let mut new = EntityStore::default();
+        let new_key = new.insert(record);
+        assert!(old.keys().is_empty());
+        assert!(trader_key(&old, uuid).is_none());
+        assert!(trader_key(&new, uuid).is_some());
+        assert_eq!(
+            merge_trader_trades(&mut old, alice, uuid, alice_menu.trades()),
+            0,
+            "a late commit against the old owner must not count"
+        );
+        assert_eq!(
+            merge_trader_trades(&mut new, alice, uuid, alice_menu.trades()),
+            0,
+            "the sale was already merged before the hand-off"
+        );
+
+        // Bob's menu is refreshed from the new owner. The remaining use is accepted there and
+        // counts exactly once, with Bob's own gossip.
+        let mut bob_menu = Menu::merchant(3, snapshot(&new, new_key, bob));
+        assert_eq!(bob_menu.trades()[0].uses, 1);
+        bob_menu.container_mut()[0] = emeralds(2);
+        assert!(bob_menu.select_trade(0));
+        assert_eq!(bob_menu.result(), &bread);
+        {
+            let crafter = NoCrafting;
+            let mut inventory = PlayerInventory::new();
+            let mut clicker = Clicker::new(&mut inventory, false, &crafter);
+            bob_menu.clicked(&mut clicker, 2, 0, ClickInput::Pickup);
+        }
+        assert_eq!(
+            merge_trader_trades(&mut new, bob, uuid, bob_menu.trades()),
+            1
+        );
+        assert_eq!(
+            merge_trader_trades(&mut new, bob, uuid, bob_menu.trades()),
+            0,
+            "the same accepted snapshot must not be counted twice after a hand-off"
+        );
+
+        let villager = new.data(new_key).unwrap().villager.as_ref().unwrap();
+        assert_eq!((villager.offers[0].uses, villager.offers[0].demand), (2, 2));
+        assert!(villager.offers[0].is_out_of_stock());
+        assert_eq!(
+            villager
+                .gossips
+                .get(alice, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
+        assert_eq!(
+            villager
+                .gossips
+                .get(bob, ferrite_entity::villager::GossipType::Trading),
+            ferrite_entity::villager::TRADING_GOSSIP
+        );
     }
 
     #[test]
@@ -8308,6 +8587,68 @@ mod tests {
         assert!(mob::state(&region.entities, cow).unwrap().health < mob::MobKind::Cow.max_health());
         region.explode([8.5, 66.5, 8.5], 4.0, true, &ctx);
         assert_ne!(source.block(8, 65, 9), Some(stone));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn region_tick_assigns_a_villager_profession_and_schedule() {
+        use ferrite_math::Vec3;
+
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        let mut ready = false;
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ready, "chunk never loaded");
+        let composter =
+            u32::from(ferrite_data::blocks::default_state("minecraft:composter").unwrap());
+        source.set_block(2, 66, 0, composter).unwrap();
+
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let key = region.entities.insert(mob::new_mob(
+            mob::MobKind::Villager,
+            Vec3::new(0.5, 66.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        ));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(Mutex::new(super::super::commands::GameState::new(0, 0, 10)));
+        {
+            let mut state = state.lock().unwrap();
+            state.clock_time = 2000;
+            state.game_time = 2000;
+        }
+        let ctx = TickContext {
+            signals,
+            tracking: Default::default(),
+            source: Some(source),
+            dimension: super::super::Dimension::Overworld,
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state,
+            tree: None,
+        };
+        region.tick(&ctx);
+        let villager = region
+            .entities
+            .data(key)
+            .unwrap()
+            .villager
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            villager.profession,
+            ferrite_entity::villager::Profession::Farmer
+        );
+        assert_eq!(villager.workstation, Some([2, 66, 0]));
+        assert_eq!(villager.activity, ferrite_entity::villager::Activity::Work);
+        assert_eq!(villager.destination, Some([2, 66, 0]));
     }
 
     #[test]

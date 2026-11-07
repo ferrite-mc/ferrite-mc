@@ -273,6 +273,12 @@ impl Player {
         }
     }
 
+    /// Closes the open menu and tells the client. Used when a trade menu's merchant is no
+    /// longer owned by this region, so its snapshot cannot be used across a hand-off.
+    pub fn close_open_menu(&mut self) {
+        self.close_open_container();
+    }
+
     /// Vanilla `handleContainerClick`.
     pub fn handle_container_click(&mut self, p: ContainerClick<HashedSlot>) {
         let infinite = self.infinite_materials();
@@ -521,6 +527,32 @@ impl Player {
         let menu = self.menus.open.as_ref()?;
         (menu.kind() == ferrite_inventory::MenuKind::Merchant)
             .then(|| (*trader, menu.trades().to_vec()))
+    }
+
+    /// Takes the villager XP accumulated by the open merchant menu, if it is a villager trade.
+    pub fn take_trader_xp(&mut self) -> i32 {
+        if !matches!(&self.menus.open_at, Some(OpenAt::Trader(_))) {
+            return 0;
+        }
+        let Some(menu) = self.menus.open.as_mut() else {
+            return 0;
+        };
+        if menu.kind() != ferrite_inventory::MenuKind::Merchant {
+            return 0;
+        }
+        menu.take_villager_xp()
+    }
+
+    /// Replaces an open merchant screen's offers with the merchant's current state, so a click
+    /// made after another viewer's purchase validates against newer uses and prices.
+    pub fn set_trader_offers(&mut self, offers: Vec<ferrite_inventory::Trade>) {
+        let Some(menu) = self.menus.open.as_mut() else {
+            return;
+        };
+        if menu.kind() != ferrite_inventory::MenuKind::Merchant {
+            return;
+        }
+        menu.set_trades(offers);
     }
 
     /// The offer picked in a merchant screen (vanilla `MerchantMenu.setSelectionHint`).

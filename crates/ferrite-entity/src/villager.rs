@@ -5,12 +5,19 @@
 //! draws its offers deterministically from its UUID, so the same villager always offers the
 //! same trades.
 //!
+//! The villager follows the Java daily schedule: it claims a workstation and a bed in its
+//! region, walks to the workstation during work, meets near a bell and sleeps at night. A
+//! restock needs a valid workstation, the work activity and a sold-out offer, and is limited to
+//! two per day. Villagers never level up from working; they level up from completed trades
+//! (vanilla's trade XP thresholds).
+//!
 //! Simplifications, documented rather than hidden:
-//! - A profession is taken from the nearest workstation block within 16 blocks (and four
-//!   blocks vertically) the first time the villager is ticked. Villagers never level up from
-//!   working; they level up from completed trades (vanilla's trade XP thresholds).
-//! - A villager restocks every 24000 ticks while it remembers a workstation, instead of the
-//!   vanilla work-schedule/POTENTIAL_JOB_SITE rules.
+//! - Workstation/bed claims are local to one region. There is no global point-of-interest table,
+//!   so two regions can claim the same block near a boundary.
+//! - The pathfinder keeps 16 waypoints; a destination farther than that needs a shorter path or
+//!   the direct fallback, and can still be blocked by terrain.
+//! - Sleeping pose, profession-specific work goals (harvesting, fishing, bookshelf inspection),
+//!   breeding and gossip decay are not modelled.
 //! - Offers with a `merchant_predicate` are skipped, and results whose data attaches item
 //!   modifiers keep their base item (see `ferrite_data::villager_trades`).
 //! - The villager type is always plains.
@@ -42,8 +49,24 @@ pub const WORKSTATION_RADIUS: i32 = 16;
 pub const WORKSTATION_VERTICAL: i32 = 4;
 /// Ticks between workstation searches while a villager is unemployed.
 pub const WORKSTATION_SEARCH_TICKS: u16 = 40;
-/// Vanilla `Villager` restock interval (24000 ticks).
-pub const RESTOCK_TICKS: u32 = 24000;
+/// Vanilla minimum time between two restocks (`Villager.shouldRestock`, 2400 ticks).
+pub const RESTOCK_COOLDOWN_TICKS: i64 = 2400;
+/// `RestocksToday` is forgotten after this long without a restock (12000 ticks).
+pub const RESTOCK_FORGET_TICKS: i64 = 12000;
+/// Vanilla allows two restocks per workday.
+pub const RESTOCKS_PER_DAY: u8 = 2;
+/// Horizontal search radius for a bed.
+pub const BED_RADIUS: i32 = 32;
+/// Vertical search radius for a bed.
+pub const BED_VERTICAL: i32 = 4;
+/// Horizontal search radius for the village bell used during a meeting.
+pub const BELL_RADIUS: i32 = 32;
+/// Vertical search radius for the village bell.
+pub const BELL_VERTICAL: i32 = 4;
+/// Vanilla job-site reach: eight blocks horizontally and at most nine blocks below the feet.
+pub const WORK_REACH_HORIZONTAL: f64 = 8.0;
+/// How far below the villager's feet a workstation may be for a restock.
+pub const WORK_REACH_BELOW: f64 = 9.0;
 /// How far a villager wanders from where it spawned before walking back.
 pub const WANDER_RADIUS: f64 = 16.0;
 /// Highest trade level.
@@ -211,6 +234,46 @@ impl VillagerType {
     }
 }
 
+/// The activity a villager follows from its daily schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Activity {
+    /// Wander around home, or stand near a missing destination.
+    #[default]
+    Idle,
+    /// A baby's daytime play period.
+    Play,
+    /// Walk to and stand at the claimed workstation.
+    Work,
+    /// Walk to the village bell (or home when there is none).
+    Meet,
+    /// Walk to the claimed bed, or home when there is no bed.
+    Rest,
+}
+
+/// The Java schedule for `day_time` (0 is 06:00).
+pub const fn activity_at(day_time: i64, baby: bool, employed: bool) -> Activity {
+    let tick = day_time.rem_euclid(24_000);
+    if tick < 10 {
+        Activity::Idle
+    } else if tick >= 12_000 {
+        Activity::Rest
+    } else if baby {
+        if (tick >= 3000 && tick < 6000) || (tick >= 10_000 && tick < 12_000) {
+            Activity::Play
+        } else {
+            Activity::Idle
+        }
+    } else if tick >= 11_000 {
+        Activity::Idle
+    } else if tick >= 9000 {
+        Activity::Meet
+    } else if tick >= 2000 && employed {
+        Activity::Work
+    } else {
+        Activity::Idle
+    }
+}
+
 /// Vanilla `GossipType`: the five kinds of memory a villager keeps about a player.
 ///
 /// The weight turns stored gossip points into reputation and the cap bounds the stored value,
@@ -347,13 +410,25 @@ pub struct VillagerState {
     /// The workstation block that gave the profession, kept as the villager's point of
     /// interest.
     pub workstation: Option<[i32; 3]>,
+    /// The foot of the bed this villager claimed, if any.
+    pub bed: Option<[i32; 3]>,
     /// The villager's offers, with their uses and demand.
     pub offers: Vec<Trade>,
     /// What this villager remembers about each player (vanilla `Gossips`).
     pub gossips: Gossips,
-    /// Ticks until the next restock.
-    pub restock_timer: u32,
-    /// Ticks until the next workstation search.
+    /// Game time of the last restock (vanilla `LastRestock`).
+    pub last_restock: i64,
+    /// Restocks completed today (vanilla `RestocksToday`).
+    pub restocks_today: u8,
+    /// Day index whose restocks have already been counted.
+    pub restock_day: i64,
+    /// The schedule activity for the current tick; derived and not persisted.
+    pub activity: Activity,
+    /// Where the AI should walk this tick; derived and not persisted.
+    pub destination: Option<[i32; 3]>,
+    /// Bell (or home fallback) chosen for the current meeting; derived and not persisted.
+    pub meeting_point: Option<[i32; 3]>,
+    /// Ticks until the next workstation or bed search.
     pub search_timer: u16,
     /// Where the villager spawned; it wanders back within [`WANDER_RADIUS`].
     pub home: [f64; 3],
@@ -368,9 +443,15 @@ impl VillagerState {
             level: 1,
             xp: 0,
             workstation: None,
+            bed: None,
             offers: Vec::new(),
             gossips: Gossips::default(),
-            restock_timer: RESTOCK_TICKS,
+            last_restock: -RESTOCK_COOLDOWN_TICKS,
+            restocks_today: 0,
+            restock_day: -1,
+            activity: Activity::Idle,
+            destination: None,
+            meeting_point: None,
             search_timer: 0,
             home,
         }
@@ -399,6 +480,29 @@ impl VillagerState {
             }
         }
         offers
+    }
+
+    /// Merges the sales made through one player's menu snapshot into the authoritative offers.
+    ///
+    /// Only uses above the current value are applied, so a stale second screen cannot rewind a
+    /// sale or push an offer past `max_uses`; demand rises with each applied sale. Returns the
+    /// number of sales applied.
+    pub fn merge_trades(&mut self, trades: &[Trade]) -> i32 {
+        if self.offers.len() != trades.len() {
+            return 0;
+        }
+        let mut sold = 0;
+        for (offer, trade) in self.offers.iter_mut().zip(trades) {
+            let available = (offer.max_uses - offer.uses).max(0);
+            let used = (trade.uses - offer.uses).clamp(0, available);
+            if used == 0 {
+                continue;
+            }
+            offer.uses += used;
+            offer.demand = offer.demand.saturating_add(used);
+            sold += used;
+        }
+        sold
     }
 
     /// Records one completed sale for `player` (vanilla's trading gossip).
@@ -456,10 +560,24 @@ pub fn offers(store: &EntityStore, key: EntityKey) -> Option<&[Trade]> {
     Some(state(store, key)?.offers.as_slice())
 }
 
-/// The nearest workstation block around `origin`, with the profession it assigns.
+/// Whether another villager in `store` owns the workstation at `position`.
+fn workstation_claimed(store: &EntityStore, owner: EntityKey, position: [i32; 3]) -> bool {
+    store.keys().iter().copied().any(|key| {
+        key != owner
+            && store
+                .data(key)
+                .and_then(|data| data.villager.as_ref())
+                .is_some_and(|villager| villager.workstation == Some(position))
+    })
+}
+
+/// The nearest unclaimed workstation around `origin` that assigns `wanted` (or any profession).
 pub fn nearest_workstation(
+    store: &EntityStore,
+    owner: EntityKey,
     blocks: &impl BlockGetter,
     origin: Vec3,
+    wanted: Option<Profession>,
 ) -> Option<(Profession, [i32; 3])> {
     let ox = origin.x.floor() as i32;
     let oy = origin.y.floor() as i32;
@@ -478,6 +596,11 @@ pub fn nearest_workstation(
                 let Some(profession) = Profession::from_workstation(name) else {
                     continue;
                 };
+                if wanted.is_some_and(|wanted| wanted != profession)
+                    || workstation_claimed(store, owner, position)
+                {
+                    continue;
+                }
                 let distance = dx * dx + dy * dy + dz * dz;
                 if best.is_none_or(|(same, _, _)| distance < same) {
                     best = Some((distance, profession, position));
@@ -486,6 +609,126 @@ pub fn nearest_workstation(
         }
     }
     best.map(|(_, profession, position)| (profession, position))
+}
+
+/// Whether the block at `position` still assigns `profession`.
+fn workstation_matches(
+    blocks: &impl BlockGetter,
+    position: [i32; 3],
+    profession: Profession,
+) -> bool {
+    blocks
+        .block_state(position[0], position[1], position[2])
+        .and_then(ferrite_data::blocks::state)
+        .is_some_and(|(name, _)| Profession::from_workstation(name) == Some(profession))
+}
+
+/// The foot position of a bed block, canonicalizing a head half by its facing.
+fn bed_foot(blocks: &impl BlockGetter, position: [i32; 3]) -> Option<[i32; 3]> {
+    let (name, props) = blocks
+        .block_state(position[0], position[1], position[2])
+        .and_then(ferrite_data::blocks::state)?;
+    if !name.ends_with("_bed") {
+        return None;
+    }
+    let part = props
+        .iter()
+        .find_map(|(key, value)| (*key == "part").then_some(*value));
+    if part != Some("head") {
+        return Some(position);
+    }
+    let facing = props
+        .iter()
+        .find_map(|(key, value)| (*key == "facing").then_some(*value))?;
+    let (dx, dz) = match facing {
+        "north" => (0, 1),
+        "south" => (0, -1),
+        "west" => (1, 0),
+        "east" => (-1, 0),
+        _ => return None,
+    };
+    Some([position[0] + dx, position[1], position[2] + dz])
+}
+
+/// Whether another villager in `store` owns the bed at `position`.
+fn bed_claimed(store: &EntityStore, owner: EntityKey, position: [i32; 3]) -> bool {
+    store.keys().iter().copied().any(|key| {
+        key != owner
+            && store
+                .data(key)
+                .and_then(|data| data.villager.as_ref())
+                .is_some_and(|villager| villager.bed == Some(position))
+    })
+}
+
+/// The nearest unclaimed bed foot around `origin`.
+pub fn nearest_bed(
+    store: &EntityStore,
+    owner: EntityKey,
+    blocks: &impl BlockGetter,
+    origin: Vec3,
+) -> Option<[i32; 3]> {
+    let ox = origin.x.floor() as i32;
+    let oy = origin.y.floor() as i32;
+    let oz = origin.z.floor() as i32;
+    let mut best: Option<(i32, [i32; 3])> = None;
+    for dx in -BED_RADIUS..=BED_RADIUS {
+        for dz in -BED_RADIUS..=BED_RADIUS {
+            for dy in -BED_VERTICAL..=BED_VERTICAL {
+                let Some(foot) = bed_foot(blocks, [ox + dx, oy + dy, oz + dz]) else {
+                    continue;
+                };
+                if bed_claimed(store, owner, foot) {
+                    continue;
+                }
+                let distance =
+                    (foot[0] - ox).pow(2) + (foot[1] - oy).pow(2) + (foot[2] - oz).pow(2);
+                if best.is_none_or(|(same, _)| distance < same) {
+                    best = Some((distance, foot));
+                }
+            }
+        }
+    }
+    best.map(|(_, foot)| foot)
+}
+
+/// The nearest bell around `origin`.
+pub fn nearest_bell(blocks: &impl BlockGetter, origin: Vec3) -> Option<[i32; 3]> {
+    let ox = origin.x.floor() as i32;
+    let oy = origin.y.floor() as i32;
+    let oz = origin.z.floor() as i32;
+    let mut best: Option<(i32, [i32; 3])> = None;
+    for dx in -BELL_RADIUS..=BELL_RADIUS {
+        for dz in -BELL_RADIUS..=BELL_RADIUS {
+            for dy in -BELL_VERTICAL..=BELL_VERTICAL {
+                let position = [ox + dx, oy + dy, oz + dz];
+                let Some(block) = blocks.block_state(position[0], position[1], position[2]) else {
+                    continue;
+                };
+                let Some((name, _)) = ferrite_data::blocks::state(block) else {
+                    continue;
+                };
+                if name.strip_prefix("minecraft:").unwrap_or(name) != "bell" {
+                    continue;
+                }
+                let distance = dx * dx + dy * dy + dz * dz;
+                if best.is_none_or(|(same, _)| distance < same) {
+                    best = Some((distance, position));
+                }
+            }
+        }
+    }
+    best.map(|(_, position)| position)
+}
+
+/// Vanilla job-site reach: within eight blocks horizontally and at most nine below the feet.
+pub fn workstation_reached(pos: Vec3, workstation: [i32; 3]) -> bool {
+    let dx = pos.x - (f64::from(workstation[0]) + 0.5);
+    let dz = pos.z - (f64::from(workstation[2]) + 0.5);
+    let y = f64::from(workstation[1]);
+    dx * dx + dz * dz <= WORK_REACH_HORIZONTAL.powi(2)
+        && y <= pos.y + 1.0
+        && y >= pos.y - WORK_REACH_BELOW
 }
 
 /// Whether the block a villager would step into while walking along `yaw` is water or lava.
@@ -503,49 +746,146 @@ pub fn ahead_is_liquid(blocks: &impl BlockGetter, pos: Vec3, yaw: f32) -> bool {
     false
 }
 
-/// Ticks a villager's profession search and restock timer.
+/// Ticks one villager's schedule, job/bed claims, movement target and restocking.
 ///
-/// Unemployed villagers look for a workstation every [`WORKSTATION_SEARCH_TICKS`] ticks; the
-/// first one found assigns the profession, the offers and the point of interest. A villager
-/// that remembers a workstation restocks its offers every [`RESTOCK_TICKS`].
-pub fn tick(store: &mut EntityStore, key: EntityKey, blocks: &impl BlockGetter) {
+/// `day_time` is the world clock (`GameState.clock_time`) and `game_time` is total world ticks;
+/// restock spacing uses the latter, like vanilla's `LastRestock`.
+pub fn tick(
+    store: &mut EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    day_time: i64,
+    game_time: i64,
+) {
     let Some(data) = store.data(key) else {
         return;
     };
     let Some(current) = data.villager.clone() else {
         return;
     };
+    let Some(mob) = data.mob.as_ref() else {
+        return;
+    };
     // A wandering trader keeps its offers and never takes a job.
-    if crate::mob::state(store, key).is_some_and(|s| s.kind != MobKind::Villager) {
+    if mob.kind != MobKind::Villager {
         return;
     }
+    let baby = mob.age < 0;
     let uuid = data.uuid;
     let pos = store.pos(key).unwrap_or(Vec3::ZERO);
     let mut state = current;
-    if state.profession == Profession::None {
-        if state.search_timer == 0 {
-            if let Some((profession, workstation)) = nearest_workstation(blocks, pos) {
+    let before = (state.profession, state.level, state.villager_type);
+    let day = day_time.div_euclid(24_000);
+    if state.restock_day != day {
+        state.restocks_today = 0;
+        state.restock_day = day;
+    }
+    if state.last_restock >= 0
+        && game_time.saturating_sub(state.last_restock) > RESTOCK_FORGET_TICKS
+    {
+        state.restocks_today = 0;
+    }
+
+    // A remembered workstation is valid only while it still assigns the profession and no
+    // other villager in this region owns it.
+    if let Some(workstation) = state.workstation
+        && (!workstation_matches(blocks, workstation, state.profession)
+            || workstation_claimed(store, key, workstation))
+    {
+        state.workstation = None;
+    }
+    if baby || state.profession == Profession::Nitwit {
+        state.workstation = None;
+    }
+    let needs_workstation = !baby
+        && state.profession != Profession::Nitwit
+        && (state.profession == Profession::None || state.workstation.is_none());
+    let mut searched = false;
+    if needs_workstation && state.search_timer == 0 {
+        let wanted = (state.profession != Profession::None).then_some(state.profession);
+        if let Some((profession, workstation)) =
+            nearest_workstation(store, key, blocks, pos, wanted)
+        {
+            if state.profession == Profession::None {
                 state.profession = profession;
-                state.workstation = Some(workstation);
                 state.offers = offers_for(profession, state.level, uuid);
             }
-            state.search_timer = WORKSTATION_SEARCH_TICKS;
-        } else {
-            state.search_timer -= 1;
+            state.workstation = Some(workstation);
         }
+        state.search_timer = WORKSTATION_SEARCH_TICKS;
+        searched = true;
     }
-    if state.workstation.is_some() {
-        state.restock_timer = state.restock_timer.saturating_sub(1);
-        if state.restock_timer == 0 {
-            for trade in &mut state.offers {
-                trade.restock();
-            }
-            state.restock_timer = RESTOCK_TICKS;
+
+    let employed = !baby && !matches!(state.profession, Profession::None | Profession::Nitwit);
+    let activity = activity_at(day_time, baby, employed);
+    if let Some(bed) = state.bed
+        && bed_foot(blocks, bed) != Some(bed)
+    {
+        state.bed = None;
+    }
+    if activity == Activity::Rest
+        && state.bed.is_none()
+        && (state.search_timer == 0 || searched)
+        && let Some(bed) = nearest_bed(store, key, blocks, pos)
+    {
+        state.bed = Some(bed);
+        state.search_timer = WORKSTATION_SEARCH_TICKS;
+    }
+    if state.search_timer > 0 {
+        state.search_timer -= 1;
+    }
+
+    let home = [
+        state.home[0].floor() as i32,
+        state.home[1].floor() as i32,
+        state.home[2].floor() as i32,
+    ];
+    if activity == Activity::Meet {
+        if state.activity != Activity::Meet || state.meeting_point.is_none() {
+            state.meeting_point = nearest_bell(blocks, pos).or(Some(home));
         }
+    } else {
+        state.meeting_point = None;
     }
+    state.destination = match activity {
+        Activity::Work => state.workstation,
+        Activity::Rest => state.bed.or(Some(home)),
+        Activity::Meet => state.meeting_point,
+        Activity::Idle | Activity::Play => None,
+    };
+
+    // Vanilla `Villager.shouldRestock` plus the two-per-day `RestocksToday` cap. A restock
+    // happens while working at a valid job site and only refreshes offers that sold out.
+    if !baby
+        && activity == Activity::Work
+        && state.restocks_today < RESTOCKS_PER_DAY
+        && (state.last_restock < 0
+            || game_time.saturating_sub(state.last_restock) >= RESTOCK_COOLDOWN_TICKS)
+        && let Some(workstation) = state.workstation
+        && workstation_reached(pos, workstation)
+        && state.offers.iter().any(|trade| trade.is_out_of_stock())
+    {
+        for trade in &mut state.offers {
+            trade.restock();
+        }
+        state.last_restock = game_time;
+        state.restocks_today = state.restocks_today.saturating_add(1);
+    }
+
+    state.activity = activity;
     if let Some(data) = store.data_mut(key) {
+        let identity_changed = before != (state.profession, state.level, state.villager_type);
         data.villager = Some(state.clone());
-        sync_metadata(&mut data.metadata, &state);
+        if identity_changed {
+            sync_metadata(&mut data.metadata, &state);
+        }
+    }
+}
+
+/// Ticks every villager in one region. Called once per region tick before mob AI.
+pub fn tick_all(store: &mut EntityStore, blocks: &impl BlockGetter, day_time: i64, game_time: i64) {
+    for key in store.keys().to_vec() {
+        tick(store, key, blocks, day_time, game_time);
     }
 }
 
@@ -561,6 +901,34 @@ pub fn apply_trades(store: &mut EntityStore, key: EntityKey, trades: Vec<Trade>,
     };
     let mut state = current;
     state.offers = trades;
+    gain_trade_xp(&mut state, xp, uuid);
+    if let Some(data) = store.data_mut(key) {
+        data.villager = Some(state.clone());
+        sync_metadata(&mut data.metadata, &state);
+    }
+}
+
+/// Adds trade XP earned through an already-merged menu, leveling up as thresholds are crossed.
+pub fn add_trade_xp(store: &mut EntityStore, key: EntityKey, xp: i32) {
+    let Some(data) = store.data(key) else {
+        return;
+    };
+    let uuid = data.uuid;
+    let Some(current) = data.villager.clone() else {
+        return;
+    };
+    if xp <= 0 {
+        return;
+    }
+    let mut state = current;
+    gain_trade_xp(&mut state, xp, uuid);
+    if let Some(data) = store.data_mut(key) {
+        data.villager = Some(state.clone());
+        sync_metadata(&mut data.metadata, &state);
+    }
+}
+
+fn gain_trade_xp(state: &mut VillagerState, xp: i32, uuid: Uuid) {
     state.xp = state.xp.saturating_add(xp.max(0));
     while state.level < MAX_LEVEL {
         let threshold = NEXT_LEVEL_XP[(state.level - 1) as usize];
@@ -571,10 +939,6 @@ pub fn apply_trades(store: &mut EntityStore, key: EntityKey, trades: Vec<Trade>,
         state
             .offers
             .extend(level_offers(state.profession, state.level, uuid));
-    }
-    if let Some(data) = store.data_mut(key) {
-        data.villager = Some(state.clone());
-        sync_metadata(&mut data.metadata, &state);
     }
 }
 
@@ -662,40 +1026,46 @@ mod tests {
     use crate::physics::BlockGetter;
 
     struct Flat {
-        feature: Option<(&'static str, [i32; 3])>,
+        blocks: Vec<(&'static str, [i32; 3])>,
     }
 
     impl Flat {
         fn empty() -> Self {
-            Self { feature: None }
+            Self { blocks: Vec::new() }
         }
 
         fn with(name: &'static str, at: [i32; 3]) -> Self {
             Self {
-                feature: Some((name, at)),
+                blocks: vec![(name, at)],
+            }
+        }
+
+        fn with_blocks(blocks: &[(&'static str, [i32; 3])]) -> Self {
+            Self {
+                blocks: blocks.to_vec(),
             }
         }
     }
 
     impl BlockGetter for Flat {
         fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
-            if let Some((name, at)) = self.feature
-                && at == [x, y, z]
-            {
+            if let Some((name, _)) = self.blocks.iter().find(|(_, at)| *at == [x, y, z]) {
                 return ferrite_data::blocks::default_state(name);
             }
             ferrite_data::blocks::default_state(if y < 64 { "stone" } else { "air" })
         }
     }
 
+    fn villager_at(store: &mut EntityStore, x: f64, z: f64) -> (EntityKey, Uuid) {
+        let mut rng = Rng::new((x.to_bits() ^ z.to_bits()).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let key = store.insert(new_mob(MobKind::Villager, Vec3::new(x, 64.0, z), &mut rng));
+        let uuid = store.data(key).unwrap().uuid;
+        (key, uuid)
+    }
+
     fn villager() -> (EntityStore, EntityKey, Uuid) {
         let mut store = EntityStore::default();
-        let key = store.insert(new_mob(
-            MobKind::Villager,
-            Vec3::new(0.5, 64.0, 0.5),
-            &mut Rng::new(1),
-        ));
-        let uuid = store.data(key).unwrap().uuid;
+        let (key, uuid) = villager_at(&mut store, 0.5, 0.5);
         (store, key, uuid)
     }
 
@@ -758,7 +1128,7 @@ mod tests {
         let (mut store, key, _) = villager();
         assert_eq!(state(&store, key).unwrap().profession, Profession::None);
         let world = Flat::with("composter", [3, 64, 0]);
-        tick(&mut store, key, &world);
+        tick(&mut store, key, &world, 2000, 2000);
         let villager = state(&store, key).unwrap();
         assert_eq!(villager.profession, Profession::Farmer);
         assert_eq!(villager.workstation, Some([3, 64, 0]));
@@ -777,45 +1147,203 @@ mod tests {
             Some(&MetaValue::Boolean(true))
         );
         // The profession and its point of interest stick even when the block is gone.
-        tick(&mut store, key, &Flat::empty());
+        tick(&mut store, key, &Flat::empty(), 2000, 2000);
         assert_eq!(state(&store, key).unwrap().profession, Profession::Farmer);
+        assert_eq!(state(&store, key).unwrap().workstation, None);
     }
 
     #[test]
-    fn trades_level_the_villager_up_and_restock_at_the_workstation() {
-        let (mut store, key, uuid) = villager();
-        let world = Flat::with("composter", [1, 64, 0]);
-        tick(&mut store, key, &world);
-        let mut offers = offers_for(Profession::Farmer, 1, uuid);
-        for trade in &mut offers {
-            trade.uses = trade.max_uses;
+    fn the_java_schedule_changes_activity_at_the_documented_boundaries() {
+        assert_eq!(activity_at(0, false, true), Activity::Idle);
+        assert_eq!(activity_at(10, false, true), Activity::Idle);
+        assert_eq!(activity_at(1999, false, true), Activity::Idle);
+        assert_eq!(activity_at(2000, false, true), Activity::Work);
+        assert_eq!(activity_at(8999, false, true), Activity::Work);
+        assert_eq!(activity_at(9000, false, true), Activity::Meet);
+        assert_eq!(activity_at(10_999, false, true), Activity::Meet);
+        assert_eq!(activity_at(11_000, false, true), Activity::Idle);
+        assert_eq!(activity_at(11_999, false, true), Activity::Idle);
+        assert_eq!(activity_at(12_000, false, true), Activity::Rest);
+        assert_eq!(activity_at(23_999, false, true), Activity::Rest);
+        assert_eq!(activity_at(2000, false, false), Activity::Idle);
+        assert_eq!(activity_at(9000, false, false), Activity::Meet);
+        assert_eq!(activity_at(3000, true, false), Activity::Play);
+        assert_eq!(activity_at(6000, true, false), Activity::Idle);
+        assert_eq!(activity_at(10_000, true, false), Activity::Play);
+        assert_eq!(activity_at(12_000, true, false), Activity::Rest);
+    }
+
+    #[test]
+    fn a_workstation_has_only_one_owner_and_unemployment_searches_again() {
+        let (mut store, first, _) = villager();
+        let (second, _) = villager_at(&mut store, 1.5, 0.5);
+        let world = Flat::with("composter", [2, 64, 0]);
+        tick(&mut store, first, &world, 2000, 2000);
+        tick(&mut store, second, &world, 2000, 2000);
+        assert_eq!(state(&store, first).unwrap().profession, Profession::Farmer);
+        assert_eq!(state(&store, second).unwrap().profession, Profession::None);
+        assert_eq!(state(&store, second).unwrap().workstation, None);
+
+        let world = Flat::with_blocks(&[("composter", [2, 64, 0]), ("lectern", [3, 64, 0])]);
+        for _ in 0..WORKSTATION_SEARCH_TICKS {
+            tick(&mut store, second, &world, 2000, 2000);
         }
-        apply_trades(&mut store, key, offers, NEXT_LEVEL_XP[0]);
+        assert_eq!(
+            state(&store, second).unwrap().profession,
+            Profession::Librarian
+        );
+        assert_eq!(state(&store, second).unwrap().workstation, Some([3, 64, 0]));
+    }
+
+    #[test]
+    fn a_removed_workstation_is_released_and_a_matching_one_is_claimed() {
+        let (mut store, key, _) = villager();
+        tick(
+            &mut store,
+            key,
+            &Flat::with("composter", [2, 64, 0]),
+            2000,
+            2000,
+        );
+        assert_eq!(state(&store, key).unwrap().workstation, Some([2, 64, 0]));
+        tick(&mut store, key, &Flat::empty(), 2000, 2000);
+        assert_eq!(state(&store, key).unwrap().profession, Profession::Farmer);
+        assert_eq!(state(&store, key).unwrap().workstation, None);
+
+        let world = Flat::with("composter", [4, 64, 0]);
+        for _ in 0..WORKSTATION_SEARCH_TICKS {
+            tick(&mut store, key, &world, 2000, 2000);
+        }
+        assert_eq!(state(&store, key).unwrap().workstation, Some([4, 64, 0]));
+    }
+
+    #[test]
+    fn a_bed_has_only_one_owner_and_releases_when_removed() {
+        let (mut store, first, _) = villager();
+        let (second, _) = villager_at(&mut store, 3.5, 0.5);
+        let one_bed = Flat::with("red_bed", [2, 64, 0]);
+        tick(&mut store, first, &one_bed, 12_000, 12_000);
+        tick(&mut store, second, &one_bed, 12_000, 12_000);
+        assert_eq!(state(&store, first).unwrap().bed, Some([2, 64, 0]));
+        assert_eq!(state(&store, second).unwrap().bed, None);
+
+        let two_beds = Flat::with_blocks(&[("red_bed", [2, 64, 0]), ("red_bed", [4, 64, 0])]);
+        for _ in 0..WORKSTATION_SEARCH_TICKS {
+            tick(&mut store, second, &two_beds, 12_000, 12_000);
+        }
+        assert_eq!(state(&store, second).unwrap().bed, Some([4, 64, 0]));
+
+        tick(&mut store, first, &Flat::empty(), 12_000, 12_000);
+        assert_eq!(state(&store, first).unwrap().bed, None);
+    }
+
+    #[test]
+    fn restocking_needs_work_a_reached_job_site_and_a_sold_out_offer() {
+        let (mut store, key, _) = villager();
+        let world = Flat::with("composter", [2, 64, 0]);
+        tick(&mut store, key, &world, 2000, 2000);
+        {
+            let villager = state_mut(&mut store, key).unwrap();
+            villager.offers[0].uses = villager.offers[0].max_uses;
+            villager.offers[0].demand = 4;
+            villager.offers[0].special_price = 3;
+            villager.last_restock = -RESTOCK_COOLDOWN_TICKS;
+            villager.restocks_today = 0;
+        }
+        tick(&mut store, key, &world, 2000, 2000);
+        let villager = state(&store, key).unwrap();
+        assert_eq!(villager.restocks_today, 1);
+        assert_eq!(villager.last_restock, 2000);
+        assert_eq!(villager.offers[0].uses, 0);
+        assert_eq!(villager.offers[0].demand, 0);
+        assert_eq!(villager.offers[0].special_price, 0);
+
+        // A second restock is refused inside the 2400-tick cooldown.
+        state_mut(&mut store, key).unwrap().offers[0].uses =
+            state(&store, key).unwrap().offers[0].max_uses;
+        tick(&mut store, key, &world, 4000, 4000);
+        assert_eq!(state(&store, key).unwrap().restocks_today, 1);
+        tick(&mut store, key, &world, 4400, 4400);
+        assert_eq!(state(&store, key).unwrap().restocks_today, 2);
+
+        // The two-per-day cap wins over the cooldown.
+        state_mut(&mut store, key).unwrap().offers[0].uses =
+            state(&store, key).unwrap().offers[0].max_uses;
+        tick(&mut store, key, &world, 7000, 7000);
+        assert_eq!(state(&store, key).unwrap().restocks_today, 2);
+
+        // A new day resets the counter.
+        state_mut(&mut store, key).unwrap().offers[0].uses =
+            state(&store, key).unwrap().offers[0].max_uses;
+        tick(&mut store, key, &world, 26_000, 26_000);
+        assert_eq!(state(&store, key).unwrap().restocks_today, 1);
+
+        // Night or a missing job site cannot restock.
+        {
+            let villager = state_mut(&mut store, key).unwrap();
+            villager.offers[0].uses = villager.offers[0].max_uses;
+            villager.restocks_today = 1;
+            villager.last_restock = 39_000;
+        }
+        tick(&mut store, key, &world, 36_000, 40_000);
+        assert_eq!(state(&store, key).unwrap().restocks_today, 1);
+        {
+            let villager = state_mut(&mut store, key).unwrap();
+            villager.offers[0].uses = villager.offers[0].max_uses;
+            villager.restocks_today = 1;
+            villager.last_restock = 59_000;
+        }
+        tick(&mut store, key, &Flat::empty(), 26_000, 60_000);
+        assert_eq!(state(&store, key).unwrap().restocks_today, 1);
+    }
+
+    #[test]
+    fn restocks_today_decays_after_ten_minutes_without_a_restock() {
+        let (mut store, key, _) = villager();
+        let world = Flat::with("composter", [2, 64, 0]);
+        tick(&mut store, key, &world, 2000, 2000);
+        {
+            let villager = state_mut(&mut store, key).unwrap();
+            villager.offers[0].uses = villager.offers[0].max_uses;
+            villager.last_restock = 0;
+            villager.restocks_today = 2;
+            villager.restock_day = 0;
+        }
+        tick(&mut store, key, &world, 2000, 12_001);
+        let villager = state(&store, key).unwrap();
+        assert_eq!(villager.restocks_today, 1);
+        assert_eq!(villager.last_restock, 12_001);
+    }
+
+    #[test]
+    fn job_site_reach_matches_the_vanilla_eight_by_nine_box() {
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+        assert!(workstation_reached(feet, [8, 64, 0]));
+        assert!(!workstation_reached(feet, [9, 64, 0]));
+        assert!(workstation_reached(feet, [0, 55, 0]));
+        assert!(!workstation_reached(feet, [0, 54, 0]));
+        assert!(workstation_reached(feet, [0, 65, 0]));
+    }
+
+    #[test]
+    fn a_completed_trade_adds_levels_and_offers() {
+        let (mut store, key, _) = villager();
+        tick(
+            &mut store,
+            key,
+            &Flat::with("composter", [1, 64, 0]),
+            2000,
+            2000,
+        );
+        add_trade_xp(&mut store, key, NEXT_LEVEL_XP[0]);
         let villager = state(&store, key).unwrap();
         assert_eq!(villager.level, 2);
-        assert_eq!(villager.xp, 10);
+        assert_eq!(villager.xp, NEXT_LEVEL_XP[0]);
         assert_eq!(villager.offers.len(), 4);
-        let metadata = store.data(key).unwrap().metadata.get(VILLAGER_DATA_INDEX);
         assert!(matches!(
-            metadata,
+            store.data(key).unwrap().metadata.get(VILLAGER_DATA_INDEX),
             Some(MetaValue::VillagerData { level: 2, .. })
         ));
-        // The restock timer only runs down at a workstation; when it hits zero every offer is
-        // usable again.
-        for trade in &mut state_mut(&mut store, key).unwrap().offers {
-            trade.uses = trade.max_uses;
-        }
-        state_mut(&mut store, key).unwrap().restock_timer = 1;
-        tick(&mut store, key, &world);
-        assert!(
-            state(&store, key)
-                .unwrap()
-                .offers
-                .iter()
-                .all(|trade| trade.uses == 0),
-            "restocked"
-        );
-        assert_eq!(state(&store, key).unwrap().restock_timer, RESTOCK_TICKS);
     }
 
     #[test]
@@ -1029,7 +1557,13 @@ mod tests {
     #[test]
     fn trade_state_and_reputation_move_with_the_entity_record() {
         let (mut store, key, _) = villager();
-        tick(&mut store, key, &Flat::with("composter", [1, 64, 0]));
+        tick(
+            &mut store,
+            key,
+            &Flat::with("composter", [1, 64, 0]),
+            2000,
+            2000,
+        );
         let player = Uuid::from_u128(5);
         {
             let villager = state_mut(&mut store, key).unwrap();
