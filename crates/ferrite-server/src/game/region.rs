@@ -821,6 +821,14 @@ pub struct Player {
     /// The credits are playing; the client answers with a respawn request when they end.
     pub watching_credits: bool,
 }
+/// A final block update held back until the client has finished its moving-piston animation.
+#[derive(Debug)]
+pub struct DelayedUpdate {
+    pub pos: [i32; 3],
+    pub due: i64,
+    pub chunk: (i32, i32),
+    pub packet: Outbound,
+}
 #[derive(Default)]
 pub struct Region {
     /// Explosions plugins asked for: center, power, whether fire is left behind and whether
@@ -831,11 +839,11 @@ pub struct Region {
     /// Chance in percent that a wandering trader turns up at the next daily roll
     /// (`WanderingTraderSpawner`: starts at 25, grows by 25 per miss, caps at 75).
     pub trader_chance: u32,
-    /// Wandering traders part-way through a drink, by uuid: the item and ticks left.
-    trader_drinks: HashMap<Uuid, (TraderDrink, u32)>,
-    /// Piston block updates held back for two ticks so the client can animate the movement:
-    /// the tick they are due, their chunk, position and resulting block state.
-    pub delayed_updates: Vec<DelayedBlockUpdate>,
+    /// Final block updates held back until the client finished the push animation. Keyed by
+    /// position through [`Region::queue_delayed_update`] so a reversal replaces stale updates.
+    pub delayed_updates: Vec<DelayedUpdate>,
+    /// Client-side moving-piston blocks that have not reached the two-tick completion yet.
+    pub moving_pistons: super::piston::Animations,
     /// The stack of every trident in flight, by entity uuid, so it can drop as it was thrown.
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
@@ -890,7 +898,10 @@ impl RegionData for Region {
         self.redstone.merge(other.redstone);
         self.command_blocks.merge(other.command_blocks);
         self.tick_clock = self.tick_clock.max(other.tick_clock);
-        self.delayed_updates.extend(other.delayed_updates);
+        for update in other.delayed_updates {
+            self.queue_delayed_update(update);
+        }
+        self.moving_pistons.merge(other.moving_pistons);
         self.players.extend(other.players);
         self.entities.merge(other.entities);
         self.trader_drinks.extend(other.trader_drinks);
@@ -905,12 +916,23 @@ impl RegionData for Region {
             .filter(|(_, p)| sections.contains(&SectionPos(p.chunk.0 >> 4, p.chunk.1 >> 4)))
             .map(|(id, _)| *id)
             .collect();
+        let in_sections = |pos: [i32; 3]| {
+            sections.contains(&SectionPos(
+                pos[0].div_euclid(16) >> 4,
+                pos[2].div_euclid(16) >> 4,
+            ))
+        };
+        let (delayed_updates, staying) = std::mem::take(&mut self.delayed_updates)
+            .into_iter()
+            .partition(|update| in_sections(update.pos));
+        self.delayed_updates = staying;
+        let moving_pistons = self.moving_pistons.split(in_sections);
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
             trader_chance: 25,
-            trader_drinks: HashMap::new(),
-            delayed_updates: Vec::new(),
+            delayed_updates,
+            moving_pistons,
             thrown_tridents: HashMap::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
@@ -6875,6 +6897,13 @@ impl Region {
         }
     }
 
+    /// Replaces a held final update for the same position, so a reversal before the two-tick
+    /// settle cannot deliver an older extension after a newer retraction.
+    fn queue_delayed_update(&mut self, update: DelayedUpdate) {
+        self.delayed_updates.retain(|old| old.pos != update.pos);
+        self.delayed_updates.push(update);
+    }
+
     /// Ticks the region's redstone network after this tick's block changes, mirroring
     /// `Level.tickBlockEntities` + `Level.tickBlocks` + scheduled block ticks.
     fn tick_redstone(&mut self, ctx: &TickContext, changed: &mut Vec<[i32; 3]>) {
@@ -6882,6 +6911,19 @@ impl Region {
             return;
         };
         let now = self.tick_clock;
+        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed_updates)
+            .into_iter()
+            .partition(|update| update.due <= now);
+        self.delayed_updates = waiting;
+        for update in due {
+            broadcast_tracked_chunk(
+                &ctx.tracking.lock().unwrap(),
+                ctx.dimension,
+                update.chunk,
+                &update.packet,
+            );
+        }
+        self.moving_pistons.advance();
         let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
         let mut world =
             super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
@@ -6952,17 +6994,107 @@ impl Region {
                     &packet(&event),
                 );
             }
+            let affected: HashSet<_> = operation.edits.iter().map(|&(at, _, _)| at).collect();
+            let mut moving = Vec::new();
+            for &moved in &operation.moves {
+                moving.push(super::piston::MovingBlock::new(
+                    moved.source,
+                    moved.destination,
+                    moved.state,
+                    facing,
+                    extending,
+                    false,
+                ));
+            }
+            if let Some(head) = operation.head {
+                moving.push(super::piston::MovingBlock::new(
+                    head.source,
+                    head.destination,
+                    head.state,
+                    facing,
+                    extending,
+                    true,
+                ));
+            }
+            let destinations: HashSet<_> = moving.iter().map(|block| block.destination).collect();
+            // Clear the cells that do not receive a moving block immediately. The base changes
+            // now; the animated destinations keep their moving_piston overlay until completion.
             for &(at, _, state) in &operation.edits {
-                // The client animates the push itself from the block event; the final blocks
-                // reach it two ticks later, when vanilla's moving piston settles.
-                queue_delayed_piston_update(
-                    &mut self.delayed_updates,
-                    self.tick_clock.wrapping_add(2),
-                    at,
-                    state,
+                if at == pos || !destinations.contains(&at) {
+                    let update = BlockUpdate {
+                        location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2])
+                            .pack(),
+                        block_state: VarInt(state as i32),
+                    };
+                    broadcast_tracked_chunk(
+                        &ctx.tracking.lock().unwrap(),
+                        ctx.dimension,
+                        (at[0].div_euclid(16), at[2].div_euclid(16)),
+                        &packet(&update),
+                    );
+                }
+            }
+            // `PistonMovingBlockEntity` is attached to the destination cell; its NBT carries the
+            // moved state, direction and progress the client interpolates over two ticks.
+            let piston_type =
+                ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:piston");
+            for block in &moving {
+                let Some(state) = block.moving_state() else {
+                    continue;
+                };
+                let location = ferrite_protocol::types::BlockPos::new(
+                    block.destination[0],
+                    block.destination[1],
+                    block.destination[2],
+                )
+                .pack();
+                let update = BlockUpdate {
+                    location,
+                    block_state: VarInt(state as i32),
+                };
+                broadcast_tracked_chunk(
+                    &ctx.tracking.lock().unwrap(),
+                    ctx.dimension,
+                    (
+                        block.destination[0].div_euclid(16),
+                        block.destination[2].div_euclid(16),
+                    ),
+                    &packet(&update),
                 );
+                if let Some(type_id) = piston_type
+                    && let Some(nbt) = block.entity_nbt()
+                {
+                    let update = BlockEntityData {
+                        location,
+                        block_type: VarInt(type_id),
+                        nbt,
+                    };
+                    broadcast_tracked_chunk(
+                        &ctx.tracking.lock().unwrap(),
+                        ctx.dimension,
+                        (
+                            block.destination[0].div_euclid(16),
+                            block.destination[2].div_euclid(16),
+                        ),
+                        &packet(&update),
+                    );
+                }
+            }
+            for &(at, _, state) in &operation.edits {
+                let update = BlockUpdate {
+                    location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+                    block_state: VarInt(state as i32),
+                };
+                self.delayed_updates.retain(|old| old.pos != at);
+                self.delayed_updates.push(DelayedUpdate {
+                    pos: at,
+                    due: self.tick_clock.wrapping_add(2),
+                    chunk: (at[0].div_euclid(16), at[2].div_euclid(16)),
+                    packet: packet(&update),
+                });
                 piston_changes.push(at);
             }
+            self.moving_pistons.start(moving, &affected);
             {
                 // Entities standing where a block was pushed are carried one block along, when
                 // there is room for them there (vanilla `PistonMovingBlockEntity.moveCollidedEntities`).
@@ -8703,6 +8835,21 @@ mod tests {
         assert!(nether_rx.try_recv().is_some());
         assert!(overworld_rx.try_recv().is_none());
     }
+    #[test]
+    fn delayed_piston_update_replaces_the_same_position() {
+        let mut region = Region::default();
+        let update = |due| DelayedUpdate {
+            pos: [1, 64, 2],
+            due,
+            chunk: (0, 0),
+            packet: Outbound::Packet(vec![42].into()),
+        };
+        region.queue_delayed_update(update(5));
+        region.queue_delayed_update(update(7));
+        assert_eq!(region.delayed_updates.len(), 1);
+        assert_eq!(region.delayed_updates[0].due, 7);
+    }
+
     #[test]
     fn experience_curve_matches_vanilla_levels() {
         assert_eq!(total_for_level(0), 0);
