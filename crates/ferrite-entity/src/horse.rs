@@ -19,6 +19,8 @@ const MAX_TEMPER: i32 = 100;
 const TEMPER_STEP: i32 = 5;
 /// The `EquipmentSlot` index of the saddle in a `set_equipment` packet.
 pub const SADDLE_SLOT: u8 = 7;
+/// The most health an equine is born with (`AbstractHorse.generateMaxHealth`).
+const MAX_HEALTH: f32 = 30.0;
 /// The `EquipmentSlot` index of body armour (horse armour).
 pub const BODY_SLOT: u8 = 6;
 
@@ -49,7 +51,7 @@ pub fn treat(store: &mut EntityStore, key: EntityKey, item: &str) -> bool {
     if !state.kind.is_equine() {
         return false;
     }
-    let max = state.kind.max_health();
+    let max = state.kind.max_health().min(MAX_HEALTH);
     let wild = state.owner.is_none() && state.temper < MAX_TEMPER;
     if state.health >= max && !wild {
         return false;

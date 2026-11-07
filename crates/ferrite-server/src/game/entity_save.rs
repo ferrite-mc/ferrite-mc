@@ -262,6 +262,8 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("Sitting".into(), Tag::Byte(mob.sitting as i8));
         c.insert("Saddled".into(), Tag::Byte(mob.saddled as i8));
         c.insert("Armor".into(), Tag::Int(i32::from(mob.armor)));
+        c.insert("HorseSpeed".into(), Tag::Float(mob.speed));
+        c.insert("HorseJump".into(), Tag::Float(mob.jump));
         c.insert("Temper".into(), Tag::Int(mob.temper));
         c.insert("InLove".into(), Tag::Int(i32::from(mob.love)));
         c.insert("WanderYaw".into(), Tag::Float(mob.wander_yaw));
@@ -392,6 +394,8 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.owner = uuid_field(c, "Owner");
                 mob.sitting = boolean(c, "Sitting");
                 mob.saddled = boolean(c, "Saddled");
+                mob.speed = float(c, "HorseSpeed").unwrap_or(0.0);
+                mob.jump = float(c, "HorseJump").unwrap_or(0.0);
                 mob.armor = int(c, "Armor").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
                 mob.temper = int(c, "Temper").unwrap_or(0);
                 if kind.is_equine() {

@@ -4466,8 +4466,46 @@ impl Region {
             state.no_ai = true;
         }
         self.send_saddle(ctx, key);
+        self.send_stats(ctx, key);
         self.send_passengers(ctx, key);
         true
+    }
+
+    /// Sends the horse's inherited speed and jump strength, which the riding client steers with.
+    fn send_stats(&self, ctx: &TickContext, key: ferrite_entity::EntityKey) {
+        let (Some(data), Some(state)) = (
+            self.entities.data(key),
+            ferrite_entity::mob::state(&self.entities, key),
+        ) else {
+            return;
+        };
+        if state.speed <= 0.0 {
+            return;
+        }
+        let attribute = |name: &str, base: f32| {
+            ferrite_data::registries::id("minecraft:attribute", name).map(|id| AttributeSnapshot {
+                attribute: VarInt(id),
+                base: f64::from(base),
+                modifiers: Vec::new(),
+            })
+        };
+        let attributes: Vec<_> = [
+            attribute("minecraft:movement_speed", state.speed),
+            attribute("minecraft:jump_strength", state.jump),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let players = &self.players;
+        tracker::broadcast(
+            &self.entities,
+            key,
+            &UpdateAttributes {
+                entity_id: VarInt(data.id),
+                attributes,
+            },
+            &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+        );
     }
 
     /// Tells everyone tracking the horse what it wears: the saddle (the client only lets the

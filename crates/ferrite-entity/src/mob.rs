@@ -302,6 +302,9 @@ pub struct MobState {
     pub saddled: bool,
     /// Item id of the horse armour it wears (0 for none).
     pub armor: u16,
+    /// Inherited `movement_speed` and `jump_strength` of an equine (0 when not rolled).
+    pub speed: f32,
+    pub jump: f32,
     /// How much a wild horse has come to accept riders (`AbstractHorse.temper`).
     pub temper: i32,
 }
@@ -342,6 +345,8 @@ impl MobState {
             anger: 0,
             saddled: false,
             armor: 0,
+            speed: 0.0,
+            jump: 0.0,
             temper: 0,
         }
     }
@@ -388,6 +393,14 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         && let Some(state) = data.mob.as_ref()
     {
         crate::horse::define_metadata(&mut data.metadata, state);
+        // `AbstractHorse.randomizeAttributes`: speed 0.1125 to 0.3375, jump 0.4 to 1.0 and 15 to
+        // 30 health, each from several rolls so the middle is likelier.
+        if let Some(mob) = data.mob.as_mut() {
+            mob.speed =
+                (0.45 + rng.next_f32() * 0.3 + rng.next_f32() * 0.3 + rng.next_f32() * 0.3) * 0.25;
+            mob.jump = 0.4 + rng.next_f32() * 0.2 + rng.next_f32() * 0.2 + rng.next_f32() * 0.2;
+            mob.health = 15.0 + rng.next_int(8) as f32 + rng.next_int(9) as f32;
+        }
         if kind == MobKind::Horse {
             // A random coat (7 colours) with a random marking (5 of them), like
             // `Horse.finalizeSpawn`.
