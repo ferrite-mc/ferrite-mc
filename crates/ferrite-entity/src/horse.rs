@@ -12,6 +12,9 @@ use uuid::Uuid;
 pub const FLAGS_INDEX: u8 = 17;
 /// Synched `Horse.DATA_ID_TYPE_VARIANT`.
 pub const VARIANT_INDEX: u8 = 18;
+/// Synched `Llama.DATA_STRENGTH_ID` and `Llama.DATA_VARIANT_ID`.
+pub const STRENGTH_INDEX: u8 = 19;
+pub const LLAMA_VARIANT_INDEX: u8 = 20;
 const TAME: i8 = 2;
 /// `AbstractHorse.getMaxTemper`.
 const MAX_TEMPER: i32 = 100;
@@ -67,7 +70,7 @@ pub fn treat(store: &mut EntityStore, key: EntityKey, item: &str) -> bool {
 pub fn add_chest(store: &mut EntityStore, key: EntityKey) -> bool {
     match mob::state_mut(store, key) {
         Some(s)
-            if matches!(s.kind, MobKind::Donkey | MobKind::Mule)
+            if matches!(s.kind, MobKind::Donkey | MobKind::Mule | MobKind::Llama)
                 && s.owner.is_some()
                 && !s.chest =>
         {
@@ -77,6 +80,16 @@ pub fn add_chest(store: &mut EntityStore, key: EntityKey) -> bool {
     }
     sync(store, key);
     true
+}
+
+/// Whether `item` is what this animal wears on its body: horse armour for a horse, a carpet
+/// for a llama.
+pub fn wears(store: &EntityStore, key: EntityKey, item: &str) -> bool {
+    match mob::state(store, key).map(|s| s.kind) {
+        Some(MobKind::Horse) => is_armor(item),
+        Some(MobKind::Llama) => item.ends_with("_carpet"),
+        _ => false,
+    }
 }
 
 /// Whether an item is horse armour.
@@ -100,7 +113,11 @@ pub fn armor_points(item: &str) -> f32 {
 /// Puts armour (an item id) on a tame horse that wears none. `false` when it does not apply.
 pub fn wear_armor(store: &mut EntityStore, key: EntityKey, item: u16, points: f32) -> bool {
     match mob::state_mut(store, key) {
-        Some(s) if s.kind == MobKind::Horse && s.owner.is_some() && s.armor == 0 => {
+        Some(s)
+            if matches!(s.kind, MobKind::Horse | MobKind::Llama)
+                && s.owner.is_some()
+                && s.armor == 0 =>
+        {
             s.armor = item;
             s.armor_points = points;
             true
@@ -117,6 +134,10 @@ pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
         metadata.define(VARIANT_INDEX, MetaValue::Int(0));
     } else {
         metadata.define(VARIANT_INDEX, MetaValue::Boolean(false));
+    }
+    if state.kind == MobKind::Llama {
+        metadata.define(STRENGTH_INDEX, MetaValue::Int(1));
+        metadata.define(LLAMA_VARIANT_INDEX, MetaValue::Int(0));
     }
     write_metadata(metadata, state);
 }
@@ -139,13 +160,20 @@ fn sync(store: &mut EntityStore, key: EntityKey) {
 
 /// Whether the horse is tame and saddled, so its rider steers it.
 pub fn is_steerable(store: &EntityStore, key: EntityKey) -> bool {
-    mob::state(store, key).is_some_and(|s| s.kind.is_equine() && s.owner.is_some() && s.saddled)
+    mob::state(store, key).is_some_and(|s| {
+        s.kind.is_equine() && s.kind != MobKind::Llama && s.owner.is_some() && s.saddled
+    })
 }
 
 /// Puts a saddle on a tame, unsaddled horse. `false` when it does not apply.
 pub fn saddle(store: &mut EntityStore, key: EntityKey) -> bool {
     match mob::state_mut(store, key) {
-        Some(s) if s.kind.is_equine() && s.owner.is_some() && !s.saddled => {
+        Some(s)
+            if s.kind.is_equine()
+                && s.kind != MobKind::Llama
+                && s.owner.is_some()
+                && !s.saddled =>
+        {
             s.saddled = true;
             true
         }

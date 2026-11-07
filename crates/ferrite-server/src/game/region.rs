@@ -3948,6 +3948,14 @@ impl Region {
                     let record = arrow::new_arrow(from, vel, damage, None, &mut self.rng);
                     self.entities.insert(record);
                 }
+                ai::MobEvent::Spit { from, direction } => {
+                    let vel = ferrite_math::Vec3::new(
+                        direction.x * 1.5,
+                        direction.y * 1.5,
+                        direction.z * 1.5,
+                    );
+                    self.entities.insert(arrow::new_spit(from, vel));
+                }
                 ai::MobEvent::DragonFireball { from, direction } => {
                     let vel = ferrite_math::Vec3::new(direction.x, direction.y, direction.z);
                     self.entities.insert(arrow::new_thrown(
@@ -4430,7 +4438,7 @@ impl Region {
     ) -> bool {
         let item = ferrite_item::item_id(held);
         let wear = item.is_some_and(|id| {
-            ferrite_entity::horse::is_armor(held)
+            ferrite_entity::horse::wears(&self.entities, key, held)
                 && ferrite_entity::horse::wear_armor(
                     &mut self.entities,
                     key,

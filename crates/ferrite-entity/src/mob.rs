@@ -46,6 +46,7 @@ pub enum MobKind {
     Horse,
     Donkey,
     Mule,
+    Llama,
 }
 
 impl MobKind {
@@ -60,7 +61,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 17] = [
+    pub const ALL_MOBS: [Self; 18] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -78,6 +79,7 @@ impl MobKind {
         Self::Horse,
         Self::Donkey,
         Self::Mule,
+        Self::Llama,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -100,6 +102,7 @@ impl MobKind {
             Self::Horse => "minecraft:horse",
             Self::Donkey => "minecraft:donkey",
             Self::Mule => "minecraft:mule",
+            Self::Llama => "minecraft:llama",
         }
     }
 
@@ -110,7 +113,7 @@ impl MobKind {
 
     /// Horses, donkeys and mules: rideable, tamed by riding and saddled (`AbstractHorse`).
     pub fn is_equine(self) -> bool {
-        matches!(self, Self::Horse | Self::Donkey | Self::Mule)
+        matches!(self, Self::Horse | Self::Donkey | Self::Mule | Self::Llama)
     }
 
     /// Whether this kind hunts players (vanilla `Monster`/`Enemy`).
@@ -194,6 +197,7 @@ impl MobKind {
             Self::Horse => "minecraft:entities/horse",
             Self::Donkey => "minecraft:entities/donkey",
             Self::Mule => "minecraft:entities/mule",
+            Self::Llama => "minecraft:entities/llama",
         }
     }
 
@@ -229,6 +233,7 @@ impl MobKind {
             Self::Horse => "Horse",
             Self::Donkey => "Donkey",
             Self::Mule => "Mule",
+            Self::Llama => "Llama",
         }
     }
 
@@ -407,6 +412,17 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
             mob.jump = 0.4 + rng.next_f32() * 0.2 + rng.next_f32() * 0.2 + rng.next_f32() * 0.2;
             mob.health = 15.0 + rng.next_int(8) as f32 + rng.next_int(9) as f32;
         }
+        if kind == MobKind::Llama {
+            // `Llama.finalizeSpawn`: a random strength (1 to 5) and one of four coats.
+            data.metadata.set(
+                crate::horse::STRENGTH_INDEX,
+                ferrite_protocol::packets::play::MetaValue::Int(1 + rng.next_int(5)),
+            );
+            data.metadata.set(
+                crate::horse::LLAMA_VARIANT_INDEX,
+                ferrite_protocol::packets::play::MetaValue::Int(rng.next_int(4)),
+            );
+        }
         if kind == MobKind::Horse {
             // A random coat (7 colours) with a random marking (5 of them), like
             // `Horse.finalizeSpawn`.
@@ -514,14 +530,17 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
     let Some(mob) = state_mut(store, key) else {
         return false;
     };
-    if mob.kind == MobKind::Wolf {
-        // A wild wolf turns on whoever hurt it; a tame one never does.
+    let kind_is_wolf = mob.kind == MobKind::Wolf;
+    if matches!(mob.kind, MobKind::Wolf | MobKind::Llama) {
+        // A wild wolf (or llama) turns on whoever hurt it; a tame one never does.
         if mob.owner.is_some() {
             return false;
         }
         mob.target = Some(player);
         mob.anger = WOLF_ANGER_TICKS;
-        alert_pack(store, key, player);
+        if kind_is_wolf {
+            alert_pack(store, key, player);
+        }
         return true;
     }
     if !mob.kind.is_hostile() {

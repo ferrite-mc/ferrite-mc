@@ -76,6 +76,8 @@ pub enum MobEvent {
         direction: Vec3,
         damage: f32,
     },
+    /// A llama spits at a player.
+    Spit { from: Vec3, direction: Vec3 },
     /// The ender dragon spits a fireball (`dragon_fireball`) at a player.
     DragonFireball { from: Vec3, direction: Vec3 },
     /// The perched dragon breathes: a lingering cloud forms at `pos`.
@@ -211,7 +213,7 @@ pub fn tick_with(
             state.bow_timer = state.bow_timer.saturating_sub(1);
             state.panic = state.panic.saturating_sub(1);
             state.path_timer = state.path_timer.saturating_sub(1);
-            if state.kind == MobKind::Wolf {
+            if matches!(state.kind, MobKind::Wolf | MobKind::Llama) {
                 state.anger = state.anger.saturating_sub(1);
                 if state.anger == 0 {
                     state.target = None;
@@ -328,7 +330,7 @@ pub fn tick_with(
                         state.wander_yaw,
                     )
                 });
-            let angry_at = if kind == MobKind::Wolf {
+            let angry_at = if matches!(kind, MobKind::Wolf | MobKind::Llama) {
                 mob::state(store, key)
                     .and_then(|state| state.target)
                     .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
@@ -364,7 +366,27 @@ pub fn tick_with(
                 directed = true;
                 let dx = target.pos.x - start.x;
                 let dz = target.pos.z - start.z;
-                if (dx * dx + dz * dz).sqrt() <= kind.attack_reach() {
+                if kind == MobKind::Llama {
+                    // `LlamaSpit`: a wild llama spits at whoever hurt it from up to 10 blocks.
+                    if (dx * dx + dz * dz).sqrt() <= 10.0
+                        && mob::state(store, key).is_some_and(|state| state.bow_timer == 0)
+                    {
+                        let from = Vec3::new(
+                            start.x,
+                            start.y + f64::from(kind.props().eye_height),
+                            start.z,
+                        );
+                        let to =
+                            Vec3::new(target.pos.x, target.pos.y + PLAYER_EYE_HEIGHT, target.pos.z);
+                        events.push(MobEvent::Spit {
+                            from,
+                            direction: (to - from).normalize(),
+                        });
+                        if let Some(state) = mob::state_mut(store, key) {
+                            state.bow_timer = SKELETON_COOLDOWN;
+                        }
+                    }
+                } else if (dx * dx + dz * dz).sqrt() <= kind.attack_reach() {
                     let ready =
                         mob::state(store, key).is_some_and(|state| state.attack_cooldown == 0);
                     if ready {
@@ -870,6 +892,28 @@ mod tests {
         assert_eq!(target(&store, near), Some(player));
         assert_eq!(target(&store, far), None);
         assert_eq!(target(&store, tame), None);
+    }
+
+    #[test]
+    fn a_wild_llama_spits_at_whoever_hurt_it() {
+        let world = TestWorld::flat(64);
+        let player = target(0.5, 0.5);
+        let mut store = EntityStore::default();
+        let llama = store.insert(new_mob(
+            MobKind::Llama,
+            Vec3::new(6.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::hurt(&mut store, llama, 1.0, Some(Vec3::new(0.5, 64.0, 0.5)));
+        assert!(mob::retaliate(&mut store, llama, player.uuid));
+        let mut rng = Rng::new(2);
+        let mut spat = false;
+        for _ in 0..100 {
+            for event in tick_with(&mut store, &world, &[player], &mut rng) {
+                spat |= matches!(event, MobEvent::Spit { .. });
+            }
+        }
+        assert!(spat);
     }
 
     #[test]

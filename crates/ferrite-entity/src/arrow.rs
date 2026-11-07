@@ -104,6 +104,8 @@ pub enum Kind {
     DragonFireball,
     /// `minecraft:trident`: flies like an arrow for 8 damage; the region drops the item where it ends.
     Trident,
+    /// `minecraft:llama_spit`: flies like an arrow for 1 damage.
+    LlamaSpit,
 }
 
 impl Kind {
@@ -117,6 +119,7 @@ impl Kind {
             Self::SmallFireball => "small_fireball",
             Self::DragonFireball => "dragon_fireball",
             Self::Trident => "trident",
+            Self::LlamaSpit => "llama_spit",
         }
     }
 
@@ -150,9 +153,19 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::SmallFireball,
         Kind::DragonFireball,
         Kind::Trident,
+        Kind::LlamaSpit,
     ]
     .into_iter()
     .find(|kind| kind.entity_type() == data.kind)
+}
+
+/// A llama's spit: an arrow in flight for one point of damage.
+pub fn new_spit(pos: Vec3, vel: Vec3) -> EntityRecord {
+    let mut record = new_arrow(pos, vel, 1.0, None, &mut Rng::new(0));
+    record.data.kind = Kind::LlamaSpit.entity_type();
+    record.data.width = 0.25;
+    record.data.height = 0.25;
+    record
 }
 
 /// A thrown trident: an arrow in flight with a bigger box and a trident damage.
@@ -204,7 +217,7 @@ pub fn tick_thrown(
         let (Some(mut state), Some(kind)) = (data.arrow, kind_of(data)) else {
             continue;
         };
-        if matches!(kind, Kind::Arrow | Kind::Trident)
+        if matches!(kind, Kind::Arrow | Kind::Trident | Kind::LlamaSpit)
             || store
                 .flags(key)
                 .is_some_and(|flags| flags.has(Flags::REMOVED))
@@ -307,7 +320,12 @@ pub fn tick_arrows(
     for key in keys {
         let Some(mut arrow) = store
             .data(key)
-            .filter(|data| matches!(kind_of(data), Some(Kind::Arrow | Kind::Trident)))
+            .filter(|data| {
+                matches!(
+                    kind_of(data),
+                    Some(Kind::Arrow | Kind::Trident | Kind::LlamaSpit)
+                )
+            })
             .and_then(|data| data.arrow)
         else {
             continue;
