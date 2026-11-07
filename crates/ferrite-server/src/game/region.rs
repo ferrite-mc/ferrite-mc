@@ -243,12 +243,27 @@ pub type Tracking = Arc<Mutex<ChunkObservers>>;
 /// out the hand-off instead of snapping.
 const LEASH_HOLDER_GRACE: i64 = 20;
 
-/// Where a lead's holder was last seen, and the world tick it was seen at.
+/// Where a lead's holder was last seen, which dimension that was, and the world tick it was
+/// seen at.
 #[derive(Debug, Clone, Copy)]
 struct LeashHolder {
     pos: ferrite_math::Vec3,
     id: i32,
+    dimension: super::Dimension,
     seen: i64,
+}
+
+/// The result of resolving one lead holder for this region.
+enum LeashHolderLookup {
+    /// The holder is in this dimension; `id` is known when a snapshot supplies it.
+    Here {
+        pos: ferrite_math::Vec3,
+        id: Option<i32>,
+    },
+    /// The holder is known to be in another dimension, which is never a local target.
+    Elsewhere,
+    /// No current owner reports the holder; the last sighting may cover a region hand-off.
+    Gone,
 }
 
 /// Leash holders any region has seen. Folia keeps entity stores region-local, so a region
@@ -3975,16 +3990,14 @@ impl Region {
     }
     /// The current position of a lead holder, and its client entity id when this region or a
     /// world-visible snapshot knows it. Another region's entity store is never touched directly.
-    fn leash_holder(
-        &self,
-        ctx: &TickContext,
-        holder: Uuid,
-    ) -> Option<(ferrite_math::Vec3, Option<i32>)> {
+    /// A holder that is known to be in another dimension is rejected immediately; only a holder
+    /// that no owner currently reports may be served from the last sighting.
+    fn leash_holder(&self, ctx: &TickContext, holder: Uuid) -> LeashHolderLookup {
         if let Some(player) = self.players.values().find(|player| player.uuid == holder) {
-            return Some((
-                ferrite_math::Vec3::new(player.pos[0], player.pos[1], player.pos[2]),
-                Some(player.entity),
-            ));
+            return LeashHolderLookup::Here {
+                pos: ferrite_math::Vec3::new(player.pos[0], player.pos[1], player.pos[2]),
+                id: Some(player.entity),
+            };
         }
         let local = self.entities.keys().iter().copied().find(|&key| {
             self.entities
@@ -3997,37 +4010,61 @@ impl Region {
                 && mob::state(&self.entities, key).is_none_or(|state| !state.is_dead())
         });
         if let Some(key) = local {
-            return Some((self.entities.pos(key)?, Some(self.entities.data(key)?.id)));
+            let Some(pos) = self.entities.pos(key) else {
+                return LeashHolderLookup::Gone;
+            };
+            let Some(data) = self.entities.data(key) else {
+                return LeashHolderLookup::Gone;
+            };
+            return LeashHolderLookup::Here {
+                pos,
+                id: Some(data.id),
+            };
         }
-        let from_index = ctx
+        // The global player list records a dimension transfer before every region has
+        // republished, so it wins over a possibly stale snapshot entry.
+        let player = {
+            let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .players
+                .iter()
+                .find(|player| player.uuid == holder)
+                .map(|player| (player.dimension, player.pos))
+        };
+        if let Some((dimension, pos)) = player {
+            if dimension != ctx.dimension {
+                return LeashHolderLookup::Elsewhere;
+            }
+            let id = ctx
+                .command_entities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(holder)
+                .map(|entity| entity.network_id);
+            return LeashHolderLookup::Here {
+                pos: ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                id,
+            };
+        }
+        let entity = ctx
             .command_entities
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(holder)
-            .map(|entity| {
-                (
-                    ferrite_math::Vec3::new(entity.pos[0], entity.pos[1], entity.pos[2]),
-                    Some(entity.network_id),
-                )
-            });
-        if let Some(found) = from_index {
-            return Some(found);
+            .map(|entity| (entity.dimension, entity.pos, entity.network_id));
+        match entity {
+            Some((dimension, pos, id)) if dimension == ctx.dimension => LeashHolderLookup::Here {
+                pos: ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                id: Some(id),
+            },
+            Some(_) => LeashHolderLookup::Elsewhere,
+            None => LeashHolderLookup::Gone,
         }
-        // A player owned by another region: the global player list has the position. The lead
-        // already stores the player's entity id, so the link target stays valid.
-        let player_pos = ctx
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .players
-            .iter()
-            .find(|player| player.uuid == holder && player.dimension == ctx.dimension)
-            .map(|player| ferrite_math::Vec3::new(player.pos[0], player.pos[1], player.pos[2]))?;
-        Some((player_pos, None))
     }
 
-    /// Resolves the holders of this region's leads to (position, entity id). A holder that no
-    /// region reports anymore leaves the table after [`LEASH_HOLDER_GRACE`] ticks, so a region
+    /// Resolves the holders of this region's leads to (position, entity id). A holder that is
+    /// known to be in another dimension is dropped at once, and one that no region reports
+    /// anymore leaves the table after [`LEASH_HOLDER_GRACE`] ticks, so a same-dimension region
     /// hand-off keeps the lead and a real removal breaks it exactly once.
     fn leash_holders(&self, ctx: &TickContext) -> HashMap<Uuid, (ferrite_math::Vec3, i32)> {
         let now = ctx
@@ -4043,22 +4080,43 @@ impl Region {
             .collect();
         referenced.sort_unstable();
         referenced.dedup();
-        let current: Vec<(Uuid, (ferrite_math::Vec3, i32))> = referenced
-            .iter()
-            .filter_map(|&(holder, stored)| {
-                self.leash_holder(ctx, holder)
-                    .map(|(pos, id)| (holder, (pos, id.unwrap_or(stored))))
-            })
-            .collect();
+        let mut current = Vec::new();
+        let mut elsewhere = Vec::new();
+        for &(holder, stored) in &referenced {
+            match self.leash_holder(ctx, holder) {
+                LeashHolderLookup::Here { pos, id } => {
+                    current.push((holder, (pos, id.unwrap_or(stored))));
+                }
+                LeashHolderLookup::Elsewhere => elsewhere.push(holder),
+                LeashHolderLookup::Gone => {}
+            }
+        }
         let mut table = LEASH_HOLDERS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        for holder in elsewhere {
+            if table
+                .get(&holder)
+                .is_some_and(|entry| entry.dimension == ctx.dimension)
+            {
+                table.remove(&holder);
+            }
+        }
         for (holder, (pos, id)) in current {
-            table.insert(holder, LeashHolder { pos, id, seen: now });
+            table.insert(
+                holder,
+                LeashHolder {
+                    pos,
+                    id,
+                    dimension: ctx.dimension,
+                    seen: now,
+                },
+            );
         }
         let mut holders = HashMap::new();
         for (holder, _) in referenced {
             if let Some(entry) = table.get(&holder)
+                && entry.dimension == ctx.dimension
                 && now.saturating_sub(entry.seen) <= LEASH_HOLDER_GRACE
             {
                 holders.insert(holder, (entry.pos, entry.id));
@@ -7111,7 +7169,7 @@ impl Region {
             });
         }
         stage!("finish");
-        self.publish_command_entities(&ctx.command_entities);
+        self.publish_command_entities(&ctx.command_entities, ctx.dimension);
     }
 
     /// Vanilla `BeaconBlockEntity`'s 80-tick timer: recompute each beacon's pyramid, resend the
@@ -7175,11 +7233,15 @@ impl Region {
 
     /// Publishes this region's entities for command selectors. Folia keeps the store region
     /// local; commands read the snapshot and route mutations back to this region.
-    fn publish_command_entities(&mut self, index: &Arc<Mutex<super::entity_index::EntityIndex>>) {
+    fn publish_command_entities(
+        &mut self,
+        index: &Arc<Mutex<super::entity_index::EntityIndex>>,
+        dimension: super::Dimension,
+    ) {
         index
             .lock()
             .unwrap()
-            .sync(&mut self.published_entities, &self.entities);
+            .sync(&mut self.published_entities, &self.entities, dimension);
         crate::plugins::facts::publish_entities(&mut self.published_facts, &self.entities);
     }
 
@@ -7578,6 +7640,7 @@ mod tests {
         uuid: Uuid,
         network_id: i32,
         pos: [f64; 3],
+        dimension: super::super::Dimension,
     ) {
         index
             .lock()
@@ -7589,6 +7652,7 @@ mod tests {
                 pos,
                 yaw: 0.0,
                 pitch: 0.0,
+                dimension,
                 tags: Default::default(),
                 custom_name: None,
             });
@@ -7625,7 +7689,13 @@ mod tests {
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
         ));
-        published_holder(&index, holder, 77, [0.5, 64.0, 0.5]);
+        published_holder(
+            &index,
+            holder,
+            77,
+            [0.5, 64.0, 0.5],
+            super::super::Dimension::Overworld,
+        );
         let ctx = leash_context(index);
         let mut region = Region::default();
         let cow = region.entities.insert(mob::new_mob(
@@ -7654,7 +7724,13 @@ mod tests {
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
         ));
-        published_holder(&index, holder, 88, [0.5, 64.0, 0.5]);
+        published_holder(
+            &index,
+            holder,
+            88,
+            [0.5, 64.0, 0.5],
+            super::super::Dimension::Overworld,
+        );
         let ctx = leash_context(index);
         let mut region = Region::default();
         let cow = region.entities.insert(mob::new_mob(
@@ -7732,13 +7808,183 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_refreshes_its_holders_position_during_a_region_hand_off() {
+        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let holder = Uuid::from_u128(0x1ea5_1005);
+        let index = Arc::new(Mutex::new(
+            super::super::entity_index::EntityIndex::default(),
+        ));
+        published_holder(
+            &index,
+            holder,
+            111,
+            [20.5, 64.0, 0.5],
+            super::super::Dimension::Overworld,
+        );
+        let ctx = leash_context(index.clone());
+        let mut region = Region::default();
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(9.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, cow).unwrap().leash = Some((holder, 111));
+        assert_eq!(
+            region.leash_holders(&ctx).get(&holder).copied(),
+            Some((ferrite_math::Vec3::new(20.5, 64.0, 0.5), 111))
+        );
+
+        // The old owner stops publishing, then the new owner reports a different position
+        // while the hand-off is still inside the grace window.
+        let mut owned = HashSet::from([holder]);
+        index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .sync(
+                &mut owned,
+                &EntityStore::default(),
+                super::super::Dimension::Overworld,
+            );
+        ctx.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .game_time += 3;
+        assert!(
+            region.leash_holders(&ctx).contains_key(&holder),
+            "the last sighting covers the gap"
+        );
+        published_holder(
+            &index,
+            holder,
+            111,
+            [7.5, 64.0, 0.5],
+            super::super::Dimension::Overworld,
+        );
+        assert_eq!(
+            region.leash_holders(&ctx).get(&holder).copied(),
+            Some((ferrite_math::Vec3::new(7.5, 64.0, 0.5), 111)),
+            "the new owner's position replaces the last sighting"
+        );
+    }
+
+    #[test]
+    fn a_lead_rejects_a_holder_that_crossed_to_another_dimension() {
+        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let holder = Uuid::from_u128(0x1ea5_1006);
+        let index = Arc::new(Mutex::new(
+            super::super::entity_index::EntityIndex::default(),
+        ));
+        published_holder(
+            &index,
+            holder,
+            222,
+            [0.5, 64.0, 0.5],
+            super::super::Dimension::Overworld,
+        );
+        let ctx = leash_context(index.clone());
+        let mut region = Region::default();
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(9.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, cow).unwrap().leash = Some((holder, 222));
+        assert!(region.leash_holders(&ctx).contains_key(&holder));
+
+        // The holder moves to the Nether while the old sighting is still inside the grace
+        // window; the stale Overworld entry must not keep the lead alive.
+        published_holder(
+            &index,
+            holder,
+            222,
+            [0.5, 64.0, 0.5],
+            super::super::Dimension::Nether,
+        );
+        ctx.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .game_time += 1;
+        assert!(
+            !region.leash_holders(&ctx).contains_key(&holder),
+            "a Nether holder is not a local target"
+        );
+
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_mobs(&ctx, &blocks);
+        assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
+        assert_eq!(dropped_leads(&region), 1, "the lead drops once");
+        region.tick_mobs(&ctx, &blocks);
+        assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
+    }
+
+    #[test]
+    fn a_lead_stops_following_a_logged_out_player_after_the_grace_window() {
+        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let holder = Uuid::from_u128(0x1ea5_1007);
+        let ctx = leash_context(Default::default());
+        {
+            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.join(holder, "Holder".into(), 0, 20);
+            state.set_position(holder, [0.5, 64.0, 0.5], 0.0, 0.0);
+        }
+        let mut region = Region::default();
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(9.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, cow).unwrap().leash = Some((holder, 123));
+        assert!(region.leash_holders(&ctx).contains_key(&holder));
+
+        ctx.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .leave(holder);
+        ctx.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .game_time += LEASH_HOLDER_GRACE;
+        assert!(
+            region.leash_holders(&ctx).contains_key(&holder),
+            "the last sighting covers the hand-off"
+        );
+        ctx.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .game_time += 1;
+        assert!(
+            !region.leash_holders(&ctx).contains_key(&holder),
+            "a logged-out player is not followed indefinitely"
+        );
+
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_mobs(&ctx, &blocks);
+        assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
+        assert_eq!(dropped_leads(&region), 1, "the lead drops once");
+        region.tick_mobs(&ctx, &blocks);
+        assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
+    }
+
+    #[test]
     fn a_lead_outlives_a_holder_hand_off_and_breaks_once_on_removal() {
         let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
         let holder = Uuid::from_u128(0x1ea5_1004);
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
         ));
-        published_holder(&index, holder, 99, [0.5, 64.0, 0.5]);
+        published_holder(
+            &index,
+            holder,
+            99,
+            [0.5, 64.0, 0.5],
+            super::super::Dimension::Overworld,
+        );
         let ctx = leash_context(index.clone());
         let mut region = Region::default();
         let cow = region.entities.insert(mob::new_mob(
@@ -7754,7 +8000,11 @@ mod tests {
         index
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .sync(&mut owned, &EntityStore::default());
+            .sync(
+                &mut owned,
+                &EntityStore::default(),
+                super::super::Dimension::Overworld,
+            );
         for _ in 0..LEASH_HOLDER_GRACE {
             ctx.state
                 .lock()
