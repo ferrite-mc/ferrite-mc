@@ -186,6 +186,10 @@ pub struct Rule {
     pub recipes: Vec<String>,
     /// Experience points the advancement rewards.
     pub experience: i32,
+    /// Loot tables rolled into the player's inventory (`rewards.loot`).
+    pub loot: Vec<String>,
+    /// Function run as the player (`rewards.function`).
+    pub function: Option<String>,
     pub criteria: BTreeMap<String, Criterion>,
     pub requirements: Vec<Vec<String>>,
 }
@@ -428,6 +432,13 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
         .as_i64()
         .and_then(|x| i32::try_from(x).ok())
         .unwrap_or(0);
+    let loot: Vec<String> = json["rewards"]["loot"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str().map(str::to_owned))
+        .collect();
+    let function = json["rewards"]["function"].as_str().map(str::to_owned);
     let mut criteria = BTreeMap::new();
     for (name, c) in json["criteria"].as_object()? {
         let kind = match c["trigger"].as_str() {
@@ -489,6 +500,8 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
         id: id.to_owned(),
         recipes,
         experience,
+        loot,
+        function,
         criteria,
         requirements,
     })
@@ -622,6 +635,23 @@ pub fn reward_experience(advancement: &str) -> i32 {
         .map_or(0, |r| r.experience)
 }
 
+/// Loot tables an advancement rolls for the player when completed.
+pub fn reward_loot(advancement: &str) -> Vec<String> {
+    rules()
+        .iter()
+        .find(|r| r.id == advancement)
+        .map(|r| r.loot.clone())
+        .unwrap_or_default()
+}
+
+/// The function an advancement runs as the player when completed.
+pub fn reward_function(advancement: &str) -> Option<String> {
+    rules()
+        .iter()
+        .find(|r| r.id == advancement)
+        .and_then(|r| r.function.clone())
+}
+
 /// Advancement criteria (`<advancement>#<criterion>`) that holding `held` completes, for every
 /// advancement with an `inventory_changed` criterion except the recipe ones.
 pub fn criteria_for(held: &BTreeSet<String>) -> Vec<String> {
@@ -657,7 +687,8 @@ mod tests {
                     "conditions": {"recipes": "minecraft:stick"}}
             },
             "requirements": [["has_the_recipe", "has_log", "has_planks"]],
-            "rewards": {"recipes": ["minecraft:stick"], "experience": 25}
+            "rewards": {"recipes": ["minecraft:stick"], "experience": 25,
+                "loot": ["t:chests/gift"], "function": "t:celebrate"}
         }))
         .unwrap()
     }
@@ -811,6 +842,8 @@ mod tests {
     #[test]
     fn experience_rewards_are_parsed() {
         assert_eq!(rule().experience, 25);
+        assert_eq!(rule().loot, vec!["t:chests/gift".to_owned()]);
+        assert_eq!(rule().function.as_deref(), Some("t:celebrate"));
     }
 
     #[test]

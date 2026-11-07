@@ -1522,6 +1522,9 @@ async fn run(
                              let points = recipe_unlock::reward_experience(&id);
                              if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
                              let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
+                             // Loot and function rewards run as console commands aimed at the player.
+                             for table in recipe_unlock::reward_loot(&id) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command: format!("loot give {name} loot {table}"), complete }); }
+                             if let Some(function) = recipe_unlock::reward_function(&id) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command: format!("execute as {name} at @s run function {function}"), complete }); }
                              if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
                          }
                      }
