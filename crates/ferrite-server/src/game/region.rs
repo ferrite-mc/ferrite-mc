@@ -704,6 +704,9 @@ pub struct Region {
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Dragon breath clouds: centre and ticks left.
     pub breath_clouds: Vec<(ferrite_math::Vec3, u32)>,
+    /// Piston block updates held back until the client finished the push animation: the tick
+    /// they are due, their chunk and the packet (`PistonMovingBlockEntity` lasts two ticks).
+    pub delayed_updates: Vec<(i64, (i32, i32), Outbound)>,
     /// The stack of every trident in flight, by entity uuid, so it can drop as it was thrown.
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
@@ -756,6 +759,7 @@ impl RegionData for Region {
         self.redstone.merge(other.redstone);
         self.command_blocks.merge(other.command_blocks);
         self.tick_clock = self.tick_clock.max(other.tick_clock);
+        self.delayed_updates.extend(other.delayed_updates);
         self.players.extend(other.players);
         self.entities.merge(other.entities);
         self.published_entities.extend(other.published_entities);
@@ -772,6 +776,7 @@ impl RegionData for Region {
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
+            delayed_updates: Vec::new(),
             thrown_tridents: HashMap::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
@@ -5666,6 +5671,14 @@ impl Region {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
+        let now = self.tick_clock;
+        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed_updates)
+            .into_iter()
+            .partition(|(at, _, _)| *at <= now);
+        self.delayed_updates = waiting;
+        for (_, chunk, update) in due {
+            broadcast_tracked_chunk(&ctx.tracking.lock().unwrap(), ctx.dimension, chunk, &update);
+        }
         let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
         let mut world =
             super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
@@ -5720,12 +5733,13 @@ impl Region {
                     location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
                     block_state: VarInt(state as i32),
                 };
-                broadcast_tracked_chunk(
-                    &ctx.tracking.lock().unwrap(),
-                    ctx.dimension,
+                // The client animates the push itself from the block event; the final blocks
+                // reach it two ticks later, when vanilla's moving piston settles.
+                self.delayed_updates.push((
+                    self.tick_clock.wrapping_add(2),
                     (at[0].div_euclid(16), at[2].div_euclid(16)),
-                    &packet(&update),
-                );
+                    packet(&update),
+                ));
                 piston_changes.push(at);
             }
             {
