@@ -466,11 +466,12 @@ mod tests {
     fn a_small_fireball_flies_level_like_a_fireball() {
         let world = TestWorld::flat(64);
         let mut store = EntityStore::default();
+        let owner = Uuid::from_u128(0x51);
         let ball = store.insert(new_thrown(
             Kind::SmallFireball,
             Vec3::new(0.5, 70.0, 0.5),
             Vec3::new(0.0, 0.0, 1.0),
-            None,
+            Some(owner),
         ));
         tick_thrown(&mut store, &world, &[]);
         assert_eq!(store.vel(ball).unwrap().y, 0.0, "no gravity");
@@ -481,6 +482,27 @@ mod tests {
         store.set_vel(ball, Vec3::new(0.0, -8.0, 0.0));
         let landed = tick_thrown(&mut store, &world, &[]);
         assert_eq!(landed[0].kind, Kind::SmallFireball);
+        assert_eq!(landed[0].owner, Some(owner));
+    }
+
+    #[test]
+    fn a_small_fireball_ignores_its_owner_and_stops_on_another_player() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let owner = Uuid::from_u128(0x51);
+        let target = Uuid::from_u128(0x52);
+        let ball = store.insert(new_thrown(
+            Kind::SmallFireball,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 2.0),
+            Some(owner),
+        ));
+        let box_ = AABB::new(0.2, 69.0, 0.2, 0.8, 71.0, 40.0);
+        let landed = tick_thrown(&mut store, &world, &[(owner, box_), (target, box_)]);
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].kind, Kind::SmallFireball);
+        assert_eq!(landed[0].owner, Some(owner));
+        assert!(store.flags(ball).unwrap().has(Flags::REMOVED));
     }
 
     #[test]

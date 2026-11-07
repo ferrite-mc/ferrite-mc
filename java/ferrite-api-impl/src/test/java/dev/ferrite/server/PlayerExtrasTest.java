@@ -403,15 +403,19 @@ class PlayerExtrasTest {
         assertEquals(java.util.List.of("strikeLightning(Location)", "strikeLightningEffect(Location)"), calls);
     }
 
-    @Test void playersShootArrowsThroughTheHost() {
+    @Test void playersShootProjectilesThroughTheHost() {
         var calls = new java.util.ArrayList<String>();
         HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
         try {
             var arrow = player.launchProjectile(org.bukkit.entity.Arrow.class, new org.bukkit.util.Vector(0, 0, 2), null);
             assertEquals(org.bukkit.entity.EntityType.ARROW, arrow.getType());
-            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.SmallFireball.class, null, null));
+            var small = player.launchProjectile(org.bukkit.entity.SmallFireball.class, new org.bukkit.util.Vector(0, 0, 1), null);
+            assertEquals(org.bukkit.entity.EntityType.SMALL_FIREBALL, small.getType());
+            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.DragonFireball.class, null, null));
         } finally { HostBridge.transport = null; }
-        assertEquals(java.util.List.of("spawnArrow(Location,double,double,double,String)"), calls);
+        assertEquals(java.util.List.of(
+            "spawnArrow(Location,double,double,double,String)",
+            "launchThrown(Location,EntityType,double,double,double,String,String)"), calls);
     }
 
     @Test void cookiesAreRetrievedFromTheClient() throws Exception {
@@ -824,17 +828,27 @@ class PlayerExtrasTest {
     }
 
     @Test void thrownProjectilesAreLaunchedWithTheirOwner() {
-        var calls = new java.util.ArrayList<String>();
-        HostBridge.transport = (owner, subject, method, args) -> { calls.add(owner + "#" + method); return ""; };
+        var calls = new java.util.ArrayList<Object[]>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{owner, subject, method, args}); return ""; };
         try {
+            var seen = new java.util.concurrent.atomic.AtomicReference<org.bukkit.entity.SmallFireball>();
+            var small = player.launchProjectile(org.bukkit.entity.SmallFireball.class, null, seen::set);
+            assertEquals(org.bukkit.entity.EntityType.SMALL_FIREBALL, small.getType());
+            assertSame(small, seen.get());
             var pearl = player.launchProjectile(org.bukkit.entity.EnderPearl.class);
             assertEquals(org.bukkit.entity.EntityType.ENDER_PEARL, pearl.getType());
             player.launchProjectile(org.bukkit.entity.Snowball.class);
             player.launchProjectile(org.bukkit.entity.Arrow.class);
-            assertTrue(calls.contains("Player#launchThrown(Location,EntityType,double,double,double,String,String)"), calls.toString());
-            assertTrue(calls.contains("Player#spawnArrow(Location,double,double,double,String)"), calls.toString());
             assertEquals(org.bukkit.entity.EntityType.FIREBALL, player.launchProjectile(org.bukkit.entity.Fireball.class).getType());
-            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.SmallFireball.class));
+            var launch = calls.stream()
+                .filter(call -> "launchThrown(Location,EntityType,double,double,double,String,String)".equals(call[2]))
+                .findFirst().orElseThrow();
+            assertEquals("Player", launch[0]);
+            assertEquals(player.getUniqueId().toString(), launch[1]);
+            var args = ((String) launch[3]).split(String.valueOf(HostBridge.ARG), -1);
+            assertEquals("SMALL_FIREBALL", args[1]);
+            assertEquals(player.getUniqueId().toString(), args[5]);
+            assertEquals(small.getUniqueId().toString(), args[6]);
         } finally { HostBridge.transport = null; }
     }
 

@@ -373,6 +373,58 @@ mod tests {
         ));
         assert_eq!(
             spawn_command(&call(
+                "launchThrown(Location,EntityType,double,double,double,String,String)",
+                &[
+                    &at,
+                    "SMALL_FIREBALL",
+                    "0",
+                    "0.5",
+                    "1.5",
+                    "00000000-0000-0000-0000-0000000000aa",
+                    "00000000-0000-0000-0000-000000000009",
+                ],
+            )),
+            Some(PlayerCommand::SpawnEntity {
+                owner: Some(Uuid::from_u128(0xaa)),
+                center: [1.0, 70.0, 2.0],
+                kind: "minecraft:small_fireball".into(),
+                block: None,
+                velocity: [0.0, 0.5, 1.5],
+                uuid: Uuid::from_u128(9),
+            })
+        );
+        assert_eq!(
+            spawn_command(&call(
+                "launchThrown(Location,EntityType,double,double,double,String,String)",
+                &[
+                    &at,
+                    "DRAGON_FIREBALL",
+                    "0",
+                    "0.5",
+                    "1.5",
+                    "00000000-0000-0000-0000-0000000000aa",
+                    "00000000-0000-0000-0000-000000000009",
+                ],
+            )),
+            None
+        );
+        assert_eq!(
+            spawn_command(&call(
+                "launchThrown(Location,EntityType,double,double,double,String,String)",
+                &[
+                    &at,
+                    "SMALL_FIREBALL",
+                    "0",
+                    "0",
+                    "99",
+                    "00000000-0000-0000-0000-0000000000aa",
+                    "00000000-0000-0000-0000-000000000009",
+                ],
+            )),
+            None
+        );
+        assert_eq!(
+            spawn_command(&call(
                 "spawnArrow(Location,double,double,double,String)",
                 &[&at, "0", "0", "99", "00000000-0000-0000-0000-000000000009"]
             )),
