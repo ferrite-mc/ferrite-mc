@@ -222,9 +222,45 @@ pub fn approach(
     Some(Bred { kind, cause, pos })
 }
 
+/// A thrown egg that lands may hatch (vanilla `ThrownEgg.onHit`): one time in eight, a baby
+/// chicken, and one time in 32 of those four of them. Returns how many chicks appeared.
+pub fn hatch_egg(store: &mut EntityStore, pos: Vec3, rng: &mut Rng) -> usize {
+    if rng.next_int(8) != 0 {
+        return 0;
+    }
+    let count = if rng.next_int(32) == 0 { 4 } else { 1 };
+    for _ in 0..count {
+        let mut chick = mob::new_mob(MobKind::Chicken, pos, rng);
+        if let Some(state) = chick.data.mob.as_mut() {
+            state.age = BABY_AGE;
+        }
+        if let Some(state) = chick.data.mob {
+            define_metadata(&mut chick.data.metadata, &state);
+        }
+        store.insert(chick);
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn some_landed_eggs_hatch_baby_chickens() {
+        let mut rng = Rng::new(11);
+        let mut store = EntityStore::default();
+        let mut chicks = 0;
+        for _ in 0..400 {
+            chicks += hatch_egg(&mut store, Vec3::new(0.5, 64.0, 0.5), &mut rng);
+        }
+        // About 1/8 of 400 eggs hatch.
+        assert!((20..120).contains(&chicks), "{chicks}");
+        let key = store.keys()[0];
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.kind, MobKind::Chicken);
+        assert_eq!(state.age, BABY_AGE);
+    }
 
     fn pair(store: &mut EntityStore, rng: &mut Rng) -> (EntityKey, EntityKey) {
         let a = store.insert(mob::new_mob(MobKind::Cow, Vec3::new(0.5, 64.0, 0.5), rng));

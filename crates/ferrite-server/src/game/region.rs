@@ -4842,6 +4842,9 @@ impl Region {
                 self.breath_clouds
                     .push((landing.pos, ferrite_entity::dragon::BREATH_TICKS));
             }
+            if landing.kind == arrow::Kind::Egg {
+                ferrite_entity::breed::hatch_egg(&mut self.entities, landing.pos, &mut self.rng);
+            }
             if landing.kind == arrow::Kind::EnderPearl
                 && let Some(owner) = landing.owner
                 && let Some(p) = self.players.get_mut(&owner)
