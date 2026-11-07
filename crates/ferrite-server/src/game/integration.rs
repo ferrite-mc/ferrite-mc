@@ -3185,6 +3185,52 @@ async fn player_data_is_scoped_to_one_world() {
     server.abort();
 }
 
+/// Stopping the server with a player still online saves that player where they stand; the
+/// disconnect at shutdown used to race the stop and leave the data file unwritten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_the_server_saves_the_players_still_online() {
+    let dir = tempfile::tempdir().unwrap();
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            gamemode: 0,
+            playerdata: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Stayer").await;
+    bot.send(&MovePosition {
+        x: 7.5,
+        y: 65.0,
+        z: 0.5,
+        flags: 1,
+    })
+    .await;
+    // Let the region take the move before the stop.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    world.shutdown().await.unwrap();
+    let saved = dir
+        .path()
+        .join(format!("{}.json", ferrite_net::offline_uuid("Stayer")));
+    assert!(saved.exists(), "shutdown did not write {}", saved.display());
+    let text = std::fs::read_to_string(&saved).unwrap();
+    assert!(text.contains("7.5"), "{text}");
+    drop(bot);
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
     use ferrite_inventory::ClickInput::*;

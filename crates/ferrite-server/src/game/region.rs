@@ -2938,23 +2938,7 @@ impl Player {
             }
             let msg = match command {
                 Command::Leave => {
-                    self.close_container();
-                    if let Some(dir) = &self.playerdata
-                        && let Err(error) = super::playerdata::save_to(
-                            dir,
-                            &self.uuid,
-                            &super::playerdata::Saved::capture(
-                                self.pos,
-                                self.yaw,
-                                self.pitch,
-                                self.gamemode,
-                                self.dimension,
-                                &self.inventory,
-                            ),
-                        )
-                    {
-                        tracing::error!(%error, "failed to save player data");
-                    }
+                    self.save_on_exit();
                     return false;
                 }
                 Command::SetMode(mode) => {

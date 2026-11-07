@@ -631,6 +631,29 @@ impl Player {
 
     /// Vanilla `doCloseContainer`: the open menu (or the inventory screen's grid and cursor)
     /// returns its items, and the inventory menu takes over what the client was shown.
+    /// Closes the open menu and writes the player's data file. Used when the player leaves and
+    /// when the server stops with the player still in a region or in flight between two
+    /// (a pending transfer is completed at its destination position).
+    pub fn save_on_exit(&mut self) {
+        self.close_container();
+        if let Some(dir) = &self.playerdata
+            && let Err(error) = super::playerdata::save_to(
+                dir,
+                &self.uuid,
+                &super::playerdata::Saved::capture(
+                    self.pos,
+                    self.yaw,
+                    self.pitch,
+                    self.gamemode,
+                    self.dimension,
+                    &self.inventory,
+                ),
+            )
+        {
+            tracing::error!(%error, "failed to save player data");
+        }
+    }
+
     pub fn close_container(&mut self) {
         if let Some(plugins) = self.plugins.clone() {
             let _ = plugins.inventory_closed(self.uuid, &self.name);
