@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ferrite-jvm = { path = "../ferrite-jvm" }
+ferrite-nbt.workspace = true
 ferrite-plugin-meta = { path = "../ferrite-plugin-meta" }
 thiserror.workspace = true
 uuid.workspace = true

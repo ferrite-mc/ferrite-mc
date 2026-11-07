@@ -1778,6 +1778,8 @@ fn route_plugin_command(
             unbreakable,
             model,
             repair,
+            flags,
+            custom_data,
         } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::ItemMeta {
@@ -1788,6 +1790,8 @@ fn route_plugin_command(
                     unbreakable,
                     model,
                     repair,
+                    flags,
+                    custom_data,
                 });
             }
         }

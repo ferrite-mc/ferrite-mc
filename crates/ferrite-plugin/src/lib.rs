@@ -424,8 +424,8 @@ pub enum PlayerCommand {
         action: u8,
         hand: u8,
     },
-    /// Writes the name, lore, enchantments, unbreakable flag, custom model data and repair
-    /// cost of the stack in a slot (`name` and `lore` are text JSON).
+    /// Writes the name, lore, enchantments, unbreakable flag, custom model data, repair cost,
+    /// item flags and persistent data of the stack in a slot (`name` and `lore` are text JSON).
     ItemMeta {
         player: uuid::Uuid,
         slot: u8,
@@ -435,6 +435,8 @@ pub enum PlayerCommand {
         unbreakable: bool,
         model: Option<i32>,
         repair: i32,
+        flags: Vec<String>,
+        custom_data: Option<ferrite_nbt::Compound>,
     },
     ItemDamage {
         player: uuid::Uuid,

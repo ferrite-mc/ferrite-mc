@@ -7,7 +7,7 @@ use ferrite_text::Component as Text;
 use super::*;
 use crate::component::{
     AttributeModifier, AttributeOperation, Component, CustomModelData, Enchantments, EquipmentSlot,
-    Food, Rarity, Tool, ToolRule,
+    Food, Rarity, Tool, ToolRule, TooltipDisplay,
 };
 use crate::component_ids as ids;
 
@@ -433,6 +433,19 @@ fn typed_components_decode_from_their_network_payloads() {
                 nutrition: 4,
                 saturation: 2.4,
                 can_always_eat: true,
+            }),
+        ),
+        (
+            ids::TOOLTIP_DISPLAY,
+            cat([
+                vec![1],
+                vi(2),
+                vi(i32::from(ids::ENCHANTMENTS)),
+                vi(i32::from(ids::ATTRIBUTE_MODIFIERS)),
+            ]),
+            Component::TooltipDisplay(TooltipDisplay {
+                hide_tooltip: true,
+                hidden_components: vec![ids::ENCHANTMENTS, ids::ATTRIBUTE_MODIFIERS],
             }),
         ),
     ];

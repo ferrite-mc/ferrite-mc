@@ -41,7 +41,7 @@ use ferrite_text::Component as Text;
 
 use crate::component::{
     AttributeModifier, AttributeOperation, Component, ComponentPatch, CustomModelData,
-    Enchantments, EquipmentSlot, Food, Rarity, Tool, ToolRule,
+    Enchantments, EquipmentSlot, Food, Rarity, Tool, ToolRule, TooltipDisplay,
 };
 use crate::component_ids as ids;
 use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count};
@@ -394,6 +394,18 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
             })
         }
         ids::TOOL => Component::Tool(decode_tool(&mut reader)?),
+        ids::TOOLTIP_DISPLAY => Component::TooltipDisplay(TooltipDisplay {
+            hide_tooltip: reader.bool().ok()?,
+            hidden_components: reader
+                .prefixed(MAX_LIST, |reader| {
+                    let id = reader.varint()?;
+                    u16::try_from(id)
+                        .ok()
+                        .filter(|id| *id < COMPONENT_COUNT as u16)
+                        .ok_or(WireError::InvalidComponentId(id))
+                })
+                .ok()?,
+        }),
         _ => return None,
     };
     (reader.remaining() == 0).then_some(component)
@@ -639,6 +651,13 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
                     name: name.clone(),
                 })?;
                 write_varint(id + 1, &mut out);
+            }
+        }
+        Component::TooltipDisplay(display) => {
+            out.push(u8::from(display.hide_tooltip));
+            write_count(display.hidden_components.len(), &mut out)?;
+            for id in &display.hidden_components {
+                write_varint(i32::from(*id), &mut out);
             }
         }
         Component::LodestoneTracker(tracker) => {

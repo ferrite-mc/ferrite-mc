@@ -17,8 +17,9 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
         int damage = 0;
         String meta = null;
         if (item != null && item.hasItemMeta()) {
-            // The host carries wear, name, lore, enchantments, unbreakable, model and repair cost;
-            // metadata beyond those is refused so nothing is silently dropped.
+            // The host carries wear, name, lore, enchantments, unbreakable, model, repair cost,
+            // item flags and the persistent data container; anything else is refused so nothing
+            // is silently dropped.
             var worn = item.getItemMeta();
             var fresh = org.bukkit.Bukkit.getItemFactory().getItemMeta(item.getType());
             if (worn instanceof org.bukkit.inventory.meta.Damageable w && fresh instanceof org.bukkit.inventory.meta.Damageable f) { damage = w.getDamage(); f.setDamage(damage); }
@@ -34,11 +35,18 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
             if (model != null) fresh.setCustomModelData(model);
             int repair = worn instanceof org.bukkit.inventory.meta.Repairable r && r.hasRepairCost() ? r.getRepairCost() : 0;
             if (repair > 0 && fresh instanceof org.bukkit.inventory.meta.Repairable fr) fr.setRepairCost(repair);
-            if (!fresh.equals(worn)) throw new UnsupportedOperationException("Ferrite: inventory metadata beyond name, lore, enchantments, unbreakable, model data and repair cost is not implemented");
+            var flags = new java.util.TreeSet<String>();
+            for (var flag : worn.getItemFlags()) flags.add(flag.name());
+            if (!flags.isEmpty()) fresh.addItemFlags(worn.getItemFlags().toArray(org.bukkit.inventory.ItemFlag[]::new));
+            var data = new FerriteDataContainer();
+            worn.getPersistentDataContainer().copyTo(data, true);
+            data.copyTo(fresh.getPersistentDataContainer(), true);
+            if (!fresh.equals(worn)) throw new UnsupportedOperationException("Ferrite: inventory metadata beyond name, lore, enchantments, unbreakable, model data, repair cost, item flags and persistent data is not implemented");
             meta = String.join("\u001e", name,
                 lore == null ? "" : String.join("\u001d", lore.stream().map(gson::serialize).toList()),
-                String.join("\u001d", enchants), worn.isUnbreakable() ? "1" : "0", model == null ? "" : model.toString(), Integer.toString(repair));
-            if (name.isEmpty() && lore == null && enchants.isEmpty() && !worn.isUnbreakable() && model == null && repair == 0) meta = null;
+                String.join("\u001d", enchants), worn.isUnbreakable() ? "1" : "0", model == null ? "" : model.toString(), Integer.toString(repair),
+                String.join(",", flags), data.toSnbt());
+            if (name.isEmpty() && lore == null && enchants.isEmpty() && !worn.isUnbreakable() && model == null && repair == 0 && flags.isEmpty() && data.isEmpty()) meta = null;
         }
         String material = item == null ? "" : item.getType().getKey().toString();
         int amount = item == null ? 0 : item.getAmount();
