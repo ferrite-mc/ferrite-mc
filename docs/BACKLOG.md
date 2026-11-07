@@ -18,6 +18,9 @@ Rust client, shared `eula.txt` gate, end-to-end test. Open:
 - Load measurement: hundreds of chunks, requested in sequence and concurrently, for resident
   memory, CPU and chunks per second; pick defaults for `[worldgen]` from the numbers.
 - `/locate biome` and a prefetch of chunks ahead of players.
+- Rust worldgen: port the hot terrain pieces (noise/surface, biomes, features, structures) to Rust,
+  piece by piece, behaviour-compatible with the user's jar and verified against it
+  (`docs/worldgen-host.md`, section "Rust worldgen").
 - `worldgen.mode = embedded | process | remote` so large deployments can run several hosts.
 - Chunk loading and encoding optimizations (baseline in `crates/ferrite-world/benches`).
 

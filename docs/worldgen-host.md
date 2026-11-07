@@ -133,3 +133,24 @@ The profile is flat. 26.3 already restructured noise (`GradientNoise`, `DensityB
 `MaterialSystem`), so Moonrise's 1.21 patches do not apply as they are, and a faster Perlin
 permutation table would win a few percent at most. Threads were the large lever
 (4 -> 8 -> 16 = 60 -> 102 -> 153 chunks/s).
+
+## Rust worldgen (planned, requested 2026-11-07)
+
+Goal: move the hot parts of terrain generation out of the JVM host into Rust (`ferrite-world` /
+`ferrite-server::game::vanilla_gen`), one piece at a time, until the host is only needed for what is
+not yet ported. The policy above applies: each Rust piece is written **from the behaviour** (inputs
+and outputs measured on the user's own jar), never from Mojang's, decompiled or Paper-patch code.
+
+Order (by the JFR profile above, biggest first):
+
+1. Noise router / `doFill` (31%) and surface rules (22%): density-function evaluation on the data
+   pack's `noise_settings`, `density_function` and `noise` JSON (already extracted under `vanilla/`).
+2. Biome lookup (7%): parameter-space search over `multi_noise` biome sources.
+3. Features (9%) and structures (3%): placed features and structure starts from the data pack.
+4. Lighting (4%) and chunk serialisation (11%): ferrite-world already owns the chunk format.
+
+Per piece, the definition of done is the same as for patches: (1) a test compares the Rust output
+with the unmodified jar over many positions and seeds and finds **no difference**, (2) a
+measurement shows it is faster, (3) it runs behind a `[worldgen]` switch that falls back to the host.
+The host stays the reference and the fallback; nothing of Mojang's is copied into the repository.
+Needs the user's `eula=true` on the dev machine to produce the reference output.
