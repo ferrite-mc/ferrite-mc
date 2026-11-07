@@ -206,6 +206,8 @@ pub enum Command {
         unbreakable: bool,
         model: Option<i32>,
         repair: i32,
+        flags: Vec<String>,
+        custom_data: Option<ferrite_nbt::Compound>,
     },
     /// A plugin wore the stack in an inventory slot down to `damage`.
     ItemDamage {
@@ -343,10 +345,40 @@ pub(super) struct ItemMetaFields {
     pub unbreakable: bool,
     pub model: Option<i32>,
     pub repair: i32,
+    pub flags: Vec<String>,
+    pub custom_data: Option<ferrite_nbt::Compound>,
 }
 
-/// Replaces the name, lore, enchantments, unbreakable flag, model and repair cost of `stack`;
-/// text that does not parse is left out.
+/// Maps Bukkit item flags to the components hidden by `minecraft:tooltip_display`.
+fn tooltip_display(flags: &[String]) -> Option<ferrite_item::TooltipDisplay> {
+    let mut display = ferrite_item::TooltipDisplay::default();
+    for flag in flags {
+        let id = match flag.as_str() {
+            "HIDE_ENCHANTS" => ferrite_item::component_ids::ENCHANTMENTS,
+            "HIDE_ATTRIBUTES" => ferrite_item::component_ids::ATTRIBUTE_MODIFIERS,
+            "HIDE_UNBREAKABLE" => ferrite_item::component_ids::UNBREAKABLE,
+            "HIDE_DESTROYS" => ferrite_item::component_ids::CAN_BREAK,
+            "HIDE_PLACED_ON" => ferrite_item::component_ids::CAN_PLACE_ON,
+            "HIDE_DYE" => ferrite_item::component_ids::DYED_COLOR,
+            "HIDE_ARMOR_TRIM" => ferrite_item::component_ids::TRIM,
+            "HIDE_STORED_ENCHANTS" => ferrite_item::component_ids::STORED_ENCHANTMENTS,
+            // 26.3 no longer has one component for this deprecated flag; hiding the whole
+            // tooltip is the closest explicit behaviour.
+            "HIDE_ADDITIONAL_TOOLTIP" => {
+                display.hide_tooltip = true;
+                continue;
+            }
+            _ => return None,
+        };
+        display.hidden_components.push(id);
+    }
+    display.hidden_components.sort_unstable();
+    display.hidden_components.dedup();
+    (!flags.is_empty()).then_some(display)
+}
+
+/// Replaces the name, lore, enchantments, unbreakable flag, model, repair cost, tooltip flags
+/// and persistent data of `stack`; text that does not parse is left out.
 pub(super) fn with_meta(
     mut stack: ferrite_item::ItemStack,
     meta: &ItemMetaFields,
@@ -360,6 +392,8 @@ pub(super) fn with_meta(
         ids::UNBREAKABLE,
         ids::CUSTOM_MODEL_DATA,
         ids::REPAIR_COST,
+        ids::TOOLTIP_DISPLAY,
+        ids::CUSTOM_DATA,
     ] {
         stack.components.remove(id);
     }
@@ -392,6 +426,14 @@ pub(super) fn with_meta(
     }
     if meta.repair > 0 {
         put(Component::RepairCost(meta.repair));
+    }
+    if let Some(display) = tooltip_display(&meta.flags) {
+        put(Component::TooltipDisplay(display));
+    }
+    if let Some(data) = &meta.custom_data
+        && !data.is_empty()
+    {
+        put(Component::CustomData(data.clone()));
     }
     stack
 }
@@ -3429,6 +3471,8 @@ impl Player {
                     unbreakable,
                     model,
                     repair,
+                    flags,
+                    custom_data,
                 } => {
                     self.set_item_meta(
                         slot,
@@ -3439,6 +3483,8 @@ impl Player {
                             unbreakable,
                             model,
                             repair,
+                            flags,
+                            custom_data,
                         },
                     );
                     continue;
@@ -7464,7 +7510,16 @@ impl Region {
                     spectator: p.gamemode == 3,
                 })
                 .collect();
-            for update in self.vaults.tick(source, &players, &self.held_chunks) {
+            let vault_updates =
+                self.vaults
+                    .tick_with_delivered(source, &players, &self.held_chunks, |token| {
+                        self.entities.keys().iter().any(|&key| {
+                            self.entities
+                                .data(key)
+                                .is_some_and(|data| data.uuid == token)
+                        })
+                    });
+            for update in vault_updates {
                 let super::vault::VaultUpdate {
                     pos,
                     block_state,
@@ -7510,14 +7565,20 @@ impl Region {
                         &update,
                     );
                 }
-                for stack in items {
-                    let record = super::vault::ejected_item(pos, &stack, &mut self.rng);
-                    self.entities.insert(record);
+                let mut spawned = Vec::new();
+                for reward in items {
+                    let record = super::vault::ejected_item(pos, &reward, &mut self.rng);
+                    spawned.push(self.entities.insert(record));
                 }
                 // The vault's ledger is written only after its item entities exist, so a
-                // crash in between re-ejects a reward instead of losing it.
-                if let Some(items) = pending_items {
-                    super::vault::commit_ejection(source, pos, &items);
+                // crash in between re-ejects a reward instead of losing it. A failed write
+                // rolls the new entities back to keep the reward pending.
+                if let Some(items) = pending_items
+                    && !super::vault::commit_ejection(source, pos, &items)
+                {
+                    for key in spawned {
+                        let _ = self.entities.remove(key);
+                    }
                 }
             }
         }
@@ -9051,6 +9112,20 @@ mod worn_stack_tests {
             unbreakable: true,
             model: Some(3),
             repair: 2,
+            flags: vec![
+                "HIDE_ENCHANTS".into(),
+                "HIDE_DYE".into(),
+                "HIDE_ADDITIONAL_TOOLTIP".into(),
+            ],
+            custom_data: Some({
+                let mut data = ferrite_nbt::Compound::new();
+                data.insert(
+                    "ferrite:owner".into(),
+                    ferrite_nbt::Tag::String("Steve".into()),
+                );
+                data.insert("ferrite:level".into(), ferrite_nbt::Tag::Int(12));
+                data
+            }),
         };
         let stack = with_meta(ferrite_item::ItemStack::with_count(sword, 1), &meta);
         for id in [
@@ -9060,9 +9135,45 @@ mod worn_stack_tests {
             ferrite_item::component_ids::UNBREAKABLE,
             ferrite_item::component_ids::CUSTOM_MODEL_DATA,
             ferrite_item::component_ids::REPAIR_COST,
+            ferrite_item::component_ids::TOOLTIP_DISPLAY,
+            ferrite_item::component_ids::CUSTOM_DATA,
         ] {
             assert!(stack.components.get(id).is_some(), "component {id}");
         }
+        assert_eq!(
+            stack
+                .components
+                .get(ferrite_item::component_ids::TOOLTIP_DISPLAY),
+            Some(&ferrite_item::Component::TooltipDisplay(
+                ferrite_item::TooltipDisplay {
+                    hide_tooltip: true,
+                    hidden_components: vec![
+                        ferrite_item::component_ids::ENCHANTMENTS,
+                        ferrite_item::component_ids::DYED_COLOR,
+                    ],
+                }
+            ))
+        );
+        let mut bytes = Vec::new();
+        ferrite_protocol::Encode::encode(&stack, &mut bytes);
+        let decoded = ferrite_item::ItemStack::decode_network(&bytes)
+            .expect("plugin metadata stays in the network slot");
+        assert_eq!(
+            decoded
+                .components
+                .get(ferrite_item::component_ids::CUSTOM_DATA),
+            stack
+                .components
+                .get(ferrite_item::component_ids::CUSTOM_DATA)
+        );
+        assert_eq!(
+            decoded
+                .components
+                .get(ferrite_item::component_ids::TOOLTIP_DISPLAY),
+            stack
+                .components
+                .get(ferrite_item::component_ids::TOOLTIP_DISPLAY)
+        );
         let bare = ItemMetaFields {
             name: None,
             lore: vec![],
@@ -9070,6 +9181,8 @@ mod worn_stack_tests {
             unbreakable: false,
             model: None,
             repair: 0,
+            flags: vec![],
+            custom_data: None,
         };
         let cleared = with_meta(stack, &bare);
         assert!(

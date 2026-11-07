@@ -758,6 +758,76 @@ impl Tool {
     }
 }
 
+/// The `minecraft:tooltip_display` value: whether the whole tooltip is hidden and which
+/// components are left out of the tooltip.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TooltipDisplay {
+    /// Hide the tooltip entirely.
+    pub hide_tooltip: bool,
+    /// Component type ids hidden from the tooltip, in display order.
+    pub hidden_components: Vec<u16>,
+}
+
+impl TooltipDisplay {
+    fn to_tag(&self) -> Result<Tag, Error> {
+        let mut compound = Compound::new();
+        if self.hide_tooltip {
+            compound.insert("hide_tooltip".to_owned(), Tag::Byte(1));
+        }
+        if !self.hidden_components.is_empty() {
+            let mut names = Vec::with_capacity(self.hidden_components.len());
+            for id in &self.hidden_components {
+                names.push(
+                    component_name(*id)
+                        .ok_or(Error::UnknownComponentId(*id))?
+                        .to_owned(),
+                );
+            }
+            compound.insert(
+                "hidden_components".to_owned(),
+                Tag::List(List::String(names)),
+            );
+        }
+        Ok(Tag::Compound(compound))
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(fields) = tag else {
+            return None;
+        };
+        if fields
+            .keys()
+            .any(|key| !matches!(key.as_str(), "hide_tooltip" | "hidden_components"))
+        {
+            return None;
+        }
+        let hide_tooltip = match fields.get("hide_tooltip") {
+            Some(tag) => as_bool(tag)?,
+            None => false,
+        };
+        let hidden_components = match fields.get("hidden_components") {
+            Some(Tag::List(List::End)) | None => Vec::new(),
+            Some(Tag::List(List::String(names))) => names
+                .iter()
+                .map(|name| component_id(name))
+                .collect::<Option<Vec<_>>>()?,
+            Some(Tag::List(List::Int(ids))) => ids
+                .iter()
+                .map(|id| {
+                    u16::try_from(*id)
+                        .ok()
+                        .filter(|id| *id < COMPONENT_COUNT as u16)
+                })
+                .collect::<Option<Vec<_>>>()?,
+            Some(_) => return None,
+        };
+        Some(Self {
+            hide_tooltip,
+            hidden_components,
+        })
+    }
+}
+
 /// A typed data component value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Component {
@@ -801,6 +871,8 @@ pub enum Component {
     Trim(Trim),
     /// `minecraft:lodestone_tracker`, a compass bound to a lodestone.
     LodestoneTracker(LodestoneTracker),
+    /// `minecraft:tooltip_display`, which hides tooltip lines.
+    TooltipDisplay(TooltipDisplay),
     /// A component without a typed variant, or a value whose NBT shape did not match its typed
     /// variant. Kept verbatim.
     Opaque(Tag),
@@ -835,6 +907,7 @@ impl Component {
             Self::Tool(_) => ids::TOOL,
             Self::Trim(_) => ids::TRIM,
             Self::LodestoneTracker(_) => ids::LODESTONE_TRACKER,
+            Self::TooltipDisplay(_) => ids::TOOLTIP_DISPLAY,
             Self::Opaque(_) | Self::Raw(_) => return None,
         })
     }
@@ -862,6 +935,7 @@ impl Component {
             Self::Tool(_) => "tool",
             Self::Trim(_) => "trim",
             Self::LodestoneTracker(_) => "lodestone_tracker",
+            Self::TooltipDisplay(_) => "tooltip_display",
             Self::Opaque(_) => "opaque",
             Self::Raw(_) => "raw",
         }
@@ -903,6 +977,7 @@ impl Component {
             Self::Tool(tool) => Tag::Compound(tool.to_compound()),
             Self::Trim(trim) => Tag::Compound(trim.to_compound()),
             Self::LodestoneTracker(tracker) => Tag::Compound(tracker.to_compound()),
+            Self::TooltipDisplay(display) => display.to_tag()?,
             Self::Opaque(tag) => tag.clone(),
             Self::Raw(_) => return Err(Error::NoNbtForm("raw")),
         })
@@ -948,6 +1023,7 @@ impl Component {
             ids::TOOL => Tool::from_tag(tag).map(Self::Tool),
             ids::TRIM => Trim::from_tag(tag).map(Self::Trim),
             ids::LODESTONE_TRACKER => LodestoneTracker::from_tag(tag).map(Self::LodestoneTracker),
+            ids::TOOLTIP_DISPLAY => TooltipDisplay::from_tag(tag).map(Self::TooltipDisplay),
             _ => None,
         };
         typed.unwrap_or_else(|| Self::Opaque(tag.clone()))
@@ -1356,6 +1432,13 @@ mod tests {
                 Component::Trim(Trim {
                     material: "minecraft:amethyst".to_owned(),
                     pattern: "minecraft:bolt".to_owned(),
+                }),
+            ),
+            (
+                ids::TOOLTIP_DISPLAY,
+                Component::TooltipDisplay(TooltipDisplay {
+                    hide_tooltip: true,
+                    hidden_components: vec![ids::ENCHANTMENTS, ids::ATTRIBUTE_MODIFIERS],
                 }),
             ),
         ];

@@ -105,18 +105,35 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
                 let (id, level) = entry.split_once('=')?;
                 enchants.push((id.to_owned(), level.parse().ok()?));
             }
+            let unbreakable = fields.next()? == "1";
+            let model = fields
+                .next()
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse().ok());
+            let repair = fields.next()?.parse().ok().filter(|r| *r >= 0)?;
+            let flags = fields
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.split(',').map(str::to_owned).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if flags.iter().any(|flag| !is_item_flag(flag)) {
+                return None;
+            }
+            let custom_data = match fields.next() {
+                Some(pdc) if !pdc.is_empty() => Some(item_pdc(pdc)?),
+                _ => None,
+            };
             Some(PlayerCommand::ItemMeta {
                 player,
                 slot,
                 name,
                 lore,
                 enchants,
-                unbreakable: fields.next()? == "1",
-                model: fields
-                    .next()
-                    .filter(|s| !s.is_empty())
-                    .and_then(|s| s.parse().ok()),
-                repair: fields.next()?.parse().ok().filter(|r| *r >= 0)?,
+                unbreakable,
+                model,
+                repair,
+                flags,
+                custom_data,
             })
         }
         "setItemDamage(int,int)" => Some(PlayerCommand::ItemDamage {
@@ -129,6 +146,68 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         }
         _ => None,
     }
+}
+
+fn is_item_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "HIDE_ENCHANTS"
+            | "HIDE_ATTRIBUTES"
+            | "HIDE_UNBREAKABLE"
+            | "HIDE_DESTROYS"
+            | "HIDE_PLACED_ON"
+            | "HIDE_DYE"
+            | "HIDE_ARMOR_TRIM"
+            | "HIDE_STORED_ENCHANTS"
+            | "HIDE_ADDITIONAL_TOOLTIP"
+    )
+}
+
+/// Decodes the item PDC bridge format: an SNBT compound whose entries are
+/// `{"type":"INTEGER", "value":42}` wrappers. The wrapper keeps BOOLEAN distinct from BYTE
+/// and rejects unsupported Bukkit PDC types instead of dropping them.
+fn item_pdc(snbt: &str) -> Option<ferrite_nbt::Compound> {
+    let ferrite_nbt::Tag::Compound(entries) = ferrite_nbt::snbt::parse(snbt).ok()? else {
+        return None;
+    };
+    let mut data = ferrite_nbt::Compound::new();
+    for (key, wrapper) in entries {
+        let (namespace, path) = key.split_once(':')?;
+        if namespace.is_empty() || path.is_empty() || data.contains_key(&key) {
+            return None;
+        }
+        let ferrite_nbt::Tag::Compound(wrapper) = wrapper else {
+            return None;
+        };
+        if wrapper.len() != 2 {
+            return None;
+        }
+        let ferrite_nbt::Tag::String(kind) = wrapper.get("type")? else {
+            return None;
+        };
+        let value = wrapper.get("value")?;
+        let matches = match kind.as_str() {
+            "BYTE" | "BOOLEAN" => matches!(value, ferrite_nbt::Tag::Byte(_)),
+            "SHORT" => matches!(value, ferrite_nbt::Tag::Short(_)),
+            "INTEGER" => matches!(value, ferrite_nbt::Tag::Int(_)),
+            "LONG" => matches!(value, ferrite_nbt::Tag::Long(_)),
+            "FLOAT" => matches!(value, ferrite_nbt::Tag::Float(_)),
+            "DOUBLE" => matches!(value, ferrite_nbt::Tag::Double(_)),
+            "STRING" => matches!(value, ferrite_nbt::Tag::String(_)),
+            "BYTE_ARRAY" => matches!(value, ferrite_nbt::Tag::ByteArray(_)),
+            "INTEGER_ARRAY" => matches!(value, ferrite_nbt::Tag::IntArray(_)),
+            "LONG_ARRAY" => matches!(value, ferrite_nbt::Tag::LongArray(_)),
+            _ => false,
+        };
+        if !matches {
+            return None;
+        }
+        if *kind == "BOOLEAN" && !matches!(value, ferrite_nbt::Tag::Byte(0 | 1)) {
+            return None;
+        }
+        data.insert(key, value.clone());
+    }
+    Some(data)
 }
 
 fn station(player: Uuid, station: &str) -> Option<PlayerCommand> {
@@ -355,6 +434,8 @@ mod tests {
             "1",
             "7",
             "2",
+            "HIDE_ENCHANTS,HIDE_DYE",
+            "{\"ferrite:owner\":{type:\"STRING\",value:\"Steve\"},\"ferrite:level\":{type:\"INTEGER\",value:12}}",
         ]
         .join("\u{1e}");
         let call = HostCall {
@@ -374,7 +455,47 @@ mod tests {
                 unbreakable: true,
                 model: Some(7),
                 repair: 2,
+                flags: vec!["HIDE_ENCHANTS".into(), "HIDE_DYE".into()],
+                custom_data: Some({
+                    let mut data = ferrite_nbt::Compound::new();
+                    data.insert(
+                        "ferrite:owner".into(),
+                        ferrite_nbt::Tag::String("Steve".into()),
+                    );
+                    data.insert("ferrite:level".into(), ferrite_nbt::Tag::Int(12));
+                    data
+                }),
             })
+        );
+    }
+
+    #[test]
+    fn item_meta_rejects_unknown_flags_and_unsupported_pdc_values() {
+        let payload =
+            |flags: &str, pdc: &str| ["", "", "", "0", "", "0", flags, pdc].join("\u{1e}");
+        let call = |text: String| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "setItemMeta(int,String)".into(),
+            args: vec!["4".into(), text],
+        };
+        assert_eq!(
+            inventory_command(&call(payload("HIDE_EVERYTHING", "{}"))),
+            None
+        );
+        assert_eq!(
+            inventory_command(&call(payload(
+                "",
+                "{\"ferrite:list\":{type:\"LIST\",value:{}}}"
+            ))),
+            None
+        );
+        assert_eq!(
+            inventory_command(&call(payload(
+                "",
+                "{\"ferrite:n\":{type:\"INTEGER\",value:\"wrong\"}}"
+            ))),
+            None
         );
     }
 

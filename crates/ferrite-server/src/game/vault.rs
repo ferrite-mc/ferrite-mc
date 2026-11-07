@@ -33,6 +33,9 @@ const STATE: &str = "state";
 const TIMER: &str = "state_timer";
 const ITEMS: &str = "items_to_eject";
 const FAILED: &str = "failed_unlock_cooldown";
+/// Per-reward delivery id stored beside the item stack, used to reconcile a spawned item entity
+/// with a ledger write that a crash may have interrupted.
+const DELIVERY: &str = "ferrite_delivery";
 
 /// Vanilla `VaultBlockEntity.Server.UNLOCKING_DELAY_TICKS`.
 pub const UNLOCKING_DELAY_TICKS: i64 = 14;
@@ -128,6 +131,40 @@ fn ints(uuid: Uuid) -> Vec<i32> {
     ]
 }
 
+fn uuid_from_ints(words: &[i32]) -> Option<Uuid> {
+    if words.len() != 4 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for word in words {
+        n = (n << 32) | u128::from(*word as u32);
+    }
+    Some(Uuid::from_u128(n))
+}
+
+/// Token for a ledger written before delivery tokens existed. It only has to be stable for the
+/// same vault, index and stack, so an entity saved from that ledger can still be reconciled.
+fn legacy_delivery_token([x, y, z]: [i32; 3], index: usize, stack: &ItemStack) -> Uuid {
+    let mut bytes = Vec::with_capacity(24);
+    for value in [x, y, z] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend_from_slice(&(index as u64).to_le_bytes());
+    bytes.extend_from_slice(&stack.item.to_le_bytes());
+    bytes.extend_from_slice(&stack.count.to_le_bytes());
+    let mut first = 0xcbf2_9ce4_8422_2325u64;
+    let mut second = 0x9e37_79b9_7f4a_7c15u64;
+    for &byte in &bytes {
+        first ^= u64::from(byte);
+        first = first.wrapping_mul(0x100_0000_01b3);
+    }
+    for &byte in bytes.iter().rev() {
+        second ^= u64::from(byte);
+        second = second.wrapping_mul(0x100_0000_01b3);
+    }
+    Uuid::from_u128((u128::from(first) << 64) | u128::from(second))
+}
+
 fn is_rewarded(server: &Compound, player: Uuid) -> bool {
     match server.get(REWARDED) {
         None => false,
@@ -152,18 +189,34 @@ fn mark_rewarded(server: &mut Compound, player: Uuid) -> bool {
     }
 }
 
-fn items_to_eject(server: &Compound) -> Vec<ItemStack> {
+fn items_to_eject(server: &Compound, pos: [i32; 3]) -> Vec<PendingReward> {
     let Some(Tag::List(List::Compound(all))) = server.get(ITEMS) else {
         return Vec::new();
     };
     all.iter()
-        .filter_map(|item| ItemStack::from_nbt(item).ok())
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let stack = ItemStack::from_nbt(item).ok()?;
+            let token = match item.get(DELIVERY) {
+                Some(Tag::IntArray(words)) => uuid_from_ints(words),
+                _ => None,
+            }
+            .unwrap_or_else(|| legacy_delivery_token(pos, index, &stack));
+            Some(PendingReward { stack, token })
+        })
         .collect()
 }
 
-fn item_tags(items: &[ItemStack]) -> Tag {
+fn item_tags(items: &[PendingReward]) -> Tag {
     Tag::List(List::Compound(
-        items.iter().filter_map(|item| item.to_nbt().ok()).collect(),
+        items
+            .iter()
+            .filter_map(|reward| {
+                let mut item = reward.stack.to_nbt().ok()?;
+                item.insert(DELIVERY.into(), Tag::IntArray(ints(reward.token)));
+                Some(item)
+            })
+            .collect(),
     ))
 }
 
@@ -271,7 +324,13 @@ pub fn try_unlock(
             .unwrap_or(Unlock::Missing);
     }
 
-    let items = roll_rewards(table);
+    let items: Vec<PendingReward> = roll_rewards(table)
+        .into_iter()
+        .map(|stack| PendingReward {
+            stack,
+            token: ferrite_entity::random_uuid(),
+        })
+        .collect();
     source
         .update_block_entity(x, y, z, |entity| {
             let Some(entity) = entity.as_mut().filter(|entity| entity.type_id == type_id) else {
@@ -322,6 +381,15 @@ pub struct VaultEvent {
     pub data: i32,
 }
 
+/// One rolled reward and its durable delivery token. The token is written into the block
+/// entity's `items_to_eject` ledger and used as the spawned item entity's UUID, so a restart can
+/// tell whether a ledger entry already became an entity.
+#[derive(Clone, Debug)]
+pub struct PendingReward {
+    pub stack: ItemStack,
+    pub token: Uuid,
+}
+
 /// What one vault tick changed, for the region to apply.
 #[derive(Debug, Default)]
 pub struct VaultUpdate {
@@ -330,11 +398,11 @@ pub struct VaultUpdate {
     pub block_state: Option<u16>,
     pub events: Vec<VaultEvent>,
     /// Rewards leaving the vault this tick.
-    pub items: Vec<ItemStack>,
+    pub items: Vec<PendingReward>,
     /// The reward ledger to write after `items` have been spawned. [`tick_vault`] deliberately
     /// leaves this out of its block-entity write, so a crash before the spawn leaves the reward
     /// pending instead of losing it.
-    pub pending_items: Option<Vec<ItemStack>>,
+    pub pending_items: Option<Vec<PendingReward>>,
 }
 
 impl VaultUpdate {
@@ -357,26 +425,42 @@ pub fn ejected_item_stack(stack: &ItemStack) -> ferrite_protocol::packets::play:
 
 /// The item entity for one reward leaving the vault (vanilla
 /// `VaultBlockEntity.Server.tryEjectItem`): above the block with a small random push and yaw.
-pub fn ejected_item([x, y, z]: [i32; 3], stack: &ItemStack, rng: &mut Rng) -> EntityRecord {
-    ferrite_entity::item::new_item(
+/// The entity UUID is the reward's delivery token, so a restart can recognize it.
+pub fn ejected_item([x, y, z]: [i32; 3], reward: &PendingReward, rng: &mut Rng) -> EntityRecord {
+    let mut record = ferrite_entity::item::new_item(
         Vec3::new(f64::from(x) + 0.5, f64::from(y) + 1.0, f64::from(z) + 0.5),
         Vec3::new(rng.range(-0.05, 0.05), 0.2, rng.range(-0.05, 0.05)),
-        ejected_item_stack(stack),
+        ejected_item_stack(&reward.stack),
         rng,
-    )
+    );
+    record.data.uuid = reward.token;
+    record
 }
 
 fn event(pos: [i32; 3], event: i32, data: i32) -> VaultEvent {
     VaultEvent { pos, event, data }
 }
 
-/// Ticks one vault: activation/deactivation near players and the unlocking/ejecting timers.
-/// The server data is written back when anything changed; the caller applies `block_state`
-/// and forwards `events`/`items` to clients and the entity store.
+/// Ticks one vault without entity-store reconciliation. Callers that do not own the ejected
+/// entities use this; a region uses [`tick_vault_with_delivered`].
+#[cfg(test)]
 pub fn tick_vault(
     source: &AnvilChunkSource,
     [x, y, z]: [i32; 3],
     players: &[VaultPlayer],
+) -> Option<VaultUpdate> {
+    tick_vault_with_delivered(source, [x, y, z], players, |_| false)
+}
+
+/// Ticks one vault: activation/deactivation near players and the unlocking/ejecting timers.
+/// The server data is written back when anything changed; the caller applies `block_state`
+/// and forwards `events`/`items` to clients and the entity store. Ledger entries whose delivery
+/// token is already in `delivered` are dropped without spawning another entity.
+pub fn tick_vault_with_delivered(
+    source: &AnvilChunkSource,
+    [x, y, z]: [i32; 3],
+    players: &[VaultPlayer],
+    delivered: impl Fn(Uuid) -> bool,
 ) -> Option<VaultUpdate> {
     let block_state = u16::try_from(source.block(x, y, z)?).ok()?;
     let (name, _) = ferrite_data::blocks::state(block_state)?;
@@ -399,7 +483,7 @@ pub fn tick_vault(
     };
     let ominous = super::blocks::property(block_state, "ominous") == Some("true");
     let mut timer = tick_value(&server, TIMER).unwrap_or(0);
-    let mut items = items_to_eject(&server);
+    let mut items = items_to_eject(&server, [x, y, z]);
     let mut dirty = false;
     let mut items_dirty = false;
     let mut update = VaultUpdate {
@@ -442,14 +526,24 @@ pub fn tick_vault(
         }
         "ejecting" => {
             if timer % EJECT_INTERVAL_TICKS == 0 && !items.is_empty() {
-                update.items.push(items.remove(0));
-                update.events.push(event([x, y, z], VAULT_EJECTS_ITEM, 0));
-                items_dirty = true;
+                let reward = items.remove(0);
+                if delivered(reward.token) {
+                    // A crash saved the item entity but not the ledger. Drop the ledger entry
+                    // instead of spawning a second copy.
+                    items_dirty = true;
+                } else {
+                    update.items.push(reward);
+                    update.events.push(event([x, y, z], VAULT_EJECTS_ITEM, 0));
+                    items_dirty = true;
+                }
             }
             timer -= 1;
             if timer <= 0 {
-                for item in items.drain(..) {
-                    update.items.push(item);
+                for reward in items.drain(..) {
+                    if delivered(reward.token) {
+                        continue;
+                    }
+                    update.items.push(reward);
                     update.events.push(event([x, y, z], VAULT_EJECTS_ITEM, 0));
                 }
                 state = "active".into();
@@ -501,10 +595,15 @@ pub fn tick_vault(
 /// Writes the pending reward ledger after the caller has spawned [`VaultUpdate::items`].
 /// Keeping this separate from [`tick_vault`] means a crash before the spawn leaves the reward
 /// pending; a crash after the spawn but before this write re-ejects an item whose entity was
-/// never persisted, so the reward is still delivered once.
-pub fn commit_ejection(source: &AnvilChunkSource, [x, y, z]: [i32; 3], items: &[ItemStack]) {
+/// never persisted, so the reward is still delivered once. Returns `false` when the write failed
+/// and the caller must remove the entities it just spawned so the reward stays pending.
+pub fn commit_ejection(
+    source: &AnvilChunkSource,
+    [x, y, z]: [i32; 3],
+    items: &[PendingReward],
+) -> bool {
     let Some(type_id) = vault_type_id() else {
-        return;
+        return true;
     };
     let result = source.update_block_entity(x, y, z, |entity| {
         let Some(entity) = entity.as_mut().filter(|entity| entity.type_id == type_id) else {
@@ -513,8 +612,12 @@ pub fn commit_ejection(source: &AnvilChunkSource, [x, y, z]: [i32; 3], items: &[
         server_data(entity).insert(ITEMS.into(), item_tags(items));
         (true, ())
     });
-    if let Err(error) = result {
-        tracing::warn!(x, y, z, %error, "could not store the vault reward ledger");
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(x, y, z, %error, "could not store the vault reward ledger");
+            false
+        }
     }
 }
 
@@ -564,13 +667,26 @@ impl Vaults {
         }
     }
 
-    /// Ticks every known vault in a chunk this region holds. Vaults whose block is gone are
-    /// forgotten; a vault in an unloaded chunk keeps ticking once its chunk returns.
+    /// Ticks every known vault in a chunk this region holds, without entity reconciliation.
+    #[cfg(test)]
     pub fn tick(
         &mut self,
         source: &AnvilChunkSource,
         players: &[VaultPlayer],
         held: &HashMap<ChunkPos, usize>,
+    ) -> Vec<VaultUpdate> {
+        self.tick_with_delivered(source, players, held, |_| false)
+    }
+
+    /// Ticks every known vault in a chunk this region holds. Vaults whose block is gone are
+    /// forgotten; a vault in an unloaded chunk keeps ticking once its chunk returns. Ledger
+    /// entries whose token is already in the region's entity store are dropped without spawning.
+    pub fn tick_with_delivered(
+        &mut self,
+        source: &AnvilChunkSource,
+        players: &[VaultPlayer],
+        held: &HashMap<ChunkPos, usize>,
+        delivered: impl Fn(Uuid) -> bool,
     ) -> Vec<VaultUpdate> {
         let mut out = Vec::new();
         let positions: Vec<_> = self.known.iter().copied().collect();
@@ -586,7 +702,7 @@ impl Vaults {
                 self.known.remove(&pos);
                 continue;
             }
-            if let Some(update) = tick_vault(source, pos, players)
+            if let Some(update) = tick_vault_with_delivered(source, pos, players, &delivered)
                 && update.changed()
             {
                 out.push(update);
@@ -620,7 +736,7 @@ impl Vaults {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
 
     async fn loaded() -> Arc<AnvilChunkSource> {
         let source = AnvilChunkSource::new_memory();
@@ -702,12 +818,23 @@ mod tests {
         is_rewarded(server, player)
     }
 
-    fn stored_items(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> Vec<ItemStack> {
+    fn stored_rewards(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> Vec<PendingReward> {
         let entity = source.block_entity(x, y, z).expect("vault block entity");
         let Some(Tag::Compound(server)) = entity.data.get(DATA) else {
             return Vec::new();
         };
-        items_to_eject(server)
+        items_to_eject(server, [x, y, z])
+    }
+
+    fn stored_items(source: &AnvilChunkSource, pos: [i32; 3]) -> Vec<ItemStack> {
+        stored_rewards(source, pos)
+            .into_iter()
+            .map(|reward| reward.stack)
+            .collect()
+    }
+
+    fn stacks(rewards: &[PendingReward]) -> Vec<ItemStack> {
+        rewards.iter().map(|reward| reward.stack.clone()).collect()
     }
 
     /// The reward ledger as a multiset of `(item id, count)`, for restart accounting.
@@ -715,6 +842,42 @@ mod tests {
         let mut counts: Vec<_> = items.iter().map(|item| (item.item, item.count)).collect();
         counts.sort_unstable();
         counts
+    }
+
+    fn reward_counts(rewards: &[PendingReward]) -> Vec<(u16, i32)> {
+        id_counts(&stacks(rewards))
+    }
+
+    fn entity_stack(record: &EntityRecord) -> ItemStack {
+        let wire = ferrite_entity::item::stack(&record.data);
+        ItemStack::with_count(
+            u16::try_from(wire.item_id).expect("item entity has a registry item id"),
+            wire.count,
+        )
+    }
+
+    fn entity_counts(records: &[EntityRecord]) -> Vec<(u16, i32)> {
+        let items: Vec<_> = records.iter().map(entity_stack).collect();
+        id_counts(&items)
+    }
+
+    fn timer_of(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> i64 {
+        let entity = source.block_entity(x, y, z).expect("vault block entity");
+        let Some(Tag::Compound(server)) = entity.data.get(DATA) else {
+            return 0;
+        };
+        tick_value(server, TIMER).unwrap_or(0)
+    }
+
+    fn rewarded_count(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> usize {
+        let entity = source.block_entity(x, y, z).expect("vault block entity");
+        let Some(Tag::Compound(server)) = entity.data.get(DATA) else {
+            return 0;
+        };
+        match server.get(REWARDED) {
+            Some(Tag::List(List::IntArray(all))) => all.len(),
+            _ => 0,
+        }
     }
 
     fn player(pos: [f64; 3], spectator: bool) -> VaultPlayer {
@@ -737,7 +900,10 @@ mod tests {
     fn apply(source: &AnvilChunkSource, update: &VaultUpdate) {
         apply_block_state(source, update);
         if let Some(items) = &update.pending_items {
-            commit_ejection(source, update.pos, items);
+            assert!(
+                commit_ejection(source, update.pos, items),
+                "vault ledger write failed"
+            );
         }
     }
 
@@ -839,6 +1005,7 @@ mod tests {
         }
         assert_eq!(state_of(&source, pos), "active");
         assert!(stored_items(&source, pos).is_empty());
+        let ejected = stacks(&ejected);
         assert!(!ejected.is_empty(), "the vault ejected its loot");
         let names: Vec<_> = ejected.iter().filter_map(|item| item.name()).collect();
         assert!(names.iter().all(|name| name.starts_with("minecraft:")));
@@ -1056,10 +1223,11 @@ mod tests {
         assert_eq!(state_of(&source, pos), "active");
         assert!(stored_items(&source, pos).is_empty());
         assert_eq!(ejection_events, ejected.len());
-        assert_eq!(id_counts(&ejected), id_counts(&reward));
+        assert_eq!(reward_counts(&ejected), id_counts(&reward));
 
         let mut rng = Rng::new(7);
-        for stack in &ejected {
+        for reward in &ejected {
+            let stack = &reward.stack;
             let name = stack
                 .name()
                 .unwrap_or_else(|| panic!("unknown item id {}", stack.item));
@@ -1073,10 +1241,11 @@ mod tests {
             assert_eq!(protocol.item_id, i32::from(stack.item));
             assert_eq!(protocol.count, stack.count);
 
-            let record = ejected_item(pos, stack, &mut rng);
+            let record = ejected_item(pos, reward, &mut rng);
             let spawned = ferrite_entity::item::stack(&record.data);
             assert_eq!(spawned.item_id, i32::from(stack.item));
             assert_eq!(spawned.count, stack.count);
+            assert_eq!(record.data.uuid, reward.token);
             assert_eq!(record.pos.x, f64::from(pos[0]) + 0.5);
             assert_eq!(record.pos.y, f64::from(pos[1]) + 1.0);
             assert_eq!(record.pos.z, f64::from(pos[2]) + 0.5);
@@ -1154,7 +1323,7 @@ mod tests {
         assert!(rewarded(&source, pos, a));
         assert!(!rewarded(&source, pos, b));
         let remaining = stored_items(&source, pos);
-        let mut ledger = ejected_before.clone();
+        let mut ledger = stacks(&ejected_before);
         ledger.extend(remaining.clone());
         assert_eq!(
             id_counts(&ledger),
@@ -1177,13 +1346,13 @@ mod tests {
         assert_eq!(state_of(&source, pos), "active");
         assert!(stored_items(&source, pos).is_empty());
         assert_eq!(
-            id_counts(&ejected_after),
+            reward_counts(&ejected_after),
             id_counts(&remaining),
             "resuming re-ejects exactly the pending rewards"
         );
         assert_eq!(ejection_events, ejected_after.len());
-        let mut total = ejected_before;
-        total.extend(ejected_after);
+        let mut total = stacks(&ejected_before);
+        total.extend(stacks(&ejected_after));
         assert_eq!(
             id_counts(&total),
             id_counts(&reward),
@@ -1294,7 +1463,7 @@ mod tests {
         assert_eq!(state_of(&source, pos), "active");
         assert_eq!(ejection_events, ejected.len());
         assert_eq!(
-            id_counts(&ejected),
+            reward_counts(&ejected),
             id_counts(&reward),
             "the resumed vault re-ejects the whole reward once"
         );
@@ -1311,5 +1480,402 @@ mod tests {
 
         drop(source);
         let _ = std::fs::remove_dir_all(world);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chunk_unload_pauses_ejection_and_resumes_without_loss_or_duplication() {
+        let Some(root) = vanilla_root() else {
+            eprintln!("SKIP vault chunk-unload test: vanilla/26.3/generated is absent");
+            return;
+        };
+        let world = temp_dir("chunk-unload");
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let pos = [4, 64, 4];
+        let player = Uuid::from_u128(51);
+        put_vault(&source, pos, "active", false);
+        assert_eq!(
+            try_unlock(&source, pos, player, Some("minecraft:trial_key"), false),
+            Unlock::Started
+        );
+        let reward = stored_items(&source, pos);
+        assert!(!reward.is_empty());
+
+        for _ in 0..UNLOCKING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            apply(&source, &update);
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        let held = HashMap::from([(ChunkPos(0, 0), 1)]);
+        let mut vaults = Vaults::default();
+        vaults.discover(&source, &held);
+        let mut rng = Rng::new(11);
+        let mut before = Vec::new();
+        for _ in 0..4 {
+            for update in vaults.tick(&source, &[near()], &held) {
+                for reward in &update.items {
+                    before.push(ejected_item(pos, reward, &mut rng));
+                }
+                apply(&source, &update);
+            }
+        }
+        assert!(!before.is_empty());
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        // The last holder released the chunk: entity sidecar first, then the chunk flush.
+        crate::game::entity_save::save(&world, (0, 0), &before).unwrap();
+        source.flush_chunk(0, 0).await.unwrap();
+        drop(source);
+
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let loaded = crate::game::entity_save::load(&world, (0, 0));
+        assert_eq!(loaded.len(), before.len());
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        // Without a holder the vault neither advances nor emits anything.
+        let state_before = state_of(&source, pos);
+        let timer_before = timer_of(&source, pos);
+        let no_hold = HashMap::new();
+        let mut idle = Vaults::default();
+        idle.discover(&source, &no_hold);
+        assert!(idle.tick(&source, &[near()], &no_hold).is_empty());
+        assert_eq!(state_of(&source, pos), state_before);
+        assert_eq!(timer_of(&source, pos), timer_before);
+
+        // Re-holding the chunk resumes from the persisted ledger.
+        let mut resumed = Vec::new();
+        let mut vaults = Vaults::default();
+        vaults.discover(&source, &held);
+        let mut rng = Rng::new(12);
+        for _ in 0..EJECTING_DELAY_TICKS {
+            for update in vaults.tick(&source, &[near()], &held) {
+                for reward in &update.items {
+                    resumed.push(ejected_item(pos, reward, &mut rng));
+                }
+                apply(&source, &update);
+            }
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        let mut total = entity_counts(&loaded);
+        total.extend(entity_counts(&resumed));
+        total.sort_unstable();
+        assert_eq!(
+            total,
+            id_counts(&reward),
+            "unload/reload lost or duplicated a reward"
+        );
+        let mut ids: Vec<_> = loaded
+            .iter()
+            .chain(resumed.iter())
+            .map(|record| record.data.uuid)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), loaded.len() + resumed.len());
+
+        drop(source);
+        let _ = std::fs::remove_dir_all(world);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn region_split_and_merge_keep_exactly_one_vault_ticker() {
+        let source = loaded().await;
+        let pos = [4, 64, 4];
+        let player = Uuid::from_u128(61);
+        put_vault(&source, pos, "active", true);
+        assert_eq!(
+            try_unlock(
+                &source,
+                pos,
+                player,
+                Some("minecraft:ominous_trial_key"),
+                true
+            ),
+            Unlock::Started
+        );
+        let reward = stored_items(&source, pos);
+        assert!(!reward.is_empty());
+
+        for _ in 0..UNLOCKING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            apply(&source, &update);
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        let held = HashMap::from([(ChunkPos(0, 0), 1)]);
+        let mut left = Vaults::default();
+        left.discover(&source, &held);
+        assert_eq!(left.known.len(), 1);
+        let mut rng = Rng::new(21);
+        let mut delivered = Vec::new();
+        let mut events = 0;
+
+        for update in left.tick(&source, &[near()], &held) {
+            events += update
+                .events
+                .iter()
+                .filter(|event| event.event == VAULT_EJECTS_ITEM)
+                .count();
+            for reward in &update.items {
+                delivered.push(ejected_item(pos, reward, &mut rng));
+            }
+            apply(&source, &update);
+        }
+
+        // The split moves the tracked vault to the receiving region.
+        let mut right = left.split(|_, _| true);
+        assert!(left.known.is_empty());
+        assert_eq!(right.known.len(), 1);
+        assert!(left.tick(&source, &[near()], &held).is_empty());
+        for update in right.tick(&source, &[near()], &held) {
+            events += update
+                .events
+                .iter()
+                .filter(|event| event.event == VAULT_EJECTS_ITEM)
+                .count();
+            for reward in &update.items {
+                delivered.push(ejected_item(pos, reward, &mut rng));
+            }
+            apply(&source, &update);
+        }
+
+        // Merging back leaves one tracker and does not replay rewards.
+        left.merge(right);
+        assert_eq!(left.known.len(), 1);
+        for _ in 0..EJECTING_DELAY_TICKS {
+            for update in left.tick(&source, &[near()], &held) {
+                events += update
+                    .events
+                    .iter()
+                    .filter(|event| event.event == VAULT_EJECTS_ITEM)
+                    .count();
+                for reward in &update.items {
+                    delivered.push(ejected_item(pos, reward, &mut rng));
+                }
+                apply(&source, &update);
+            }
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        assert!(stored_items(&source, pos).is_empty());
+        assert_eq!(events, delivered.len());
+        assert_eq!(
+            entity_counts(&delivered),
+            id_counts(&reward),
+            "region handoff lost or duplicated a reward"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_skips_entities_already_saved_for_their_ledger_token() {
+        let Some(root) = vanilla_root() else {
+            eprintln!("SKIP vault token-reconciliation test: vanilla/26.3/generated is absent");
+            return;
+        };
+        let world = temp_dir("token-restart");
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let pos = [4, 64, 4];
+        let player = Uuid::from_u128(71);
+        put_vault(&source, pos, "active", true);
+        assert_eq!(
+            try_unlock(
+                &source,
+                pos,
+                player,
+                Some("minecraft:ominous_trial_key"),
+                true
+            ),
+            Unlock::Started
+        );
+        let reward = stored_items(&source, pos);
+        assert!(!reward.is_empty());
+
+        for _ in 0..UNLOCKING_DELAY_TICKS {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            apply(&source, &update);
+        }
+        assert_eq!(state_of(&source, pos), "ejecting");
+
+        // Spawn one item, apply its block-state change, but intentionally do not commit the
+        // ledger. Persist the stale ledger and the entity, as the autosave/unload race can.
+        let crash = tick_vault(&source, pos, &[near()]).expect("vault tick");
+        assert_eq!(crash.items.len(), 1);
+        let saved_reward = crash.items[0].clone();
+        let mut rng = Rng::new(31);
+        let saved_entity = ejected_item(pos, &saved_reward, &mut rng);
+        apply_block_state(&source, &crash);
+        source.flush_chunk(0, 0).await.unwrap();
+        crate::game::entity_save::save(&world, (0, 0), &[saved_entity.clone()]).unwrap();
+        drop(source);
+
+        let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+        let source = AnvilChunkSource::new(world.clone(), registry);
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let loaded = crate::game::entity_save::load(&world, (0, 0));
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].data.uuid, saved_reward.token);
+        let ledger = stored_rewards(&source, pos);
+        assert!(
+            ledger
+                .iter()
+                .any(|reward| reward.token == saved_reward.token),
+            "the stale ledger still owns the spawned token"
+        );
+
+        let held = HashMap::from([(ChunkPos(0, 0), 1)]);
+        let mut vaults = Vaults::default();
+        vaults.discover(&source, &held);
+        let mut rng = Rng::new(32);
+        let mut resumed = Vec::new();
+        let mut events = 0;
+        for _ in 0..EJECTING_DELAY_TICKS {
+            let updates = vaults.tick_with_delivered(&source, &[near()], &held, |token| {
+                loaded.iter().any(|record| record.data.uuid == token)
+            });
+            for update in updates {
+                assert!(
+                    update
+                        .items
+                        .iter()
+                        .all(|reward| reward.token != saved_reward.token),
+                    "the saved entity was spawned again"
+                );
+                events += update
+                    .events
+                    .iter()
+                    .filter(|event| event.event == VAULT_EJECTS_ITEM)
+                    .count();
+                for reward in &update.items {
+                    resumed.push(ejected_item(pos, reward, &mut rng));
+                }
+                apply(&source, &update);
+            }
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        assert!(stored_items(&source, pos).is_empty());
+        assert_eq!(events, resumed.len());
+        let mut total = entity_counts(&loaded);
+        total.extend(entity_counts(&resumed));
+        total.sort_unstable();
+        assert_eq!(
+            total,
+            id_counts(&reward),
+            "token reconciliation lost or duplicated a reward"
+        );
+        let mut ids: Vec<_> = loaded
+            .iter()
+            .chain(resumed.iter())
+            .map(|record| record.data.uuid)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), loaded.len() + resumed.len());
+
+        drop(source);
+        let _ = std::fs::remove_dir_all(world);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_duplicate_unlocks_start_exactly_one_reward() {
+        let source = loaded().await;
+        let pos = [4, 64, 4];
+        put_vault(&source, pos, "active", false);
+        let attempts = 4;
+        let barrier = Arc::new(Barrier::new(attempts));
+        let handles: Vec<_> = (0..attempts)
+            .map(|index| {
+                let source = source.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    try_unlock(
+                        &source,
+                        pos,
+                        Uuid::from_u128(80 + index as u128),
+                        Some("minecraft:trial_key"),
+                        false,
+                    )
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == Unlock::Started)
+                .count(),
+            1,
+            "one concurrent key use starts the unlock: {outcomes:?}"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, Unlock::Started | Unlock::Busy))
+        );
+        assert_eq!(
+            rewarded_count(&source, pos),
+            1,
+            "outcomes={outcomes:?} state={:?} rewards_tag={:?} ledger={:?}",
+            state_of(&source, pos),
+            source
+                .block_entity(pos[0], pos[1], pos[2])
+                .and_then(|entity| entity.data.get(REWARDED).cloned()),
+            stored_rewards(&source, pos)
+        );
+        let winner = (0..attempts)
+            .map(|index| Uuid::from_u128(80 + index as u128))
+            .find(|player| rewarded(&source, pos, *player))
+            .expect("one player claimed the reward");
+        for index in 0..attempts {
+            let player = Uuid::from_u128(80 + index as u128);
+            if player != winner {
+                assert!(!rewarded(&source, pos, player));
+            }
+        }
+
+        let reward = stored_items(&source, pos);
+        assert!(!reward.is_empty());
+        let mut rng = Rng::new(41);
+        let mut delivered = Vec::new();
+        let mut events = 0;
+        for _ in 0..(UNLOCKING_DELAY_TICKS + EJECTING_DELAY_TICKS) {
+            let update = tick_vault(&source, pos, &[near()]).expect("vault tick");
+            events += update
+                .events
+                .iter()
+                .filter(|event| event.event == VAULT_EJECTS_ITEM)
+                .count();
+            for reward in &update.items {
+                delivered.push(ejected_item(pos, reward, &mut rng));
+            }
+            apply(&source, &update);
+        }
+        assert_eq!(state_of(&source, pos), "active");
+        assert_eq!(events, delivered.len());
+        assert_eq!(
+            entity_counts(&delivered),
+            id_counts(&reward),
+            "duplicate interaction ejected extra rewards"
+        );
+        let mut ids: Vec<_> = delivered.iter().map(|record| record.data.uuid).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), delivered.len());
     }
 }

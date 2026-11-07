@@ -8,6 +8,9 @@ public class ServerGamePacketListenerImpl {
     public net.minecraft.server.level.ServerPlayer player;
     private net.kyori.adventure.text.Component pendingSubtitle;
     private net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket pendingTimes;
+    /** NMS container ids mapped to the Bukkit view this connection opened for them. */
+    private final java.util.Map<Integer, org.bukkit.inventory.InventoryView> openContainers = new java.util.LinkedHashMap<>();
+    private static final int PLAYER_MENU_SLOTS = 36;
     public ServerGamePacketListenerImpl(net.minecraft.server.level.ServerPlayer player) { this.player = player; }
     public net.minecraft.server.level.ServerPlayer getPlayer() { return player; }
     public void send(net.minecraft.network.protocol.Packet<?> packet) {
@@ -32,11 +35,71 @@ public class ServerGamePacketListenerImpl {
             return;
         }
         if (packet instanceof net.minecraft.network.protocol.game.ClientboundTabListPacket tab) { target.sendPlayerListHeaderAndFooter(tab.header().adventure(), tab.footer().adventure()); return; }
-        if (packet instanceof net.minecraft.network.protocol.game.ClientboundContainerClosePacket) { target.closeInventory(); return; }
+        if (packet instanceof net.minecraft.network.protocol.game.ClientboundContainerClosePacket close) { closeContainer(target, close.getContainerId()); return; }
+        if (packet instanceof net.minecraft.network.protocol.game.ClientboundOpenScreenPacket open) { openContainer(target, open); return; }
+        if (packet instanceof net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket content) { setContent(target, content); return; }
+        if (packet instanceof net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket slot) { setSlot(target, slot); return; }
         if (packet instanceof net.minecraft.network.protocol.game.ClientboundSetExperiencePacket exp) { target.sendExperienceChange(exp.experienceProgress(), exp.experienceLevel()); return; }
         if (packet instanceof net.minecraft.network.protocol.game.ClientboundSetHealthPacket health) { target.sendHealthUpdate(health.getHealth(), health.getFood(), health.getSaturation()); return; }
         dev.ferrite.server.HostBridge.callVoid("NMS", target.getUniqueId().toString(), "send(" + packet.getClass().getSimpleName() + ")", packet.toString());
     }
+    private void openContainer(org.bukkit.entity.Player target, net.minecraft.network.protocol.game.ClientboundOpenScreenPacket packet) {
+        int id = packet.getContainerId();
+        if (id <= 0) throw new IllegalArgumentException("Ferrite: invalid NMS container id " + id);
+        int rows = packet.getType().getChestRows();
+        if (rows == 0) throw new UnsupportedOperationException("Ferrite: not implemented: NMS open screen menu " + packet.getType().getName());
+        var inventory = org.bukkit.Bukkit.createInventory(null, rows * 9, packet.getTitle().getString());
+        if (!openContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); }
+        var view = target.openInventory(inventory);
+        if (view == null) throw new IllegalStateException("Ferrite: the player did not accept NMS container " + id);
+        openContainers.put(id, view);
+    }
+
+    private void setContent(org.bukkit.entity.Player target, net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket packet) {
+        var view = container(target, packet.containerId());
+        int slots = menuSlots(view);
+        if (packet.items().size() != slots) throw new IllegalArgumentException("Ferrite: NMS container " + packet.containerId() + " has " + slots + " slots, packet has " + packet.items().size());
+        for (int i = 0; i < slots; i++) view.setItem(i, bukkitStack(packet.items().get(i)));
+        view.setCursor(bukkitStack(packet.carriedItem()));
+        target.updateInventory();
+    }
+
+    private void setSlot(org.bukkit.entity.Player target, net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket packet) {
+        var view = container(target, packet.getContainerId());
+        int slot = packet.getSlot();
+        if (slot == -1) view.setCursor(bukkitStack(packet.getItem()));
+        else {
+            int slots = menuSlots(view);
+            if (slot < 0 || slot >= slots) throw new IllegalArgumentException("Ferrite: NMS container " + packet.getContainerId() + " has no slot " + slot);
+            view.setItem(slot, bukkitStack(packet.getItem()));
+        }
+        target.updateInventory();
+    }
+
+    private void closeContainer(org.bukkit.entity.Player target, int containerId) {
+        var view = container(target, containerId);
+        openContainers.remove(containerId);
+        target.closeInventory();
+    }
+
+    private org.bukkit.inventory.InventoryView container(org.bukkit.entity.Player target, int containerId) {
+        var view = openContainers.get(containerId);
+        if (view == null) throw new IllegalStateException("Ferrite: NMS container " + containerId + " is not open");
+        if (target.getOpenInventory() != view) {
+            openContainers.remove(containerId);
+            throw new IllegalStateException("Ferrite: NMS container " + containerId + " is no longer the player's open view");
+        }
+        return view;
+    }
+
+    private static int menuSlots(org.bukkit.inventory.InventoryView view) {
+        return view.getTopInventory().getSize() + PLAYER_MENU_SLOTS;
+    }
+
+    private static org.bukkit.inventory.ItemStack bukkitStack(net.minecraft.world.item.ItemStack stack) {
+        return stack == null || stack.isEmpty() ? null : stack.toBukkit();
+    }
+
     public void disconnect(net.minecraft.network.chat.Component reason) { player.getBukkitEntity().kick(reason.adventure()); }
     public void disconnect(String reason) { player.getBukkitEntity().kickPlayer(reason); }
 }

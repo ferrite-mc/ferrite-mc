@@ -593,7 +593,68 @@ class PlayerExtrasTest {
             var flaggedMeta = flagged.getItemMeta();
             flaggedMeta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ENCHANTS);
             flagged.setItemMeta(flaggedMeta);
-            assertThrows(UnsupportedOperationException.class, () -> player.getInventory().setItem(5, flagged));
+            try { player.getInventory().setItem(5, flagged); } catch (IllegalStateException noNative) { /* no host in unit tests */ }
+            assertTrue(calls.stream().anyMatch(c -> c.startsWith("setItemMeta(int,String)[5") && c.contains("HIDE_ENCHANTS")), calls.toString());
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void itemPdcKeepsTypesAndReachesTheHostSlot() throws Exception {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "[" + args + "]"); return ""; };
+        try {
+            var item = new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE);
+            var meta = item.getItemMeta();
+            var pdc = meta.getPersistentDataContainer();
+            var byteKey = new org.bukkit.NamespacedKey("ferrite", "byte");
+            var shortKey = new org.bukkit.NamespacedKey("ferrite", "short");
+            var intKey = new org.bukkit.NamespacedKey("ferrite", "int");
+            var longKey = new org.bukkit.NamespacedKey("ferrite", "long");
+            var floatKey = new org.bukkit.NamespacedKey("ferrite", "float");
+            var doubleKey = new org.bukkit.NamespacedKey("ferrite", "double");
+            var boolKey = new org.bukkit.NamespacedKey("ferrite", "bool");
+            var stringKey = new org.bukkit.NamespacedKey("ferrite", "string");
+            var bytesKey = new org.bukkit.NamespacedKey("ferrite", "bytes");
+            var intsKey = new org.bukkit.NamespacedKey("ferrite", "ints");
+            var longsKey = new org.bukkit.NamespacedKey("ferrite", "longs");
+            pdc.set(byteKey, org.bukkit.persistence.PersistentDataType.BYTE, (byte) 4);
+            pdc.set(shortKey, org.bukkit.persistence.PersistentDataType.SHORT, (short) 5);
+            pdc.set(intKey, org.bukkit.persistence.PersistentDataType.INTEGER, 6);
+            pdc.set(longKey, org.bukkit.persistence.PersistentDataType.LONG, 7L);
+            pdc.set(floatKey, org.bukkit.persistence.PersistentDataType.FLOAT, 1.5f);
+            pdc.set(doubleKey, org.bukkit.persistence.PersistentDataType.DOUBLE, 2.5);
+            pdc.set(boolKey, org.bukkit.persistence.PersistentDataType.BOOLEAN, true);
+            pdc.set(stringKey, org.bukkit.persistence.PersistentDataType.STRING, "hello\nworld");
+            pdc.set(bytesKey, org.bukkit.persistence.PersistentDataType.BYTE_ARRAY, new byte[]{1, -2});
+            pdc.set(intsKey, org.bukkit.persistence.PersistentDataType.INTEGER_ARRAY, new int[]{3, -4});
+            pdc.set(longsKey, org.bukkit.persistence.PersistentDataType.LONG_ARRAY, new long[]{5L, -6L});
+            meta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ENCHANTS, org.bukkit.inventory.ItemFlag.HIDE_DYE);
+            assertEquals((byte) 4, pdc.get(byteKey, org.bukkit.persistence.PersistentDataType.BYTE));
+            assertEquals((short) 5, pdc.get(shortKey, org.bukkit.persistence.PersistentDataType.SHORT));
+            assertEquals(6, pdc.get(intKey, org.bukkit.persistence.PersistentDataType.INTEGER));
+            assertEquals(7L, pdc.get(longKey, org.bukkit.persistence.PersistentDataType.LONG));
+            assertEquals(1.5f, pdc.get(floatKey, org.bukkit.persistence.PersistentDataType.FLOAT));
+            assertEquals(2.5, pdc.get(doubleKey, org.bukkit.persistence.PersistentDataType.DOUBLE));
+            assertTrue(pdc.get(boolKey, org.bukkit.persistence.PersistentDataType.BOOLEAN));
+            assertEquals("hello\nworld", pdc.get(stringKey, org.bukkit.persistence.PersistentDataType.STRING));
+            assertArrayEquals(new byte[]{1, -2}, pdc.get(bytesKey, org.bukkit.persistence.PersistentDataType.BYTE_ARRAY));
+            assertArrayEquals(new int[]{3, -4}, pdc.get(intsKey, org.bukkit.persistence.PersistentDataType.INTEGER_ARRAY));
+            assertArrayEquals(new long[]{5L, -6L}, pdc.get(longsKey, org.bukkit.persistence.PersistentDataType.LONG_ARRAY));
+            assertNull(pdc.get(byteKey, org.bukkit.persistence.PersistentDataType.INTEGER), "wrong type access is null");
+            assertFalse(pdc.has(byteKey, org.bukkit.persistence.PersistentDataType.BOOLEAN));
+            assertThrows(UnsupportedOperationException.class, () -> pdc.set(new org.bukkit.NamespacedKey("ferrite", "unsupported"), org.bukkit.persistence.PersistentDataType.TAG_CONTAINER, new FerriteDataContainer()));
+            pdc.remove(longKey);
+            assertFalse(pdc.has(longKey));
+            assertTrue(item.setItemMeta(meta));
+            var clone = item.clone();
+            assertTrue(clone.isSimilar(item));
+            var bytes = ((FerriteDataContainer) clone.getItemMeta().getPersistentDataContainer()).serializeToBytes();
+            var reloaded = new FerriteDataContainer();
+            reloaded.readFromBytes(bytes, true);
+            assertEquals("hello\nworld", reloaded.get(stringKey, org.bukkit.persistence.PersistentDataType.STRING));
+            assertArrayEquals(new int[]{3, -4}, reloaded.get(intsKey, org.bukkit.persistence.PersistentDataType.INTEGER_ARRAY));
+            assertTrue(reloaded.get(boolKey, org.bukkit.persistence.PersistentDataType.BOOLEAN));
+            try { player.getInventory().setItem(6, clone); } catch (IllegalStateException noNative) { /* no host in unit tests */ }
+            assertTrue(calls.stream().anyMatch(c -> c.startsWith("setItemMeta(int,String)[6") && c.contains("HIDE_ENCHANTS") && c.contains("ferrite:string")), calls.toString());
         } finally { HostBridge.transport = null; }
     }
 

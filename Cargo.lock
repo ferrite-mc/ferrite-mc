@@ -790,6 +790,7 @@ name = "ferrite-plugin"
 version = "0.1.0"
 dependencies = [
  "ferrite-jvm",
+ "ferrite-nbt",
  "ferrite-plugin-meta",
  "tempfile",
  "thiserror 2.0.21",

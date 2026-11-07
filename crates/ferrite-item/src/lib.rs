@@ -54,8 +54,8 @@ pub mod wire;
 pub use component::{
     AttributeModifier, AttributeOperation, COMPONENT_COUNT, Component, ComponentPatch,
     ComponentType, CustomModelData, Enchantments, EquipmentSlot, Food, LodestoneTracker,
-    PotionContents, PotionEffect, Rarity, Tool, ToolRule, Trim, component_id, component_name,
-    component_type, component_types,
+    PotionContents, PotionEffect, Rarity, Tool, ToolRule, TooltipDisplay, Trim, component_id,
+    component_name, component_type, component_types,
 };
 pub use defaults::{
     AIR, ItemDefaults, default_components, item_count, item_defaults, item_defaults_by_name,
