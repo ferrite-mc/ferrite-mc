@@ -21,9 +21,9 @@ use ferrite_protocol::{
         play::{
             BlockUpdate, BossBar, BossBarAction, ChunkBatchReceived, ClientboundPlayerChat,
             ConfirmTeleport, ContainerClick, CreativeSlot, ItemStack, LastSeenUpdate, MovePosition,
-            MoveRotation, OpenScreen, PlayerAction, PositionSync, ServerboundChat,
-            ServerboundContainerClose, SetExperience, SetHealth, SetPlayerInventory, SystemChat,
-            UseItemOn,
+            MoveRotation, OpenScreen, PlayerAction, PlayerCombatKill, PositionSync, Respawn,
+            ServerboundChat, ServerboundClientCommand, ServerboundContainerClose, SetExperience,
+            SetHealth, SetPlayerInventory, SystemChat, UseItemOn,
         },
     },
     types::BlockPos,
@@ -453,6 +453,28 @@ fn wait_for_prefix(
     }
 }
 
+fn assert_event_order(path: &Path, first: &str, second: &str) {
+    let content = fs::read_to_string(path).unwrap_or_default();
+    let position = |prefix: &str| content.lines().position(|line| line.starts_with(prefix));
+    let first_at = position(first).unwrap_or_else(|| {
+        panic!(
+            "plugin never wrote a {first:?} line to {}:\n{content}",
+            path.display()
+        )
+    });
+    let second_at = position(second).unwrap_or_else(|| {
+        panic!(
+            "plugin never wrote a {second:?} line to {}:\n{content}",
+            path.display()
+        )
+    });
+    assert!(
+        first_at < second_at,
+        "expected {first:?} before {second:?} in {}:\n{content}",
+        path.display()
+    );
+}
+
 fn wait_for_block_state(
     bot: &mut Bot,
     position: BlockPos,
@@ -614,6 +636,8 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
         window: open.window,
     });
     wait_for_line(&events, "close Bot", &stdout, &stderr);
+    assert_event_order(&events, "inventory-open Bot", "click 0");
+    assert_event_order(&events, "click 0", "close Bot");
     bot.move_to(2.5, 65.0, 0.5);
     wait_for_prefix(&events, "move Bot 2 65 0", &stdout, &stderr);
     bot.move_to(2.5, 100.0, 0.5);
@@ -647,6 +671,7 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
     });
     wait_for_prefix(&events, "interact right 0 63 0", &stdout, &stderr);
     wait_for_prefix(&events, "break 0 64 0", &stdout, &stderr);
+    assert_event_order(&events, "interact left 0 64 0", "break 0 64 0");
     wait_for_line(
         &events,
         "break-type minecraft:grass_block world",
@@ -694,6 +719,8 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
         sequence: VarInt(33),
     });
     wait_for_prefix(&events, "place-cancel 0 64 0", &stdout, &stderr);
+    assert_event_order(&events, "interact right 0 63 0", "place 0 64 0");
+    assert_event_order(&events, "place 0 64 0", "place-cancel 0 64 0");
     assert_eq!(
         wait_for_block_state(&mut bot, BlockPos::new(0, 64, 0), &stdout, &stderr, &events),
         0,
@@ -708,10 +735,25 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
             .any(|message| message.contains("pong")),
         "a cancelled command still ran: {after_command_cancel:?}"
     );
+    // `/kill` goes through the server death path: the plugin sees PlayerDeathEvent and the
+    // bot sees the combat-kill screen. The respawn request must produce PlayerRespawnEvent,
+    // a new health bar and the quit marker before the server is stopped.
+    let mut stdin = process.0.stdin.take().unwrap();
+    stdin.write_all(b"kill Bot\n").unwrap();
+    let kill = PlayerCombatKill::decode(&mut bot.until(PlayerCombatKill::ID).as_slice()).unwrap();
+    assert!(kill.message.0.contains("Bot"), "{kill:?}");
+    let dead = SetHealth::decode(&mut bot.until(SetHealth::ID).as_slice()).unwrap();
+    assert_eq!(dead.health, 0.0, "the death health bar was not sent");
+    wait_for_line(&events, "death Bot", &stdout, &stderr);
+    bot.send(&ServerboundClientCommand { action: VarInt(0) });
+    let _ = Respawn::decode(&mut bot.until(Respawn::ID).as_slice()).unwrap();
+    let alive = SetHealth::decode(&mut bot.until(SetHealth::ID).as_slice()).unwrap();
+    assert_eq!((alive.health, alive.food.0), (20.0, 20));
+    wait_for_prefix(&events, "respawn ", &stdout, &stderr);
+    assert_event_order(&events, "death Bot", "respawn ");
     drop(bot);
     wait_for_line(&events, "quit Bot", &stdout, &stderr);
 
-    let mut stdin = process.0.stdin.take().unwrap();
     stdin.write_all(b"stop\n").unwrap();
     drop(stdin);
     let deadline = Instant::now() + Duration::from_secs(120);
