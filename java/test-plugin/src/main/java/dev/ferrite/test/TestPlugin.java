@@ -70,7 +70,8 @@ public final class TestPlugin extends JavaPlugin implements Listener {
         getLogger().info("FerriteTest settings " + getServer().getMotd() + " " + getServer().getMaxPlayers() + " " + getServer().getPort() + " " + getServer().getViewDistance() + " " + getServer().hasWhitelist());
         if (!getName().equals("FerriteLegacyTest")) getLogger().info(dev.ferrite.dependency.Helper.greeting());
         getCommand("testping").setExecutor((sender, command, label, args) -> { sender.sendMessage("pong"); return true; });
-        getCommand("test-inventory").setExecutor((sender, command, label, args) -> {
+        var inventoryCommand = getCommand("test-inventory");
+        if (inventoryCommand != null) inventoryCommand.setExecutor((sender, command, label, args) -> {
             if (!(sender instanceof org.bukkit.entity.Player player)) return false;
             var inventory = getServer().createInventory(null, 9, "Lifecycle");
             inventory.setItem(0, new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 1));
