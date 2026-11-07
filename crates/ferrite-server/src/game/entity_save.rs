@@ -19,8 +19,8 @@
 //! keep their owners. Effects and metadata beyond the item stack are not persisted yet.
 
 use ferrite_entity::{
-    EntityData, EntityRecord, Flags, allocate_id, arrow::ArrowState, experience::OrbState,
-    item::ItemState, mob::MobKind, mob::MobState, random_uuid,
+    EntityData, EntityRecord, Flags, allocate_id, arrow::ArrowState, dragon::DragonPhase,
+    experience::OrbState, item::ItemState, mob::MobKind, mob::MobState, random_uuid,
 };
 use ferrite_math::Vec3;
 use ferrite_nbt::{Compound, List, Tag, binary};
@@ -255,6 +255,14 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("LootDropped".into(), Tag::Byte(mob.loot_dropped as i8));
         c.insert("NoAI".into(), Tag::Byte(mob.no_ai as i8));
         c.insert("WanderTimer".into(), Tag::Int(mob.wander_timer as i32));
+        c.insert(
+            "DragonPhase".into(),
+            Tag::String(mob.dragon_phase.name().to_owned()),
+        );
+        c.insert(
+            "DragonPhaseTicks".into(),
+            Tag::Int(mob.dragon_phase_ticks as i32),
+        );
         c.insert("Age".into(), Tag::Int(mob.age));
         if let Some(owner) = mob.owner {
             c.insert("Owner".into(), Tag::IntArray(uuid_words(owner)));
@@ -388,6 +396,13 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.loot_dropped = boolean(c, "LootDropped");
                 mob.no_ai = boolean(c, "NoAI");
                 mob.wander_timer = int(c, "WanderTimer").unwrap_or(0).max(0) as u32;
+                mob.dragon_phase = match c.get("DragonPhase") {
+                    Some(Tag::String(name)) => {
+                        DragonPhase::from_name(name).unwrap_or(DragonPhase::Holding)
+                    }
+                    _ => DragonPhase::Holding,
+                };
+                mob.dragon_phase_ticks = int(c, "DragonPhaseTicks").unwrap_or(0).max(0) as u32;
                 mob.wander_yaw = float(c, "WanderYaw").unwrap_or(0.0);
                 mob.moving = boolean(c, "Moving");
                 mob.attack_cooldown = int(c, "AttackCooldown")
@@ -558,6 +573,24 @@ mod tests {
             Some(Uuid::from_u128(7))
         );
         assert_eq!(loaded[3].data.fuse, Some(80));
+    }
+
+    #[test]
+    fn a_dragon_phase_survives_a_save() {
+        let mut record = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.5, 90.0, 0.5),
+            &mut Rng::default(),
+        );
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.dragon_phase = DragonPhase::LandingApproach;
+            state.dragon_phase_ticks = 137;
+        }
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let state = loaded[0].data.mob.as_ref().unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::LandingApproach);
+        assert_eq!(state.dragon_phase_ticks, 137);
     }
 
     #[test]

@@ -1,11 +1,13 @@
-//! The ender dragon's flight: a slow circle above the main island.
+//! The ender dragon's flight: a slow circle, a dive at nearby players, a fireball, and a
+//! landing cycle around the exit portal.
 //!
-//! This is the holding pattern of vanilla's phase machine, without strafing, charging or
-//! perching. It is a pure function of the dragon's age, so it is deterministic and cheap.
+//! The circle is still the holding pattern of vanilla's phase machine; the landing decision and
+//! its approach/perch/takeoff phases are modelled explicitly, while strafing remains simplified.
 
 use crate::ai::{MobEvent, Target};
 use crate::id::{EntityKey, allocate_id, random_uuid};
 use crate::mob;
+use crate::rng::Rng;
 use crate::store::{EntityData, EntityRecord, EntityStore, Flags};
 use ferrite_math::{AABB, Vec3};
 
@@ -45,12 +47,54 @@ pub const CONTACT_RANGE: f64 = 5.0;
 /// Damage of one hit and the ticks between hits.
 pub const CONTACT_DAMAGE: f32 = 6.0;
 pub const CONTACT_COOLDOWN: u16 = 20;
-/// Every `PERCH_PERIOD` ticks the dragon lands on the exit portal for `PERCH_TICKS` and breathes
-/// a cloud every `BREATH_INTERVAL` ticks (vanilla perch phases, without the sitting animation).
-pub const PERCH_PERIOD: u32 = 1500;
+/// The dragon's landing cycle. Vanilla chooses this when a holding-pattern path ends; Ferrite
+/// uses a fixed-length holding window so the decision is deterministic and testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DragonPhase {
+    #[default]
+    Holding,
+    LandingApproach,
+    Perched,
+    Takeoff,
+}
+
+impl DragonPhase {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Holding => "holding",
+            Self::LandingApproach => "landing_approach",
+            Self::Perched => "perched",
+            Self::Takeoff => "takeoff",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "holding" => Some(Self::Holding),
+            "landing_approach" => Some(Self::LandingApproach),
+            "perched" => Some(Self::Perched),
+            "takeoff" => Some(Self::Takeoff),
+            _ => None,
+        }
+    }
+}
+
+/// Ticks of circling before the dragon decides whether to land. Vanilla makes that decision
+/// when a path ends; this window keeps the decision deterministic without modelling the path.
+pub const HOLDING_DECISION_TICKS: u32 = 1200;
+/// The dragon starts its approach after this many holding-window ticks when the roll succeeds,
+/// with a chance of `1 / (alive crystals + 3)`.
+pub fn should_land(alive_crystals: u32, roll: u32) -> bool {
+    roll.is_multiple_of(alive_crystals.saturating_add(3))
+}
+/// The distance to the perch spot at which the approach becomes a perch.
+pub const PERCH_REACH: f64 = 4.0;
+/// How long the dragon stays perched before taking off again.
 pub const PERCH_TICKS: u32 = 200;
 pub const PERCH_SPOT: Vec3 = Vec3::new(0.0, 68.0, 0.0);
 pub const BREATH_INTERVAL: u32 = 20;
+/// The distance to the circling path at which takeoff ends.
+pub const TAKEOFF_REACH: f64 = 4.0;
 /// A breath cloud lasts 30 seconds, reaches 3 blocks and hurts everyone in it every 20 ticks.
 /// shortcut: the cloud keeps its radius instead of shrinking, and hurts for a flat 6.
 pub const BREATH_TICKS: u32 = 600;
@@ -181,26 +225,51 @@ pub fn heal_from_crystals(store: &mut EntityStore) {
 
 /// Advances one dragon by a tick. The age lives in the mob's `wander_timer`; hits on players
 /// that get in its way are reported as melee events.
+///
+/// The landing branch uses vanilla's holding-pattern decision: after a fixed holding window the
+/// dragon lands with probability `1 / (alive crystals + 3)`, descends to the podium, breathes
+/// while perched, then climbs back to its circling path. The dive and fireball cadence remains
+/// the simplified attack cycle represented by the existing constants.
 pub fn fly(
     store: &mut EntityStore,
     key: EntityKey,
     players: &[Target],
+    rng: &mut Rng,
     events: &mut Vec<MobEvent>,
 ) {
-    let age = match mob::state_mut(store, key) {
+    let (age, mut phase, mut phase_ticks) = match mob::state_mut(store, key) {
         Some(state) => {
             state.wander_timer = state.wander_timer.wrapping_add(1);
             state.attack_cooldown = state.attack_cooldown.saturating_sub(1);
-            state.wander_timer
+            (
+                state.wander_timer,
+                state.dragon_phase,
+                state.dragon_phase_ticks.saturating_add(1),
+            )
         }
         None => return,
     };
     let previous = store.pos(key).unwrap_or_default();
     let (circle, circle_yaw) = position_at(age);
+    let alive_crystals = store
+        .keys()
+        .iter()
+        .filter(|&&other| is_crystal(store, other))
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX);
+    // The holding-pattern decision happens only at the end of a window, not every tick.
+    if phase == DragonPhase::Holding && phase_ticks >= HOLDING_DECISION_TICKS {
+        let bound = i32::try_from(alive_crystals.saturating_add(3)).unwrap_or(i32::MAX);
+        if should_land(alive_crystals, rng.next_int(bound) as u32) {
+            phase = DragonPhase::LandingApproach;
+        }
+        phase_ticks = 0;
+    }
     // Every `CHARGE_PERIOD` ticks the dragon dives at the nearest player for a while, then
     // rejoins the circle; between those it never moves faster than `MAX_SPEED`.
-    let perching = age % PERCH_PERIOD >= PERCH_PERIOD - PERCH_TICKS;
-    let charging = !perching && age % CHARGE_PERIOD >= CHARGE_PERIOD - CHARGE_TICKS;
+    let charging =
+        phase == DragonPhase::Holding && age % CHARGE_PERIOD >= CHARGE_PERIOD - CHARGE_TICKS;
     let target = players
         .iter()
         .filter(|target| target.pos.distance_to_sqr(previous) <= CHARGE_RANGE * CHARGE_RANGE)
@@ -209,10 +278,11 @@ pub fn fly(
                 .distance_to_sqr(previous)
                 .total_cmp(&b.pos.distance_to_sqr(previous))
         });
-    let goal = match target {
-        _ if perching => PERCH_SPOT,
-        Some(target) if charging => target.pos,
-        _ => circle,
+    let goal = match phase {
+        DragonPhase::LandingApproach | DragonPhase::Perched => PERCH_SPOT,
+        DragonPhase::Takeoff => circle,
+        DragonPhase::Holding if charging => target.map_or(circle, |target| target.pos),
+        DragonPhase::Holding => circle,
     };
     let step = goal - previous;
     let length = (step.x * step.x + step.y * step.y + step.z * step.z).sqrt();
@@ -233,9 +303,26 @@ pub fn fly(
     };
     store.set_pos(key, pos);
     store.set_vel(key, pos - previous);
+    match phase {
+        DragonPhase::LandingApproach
+            if pos.distance_to_sqr(PERCH_SPOT) <= PERCH_REACH * PERCH_REACH =>
+        {
+            phase = DragonPhase::Perched;
+            phase_ticks = 0;
+        }
+        DragonPhase::Perched if phase_ticks >= PERCH_TICKS => {
+            phase = DragonPhase::Takeoff;
+            phase_ticks = 0;
+        }
+        DragonPhase::Takeoff if pos.distance_to_sqr(circle) <= TAKEOFF_REACH * TAKEOFF_REACH => {
+            phase = DragonPhase::Holding;
+            phase_ticks = 0;
+        }
+        _ => {}
+    }
     // Strafing: a fireball at the nearest player now and then, from the head.
-    if age % FIREBALL_PERIOD == FIREBALL_PERIOD / 2
-        && !perching
+    if phase == DragonPhase::Holding
+        && age % FIREBALL_PERIOD == FIREBALL_PERIOD / 2
         && let Some(target) = players
             .iter()
             .filter(|t| t.pos.distance_to_sqr(pos) <= FIREBALL_RANGE * FIREBALL_RANGE)
@@ -253,7 +340,7 @@ pub fn fly(
         });
     }
     // Perched on the portal it breathes a cloud at its feet.
-    if perching && pos.distance_to_sqr(PERCH_SPOT) < 16.0 && age.is_multiple_of(BREATH_INTERVAL) {
+    if phase == DragonPhase::Perched && phase_ticks.is_multiple_of(BREATH_INTERVAL) {
         events.push(MobEvent::Breath {
             pos: Vec3::new(pos.x, PERCH_SPOT.y - 3.0, pos.z),
         });
@@ -277,6 +364,10 @@ pub fn fly(
         if let Some(state) = mob::state_mut(store, key) {
             state.attack_cooldown = CONTACT_COOLDOWN;
         }
+    }
+    if let Some(state) = mob::state_mut(store, key) {
+        state.dragon_phase = phase;
+        state.dragon_phase_ticks = phase_ticks;
     }
 }
 
@@ -317,18 +408,18 @@ mod tests {
         let (spot, _) = position_at(1);
         let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
         let mut events = Vec::new();
-        fly(&mut store, key, &[], &mut events);
+        fly(&mut store, key, &[], &mut rng, &mut events);
         mob::state_mut(&mut store, key).unwrap().health = 100.0;
         // No crystal: no healing, whatever the age.
         for _ in 0..30 {
-            fly(&mut store, key, &[], &mut events);
+            fly(&mut store, key, &[], &mut rng, &mut events);
             heal_from_crystals(&mut store);
         }
         assert_eq!(mob::state(&store, key).unwrap().health, 100.0);
         let here = store.pos(key).unwrap();
         store.insert(new_crystal(Vec3::new(here.x + 10.0, here.y, here.z)));
         for _ in 0..30 {
-            fly(&mut store, key, &[], &mut events);
+            fly(&mut store, key, &[], &mut rng, &mut events);
             heal_from_crystals(&mut store);
         }
         assert_eq!(mob::state(&store, key).unwrap().health, 103.0);
@@ -338,7 +429,7 @@ mod tests {
                 uuid: uuid::Uuid::from_u128(7),
                 pos: store.pos(key).unwrap(),
             };
-            fly(&mut store, key, &[target], &mut events);
+            fly(&mut store, key, &[target], &mut rng, &mut events);
         }
         let hits = events
             .iter()
@@ -360,7 +451,7 @@ mod tests {
         let mut events = Vec::new();
         let mut closest = f64::MAX;
         for _ in 0..(CHARGE_PERIOD + 200) {
-            fly(&mut store, key, &[player], &mut events);
+            fly(&mut store, key, &[player], &mut rng, &mut events);
             closest = closest.min(store.pos(key).unwrap().distance_to_sqr(player.pos));
         }
         assert!(
@@ -373,7 +464,7 @@ mod tests {
         let mut calm = EntityStore::new(4);
         let key = calm.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
         for _ in 0..(CHARGE_PERIOD + 200) {
-            fly(&mut calm, key, &[], &mut Vec::new());
+            fly(&mut calm, key, &[], &mut rng, &mut Vec::new());
         }
         let age = CHARGE_PERIOD + 200;
         assert!(calm.pos(key).unwrap().distance_to_sqr(position_at(age).0) < 1e-9);
@@ -415,8 +506,8 @@ mod tests {
         assert_eq!(mob::state(&store, key).unwrap().health, 200.0);
         let before = store.pos(key).unwrap();
         let mut events = Vec::new();
-        fly(&mut store, key, &[], &mut events);
-        fly(&mut store, key, &[], &mut events);
+        fly(&mut store, key, &[], &mut rng, &mut events);
+        fly(&mut store, key, &[], &mut rng, &mut events);
         let after = store.pos(key).unwrap();
         assert_ne!(before, after);
         assert!(mob::is_mob(&store, key));
@@ -428,24 +519,92 @@ mod tests {
     }
 
     #[test]
-    fn it_spits_fireballs_and_breathes_while_perched() {
+    fn alive_crystal_count_controls_the_landing_roll() {
+        assert!(should_land(0, 0));
+        assert!(!should_land(0, 1));
+        assert!(should_land(0, 3));
+        assert!(should_land(10, 0));
+        assert!(!should_land(10, 12));
+        assert!(should_land(10, 13));
+    }
+
+    #[test]
+    fn it_spits_fireballs_while_holding() {
         let mut rng = Rng::new(1);
         let mut store = EntityStore::new(4);
         let (spot, _) = position_at(0);
         let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
         let player = Target {
             uuid: uuid::Uuid::from_u128(3),
-            pos: Vec3::new(30.0, 90.0, 0.0),
+            pos: position_at(FIREBALL_PERIOD / 2).0,
         };
         let mut events = Vec::new();
-        for _ in 0..PERCH_PERIOD {
-            fly(&mut store, key, &[player], &mut events);
+        for _ in 0..FIREBALL_PERIOD {
+            fly(&mut store, key, &[player], &mut rng, &mut events);
         }
         assert!(
             events
                 .iter()
                 .any(|e| matches!(e, MobEvent::DragonFireball { .. }))
         );
-        assert!(events.iter().any(|e| matches!(e, MobEvent::Breath { .. })));
+    }
+
+    #[test]
+    fn a_player_outside_the_charge_range_does_not_pull_it_off_the_circle() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let (spot, _) = position_at(0);
+        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        let player = Target {
+            uuid: uuid::Uuid::from_u128(4),
+            pos: Vec3::new(CHARGE_RANGE + 50.0, 90.0, 0.0),
+        };
+        let mut events = Vec::new();
+        for _ in 0..(CHARGE_PERIOD + 50) {
+            fly(&mut store, key, &[player], &mut rng, &mut events);
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, MobEvent::Melee { .. })),
+            "an out-of-range target is not attacked"
+        );
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Holding
+        );
+    }
+
+    #[test]
+    fn it_lands_perches_breathes_and_takes_off() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let (spot, _) = position_at(0);
+        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        mob::state_mut(&mut store, key).unwrap().dragon_phase = DragonPhase::LandingApproach;
+        let mut events = Vec::new();
+        let mut saw_perched = false;
+        let mut saw_takeoff = false;
+        for _ in 0..(PERCH_TICKS + 120) {
+            fly(&mut store, key, &[], &mut rng, &mut events);
+            match mob::state(&store, key).unwrap().dragon_phase {
+                DragonPhase::Perched => saw_perched = true,
+                DragonPhase::Takeoff => saw_takeoff = true,
+                _ => {}
+            }
+        }
+        assert!(saw_perched, "the approach ends in a perch");
+        assert!(saw_takeoff, "the perch ends in takeoff");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, MobEvent::Breath { .. })),
+            "the perched dragon breathes"
+        );
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Holding,
+            "it returns to the holding pattern after takeoff"
+        );
     }
 }

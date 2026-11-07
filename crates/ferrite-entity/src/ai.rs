@@ -360,7 +360,7 @@ pub fn tick_with_holders(
         }
         let mut directed = false;
         if kind == MobKind::EnderDragon {
-            crate::dragon::fly(store, key, players, &mut events);
+            crate::dragon::fly(store, key, players, rng, &mut events);
             continue;
         }
         let start = store.pos(key).unwrap_or_default();
