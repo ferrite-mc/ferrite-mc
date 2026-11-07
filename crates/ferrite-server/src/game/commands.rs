@@ -143,6 +143,8 @@ pub struct GameState {
     pub game_time: i64,
     pub weather: Weather,
     pub weather_duration: i32,
+    /// The weather the clients were last told about.
+    pub weather_sent: Option<Weather>,
     pub seed: i64,
     pub max_players: i32,
     pub players: Vec<PlayerEntry>,
@@ -185,6 +187,7 @@ impl GameState {
             game_time: 0,
             weather: Weather::Clear,
             weather_duration: 6_000,
+            weather_sent: None,
             seed,
             max_players,
             players: Vec::new(),
@@ -279,11 +282,46 @@ impl GameState {
         idle
     }
 
+    /// The weather cycle when the current spell ends (vanilla `ServerLevel.advanceWeatherCycle`,
+    /// shortened): clear weather turns to rain, rain to thunder one time in three, and both
+    /// clear up again. shortcut: durations come from the tick count, not a random sequence.
+    fn advance_weather(&mut self) {
+        let r = ((self.game_time as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33) as i32;
+        let (weather, duration) = match self.weather {
+            Weather::Clear => (Weather::Rain, 12_000 + r % 12_000),
+            Weather::Rain if r % 3 == 0 => (Weather::Thunder, 3_600 + r % 12_000),
+            Weather::Rain | Weather::Thunder => (Weather::Clear, 12_000 + r % 168_000),
+        };
+        self.weather = weather;
+        self.weather_duration = duration;
+    }
+
+    /// The `game_event` packets (event, value) that tell clients the weather, when it changed
+    /// since the last call or `force` asks for a refresh (joiners and new dimensions).
+    pub fn weather_events(&mut self, force: bool) -> Vec<(u8, f32)> {
+        if self.weather_sent == Some(self.weather) && !force {
+            return Vec::new();
+        }
+        self.weather_sent = Some(self.weather);
+        // Events 1/2 begin/end raining, 7 the rain level, 8 the thunder level.
+        match self.weather {
+            Weather::Clear => vec![(2, 0.0), (7, 0.0), (8, 0.0)],
+            Weather::Rain => vec![(1, 0.0), (7, 1.0), (8, 0.0)],
+            Weather::Thunder => vec![(1, 0.0), (7, 1.0), (8, 1.0)],
+        }
+    }
+
     /// Advances the world tick. The overworld clock only moves while
     /// `advance_time` (vanilla `doDaylightCycle`) is enabled. Returns the scheduled functions
     /// that are due this tick, once per function.
     pub fn tick(&mut self, advance_time: bool) -> Vec<String> {
         self.game_time += 1;
+        if self.weather_duration > 0 {
+            self.weather_duration -= 1;
+            if self.weather_duration == 0 {
+                self.advance_weather();
+            }
+        }
         if advance_time {
             self.clock_time += 1;
         }
@@ -4143,5 +4181,27 @@ mod tests {
         state.tick(false);
         assert_eq!(state.clock_time, 1);
         assert_eq!(state.game_time, 2);
+    }
+
+    #[test]
+    fn the_weather_cycle_moves_on_and_clients_are_told_once() {
+        let mut state = GameState::new(0, 0, 10);
+        assert_eq!(
+            state.weather_events(false),
+            vec![(2, 0.0), (7, 0.0), (8, 0.0)]
+        );
+        assert!(state.weather_events(false).is_empty());
+        state.weather_duration = 2;
+        state.tick(false);
+        assert_eq!(state.weather, Weather::Clear);
+        state.tick(false);
+        assert_eq!(state.weather, Weather::Rain, "clear weather turns to rain");
+        assert!(state.weather_duration >= 12_000);
+        assert_eq!(
+            state.weather_events(false),
+            vec![(1, 0.0), (7, 1.0), (8, 0.0)]
+        );
+        assert!(state.weather_events(false).is_empty());
+        assert_eq!(state.weather_events(true).len(), 3, "a refresh repeats it");
     }
 }

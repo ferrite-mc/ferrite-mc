@@ -422,6 +422,7 @@ pub struct TickContext {
     /// The dimension this world runs, for bed and fire rules.
     pub dimension: super::Dimension,
     /// Current weather, for fire and cauldron rules.
+    #[allow(dead_code)] // the live weather is read from `state`; kept for the startup setting
     pub raining: bool,
     /// Live game rules (natural regeneration, keepInventory, death messages, ...).
     pub rules: Arc<Mutex<ferrite_command::gamerule::GameRules>>,
@@ -6330,7 +6331,11 @@ impl Region {
             self.fire.tick(
                 &mut world,
                 ctx.dimension,
-                ctx.raining,
+                ctx.dimension == super::Dimension::Overworld
+                    && ctx
+                        .state
+                        .lock()
+                        .is_ok_and(|s| s.weather != super::commands::Weather::Clear),
                 &mut self.rng,
                 &mut fire_changed,
             );

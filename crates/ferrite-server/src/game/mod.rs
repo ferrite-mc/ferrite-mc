@@ -1506,6 +1506,7 @@ async fn run(
                      }
         laps.lap("head");
                      drop(_head); let (due, idle) = { let mut game = command_state.lock().unwrap(); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
+                     { let events = { let mut game = command_state.lock().unwrap(); let refresh = game.game_time % 100 == 0; game.weather_events(refresh) }; for (event, value) in events { let bytes = game::packet(&GameEvent { event, value }); for player in online.values() { let _ = player.outbound.send(bytes.clone()); } } }
         laps.lap("game_tick");
                      {
                          let _t = CoordinatorTimer::new(4);
