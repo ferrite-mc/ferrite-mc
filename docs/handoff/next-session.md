@@ -65,6 +65,7 @@ on the branch only.
   tridents, wolf pack anger, worldgen host default 8 threads, Paper/Folia comparisons
   (`docs/handoff/2026-11-07-paper-comparison.md`; its 200-bot tables were measured with bots that
   did not send a view distance, so read them as rough).
-- Still open: vaults (`revaulting`, `under_lock_and_key`), tamed wolves attacking for the owner
+- Vaults: a trial key opens a vault once per player and ejects the reward table (`game/vault.rs`; no state check or animation).
+- Still open: tamed wolves attacking for the owner
   (mobs only target players today), other tameable kinds, piston timing and edge-case tests,
   Moonrise-style worldgen ports (profile is flat, see `docs/worldgen-host.md`), real-client checks.

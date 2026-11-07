@@ -49,6 +49,7 @@ mod end_fight;
 mod end_frame;
 mod jukebox;
 mod portal;
+mod vault;
 pub use dimension::{Dimension, DimensionRegistry};
 mod commands_data;
 mod commands_exec;

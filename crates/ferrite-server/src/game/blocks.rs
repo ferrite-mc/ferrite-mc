@@ -508,6 +508,37 @@ fn use_jukebox(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> b
     true
 }
 
+/// Vanilla `VaultBlock.useItemOn`: the matching trial key is used up and the vault ejects its
+/// rewards, once per player.
+fn use_vault(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> bool {
+    if block != "minecraft:vault" {
+        return false;
+    }
+    let (key, table) = super::vault::key_and_table(property(state, "ominous") == Some("true"));
+    if player.inventory.selected_item().name() != Some(key) {
+        return false;
+    }
+    let Some(source) = player.source.clone() else {
+        return false;
+    };
+    if !super::vault::reward_once(&source, pos, player.uuid) {
+        return false;
+    }
+    consume_held(player);
+    let context = ferrite_loot::LootContext::default();
+    for (item, count) in super::drops::roll_table(table, &context).unwrap_or_default() {
+        if let Some(stack) = ItemStack::from_name(&item).map(|s| s.copy_with_count(count))
+            && count > 0
+        {
+            player
+                .menus
+                .spilled
+                .push(([pos[0], pos[1] + 1, pos[2]], stack));
+        }
+    }
+    true
+}
+
 /// Sends a world event (sounds, particles) to everyone tracking the chunk.
 fn broadcast_level_event(player: &Player, pos: [i32; 3], event: i32, data: i32) {
     let update = packet(&ferrite_protocol::packets::play::LevelEvent {
@@ -712,6 +743,7 @@ pub fn use_block(player: &mut Player, location: i64) -> bool {
         || charge_anchor(player, pos, state, name)
         || bind_compass(player, pos, name)
         || use_jukebox(player, pos, state, name)
+        || use_vault(player, pos, state, name)
         || harvest_honey(player, pos, state, name)
     {
         return true;
