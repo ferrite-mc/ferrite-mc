@@ -4285,10 +4285,12 @@ mod tests {
 
     #[test]
     fn thunder_can_end_while_rain_continues() {
-        let mut state = GameState::default();
-        state.weather = Weather::Thunder;
-        state.rain_duration = 3;
-        state.thunder_duration = 1;
+        let mut state = GameState {
+            weather: Weather::Thunder,
+            rain_duration: 3,
+            thunder_duration: 1,
+            ..GameState::default()
+        };
         state.tick(false);
         assert_eq!(state.weather, Weather::Rain);
         assert_eq!(state.rain_duration, 2);
