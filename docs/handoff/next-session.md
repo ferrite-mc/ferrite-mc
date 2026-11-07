@@ -97,3 +97,5 @@ on the branch only.
 - Not verifiable here: any of the above against a real client.
 - Order the user gave: Rust worldgen last; Moonrise-style optimisations are done while writing the
   Rust version, not as a Java patch port.
+
+- Remaining work and pitfalls: `docs/handoff/2026-11-07-remaining-work.md`.
