@@ -1,33 +1,21 @@
-# Ferrite game-systems worker instructions
+﻿# Ferrite parallel game-systems instructions
 
-Baseline: `main` at `d7f6ccb` plus this instruction set. Treat source and tests as
-authoritative; older handoff/backlog lists contain stale items. These tasks cover Rust
-gameplay and world behavior. Rust world generation, Moonrise-style worldgen work, and the
-plugin API are out of scope for this run.
+Refresh from current `origin/main` before work. Treat source and tests as authoritative; older handoffs may be stale. The current parallel wave has six independent tasks, each described in its assigned `freebuff-*.md` file.
 
-## Shared constraints
+## Shared rules
 
-- Read this file and your assigned task file before editing.
-- Preserve protocol 777 / Minecraft Java 26.3 behavior and do not add Mojang code or assets.
-- Keep edits within the task's owned files/functions. Ask the coordinator before crossing that
-  boundary; shared integration points in `game/region.rs` must stay within the named function.
-- Add regression tests for behavior changes. Do not weaken or delete existing tests.
-- Run the task's focused tests, `cargo fmt --all -- --check`, and scoped clippy where practical.
-- Report what was already correct, changes made, exact test commands/results, commit/hash (Freebuff
-  workers), and any behavior that still needs a real-client check.
-- Do not push to `main`. The coordinator reviews and integrates completed work.
+- Keep changes inside the ownership listed by your task. Ask the coordinator before crossing a boundary or editing shared files outside your named functions.
+- Preserve Minecraft Java 26.3 / protocol 777 behavior. Never commit Mojang code or assets.
+- Add regression tests for behavior changes. Do not weaken existing tests.
+- Run focused tests, `cargo fmt --all -- --check` and scoped clippy for Rust changes, or Gradle tests for Java changes. Report exact commands and results.
+- State clearly what needs a real Minecraft client and do not claim visual verification without one.
+- Commit your task. After verification and commit, run `cargo clean` in your own worktree; for Java work also run `./gradlew clean` if Gradle outputs were created. Do not delete shared/global caches or another worktree's files. Send a concise report with commit and checks, then stop.
+- Do not push to `main`; coordinator reviews and integrates completed work.
 
-## Freebuff session reuse rule
+## Explicit exclusions
 
-The five initial Freebuff worker sessions are the only new Freebuff sessions for this run. Once a
-worker reports `worker_done` and the coordinator accepts the result, dispatch its next queued task
-to that same Orca worker/session. Do not open a replacement session merely because its task ended.
-If its process is positively known to have exited or its state is unverifiable, do not duplicate
-the task or silently create a session; report the exact state to the coordinator for routing.
+ASWM / Advanced Slime World Manager and Rust world generation are not assigned in this wave. Rust world generation remains last on the roadmap. Do not start either task or include it as incidental scope.
 
-## Completion contract
+## Current integration baseline
 
-Every task ends with a focused implementation result and regression evidence. A worker must not
-claim client-visible visual behavior is verified without a real Minecraft client. Avoid edits to
-the single shared integration test file unless your task explicitly owns it; prefer unit tests in
-the module you own.
+`origin/main` includes cross-region lead reconnect fixes and CI lint corrections through `da2ea4a`. Re-check `origin/main` when you start because the coordinator may integrate more commits during the wave.
