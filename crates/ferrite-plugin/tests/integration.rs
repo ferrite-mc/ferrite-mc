@@ -126,6 +126,7 @@ fn plugin_lifecycle() {
         data_dir: project.join("../../vanilla/26.3/generated"),
         world_view: None,
         world: None,
+        worlds: Vec::new(),
         command_handler: Some(std::sync::Arc::new(move |_, line| {
             captured.lock().unwrap().push(line.to_owned());
             true

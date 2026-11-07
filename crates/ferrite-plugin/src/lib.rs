@@ -61,6 +61,8 @@ pub struct PluginConfig {
     pub server_snapshot: ServerSnapshot,
     /// Published before plugins enable, so `onEnable` can query worlds.
     pub world: Option<WorldSnapshot>,
+    /// Other dimensions published before plugins enable (nether, end).
+    pub worlds: Vec<WorldSnapshot>,
     pub player_handler: Option<PlayerHandler>,
     pub world_handler: Option<WorldHandler>,
     /// Read-only block and biome access for Bukkit's block queries.
@@ -137,14 +139,15 @@ pub trait WorldView: Send + Sync {
     /// The biome key at a position, for example `minecraft:plains`.
     fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String>;
     /// The block entities inside the box `min..=max` of the loaded chunks, each as its position
-    /// and binary NBT (a named root compound).
+    /// and binary NBT (a named root compound). `None` means the world is unknown; an empty
+    /// vector means the world exists but the box has no block entities.
     fn block_entities(
         &self,
         _world: uuid::Uuid,
         _min: [i32; 3],
         _max: [i32; 3],
-    ) -> Vec<([i32; 3], Vec<u8>)> {
-        Vec::new()
+    ) -> Option<Vec<([i32; 3], Vec<u8>)>> {
+        None
     }
 }
 
@@ -2238,6 +2241,9 @@ impl PluginHost {
             region_context: cfg.region_context,
         };
         if let Some(world) = &cfg.world {
+            host.register_world(world)?;
+        }
+        for world in &cfg.worlds {
             host.register_world(world)?;
         }
         host.jvm.with_env(|env| {

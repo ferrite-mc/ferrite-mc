@@ -4,7 +4,7 @@
 //! keys must pass [`is_resource_key`](super::is_resource_key), and the target is always the
 //! calling player's UUID, so a plugin cannot smuggle a second argument or another selector.
 
-use super::{HostAction, is_resource_key};
+use super::{HostAction, is_resource_key, world_dimension};
 use ferrite_plugin::{HOST_NULL, HostCall};
 use uuid::Uuid;
 
@@ -222,10 +222,13 @@ fn location_xyz(encoded: &str) -> Option<(f64, f64, f64)> {
     Some((axis()?, axis()?, axis()?))
 }
 
-/// World effects that vanilla exposes as commands. Only the default world has a console
-/// target, so a call on another world is left unhandled.
+/// World effects that vanilla exposes as commands. Block-entity data merges support every
+/// server-owned dimension; the remaining effects still target only the default world.
 fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
-    if Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id() {
+    let dimension = world_dimension(Uuid::parse_str(&call.subject).ok()?)?;
+    if dimension != crate::game::Dimension::Overworld
+        && method != "ferriteDataMerge(int,int,int,String)"
+    {
         return None;
     }
     let arg = |index: usize| {
@@ -275,7 +278,13 @@ fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
             if !snbt.starts_with('{') || snbt.contains(['\n', '\r']) {
                 return None;
             }
-            console(format!("data merge block {x} {y} {z} {snbt}"), "")
+            let line = format!("data merge block {x} {y} {z} {snbt}");
+            let line = if dimension == crate::game::Dimension::Overworld {
+                line
+            } else {
+                format!("execute in {} run {line}", dimension.key())
+            };
+            console(line, "")
         }
         // Vanilla stores biomes per 4x4x4 cell, so `/fillbiome` on one block recolors its cell.
         "setBiome(int,int,int,Biome)" => {
@@ -573,6 +582,22 @@ mod tests {
 stop"
                 ]
             )),
+            None
+        );
+        let nether = crate::plugins::world_id(crate::game::Dimension::Nether).to_string();
+        assert_eq!(
+            line(world(
+                &nether,
+                "ferriteDataMerge(int,int,int,String)",
+                &["1", "64", "-2", "{marker:\"nether\"}"]
+            ))
+            .as_deref(),
+            Some(
+                "execute in minecraft:the_nether run data merge block 1 64 -2 {marker:\"nether\"}"
+            )
+        );
+        assert_eq!(
+            line(world(&nether, "strikeLightning(Location)", &[&at])),
             None
         );
         assert_eq!(

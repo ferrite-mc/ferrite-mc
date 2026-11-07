@@ -89,13 +89,18 @@ final class CapturedStructure implements Structure {
             cells.add(new Cell(x, y, z, block.getBlockData().getAsString()));
         }
         // One host call per capture brings the block entities in the box (chests, signs, ...).
+        // Without a host (unit tests, standalone bridge) the blocks are still captured; with a
+        // host, an unknown world is an explicit failure instead of silently losing block data.
         List<String> entities;
-        try {
+        if (!HostBridge.available()) {
+            entities = List.of();
+        } else {
             @SuppressWarnings("unchecked") var reply = (List<String>) HostBridge.call("World", world.getUID(), "ferriteBlockEntities(int,int,int,int,int,int)", List.class,
                 x0, y0, z0, x0 + sx - 1, y0 + sy - 1, z0 + sz - 1);
-            entities = reply == null ? List.of() : reply;
-        } catch (UnsupportedOperationException | IllegalStateException e) {
-            entities = List.of(); // no host: the blocks are captured without their data
+            if (reply == null) {
+                throw new UnsupportedOperationException("Ferrite: block entity data is unavailable for world " + world.getName() + " (" + world.getUID() + ")");
+            }
+            entities = reply;
         }
         for (var item : entities) {
             var parts = item.split(",", 4);

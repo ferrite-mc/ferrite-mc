@@ -20,6 +20,9 @@ public final class HostBridge {
     interface Transport { String call(String owner, String subject, String method, String args); }
     static volatile Transport transport;
 
+    /** Whether a host is present, so callers can distinguish "no host" from "unknown world". */
+    static boolean available() { return transport != null || Native.enabled(); }
+
     static String encode(Object value) {
         if (value == null) return NULL;
         if (value instanceof String || value instanceof Number || value instanceof Boolean || value instanceof Character) return value.toString();

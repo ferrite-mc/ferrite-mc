@@ -288,6 +288,31 @@ async fn main() -> anyhow::Result<()> {
         [0, source.spawn_height(0, 0).unwrap_or(100), 0]
     };
     ferrite_server::plugins::chunks::set_world_dir(config.world.clone());
+    // The plugin bridge and the game loop share these sources, so a plugin write lands in the
+    // same chunk data the server ticks.
+    let dimensions = game::DimensionRegistry::with_source(
+        game::Dimension::Overworld,
+        std::sync::Arc::clone(&source),
+        spawn,
+    );
+    let plugin_worlds = [game::Dimension::Nether, game::Dimension::End]
+        .into_iter()
+        .map(|dimension| {
+            let spawn = dimensions.spawn(dimension);
+            ferrite_plugin::WorldSnapshot {
+                id: ferrite_server::plugins::world_id(dimension),
+                name: ferrite_server::plugins::world_name(dimension).into(),
+                time: 0,
+                spawn: ferrite_plugin::BlockPosition {
+                    x: spawn[0],
+                    y: spawn[1],
+                    z: spawn[2],
+                },
+                blocks: Vec::new(),
+                heights: Vec::new(),
+            }
+        })
+        .collect();
     let plugin_bridge =
         ferrite_server::plugins::PluginBridge::start(ferrite_server::plugins::Settings {
             directory: config.plugins_dir.unwrap_or_else(|| "plugins".into()),
@@ -314,12 +339,13 @@ async fn main() -> anyhow::Result<()> {
                 blocks: Vec::new(),
                 heights: Vec::new(),
             },
+            worlds: plugin_worlds,
             player_handler: Some(std::sync::Arc::new(move |command| {
                 let _ = plugin_command_tx.send(command);
             })),
             terrain: terrain_for_plugins,
             world_view: Some(ferrite_server::plugins::world_view(std::sync::Arc::clone(
-                &source,
+                &dimensions,
             ))),
             console: Some(plugin_console_tx),
         })
@@ -349,7 +375,7 @@ async fn main() -> anyhow::Result<()> {
                 .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
         ),
         plugin_commands: Some(plugin_commands),
-        dimensions: None,
+        dimensions: Some(dimensions),
     };
     let world = game::World::start_configured(Some(source), spawn, settings);
     ferrite_server::plugins::forward_console(plugin_console, world.sender.clone());

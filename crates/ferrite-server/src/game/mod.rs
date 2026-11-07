@@ -53,6 +53,8 @@ mod portal;
 mod vault;
 pub use dimension::{Dimension, DimensionRegistry};
 mod commands_data;
+#[cfg(test)]
+pub(crate) use commands_data::{BlockData, apply_block};
 mod commands_exec;
 mod commands_extras;
 mod commands_item;

@@ -21,8 +21,10 @@ mod visual;
 pub mod worldgen;
 pub mod worldinfo;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use anyhow::Context;
 use ferrite_plugin::{PluginConfig, PluginHost, ServerHooks, ServerSnapshot, WorldSnapshot};
@@ -44,6 +46,8 @@ pub struct Settings {
     pub whitelist: bool,
     /// The main world, published before plugins can query the server.
     pub world: WorldSnapshot,
+    /// Other dimensions published before plugins can query the server.
+    pub worlds: Vec<WorldSnapshot>,
     /// Receives player mutations a plugin made through the Bukkit API. The game loop routes
     /// them to the region that owns the player.
     pub player_handler: Option<ferrite_plugin::PlayerHandler>,
@@ -89,6 +93,7 @@ impl PluginBridge {
                         bind_address: settings.bind_address,
                     },
                     world: Some(settings.world.clone()),
+                    worlds: settings.worlds,
                     player_handler: settings.player_handler,
                     world_view: settings.world_view,
                     world_handler: settings.console.clone().map(|console| {
@@ -380,23 +385,49 @@ impl PluginBridge {
     }
 }
 
-/// Live world reads for the Bukkit block API, backed by the server's chunk source.
+/// The stable Bukkit UUID for a dimension. Java's default world keeps the existing UUID so
+/// plugins that hard-code it keep working; the nether and end get distinct, stable IDs.
+pub fn world_id(dimension: crate::game::Dimension) -> Uuid {
+    match dimension {
+        crate::game::Dimension::Overworld => ferrite_plugin::default_world_id(),
+        crate::game::Dimension::Nether => Uuid::from_u128(2),
+        crate::game::Dimension::End => Uuid::from_u128(3),
+    }
+}
+
+/// The Bukkit directory name of a dimension, matching the standard `world_nether` and
+/// `world_the_end` names.
+pub fn world_name(dimension: crate::game::Dimension) -> &'static str {
+    match dimension {
+        crate::game::Dimension::Overworld => "world",
+        crate::game::Dimension::Nether => "world_nether",
+        crate::game::Dimension::End => "world_the_end",
+    }
+}
+
+/// Resolve a Bukkit world UUID to the dimension it names, or `None` when the server does not
+/// own that world. Callers must not substitute the overworld for an unknown world.
+pub fn world_dimension(world: Uuid) -> Option<crate::game::Dimension> {
+    crate::game::Dimension::ALL
+        .into_iter()
+        .find(|dimension| world_id(*dimension) == world)
+}
+
+/// Live world reads for the Bukkit block API, backed by the server's chunk sources.
 struct SourceWorldView {
-    source: Arc<crate::game::AnvilChunkSource>,
+    worlds: HashMap<Uuid, Arc<crate::game::AnvilChunkSource>>,
 }
 
 impl SourceWorldView {
-    fn known(&self, world: uuid::Uuid) -> bool {
-        world == ferrite_plugin::default_world_id()
+    fn source(&self, world: Uuid) -> Option<&Arc<crate::game::AnvilChunkSource>> {
+        self.worlds.get(&world)
     }
 }
 
 impl ferrite_plugin::WorldView for SourceWorldView {
     fn block(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String> {
-        if !self.known(world) {
-            return None;
-        }
-        let state = u16::try_from(self.source.block(x, y, z)?).ok()?;
+        let source = self.source(world)?;
+        let state = u16::try_from(source.block(x, y, z)?).ok()?;
         ferrite_data::blocks::state(state).map(|(name, props)| {
             if props.is_empty() {
                 return name.to_owned();
@@ -406,65 +437,84 @@ impl ferrite_plugin::WorldView for SourceWorldView {
         })
     }
     fn sky_light(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<u8> {
-        self.known(world)
-            .then(|| self.source.sky_light(x, y, z))
-            .flatten()
+        self.source(world)?.sky_light(x, y, z)
     }
     fn highest_block(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<i32> {
-        self.known(world)
-            .then(|| self.source.highest_block_y(x, z))
-            .flatten()
+        self.source(world)?.highest_block_y(x, z)
     }
     fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String> {
-        self.known(world)
-            .then(|| self.source.biome_name(x, y, z))
-            .flatten()
+        self.source(world)?.biome_name(x, y, z)
     }
     fn block_entities(
         &self,
         world: uuid::Uuid,
         min: [i32; 3],
         max: [i32; 3],
-    ) -> Vec<([i32; 3], Vec<u8>)> {
-        if !self.known(world) {
-            return Vec::new();
-        }
-        self.source
-            .block_entities()
-            .into_iter()
-            .filter(|(at, _)| (0..3).all(|axis| at[axis] >= min[axis] && at[axis] <= max[axis]))
-            .filter_map(|(at, entity)| {
-                let bytes =
-                    ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(entity.data))
-                        .ok()?;
-                Some((at, bytes))
-            })
-            .collect()
+    ) -> Option<Vec<([i32; 3], Vec<u8>)>> {
+        let source = self.source(world)?;
+        Some(
+            source
+                .block_entities()
+                .into_iter()
+                .filter(|(at, _)| (0..3).all(|axis| at[axis] >= min[axis] && at[axis] <= max[axis]))
+                .filter_map(|(at, entity)| {
+                    let bytes = ferrite_nbt::binary::write_named(
+                        "",
+                        &ferrite_nbt::Tag::Compound(entity.data),
+                    )
+                    .ok()?;
+                    Some((at, bytes))
+                })
+                .collect(),
+        )
     }
 }
 
 /// Build the live world view handed to the plugin bridge.
 pub fn world_view(
-    source: Arc<crate::game::AnvilChunkSource>,
+    dimensions: Arc<crate::game::DimensionRegistry>,
 ) -> Arc<dyn ferrite_plugin::WorldView> {
-    Arc::new(SourceWorldView { source })
+    let worlds = crate::game::Dimension::ALL
+        .into_iter()
+        .map(|dimension| {
+            (
+                world_id(dimension),
+                Arc::clone(dimensions.source(dimension)),
+            )
+        })
+        .collect();
+    Arc::new(SourceWorldView { worlds })
 }
 
-/// The vanilla command that performs a plugin's world mutation, or `None` for another world.
+#[cfg(test)]
+pub(crate) fn world_view_for_sources(
+    worlds: impl IntoIterator<Item = (Uuid, Arc<crate::game::AnvilChunkSource>)>,
+) -> Arc<dyn ferrite_plugin::WorldView> {
+    Arc::new(SourceWorldView {
+        worlds: worlds.into_iter().collect(),
+    })
+}
+
+/// The vanilla command that performs a plugin's world mutation, or `None` for a world the
+/// server does not own. Non-overworld commands are prefixed with `/execute in` so they cannot
+/// mutate the overworld by accident.
 ///
 /// Bukkit `Block#setType` places the material's default state, exactly like `/setblock`.
 pub fn world_console_line(command: &ferrite_plugin::WorldCommand) -> Option<String> {
-    match command {
-        ferrite_plugin::WorldCommand::SetBlock {
-            world,
-            position,
-            material,
-        } => (*world == ferrite_plugin::default_world_id()).then(|| {
-            format!(
-                "setblock {} {} {} {material}",
-                position.x, position.y, position.z
-            )
-        }),
+    let ferrite_plugin::WorldCommand::SetBlock {
+        world,
+        position,
+        material,
+    } = command;
+    let dimension = world_dimension(*world)?;
+    let line = format!(
+        "setblock {} {} {} {material}",
+        position.x, position.y, position.z
+    );
+    if dimension == crate::game::Dimension::Overworld {
+        Some(line)
+    } else {
+        Some(format!("execute in {} run {line}", dimension.key()))
     }
 }
 
@@ -1143,6 +1193,10 @@ mod tests {
         assert_eq!(
             world_console_line(&set(ferrite_plugin::default_world_id())).as_deref(),
             Some("setblock 1 -2 3 minecraft:stone")
+        );
+        assert_eq!(
+            world_console_line(&set(world_id(crate::game::Dimension::Nether))).as_deref(),
+            Some("execute in minecraft:the_nether run setblock 1 -2 3 minecraft:stone")
         );
         assert_eq!(world_console_line(&set(uuid::Uuid::nil())), None);
 

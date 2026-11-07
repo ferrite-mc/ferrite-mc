@@ -170,6 +170,16 @@ class CapturedStructureTest {
         } finally { HostBridge.transport = null; }
     }
 
+    @Test void blockEntityCaptureFailsLoudlyWhenTheHostDoesNotKnowTheWorld() {
+        build();
+        HostBridge.transport = (owner, subject, method, args) -> null;
+        try {
+            var structure = org.bukkit.Bukkit.getStructureManager().createStructure();
+            assertThrows(UnsupportedOperationException.class,
+                () -> structure.fill(new Location(world, 100, 70, 100), new BlockVector(2, 2, 3), false));
+        } finally { HostBridge.transport = null; }
+    }
+
     @Test void snbtWritesEveryTagType() {
         var map = new java.util.LinkedHashMap<String, Object>();
         map.put("b", (byte) 1); map.put("s", (short) 2); map.put("i", 3); map.put("l", 4L);
