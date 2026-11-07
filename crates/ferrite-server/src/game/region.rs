@@ -174,12 +174,13 @@ pub enum Command {
         slot: u8,
         item: Option<ferrite_plugin::ItemSnapshot>,
     },
-    /// A plugin sends the colours of a map.
+    /// A plugin sends the colours and visible cursors of a map.
     MapData {
         id: i32,
         scale: u8,
         locked: bool,
         colors: Vec<u8>,
+        decorations: Vec<ferrite_plugin::MapDecoration>,
     },
     /// A plugin shows a written book to the player.
     OpenBook {
@@ -3555,6 +3556,7 @@ impl Player {
                     scale,
                     locked,
                     colors,
+                    decorations,
                 } => {
                     send(
                         self,
@@ -3562,7 +3564,22 @@ impl Player {
                             map_id: VarInt(id),
                             scale,
                             locked,
-                            has_decorations: false,
+                            decorations: Some(
+                                decorations
+                                    .into_iter()
+                                    .map(|decoration| {
+                                        ferrite_protocol::packets::play::MapDecoration {
+                                            kind: VarInt(decoration.kind),
+                                            x: decoration.x,
+                                            y: decoration.y,
+                                            direction: decoration.direction as i8,
+                                            caption: decoration
+                                                .caption
+                                                .map(ferrite_protocol::types::PlainText),
+                                        }
+                                    })
+                                    .collect(),
+                            ),
                             width: 128,
                             height: 128,
                             x: 0,

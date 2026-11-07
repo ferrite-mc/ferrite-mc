@@ -5,12 +5,14 @@
 //! separated by U+001E; an item is `MATERIAL U+001D amount`, and an empty field is an empty slot.
 //! Values come from plugin code, so every field is validated before it reaches the game loop.
 
-use ferrite_plugin::{HostCall, ItemSnapshot, PlayerCommand};
+use ferrite_plugin::{HostCall, ItemSnapshot, MapDecoration, PlayerCommand};
 use uuid::Uuid;
 
 const FIELD: char = '\u{1e}';
 const PART: char = '\u{1d}';
 const MAX_ROWS: usize = 6;
+/// Maximum UTF-16 units in a caption that still fit a network NBT string (65,535 bytes).
+const MAX_MAP_CAPTION_UTF16: usize = 21_844;
 
 /// The command behind an inventory call, or `None` when it is not one this module handles
 /// (a hopper or dispenser inventory, say, which the menu code cannot show yet).
@@ -28,7 +30,7 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         "openStonecutter(Location,boolean)" => station(player, "stonecutter"),
         "openSmithingTable(Location,boolean)" => station(player, "smithing"),
         "openLoom(Location,boolean)" => station(player, "loom"),
-        "sendMapData(int,int,boolean,byte[])" => {
+        "sendMapData(int,int,boolean,byte[],String)" => {
             use base64::Engine;
             let colors = base64::engine::general_purpose::STANDARD
                 .decode(call.args.get(3)?)
@@ -40,6 +42,7 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
                 scale: call.args.get(1)?.parse::<u8>().ok().filter(|s| *s <= 4)?,
                 locked: call.args.get(2)?.parse().ok()?,
                 colors,
+                decorations: map_decorations(call.args.get(4)?)?,
             })
         }
         "openBookContent(String)" => {
@@ -258,6 +261,60 @@ fn item(field: &str) -> Option<Option<ItemSnapshot>> {
     })
 }
 
+/// Parses the bridge's visible-cursor list. Each cursor has six U+001E-separated fields:
+/// decoration key, x, y, direction, has-caption, base64(UTF-8 caption); cursors are separated by
+/// U+001D. Invisible cursors never arrive: 26.3 has no wire visibility bit, so omission is the
+/// only exact representation and the Java bridge filters them out.
+fn map_decorations(encoded: &str) -> Option<Vec<MapDecoration>> {
+    if encoded.is_empty() {
+        return Some(Vec::new());
+    }
+    encoded
+        .split(PART)
+        .map(|cursor| {
+            let mut fields = cursor.split(FIELD);
+            let kind =
+                ferrite_data::registries::id("minecraft:map_decoration_type", fields.next()?)?;
+            let x = fields.next()?.parse::<i8>().ok()?;
+            let y = fields.next()?.parse::<i8>().ok()?;
+            let direction = fields
+                .next()?
+                .parse::<i8>()
+                .ok()
+                .filter(|direction| (0..=15).contains(direction))?
+                as u8;
+            let has_caption = fields.next()?.parse::<bool>().ok()?;
+            let encoded_caption = fields.next()?;
+            if fields.next().is_some() {
+                return None;
+            }
+            let caption = if has_caption {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded_caption)
+                    .ok()?;
+                let text = String::from_utf8(bytes).ok()?;
+                if text.encode_utf16().count() > MAX_MAP_CAPTION_UTF16 {
+                    return None;
+                }
+                Some(text)
+            } else {
+                if !encoded_caption.is_empty() {
+                    return None;
+                }
+                None
+            };
+            Some(MapDecoration {
+                kind,
+                x,
+                y,
+                direction,
+                caption,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,25 +436,113 @@ mod tests {
     }
 
     #[test]
-    fn map_data_needs_a_full_colour_grid() {
+    fn map_data_needs_a_full_colour_grid_and_valid_decorations() {
         use base64::Engine;
         let encode = |n: usize| base64::engine::general_purpose::STANDARD.encode(vec![5u8; n]);
-        let call = |colors: String| HostCall {
+        let call = |colors: String, decorations: &str| HostCall {
             owner: "Player".into(),
             subject: PLAYER.into(),
-            method: "sendMapData(int,int,boolean,byte[])".into(),
-            args: vec!["7".into(), "2".into(), "true".into(), colors],
+            method: "sendMapData(int,int,boolean,byte[],String)".into(),
+            args: vec![
+                "7".into(),
+                "2".into(),
+                "true".into(),
+                colors,
+                decorations.into(),
+            ],
         };
         assert!(matches!(
-            inventory_command(&call(encode(16384))),
+            inventory_command(&call(encode(16384), "")),
             Some(PlayerCommand::MapData {
                 id: 7,
                 scale: 2,
                 locked: true,
+                decorations,
                 ..
-            })
+            }) if decorations.is_empty()
         ));
-        assert_eq!(inventory_command(&call(encode(100))), None);
+        assert_eq!(inventory_command(&call(encode(100), "")), None);
+        assert_eq!(
+            inventory_command(&call(encode(16384), "minecraft:not_a_type")),
+            None
+        );
+    }
+
+    #[test]
+    fn map_decorations_keep_type_bounds_and_optional_plain_captions() {
+        use base64::Engine;
+        let encode_colours =
+            |n: usize| base64::engine::general_purpose::STANDARD.encode(vec![5u8; n]);
+        let caption = base64::engine::general_purpose::STANDARD.encode("Alex");
+        let encoded = [
+            format!("minecraft:player{FIELD}-128{FIELD}127{FIELD}3{FIELD}true{FIELD}{caption}"),
+            format!("minecraft:red_x{FIELD}127{FIELD}-128{FIELD}15{FIELD}false{FIELD}"),
+        ]
+        .join(&PART.to_string());
+        let call = HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "sendMapData(int,int,boolean,byte[],String)".into(),
+            args: vec![
+                "7".into(),
+                "2".into(),
+                "true".into(),
+                encode_colours(16384),
+                encoded,
+            ],
+        };
+        let Some(PlayerCommand::MapData {
+            id,
+            scale,
+            locked,
+            decorations,
+            ..
+        }) = inventory_command(&call)
+        else {
+            panic!("valid map data was rejected");
+        };
+        assert_eq!((id, scale, locked), (7, 2, true));
+        assert_eq!(
+            decorations,
+            vec![
+                MapDecoration {
+                    kind: 0,
+                    x: -128,
+                    y: 127,
+                    direction: 3,
+                    caption: Some("Alex".into()),
+                },
+                MapDecoration {
+                    kind: 26,
+                    x: 127,
+                    y: -128,
+                    direction: 15,
+                    caption: None,
+                },
+            ]
+        );
+
+        let valid_colours = encode_colours(16384);
+        for bad in [
+            "minecraft:player\u{1e}0\u{1e}0\u{1e}16\u{1e}false\u{1e}",
+            "minecraft:player\u{1e}0\u{1e}0\u{1e}0\u{1e}true\u{1e}not-base64",
+            "minecraft:player\u{1e}0\u{1e}0\u{1e}0\u{1e}false\u{1e}unexpected",
+            "minecraft:player\u{1e}0\u{1e}0\u{1e}0\u{1e}false",
+        ] {
+            let call = HostCall {
+                owner: "Player".into(),
+                subject: PLAYER.into(),
+                method: "sendMapData(int,int,boolean,byte[],String)".into(),
+                args: vec![
+                    "7".into(),
+                    "2".into(),
+                    "true".into(),
+                    valid_colours.clone(),
+                    bad.into(),
+                ],
+            };
+            assert_eq!(inventory_command(&call), None, "{bad:?}");
+        }
     }
 
     #[test]

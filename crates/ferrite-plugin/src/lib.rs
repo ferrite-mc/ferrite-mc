@@ -404,6 +404,19 @@ pub enum SurvivalStat {
     /// The base `max_health`, before effects such as health boost.
     MaxHealth,
 }
+/// One visible map cursor after the Java bridge has encoded it for the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapDecoration {
+    /// Protocol id in the `minecraft:map_decoration_type` registry.
+    pub kind: i32,
+    pub x: i8,
+    pub y: i8,
+    /// Rotation in 0..=15.
+    pub direction: u8,
+    /// Plain-text caption. Rich component formatting is rejected by the Java bridge.
+    pub caption: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
     Message {
@@ -494,13 +507,14 @@ pub enum PlayerCommand {
         author: String,
         pages: Vec<String>,
     },
-    /// `Player#sendMap`: the full 128x128 colour data of a map.
+    /// `Player#sendMap`: the full 128x128 colour data and visible cursors of a map.
     MapData {
         player: uuid::Uuid,
         id: i32,
         scale: u8,
         locked: bool,
         colors: Vec<u8>,
+        decorations: Vec<MapDecoration>,
     },
     /// `World#refreshChunk` on the default world: players that have the chunk get it again.
     RefreshChunk {

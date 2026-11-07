@@ -35,6 +35,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type == org.bukkit.block.Biome.class) return (org.bukkit.Registry<T>) cached("worldgen/biome", () -> identityRegistry("worldgen/biome", org.bukkit.block.Biome.class));
         if (type == org.bukkit.generator.structure.Structure.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.STRUCTURE);
         if (type == org.bukkit.damage.DamageType.class) return (org.bukkit.Registry<T>) cached("damage_type", FerriteRegistryAccess::damageTypeRegistry);
+        if (type == org.bukkit.map.MapCursor.Type.class) return (org.bukkit.Registry<T>) cached("map_decoration_type", FerriteRegistryAccess::mapDecorationRegistry);
         return unavailable(type.getName());
     }
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(io.papermc.paper.registry.RegistryKey<T> type) {
@@ -51,8 +52,50 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type.equals(io.papermc.paper.registry.RegistryKey.BIOME)) return cast(cached("worldgen/biome", () -> identityRegistry("worldgen/biome", org.bukkit.block.Biome.class)));
         if (type.equals(io.papermc.paper.registry.RegistryKey.STRUCTURE)) return cast(cached("worldgen/structure", () -> identityRegistry("worldgen/structure", org.bukkit.generator.structure.Structure.class, FerriteStructure::new)));
         if (type.equals(io.papermc.paper.registry.RegistryKey.DAMAGE_TYPE)) return cast(cached("damage_type", FerriteRegistryAccess::damageTypeRegistry));
+        if (type.equals(io.papermc.paper.registry.RegistryKey.MAP_DECORATION_TYPE)) return cast(cached("map_decoration_type", FerriteRegistryAccess::mapDecorationRegistry));
         return unavailable(type.key().toString());
     }
+    /** 26.3 map decoration type keys in protocol-id order. */
+    private static final String[] MAP_DECORATION_KEYS = {
+        "player", "frame", "red_marker", "blue_marker", "target_x", "target_point",
+        "player_off_map", "player_off_limits", "mansion", "monument", "banner_white",
+        "banner_orange", "banner_magenta", "banner_light_blue", "banner_yellow",
+        "banner_lime", "banner_pink", "banner_gray", "banner_light_gray", "banner_cyan",
+        "banner_purple", "banner_blue", "banner_brown", "banner_green", "banner_red",
+        "banner_black", "red_x", "village_desert", "village_plains", "village_savanna",
+        "village_snowy", "village_taiga", "jungle_temple", "swamp_hut", "trial_chambers",
+        "abandoned_camp", "ancient_city", "desert_pyramid", "mineshaft", "ocean_ruin_warm",
+    };
+
+    /** Bukkit's MapCursor.Type constants resolve through this registry during class init. */
+    private static org.bukkit.Registry<org.bukkit.map.MapCursor.Type> mapDecorationRegistry() {
+        return new BaseRegistry<org.bukkit.map.MapCursor.Type>("map_decoration_type") {
+            private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.map.MapCursor.Type> entries = new java.util.concurrent.ConcurrentHashMap<>();
+            @Override public org.bukkit.map.MapCursor.Type get(org.bukkit.NamespacedKey key) {
+                if (!"minecraft".equals(key.getNamespace())) return null;
+                int value = java.util.Arrays.asList(MAP_DECORATION_KEYS).indexOf(key.getKey());
+                if (value < 0) return null;
+                return entries.computeIfAbsent(key, k -> new MapDecorationType(k, (byte) value));
+            }
+            @Override public int size() { return MAP_DECORATION_KEYS.length; }
+            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() {
+                return java.util.stream.IntStream.range(0, MAP_DECORATION_KEYS.length)
+                    .mapToObj(i -> org.bukkit.NamespacedKey.minecraft(MAP_DECORATION_KEYS[i]));
+            }
+            @Override public java.util.stream.Stream<org.bukkit.map.MapCursor.Type> stream() { return keyStream().map(this::get); }
+            @Override public java.util.Iterator<org.bukkit.map.MapCursor.Type> iterator() { return stream().iterator(); }
+        };
+    }
+
+    private record MapDecorationType(org.bukkit.NamespacedKey key, byte value) implements org.bukkit.map.MapCursor.Type {
+        @Override public org.bukkit.NamespacedKey getKey() { return key; }
+        @Override public byte getValue() { return value; }
+        @Override public String name() { return key.getKey().toUpperCase(java.util.Locale.ROOT); }
+        @Override public int ordinal() { return value; }
+        @Override public int compareTo(org.bukkit.map.MapCursor.Type other) { return Integer.compare(value, other.getValue()); }
+        @Override public String toString() { return "MapDecorationType[" + key + "]"; }
+    }
+
     /** Vanilla damage types are data-driven; the registry identity is all plugins need here. */
     private static org.bukkit.Registry<org.bukkit.damage.DamageType> damageTypeRegistry() {
         return new BaseRegistry<org.bukkit.damage.DamageType>("damage_type") {

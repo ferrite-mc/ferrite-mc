@@ -700,7 +700,7 @@ class PlayerExtrasTest {
 
     @Test void mapsArePaintedByTheirRenderersAndSentAsColours() {
         var calls = new java.util.ArrayList<Object[]>();
-        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{method, args}); return ""; };
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{subject, method, args}); return ""; };
         try {
             var view = new FerriteMapView(player.getWorld());
             view.addRenderer(new org.bukkit.map.MapRenderer() {
@@ -709,11 +709,102 @@ class PlayerExtrasTest {
                     canvas.setPixelColor(0, 0, java.awt.Color.WHITE);
                 }
             });
-            var pixels = view.render(player);
+            var rendered = view.render(player);
+            var pixels = rendered.pixels();
             assertEquals(44, pixels[1 * 128 + 2]);
             assertNotEquals(0, pixels[0]);
+            assertEquals("", rendered.decorations(), "no cursors means an empty decoration list");
+            view.setScale(org.bukkit.map.MapView.Scale.FAR);
+            view.setLocked(true);
             player.sendMap(view);
-            assertEquals("sendMapData(int,int,boolean,byte[])", calls.get(0)[0]);
+            assertEquals(player.getUniqueId().toString(), calls.get(0)[0]);
+            assertEquals("sendMapData(int,int,boolean,byte[],String)", calls.get(0)[1]);
+            var args = ((String) calls.get(0)[2]).split(String.valueOf(HostBridge.ARG), -1);
+            assertEquals(String.valueOf(view.getScale().getValue()), args[1]);
+            assertEquals("true", args[2]);
+            assertEquals("", args[4]);
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void mapCursorsCarryTypeBoundsDirectionAndPlainCaptions() {
+        var calls = new java.util.ArrayList<Object[]>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{subject, method, args}); return ""; };
+        try {
+            assertEquals(0, org.bukkit.map.MapCursor.Type.PLAYER.getValue());
+            assertEquals(26, org.bukkit.map.MapCursor.Type.RED_X.getValue());
+            assertEquals("minecraft:red_x", org.bukkit.map.MapCursor.Type.RED_X.getKey().toString());
+            var view = new FerriteMapView(player.getWorld());
+            view.addRenderer(new org.bukkit.map.MapRenderer() {
+                @Override public void render(org.bukkit.map.MapView map, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player viewer) {
+                    canvas.getCursors().addCursor(new org.bukkit.map.MapCursor((byte) -128, (byte) 127, (byte) 3,
+                        org.bukkit.map.MapCursor.Type.PLAYER, true, net.kyori.adventure.text.Component.text("Alex")));
+                    canvas.getCursors().addCursor(new org.bukkit.map.MapCursor((byte) 127, (byte) -128, (byte) 15,
+                        org.bukkit.map.MapCursor.Type.RED_X, true));
+                    canvas.getCursors().addCursor(new org.bukkit.map.MapCursor((byte) 1, (byte) 2, (byte) 0,
+                        org.bukkit.map.MapCursor.Type.RED_MARKER, false));
+                }
+            });
+            var rendered = view.render(player);
+            var caption = java.util.Base64.getEncoder().encodeToString("Alex".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var expected = "minecraft:player-12812731" + caption
+                + "" + "minecraft:red_x127-128150";
+            assertEquals(expected, rendered.decorations(), "hidden cursors are omitted");
+            view.setScale(org.bukkit.map.MapView.Scale.FAR);
+            view.setLocked(true);
+            player.sendMap(view);
+            var args = ((String) calls.get(0)[2]).split(String.valueOf(HostBridge.ARG), -1);
+            assertEquals(player.getUniqueId().toString(), calls.get(0)[0]);
+            assertEquals("sendMapData(int,int,boolean,byte[],String)", calls.get(0)[1]);
+            assertEquals(String.valueOf(view.getScale().getValue()), args[1]);
+            assertEquals("true", args[2]);
+            assertEquals(expected, args[4]);
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void styledMapCaptionsAreRejectedInsteadOfLosingFormatting() {
+        var view = new FerriteMapView(player.getWorld());
+        view.addRenderer(new org.bukkit.map.MapRenderer() {
+            @Override public void render(org.bukkit.map.MapView map, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player viewer) {
+                canvas.getCursors().addCursor(new org.bukkit.map.MapCursor((byte) 0, (byte) 0, (byte) 0,
+                    org.bukkit.map.MapCursor.Type.PLAYER, true,
+                    net.kyori.adventure.text.Component.text("Alex")
+                        .color(net.kyori.adventure.text.format.NamedTextColor.RED)));
+            }
+        });
+        assertThrows(UnsupportedOperationException.class, () -> view.render(player));
+    }
+
+    @Test void mapUpdatesUseTheRequestedViewer() {
+        Bootstrap.registerPlayer("00000000-0000-0000-0000-0000000000bb", "Other", false);
+        org.bukkit.entity.Player other;
+        try {
+            var ensure = Bootstrap.class.getDeclaredMethod("ensurePlayer", String.class, String.class);
+            ensure.setAccessible(true);
+            other = (org.bukkit.entity.Player) ensure.invoke(null, "00000000-0000-0000-0000-0000000000bb", "Other");
+        } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
+        var calls = new java.util.ArrayList<Object[]>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{subject, method, args}); return ""; };
+        try {
+            var view = new FerriteMapView(player.getWorld());
+            view.addRenderer(new org.bukkit.map.MapRenderer() {
+                @Override public void render(org.bukkit.map.MapView map, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player viewer) {
+                    canvas.getCursors().addCursor(new org.bukkit.map.MapCursor((byte) 0, (byte) 0, (byte) 0,
+                        org.bukkit.map.MapCursor.Type.PLAYER, true,
+                        net.kyori.adventure.text.Component.text(viewer.getName())));
+                }
+            });
+            player.sendMap(view);
+            other.sendMap(view);
+            assertEquals(2, calls.size());
+            assertEquals(player.getUniqueId().toString(), calls.get(0)[0]);
+            assertEquals(other.getUniqueId().toString(), calls.get(1)[0]);
+            var encode = java.util.Base64.getEncoder();
+            var first = ((String) calls.get(0)[2]).split(String.valueOf(HostBridge.ARG), -1)[4];
+            var second = ((String) calls.get(1)[2]).split(String.valueOf(HostBridge.ARG), -1)[4];
+            assertEquals("minecraft:player0001"
+                + encode.encodeToString(player.getName().getBytes(java.nio.charset.StandardCharsets.UTF_8)), first);
+            assertEquals("minecraft:player0001"
+                + encode.encodeToString(other.getName().getBytes(java.nio.charset.StandardCharsets.UTF_8)), second);
         } finally { HostBridge.transport = null; }
     }
 

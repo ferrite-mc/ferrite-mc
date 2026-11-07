@@ -611,9 +611,104 @@ impl Packet for ShowDialogInline {
 packet!(SetCommandBlock,55,Serverbound,{location:i64,command:String,mode:VarInt,track_output:bool,conditional:bool,automatic:bool});
 packet!(AcknowledgeBlockChange,4,Clientbound,{sequence:VarInt});
 packet!(OpenBook,59,Clientbound,{hand:VarInt});
-// `minecraft:map_item_data` with no decorations and one full-size colour patch (the only shape
-// Ferrite sends: `width` and `height` are never 0).
-packet!(MapItemData,52,Clientbound,{map_id:VarInt,scale:u8,locked:bool,has_decorations:bool,width:u8,height:u8,x:u8,z:u8,colors:Vec<u8>});
+/// One 26.3 `MapDecoration`: a registry decoration type, signed map-relative position, a
+/// four-bit rotation and an optional plain-text caption (network NBT `TAG_String`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapDecoration {
+    pub kind: VarInt,
+    pub x: i8,
+    pub y: i8,
+    pub direction: i8,
+    pub caption: Option<PlainText>,
+}
+impl Encode for MapDecoration {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.kind.encode(out);
+        self.x.encode(out);
+        self.y.encode(out);
+        self.direction.encode(out);
+        self.caption.encode(out);
+    }
+}
+impl Decode for MapDecoration {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        Ok(Self {
+            kind: VarInt::decode(buf)?,
+            x: i8::decode(buf)?,
+            y: i8::decode(buf)?,
+            direction: i8::decode(buf)?,
+            caption: Option::decode(buf)?,
+        })
+    }
+}
+/// `minecraft:map_item_data`: optional decorations followed by an optional full or partial
+/// colour patch. The patch is encoded as `width`, and only when `width` is non-zero, `height`,
+/// `startX`, `startY` and the colour byte array (vanilla `MapPatch.STREAM_CODEC`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapItemData {
+    pub map_id: VarInt,
+    pub scale: u8,
+    pub locked: bool,
+    pub decorations: Option<Vec<MapDecoration>>,
+    pub width: u8,
+    pub height: u8,
+    pub x: u8,
+    pub z: u8,
+    pub colors: Vec<u8>,
+}
+impl Encode for MapItemData {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.map_id.encode(out);
+        self.scale.encode(out);
+        self.locked.encode(out);
+        self.decorations.encode(out);
+        self.width.encode(out);
+        if self.width != 0 {
+            self.height.encode(out);
+            self.x.encode(out);
+            self.z.encode(out);
+            self.colors.encode(out);
+        }
+    }
+}
+impl Decode for MapItemData {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        let map_id = VarInt::decode(buf)?;
+        let scale = u8::decode(buf)?;
+        let locked = bool::decode(buf)?;
+        let decorations = Option::<Vec<MapDecoration>>::decode(buf)?;
+        let width = u8::decode(buf)?;
+        if width == 0 {
+            return Ok(Self {
+                map_id,
+                scale,
+                locked,
+                decorations,
+                width,
+                height: 0,
+                x: 0,
+                z: 0,
+                colors: Vec::new(),
+            });
+        }
+        Ok(Self {
+            map_id,
+            scale,
+            locked,
+            decorations,
+            width,
+            height: u8::decode(buf)?,
+            x: u8::decode(buf)?,
+            z: u8::decode(buf)?,
+            colors: Vec::decode(buf)?,
+        })
+    }
+}
+impl Packet for MapItemData {
+    const ID: i32 = 52;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
 packet!(SetHeldItem,54,Serverbound,{slot:i16});
 // Vanilla `ServerboundAttackPacket`: left-click on an entity, by network id.
 packet!(ServerboundAttack,1,Serverbound,{entity_id:VarInt});
@@ -1891,15 +1986,64 @@ mod interaction_tests {
         assert_eq!(MapItemData::ID, 52);
         roundtrip(MapItemData {
             map_id: VarInt(3),
-            scale: 0,
+            scale: 2,
             locked: true,
-            has_decorations: false,
+            decorations: Some(vec![
+                MapDecoration {
+                    kind: VarInt(0),
+                    x: -128,
+                    y: 127,
+                    direction: 15,
+                    caption: Some(crate::types::PlainText("Alex".into())),
+                },
+                MapDecoration {
+                    kind: VarInt(26),
+                    x: 127,
+                    y: -128,
+                    direction: 4,
+                    caption: None,
+                },
+            ]),
             width: 128,
             height: 128,
             x: 0,
             z: 0,
-            colors: vec![4; 16],
+            colors: vec![4; 128 * 128],
         });
+        roundtrip(MapItemData {
+            map_id: VarInt(4),
+            scale: 0,
+            locked: false,
+            decorations: Some(Vec::new()),
+            width: 2,
+            height: 1,
+            x: 5,
+            z: 6,
+            colors: vec![44, 45],
+        });
+        let mut encoded = Vec::new();
+        MapItemData {
+            map_id: VarInt(3),
+            scale: 2,
+            locked: true,
+            decorations: Some(vec![MapDecoration {
+                kind: VarInt(0),
+                x: -128,
+                y: 127,
+                direction: 15,
+                caption: None,
+            }]),
+            width: 1,
+            height: 1,
+            x: 5,
+            z: 6,
+            colors: vec![44],
+        }
+        .encode(&mut encoded);
+        assert_eq!(
+            encoded,
+            vec![3, 2, 1, 1, 1, 0, 128, 127, 15, 0, 1, 1, 5, 6, 1, 44]
+        );
         assert_eq!(OpenBook::ID, 59);
         roundtrip(OpenBook { hand: VarInt(1) });
         roundtrip(AcknowledgeBlockChange {

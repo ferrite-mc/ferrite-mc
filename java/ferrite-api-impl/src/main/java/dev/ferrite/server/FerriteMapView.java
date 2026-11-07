@@ -1,9 +1,13 @@
 package dev.ferrite.server;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.bukkit.World;
+import org.bukkit.map.MapCursor;
+import org.bukkit.map.MapCursorCollection;
 import org.bukkit.map.MapRenderer;
 
 /** An in-memory map view from Server#createMap: ids increase, renderers are listed only. */
@@ -39,9 +43,12 @@ final class FerriteMapView implements org.bukkit.map.MapView {
     @Override public void setLocked(boolean value) { locked = value; }
     @Override public String toString() { return "MapView[" + id + "]"; }
 
-    /** The 128x128 palette bytes the renderers paint for this viewer (0 stays transparent). */
+    /** Pixels and encoded visible cursors for one viewer; nothing is kept between renders. */
+    record Rendered(byte[] pixels, String decorations) {}
+
+    /** The 128x128 palette bytes and visible cursors the renderers paint for this viewer. */
     @SuppressWarnings("deprecation")
-    byte[] render(org.bukkit.entity.Player viewer) {
+    Rendered render(org.bukkit.entity.Player viewer) {
         final byte[] pixels = new byte[128 * 128];
         final var cursors = new org.bukkit.map.MapCursorCollection();
         final var view = this;
@@ -92,6 +99,38 @@ final class FerriteMapView implements org.bukkit.map.MapView {
             }
         });
         for (var renderer : renderers) renderer.render(this, canvas, viewer);
-        return pixels;
+        return new Rendered(pixels, encodeCursors(cursors));
+    }
+
+    /**
+     * Encodes visible cursors as the host's six fields: type key, x, y, direction, has-caption,
+     * base64(plain caption). Invisible cursors are omitted because the 26.3 decoration record
+     * has no visibility bit. Styled or translated captions are rejected rather than flattened.
+     */
+    private static String encodeCursors(MapCursorCollection cursors) {
+        var encoded = new StringBuilder();
+        for (int i = 0; i < cursors.size(); i++) {
+            MapCursor cursor = cursors.getCursor(i);
+            if (!cursor.isVisible()) continue;
+            var type = cursor.getType();
+            if (type == null) throw new UnsupportedOperationException("Ferrite: map cursor has no 26.3 decoration type");
+            var caption = cursor.caption();
+            String captionText = "";
+            if (caption != null) {
+                if (!(caption instanceof net.kyori.adventure.text.TextComponent text)
+                        || !text.style().isEmpty() || !text.children().isEmpty()) {
+                    throw new UnsupportedOperationException("Ferrite: map cursor captions support plain text only");
+                }
+                captionText = Base64.getEncoder().encodeToString(text.content().getBytes(StandardCharsets.UTF_8));
+            }
+            if (!encoded.isEmpty()) encoded.append(HostBridge.ITEM);
+            encoded.append(type.getKey()).append('')
+                .append(cursor.getX()).append('')
+                .append(cursor.getY()).append('')
+                .append(cursor.getDirection()).append('')
+                .append(caption == null ? '0' : '1').append('')
+                .append(captionText);
+        }
+        return encoded.toString();
     }
 }

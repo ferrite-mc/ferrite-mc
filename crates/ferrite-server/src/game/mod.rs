@@ -1747,6 +1747,7 @@ fn route_plugin_command(
             scale,
             locked,
             colors,
+            decorations,
         } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::MapData {
@@ -1754,6 +1755,7 @@ fn route_plugin_command(
                     scale,
                     locked,
                     colors,
+                    decorations,
                 });
             }
         }
