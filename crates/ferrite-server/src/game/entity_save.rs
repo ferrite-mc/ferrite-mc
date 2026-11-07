@@ -906,6 +906,38 @@ mod tests {
                 level: 2,
             })
         );
+
+    }
+
+    #[test]
+    fn a_chested_equine_keeps_its_pack_through_a_save() {
+        let mut record = ferrite_entity::mob::new_mob(
+            MobKind::Donkey,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        let uuid = record.data.uuid;
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.owner = Some(Uuid::from_u128(6));
+            state.chest = true;
+            state.saddled = true;
+        }
+        let mut items = super::super::equine_chest::load(uuid, 15);
+        items[4] = ferrite_item::ItemStack::from_name("minecraft:bread")
+            .unwrap()
+            .copy_with_count(3);
+        super::super::equine_chest::store(uuid, &items);
+
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let state = loaded[0].data.mob.as_ref().unwrap();
+        assert!(state.chest);
+        assert!(state.saddled);
+        let pack = super::super::equine_chest::load(uuid, 15);
+        assert_eq!(pack[4].name(), Some("minecraft:bread"));
+        assert_eq!(pack[4].count, 3);
+        assert!(pack[0].is_empty());
+        super::super::equine_chest::clear(uuid);
     }
 
     #[test]

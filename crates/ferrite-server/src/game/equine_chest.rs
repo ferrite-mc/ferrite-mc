@@ -3,6 +3,7 @@
 //! The menu is vanilla's: three rows of five columns for a donkey or mule, three rows of
 //! `strength` columns for a llama.
 
+use ferrite_entity::mob::MobKind;
 use ferrite_item::ItemStack;
 use ferrite_nbt::{Compound, List, Tag};
 use std::collections::HashMap;
@@ -36,6 +37,22 @@ pub fn store(animal: Uuid, items: &[ItemStack]) {
         .insert(animal, items.to_vec());
 }
 
+/// Removes `animal`'s chest and returns its items, padded to [`MAX_SLOTS`] slots. Death uses this
+/// so dropped contents cannot be saved or shown in a screen a second time.
+pub fn take(animal: Uuid) -> Vec<ItemStack> {
+    let mut items = chests()
+        .get_or_insert_with(HashMap::new)
+        .remove(&animal)
+        .unwrap_or_default();
+    items.resize(MAX_SLOTS, ItemStack::empty());
+    items
+}
+
+/// Forgets `animal`'s chest without returning its items (a dead animal that dropped nothing).
+pub fn clear(animal: Uuid) {
+    chests().get_or_insert_with(HashMap::new).remove(&animal);
+}
+
 /// What a dead horse drops besides its loot table: its equipped saddle and horse armour. Pack
 /// equines use [`gear`]; llamas never take horse armour, so they never drop it.
 pub fn horse_gear(saddled: bool, armor: u16) -> Vec<ItemStack> {
@@ -43,21 +60,27 @@ pub fn horse_gear(saddled: bool, armor: u16) -> Vec<ItemStack> {
     if saddled {
         gear.extend(ItemStack::from_name("minecraft:saddle"));
     }
-    if armor != 0 {
+    if armor != 0 && ferrite_entity::horse::body_armor_fits(MobKind::Horse, armor) {
         gear.push(ItemStack::with_count(armor, 1));
     }
     gear
 }
 
-/// What a dead donkey, mule or llama drops besides its loot table: the chest, its items and the saddle.
-pub fn gear(animal: Uuid, chest: bool, saddled: bool) -> Vec<ItemStack> {
+/// What a dead donkey, mule or llama drops besides its loot table: the chest, its items, the
+/// saddle and body gear (a llama's carpet). The chest is taken out of the store, so a save or a
+/// screen opened around the death cannot duplicate the dropped contents.
+pub fn gear(animal: Uuid, kind: MobKind, chest: bool, saddled: bool, armor: u16) -> Vec<ItemStack> {
     let mut gear = Vec::new();
+    let stored = take(animal);
     if chest {
-        gear.extend(load(animal, MAX_SLOTS));
+        gear.extend(stored);
         gear.extend(ItemStack::from_name("minecraft:chest"));
     }
-    if saddled {
+    if saddled && !kind.is_llama() {
         gear.extend(ItemStack::from_name("minecraft:saddle"));
+    }
+    if armor != 0 && ferrite_entity::horse::body_armor_fits(kind, armor) {
+        gear.push(ItemStack::with_count(armor, 1));
     }
     gear.retain(|stack| !stack.is_empty());
     gear
@@ -107,7 +130,7 @@ mod tests {
             .unwrap()
             .copy_with_count(2);
         store(a, &items);
-        let names: Vec<_> = gear(a, true, true)
+        let names: Vec<_> = gear(a, MobKind::Donkey, true, true, 0)
             .iter()
             .map(|s| s.name().unwrap().to_string())
             .collect();
@@ -115,7 +138,63 @@ mod tests {
             names,
             ["minecraft:bread", "minecraft:chest", "minecraft:saddle"]
         );
-        assert!(gear(Uuid::from_u128(82), false, false).is_empty());
+        assert!(
+            load(a, 15).iter().all(ItemStack::is_empty),
+            "the dropped chest is gone"
+        );
+        assert!(gear(Uuid::from_u128(82), MobKind::Donkey, false, false, 0).is_empty());
+    }
+
+    #[test]
+    fn a_dead_llama_drops_its_carpet_but_never_horse_armor() {
+        let carpet = ItemStack::from_name("minecraft:white_carpet").unwrap();
+        let names: Vec<_> = gear(
+            Uuid::from_u128(83),
+            MobKind::Llama,
+            false,
+            false,
+            carpet.item,
+        )
+        .iter()
+        .map(|stack| stack.name().unwrap())
+        .collect();
+        assert_eq!(names, ["minecraft:white_carpet"]);
+
+        let armor = ItemStack::from_name("minecraft:iron_horse_armor").unwrap();
+        assert!(
+            gear(
+                Uuid::from_u128(84),
+                MobKind::Llama,
+                false,
+                false,
+                armor.item
+            )
+            .is_empty(),
+            "a llama never drops horse armour"
+        );
+        assert!(
+            gear(
+                Uuid::from_u128(85),
+                MobKind::Donkey,
+                false,
+                true,
+                armor.item
+            )
+            .iter()
+            .all(|stack| stack.name() != Some("minecraft:iron_horse_armor")),
+            "a donkey has no body slot"
+        );
+        assert!(
+            gear(
+                Uuid::from_u128(86),
+                MobKind::Llama,
+                true,
+                false,
+                carpet.item
+            )
+            .iter()
+            .any(|stack| stack.name() == Some("minecraft:chest"))
+        );
     }
 
     #[test]

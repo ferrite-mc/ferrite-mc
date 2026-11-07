@@ -235,6 +235,13 @@ pub fn set_gear(
     let changed = match mob::state_mut(store, key) {
         Some(s) if s.kind.is_equine() && s.owner.is_some() => {
             let saddled = saddled && !s.kind.is_llama();
+            // The screen slot accepts anything the client predicts; only body gear this kind
+            // can wear is equipped. A rejected item is handed back by the server.
+            let armor = if body_armor_fits(s.kind, armor) {
+                armor
+            } else {
+                0
+            };
             let changed = s.saddled != saddled || s.armor != armor;
             s.saddled = saddled;
             s.armor = armor;
@@ -254,6 +261,19 @@ pub fn is_armor(item: &str) -> bool {
     item.ends_with("_horse_armor")
 }
 
+/// Whether `kind` can wear `item` in its body slot: horse armour on a horse, a carpet on a llama.
+/// Donkeys and mules have no body slot at all.
+pub fn body_armor_fits(kind: MobKind, item: u16) -> bool {
+    let Some(name) = ferrite_item::item_name(item) else {
+        return false;
+    };
+    match kind {
+        MobKind::Horse => is_armor(name),
+        MobKind::Llama | MobKind::TraderLlama => name.ends_with("_carpet"),
+        _ => false,
+    }
+}
+
 /// Armour points of a horse armour item (`Items.*_HORSE_ARMOR` armor attribute).
 pub fn armor_points(item: &str) -> f32 {
     match item {
@@ -270,13 +290,7 @@ pub fn armor_points(item: &str) -> f32 {
 /// Puts armour (an item id) on a tame horse that wears none. `false` when it does not apply.
 pub fn wear_armor(store: &mut EntityStore, key: EntityKey, item: u16, points: f32) -> bool {
     match mob::state_mut(store, key) {
-        Some(s)
-            if matches!(
-                s.kind,
-                MobKind::Horse | MobKind::Llama | MobKind::TraderLlama
-            ) && s.owner.is_some()
-                && s.armor == 0 =>
-        {
+        Some(s) if body_armor_fits(s.kind, item) && s.owner.is_some() && s.armor == 0 => {
             s.armor = item;
             s.armor_points = points;
             true
@@ -429,11 +443,16 @@ mod tests {
         assert!(wear_armor(
             &mut store,
             key,
-            7,
+            ferrite_item::item_id("minecraft:iron_horse_armor").unwrap(),
             armor_points("minecraft:iron_horse_armor")
         ));
         assert!(
-            !wear_armor(&mut store, key, 8, 3.0),
+            !wear_armor(
+                &mut store,
+                key,
+                ferrite_item::item_id("minecraft:copper_horse_armor").unwrap(),
+                4.0
+            ),
             "one set of armour at a time"
         );
         let before = mob::state(&store, key).unwrap().health;
@@ -775,5 +794,60 @@ mod tests {
         mob::state_mut(&mut store, key).unwrap().health = 5.0;
         assert!(treat(&mut store, key, "minecraft:wheat"));
         assert_eq!(mob::state(&store, key).unwrap().health, 7.0);
+    }
+
+    #[test]
+    fn only_the_right_body_gear_fits_each_equine() {
+        let iron = ferrite_item::item_id("minecraft:iron_horse_armor").unwrap();
+        let carpet = ferrite_item::item_id("minecraft:white_carpet").unwrap();
+        let saddle = ferrite_item::item_id("minecraft:saddle").unwrap();
+        assert!(body_armor_fits(MobKind::Horse, iron));
+        assert!(!body_armor_fits(MobKind::Horse, carpet));
+        assert!(!body_armor_fits(MobKind::Horse, saddle));
+        assert!(body_armor_fits(MobKind::Llama, carpet));
+        assert!(body_armor_fits(MobKind::TraderLlama, carpet));
+        assert!(!body_armor_fits(MobKind::Llama, iron));
+        assert!(!body_armor_fits(MobKind::Donkey, iron));
+        assert!(!body_armor_fits(MobKind::Mule, carpet));
+        assert!(!body_armor_fits(MobKind::Horse, 0));
+    }
+
+    #[test]
+    fn a_donkey_ignores_body_armor_from_its_screen_and_a_llama_takes_a_carpet() {
+        let mut store = EntityStore::default();
+        let donkey = store.insert(new_mob(
+            MobKind::Donkey,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::state_mut(&mut store, donkey).unwrap().owner = Some(Uuid::from_u128(1));
+        let iron = ferrite_item::item_id("minecraft:iron_horse_armor").unwrap();
+        assert!(set_gear(&mut store, donkey, true, iron, 5.0));
+        let state = mob::state(&store, donkey).unwrap();
+        assert!(state.saddled);
+        assert_eq!(state.armor, 0, "a donkey has no body slot");
+        assert_eq!(state.armor_points, 0.0);
+
+        let llama = store.insert(new_mob(
+            MobKind::Llama,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::state_mut(&mut store, llama).unwrap().owner = Some(Uuid::from_u128(1));
+        let carpet = ferrite_item::item_id("minecraft:white_carpet").unwrap();
+        assert!(set_gear(&mut store, llama, false, carpet, 0.0));
+        assert_eq!(mob::state(&store, llama).unwrap().armor, carpet);
+        assert!(set_gear(&mut store, llama, false, iron, 5.0));
+        assert_eq!(
+            mob::state(&store, llama).unwrap().armor,
+            0,
+            "horse armour never fits a llama"
+        );
+        assert!(!wear_armor(
+            &mut store,
+            llama,
+            ferrite_item::item_id("minecraft:iron_horse_armor").unwrap(),
+            5.0
+        ));
     }
 }

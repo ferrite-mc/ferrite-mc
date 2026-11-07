@@ -4765,12 +4765,20 @@ impl Region {
                     (MobKind::Horse, _, Some(state)) => {
                         super::equine_chest::horse_gear(state.saddled, state.armor)
                     }
-                    (_, Some(data), Some(state)) => {
-                        super::equine_chest::gear(data.uuid, state.chest, state.saddled)
-                    }
+                    (_, Some(data), Some(state)) => super::equine_chest::gear(
+                        data.uuid,
+                        kind,
+                        state.chest,
+                        state.saddled,
+                        state.armor,
+                    ),
                     _ => Vec::new(),
                 }
             };
+            // Nothing may stay behind to be saved, reopened or dropped a second time.
+            if let Some(data) = self.entities.data(key) {
+                super::equine_chest::clear(data.uuid);
+            }
             if kind == ferrite_entity::mob::MobKind::EnderDragon {
                 self.dragon_died(ctx, pos);
             }
@@ -5625,6 +5633,9 @@ impl Region {
         ) else {
             return;
         };
+        if state.is_dead() {
+            return;
+        }
         let (uuid, id) = (data.uuid, data.id);
         let columns = ferrite_entity::horse::chest_columns(&self.entities, key);
         let saddle = if state.saddled {
@@ -5637,7 +5648,8 @@ impl Region {
         } else {
             ferrite_item::ItemStack::empty()
         };
-        let llama = state.kind == ferrite_entity::mob::MobKind::Llama;
+        // Trader llamas wear carpets too; only horses use the horse-armour rule.
+        let llama = state.kind.is_llama();
         if let Some(p) = self.players.get_mut(&player) {
             p.open_mount(uuid, id, columns, llama, saddle, armor);
         }
@@ -5868,22 +5880,66 @@ impl Region {
                 }
             }
         }
-        // What a player moved in an open mount screen reaches the animal.
-        let viewers: Vec<(Uuid, ferrite_item::ItemStack, ferrite_item::ItemStack)> = self
+        // What a player moved in an open mount screen reaches the animal. Gear the animal
+        // cannot wear is handed back to the player instead of vanishing on close.
+        let viewers: Vec<(Uuid, Uuid, ferrite_item::ItemStack, ferrite_item::ItemStack)> = self
             .players
-            .values()
-            .filter_map(|p| p.mount_gear())
+            .iter()
+            .filter_map(|(&player, p)| {
+                p.mount_gear()
+                    .map(|(animal, saddle, armor)| (player, animal, saddle, armor))
+            })
             .collect();
-        for (animal, saddle, armor) in viewers {
-            let Some(key) = self
-                .entities
-                .keys()
-                .iter()
-                .copied()
-                .find(|&k| self.entities.data(k).is_some_and(|d| d.uuid == animal))
-            else {
+        for (player, animal, saddle, armor) in viewers {
+            let Some(key) = self.entities.keys().iter().copied().find(|&k| {
+                self.entities.data(k).is_some_and(|d| d.uuid == animal)
+                    && mob::state(&self.entities, k).is_some_and(|s| !s.is_dead())
+            }) else {
+                // The animal died or left the region: vanilla's `stillValid` closes the
+                // screen instead of leaving a copy of its gear to take.
+                if let Some(p) = self.players.get_mut(&player) {
+                    if let Some(window) = p.menus.open.as_ref().map(|menu| menu.container_id()) {
+                        send(
+                            p,
+                            &ClientboundContainerClose {
+                                window: VarInt(window),
+                            },
+                        );
+                    }
+                    p.close_container();
+                }
                 continue;
             };
+            let Some(kind) = mob::state(&self.entities, key).map(|s| s.kind) else {
+                continue;
+            };
+            let mut saddle = saddle;
+            let mut armor = armor;
+            let bad_saddle = !saddle.is_empty() && saddle.name() != Some("minecraft:saddle");
+            let bad_armor =
+                !armor.is_empty() && !ferrite_entity::horse::body_armor_fits(kind, armor.item);
+            if bad_saddle {
+                let rejected = std::mem::take(&mut saddle);
+                if let Some(p) = self.players.get_mut(&player) {
+                    if let Some(menu) = p.menus.open.as_mut()
+                        && let Some(slot) = menu.container_mut().first_mut()
+                    {
+                        *slot = ferrite_item::ItemStack::empty();
+                    }
+                    p.menus.thrown.push(rejected);
+                }
+            }
+            if bad_armor {
+                let rejected = std::mem::take(&mut armor);
+                if let Some(p) = self.players.get_mut(&player) {
+                    if let Some(menu) = p.menus.open.as_mut()
+                        && let Some(slot) = menu.container_mut().get_mut(1)
+                    {
+                        *slot = ferrite_item::ItemStack::empty();
+                    }
+                    p.menus.thrown.push(rejected);
+                }
+            }
             let name = armor.name().unwrap_or("");
             if ferrite_entity::horse::set_gear(
                 &mut self.entities,
@@ -8663,6 +8719,46 @@ mod tests {
     }
 
     #[test]
+    fn a_dead_equine_llama_drops_its_carpet() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Llama);
+        let carpet = ferrite_item::item_id("minecraft:white_carpet").unwrap();
+        mob::state_mut(&mut region.entities, key).unwrap().armor = carpet;
+        region.tick(&tick_context());
+        assert!(dropped_items(&region).contains(&"minecraft:white_carpet"));
+    }
+
+    #[test]
+    fn a_dead_equine_trader_llama_drops_its_carpet_not_a_saddle() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::TraderLlama);
+        let carpet = ferrite_item::item_id("minecraft:white_carpet").unwrap();
+        mob::state_mut(&mut region.entities, key).unwrap().armor = carpet;
+        region.tick(&tick_context());
+        let names = dropped_items(&region);
+        assert!(names.contains(&"minecraft:white_carpet"));
+        assert!(!names.contains(&"minecraft:saddle"));
+    }
+
+    #[test]
+    fn a_dead_equine_mule_drops_its_pack() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Mule);
+        let uuid = region.entities.data(key).unwrap().uuid;
+        let mut chest = super::super::equine_chest::load(uuid, 15);
+        chest[1] = ferrite_item::ItemStack::from_name("minecraft:bread").unwrap();
+        super::super::equine_chest::store(uuid, &chest);
+        mob::state_mut(&mut region.entities, key).unwrap().chest = true;
+        region.tick(&tick_context());
+        let names = dropped_items(&region);
+        assert!(names.contains(&"minecraft:bread"));
+        assert!(names.contains(&"minecraft:chest"));
+    }
+
+    #[test]
     fn a_dead_pack_equine_still_drops_chest_and_saddle() {
         let mut region = Region::default();
         region.hold_chunk(ChunkPos(0, 0));
@@ -8680,6 +8776,12 @@ mod tests {
         assert!(names.contains(&"minecraft:bread"));
         assert!(names.contains(&"minecraft:chest"));
         assert!(names.contains(&"minecraft:saddle"));
+        assert!(
+            super::super::equine_chest::load(uuid, 15)
+                .iter()
+                .all(ferrite_item::ItemStack::is_empty),
+            "the dropped pack is not kept for another drop or save"
+        );
     }
 
     async fn memory_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
