@@ -3658,7 +3658,7 @@ async fn redstone_lever_extends_piston_and_moves_stone() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_extending_piston_carries_the_mob_in_the_way() {
-    use ferrite_protocol::packets::play::{AddEntity, EntityTeleport};
+    use ferrite_protocol::packets::play::{AddEntity, TeleportEntity};
     let lever = block_state(
         "minecraft:lever",
         &[("face", "floor"), ("facing", "north"), ("powered", "false")],
@@ -3679,7 +3679,7 @@ async fn an_extending_piston_carries_the_mob_in_the_way() {
     bot.until(46).await;
     // A cow stands where the stone is about to be pushed.
     world
-        .console_command("/summon minecraft:cow 3.5 64 0.5".into())
+        .console_command("/summon minecraft:cow 3.5 64 0.5 {NoAI:1b}".into())
         .await
         .unwrap();
     let cow = ferrite_entity::mob::MobKind::Cow.entity_type() as i32;
@@ -3693,8 +3693,8 @@ async fn an_extending_piston_carries_the_mob_in_the_way() {
     click_block(&mut bot, [0, 64, 0]).await;
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
-            let body = bot.until(EntityTeleport::ID).await;
-            let teleport = EntityTeleport::decode(&mut body.as_slice()).unwrap();
+            let body = bot.until(TeleportEntity::ID).await;
+            let teleport = TeleportEntity::decode(&mut body.as_slice()).unwrap();
             if teleport.id.0 == id && teleport.x > 4.0 {
                 break;
             }
