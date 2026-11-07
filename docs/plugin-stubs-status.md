@@ -13,6 +13,24 @@
 단위 테스트(Rust, JUnit)도 있다.
 CMI가 동작한다고 말할 수 없다.
 
+## 2026-11-08 — fb-32 (Bukkit 보스바 연결 + 스텁 인벤토리)
+
+- **Bukkit `org.bukkit.boss.BossBar`가 실제 클라이언트에 표시된다.** `FerriteBossBar`가 Adventure
+  `BossBar`를 소유하고, 뷰어 추가/제거는 `Player#showBossBar`/`hideBossBar`(기존
+  `bossBarAdd`/`bossBarRemove` → `PluginPacket::BossBar` 경로)로 나간다. 제목·진행도·색·스타일·
+  플래그 변경도 같은 경로로 전달되고, `Server#removeBossBar`는 레지스트리에서 지우기 전에 모든
+  뷰어에게 숨긴다. 보스바별 Java 상태만 다루며 월드/엔티티 리전 상태는 읽지 않는다(플레이어별
+  패킷 경로라 리전을 직렬화하지 않음).
+- 검증: `FerriteBossBarTest`(JUnit, 뷰어/속성/숨김·재표시), `typical_plugin_uses_config_commands_listener_and_repeating_task`
+  (실제 서버+JVM+봇이 `/typical surface` 뒤 `BossBar` 추가·제거 패킷 수신), `./gradlew test` 전체 통과.
+- 남은 스텁의 정확한 생성 목록과 소유자는 [`docs/plugin-api-stubs.md`](plugin-api-stubs.md)에 있다.
+  2026-11-08 프로브 기준 Player 106, Server 5, World 61개가 호스트 없이 실패했고, 이 중 상당수는
+  실제 Rust 호스트(`facts.rs`, `network.rs`, `extra.rs`)가 답한다. 실제 서버 기준 남은 경로는
+  `plugin-api-stubs.md`의 "남은 명시적 미지원 경로" 표와 아래 "오늘 못한 것"을 따른다.
+- **Paper/NMS 호환 전체가 완료된 것은 아니다.** NMS-타입 `CraftItemStack.asNMSCopy`,
+  `CraftWorld#getHandle`, `CraftMagicNumbers`는 계속 의도적 미지원이며, 비플레이어 엔티티 조회와
+  구조물 엔티티는 호스트 경계가 아직 없다.
+
 ## 구현됨 (게임에 실제 효과가 있는 것)
 
 - 최대 체력(`setMaxHealth`/`getMaxHealth`): 클라이언트에 `UpdateAttributes`를 보낸다.

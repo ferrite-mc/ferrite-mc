@@ -147,6 +147,8 @@ public final class TypicalPlugin extends JavaPlugin implements Listener {
                 var key = new org.bukkit.NamespacedKey("ferrite", "probe");
                 var bar = srv.createBossBar(key, "Boss", org.bukkit.boss.BarColor.RED, org.bukkit.boss.BarStyle.SOLID);
                 bar.setProgress(0.25);
+                // A viewer makes this a client-visible bar: the bridge sends the Adventure packet.
+                if (sender instanceof org.bukkit.entity.Player viewer) bar.addPlayer(viewer);
                 append("boss " + (srv.getBossBar(key) == bar) + " " + bar.getProgress() + " " + bar.getTitle() + " " + srv.getBossBars().hasNext() + " " + srv.removeBossBar(key));
             }
             default -> sender.sendMessage("usage: /typical <ping|where|info|give|state|tp|world|surface>");
