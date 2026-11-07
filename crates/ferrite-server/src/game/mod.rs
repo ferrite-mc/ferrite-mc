@@ -420,7 +420,7 @@ mod survival;
 
 use self::{
     global::{GlobalPlayer, GlobalRegion},
-    region::{Command, Mailbox, Player, Region, Signal, TickContext, apply_trade_sync},
+    region::{Command, Mailbox, Player, Region, Signal, TickContext},
 };
 use ferrite_admin::AdminLists;
 use ferrite_net::game::{self, GameMessage, Outbound, OutboundSender, ServerboundPlay};
@@ -1419,17 +1419,6 @@ async fn run(
                   },
                   Signal::Transfer{dimension,from,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;worlds.schedule_at_chunk(dimension,to,move |r|{r.hold_chunk(to);r.players.insert(id,*player);});defer_release(&worlds,&signal_tx,dimension,from,false);},
                   Signal::EntityTransfer{dimension,to,entity}=>hand_off(worlds.scheduler(dimension), to, entity),
-                  Signal::TradeSync{dimension,trader,player,offers}=>{
-                    let position = command_entities.lock().unwrap().get(trader).map(|entity| entity.pos);
-                    if let Some(pos) = position {
-                      let chunk = ChunkPos((pos[0].floor() as i32).div_euclid(16), (pos[2].floor() as i32).div_euclid(16));
-                      worlds.schedule_at_chunk(dimension,chunk,move |region| {
-                        if let Some(key) = region.entities.keys().iter().copied().find(|&key| region.entities.data(key).is_some_and(|data| data.uuid == trader)) {
-                          apply_trade_sync(&mut region.entities,key,player,&offers);
-                        }
-                      });
-                    }
-                  },
                   Signal::ChangeDimension{from_dimension,from,player}=>{
                     let dimension=player.dimension;let chunk=player.chunk;let id=player.uuid;
                     worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);r.players.insert(id,*player);});

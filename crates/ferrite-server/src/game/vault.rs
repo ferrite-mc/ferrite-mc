@@ -1716,7 +1716,8 @@ mod tests {
         let saved_entity = ejected_item(pos, &saved_reward, &mut rng);
         apply_block_state(&source, &crash);
         source.flush_chunk(0, 0).await.unwrap();
-        crate::game::entity_save::save(&world, (0, 0), &[saved_entity.clone()]).unwrap();
+        crate::game::entity_save::save(&world, (0, 0), std::slice::from_ref(&saved_entity))
+            .unwrap();
         drop(source);
 
         let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();

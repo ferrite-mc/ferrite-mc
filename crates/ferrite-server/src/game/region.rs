@@ -28,8 +28,10 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-pub type DelayedBlockUpdate = (i64, (i32, i32), [i32; 3], u32);
+#[cfg(test)]
+type DelayedBlockUpdate = (i64, (i32, i32), [i32; 3], u32);
 
+#[cfg(test)]
 fn queue_delayed_piston_update(
     updates: &mut Vec<DelayedBlockUpdate>,
     due_tick: i64,
@@ -522,13 +524,6 @@ pub enum Signal {
         to: ChunkPos,
         entity: Box<EntityRecord>,
     },
-    /// Trade offer state changed in a player menu owned by a different region.
-    TradeSync {
-        dimension: super::Dimension,
-        trader: Uuid,
-        player: Uuid,
-        offers: Vec<(i32, i32)>,
-    },
 }
 /// What a region tick needs from the world loop.
 #[derive(Clone)]
@@ -828,6 +823,8 @@ pub struct DelayedUpdate {
     pub pos: [i32; 3],
     pub due: i64,
     pub chunk: (i32, i32),
+    /// Final state the delayed packet represents; discard it if a later action changed the block.
+    pub expected_state: u32,
     pub packet: Outbound,
 }
 #[derive(Default)]
@@ -840,6 +837,8 @@ pub struct Region {
     /// Chance in percent that a wandering trader turns up at the next daily roll
     /// (`WanderingTraderSpawner`: starts at 25, grows by 25 per miss, caps at 75).
     pub trader_chance: u32,
+    /// Active wandering-trader potion drinks and remaining duration, keyed by entity UUID.
+    trader_drinks: HashMap<Uuid, (TraderDrink, u32)>,
     /// Final block updates held back until the client finished the push animation. Keyed by
     /// position through [`Region::queue_delayed_update`] so a reversal replaces stale updates.
     pub delayed_updates: Vec<DelayedUpdate>,
@@ -932,6 +931,7 @@ impl RegionData for Region {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
             trader_chance: 25,
+            trader_drinks: HashMap::new(),
             delayed_updates,
             moving_pistons,
             thrown_tridents: HashMap::new(),
@@ -4282,6 +4282,7 @@ fn trader_bright_outside(clock_time: i64) -> bool {
     !(12_000..23_000).contains(&clock_time.rem_euclid(24_000))
 }
 
+#[cfg(test)]
 pub(super) fn apply_trade_sync(
     entities: &mut EntityStore,
     key: ferrite_entity::EntityKey,
@@ -4627,6 +4628,15 @@ impl Region {
     /// death loot.
     #[cfg(test)]
     fn tick_mobs(&mut self, ctx: &TickContext, blocks: &TickBlocks<'_>) {
+        self.tick_mobs_with_owner_attacks(ctx, blocks, &[]);
+    }
+
+    fn tick_mobs_with_owner_attacks(
+        &mut self,
+        ctx: &TickContext,
+        blocks: &TickBlocks<'_>,
+        owner_attacks: &[(Uuid, ferrite_entity::EntityKey)],
+    ) {
         // The villager schedule runs before AI so each villager has this tick's activity and
         // destination. `/tick freeze` already guards this call at the region level.
         let (day_time, game_time) = {
@@ -6986,11 +6996,18 @@ impl Region {
             return;
         };
         let now = self.tick_clock;
+        let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
+        let mut world =
+            super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
         let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed_updates)
             .into_iter()
             .partition(|update| update.due <= now);
         self.delayed_updates = waiting;
         for update in due {
+            let current = super::redstone::RedstoneWorld::block(&world, update.pos);
+            if !delayed_piston_update_matches_current(update.expected_state, current) {
+                continue;
+            }
             broadcast_tracked_chunk(
                 &ctx.tracking.lock().unwrap(),
                 ctx.dimension,
@@ -6999,30 +7016,6 @@ impl Region {
             );
         }
         self.moving_pistons.advance();
-        let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
-        let mut world =
-            super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
-        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed_updates)
-            .into_iter()
-            .partition(|(at, _, _, _)| *at <= now);
-        self.delayed_updates = waiting;
-        for update in due {
-            let (_, chunk, pos, state) = update;
-            let current = super::redstone::RedstoneWorld::block(&world, pos);
-            if !delayed_piston_update_matches_current(state, current) {
-                continue;
-            }
-            let update = BlockUpdate {
-                location: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).pack(),
-                block_state: VarInt(state as i32),
-            };
-            broadcast_tracked_chunk(
-                &ctx.tracking.lock().unwrap(),
-                ctx.dimension,
-                chunk,
-                &packet(&update),
-            );
-        }
         self.redstone.blocks_changed(&mut world, changed);
         self.redstone.tick(&mut world, &players);
         let actions = self.redstone.take_piston_actions(&world);
@@ -7165,6 +7158,7 @@ impl Region {
                     pos: at,
                     due: self.tick_clock.wrapping_add(2),
                     chunk: (at[0].div_euclid(16), at[2].div_euclid(16)),
+                    expected_state: state,
                     packet: packet(&update),
                 });
                 piston_changes.push(at);
@@ -8952,6 +8946,7 @@ mod tests {
             pos: [1, 64, 2],
             due,
             chunk: (0, 0),
+            expected_state: 1,
             packet: Outbound::Packet(vec![42].into()),
         };
         region.queue_delayed_update(update(5));

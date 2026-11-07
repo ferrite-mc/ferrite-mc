@@ -452,6 +452,8 @@ pub struct Operation {
     pub moves: Vec<MovedBlock>,
     /// The extension head, which travels from the base to the head cell.
     pub head: Option<MovedBlock>,
+    /// Cells occupied by the piston head or a moved block before entities are pushed.
+    pub entity_push_cells: Vec<[i32; 3]>,
 }
 
 /// Prepare a complete operation without modifying the world.
@@ -496,11 +498,18 @@ pub fn operation(
     } else {
         None
     };
+    let mut entity_push_cells = vec![offset(base, facing)];
+    entity_push_cells.extend(
+        plan.to_move
+            .iter()
+            .map(|&pos| if extending { offset(pos, facing) } else { pos }),
+    );
     Some(Operation {
         edits: changes(world, base, facing, extending, &plan)?,
         destroyed,
         moves,
         head,
+        entity_push_cells,
     })
 }
 
@@ -717,6 +726,8 @@ mod tests {
         let stone = state("stone");
         grid.0.insert(base, piston);
         grid.0.insert([1, 64, 0], stone);
+        let operation = operation(&grid, base, Direction::East, true).unwrap();
+        assert_eq!(operation.entity_push_cells, vec![[1, 64, 0], [2, 64, 0]]);
         let plan = resolve(&grid, base, Direction::East, true).unwrap();
         for (pos, _, next) in changes(&grid, base, Direction::East, true, &plan).unwrap() {
             grid.0.insert(pos, u16::try_from(next).unwrap());
