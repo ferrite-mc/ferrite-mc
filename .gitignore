@@ -9,3 +9,5 @@ __pycache__/
 **/logs/
 playerdata/
 /worldgen
+compat-report.md
+check.out
