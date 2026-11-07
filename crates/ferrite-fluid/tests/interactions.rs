@@ -92,6 +92,20 @@ fn water_bucket_preserves_waterloggable_blocks() {
 }
 
 #[test]
+fn water_bucket_fills_cauldron_and_only_full_cauldron_can_be_picked_up() {
+    let mut w = world();
+    let empty = id("cauldron");
+    w.set_block(0, 0, 0, empty);
+    assert!(place_water(&mut w, (0, 0, 0)));
+    assert_eq!(w.block(0, 0, 0), state("water_cauldron", &[("level", "3")]));
+    w.set_block(0, 0, 0, state("water_cauldron", &[("level", "2")]));
+    assert!(!pickup_water(&mut w, (0, 0, 0)));
+    w.set_block(0, 0, 0, state("water_cauldron", &[("level", "3")]));
+    assert!(pickup_water(&mut w, (0, 0, 0)));
+    assert_eq!(w.block(0, 0, 0), empty);
+}
+
+#[test]
 fn flowing_water_does_not_fill_slab_but_source_water_does() {
     let mut w = world();
     let dry = state(

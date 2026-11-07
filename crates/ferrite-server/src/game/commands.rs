@@ -142,6 +142,11 @@ pub struct GameState {
     /// Total world ticks (`/time query gametime`).
     pub game_time: i64,
     pub weather: Weather,
+    /// Ticks until precipitation ends; remains active while thunder is active.
+    pub rain_duration: i32,
+    /// Ticks until thunder ends; independent from the precipitation timer.
+    pub thunder_duration: i32,
+    /// Remaining clear-weather ticks, or the active weather timer exposed to callers.
     pub weather_duration: i32,
     /// The weather the clients were last told about.
     pub weather_sent: Option<Weather>,
@@ -190,6 +195,8 @@ impl GameState {
             clock_time: 0,
             game_time: 0,
             weather: Weather::Clear,
+            rain_duration: 0,
+            thunder_duration: 0,
             weather_duration: 6_000,
             weather_sent: None,
             advance_weather: true,
@@ -288,9 +295,7 @@ impl GameState {
         idle
     }
 
-    /// The weather cycle when the current spell ends (vanilla `ServerLevel.advanceWeatherCycle`,
-    /// shortened): clear weather turns to rain, rain to thunder one time in three, and both
-    /// clear up again. shortcut: vanilla's separate rain and thunder timers are one spell here.
+    /// Starts the next weather phase in the ordinary weather cycle.
     fn advance_weather(&mut self) {
         // xorshift64: a seeded random sequence, so each world gets its own weather.
         let mut x = self.weather_rng;
@@ -299,13 +304,26 @@ impl GameState {
         x ^= x << 17;
         self.weather_rng = x;
         let r = ((x >> 33) & 0x7fff_ffff) as i32;
-        let (weather, duration) = match self.weather {
-            Weather::Clear => (Weather::Rain, 12_000 + r % 12_000),
-            Weather::Rain if r % 3 == 0 => (Weather::Thunder, 3_600 + r % 12_000),
-            Weather::Rain | Weather::Thunder => (Weather::Clear, 12_000 + r % 168_000),
-        };
-        self.weather = weather;
-        self.weather_duration = duration;
+        match self.weather {
+            Weather::Clear => {
+                self.weather = Weather::Rain;
+                self.rain_duration = 12_000 + r % 12_000;
+                self.thunder_duration = 0;
+                self.weather_duration = self.rain_duration;
+            }
+            Weather::Rain if r % 3 == 0 => {
+                self.weather = Weather::Thunder;
+                self.thunder_duration = 3_600 + r % 12_000;
+                self.rain_duration = self.thunder_duration + 12_000 + r % 12_000;
+                self.weather_duration = self.thunder_duration;
+            }
+            Weather::Rain | Weather::Thunder => {
+                self.weather = Weather::Clear;
+                self.rain_duration = 0;
+                self.thunder_duration = 0;
+                self.weather_duration = 12_000 + r % 168_000;
+            }
+        }
     }
 
     /// The `game_event` packets (event, value) that tell clients the weather, when it changed
@@ -328,10 +346,36 @@ impl GameState {
     /// that are due this tick, once per function.
     pub fn tick(&mut self, advance_time: bool) -> Vec<String> {
         self.game_time += 1;
-        if self.advance_weather && self.weather_duration > 0 {
-            self.weather_duration -= 1;
-            if self.weather_duration == 0 {
-                self.advance_weather();
+        if self.advance_weather {
+            match self.weather {
+                Weather::Clear => {
+                    if self.weather_duration > 0 {
+                        self.weather_duration -= 1;
+                    }
+                    if self.weather_duration == 0 {
+                        self.advance_weather();
+                    }
+                }
+                Weather::Rain | Weather::Thunder => {
+                    if self.rain_duration > 0 {
+                        self.rain_duration -= 1;
+                    }
+                    if self.thunder_duration > 0 {
+                        self.thunder_duration -= 1;
+                    }
+                    if self.rain_duration == 0 {
+                        self.advance_weather();
+                    } else if self.thunder_duration == 0 {
+                        self.weather = Weather::Rain;
+                    }
+                    if self.weather != Weather::Clear {
+                        self.weather_duration = if self.weather == Weather::Thunder {
+                            self.thunder_duration
+                        } else {
+                            self.rain_duration
+                        };
+                    }
+                }
             }
         }
         if advance_time {
@@ -1666,6 +1710,21 @@ fn set_weather(ctx: &CommandContext<Source>, kind: Weather) -> Result<i32, Comma
     {
         let mut state = source.state.lock().unwrap();
         state.weather = kind;
+        match kind {
+            Weather::Clear => {
+                state.rain_duration = 0;
+                state.thunder_duration = 0;
+            }
+            Weather::Rain => {
+                state.rain_duration = duration.unwrap_or(state.weather_duration).max(1);
+                state.thunder_duration = 0;
+            }
+            Weather::Thunder => {
+                let duration = duration.unwrap_or(state.weather_duration).max(1);
+                state.rain_duration = duration;
+                state.thunder_duration = duration;
+            }
+        }
         if let Some(duration) = duration {
             state.weather_duration = duration;
         }
@@ -3763,6 +3822,8 @@ mod tests {
         assert_eq!(feedback.key, "commands.weather.set.thunder");
         assert_eq!(feedback.text, "Set the weather to rain and thunder");
         assert_eq!(state.lock().unwrap().weather, Weather::Thunder);
+        assert_eq!(state.lock().unwrap().rain_duration, 200);
+        assert_eq!(state.lock().unwrap().thunder_duration, 200);
 
         let (console, _) = player_source(2, None, state);
         let error = tree.execute("weather rain 0", console).unwrap_err();
@@ -4220,5 +4281,21 @@ mod tests {
         );
         assert!(state.weather_events(false).is_empty());
         assert_eq!(state.weather_events(true).len(), 3, "a refresh repeats it");
+    }
+
+    #[test]
+    fn thunder_can_end_while_rain_continues() {
+        let mut state = GameState::default();
+        state.weather = Weather::Thunder;
+        state.rain_duration = 3;
+        state.thunder_duration = 1;
+        state.tick(false);
+        assert_eq!(state.weather, Weather::Rain);
+        assert_eq!(state.rain_duration, 2);
+        assert_eq!(state.thunder_duration, 0);
+        assert_eq!(
+            state.weather_events(false),
+            vec![(1, 0.0), (7, 1.0), (8, 0.0)]
+        );
     }
 }

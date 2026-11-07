@@ -348,6 +348,16 @@ pub fn place_water(world: &mut impl FluidWorld, pos: Position) -> bool {
     if fluid_state(old).kind != FluidKind::Empty {
         return false;
     }
+    if u16::try_from(old)
+        .ok()
+        .and_then(blocks::state)
+        .is_some_and(|(name, _)| name == "minecraft:cauldron" || name == "cauldron")
+    {
+        if let Some(full) = blocks::state_id("water_cauldron", &[("level", "3")]) {
+            world.set_block(pos.0, pos.1, pos.2, u32::from(full));
+            return true;
+        }
+    }
     if let Some(new) = waterlogged_variant(old, true) {
         world.set_block(pos.0, pos.1, pos.2, new);
         return true;
@@ -366,6 +376,23 @@ pub fn place_water(world: &mut impl FluidWorld, pos: Position) -> bool {
 /// Emulates source water `BucketPickup` for liquid blocks and waterlogged blocks.
 pub fn pickup_water(world: &mut impl FluidWorld, pos: Position) -> bool {
     let old = world.block(pos.0, pos.1, pos.2);
+    if let Some((name, properties)) = u16::try_from(old).ok().and_then(blocks::state)
+        && (name == "minecraft:water_cauldron" || name == "water_cauldron")
+    {
+        if properties
+            .iter()
+            .any(|&(key, value)| key == "level" && value == "3")
+        {
+            world.set_block(
+                pos.0,
+                pos.1,
+                pos.2,
+                u32::from(blocks::default_state("cauldron").unwrap()),
+            );
+            return true;
+        }
+        return false;
+    }
     let fluid = fluid_state(old);
     if fluid.kind != FluidKind::Water || !fluid.source {
         return false;

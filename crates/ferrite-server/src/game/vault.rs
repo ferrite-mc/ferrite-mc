@@ -5,12 +5,30 @@
 //! the player is refused like vanilla.
 
 use super::anvil::AnvilChunkSource;
-use ferrite_nbt::{Compound, List, Tag};
-use ferrite_world::BlockEntity;
+use ferrite_nbt::{List, Tag};
 use uuid::Uuid;
 
 const DATA: &str = "server_data";
 const REWARDED: &str = "rewarded_players";
+const STATE: &str = "state";
+
+/// Result of checking whether a player may unlock a vault in its current state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenState {
+    Ready,
+    AlreadyRewarded,
+    Inactive,
+    Busy,
+}
+
+fn open_state(state: &str, rewarded: bool) -> OpenState {
+    match state {
+        "active" if rewarded => OpenState::AlreadyRewarded,
+        "active" => OpenState::Ready,
+        "unlocking" | "ejecting" => OpenState::Busy,
+        _ => OpenState::Inactive,
+    }
+}
 
 /// The key a vault takes, and the loot table it ejects.
 pub fn key_and_table(ominous: bool) -> (&'static str, &'static str) {
@@ -37,8 +55,8 @@ fn ints(uuid: Uuid) -> Vec<i32> {
     ]
 }
 
-/// Records `player` as rewarded by the vault at `pos`. `false` when the player already was
-/// (or the chunk is not loaded), so the key is not used up.
+/// Records `player` as rewarded by an active vault at `pos`. `false` when the vault cannot be
+/// opened, the player already was rewarded, or the chunk is not loaded, so the key is preserved.
 pub fn reward_once(source: &AnvilChunkSource, [x, y, z]: [i32; 3], player: Uuid) -> bool {
     let Some(type_id) =
         ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:vault")
@@ -49,28 +67,29 @@ pub fn reward_once(source: &AnvilChunkSource, [x, y, z]: [i32; 3], player: Uuid)
     let who = ints(player);
     source
         .update_block_entity(x, y, z, |entity| {
-            let entity = entity.get_or_insert_with(|| {
-                let mut data = Compound::new();
-                data.insert("id".into(), Tag::String("minecraft:vault".into()));
-                data.insert("x".into(), Tag::Int(x));
-                data.insert("y".into(), Tag::Int(y));
-                data.insert("z".into(), Tag::Int(z));
-                BlockEntity { type_id, data }
-            });
-            let server = match entity
-                .data
-                .entry(DATA.to_owned())
-                .or_insert_with(|| Tag::Compound(Compound::new()))
-            {
-                Tag::Compound(c) => c,
-                _ => return (false, false),
+            let Some(entity) = entity.as_mut().filter(|entity| entity.type_id == type_id) else {
+                return (false, false);
             };
+            let Some(Tag::Compound(server)) = entity.data.get_mut(DATA) else {
+                return (false, false);
+            };
+            let Some(Tag::String(state)) = server.get(STATE) else {
+                return (false, false);
+            };
+            let rewarded = match server.get(REWARDED) {
+                None => false,
+                Some(Tag::List(List::IntArray(all))) => all.contains(&who),
+                Some(_) => return (false, false),
+            };
+            if open_state(state, rewarded) != OpenState::Ready {
+                return (false, false);
+            }
             let list = server
                 .entry(REWARDED.to_owned())
                 .or_insert_with(|| Tag::List(List::IntArray(Vec::new())));
             match list {
-                Tag::List(List::IntArray(all)) if !all.contains(&who) => {
-                    all.push(who.clone());
+                Tag::List(List::IntArray(all)) => {
+                    all.push(who);
                     (true, true)
                 }
                 _ => (false, false),
@@ -82,6 +101,37 @@ pub fn reward_once(source: &AnvilChunkSource, [x, y, z]: [i32; 3], player: Uuid)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrite_nbt::Compound;
+    use ferrite_world::BlockEntity;
+
+    fn put_vault(source: &AnvilChunkSource, pos: [i32; 3], state: &str) {
+        let type_id =
+            ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:vault")
+                .and_then(|id| u32::try_from(id).ok())
+                .unwrap();
+        source
+            .update_block_entity(pos[0], pos[1], pos[2], |entity| {
+                let mut server = Compound::new();
+                server.insert(STATE.into(), Tag::String(state.into()));
+                server.insert(REWARDED.into(), Tag::List(List::IntArray(Vec::new())));
+                let mut data = Compound::new();
+                data.insert("id".into(), Tag::String("minecraft:vault".into()));
+                data.insert(DATA.into(), Tag::Compound(server));
+                *entity = Some(BlockEntity { type_id, data });
+                (true, ())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn only_active_vaults_can_be_opened_and_only_once_per_player() {
+        assert_eq!(open_state("active", false), OpenState::Ready);
+        assert_eq!(open_state("active", true), OpenState::AlreadyRewarded);
+        assert_eq!(open_state("inactive", false), OpenState::Inactive);
+        assert_eq!(open_state("unlocking", false), OpenState::Busy);
+        assert_eq!(open_state("ejecting", false), OpenState::Busy);
+        assert_eq!(open_state("unknown", false), OpenState::Inactive);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_player_is_rewarded_once_per_vault() {
@@ -90,9 +140,24 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        put_vault(&source, [3, 70, 3], "active");
+        put_vault(&source, [9, 70, 3], "active");
         assert!(reward_once(&source, [3, 70, 3], a));
         assert!(!reward_once(&source, [3, 70, 3], a));
         assert!(reward_once(&source, [3, 70, 3], b));
         assert!(reward_once(&source, [9, 70, 3], a));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inactive_vault_does_not_create_reward_state_or_consume_a_claim() {
+        let source = AnvilChunkSource::new_memory();
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let pos = [3, 70, 3];
+        put_vault(&source, pos, "inactive");
+        assert!(!reward_once(&source, pos, Uuid::from_u128(1)));
+        put_vault(&source, pos, "active");
+        assert!(reward_once(&source, pos, Uuid::from_u128(1)));
     }
 }

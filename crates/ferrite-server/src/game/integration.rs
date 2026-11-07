@@ -3709,6 +3709,73 @@ async fn an_extending_piston_carries_the_mob_in_the_way() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_extending_piston_pushes_a_player_in_the_way() {
+    use ferrite_protocol::packets::play::{BlockUpdate, PositionSync};
+    use ferrite_protocol::types::BlockPos;
+    let lever = block_state(
+        "minecraft:lever",
+        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+    );
+    let (world, temp, addr, server) = redstone_fixture(&[
+        ([0, 64, 0], lever),
+        (
+            [1, 64, 0],
+            block_state(
+                "minecraft:piston",
+                &[("facing", "east"), ("extended", "false")],
+            ),
+        ),
+        ([2, 64, 0], block_state("minecraft:stone", &[])),
+    ])
+    .await;
+    let mut bot = Bot::join(addr, "RedstoneBot").await;
+    bot.until(46).await;
+    // Stand in the empty destination cell that the stone will occupy.
+    bot.send(&MovePosition {
+        x: 3.5,
+        y: 64.0,
+        z: 0.5,
+        flags: 0,
+    })
+    .await;
+    let mut trigger = Bot::join(addr, "TriggerBot").await;
+    trigger.until(46).await;
+    click_block(&mut trigger, [0, 64, 0]).await;
+    let mut pushed_to = None;
+    let mut stone_arrived = false;
+    let mut block_updates = Vec::new();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while pushed_to.is_none() || !stone_arrived {
+            let (id, body) = bot.next_play().await;
+            if id == PositionSync::ID {
+                let sync = PositionSync::decode(&mut body.as_slice()).unwrap();
+                if sync.x > 4.0 {
+                    pushed_to = Some(sync.x);
+                }
+            } else if id == BlockUpdate::ID {
+                let update = BlockUpdate::decode(&mut body.as_slice()).unwrap();
+                let pos = BlockPos::unpack(update.location);
+                block_updates.push(((pos.x, pos.y, pos.z), update.block_state.0));
+                stone_arrived |= (pos.x, pos.y, pos.z) == (3, 64, 0)
+                    && update.block_state.0
+                        == i32::try_from(block_state("minecraft:stone", &[])).unwrap();
+            }
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "the piston should move the stone and push the player; block updates: {block_updates:?}, pushed_to: {pushed_to:?}"
+    );
+    assert!((pushed_to.unwrap() - 4.5).abs() < 0.01);
+    drop(trigger);
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sticky_piston_pulls_stone_after_power_is_removed() {
     let lever = block_state(
         "minecraft:lever",

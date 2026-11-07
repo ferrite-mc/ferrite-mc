@@ -58,7 +58,10 @@ impl Saved {
             "dragon_alive".into(),
             Tag::Byte(i8::from(self.dragon_alive)),
         );
-        c.insert("gateways_opened".into(), Tag::Int(self.gateways as i32));
+        c.insert(
+            "gateways_opened".into(),
+            Tag::Int(self.gateways.min(GATEWAY_COUNT) as i32),
+        );
         c.insert(
             "crystals".into(),
             Tag::ByteArray(self.crystals.iter().map(|&n| n as i8).collect()),
@@ -74,7 +77,7 @@ impl Saved {
             killed: flag("previously_killed"),
             dragon_alive: flag("dragon_alive"),
             gateways: match c.get("gateways_opened") {
-                Some(Tag::Int(n)) => u32::try_from(*n).ok()?,
+                Some(Tag::Int(n)) => u32::try_from(*n).ok()?.min(GATEWAY_COUNT),
                 _ => 0,
             },
             crystals: match c.get("crystals") {
@@ -86,12 +89,24 @@ impl Saved {
 }
 
 impl FightState {
+    /// Records and returns the next End gateway position. A fight opens each of the twenty
+    /// vanilla gateways once; asking again after the ring is complete does not place duplicates.
+    pub fn open_next_gateway(&mut self) -> Option<[i32; 3]> {
+        if self.gateways >= GATEWAY_COUNT {
+            self.gateways = GATEWAY_COUNT;
+            return None;
+        }
+        let at = gateway_position(self.gateways);
+        self.gateways += 1;
+        Some(at)
+    }
+
     pub fn saved(&self) -> Saved {
         Saved {
             started: self.started,
             killed: self.killed,
             dragon_alive: self.dragon_alive,
-            gateways: self.gateways,
+            gateways: self.gateways.min(GATEWAY_COUNT),
             crystals: self.crystals.iter().copied().collect(),
         }
     }
@@ -100,7 +115,7 @@ impl FightState {
         self.started = saved.started;
         self.killed = saved.killed;
         self.dragon_alive = saved.dragon_alive;
-        self.gateways = saved.gateways;
+        self.gateways = saved.gateways.min(GATEWAY_COUNT);
         self.crystals = saved.crystals.iter().copied().collect();
         self.on_disk = Some(saved);
     }
@@ -396,5 +411,28 @@ mod respawn_tests {
         let mut fresh = FightState::default();
         fresh.restore(back);
         assert!(fresh.started && fresh.killed && fresh.crystals.len() == 3);
+    }
+
+    #[test]
+    fn fight_opens_each_gateway_once_and_stops_after_the_ring() {
+        let mut fight = FightState {
+            gateways: GATEWAY_COUNT - 1,
+            ..Default::default()
+        };
+        let last = fight.open_next_gateway();
+        assert_eq!(last, Some(gateway_position(GATEWAY_COUNT - 1)));
+        assert_eq!(fight.gateways, GATEWAY_COUNT);
+        assert_eq!(fight.open_next_gateway(), None);
+        assert_eq!(fight.gateways, GATEWAY_COUNT);
+
+        let oversized = Saved {
+            started: true,
+            killed: true,
+            dragon_alive: false,
+            gateways: u32::MAX,
+            crystals: Vec::new(),
+        };
+        let restored = Saved::from_nbt(&oversized.to_nbt()).unwrap();
+        assert_eq!(restored.gateways, GATEWAY_COUNT);
     }
 }

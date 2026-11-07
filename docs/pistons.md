@@ -22,14 +22,12 @@ height (`within_height`), so nothing is pushed out of the world.
 across loaded chunks atomically. Sticky retraction leaves its target in place if it
 cannot resolve a pull.
 
-Pistons currently move blocks immediately: there is no moving-piston block entity or
-validated vanilla animation/timing. Extending pistons do carry non-player entities (mobs,
-items) standing in a cell a block is pushed into one block along, when the destination has
-room for them (test `an_extending_piston_carries_the_mob_in_the_way`); a retracting sticky piston carries non-player
-entities standing on the pulled block toward the piston (test
-`a_retracting_sticky_piston_carries_the_mob_standing_on_the_block`, needs the fixture world and
-has not been run); players are pushed the same way (feet and head cells
-must be air; the client gets a position sync). Player pushing is untested. The server sends
-a block event and final block updates, but client animation has not been verified.
-Vanilla edge cases, including interrupted movement, world borders, drops and full
-cross-region runtime behaviour, still need regression coverage and parity validation.
+The world is updated immediately; the server sends a block event and delays final block
+updates by two ticks. There is no moving-piston block entity, and the animation/timing has
+not been checked with a real client. Extending pistons carry mobs/items in the pushed cell
+when the destination has room (`an_extending_piston_carries_the_mob_in_the_way`); sticky
+retraction carries mobs standing on the pulled block (`a_retracting_sticky_piston_carries_the_mob_standing_on_the_block`).
+Players are pushed too when both feet and head cells at the destination are air; the new
+`an_extending_piston_pushes_a_player_in_the_way` integration test checks the position sync and
+the moved block. Player retraction remains untested. Interrupted movement, resolver parity,
+world-border/drop edge cases and full cross-region runtime behaviour still need coverage.

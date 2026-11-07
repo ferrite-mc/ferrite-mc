@@ -1,7 +1,7 @@
-//! Horses (`AbstractHorse`): an untamed horse can be ridden, bucks its rider off now and then
-//! and is tamed with a chance that grows with each ride (its temper); a tamed horse takes a
-//! saddle and is then steered by its rider. Horses, donkeys and mules share this. shortcut: no
-//! llamas, armour, chest or inventory, jump strength or speed genetics, or eating of treats.
+//! Equines (`AbstractHorse`): wild animals can be tamed by riding; tame equines support saddles,
+//! horse armour, pack chests, llama carpets and treats. Horse movement speed, jump strength and
+//! health are randomized at spawn. Bucking still uses a per-tick probability approximation of
+//! `RunAroundLikeCrazyGoal` rather than that goal's timed run.
 
 use crate::mob::{self, MobKind, MobState};
 use crate::{EntityKey, EntityStore, Metadata, Rng};
@@ -333,6 +333,31 @@ mod tests {
         let horse = horse(&mut store);
         mob::state_mut(&mut store, horse).unwrap().owner = Some(Uuid::from_u128(1));
         assert!(!add_chest(&mut store, horse), "horses carry no chest");
+    }
+
+    #[test]
+    fn llama_pack_columns_follow_strength_metadata() {
+        let mut store = EntityStore::default();
+        let llama = store.insert(new_mob(
+            MobKind::Llama,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let state = mob::state_mut(&mut store, llama).unwrap();
+        state.owner = Some(Uuid::from_u128(3));
+        state.chest = true;
+
+        for strength in 1..=5 {
+            store
+                .data_mut(llama)
+                .unwrap()
+                .metadata
+                .set(STRENGTH_INDEX, MetaValue::Int(strength));
+            assert_eq!(chest_columns(&store, llama), strength as u8);
+        }
+
+        mob::state_mut(&mut store, llama).unwrap().chest = false;
+        assert_eq!(chest_columns(&store, llama), 0);
     }
 
     #[test]

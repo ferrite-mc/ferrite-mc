@@ -58,6 +58,8 @@ const LEASH_PULL: f64 = 6.0;
 const LEASH_SNAP: f64 = 12.0;
 /// Caravan llamas hurry after their head (`LlamaFollowCaravanGoal` speed modifier 2.1).
 const CARAVAN_SPEED: f64 = 2.1;
+/// Maximum number of llamas in one caravan, including its head.
+const CARAVAN_LIMIT: usize = 10;
 
 /// Where the holder of a leashed animal is when it is more than six blocks away; a lead that
 /// stretches past twelve snaps. `None` when the animal is not on a lead, the holder is not in
@@ -140,6 +142,11 @@ fn caravan_target(store: &mut EntityStore, key: crate::EntityKey, start: Vec3) -
             return None;
         }
         let data = store.data(k)?;
+        // Count this candidate and each llama it follows back to the line's head.
+        let line_len = caravan_chain_len(store, k);
+        if line_len >= CARAVAN_LIMIT {
+            return None;
+        }
         let pos = store.pos(k)?;
         let (dx, dz) = (pos.x - start.x, pos.z - start.z);
         if dx * dx + dz * dz > 81.0 {
@@ -157,6 +164,25 @@ fn caravan_target(store: &mut EntityStore, key: crate::EntityKey, start: Vec3) -
         mob::state_mut(store, key)?.caravan = Some(head);
     }
     None
+}
+
+fn caravan_chain_len(store: &EntityStore, key: crate::EntityKey) -> usize {
+    let mut length = 1;
+    let mut next = mob::state(store, key).and_then(|state| state.caravan);
+    for _ in 0..CARAVAN_LIMIT {
+        let Some(uuid) = next else { return length };
+        let Some(parent) = store
+            .keys()
+            .iter()
+            .copied()
+            .find(|&candidate| store.data(candidate).is_some_and(|data| data.uuid == uuid))
+        else {
+            return length;
+        };
+        length += 1;
+        next = mob::state(store, parent).and_then(|state| state.caravan);
+    }
+    length
 }
 
 /// A player as the goals see it.
@@ -1144,6 +1170,37 @@ mod tests {
             store.pos(tail).unwrap().x < before,
             "the tail llama trails its head"
         );
+    }
+
+    #[test]
+    fn a_caravan_at_the_ten_llama_limit_rejects_another_member() {
+        let mut store = EntityStore::default();
+        let head = store.insert(new_mob(
+            MobKind::Llama,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::state_mut(&mut store, head).unwrap().leash = Some((Uuid::nil(), 1));
+        let head_uuid = store.data(head).unwrap().uuid;
+        let mut parent = head_uuid;
+        for seed in 2..=10 {
+            let member = store.insert(new_mob(
+                MobKind::Llama,
+                Vec3::new(0.5, 64.0, 0.5),
+                &mut Rng::new(seed),
+            ));
+            mob::state_mut(&mut store, member).unwrap().caravan = Some(parent);
+            parent = store.data(member).unwrap().uuid;
+        }
+        let extra = store.insert(new_mob(
+            MobKind::Llama,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(11),
+        ));
+
+        let extra_pos = store.pos(extra).unwrap();
+        assert_eq!(caravan_target(&mut store, extra, extra_pos), None);
+        assert_eq!(mob::state(&store, extra).unwrap().caravan, None);
     }
 
     #[test]

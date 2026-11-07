@@ -3835,6 +3835,43 @@ fn deliver(
         }
     }
 }
+
+/// Sends player metadata to other online players in the same dimension. Player entities are not
+/// in the region entity tracker, so state changes such as riptide spin need this world-wide path.
+fn should_broadcast_player_metadata(
+    source: Uuid,
+    viewer: Uuid,
+    source_dimension: super::Dimension,
+    viewer_dimension: super::Dimension,
+) -> bool {
+    source != viewer && source_dimension == viewer_dimension
+}
+
+fn broadcast_player_metadata(
+    tracking: &Tracking,
+    dimension: super::Dimension,
+    source: Uuid,
+    entity: i32,
+    spin: bool,
+) {
+    let bytes = packet(&SetEntityData {
+        id: VarInt(entity),
+        values: vec![MetaEntry {
+            index: 8,
+            value: MetaValue::Byte(if spin { 4 } else { 0 }),
+        }],
+    });
+    for (uuid, (viewer_dimension, _, outbound)) in tracking.lock().unwrap().iter() {
+        if should_broadcast_player_metadata(source, *uuid, dimension, *viewer_dimension) {
+            let _ = outbound.send(bytes.clone());
+        }
+    }
+}
+
+fn trader_spawning_enabled(rules: &ferrite_command::gamerule::GameRules) -> bool {
+    rules.get_bool("spawn_wandering_traders").unwrap_or(true)
+}
+
 impl Region {
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
         *self.held_chunks.entry(chunk).or_default() += 1;
@@ -4032,7 +4069,11 @@ impl Region {
                 }
             }
         }
-        self.tick_trader_spawn(blocks);
+        let trader_spawning = {
+            let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
+            trader_spawning_enabled(&rules)
+        };
+        self.tick_trader_spawn(blocks, trader_spawning);
         for record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1) {
             self.entities.insert(record);
         }
@@ -4377,10 +4418,10 @@ impl Region {
             first = !std::mem::replace(&mut fight.killed, true);
             fight.dragon_alive = false;
             // The next gateway of the ring opens; chunks that are not loaded keep the old air.
-            let at = super::end_fight::gateway_position(fight.gateways);
-            fight.gateways += 1;
-            for ([x, y, z], block) in super::end_fight::gateway_blocks(at) {
-                let _ = source.set_block(x, y, z, u32::from(block));
+            if let Some(at) = fight.open_next_gateway() {
+                for ([x, y, z], block) in super::end_fight::gateway_blocks(at) {
+                    let _ = source.set_block(x, y, z, u32::from(block));
+                }
             }
         }
         for record in experience::award(pos, super::end_fight::dragon_experience(first) as i32) {
@@ -4500,9 +4541,13 @@ impl Region {
 
     /// The daily wandering trader roll (`WanderingTraderSpawner`): near a random player, with two
     /// trader llamas on leads, gone after 48000 ticks.
-    fn tick_trader_spawn(&mut self, blocks: &TickBlocks<'_>) {
+    fn tick_trader_spawn(&mut self, blocks: &TickBlocks<'_>, enabled: bool) {
         use ferrite_entity::mob::{MobKind, new_mob};
-        if self.tick_clock <= 0 || self.tick_clock % 24_000 != 0 || self.players.is_empty() {
+        if !enabled
+            || self.tick_clock <= 0
+            || self.tick_clock % 24_000 != 0
+            || self.players.is_empty()
+        {
             return;
         }
         if (self.rng.next_int(100) as u32) >= self.trader_chance {
@@ -4963,6 +5008,13 @@ impl Region {
                             }],
                         },
                     );
+                    broadcast_player_metadata(
+                        &ctx.tracking,
+                        ctx.dimension,
+                        p.uuid,
+                        p.entity,
+                        false,
+                    );
                 }
             }
         }
@@ -5149,7 +5201,7 @@ impl Region {
                             .state
                             .lock()
                             .is_ok_and(|s| s.weather != super::commands::Weather::Clear);
-                        self.throw_trident(uuid, yaw, pitch, wet);
+                        self.throw_trident(ctx, uuid, yaw, pitch, wet);
                     }
                 } else if charge >= 0.1 {
                     self.fire_bow(uuid, charge, yaw, pitch);
@@ -5287,7 +5339,14 @@ impl Region {
     /// `TridentItem.releaseUsing`: the held trident leaves the hand and flies where the player
     /// looks. shortcut: loyalty returns it the moment it lands (no flight back); riptide launches the
     /// player without the spin pose; channeling calls lightning on a mob during thunder. Without loyalty it drops as an item where it ends.
-    fn throw_trident(&mut self, uuid: Uuid, yaw: f32, pitch: f32, raining: bool) {
+    fn throw_trident(
+        &mut self,
+        ctx: &TickContext,
+        uuid: Uuid,
+        yaw: f32,
+        pitch: f32,
+        raining: bool,
+    ) {
         let Some(p) = self.players.get_mut(&uuid) else {
             return;
         };
@@ -5348,6 +5407,7 @@ impl Region {
                     }],
                 },
             );
+            broadcast_player_metadata(&ctx.tracking, ctx.dimension, p.uuid, p.entity, true);
             if p.gamemode != 1
                 && let Some(worn) = worn_stack(stack.clone(), stack.damage() + 1)
             {
@@ -7115,6 +7175,40 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wandering_trader_spawning_obeys_its_gamerule() {
+        let mut rules = ferrite_command::gamerule::GameRules::default();
+        assert!(trader_spawning_enabled(&rules));
+
+        rules.set("spawn_wandering_traders", "false").unwrap();
+        assert!(!trader_spawning_enabled(&rules));
+    }
+
+    #[test]
+    fn player_metadata_broadcast_stays_in_dimension_and_excludes_source() {
+        let source = Uuid::from_u128(1);
+        let viewer = Uuid::from_u128(2);
+        assert!(should_broadcast_player_metadata(
+            source,
+            viewer,
+            super::super::Dimension::Overworld,
+            super::super::Dimension::Overworld,
+        ));
+        assert!(!should_broadcast_player_metadata(
+            source,
+            source,
+            super::super::Dimension::Overworld,
+            super::super::Dimension::Overworld,
+        ));
+        assert!(!should_broadcast_player_metadata(
+            source,
+            viewer,
+            super::super::Dimension::Overworld,
+            super::super::Dimension::Nether,
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plugin_explosion_can_preserve_blocks_and_still_push_entities() {
         use ferrite_entity::{EntityData, EntityRecord, allocate_id, random_uuid};
