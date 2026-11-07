@@ -36,6 +36,19 @@ pub fn store(animal: Uuid, items: &[ItemStack]) {
         .insert(animal, items.to_vec());
 }
 
+/// What a dead horse drops besides its loot table: its equipped saddle and horse armour. Pack
+/// equines use [`gear`]; llamas never take horse armour, so they never drop it.
+pub fn horse_gear(saddled: bool, armor: u16) -> Vec<ItemStack> {
+    let mut gear = Vec::new();
+    if saddled {
+        gear.extend(ItemStack::from_name("minecraft:saddle"));
+    }
+    if armor != 0 {
+        gear.push(ItemStack::with_count(armor, 1));
+    }
+    gear
+}
+
 /// What a dead donkey, mule or llama drops besides its loot table: the chest, its items and the saddle.
 pub fn gear(animal: Uuid, chest: bool, saddled: bool) -> Vec<ItemStack> {
     let mut gear = Vec::new();
@@ -103,6 +116,41 @@ mod tests {
             ["minecraft:bread", "minecraft:chest", "minecraft:saddle"]
         );
         assert!(gear(Uuid::from_u128(82), false, false).is_empty());
+    }
+
+    #[test]
+    fn horse_gear_drops_a_saddle_and_every_horse_armor_tier() {
+        for name in [
+            "minecraft:leather_horse_armor",
+            "minecraft:copper_horse_armor",
+            "minecraft:iron_horse_armor",
+            "minecraft:golden_horse_armor",
+            "minecraft:diamond_horse_armor",
+            "minecraft:netherite_horse_armor",
+        ] {
+            let armor = ItemStack::from_name(name).unwrap();
+            let names: Vec<_> = horse_gear(true, armor.item)
+                .iter()
+                .map(|stack| stack.name().unwrap())
+                .collect();
+            assert_eq!(names, ["minecraft:saddle", name]);
+        }
+        assert!(horse_gear(false, 0).is_empty());
+        let iron = ItemStack::from_name("minecraft:iron_horse_armor").unwrap();
+        assert_eq!(
+            horse_gear(false, iron.item)
+                .iter()
+                .map(|stack| stack.name().unwrap())
+                .collect::<Vec<_>>(),
+            ["minecraft:iron_horse_armor"]
+        );
+        assert_eq!(
+            horse_gear(true, 0)
+                .iter()
+                .map(|stack| stack.name().unwrap())
+                .collect::<Vec<_>>(),
+            ["minecraft:saddle"]
+        );
     }
 
     #[test]

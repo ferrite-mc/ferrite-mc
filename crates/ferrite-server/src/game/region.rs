@@ -4749,15 +4749,27 @@ impl Region {
                     state.leash = None;
                 }
             }
-            // A donkey, mule or llama drops its chest, what is in it, and its saddle.
+            // A horse drops its saddle and body armour; a donkey, mule or llama drops its
+            // chest, what is in it, and its saddle. A baby equine drops no gear at all.
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
             }
-            let gear = match (self.entities.data(key), mob::state(&self.entities, key)) {
-                (Some(data), Some(state)) => {
-                    super::equine_chest::gear(data.uuid, state.chest, state.saddled)
+            let gear = if baby {
+                Vec::new()
+            } else {
+                match (
+                    kind,
+                    self.entities.data(key),
+                    mob::state(&self.entities, key),
+                ) {
+                    (MobKind::Horse, _, Some(state)) => {
+                        super::equine_chest::horse_gear(state.saddled, state.armor)
+                    }
+                    (_, Some(data), Some(state)) => {
+                        super::equine_chest::gear(data.uuid, state.chest, state.saddled)
+                    }
+                    _ => Vec::new(),
                 }
-                _ => Vec::new(),
             };
             if kind == ferrite_entity::mob::MobKind::EnderDragon {
                 self.dragon_died(ctx, pos);
@@ -8552,6 +8564,137 @@ mod tests {
         assert_eq!(villager.level, 2);
         assert_eq!(villager.xp, ferrite_entity::villager::NEXT_LEVEL_XP[0]);
         assert_eq!(villager.offers.len(), 4);
+    }
+
+    fn tick_context() -> TickContext {
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        TickContext {
+            signals,
+            tracking: Default::default(),
+            source: None,
+            dimension: super::super::Dimension::Overworld,
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state: Default::default(),
+            tree: None,
+        }
+    }
+
+    fn dropped_items(region: &Region) -> Vec<&'static str> {
+        region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| {
+                let data = region.entities.data(key)?;
+                data.item.as_ref()?;
+                u16::try_from(ferrite_entity::item::stack(data).item_id)
+                    .ok()
+                    .and_then(ferrite_item::item_name)
+            })
+            .collect()
+    }
+
+    fn dropped_gear(region: &Region) -> Vec<&'static str> {
+        dropped_items(region)
+            .into_iter()
+            .filter(|name| *name == "minecraft:saddle" || name.ends_with("_horse_armor"))
+            .collect()
+    }
+
+    fn dead_equine(region: &mut Region, kind: MobKind) -> ferrite_entity::EntityKey {
+        let key = region.entities.insert(mob::new_mob(
+            kind,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.health = 0.0;
+        }
+        key
+    }
+
+    #[test]
+    fn a_dead_equine_horse_drops_saddle_and_armor_once() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Horse);
+        let armor = ferrite_item::item_id("minecraft:diamond_horse_armor").unwrap();
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.saddled = true;
+            state.armor = armor;
+        }
+        let ctx = tick_context();
+        region.tick(&ctx);
+        let mut names = dropped_gear(&region);
+        names.sort();
+        assert_eq!(names, ["minecraft:diamond_horse_armor", "minecraft:saddle"]);
+        assert!(mob::state(&region.entities, key).unwrap().loot_dropped);
+        region.tick(&ctx);
+        assert_eq!(dropped_gear(&region).len(), 2, "gear drops exactly once");
+    }
+
+    #[test]
+    fn a_dead_equine_baby_drops_no_gear() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Horse);
+        let armor = ferrite_item::item_id("minecraft:iron_horse_armor").unwrap();
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.age = -1;
+            state.saddled = true;
+            state.armor = armor;
+        }
+        region.tick(&tick_context());
+        assert!(dropped_gear(&region).is_empty());
+    }
+
+    #[test]
+    fn a_dead_equine_llama_never_drops_horse_armor() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Llama);
+        let armor = ferrite_item::item_id("minecraft:iron_horse_armor").unwrap();
+        mob::state_mut(&mut region.entities, key).unwrap().armor = armor;
+        region.tick(&tick_context());
+        assert!(dropped_gear(&region).is_empty());
+    }
+
+    #[test]
+    fn a_dead_pack_equine_still_drops_chest_and_saddle() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Donkey);
+        let uuid = region.entities.data(key).unwrap().uuid;
+        let mut chest = super::super::equine_chest::load(uuid, 15);
+        chest[0] = ferrite_item::ItemStack::from_name("minecraft:bread").unwrap();
+        super::super::equine_chest::store(uuid, &chest);
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.chest = true;
+            state.saddled = true;
+        }
+        region.tick(&tick_context());
+        let names = dropped_items(&region);
+        assert!(names.contains(&"minecraft:bread"));
+        assert!(names.contains(&"minecraft:chest"));
+        assert!(names.contains(&"minecraft:saddle"));
+    }
+
+    async fn memory_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        let mut ready = false;
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ready, "chunk never loaded");
+        source
     }
 
     #[test]
