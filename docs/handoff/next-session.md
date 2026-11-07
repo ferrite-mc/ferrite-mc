@@ -82,7 +82,7 @@ on the branch only.
   keeps the lead, trader spawn ignores the `spawn_wandering_traders` rule and light/biome checks.
 - Weather cycle (clear/rain/thunder, `advance_weather` rule, game_event packets), trident riptide /
   loyalty / channeling, piston block updates delayed two ticks. Shortcuts: single weather timer,
-  no riptide spin pose, vault state/animation ignored.
+  riptide spin shows only on the thrower's own client (living flag 0x04), vault state/animation ignored.
 - 26.3 `PlayerCommand` ids were wrong (wake/sprint) and are fixed: 0 stop sleeping, 1/2 sprint,
   5 open inventory.
 - Plugin Structure API (`java/ferrite-api-impl`): `createStructure()` + `fill`, `place` with
@@ -91,8 +91,9 @@ on the branch only.
   read from the host in one call per `fill` and written back with `/data merge block`. Shortcuts:
   no entities (plugins cannot list non-player entities yet); only `facing`/`axis` turn with
   rotation; the Java world now carries full block states (host sends `name[props]`,
-  `setBlockData` keeps them); templates loaded by key still place through the
-  server (`/place template`) and cannot be `fill`ed.
+  `setBlockData` keeps them); templates loaded by key place through the
+  server (`/place template`) until they are `fill`ed, then from memory. 26.3 template palettes
+  use `id`/`properties` (older `Name`/`Properties`); both are read.
 - Not verifiable here: any of the above against a real client.
 - Order the user gave: Rust worldgen last; Moonrise-style optimisations are done while writing the
   Rust version, not as a Java patch port.

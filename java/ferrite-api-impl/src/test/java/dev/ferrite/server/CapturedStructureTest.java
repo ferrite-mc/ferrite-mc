@@ -177,4 +177,16 @@ class CapturedStructureTest {
         map.put("ints", new int[] {1, 2}); map.put("list", java.util.List.of(1, 2));
         assertEquals("{b:1b,s:2s,i:3,l:4L,f:1.5f,d:2.5d,t:\"a\\\"b\",ints:[I;1,2],list:[1,2]}", Snbt.of(map));
     }
+
+    @Test void aLoadedTemplateCanBeRefilledAndThenPlacesFromMemory() {
+        build();
+        var manager = org.bukkit.Bukkit.getStructureManager();
+        var template = manager.loadStructure(new NamespacedKey("minecraft", "igloo/top"), false);
+        assertNotNull(template);
+        assertTrue(template.getPaletteCount() >= 1, "the file is read into palettes");
+        template.fill(new Location(world, 100, 70, 100), new BlockVector(2, 2, 3), false);
+        assertEquals(new BlockVector(2, 2, 3), template.getSize());
+        template.place(new Location(world, 800, 70, 800), false, StructureRotation.NONE, Mirror.NONE, 0, 1f, new Random(1));
+        assertEquals(Material.STONE, world.getBlockAt(800, 70, 800).getType());
+    }
 }

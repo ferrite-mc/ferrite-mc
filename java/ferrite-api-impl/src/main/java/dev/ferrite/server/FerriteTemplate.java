@@ -90,7 +90,7 @@ final class FerriteTemplate implements Structure {
         }
     }
 
-    @Override public BlockVector getSize() { return new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()); }
+    @Override public synchronized BlockVector getSize() { return refilled ? captured().getSize() : new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()); }
     private CapturedStructure parsed;
 
     /** The template file read into memory (palettes, block states), once. */
@@ -112,23 +112,25 @@ final class FerriteTemplate implements Structure {
     @Override public PersistentDataContainer getPersistentDataContainer() { return data; }
 
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
+        if (refilled) { captured().place(location, includeEntities, rotation, mirror, palette, integrity, random); return; }
         placeAt(location, rotation, mirror, integrity, random);
     }
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
         if (!blockTransformers.isEmpty() || !entityTransformers.isEmpty()) throw notImplemented("place with transformers");
-        placeAt(location, rotation, mirror, integrity, random);
+        place(location, includeEntities, rotation, mirror, palette, integrity, random);
     }
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
-        placeAt(at(region, location), rotation, mirror, integrity, random);
+        place(at(region, location), includeEntities, rotation, mirror, palette, integrity, random);
     }
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
         if (!blockTransformers.isEmpty() || !entityTransformers.isEmpty()) throw notImplemented("place with transformers");
-        placeAt(at(region, location), rotation, mirror, integrity, random);
+        place(at(region, location), includeEntities, rotation, mirror, palette, integrity, random);
     }
-    // A template read from the data directory is placed by the server; refilling it would make it
-    // differ from its file, so plugins fill a structure from createStructure() instead.
-    @Override public void fill(Location corner1, Location corner2, boolean includeEntities) { throw notImplemented("fill on a loaded template; use createStructure()"); }
-    @Override public void fill(Location corner, BlockVector size, boolean includeEntities) { throw notImplemented("fill on a loaded template; use createStructure()"); }
+    // An untouched template is placed by the server (`/place template`). Refilling it from the
+    // world makes the in-memory copy the structure, and that copy is placed block by block.
+    private boolean refilled;
+    @Override public synchronized void fill(Location corner1, Location corner2, boolean includeEntities) { captured().fill(corner1, corner2, includeEntities); refilled = true; }
+    @Override public synchronized void fill(Location corner, BlockVector size, boolean includeEntities) { captured().fill(corner, size, includeEntities); refilled = true; }
 
     private static Location at(RegionAccessor region, BlockVector location) {
         if (!(region instanceof org.bukkit.World world)) throw notImplemented("place into a non-world region");

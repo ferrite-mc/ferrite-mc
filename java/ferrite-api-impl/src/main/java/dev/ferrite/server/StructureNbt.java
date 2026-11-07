@@ -15,7 +15,8 @@ import org.bukkit.util.BlockVector;
 
 /**
  * Reads and writes the vanilla structure template file: a gzip-compressed NBT compound with
- * {@code size}, {@code palette} (or {@code palettes}), {@code blocks}, {@code entities} and
+ * {@code size}, {@code palette} (or {@code palettes}; entries are {@code id} and {@code properties}
+ * since 26.3, {@code Name} and {@code Properties} before), {@code blocks}, {@code entities} and
  * {@code DataVersion}. Entities are not carried; block entity data is dropped.
  */
 final class StructureNbt {
@@ -79,10 +80,11 @@ final class StructureNbt {
         data.writeInt(states.size());
         for (var state : states) {
             int open = state.indexOf('[');
-            named(data, 8, "Name");
+            // 26.3 palette entries are {id, properties}; older files used {Name, Properties}.
+            named(data, 8, "id");
             data.writeUTF(open < 0 ? state : state.substring(0, open));
             if (open >= 0) {
-                named(data, 10, "Properties");
+                named(data, 10, "properties");
                 for (var pair : state.substring(open + 1, state.length() - 1).split(",")) {
                     int eq = pair.indexOf('=');
                     named(data, 8, pair.substring(0, eq));
@@ -212,9 +214,11 @@ final class StructureNbt {
         var states = new ArrayList<String>();
         for (var entry : palette) {
             @SuppressWarnings("unchecked") var map = (Map<String, Object>) entry;
-            if (!(map.get("Name") instanceof String name)) throw new IOException("Palette entry has no Name");
+            var named = map.containsKey("id") ? map.get("id") : map.get("Name");
+            if (!(named instanceof String name)) throw new IOException("Palette entry has no id");
             var text = new StringBuilder(name);
-            if (map.get("Properties") instanceof Map<?, ?> props && !props.isEmpty()) {
+            var properties = map.containsKey("properties") ? map.get("properties") : map.get("Properties");
+            if (properties instanceof Map<?, ?> props && !props.isEmpty()) {
                 text.append('[');
                 boolean firstProperty = true;
                 for (var property : props.entrySet()) {

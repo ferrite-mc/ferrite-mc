@@ -685,6 +685,8 @@ pub struct Player {
     pub open_animal_chest: bool,
     /// Whether the player holds sneak (input bit 5).
     pub sneaking: bool,
+    /// Ticks left of a riptide spin (`LivingEntity.autoSpinAttackTicks`).
+    pub spin_ticks: u8,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
     /// The dimension registry, used to swap the chunk source on a dimension change.
@@ -4947,6 +4949,23 @@ impl Region {
             };
             self.open_mount(rider, key);
         }
+        for p in self.players.values_mut() {
+            if p.spin_ticks > 0 {
+                p.spin_ticks -= 1;
+                if p.spin_ticks == 0 {
+                    send(
+                        p,
+                        &SetEntityData {
+                            id: VarInt(p.entity),
+                            values: vec![MetaEntry {
+                                index: 8,
+                                value: MetaValue::Byte(0),
+                            }],
+                        },
+                    );
+                }
+            }
+        }
         // What a player moved in an open mount screen reaches the animal.
         let viewers: Vec<(Uuid, ferrite_item::ItemStack, ferrite_item::ItemStack)> = self
             .players
@@ -5315,6 +5334,18 @@ impl Region {
                         direction.y * scale + if in_water { 0.0 } else { 1.2 },
                         direction.z * scale,
                     ]),
+                },
+            );
+            // The living-entity flag 0x04 plays the spin for the twenty ticks of the launch.
+            p.spin_ticks = 20;
+            send(
+                p,
+                &SetEntityData {
+                    id: VarInt(p.entity),
+                    values: vec![MetaEntry {
+                        index: 8,
+                        value: MetaValue::Byte(4),
+                    }],
                 },
             );
             if p.gamemode != 1
