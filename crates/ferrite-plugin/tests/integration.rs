@@ -1,7 +1,8 @@
 use ferrite_plugin::{
     BlockPosition, BlockSnapshot, ColumnHeight, CommandSender, EntityTask, GameMode, ItemSnapshot,
-    OfflinePlayerSnapshot, PlayerCommand, PlayerLocation, PlayerSnapshot, PluginConfig, PluginHost,
-    RegionContext, RegionTask, ServerCommand, ServerSnapshot, WorldCommand, WorldSnapshot,
+    OfflinePlayerSnapshot, PlayerCommand, PlayerDeath, PlayerDeathOutcome, PlayerLocation,
+    PlayerSnapshot, PluginConfig, PluginHost, RegionContext, RegionTask, ServerCommand,
+    ServerHooks, ServerSnapshot, WorldCommand, WorldSnapshot,
 };
 
 #[derive(Default)]
@@ -185,6 +186,56 @@ fn plugin_lifecycle() {
         },
     })
     .unwrap();
+    let event_id = uuid::Uuid::new_v4();
+    host.register_player(&PlayerSnapshot {
+        id: event_id,
+        name: "EventProbe".into(),
+        operator: false,
+        health: 20.0,
+        food: 20,
+        mode: GameMode::Survival,
+        inventory: Vec::new(),
+        location: PlayerLocation {
+            world: world_id,
+            x: 1.0,
+            y: 65.0,
+            z: 2.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        },
+    })
+    .unwrap();
+    assert_eq!(
+        host.entity_damaged(event_id, "EventProbe", "FALL", 5.0)
+            .unwrap(),
+        0.0
+    );
+    assert_eq!(
+        host.entity_damaged(event_id, "EventProbe", "FALL", 7.0)
+            .unwrap(),
+        2.5
+    );
+    let death = PlayerDeath {
+        drops: vec![ItemSnapshot {
+            material: "minecraft:stone".into(),
+            amount: 4,
+        }],
+        dropped_exp: 7,
+        keep_inventory: false,
+        message: "EventProbe died".into(),
+    };
+    assert_eq!(
+        host.player_died(event_id, "EventProbe", "FALL", &death)
+            .unwrap(),
+        PlayerDeathOutcome {
+            drops: vec![ItemSnapshot {
+                material: "minecraft:diamond".into(),
+                amount: 2,
+            }],
+            dropped_exp: 3,
+            keep_inventory: false,
+        }
+    );
     assert!(
         host.dispatch_command(CommandSender::Player(player_id), "ferrite-test hello")
             .unwrap()
@@ -358,6 +409,54 @@ fn plugin_lifecycle() {
             .filter(|line| line.contains("FerriteTest range owned"))
             .count(),
         2
+    );
+    let error_id = uuid::Uuid::new_v4();
+    host.register_player(&PlayerSnapshot {
+        id: error_id,
+        name: "EventError".into(),
+        operator: false,
+        health: 20.0,
+        food: 20,
+        mode: GameMode::Survival,
+        inventory: Vec::new(),
+        location: PlayerLocation {
+            world: world_id,
+            x: 1.0,
+            y: 65.0,
+            z: 2.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        },
+    })
+    .unwrap();
+    // Bukkit logs listener exceptions and continues with the unmodified damage.
+    assert_eq!(
+        host.entity_damaged(error_id, "EventError", "FALL", 5.0)
+            .unwrap(),
+        5.0
+    );
+    let unsupported_id = uuid::Uuid::new_v4();
+    host.register_player(&PlayerSnapshot {
+        id: unsupported_id,
+        name: "UnsupportedDeath".into(),
+        operator: false,
+        health: 20.0,
+        food: 20,
+        mode: GameMode::Survival,
+        inventory: Vec::new(),
+        location: PlayerLocation {
+            world: world_id,
+            x: 1.0,
+            y: 65.0,
+            z: 2.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        },
+    })
+    .unwrap();
+    assert!(
+        host.player_died(unsupported_id, "UnsupportedDeath", "FALL", &death)
+            .is_err()
     );
     host.shutdown().unwrap();
     assert!(

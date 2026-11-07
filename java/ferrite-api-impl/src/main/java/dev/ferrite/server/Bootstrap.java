@@ -189,11 +189,49 @@ public final class Bootstrap {
         if (resolved == null) return;
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(new org.bukkit.event.world.ChunkUnloadEvent(FerriteEventObjects.chunk(resolved, x, z))); }
     }
-    /** Fires Bukkit's {@code PlayerDeathEvent}; drops and experience stay host-owned. */
-    public static void firePlayerDeath(String id, String name, String cause, int droppedExp, String message) {
+    /** Fires Bukkit's {@code PlayerDeathEvent}; returns the drops and experience a listener left. */
+    public static String firePlayerDeath(String id, String name, String cause, int droppedExp, boolean keepInventory, String message, String encodedDrops) {
         var player = ensurePlayer(id, name);
-        var event = new org.bukkit.event.entity.PlayerDeathEvent(player, damageSource(), new java.util.ArrayList<org.bukkit.inventory.ItemStack>(), droppedExp, message == null ? null : net.kyori.adventure.text.Component.text(message), true);
+        var drops = new java.util.ArrayList<org.bukkit.inventory.ItemStack>();
+        if (encodedDrops != null && !encodedDrops.isEmpty()) {
+            for (var line : encodedDrops.split("\n")) {
+                if (line.isEmpty()) continue;
+                int tab = line.indexOf('\t');
+                if (tab <= 0) throw new IllegalArgumentException("Ferrite: invalid death drop: " + line);
+                drops.add(new org.bukkit.inventory.ItemStack(material(line.substring(0, tab)), Integer.parseInt(line.substring(tab + 1))));
+            }
+        }
+        var event = new org.bukkit.event.entity.PlayerDeathEvent(player, damageSource(), drops, droppedExp, message == null ? null : net.kyori.adventure.text.Component.text(message), keepInventory);
+        boolean initialKeepLevel = event.getKeepLevel();
+        int initialNewExp = event.getNewExp();
+        int initialNewTotalExp = event.getNewTotalExp();
+        int initialNewLevel = event.getNewLevel();
+        boolean initialShouldDropExperience = event.shouldDropExperience();
+        boolean initialShowDeathMessages = event.getShowDeathMessages();
+        var initialDeathMessage = event.deathMessage();
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
+        if (event.getKeepLevel() != initialKeepLevel) throw unsupportedDeath("keepLevel");
+        if (event.getNewExp() != initialNewExp) throw unsupportedDeath("newExp");
+        if (event.getNewTotalExp() != initialNewTotalExp) throw unsupportedDeath("newTotalExp");
+        if (event.getNewLevel() != initialNewLevel) throw unsupportedDeath("newLevel");
+        if (event.shouldDropExperience() != initialShouldDropExperience) throw unsupportedDeath("shouldDropExperience");
+        if (event.getShowDeathMessages() != initialShowDeathMessages) throw unsupportedDeath("showDeathMessages");
+        if (!java.util.Objects.equals(event.deathMessage(), initialDeathMessage)) throw unsupportedDeath("deathMessage");
+        if (event.getDroppedExp() < 0) throw unsupportedDeath("droppedExp");
+        var out = new StringBuilder();
+        out.append(event.getDroppedExp()).append('\t').append(event.getKeepInventory() ? 1 : 0).append('\n');
+        for (var item : event.getDrops()) {
+            if (item == null) throw unsupportedDeath("null drop");
+            if (item.getType().isAir() || item.getAmount() <= 0) continue;
+            if (item.hasItemMeta()) throw unsupportedDeath("drop metadata");
+            if (item.getAmount() > 255) throw unsupportedDeath("drop amount");
+            out.append(item.getType().getKey()).append('\t').append(item.getAmount()).append('\n');
+        }
+        return out.toString();
+    }
+    /** A death-event mutation the host cannot represent. */
+    private static UnsupportedOperationException unsupportedDeath(String field) {
+        return new UnsupportedOperationException("Ferrite: PlayerDeathEvent " + field + " changes are not supported");
     }
     /** Fires Bukkit's {@code PlayerRespawnEvent}; returns the (possibly moved) spawn as "x y z yaw pitch". */
     public static String firePlayerRespawn(String id, String name, double x, double y, double z, float yaw, float pitch, String reason) {
@@ -213,6 +251,7 @@ public final class Bootstrap {
         var event = new org.bukkit.event.entity.EntityDamageEvent(entity, damageCause(cause), amount);
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
         double finalDamage = event.isCancelled() ? 0.0 : event.getFinalDamage();
+        if (!Double.isFinite(finalDamage) || finalDamage < 0.0 || finalDamage > Float.MAX_VALUE) throw new UnsupportedOperationException("Ferrite: EntityDamageEvent damage " + finalDamage + " is not supported");
         if (finalDamage > 0 && entity instanceof PlayerMisc tracked) tracked.recordDamage(damageSource(), finalDamage);
         return finalDamage;
     }

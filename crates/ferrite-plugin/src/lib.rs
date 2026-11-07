@@ -169,6 +169,21 @@ pub struct ItemSnapshot {
     pub material: String,
     pub amount: u8,
 }
+/// The death the server is about to apply, as sent to `PlayerDeathEvent`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerDeath {
+    pub drops: Vec<ItemSnapshot>,
+    pub dropped_exp: i32,
+    pub keep_inventory: bool,
+    pub message: String,
+}
+/// What `PlayerDeathEvent` listeners left behind: the drops and experience to apply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerDeathOutcome {
+    pub drops: Vec<ItemSnapshot>,
+    pub dropped_exp: i32,
+    pub keep_inventory: bool,
+}
 #[derive(Clone, Debug)]
 pub struct PlayerSnapshot {
     pub id: uuid::Uuid,
@@ -825,6 +840,8 @@ pub enum Error {
     InvalidPlayerSnapshot,
     #[error("invalid offline player snapshot")]
     InvalidOfflinePlayerSnapshot,
+    #[error("plugin event returned invalid data: {0}")]
+    InvalidEvent(String),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandSender {
@@ -907,16 +924,20 @@ pub trait ServerHooks: Send + Sync {
     fn chunk_unloaded(&self, _world: uuid::Uuid, _x: i32, _z: i32) -> Result<(), Error> {
         Ok(())
     }
-    /// Fires Bukkit's `PlayerDeathEvent` once per death.
+    /// Fires Bukkit's `PlayerDeathEvent` once per death and returns the drops and experience to
+    /// apply. The default keeps the server's vanilla values.
     fn player_died(
         &self,
         _id: uuid::Uuid,
         _name: &str,
         _cause: &str,
-        _dropped_exp: i32,
-        _message: &str,
-    ) -> Result<(), Error> {
-        Ok(())
+        death: &PlayerDeath,
+    ) -> Result<PlayerDeathOutcome, Error> {
+        Ok(PlayerDeathOutcome {
+            drops: death.drops.clone(),
+            dropped_exp: death.dropped_exp,
+            keep_inventory: death.keep_inventory,
+        })
     }
     /// Fires Bukkit's `PlayerRespawnEvent`; returns the spawn a listener selected.
     fn player_respawned(
@@ -3019,32 +3040,53 @@ impl PluginHost {
         id: uuid::Uuid,
         name: &str,
         cause: &str,
-        dropped_exp: i32,
-        message: &str,
-    ) -> Result<(), Error> {
+        death: &PlayerDeath,
+    ) -> Result<PlayerDeathOutcome, Error> {
         if !self.listens_for(PLAYER_DEATH_EVENT) {
-            return Ok(());
+            return Ok(PlayerDeathOutcome {
+                drops: death.drops.clone(),
+                dropped_exp: death.dropped_exp,
+                keep_inventory: death.keep_inventory,
+            });
         }
-        self.jvm.with_env(|env| {
+        let drops = death
+            .drops
+            .iter()
+            .map(|drop| format!("{}\t{}", drop.material, drop.amount))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = self.jvm.with_env(|env| {
             let id = env.new_string(id.to_string())?;
             let name = env.new_string(name)?;
             let cause = env.new_string(cause)?;
-            let message = env.new_string(message)?;
-            env.call_static_method(
-                BOOTSTRAP,
-                "firePlayerDeath",
-                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)V",
-                &[
-                    JValue::Object(id.as_ref()),
-                    JValue::Object(name.as_ref()),
-                    JValue::Object(cause.as_ref()),
-                    JValue::Int(dropped_exp),
-                    JValue::Object(message.as_ref()),
-                ],
-            )?;
-            Ok(())
+            let message = env.new_string(&death.message)?;
+            let drops = env.new_string(&drops)?;
+            let value = env
+                .call_static_method(
+                    BOOTSTRAP,
+                    "firePlayerDeath",
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IZLjava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    &[
+                        JValue::Object(id.as_ref()),
+                        JValue::Object(name.as_ref()),
+                        JValue::Object(cause.as_ref()),
+                        JValue::Int(death.dropped_exp),
+                        JValue::Bool(u8::from(death.keep_inventory)),
+                        JValue::Object(message.as_ref()),
+                        JValue::Object(drops.as_ref()),
+                    ],
+                )?
+                .l()?;
+            if value.is_null() {
+                return Ok(None);
+            }
+            let text: String = env.get_string(&JString::from(value))?.into();
+            Ok(Some(text))
         })?;
-        Ok(())
+        let Some(text) = text else {
+            return Err(Error::InvalidEvent("death outcome is null".into()));
+        };
+        parse_player_death(&text)
     }
 
     /// Fires Bukkit's `PlayerRespawnEvent`; returns the location a listener selected.
@@ -3381,10 +3423,9 @@ impl ServerHooks for PluginHost {
         id: uuid::Uuid,
         name: &str,
         cause: &str,
-        dropped_exp: i32,
-        message: &str,
-    ) -> Result<(), Error> {
-        self.fire_player_death(id, name, cause, dropped_exp, message)
+        death: &PlayerDeath,
+    ) -> Result<PlayerDeathOutcome, Error> {
+        self.fire_player_death(id, name, cause, death)
     }
     fn player_respawned(
         &self,
@@ -3496,3 +3537,105 @@ fn consume_task<T: PartialEq>(issued: &Mutex<Vec<T>>, task: &T) -> Result<(), Er
     Ok(())
 }
 mod scheduling;
+
+/// Parses the bridge's `droppedExp<TAB>keepInventory` header followed by one
+/// `material<TAB>amount` line per drop.
+fn parse_player_death(text: &str) -> Result<PlayerDeathOutcome, Error> {
+    let (header, drops) = text
+        .split_once('\n')
+        .ok_or_else(|| Error::InvalidEvent("death outcome has no header".into()))?;
+    let mut header = header.split('\t');
+    let dropped_exp = header
+        .next()
+        .ok_or_else(|| Error::InvalidEvent("death outcome has no experience".into()))?
+        .parse::<i32>()
+        .map_err(|error| Error::InvalidEvent(format!("invalid death experience: {error}")))?;
+    if dropped_exp < 0 {
+        return Err(Error::InvalidEvent("death experience is negative".into()));
+    }
+    let keep_inventory = match header.next() {
+        Some("0") => false,
+        Some("1") => true,
+        Some(other) => {
+            return Err(Error::InvalidEvent(format!(
+                "invalid death keepInventory: {other}"
+            )));
+        }
+        None => {
+            return Err(Error::InvalidEvent(
+                "death outcome has no keepInventory".into(),
+            ));
+        }
+    };
+    if header.next().is_some() {
+        return Err(Error::InvalidEvent(
+            "death outcome has extra header fields".into(),
+        ));
+    }
+    let mut parsed = Vec::new();
+    for line in drops.lines().filter(|line| !line.is_empty()) {
+        let (material, amount) = line
+            .split_once('\t')
+            .ok_or_else(|| Error::InvalidEvent(format!("invalid death drop: {line}")))?;
+        let amount = amount
+            .parse::<u8>()
+            .map_err(|error| Error::InvalidEvent(format!("invalid death drop amount: {error}")))?;
+        if material.is_empty() || amount == 0 {
+            return Err(Error::InvalidEvent(format!("invalid death drop: {line}")));
+        }
+        parsed.push(ItemSnapshot {
+            material: material.to_owned(),
+            amount,
+        });
+    }
+    Ok(PlayerDeathOutcome {
+        drops: parsed,
+        dropped_exp,
+        keep_inventory,
+    })
+}
+
+#[cfg(test)]
+mod death_event_tests {
+    use super::{Error, ItemSnapshot, PlayerDeathOutcome, parse_player_death};
+
+    #[test]
+    fn death_outcome_round_trips_drops_and_experience() {
+        let outcome =
+            parse_player_death("3\t1\nminecraft:diamond\t2\nminecraft:stone\t4\n").unwrap();
+        assert_eq!(
+            outcome,
+            PlayerDeathOutcome {
+                drops: vec![
+                    ItemSnapshot {
+                        material: "minecraft:diamond".into(),
+                        amount: 2,
+                    },
+                    ItemSnapshot {
+                        material: "minecraft:stone".into(),
+                        amount: 4,
+                    },
+                ],
+                dropped_exp: 3,
+                keep_inventory: true,
+            }
+        );
+    }
+
+    #[test]
+    fn death_outcome_rejects_malformed_values() {
+        for text in [
+            "3\n",
+            "-1\t0\n",
+            "3\t2\n",
+            "3\t0",
+            "3\t0\nminecraft:stone\t0\n",
+            "3\t0\nminecraft:stone\n",
+        ] {
+            assert!(
+                matches!(parse_player_death(text), Err(Error::InvalidEvent(_))),
+                "accepted {text:?}"
+            );
+        }
+    }
+}

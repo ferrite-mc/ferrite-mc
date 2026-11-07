@@ -1082,6 +1082,51 @@ fn event_allows(
         }
     }
 }
+/// Applies a Bukkit `EntityDamageEvent` result. `None` cancels the hit; a failed event follows
+/// `plugin-event-errors` (Allow keeps the original damage, Deny cancels it).
+fn plugin_damage(
+    plugins: Option<&dyn ferrite_plugin::ServerHooks>,
+    policy: PluginEventPolicy,
+    amount: f32,
+    event: impl FnOnce(&dyn ferrite_plugin::ServerHooks) -> Result<f64, ferrite_plugin::Error>,
+) -> Option<f32> {
+    let Some(plugins) = plugins else {
+        return Some(amount);
+    };
+    match event(plugins) {
+        Ok(damage) if damage.is_finite() && (0.0..=f64::from(f32::MAX)).contains(&damage) => {
+            (damage > 0.0).then_some(damage as f32)
+        }
+        Ok(damage) => {
+            let allow = policy == PluginEventPolicy::Allow;
+            tracing::warn!(damage, allow, "plugin damage event returned invalid damage");
+            allow.then_some(amount)
+        }
+        Err(error) => {
+            let allow = policy == PluginEventPolicy::Allow;
+            tracing::warn!(%error, allow, "plugin damage event failed");
+            allow.then_some(amount)
+        }
+    }
+}
+/// Bukkit's damage cause for the host's internal damage kind.
+fn damage_cause(kind: DamageKind) -> &'static str {
+    match kind {
+        DamageKind::Fall => "FALL",
+        DamageKind::Drown => "DROWNING",
+        DamageKind::Lava => "LAVA",
+        DamageKind::Fire => "FIRE",
+        DamageKind::Void => "VOID",
+        DamageKind::Starve => "STARVATION",
+        DamageKind::Magic => "MAGIC",
+        DamageKind::Wither => "WITHER",
+        DamageKind::Explosion => "ENTITY_EXPLOSION",
+        DamageKind::Mob => "ENTITY_ATTACK",
+        DamageKind::Arrow => "PROJECTILE",
+        DamageKind::GenericKill => "KILL",
+        DamageKind::Generic => "CUSTOM",
+    }
+}
 /// Vanilla's total experience required to reach `level`.
 fn total_for_level(level: i32) -> i64 {
     let level = i64::from(level.max(0));
@@ -2300,6 +2345,19 @@ impl Player {
         // `LivingEntity.getDamageAfterArmorAbsorb` includes the resistance attribute.
         let reduction = self.effects.attributes().damage_reduction as f32;
         let amount = (amount * (1.0 - reduction)).max(0.0);
+        if amount <= 0.0 {
+            return false;
+        }
+        let Some(amount) = plugin_damage(
+            self.plugins.as_deref(),
+            self.plugin_event_errors,
+            amount,
+            |plugins| {
+                plugins.entity_damaged(self.uuid, &self.name, damage_cause(kind), f64::from(amount))
+            },
+        ) else {
+            return false;
+        };
         if !self.survival.damage(kind, amount) {
             return false;
         }
@@ -7537,33 +7595,74 @@ impl Region {
         p.breaking = None;
         p.close_container();
         let survival_mode = matches!(p.gamemode, 0 | 2);
-        let dropped_exp = if !rules.keep_inventory && survival_mode {
+        let drop_allowed = !rules.keep_inventory && survival_mode;
+        let initial_exp = if drop_allowed {
             p.experience_level.saturating_mul(7).min(100)
         } else {
             0
         };
-        if !rules.keep_inventory && survival_mode {
+        let mut initial_drops = Vec::new();
+        if drop_allowed {
+            for slot in 0..ferrite_inventory::SIZE {
+                let stack = p.inventory.get(slot);
+                if stack.is_empty() {
+                    continue;
+                }
+                let Some(material) = ferrite_item::item_name(stack.item) else {
+                    continue;
+                };
+                initial_drops.push(ferrite_plugin::ItemSnapshot {
+                    material: material.to_owned(),
+                    amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
+                });
+            }
+        }
+        let kind = p.survival.death_cause.unwrap_or(DamageKind::GenericKill);
+        let message = kind.death_message(&p.name);
+        let initial = ferrite_plugin::PlayerDeath {
+            drops: initial_drops,
+            dropped_exp: initial_exp,
+            keep_inventory: !drop_allowed,
+            message: message.clone(),
+        };
+        let mut outcome = ferrite_plugin::PlayerDeathOutcome {
+            drops: initial.drops.clone(),
+            dropped_exp: initial.dropped_exp,
+            keep_inventory: initial.keep_inventory,
+        };
+        if let Some(plugins) = p.plugins.clone() {
+            match plugins.player_died(p.uuid, &p.name, damage_cause(kind), &initial) {
+                Ok(modified) => outcome = modified,
+                Err(error) => {
+                    tracing::warn!(%error, "plugin death event failed; using vanilla drops");
+                }
+            }
+        }
+        let keep_inventory = outcome.keep_inventory || !drop_allowed;
+        if !keep_inventory {
             let pos = [
                 p.pos[0].floor() as i32,
                 p.pos[1].floor() as i32,
                 p.pos[2].floor() as i32,
             ];
             for slot in 0..ferrite_inventory::SIZE {
-                let stack = p.inventory.get(slot).clone();
-                if stack.is_empty() {
-                    continue;
-                }
                 p.inventory.set(slot, ferrite_item::ItemStack::empty());
-                let plain = ferrite_protocol::packets::play::ItemStack {
-                    count: stack.count,
-                    item_id: i32::from(stack.item),
+            }
+            for drop in &outcome.drops {
+                let Some(item) = ferrite_item::item_id(&drop.material) else {
+                    tracing::warn!(material = %drop.material, "death drop material is unknown");
+                    continue;
+                };
+                let plain = ItemStack {
+                    count: i32::from(drop.amount),
+                    item_id: i32::from(item),
                 };
                 self.entities
                     .insert(item::pop_resource(pos, plain, &mut self.rng));
             }
             // `ServerPlayer.dropExperience`: `min(level * 7, 100)` points, split by
             // `ExperienceOrb.award` and spawned where the player died.
-            let dropped = p.experience_level.saturating_mul(7).min(100);
+            let dropped = outcome.dropped_exp.max(0);
             if dropped > 0 {
                 let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
                 for record in experience::award(feet, dropped) {
@@ -7582,12 +7681,6 @@ impl Region {
                 },
             );
             tracing::info!(player = %p.name, dropped, "player died; experience orbs dropped");
-        }
-        let kind = p.survival.death_cause.unwrap_or(DamageKind::GenericKill);
-        let message = kind.death_message(&p.name);
-        if let Some(plugins) = p.plugins.clone() {
-            let cause = format!("{kind:?}");
-            let _ = plugins.player_died(p.uuid, &p.name, &cause, dropped_exp, &message);
         }
         send(
             p,
@@ -9822,6 +9915,38 @@ mod event_policy_tests {
         assert!(event_allows(None, PluginEventPolicy::Deny, |_| Err(
             ferrite_plugin::Error::InvalidTask
         )));
+    }
+
+    #[test]
+    fn damage_events_cancel_or_change_the_health_loss() {
+        let mut survival = Survival::default();
+        assert_eq!(damage_cause(DamageKind::Fall), "FALL");
+        assert_eq!(damage_cause(DamageKind::Drown), "DROWNING");
+        assert_eq!(
+            plugin_damage(Some(&Failing), PluginEventPolicy::Allow, 5.0, |_| Ok(0.0)),
+            None
+        );
+        assert_eq!(survival.health, 20.0);
+        let modified = plugin_damage(Some(&Failing), PluginEventPolicy::Allow, 5.0, |_| Ok(2.5))
+            .expect("modified damage");
+        assert!(survival.damage(DamageKind::Fall, modified));
+        assert_eq!(survival.health, 17.5);
+        assert_eq!(
+            plugin_damage(None, PluginEventPolicy::Deny, 5.0, |_| unreachable!()),
+            Some(5.0)
+        );
+        assert_eq!(
+            plugin_damage(Some(&Failing), PluginEventPolicy::Deny, 5.0, |_| Err(
+                ferrite_plugin::Error::InvalidTask
+            )),
+            None
+        );
+        assert_eq!(
+            plugin_damage(Some(&Failing), PluginEventPolicy::Allow, 5.0, |_| {
+                Err(ferrite_plugin::Error::InvalidTask)
+            }),
+            Some(5.0)
+        );
     }
 
     #[test]

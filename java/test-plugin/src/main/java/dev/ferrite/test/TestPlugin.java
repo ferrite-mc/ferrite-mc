@@ -51,8 +51,27 @@ public final class TestPlugin extends JavaPlugin implements Listener {
     @EventHandler public void onChunkUnload(org.bukkit.event.world.ChunkUnloadEvent event) { appendEvent("chunk-unload " + event.getChunk().getX() + " " + event.getChunk().getZ()); }
     @EventHandler public void onWorldLoad(org.bukkit.event.world.WorldLoadEvent event) { appendEvent("world-load " + event.getWorld().getName()); }
     @EventHandler public void onWeather(org.bukkit.event.weather.WeatherChangeEvent event) { appendEvent("weather " + event.toWeatherState()); }
-    @EventHandler public void onDamage(org.bukkit.event.entity.EntityDamageEvent event) { appendEvent("damage " + event.getCause() + " " + event.getDamage()); }
-    @EventHandler public void onDeath(org.bukkit.event.entity.PlayerDeathEvent event) { appendEvent("death " + event.getPlayer().getName()); }
+    @EventHandler public void onDamage(org.bukkit.event.entity.EntityDamageEvent event) {
+        appendEvent("damage " + event.getCause() + " " + event.getDamage());
+        if (event.getEntity() instanceof org.bukkit.entity.Player player) {
+            if (player.getName().equals("EventError")) throw new IllegalStateException("event failure");
+            if (player.getName().equals("EventProbe")) {
+                if (event.getCause() == org.bukkit.event.entity.EntityDamageEvent.DamageCause.FALL && event.getDamage() == 5.0) event.setCancelled(true);
+                else if (event.getDamage() == 7.0) event.setDamage(2.5);
+            }
+        }
+    }
+    @EventHandler public void onDeath(org.bukkit.event.entity.PlayerDeathEvent event) {
+        appendEvent("death " + event.getPlayer().getName());
+        String name = event.getPlayer().getName();
+        if (name.equals("EventError")) throw new IllegalStateException("event failure");
+        if (name.equals("UnsupportedDeath")) event.setKeepLevel(true);
+        if (name.equals("EventProbe")) {
+            event.getDrops().clear();
+            event.getDrops().add(new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 2));
+            event.setDroppedExp(3);
+        }
+    }
     @EventHandler public void onEntityDeath(org.bukkit.event.entity.EntityDeathEvent event) { appendEvent("entity-death " + event.getEntityType()); }
     @EventHandler public void onRespawn(org.bukkit.event.player.PlayerRespawnEvent event) { appendEvent("respawn " + event.getRespawnLocation().getBlockY()); }
     @EventHandler public void onLevel(org.bukkit.event.player.PlayerLevelChangeEvent event) { appendEvent("level " + event.getOldLevel() + " " + event.getNewLevel()); }
