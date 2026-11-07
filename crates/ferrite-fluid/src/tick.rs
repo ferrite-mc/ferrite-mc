@@ -2,7 +2,7 @@
 //! `#getSpread` and `#getSlopeDistance`.
 use crate::{
     Direction, FluidKind, FluidState, FluidWorld, block_for, can_hold_fluid, can_pass_at,
-    fluid_state, get_new_liquid, tick_delay,
+    fluid_state, get_new_liquid_with_rules, tick_delay,
 };
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -156,12 +156,13 @@ impl FluidTicks {
             return;
         }
         if !current.source {
-            let next = get_new_liquid(
+            let next = get_new_liquid_with_rules(
                 world,
                 pos.0,
                 pos.1,
                 pos.2,
                 current.kind,
+                world.water_conversion(),
                 world.lava_conversion(),
             );
             if next != current {
@@ -199,12 +200,13 @@ impl FluidTicks {
         }
         let mut spread_down = false;
         if self.can_enter(world, pos, down, current.kind) {
-            let next = get_new_liquid(
+            let next = get_new_liquid_with_rules(
                 world,
                 down.0,
                 down.1,
                 down.2,
                 current.kind,
+                world.water_conversion(),
                 world.lava_conversion(),
             );
             if next.kind != FluidKind::Empty {
@@ -261,7 +263,15 @@ impl FluidTicks {
             }
         }
         for n in choices {
-            let next = get_new_liquid(world, n.0, n.1, n.2, current.kind, world.lava_conversion());
+            let next = get_new_liquid_with_rules(
+                world,
+                n.0,
+                n.1,
+                n.2,
+                current.kind,
+                world.water_conversion(),
+                world.lava_conversion(),
+            );
             if next.kind != FluidKind::Empty {
                 self.put(world, n, next);
             }

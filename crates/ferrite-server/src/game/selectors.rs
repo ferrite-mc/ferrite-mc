@@ -581,6 +581,7 @@ mod tests {
             pos: [3.5, 64.0, 4.5],
             yaw: 0.0,
             pitch: 0.0,
+            dimension: crate::game::Dimension::Overworld,
             tags: BTreeSet::from(["boss".to_owned()]),
             custom_name: Some("Boss".into()),
         });

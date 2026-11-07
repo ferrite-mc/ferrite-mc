@@ -20,6 +20,8 @@ pub struct CommandEntity {
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// The dimension whose region published this snapshot entry.
+    pub dimension: super::Dimension,
     pub tags: BTreeSet<String>,
     /// Custom name from NBT/metadata, when the entity has one.
     pub custom_name: Option<String>,
@@ -66,12 +68,18 @@ impl EntityIndex {
         self.entries.insert(entity.uuid, entity);
     }
 
-    /// Replaces this region's entries with a fresh snapshot of `store`.
+    /// Replaces this region's entries with a fresh snapshot of `store`. `dimension` is stamped
+    /// on every entry so leash resolution can reject holders outside the local dimension.
     ///
     /// `owned` is the set of UUIDs this index currently holds for the region; it is cleared
     /// and filled with the entities the store owns after the update, so a removed entity
     /// disappears from the command view on the next tick.
-    pub fn sync(&mut self, owned: &mut HashSet<Uuid>, store: &EntityStore) {
+    pub fn sync(
+        &mut self,
+        owned: &mut HashSet<Uuid>,
+        store: &EntityStore,
+        dimension: super::Dimension,
+    ) {
         for uuid in owned.iter() {
             self.entries.remove(uuid);
         }
@@ -96,6 +104,7 @@ impl EntityIndex {
                 pos: [pos.x, pos.y, pos.z],
                 yaw: data.yaw,
                 pitch: data.pitch,
+                dimension,
                 tags: data.tags.clone(),
                 custom_name: None,
             };
@@ -129,14 +138,15 @@ mod tests {
 
         let mut index = EntityIndex::default();
         let mut owned = HashSet::new();
-        index.sync(&mut owned, &store);
+        index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
         assert_eq!(owned, HashSet::from([uuid]));
         let entry = index.get(uuid).expect("published entity");
         assert_eq!(entry.pos, [1.5, 64.0, 2.5]);
+        assert_eq!(entry.dimension, crate::game::Dimension::Overworld);
         assert!(entry.tags.contains("boss"));
 
         store.remove(key);
-        index.sync(&mut owned, &store);
+        index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
         assert_eq!(index.entries().count(), 0);
         assert!(owned.is_empty());
 
@@ -144,7 +154,7 @@ mod tests {
         let key = store.insert(record(3.5, 64.0, 3.5));
         let uuid = store.data(key).unwrap().uuid;
         store.flags_mut(key).unwrap().set(Flags::REMOVED, true);
-        index.sync(&mut owned, &store);
+        index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
         assert!(index.get(uuid).is_none());
     }
 }

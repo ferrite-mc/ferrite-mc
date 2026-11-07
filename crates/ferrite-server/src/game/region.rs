@@ -27,6 +27,40 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
+
+pub type DelayedBlockUpdate = (i64, (i32, i32), [i32; 3], u32);
+
+fn queue_delayed_piston_update(
+    updates: &mut Vec<DelayedBlockUpdate>,
+    due_tick: i64,
+    pos: [i32; 3],
+    state: u32,
+) {
+    updates.retain(|(_, _, queued_pos, _)| *queued_pos != pos);
+    updates.push((
+        due_tick,
+        (pos[0].div_euclid(16), pos[2].div_euclid(16)),
+        pos,
+        state,
+    ));
+}
+
+fn delayed_piston_update_matches_current(state: u32, current: Option<u16>) -> bool {
+    current.is_some_and(|current| u32::from(current) == state)
+}
+
+fn piston_entity_collision_box(cell: [i32; 3], extending: bool) -> ferrite_math::AABB {
+    let lift = if extending { 0.0 } else { 0.05 };
+    ferrite_math::AABB::new(
+        f64::from(cell[0]),
+        f64::from(cell[1]),
+        f64::from(cell[2]),
+        f64::from(cell[0] + 1),
+        f64::from(cell[1] + 1) + lift,
+        f64::from(cell[2] + 1),
+    )
+}
+
 /// How `/item` writes stacks into a player's slots.
 #[derive(Debug, Clone)]
 pub enum SlotFill {
@@ -410,6 +444,13 @@ pub enum Signal {
         to: ChunkPos,
         entity: Box<EntityRecord>,
     },
+    /// Trade offer state changed in a player menu owned by a different region.
+    TradeSync {
+        dimension: super::Dimension,
+        trader: Uuid,
+        player: Uuid,
+        offers: Vec<(i32, i32)>,
+    },
 }
 /// What a region tick needs from the world loop.
 #[derive(Clone)]
@@ -713,9 +754,11 @@ pub struct Region {
     /// Chance in percent that a wandering trader turns up at the next daily roll
     /// (`WanderingTraderSpawner`: starts at 25, grows by 25 per miss, caps at 75).
     pub trader_chance: u32,
-    /// Piston block updates held back until the client finished the push animation: the tick
-    /// they are due, their chunk and the packet (`PistonMovingBlockEntity` lasts two ticks).
-    pub delayed_updates: Vec<(i64, (i32, i32), Outbound)>,
+    /// Wandering traders part-way through a drink, by uuid: the item and ticks left.
+    trader_drinks: HashMap<Uuid, (TraderDrink, u32)>,
+    /// Piston block updates held back for two ticks so the client can animate the movement:
+    /// the tick they are due, their chunk, position and resulting block state.
+    pub delayed_updates: Vec<DelayedBlockUpdate>,
     /// The stack of every trident in flight, by entity uuid, so it can drop as it was thrown.
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
@@ -733,6 +776,7 @@ pub struct Region {
     gravity: super::gravity::Gravity,
     fire: super::fire::FireTicks,
     buttons: super::blocks::ButtonTicks,
+    vaults: super::vault::Vaults,
     dispensers: super::dispenser::Dispensers,
     hoppers: super::hopper::Hoppers,
     redstone: super::redstone::Redstone,
@@ -763,6 +807,7 @@ impl RegionData for Region {
         self.gravity.merge(other.gravity);
         self.fire.merge(other.fire);
         self.buttons.merge(other.buttons);
+        self.vaults.merge(other.vaults);
         self.dispensers.merge(other.dispensers);
         self.hoppers.merge(other.hoppers);
         self.redstone.merge(other.redstone);
@@ -771,6 +816,7 @@ impl RegionData for Region {
         self.delayed_updates.extend(other.delayed_updates);
         self.players.extend(other.players);
         self.entities.merge(other.entities);
+        self.trader_drinks.extend(other.trader_drinks);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
         self.generator.merge(other.generator);
@@ -786,6 +832,7 @@ impl RegionData for Region {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
             trader_chance: 25,
+            trader_drinks: HashMap::new(),
             delayed_updates: Vec::new(),
             thrown_tridents: HashMap::new(),
             pending_swings: Vec::new(),
@@ -810,6 +857,9 @@ impl RegionData for Region {
             buttons: self.buttons.split(|x, z| {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
             }),
+            vaults: self.vaults.split(|x, z| {
+                sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
+            }),
             dispensers: self.dispensers.split(|x, z| {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
             }),
@@ -829,6 +879,28 @@ impl RegionData for Region {
             published_entities: HashSet::new(),
             published_facts: HashSet::new(),
         };
+        let moved_traders: HashSet<_> = result
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| {
+                let data = result.entities.data(key)?;
+                data.mob
+                    .is_some_and(|mob| mob.kind == MobKind::WanderingTrader)
+                    .then_some(data.uuid)
+            })
+            .collect();
+        let moved_drinks: Vec<_> = self
+            .trader_drinks
+            .keys()
+            .filter(|uuid| moved_traders.contains(uuid))
+            .copied()
+            .collect();
+        for uuid in moved_drinks {
+            if let Some(drink) = self.trader_drinks.remove(&uuid) {
+                result.trader_drinks.insert(uuid, drink);
+            }
+        }
         let moving: Vec<_> = self
             .held_chunks
             .keys()
@@ -2829,6 +2901,12 @@ impl Player {
         yaw: f32,
         pitch: f32,
     ) {
+        if matches!(
+            self.menus.open_at,
+            Some(super::container::OpenAt::Trader(_))
+        ) {
+            self.close_container();
+        }
         let old = self.dimension;
         let old_loaded = std::mem::take(&mut self.loaded);
         crate::plugins::facts::clear_sent_chunks(self.uuid);
@@ -3872,6 +3950,66 @@ fn trader_spawning_enabled(rules: &ferrite_command::gamerule::GameRules) -> bool
     rules.get_bool("spawn_wandering_traders").unwrap_or(true)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraderDrink {
+    Invisibility,
+    Milk,
+}
+
+const TRADER_DRINK_TICKS: u32 = 32;
+
+fn trader_spawn_biome_allows(biome: Option<&str>) -> bool {
+    biome.is_none_or(|biome| {
+        !ferrite_data::tags::contains("worldgen/biome", "without_wandering_trader_spawns", biome)
+    })
+}
+
+fn trader_spawn_light_allows(light: u8) -> bool {
+    light >= ferrite_entity::spawn::MIN_LIGHT
+}
+
+fn trader_bright_outside(clock_time: i64) -> bool {
+    !(12_000..23_000).contains(&clock_time.rem_euclid(24_000))
+}
+
+pub(super) fn apply_trade_sync(
+    entities: &mut EntityStore,
+    key: ferrite_entity::EntityKey,
+    player: Uuid,
+    trades: &[(i32, i32)],
+) {
+    let Some(data) = entities.data_mut(key) else {
+        return;
+    };
+    let village = data
+        .mob
+        .as_ref()
+        .is_some_and(|mob| mob.kind == ferrite_entity::mob::MobKind::Villager);
+    let Some(villager) = data.villager.as_mut() else {
+        return;
+    };
+    if villager.offers.len() != trades.len() {
+        return;
+    }
+    let sold: i32 = villager
+        .offers
+        .iter()
+        .zip(trades)
+        .map(|(offer, (uses, _))| (*uses - offer.uses).max(0))
+        .sum();
+    for (offer, (uses, demand)) in villager.offers.iter_mut().zip(trades) {
+        // Independent open menus hold snapshots. An older one must not roll back a newer
+        // sale and make that same sale look new when the newer snapshot arrives again.
+        offer.uses = offer.uses.max(*uses);
+        offer.demand = offer.demand.max(*demand);
+    }
+    if village {
+        for _ in 0..sold {
+            villager.record_trade(player);
+        }
+    }
+}
+
 impl Region {
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
         *self.held_chunks.entry(chunk).or_default() += 1;
@@ -3933,8 +4071,20 @@ impl Region {
         self.random_ticks
             .tick(source, &self.held_chunks, tracking, speed, &mut self.fire);
     }
-    pub fn tick_fluids(&mut self, source: &super::anvil::AnvilChunkSource, tracking: &Tracking) {
-        let mut world = super::fluid::RegionFluidWorld::new(source, &self.held_chunks, tracking);
+    pub fn tick_fluids(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        water_conversion: bool,
+        lava_conversion: bool,
+    ) {
+        let mut world = super::fluid::RegionFluidWorld::with_source_rules(
+            source,
+            &self.held_chunks,
+            tracking,
+            water_conversion,
+            lava_conversion,
+        );
         self.fluid_ticks.advance(&mut world);
     }
     /// Creates a mob at an absolute position (`/summon`).
@@ -3958,7 +4108,12 @@ impl Region {
     }
     /// Ticks the modelled mobs: goals, movement, fall damage, despawn, natural spawning and
     /// death loot.
-    fn tick_mobs(&mut self, ctx: &TickContext, blocks: &TickBlocks<'_>) {
+    fn tick_mobs(
+        &mut self,
+        ctx: &TickContext,
+        blocks: &TickBlocks<'_>,
+        owner_attacks: &[(Uuid, ferrite_entity::EntityKey)],
+    ) {
         let positions: Vec<_> = self
             .players
             .values()
@@ -3996,7 +4151,13 @@ impl Region {
                 self.send_link(ctx, key, real);
             }
         }
-        for event in ai::tick_with(&mut self.entities, blocks, &targets, &mut self.rng) {
+        for event in ai::tick_with_owner_attacks(
+            &mut self.entities,
+            blocks,
+            &targets,
+            owner_attacks,
+            &mut self.rng,
+        ) {
             match event {
                 ai::MobEvent::LeashBroke { key } => {
                     self.send_link(ctx, key, 0);
@@ -4073,7 +4234,12 @@ impl Region {
             let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
             trader_spawning_enabled(&rules)
         };
-        self.tick_trader_spawn(blocks, trader_spawning);
+        let clock_time = ctx
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clock_time;
+        self.tick_trader_spawn(blocks, trader_spawning, clock_time);
         for record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1) {
             self.entities.insert(record);
         }
@@ -4205,7 +4371,7 @@ impl Region {
         if !fight.started {
             return;
         }
-        // Four end crystals around the exit portal bring the dragon back (`tryRespawn`).
+        // Four end crystals around the exit portal start the staged vanilla respawn.
         if fight.killed && !fight.dragon_alive && self.held_chunks.contains_key(&ChunkPos(0, 0)) {
             let portal = ferrite_data::blocks::default_state("minecraft:end_portal").map(u32::from);
             let level = (0..=255).find(|&y| portal.is_some() && source.block(1, y, 0) == portal);
@@ -4228,24 +4394,53 @@ impl Region {
                             .find(|&key| ferrite_entity::dragon::is_crystal(&self.entities, key))
                     })
                     .collect();
-                if found.len() == cells.len() {
-                    fight.dragon_alive = true;
-                    fight.crystals.clear();
-                    drop(state);
-                    // The spike crystals are placed again, so every old one goes.
-                    for key in self.entities.keys().to_vec() {
-                        if ferrite_entity::dragon::is_crystal(&self.entities, key)
-                            && let Some(flags) = self.entities.flags_mut(key)
-                        {
-                            flags.set(ferrite_entity::Flags::REMOVED, true);
-                        }
+                let valid_layout = found.len() == cells.len();
+                match fight.tick_respawn(valid_layout) {
+                    super::end_fight::RespawnAction::Started => {
+                        drop(state);
+                        // Clientbound level event 3001 starts the Ender Dragon respawn effect.
+                        // It is defined by the vanilla LevelEvent protocol used by 26.3.
+                        let update = packet(&ferrite_protocol::packets::play::LevelEvent {
+                            event: 3001,
+                            location: ferrite_protocol::types::BlockPos::new(0, level, 0).pack(),
+                            data: 0,
+                            global: false,
+                        });
+                        broadcast_tracked_chunk(
+                            &ctx.tracking.lock().unwrap(),
+                            ctx.dimension,
+                            (0, 0),
+                            &update,
+                        );
+                        return;
                     }
-                    let (spot, _) = ferrite_entity::dragon::position_at(0);
-                    let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
-                    self.entities.insert(dragon);
-                    self.place_blocks(ctx, &super::end_fight::podium_blocks([0, level, 0], false));
-                    return;
+                    super::end_fight::RespawnAction::Complete => {
+                        fight.dragon_alive = true;
+                        fight.crystals.clear();
+                        drop(state);
+                        // The spike crystals are restored by the normal spike pass below; remove
+                        // all old crystals first so each spike can receive exactly one.
+                        for key in self.entities.keys().to_vec() {
+                            if ferrite_entity::dragon::is_crystal(&self.entities, key)
+                                && let Some(flags) = self.entities.flags_mut(key)
+                            {
+                                flags.set(ferrite_entity::Flags::REMOVED, true);
+                            }
+                        }
+                        let (spot, _) = ferrite_entity::dragon::position_at(0);
+                        let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
+                        self.entities.insert(dragon);
+                        self.place_blocks(
+                            ctx,
+                            &super::end_fight::podium_blocks([0, level, 0], false),
+                        );
+                        return;
+                    }
+                    super::end_fight::RespawnAction::Interrupted
+                    | super::end_fight::RespawnAction::None => {}
                 }
+            } else {
+                let _ = fight.tick_respawn(false);
             }
         }
         let mut placed = Vec::new();
@@ -4487,10 +4682,15 @@ impl Region {
             return false;
         };
         let village = state.kind == MobKind::Villager;
+        let offers = if village {
+            villager.offers_for_player(player)
+        } else {
+            villager.offers
+        };
         if let Some(p) = self.players.get_mut(&player) {
             p.open_merchant_offers(
                 state.kind.display_name(),
-                villager.offers,
+                offers,
                 if village {
                     i32::from(villager.level)
                 } else {
@@ -4505,14 +4705,19 @@ impl Region {
         true
     }
 
-    /// What players buy in an open trading screen counts against the merchant's offers.
+    /// Copies what players bought in an open trading screen back into the merchant and records
+    /// the trading gossip that earns reputation (vanilla adds two points per completed sale).
     fn sync_trades(&mut self) {
         let open: Vec<_> = self
             .players
-            .values()
-            .filter_map(|p| p.open_trader())
+            .iter()
+            .filter_map(|(player, p)| {
+                p.open_trader().map(|(trader, trades)| {
+                    (*player, trader, trades, p.dimension, p.signals.clone())
+                })
+            })
             .collect();
-        for (trader, trades) in open {
+        for (player, trader, trades, dimension, signals) in open {
             let Some(key) = self
                 .entities
                 .keys()
@@ -4520,29 +4725,29 @@ impl Region {
                 .copied()
                 .find(|&k| self.entities.data(k).is_some_and(|d| d.uuid == trader))
             else {
+                let offers = trades
+                    .iter()
+                    .map(|trade| (trade.uses, trade.demand))
+                    .collect();
+                let _ = signals.send(Signal::TradeSync {
+                    dimension,
+                    trader,
+                    player,
+                    offers,
+                });
                 continue;
             };
-            let Some(villager) = self
-                .entities
-                .data_mut(key)
-                .and_then(|d| d.villager.as_mut())
-            else {
-                continue;
-            };
-            if villager.offers.len() != trades.len() {
-                continue;
-            }
-            for (offer, trade) in villager.offers.iter_mut().zip(trades) {
-                offer.uses = trade.uses;
-                offer.demand = trade.demand;
-            }
+            let offers: Vec<_> = trades
+                .iter()
+                .map(|trade| (trade.uses, trade.demand))
+                .collect();
+            apply_trade_sync(&mut self.entities, key, player, &offers);
         }
     }
 
-    /// The daily wandering trader roll (`WanderingTraderSpawner`): near a random player, with two
-    /// trader llamas on leads, gone after 48000 ticks.
-    fn tick_trader_spawn(&mut self, blocks: &TickBlocks<'_>, enabled: bool) {
-        use ferrite_entity::mob::{MobKind, new_mob};
+    /// Wandering trader lifetime and daily roll. Drink goals run regardless of the spawn rule.
+    fn tick_trader_spawn(&mut self, blocks: &TickBlocks<'_>, enabled: bool, clock_time: i64) {
+        self.tick_trader_drinks(clock_time);
         if !enabled
             || self.tick_clock <= 0
             || self.tick_clock % 24_000 != 0
@@ -4556,34 +4761,55 @@ impl Region {
         }
         let anchors: Vec<_> = self.players.values().map(|p| p.pos).collect();
         let anchor = anchors[self.rng.next_int(anchors.len() as i32) as usize];
-        let air = ferrite_data::blocks::default_state("air");
         let angle = f64::from(self.rng.next_f32()) * std::f64::consts::TAU;
         let distance = 24.0 + f64::from(self.rng.next_f32()) * 24.0;
         let (x, z) = (
             (anchor[0] + angle.cos() * distance).floor() as i32,
             (anchor[2] + angle.sin() * distance).floor() as i32,
         );
-        // Stand on the first solid block under the player's height with two air blocks above.
+        if self.try_spawn_trader(blocks, anchor, x, z) {
+            self.trader_chance = 25;
+        }
+    }
+
+    fn try_spawn_trader(
+        &mut self,
+        blocks: &TickBlocks<'_>,
+        anchor: [f64; 3],
+        x: i32,
+        z: i32,
+    ) -> bool {
+        let air = ferrite_data::blocks::default_state("air");
+        let solid = |y: i32| blocks.block_state(x, y, z).is_some_and(|s| Some(s) != air);
         let top = anchor[1].floor() as i32 + 16;
-        let ground = (top - 48..=top).rev().find(|&y| {
-            let solid = |y: i32| blocks.block_state(x, y, z).is_some_and(|s| Some(s) != air);
-            solid(y) && !solid(y + 1) && !solid(y + 2)
-        });
-        let Some(ground) = ground else {
-            return;
+        let Some(ground) = (top - 48..=top)
+            .rev()
+            .find(|&y| solid(y) && !solid(y + 1) && !solid(y + 2))
+        else {
+            return false;
         };
-        self.trader_chance = 25;
-        let at = ferrite_math::Vec3::new(
-            f64::from(x) + 0.5,
-            f64::from(ground) + 1.0,
-            f64::from(z) + 0.5,
-        );
+        let feet = ground + 1;
+        let biome = blocks
+            .source
+            .and_then(|source| source.biome_name(x, feet, z));
+        if !trader_spawn_biome_allows(biome.as_deref())
+            || !trader_spawn_light_allows(blocks.light(x, feet, z))
+        {
+            return false;
+        }
+        let at = ferrite_math::Vec3::new(f64::from(x) + 0.5, f64::from(feet), f64::from(z) + 0.5);
+        self.insert_trader_with_llamas(at);
+        true
+    }
+
+    fn insert_trader_with_llamas(&mut self, at: ferrite_math::Vec3) -> ferrite_entity::EntityKey {
+        use ferrite_entity::mob::{MobKind, new_mob};
         let mut trader = new_mob(MobKind::WanderingTrader, at, &mut self.rng);
         if let Some(state) = trader.data.mob.as_mut() {
             state.lifetime = 48_000;
         }
         let (trader_uuid, trader_id) = (trader.data.uuid, trader.data.id);
-        self.entities.insert(trader);
+        let trader_key = self.entities.insert(trader);
         for _ in 0..2 {
             let offset = ferrite_math::Vec3::new(
                 f64::from(self.rng.next_f32()) * 4.0 - 2.0,
@@ -4596,6 +4822,111 @@ impl Region {
                 state.leash = Some((trader_uuid, trader_id));
             }
             self.entities.insert(llama);
+        }
+        trader_key
+    }
+
+    fn tick_trader_drinks(&mut self, clock_time: i64) {
+        let bright = trader_bright_outside(clock_time);
+        let trading: HashSet<Uuid> = self
+            .players
+            .values()
+            .filter_map(|player| player.open_trader())
+            .map(|(trader, _)| trader)
+            .collect();
+        let traders: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&key| {
+                self.entities
+                    .flags(key)
+                    .is_some_and(|flags| !flags.has(Flags::REMOVED))
+                    && self.entities.data(key).is_some_and(|data| {
+                        data.mob
+                            .is_some_and(|mob| mob.kind == MobKind::WanderingTrader)
+                    })
+            })
+            .collect();
+        let alive: HashSet<Uuid> = traders
+            .iter()
+            .filter_map(|&key| self.entities.data(key).map(|data| data.uuid))
+            .collect();
+        self.trader_drinks.retain(|uuid, _| alive.contains(uuid));
+        for key in traders {
+            let Some(data) = self.entities.data(key) else {
+                continue;
+            };
+            let uuid = data.uuid;
+            if trading.contains(&uuid) {
+                continue;
+            }
+            let invisible = data.effects.invisibility();
+            if let Some((_, left)) = self.trader_drinks.get_mut(&uuid) {
+                *left = left.saturating_sub(1);
+                if *left > 0 {
+                    continue;
+                }
+                let drink = self.trader_drinks.remove(&uuid).map(|(drink, _)| drink);
+                match drink {
+                    Some(TraderDrink::Invisibility) => {
+                        if let Some(data) = self.entities.data_mut(key) {
+                            data.effects.add(MobEffectInstance::new(
+                                Effect::Invisibility.id(),
+                                9_600,
+                                0,
+                            ));
+                        }
+                    }
+                    Some(TraderDrink::Milk) => {
+                        if let Some(data) = self.entities.data_mut(key) {
+                            data.effects.clear();
+                        }
+                    }
+                    None => {}
+                }
+                self.despawn_trader(key);
+                continue;
+            }
+            let drink = match (bright, invisible) {
+                (false, false) => Some(TraderDrink::Invisibility),
+                (true, true) => Some(TraderDrink::Milk),
+                _ => None,
+            };
+            if let Some(drink) = drink {
+                self.trader_drinks.insert(uuid, (drink, TRADER_DRINK_TICKS));
+            }
+        }
+    }
+
+    fn despawn_trader(&mut self, key: ferrite_entity::EntityKey) {
+        let Some(trader_uuid) = self.entities.data(key).map(|data| data.uuid) else {
+            return;
+        };
+        let llamas: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&other| {
+                self.entities.data(other).is_some_and(|data| {
+                    data.mob.is_some_and(|mob| {
+                        mob.kind == MobKind::TraderLlama
+                            && mob.leash.is_some_and(|(holder, _)| holder == trader_uuid)
+                    })
+                })
+            })
+            .collect();
+        for other in llamas.into_iter().chain(std::iter::once(key)) {
+            if let Some(state) = mob::state_mut(&mut self.entities, other) {
+                state.leash = None;
+                state.loot_dropped = true;
+            }
+            if let Some(flags) = self.entities.flags_mut(other) {
+                flags.set(Flags::REMOVED, true);
+                flags.set(Flags::NEEDS_SYNC, true);
+            }
         }
     }
 
@@ -5095,8 +5426,12 @@ impl Region {
                 }
                 continue;
             };
-            let outcome =
-                ferrite_entity::horse::tick_rider(&mut self.entities, key, rider, &mut self.rng);
+            let outcome = ferrite_entity::horse::tick_rider(
+                &mut self.entities,
+                key,
+                Some(rider),
+                &mut self.rng,
+            );
             if outcome != ferrite_entity::horse::Bucked::No {
                 super::ride::dismount(rider);
                 super::ride::set_controlled(horse, false);
@@ -5118,7 +5453,8 @@ impl Region {
         }
     }
 
-    fn resolve_attacks(&mut self, ctx: &TickContext) {
+    fn resolve_attacks(&mut self, ctx: &TickContext) -> Vec<(Uuid, ferrite_entity::EntityKey)> {
+        let mut owner_attacks = Vec::new();
         for uuid in std::mem::take(&mut self.pending_hurts) {
             let key = self.entities.keys().iter().copied().find(|key| {
                 self.entities
@@ -5259,6 +5595,7 @@ impl Region {
                 else {
                     continue;
                 };
+                owner_attacks.push((uuid, key));
                 mob::retaliate(&mut self.entities, key, uuid);
                 if matches!(hurt, mob::Hurt::Died)
                     && let Some(mob) = self.entities.data(key).and_then(|d| d.mob)
@@ -5309,6 +5646,7 @@ impl Region {
                 self.explode([at.x, at.y + 1.0, at.z], 6.0, true, ctx);
             }
         }
+        owner_attacks
     }
 
     /// Fires an arrow from a released bow (vanilla `BowItem.releaseUsing`): speed and damage
@@ -6159,16 +6497,30 @@ impl Region {
             return;
         };
         let now = self.tick_clock;
-        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed_updates)
-            .into_iter()
-            .partition(|(at, _, _)| *at <= now);
-        self.delayed_updates = waiting;
-        for (_, chunk, update) in due {
-            broadcast_tracked_chunk(&ctx.tracking.lock().unwrap(), ctx.dimension, chunk, &update);
-        }
         let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
         let mut world =
             super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed_updates)
+            .into_iter()
+            .partition(|(at, _, _, _)| *at <= now);
+        self.delayed_updates = waiting;
+        for update in due {
+            let (_, chunk, pos, state) = update;
+            let current = super::redstone::RedstoneWorld::block(&world, pos);
+            if !delayed_piston_update_matches_current(state, current) {
+                continue;
+            }
+            let update = BlockUpdate {
+                location: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                block_state: VarInt(state as i32),
+            };
+            broadcast_tracked_chunk(
+                &ctx.tracking.lock().unwrap(),
+                ctx.dimension,
+                chunk,
+                &packet(&update),
+            );
+        }
         self.redstone.blocks_changed(&mut world, changed);
         self.redstone.tick(&mut world, &players);
         let actions = self.redstone.take_piston_actions(&world);
@@ -6216,17 +6568,14 @@ impl Region {
                 );
             }
             for &(at, _, state) in &operation.edits {
-                let update = BlockUpdate {
-                    location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
-                    block_state: VarInt(state as i32),
-                };
                 // The client animates the push itself from the block event; the final blocks
                 // reach it two ticks later, when vanilla's moving piston settles.
-                self.delayed_updates.push((
+                queue_delayed_piston_update(
+                    &mut self.delayed_updates,
                     self.tick_clock.wrapping_add(2),
-                    (at[0].div_euclid(16), at[2].div_euclid(16)),
-                    packet(&update),
-                ));
+                    at,
+                    state,
+                );
                 piston_changes.push(at);
             }
             {
@@ -6240,26 +6589,11 @@ impl Region {
                     f64::from(dy * sign),
                     f64::from(dz * sign),
                 );
-                for &(at, _, state) in &operation.edits {
-                    if state == 0 {
-                        continue;
-                    }
-                    // Extension: the cell the block now fills. Retraction: the cell it left,
-                    // reaching slightly above it for entities standing on top.
-                    let from = if extending {
-                        at
-                    } else {
-                        [at[0] + dx, at[1] + dy, at[2] + dz]
-                    };
-                    let lift = if extending { 0.0 } else { 0.05 };
-                    let cell = ferrite_math::AABB::new(
-                        f64::from(from[0]),
-                        f64::from(from[1]),
-                        f64::from(from[2]),
-                        f64::from(from[0] + 1),
-                        f64::from(from[1] + 1) + lift,
-                        f64::from(from[2] + 1),
-                    );
+                for &at in &operation.entity_push_cells {
+                    // These coordinates are the occupied destination (extension) or source
+                    // (retraction) cells. Retraction also reaches slightly above the cell for
+                    // entities standing on top.
+                    let cell = piston_entity_collision_box(at, extending);
                     for key in self.entities.query_vec(cell) {
                         let (Some(pos), Some(bbox)) =
                             (self.entities.pos(key), self.entities.bbox(key))
@@ -6884,6 +7218,80 @@ impl Region {
         }
         let mut changed = self.tick_block_updates(ctx);
         changed.extend(button_changed);
+        stage!("vaults");
+        // Vanilla `VaultBlockEntity.Server.tick`: a vault wakes up near players and runs its
+        // unlocking/ejecting timers. Only vaults in chunks this region holds are ticked.
+        let mut vault_changed = Vec::new();
+        if let Some(source) = ctx.source.as_deref() {
+            self.vaults.discover(source, &self.held_chunks);
+            self.vaults
+                .blocks_changed(source, &changed, &self.held_chunks);
+            let players: Vec<super::vault::VaultPlayer> = self
+                .players
+                .values()
+                .map(|p| super::vault::VaultPlayer {
+                    pos: p.pos,
+                    spectator: p.gamemode == 3,
+                })
+                .collect();
+            for update in self.vaults.tick(source, &players, &self.held_chunks) {
+                let super::vault::VaultUpdate {
+                    pos,
+                    block_state,
+                    events,
+                    items,
+                    pending_items,
+                } = update;
+                if let Some(state) = block_state {
+                    {
+                        let mut world = super::fluid::RegionFluidWorld::new(
+                            source,
+                            &self.held_chunks,
+                            &ctx.tracking,
+                        );
+                        ferrite_fluid::FluidWorld::set_block(
+                            &mut world,
+                            pos[0],
+                            pos[1],
+                            pos[2],
+                            u32::from(state),
+                        );
+                    }
+                    self.updates.block_changed(pos);
+                    vault_changed.push(pos);
+                }
+                for event in events {
+                    let update = packet(&LevelEvent {
+                        event: event.event,
+                        location: ferrite_protocol::types::BlockPos::new(
+                            event.pos[0],
+                            event.pos[1],
+                            event.pos[2],
+                        )
+                        .pack(),
+                        data: event.data,
+                        global: false,
+                    });
+                    let tracking = ctx.tracking.lock().unwrap();
+                    broadcast_tracked_chunk(
+                        &tracking,
+                        source.dimension(),
+                        (event.pos[0].div_euclid(16), event.pos[2].div_euclid(16)),
+                        &update,
+                    );
+                }
+                for stack in items {
+                    let record = super::vault::ejected_item(pos, &stack, &mut self.rng);
+                    self.entities.insert(record);
+                }
+                // The vault's ledger is written only after its item entities exist, so a
+                // crash in between re-ejects a reward instead of losing it.
+                if let Some(items) = pending_items {
+                    super::vault::commit_ejection(source, pos, &items);
+                }
+            }
+        }
+        changed.extend(vault_changed);
         stage!("hoppers");
         // Vanilla `HopperBlockEntity` ticks as a block entity; a region keeps only the
         // hoppers it has seen and ticks them every game tick (their own cooldown gates moves).
@@ -6948,7 +7356,7 @@ impl Region {
             item::tick_items(&mut self.entities, &blocks, &mut self.rng);
         }
         stage!("entities");
-        self.resolve_attacks(ctx);
+        let owner_attacks = self.resolve_attacks(ctx);
         self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
@@ -6956,7 +7364,7 @@ impl Region {
             self.sync_trades();
             self.land_tridents();
             self.tick_dragon_effects(ctx);
-            self.tick_mobs(ctx, &blocks);
+            self.tick_mobs(ctx, &blocks, &owner_attacks);
         }
         let alive: Vec<ferrite_math::Vec3> = self
             .players
@@ -6988,7 +7396,7 @@ impl Region {
             });
         }
         stage!("finish");
-        self.publish_command_entities(&ctx.command_entities);
+        self.publish_command_entities(&ctx.command_entities, ctx.dimension);
     }
 
     /// Vanilla `BeaconBlockEntity`'s 80-tick timer: recompute each beacon's pyramid, resend the
@@ -7052,11 +7460,15 @@ impl Region {
 
     /// Publishes this region's entities for command selectors. Folia keeps the store region
     /// local; commands read the snapshot and route mutations back to this region.
-    fn publish_command_entities(&mut self, index: &Arc<Mutex<super::entity_index::EntityIndex>>) {
+    fn publish_command_entities(
+        &mut self,
+        index: &Arc<Mutex<super::entity_index::EntityIndex>>,
+        dimension: super::Dimension,
+    ) {
         index
             .lock()
             .unwrap()
-            .sync(&mut self.published_entities, &self.entities);
+            .sync(&mut self.published_entities, &self.entities, dimension);
         crate::plugins::facts::publish_entities(&mut self.published_facts, &self.entities);
     }
 
@@ -7177,12 +7589,358 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retracting_piston_checks_the_moved_blocks_source_cell() {
+        let source = [2, 64, 0];
+        let cell = piston_entity_collision_box(source, false);
+        assert_eq!(cell.min.x, 2.0);
+        assert_eq!(cell.min.y, 64.0);
+        assert_eq!(cell.min.z, 0.0);
+        assert_eq!(cell.max.y, 65.05);
+    }
+
+    #[test]
+    fn stale_concurrent_trade_menu_cannot_roll_back_or_double_count_sales() {
+        let mut entities = EntityStore::default();
+        let key = entities.insert(mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(20.5, 64.0, 0.5),
+            &mut Rng::new(7),
+        ));
+        let player = Uuid::from_u128(44);
+        let villager = entities.data_mut(key).unwrap().villager.as_mut().unwrap();
+        villager.offers = vec![ferrite_inventory::Trade::new(
+            ferrite_item::ItemStack::from_name("emerald").unwrap(),
+            ferrite_item::ItemStack::from_name("bread").unwrap(),
+            12,
+            1,
+        )];
+
+        // Two player regions opened the same villager at uses=0. One sale arrives, then the
+        // other player's stale pre-sale snapshot, then the first player's repeated snapshot.
+        apply_trade_sync(&mut entities, key, player, &[(1, 1)]);
+        apply_trade_sync(&mut entities, key, Uuid::from_u128(45), &[(0, 0)]);
+        apply_trade_sync(&mut entities, key, player, &[(1, 1)]);
+
+        let villager = entities.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!(villager.offers[0].uses, 1);
+        assert_eq!(villager.offers[0].demand, 1);
+        assert_eq!(
+            villager
+                .gossips
+                .get(player, ferrite_entity::villager::GossipType::Trading),
+            2
+        );
+    }
+
+    #[test]
+    fn delayed_piston_updates_for_one_position_keep_only_the_latest_state() {
+        let pos = [3, 64, -2];
+        let extended =
+            ferrite_data::blocks::state_id("piston", &[("facing", "east"), ("extended", "true")])
+                .unwrap();
+        let retracted =
+            ferrite_data::blocks::state_id("piston", &[("facing", "east"), ("extended", "false")])
+                .unwrap();
+        let mut updates = Vec::new();
+
+        queue_delayed_piston_update(&mut updates, 12, pos, u32::from(extended));
+        queue_delayed_piston_update(&mut updates, 13, pos, u32::from(retracted));
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, 13);
+        assert_eq!(updates[0].1, (0, -1));
+        assert_eq!(updates[0].2, pos);
+        assert_eq!(updates[0].3, u32::from(retracted));
+        assert!(!delayed_piston_update_matches_current(
+            updates[0].3,
+            Some(extended)
+        ));
+        assert!(delayed_piston_update_matches_current(
+            updates[0].3,
+            Some(retracted)
+        ));
+    }
+
+    #[test]
     fn wandering_trader_spawning_obeys_its_gamerule() {
         let mut rules = ferrite_command::gamerule::GameRules::default();
         assert!(trader_spawning_enabled(&rules));
 
         rules.set("spawn_wandering_traders", "false").unwrap();
         assert!(!trader_spawning_enabled(&rules));
+    }
+
+    #[test]
+    fn trader_spawn_candidates_check_biome_and_light() {
+        assert!(trader_spawn_biome_allows(Some("minecraft:plains")));
+        assert!(!trader_spawn_biome_allows(Some("minecraft:the_void")));
+        assert!(trader_spawn_biome_allows(None));
+        assert!(trader_spawn_light_allows(15));
+        assert!(trader_spawn_light_allows(ferrite_entity::spawn::MIN_LIGHT));
+        assert!(!trader_spawn_light_allows(
+            ferrite_entity::spawn::MIN_LIGHT - 1
+        ));
+    }
+
+    #[test]
+    fn trader_drinks_follow_vanillas_day_and_night_windows() {
+        assert!(trader_bright_outside(0));
+        assert!(trader_bright_outside(6_000));
+        assert!(!trader_bright_outside(13_000));
+        assert!(trader_bright_outside(23_500));
+        assert!(trader_bright_outside(24_000 + 1_000));
+    }
+
+    fn tick_blocks() -> TickBlocks<'static> {
+        TickBlocks {
+            source: None,
+            seen: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_failed_spawn_candidate_keeps_the_roll_and_creates_nothing() {
+        let mut region = Region {
+            trader_chance: 75,
+            ..Region::default()
+        };
+        assert!(!region.try_spawn_trader(&tick_blocks(), [0.5, 64.0, 0.5], 0, 0));
+        assert_eq!(
+            region.trader_chance, 75,
+            "a rejected candidate is not a successful roll"
+        );
+        assert!(
+            region.entities.keys().is_empty(),
+            "no partial trader or llama"
+        );
+        assert!(region.trader_drinks.is_empty());
+    }
+
+    #[test]
+    fn an_eligible_candidate_creates_a_trader_and_two_leashed_llamas() {
+        assert!(trader_spawn_biome_allows(Some("minecraft:plains")));
+        assert!(trader_spawn_light_allows(15));
+        let mut region = Region::default();
+        let trader = region.insert_trader_with_llamas(ferrite_math::Vec3::new(0.5, 65.0, 0.5));
+        assert_eq!(region.entities.keys().len(), 3);
+        let trader_data = region.entities.data(trader).unwrap();
+        let trader_uuid = trader_data.uuid;
+        let trader_state = trader_data.mob.unwrap();
+        assert_eq!(trader_state.lifetime, 48_000);
+        assert_eq!(trader_state.kind, MobKind::WanderingTrader);
+        let llamas: Vec<_> = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&key| {
+                region.entities.data(key).is_some_and(|data| {
+                    data.mob.is_some_and(|mob| mob.kind == MobKind::TraderLlama)
+                })
+            })
+            .collect();
+        assert_eq!(llamas.len(), 2);
+        for llama in llamas {
+            let state = mob::state(&region.entities, llama).unwrap();
+            assert_eq!(state.lifetime, 48_000);
+            assert_eq!(state.leash.map(|(holder, _)| holder), Some(trader_uuid));
+        }
+        assert!(region.trader_drinks.is_empty());
+    }
+
+    #[test]
+    fn trader_spawning_disabled_does_not_raise_the_chance_or_spawn() {
+        let mut region = Region {
+            tick_clock: 24_000,
+            trader_chance: 100,
+            ..Region::default()
+        };
+        region.tick_trader_spawn(&tick_blocks(), false, 6_000);
+        assert_eq!(region.trader_chance, 100);
+        assert!(region.entities.keys().is_empty());
+    }
+
+    #[test]
+    fn trader_drink_state_follows_the_trader_when_a_region_splits() {
+        let mut region = Region::default();
+        let trader = region.insert_trader_with_llamas(ferrite_math::Vec3::new(0.5, 64.0, 0.5));
+        let uuid = region.entities.data(trader).unwrap().uuid;
+        region
+            .trader_drinks
+            .insert(uuid, (TraderDrink::Invisibility, 12));
+
+        let moved = region.split(&HashSet::from([SectionPos(0, 0)]));
+
+        assert_eq!(
+            moved.trader_drinks.get(&uuid),
+            Some(&(TraderDrink::Invisibility, 12))
+        );
+        assert!(!region.trader_drinks.contains_key(&uuid));
+    }
+
+    /// A wandering trader with two trader llamas on its leads and one unleashed llama.
+    fn trader_and_llamas(
+        region: &mut Region,
+    ) -> (
+        ferrite_entity::EntityKey,
+        Vec<ferrite_entity::EntityKey>,
+        ferrite_entity::EntityKey,
+    ) {
+        let mut rng = Rng::new(7);
+        let mut trader = mob::new_mob(
+            MobKind::WanderingTrader,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        );
+        if let Some(state) = trader.data.mob.as_mut() {
+            state.lifetime = 48_000;
+        }
+        let (trader_uuid, trader_id) = (trader.data.uuid, trader.data.id);
+        let trader_key = region.entities.insert(trader);
+        let mut leashed = Vec::new();
+        for offset in [-1.0, 1.0] {
+            let mut llama = mob::new_mob(
+                MobKind::TraderLlama,
+                ferrite_math::Vec3::new(0.5 + offset, 64.0, 0.5),
+                &mut rng,
+            );
+            if let Some(state) = llama.data.mob.as_mut() {
+                state.lifetime = 48_000;
+                state.leash = Some((trader_uuid, trader_id));
+            }
+            leashed.push(region.entities.insert(llama));
+        }
+        let free = region.entities.insert(mob::new_mob(
+            MobKind::TraderLlama,
+            ferrite_math::Vec3::new(5.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        (trader_key, leashed, free)
+    }
+
+    #[test]
+    fn a_trader_drinking_invisibility_despawns_with_its_leashed_llamas() {
+        let mut region = Region::default();
+        let (trader, leashed, free) = trader_and_llamas(&mut region);
+        // Night starts the invisibility potion; the vanilla use duration is 32 ticks.
+        for _ in 0..=TRADER_DRINK_TICKS {
+            region.tick_trader_spawn(&tick_blocks(), true, 13_000);
+        }
+        assert!(region.entities.flags(trader).unwrap().has(Flags::REMOVED));
+        for key in leashed {
+            assert!(
+                region.entities.flags(key).unwrap().has(Flags::REMOVED),
+                "a leashed llama follows the trader"
+            );
+        }
+        assert!(
+            !region.entities.flags(free).unwrap().has(Flags::REMOVED),
+            "an unleashed llama stays"
+        );
+        assert!(region.trader_drinks.is_empty());
+    }
+
+    #[test]
+    fn a_trader_drinking_milk_despawns_with_its_leashed_llamas() {
+        let mut region = Region::default();
+        let (trader, leashed, free) = trader_and_llamas(&mut region);
+        // A splash potion or plugin made it invisible; the morning milk clears it and despawns.
+        region
+            .entities
+            .data_mut(trader)
+            .unwrap()
+            .effects
+            .add(MobEffectInstance::new(Effect::Invisibility.id(), 200, 0));
+        for _ in 0..=TRADER_DRINK_TICKS {
+            region.tick_trader_spawn(&tick_blocks(), true, 6_000);
+        }
+        assert!(region.entities.flags(trader).unwrap().has(Flags::REMOVED));
+        assert!(region.entities.data(trader).unwrap().effects.is_empty());
+        for key in leashed {
+            assert!(
+                region.entities.flags(key).unwrap().has(Flags::REMOVED),
+                "a leashed llama follows the trader"
+            );
+        }
+        assert!(
+            !region.entities.flags(free).unwrap().has(Flags::REMOVED),
+            "an unleashed llama stays"
+        );
+    }
+
+    #[test]
+    fn a_trader_still_expires_on_its_normal_lifetime() {
+        let mut region = Region::default();
+        let trader = region.entities.insert(mob::new_mob(
+            MobKind::WanderingTrader,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        if let Some(state) = mob::state_mut(&mut region.entities, trader) {
+            state.lifetime = 1;
+        }
+        ai::tick_with(&mut region.entities, &tick_blocks(), &[], &mut region.rng);
+        let state = mob::state(&region.entities, trader).unwrap();
+        assert!(state.is_dead());
+        assert!(state.loot_dropped);
+        assert!(!region.entities.flags(trader).unwrap().has(Flags::REMOVED));
+        assert!(region.trader_drinks.is_empty());
+    }
+
+    async fn memory_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        let mut ready = false;
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ready, "chunk never loaded");
+        source
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_flat_candidate_without_light_is_rejected_whole() {
+        let source = memory_source().await;
+        let blocks = TickBlocks {
+            source: Some(source.as_ref()),
+            seen: Default::default(),
+        };
+        let mut region = Region {
+            trader_chance: 75,
+            ..Region::default()
+        };
+        assert!(
+            !region.try_spawn_trader(&blocks, [0.5, 64.0, 0.5], 0, 0),
+            "the flat test world has no stored light"
+        );
+        assert_eq!(region.trader_chance, 75);
+        assert!(
+            region.entities.keys().is_empty(),
+            "no partial trader or llama"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_void_biome_candidate_is_rejected() {
+        let source = memory_source().await;
+        source
+            .fill_biome([0, -64, 0], [0, 100, 0], "minecraft:the_void", &|_| true)
+            .expect("biome fill");
+        let blocks = TickBlocks {
+            source: Some(source.as_ref()),
+            seen: Default::default(),
+        };
+        let mut region = Region {
+            trader_chance: 75,
+            ..Region::default()
+        };
+        assert!(!region.try_spawn_trader(&blocks, [0.5, 64.0, 0.5], 0, 0));
+        assert_eq!(region.trader_chance, 75);
+        assert!(region.entities.keys().is_empty());
     }
 
     #[test]

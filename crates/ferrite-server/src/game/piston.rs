@@ -284,6 +284,8 @@ pub fn changes(
 pub struct Operation {
     pub edits: Vec<([i32; 3], u32, u32)>,
     pub destroyed: Vec<([i32; 3], u16)>,
+    /// Cells occupied by the piston head or a moved block, before the entity is pushed.
+    pub entity_push_cells: Vec<[i32; 3]>,
 }
 
 /// Prepare a complete operation without modifying the world.
@@ -307,9 +309,17 @@ pub fn operation(
         .iter()
         .map(|&pos| Some((pos, world.block(pos)?)))
         .collect::<Option<Vec<_>>>()?;
+    let head = offset(base, facing);
+    let mut entity_push_cells = vec![head];
+    entity_push_cells.extend(
+        plan.to_move
+            .iter()
+            .map(|&pos| if extending { offset(pos, facing) } else { pos }),
+    );
     Some(Operation {
         edits: changes(world, base, facing, extending, &plan)?,
         destroyed,
+        entity_push_cells,
     })
 }
 
@@ -620,5 +630,22 @@ mod tests {
         let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
         assert_eq!(plan.to_move.len(), 1);
         assert!(plan.to_destroy.is_empty());
+    }
+
+    #[test]
+    fn entity_push_cells_include_head_and_moved_blocks_but_not_the_fixed_base() {
+        let mut grid = Grid::default();
+        let base = [1, 64, 0];
+        grid.0.insert(
+            base,
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "false")]).unwrap(),
+        );
+        grid.0.insert([2, 64, 0], state("stone"));
+
+        let operation = operation(&grid, base, Direction::East, true).unwrap();
+
+        assert!(operation.entity_push_cells.contains(&[2, 64, 0]));
+        assert!(operation.entity_push_cells.contains(&[3, 64, 0]));
+        assert!(!operation.entity_push_cells.contains(&base));
     }
 }

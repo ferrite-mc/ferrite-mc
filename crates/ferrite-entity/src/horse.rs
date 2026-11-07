@@ -1,7 +1,7 @@
 //! Equines (`AbstractHorse`): wild animals can be tamed by riding; tame equines support saddles,
 //! horse armour, pack chests, llama carpets and treats. Horse movement speed, jump strength and
-//! health are randomized at spawn. Bucking still uses a per-tick probability approximation of
-//! `RunAroundLikeCrazyGoal` rather than that goal's timed run.
+//! health are randomized at spawn. Bucking follows `RunAroundLikeCrazyGoal`: while a wild equine
+//! carries a rider it rolls on the mob goal phase, every other game tick.
 
 use crate::mob::{self, MobKind, MobState};
 use crate::{EntityKey, EntityStore, Metadata, Rng};
@@ -20,6 +20,9 @@ const TAME: i8 = 2;
 const MAX_TEMPER: i32 = 100;
 /// Temper gained by every ride that did not tame (`RunAroundLikeCrazyGoal`).
 const TEMPER_STEP: i32 = 5;
+/// `RunAroundLikeCrazyGoal` rolls `nextInt(adjustedTickDelay(50))`. The goal does not require an
+/// update every tick, so `Goal.reducedTickDelay` halves it: `ceil(50 / 2) = 25`.
+const BUCK_ROLL: i32 = 25;
 /// The `EquipmentSlot` index of the saddle in a `set_equipment` packet.
 pub const SADDLE_SLOT: u8 = 7;
 /// The most health an equine is born with (`AbstractHorse.generateMaxHealth`).
@@ -237,14 +240,36 @@ pub enum Bucked {
     Tamed,
 }
 
-/// `RunAroundLikeCrazyGoal`, shortened: now and then an untamed horse with a rider rolls its
-/// temper against the maximum. It is tamed on success, otherwise the temper grows; either way
-/// the rider falls off. shortcut: a plain 1-in-50 chance per tick instead of the goal's timing.
-pub fn tick_rider(store: &mut EntityStore, key: EntityKey, rider: Uuid, rng: &mut Rng) -> Bucked {
+/// `Mob.serverAiStep` runs goal selectors in full only when `(tickCount + id)` is even; on other
+/// ticks it only updates goals that require an update every tick. `RunAroundLikeCrazyGoal` does
+/// not override `requiresUpdateEveryTick`, so its roll lands once every two game ticks.
+fn buck_goal_tick(tick_count: u32, id: i32) -> bool {
+    tick_count.wrapping_add(id as u32).is_multiple_of(2)
+}
+
+/// `RunAroundLikeCrazyGoal`: on every goal phase tick, a wild equine with a rider has a 1-in-25
+/// chance to compare its temper with the taming threshold (`nextInt(getMaxTemper()) < temper`);
+/// a hit tames it, a miss gains 5 temper and ejects the rider. `rider` is `None` once the horse
+/// is dismounted, which stops the goal without touching temper or ownership.
+pub fn tick_rider(
+    store: &mut EntityStore,
+    key: EntityKey,
+    rider: Option<Uuid>,
+    rng: &mut Rng,
+) -> Bucked {
+    let Some(rider) = rider else {
+        return Bucked::No;
+    };
+    let Some((tick_count, id)) = store.data(key).map(|data| (data.tick_count, data.id)) else {
+        return Bucked::No;
+    };
+    if !buck_goal_tick(tick_count, id) {
+        return Bucked::No;
+    }
     let Some(state) = mob::state_mut(store, key) else {
         return Bucked::No;
     };
-    if !state.kind.is_equine() || state.owner.is_some() || rng.next_int(50) != 0 {
+    if !state.kind.is_equine() || state.owner.is_some() || rng.next_int(BUCK_ROLL) != 0 {
         return Bucked::No;
     }
     if rng.next_int(MAX_TEMPER) < state.temper {
@@ -280,10 +305,11 @@ mod tests {
         let mut rng = Rng::new(7);
         let mut tamed = false;
         for _ in 0..200_000 {
-            if tick_rider(&mut store, key, rider, &mut rng) == Bucked::Tamed {
+            if tick_rider(&mut store, key, Some(rider), &mut rng) == Bucked::Tamed {
                 tamed = true;
                 break;
             }
+            store.data_mut(key).unwrap().tick_count += 1;
         }
         assert!(tamed);
         assert_eq!(mob::state(&store, key).unwrap().owner, Some(rider));
@@ -312,6 +338,116 @@ mod tests {
             lost < 10.0 && lost > 7.0,
             "iron armour absorbs part of a hit, lost {lost}"
         );
+    }
+
+    /// A seed whose first `rides` buck rolls hit and whose temper rolls all fail against the
+    /// temper gained so far, consuming the rolls exactly like `tick_rider`.
+    fn seed_that_bucks(rides: usize) -> u64 {
+        (1..=1_000_000)
+            .find(|&seed| {
+                let mut rng = Rng::new(seed);
+                (0..rides).all(|ride| {
+                    if rng.next_int(BUCK_ROLL) != 0 {
+                        return false;
+                    }
+                    rng.next_int(MAX_TEMPER) >= TEMPER_STEP * ride as i32
+                })
+            })
+            .expect("a seed that hits the buck roll")
+    }
+
+    /// Moves `tick_count` to a game tick where `Mob.serverAiStep` runs the goal selector.
+    fn goal_phase(store: &mut EntityStore, key: EntityKey) {
+        let id = store.data(key).unwrap().id;
+        store.data_mut(key).unwrap().tick_count = id as u32 & 1;
+    }
+
+    #[test]
+    fn buck_attempts_follow_the_two_tick_goal_phase() {
+        let mut store = EntityStore::default();
+        let key = horse(&mut store);
+        let rider = Uuid::from_u128(5);
+        let mut rng = Rng::new(seed_that_bucks(1));
+        let id = store.data(key).unwrap().id;
+        // On the off tick `serverAiStep` only updates every-tick goals, so no roll happens.
+        store.data_mut(key).unwrap().tick_count = (id as u32 & 1) ^ 1;
+        assert_eq!(
+            tick_rider(&mut store, key, Some(rider), &mut rng),
+            Bucked::No
+        );
+        assert_eq!(mob::state(&store, key).unwrap().temper, 0);
+        // The next game tick is the goal phase and the first buck roll hits.
+        store.data_mut(key).unwrap().tick_count += 1;
+        assert_eq!(
+            tick_rider(&mut store, key, Some(rider), &mut rng),
+            Bucked::Wild
+        );
+        assert_eq!(mob::state(&store, key).unwrap().temper, TEMPER_STEP);
+    }
+
+    #[test]
+    fn bucking_continues_on_later_goal_ticks() {
+        let mut store = EntityStore::default();
+        let key = horse(&mut store);
+        let rider = Uuid::from_u128(5);
+        goal_phase(&mut store, key);
+        let mut rng = Rng::new(seed_that_bucks(2));
+        // The first ride throws the player; the test remounts for the next goal phase.
+        assert_eq!(
+            tick_rider(&mut store, key, Some(rider), &mut rng),
+            Bucked::Wild
+        );
+        assert_eq!(mob::state(&store, key).unwrap().temper, TEMPER_STEP);
+        store.data_mut(key).unwrap().tick_count += 2;
+        assert_eq!(
+            tick_rider(&mut store, key, Some(rider), &mut rng),
+            Bucked::Wild
+        );
+        assert_eq!(mob::state(&store, key).unwrap().temper, TEMPER_STEP * 2);
+    }
+
+    #[test]
+    fn a_tamed_horse_stops_bucking() {
+        let mut store = EntityStore::default();
+        let key = horse(&mut store);
+        let rider = Uuid::from_u128(5);
+        goal_phase(&mut store, key);
+        mob::state_mut(&mut store, key).unwrap().temper = MAX_TEMPER;
+        let mut rng = Rng::new(seed_that_bucks(1));
+        assert_eq!(
+            tick_rider(&mut store, key, Some(rider), &mut rng),
+            Bucked::Tamed
+        );
+        assert_eq!(mob::state(&store, key).unwrap().owner, Some(rider));
+        for _ in 0..20 {
+            store.data_mut(key).unwrap().tick_count += 1;
+            assert_eq!(
+                tick_rider(&mut store, key, Some(rider), &mut rng),
+                Bucked::No
+            );
+        }
+        assert_eq!(mob::state(&store, key).unwrap().owner, Some(rider));
+        assert_eq!(mob::state(&store, key).unwrap().temper, MAX_TEMPER);
+    }
+
+    #[test]
+    fn a_dismounted_wild_horse_never_rolls() {
+        let mut store = EntityStore::default();
+        let key = horse(&mut store);
+        goal_phase(&mut store, key);
+        let rider = Uuid::from_u128(5);
+        let mut rng = Rng::new(seed_that_bucks(1));
+        assert_eq!(tick_rider(&mut store, key, None, &mut rng), Bucked::No);
+        assert_eq!(mob::state(&store, key).unwrap().temper, 0);
+        // A buck throws the rider; the following tick has no passenger and cannot roll again.
+        assert_eq!(
+            tick_rider(&mut store, key, Some(rider), &mut rng),
+            Bucked::Wild
+        );
+        let temper = mob::state(&store, key).unwrap().temper;
+        store.data_mut(key).unwrap().tick_count += 2;
+        assert_eq!(tick_rider(&mut store, key, None, &mut rng), Bucked::No);
+        assert_eq!(mob::state(&store, key).unwrap().temper, temper);
     }
 
     #[test]

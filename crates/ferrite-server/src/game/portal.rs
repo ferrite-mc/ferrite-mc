@@ -319,32 +319,40 @@ pub fn create_portal(source: &AnvilChunkSource, pos: [f64; 3]) -> Option<[f64; 3
         dimension.min_y() + 8,
         dimension.min_y() + dimension.height() - 8,
     );
-    // Require the destination chunk to be loaded before editing it.
-    let loaded = source
-        .with_loaded_chunk(x.div_euclid(16), z.div_euclid(16), |_| ())
-        .is_some();
-    if !loaded {
-        return None;
+    // Check every chunk touched by the clear-and-build area before publishing any changes. A
+    // portal near a chunk edge spans two chunks along X; checking only its center can otherwise
+    // clear the loaded half before the first write to the missing half fails.
+    let first_chunk_x = (x - 2).div_euclid(16);
+    let last_chunk_x = (x + 3).div_euclid(16);
+    let chunk_z = z.div_euclid(16);
+    for chunk_x in first_chunk_x..=last_chunk_x {
+        source.with_loaded_chunk(chunk_x, chunk_z, |_| ())?;
     }
     let obsidian = ferrite_data::blocks::default_state(OBSIDIAN)?;
     let portal = portal_state(Axis::X)?;
-    // A 2x3 interior at x..x+1, y..y+2, z, surrounded by obsidian and an air approach.
+
+    // A 2x3 interior at x..x+1, y..y+2, z, surrounded by obsidian and an air approach. Build
+    // the final state map first, then publish it as one compare-set batch so any concurrent edit,
+    // cache-capacity failure, or encoding error leaves the whole frame untouched.
+    let mut final_blocks = std::collections::BTreeMap::new();
     for dx in -2..=3 {
         for dy in -2..=4 {
-            if !PortalWorld::set_block(source, x + dx, y + dy, z, 0) {
-                return None;
-            }
+            final_blocks.insert([x + dx, y + dy, z], 0_u32);
         }
     }
     for dx in -1..=2 {
         for dy in -1..=3 {
             let edge = dx == -1 || dx == 2 || dy == -1 || dy == 3;
             let state = if edge { obsidian } else { portal };
-            if !PortalWorld::set_block(source, x + dx, y + dy, z, state) {
-                return None;
-            }
+            final_blocks.insert([x + dx, y + dy, z], u32::from(state));
         }
     }
+    let changes: Option<Vec<_>> = final_blocks
+        .into_iter()
+        .map(|(position @ [x, y, z], state)| Some((position, source.block(x, y, z)?, state)))
+        .collect();
+    source.compare_set_blocks(&changes?).ok()?;
+
     Some([f64::from(x) + 1.0, f64::from(y), f64::from(z) + 0.5])
 }
 
@@ -352,6 +360,7 @@ pub fn create_portal(source: &AnvilChunkSource, pos: [f64; 3]) -> Option<[f64; 3
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     struct MapWorld {
         blocks: std::cell::RefCell<HashMap<(i32, i32, i32), u16>>,
@@ -377,6 +386,83 @@ mod tests {
 
     fn obsidian() -> u16 {
         ferrite_data::blocks::default_state(OBSIDIAN).expect("obsidian state")
+    }
+
+    async fn load_chunk(source: &Arc<AnvilChunkSource>, x: i32, z: i32) {
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(x, z, 0) {
+                result.expect("chunk load");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("chunk ({x}, {z}) never loaded");
+    }
+
+    #[tokio::test]
+    async fn portal_creation_is_atomic_when_a_footprint_chunk_is_unloaded() {
+        let stone = ferrite_data::blocks::default_state("minecraft:stone").unwrap();
+        let obsidian = obsidian();
+        let portal = portal_state(Axis::X).unwrap();
+
+        for x in [15_i32, -17] {
+            let source = AnvilChunkSource::new_memory_dimension(None, Dimension::Nether);
+            let center_chunk = x.div_euclid(16);
+            load_chunk(&source, center_chunk, 0).await;
+
+            let footprint: Vec<_> = (x - 2..=x + 3)
+                .flat_map(|x| (64 - 2..=64 + 4).map(move |y| [x, y, 0]))
+                .collect();
+            let center_footprint: Vec<_> = footprint
+                .iter()
+                .copied()
+                .filter(|[x, _, _]| x.div_euclid(16) == center_chunk)
+                .collect();
+            for [x, y, z] in &center_footprint {
+                source
+                    .set_block(*x, *y, *z, u32::from(stone))
+                    .expect("seed center chunk");
+            }
+
+            assert_eq!(
+                create_portal(&source, [f64::from(x), 64.0, 0.0]),
+                None,
+                "a missing footprint chunk must defer portal creation"
+            );
+            for [x, y, z] in &center_footprint {
+                assert_eq!(
+                    source.block(*x, *y, *z),
+                    Some(u32::from(stone)),
+                    "failed creation must leave ({x}, {y}, {z}) unchanged"
+                );
+            }
+
+            let footprint_chunks: std::collections::BTreeSet<_> = footprint
+                .iter()
+                .map(|[x, _, z]| (x.div_euclid(16), z.div_euclid(16)))
+                .collect();
+            for (chunk_x, chunk_z) in footprint_chunks {
+                load_chunk(&source, chunk_x, chunk_z).await;
+            }
+
+            assert!(create_portal(&source, [f64::from(x), 64.0, 0.0]).is_some());
+            for dx in -1..=2 {
+                for dy in -1..=3 {
+                    let expected = if dx == -1 || dx == 2 || dy == -1 || dy == 3 {
+                        obsidian
+                    } else {
+                        portal
+                    };
+                    assert_eq!(
+                        source.block(x + dx, 64 + dy, 0),
+                        Some(u32::from(expected)),
+                        "portal block at ({}, {}, 0)",
+                        x + dx,
+                        64 + dy
+                    );
+                }
+            }
+        }
     }
 
     fn frame_world(width: i32, height: i32) -> MapWorld {

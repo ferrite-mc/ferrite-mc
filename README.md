@@ -93,8 +93,26 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 
 ## 해야 할 일
 
-- 플러그인 브리지 완성(NMS 호환 포함), 피스톤 마무리(움직이는 피스톤 블록·애니메이션), 엔드 드래곤 행동 패턴·수정 재소환·저장, 고양이·말 등 나머지 동물과 볼트, 실제 클라이언트 검증
-- 최적화 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
+- 다음 게임·호환성 작업은 파일 소유권을 분리해 병렬 진행: 플러그인 브리지 완성(NMS 호환 포함),
+  움직이는 피스톤 블록·애니메이션, 엔드 드래곤 행동·수정 재소환·크레딧·전투 상태 저장 점검,
+  고양이·말 등 나머지 동물과 볼트.
+- 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
+  피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI, 플러그인 동작을 통합 서버에서 확인.
+- 최적화 조사 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [최적화 모드팩](https://modrinth.com/modpack/server-optimizationn),
-  [최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization)
-- 모든 작업을 병렬 처리
+  [최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization),
+  [Pumpkin Rust 서버](https://github.com/Pumpkin-MC/Pumpkin),
+  [Pumpkin PatchBukkit 브리지](https://github.com/Pumpkin-MC/PatchBukkit).
+  한국어 조사 메모: [`optimization-references.md`](docs/handoff/2026-11-07-game-systems/optimization-references.md).
+  최적화와 브리지 설계 참고 자료로 조사하고, 구현·호환성을 그대로 가정하지 않는다.
+
+## 후속 로드맵
+
+- [Advanced Slime World Manager (ASWM)](https://github.com/Paul19988/Advanced-Slime-World-Manager) /
+  [Advanced Slime Paper](https://github.com/InfernalSuite/AdvancedSlimePaper) 참고해 Slime Region Format
+  월드 로드·저장·전환 및 플러그인 연동을 구현한다.
+- **마지막 단계:** Java 호스트를 대체할 Rust 월드젠을 구현한다. 바닐라 26.3 대조와 기존 사용자
+  월드젠 호스트 병행을 완료한 뒤 진행한다.
+
+Rust 월드젠을 제외한 작업은 독립된 파일 소유권과 명시적인 인수 조건을 정해 병렬 처리한다.
+현재 세션과 다음 독립 트랙: [`parallel-work-plan.md`](docs/handoff/2026-11-07-game-systems/parallel-work-plan.md).

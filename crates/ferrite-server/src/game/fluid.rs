@@ -8,6 +8,8 @@ pub(super) struct RegionFluidWorld<'a> {
     pub(super) source: &'a AnvilChunkSource,
     held: &'a HashMap<ChunkPos, usize>,
     tracking: &'a Tracking,
+    water_conversion: bool,
+    lava_conversion: bool,
 }
 impl<'a> RegionFluidWorld<'a> {
     pub fn new(
@@ -15,10 +17,21 @@ impl<'a> RegionFluidWorld<'a> {
         held: &'a HashMap<ChunkPos, usize>,
         tracking: &'a Tracking,
     ) -> Self {
+        Self::with_source_rules(source, held, tracking, true, false)
+    }
+    pub fn with_source_rules(
+        source: &'a AnvilChunkSource,
+        held: &'a HashMap<ChunkPos, usize>,
+        tracking: &'a Tracking,
+        water_conversion: bool,
+        lava_conversion: bool,
+    ) -> Self {
         Self {
             source,
             held,
             tracking,
+            water_conversion,
+            lava_conversion,
         }
     }
     pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -69,7 +82,13 @@ impl FluidWorld for RegionFluidWorld<'_> {
         );
     }
     fn ultrawarm(&self) -> bool {
-        false
+        self.source.dimension() == super::dimension::Dimension::Nether
+    }
+    fn lava_conversion(&self) -> bool {
+        self.lava_conversion
+    }
+    fn water_conversion(&self) -> bool {
+        self.water_conversion
     }
 }
 
@@ -81,6 +100,33 @@ mod tests {
         collections::HashMap,
         sync::{Arc, Mutex},
     };
+
+    #[tokio::test]
+    async fn fluid_world_uses_dimension_and_source_conversion_rules() {
+        use super::super::dimension::Dimension;
+
+        let overworld = AnvilChunkSource::new_memory_dimension(None, Dimension::Overworld);
+        let nether = AnvilChunkSource::new_memory_dimension(None, Dimension::Nether);
+        let held = HashMap::new();
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let normal = RegionFluidWorld::with_source_rules(&overworld, &held, &tracking, false, true);
+        let hot = RegionFluidWorld::with_source_rules(&nether, &held, &tracking, true, false);
+
+        assert!(!normal.ultrawarm());
+        assert!(hot.ultrawarm());
+        assert!(!normal.water_conversion());
+        assert!(normal.lava_conversion());
+        assert!(hot.water_conversion());
+        assert!(!hot.lava_conversion());
+        assert_eq!(
+            ferrite_fluid::tick_delay(ferrite_fluid::FluidKind::Lava, normal.ultrawarm()),
+            30
+        );
+        assert_eq!(
+            ferrite_fluid::tick_delay(ferrite_fluid::FluidKind::Lava, hot.ultrawarm()),
+            10
+        );
+    }
     #[tokio::test]
     async fn missing_and_unowned_chunks_are_solid_and_not_loaded() {
         let source = super::super::anvil::AnvilChunkSource::new_memory();

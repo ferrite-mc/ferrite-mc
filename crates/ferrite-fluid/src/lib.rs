@@ -14,6 +14,10 @@ pub trait FluidWorld {
     fn lava_conversion(&self) -> bool {
         false
     }
+    /// Whether the water source conversion game rule is enabled.
+    fn water_conversion(&self) -> bool {
+        true
+    }
     /// Collision boxes in block-local coordinates; override for dynamic shapes.
     fn collision_shape(&self, x: i32, y: i32, z: i32) -> Vec<[f64; 6]> {
         u16::try_from(self.block(x, y, z))
@@ -253,13 +257,26 @@ pub fn can_pass_through(from: u32, to: u32) -> bool {
 
 /// Compute `FlowingFluid.java#getNewLiquid` without changing the world. Source
 /// support uses the extracted vanilla `BlockState.isSolid`; face occlusion uses [`can_pass_face`].
-/// `lava_conversion` is the lava source-conversion game rule.
+/// The boolean keeps the historical API meaning: lava source conversion. Water source conversion
+/// defaults to vanilla's enabled rule; tick simulation uses both world rules directly.
 pub fn get_new_liquid(
     world: &impl FluidWorld,
     x: i32,
     y: i32,
     z: i32,
     kind: FluidKind,
+    lava_conversion: bool,
+) -> FluidState {
+    get_new_liquid_with_rules(world, x, y, z, kind, true, lava_conversion)
+}
+
+pub(crate) fn get_new_liquid_with_rules(
+    world: &impl FluidWorld,
+    x: i32,
+    y: i32,
+    z: i32,
+    kind: FluidKind,
+    water_conversion: bool,
     lava_conversion: bool,
 ) -> FluidState {
     let empty = FluidState {
@@ -290,8 +307,13 @@ pub fn get_new_liquid(
             sources += u8::from(fluid.source);
         }
     }
+    let conversion_enabled = match kind {
+        FluidKind::Water => water_conversion,
+        FluidKind::Lava => lava_conversion,
+        FluidKind::Empty => false,
+    };
     if sources >= 2
-        && (kind == FluidKind::Water || lava_conversion)
+        && conversion_enabled
         && let Some(below_y) = y.checked_sub(1)
     {
         let below = world.block(x, below_y, z);

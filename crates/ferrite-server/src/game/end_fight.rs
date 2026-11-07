@@ -32,6 +32,8 @@ pub struct FightState {
     pub crystals: std::collections::BTreeSet<u8>,
     /// A dragon is flying (spawned or respawned and not dead yet).
     pub dragon_alive: bool,
+    /// Ticks remaining in the staged crystal respawn sequence; `None` means idle.
+    pub respawn_ticks: Option<u16>,
     /// The file was read (or found missing) already.
     pub loaded: bool,
     /// What the file holds right now, so only a change is written.
@@ -44,6 +46,7 @@ pub struct Saved {
     pub started: bool,
     pub killed: bool,
     pub dragon_alive: bool,
+    pub respawn_ticks: Option<u16>,
     pub gateways: u32,
     pub crystals: Vec<u8>,
 }
@@ -58,6 +61,9 @@ impl Saved {
             "dragon_alive".into(),
             Tag::Byte(i8::from(self.dragon_alive)),
         );
+        if let Some(ticks) = self.respawn_ticks {
+            c.insert("respawn_ticks".into(), Tag::Short(ticks as i16));
+        }
         c.insert(
             "gateways_opened".into(),
             Tag::Int(self.gateways.min(GATEWAY_COUNT) as i32),
@@ -76,6 +82,12 @@ impl Saved {
             started: flag("started"),
             killed: flag("previously_killed"),
             dragon_alive: flag("dragon_alive"),
+            respawn_ticks: match c.get("respawn_ticks") {
+                Some(Tag::Short(ticks)) => {
+                    Some(u16::try_from(*ticks).ok()?.min(RESPAWN_DELAY_TICKS))
+                }
+                _ => None,
+            },
             gateways: match c.get("gateways_opened") {
                 Some(Tag::Int(n)) => u32::try_from(*n).ok()?.min(GATEWAY_COUNT),
                 _ => 0,
@@ -106,6 +118,7 @@ impl FightState {
             started: self.started,
             killed: self.killed,
             dragon_alive: self.dragon_alive,
+            respawn_ticks: self.respawn_ticks,
             gateways: self.gateways.min(GATEWAY_COUNT),
             crystals: self.crystals.iter().copied().collect(),
         }
@@ -115,6 +128,7 @@ impl FightState {
         self.started = saved.started;
         self.killed = saved.killed;
         self.dragon_alive = saved.dragon_alive;
+        self.respawn_ticks = saved.respawn_ticks;
         self.gateways = saved.gateways.min(GATEWAY_COUNT);
         self.crystals = saved.crystals.iter().copied().collect();
         self.on_disk = Some(saved);
@@ -124,6 +138,48 @@ impl FightState {
 /// How many obsidian spikes ring the main island, and how far from the centre they stand.
 pub const SPIKE_COUNT: u8 = 10;
 pub const SPIKE_RADIUS: f64 = 42.0;
+
+/// Vanilla's crystal activation pause before the spike sequence begins.
+pub const RESPAWN_DELAY_TICKS: u16 = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RespawnAction {
+    None,
+    Started,
+    Interrupted,
+    Complete,
+}
+
+impl FightState {
+    /// Advances a respawn sequence only while all four correctly placed crystals remain present.
+    /// Starting does not consume a delay tick; the next 100 valid ticks complete it.
+    pub fn tick_respawn(&mut self, valid_crystal_layout: bool) -> RespawnAction {
+        if !self.killed || self.dragon_alive {
+            self.respawn_ticks = None;
+            return RespawnAction::None;
+        }
+        let Some(ticks) = self.respawn_ticks else {
+            if valid_crystal_layout {
+                self.respawn_ticks = Some(0);
+                return RespawnAction::Started;
+            }
+            return RespawnAction::None;
+        };
+        if !valid_crystal_layout {
+            self.respawn_ticks = None;
+            return RespawnAction::Interrupted;
+        }
+        let next = ticks.saturating_add(1);
+        if next >= RESPAWN_DELAY_TICKS {
+            self.respawn_ticks = None;
+            self.dragon_alive = true;
+            RespawnAction::Complete
+        } else {
+            self.respawn_ticks = Some(next);
+            RespawnAction::None
+        }
+    }
+}
 
 /// The column of spike number `index`: ten evenly spaced around the world origin.
 pub fn spike_column(index: u8) -> [i32; 2] {
@@ -429,10 +485,75 @@ mod respawn_tests {
             started: true,
             killed: true,
             dragon_alive: false,
+            respawn_ticks: None,
             gateways: u32::MAX,
             crystals: Vec::new(),
         };
         let restored = Saved::from_nbt(&oversized.to_nbt()).unwrap();
         assert_eq!(restored.gateways, GATEWAY_COUNT);
+    }
+
+    #[test]
+    fn respawn_waits_one_hundred_ticks_and_completes_once() {
+        let mut fight = FightState {
+            killed: true,
+            ..Default::default()
+        };
+        assert_eq!(fight.tick_respawn(true), RespawnAction::Started);
+        for _ in 0..RESPAWN_DELAY_TICKS - 1 {
+            assert_eq!(fight.tick_respawn(true), RespawnAction::None);
+        }
+        assert_eq!(fight.tick_respawn(true), RespawnAction::Complete);
+        assert!(fight.dragon_alive);
+        assert_eq!(fight.tick_respawn(true), RespawnAction::None);
+    }
+
+    #[test]
+    fn invalid_crystal_layout_does_not_start_or_interrupt_more_than_once() {
+        let mut fight = FightState {
+            killed: true,
+            ..Default::default()
+        };
+        assert_eq!(fight.tick_respawn(false), RespawnAction::None);
+        assert_eq!(fight.tick_respawn(true), RespawnAction::Started);
+        assert_eq!(fight.tick_respawn(false), RespawnAction::Interrupted);
+        assert_eq!(fight.tick_respawn(false), RespawnAction::None);
+    }
+
+    #[test]
+    fn respawn_delay_survives_a_saved_fight_round_trip() {
+        let fight = FightState {
+            started: true,
+            killed: true,
+            gateways: 7,
+            respawn_ticks: Some(37),
+            ..Default::default()
+        };
+        let saved = Saved::from_nbt(&fight.saved().to_nbt()).unwrap();
+        let mut resumed = FightState::default();
+        resumed.restore(saved);
+        assert_eq!(resumed.respawn_ticks, Some(37));
+        for _ in 0..RESPAWN_DELAY_TICKS - 37 - 1 {
+            assert_eq!(resumed.tick_respawn(true), RespawnAction::None);
+        }
+        assert_eq!(resumed.tick_respawn(true), RespawnAction::Complete);
+        assert_eq!(resumed.gateways, 7);
+        assert!(resumed.killed);
+    }
+
+    #[test]
+    fn an_old_saved_fight_without_respawn_fields_restores_idle() {
+        let mut old = Saved {
+            started: true,
+            killed: true,
+            dragon_alive: false,
+            respawn_ticks: None,
+            gateways: 2,
+            crystals: Vec::new(),
+        }
+        .to_nbt();
+        old.shift_remove("respawn_ticks");
+        let restored = Saved::from_nbt(&old).unwrap();
+        assert_eq!(restored.respawn_ticks, None);
     }
 }

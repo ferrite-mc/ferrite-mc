@@ -307,6 +307,17 @@ pub fn tick_with(
     players: &[Target],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
+    tick_with_owner_attacks(store, blocks, players, &[], rng)
+}
+
+/// Advances mob goals while allowing tamed wolves to target a mob their owner attacked this tick.
+pub fn tick_with_owner_attacks(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[Target],
+    owner_attacks: &[(Uuid, crate::EntityKey)],
+    rng: &mut Rng,
+) -> Vec<MobEvent> {
     let mut events = Vec::new();
     let player_positions: Vec<Vec3> = players.iter().map(|target| target.pos).collect();
     let owners: Vec<(Uuid, Vec3)> = players
@@ -484,7 +495,13 @@ pub fn tick_with(
                 None
             };
             let defend = if kind == MobKind::Wolf && angry_at.is_none() {
-                crate::tame::defend_target(store, key, &owners, start)
+                crate::tame::defend_target_with_owner_attack(
+                    store,
+                    key,
+                    &owners,
+                    owner_attacks,
+                    start,
+                )
             } else {
                 None
             };
@@ -937,6 +954,43 @@ mod tests {
         }
         let after = mob::state(&store, zombie).map_or(0.0, |m| m.health);
         assert!(after < before, "{after} >= {before}");
+    }
+
+    #[test]
+    fn a_tamed_wolf_bites_the_mob_its_owner_attacked() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(9);
+        let mut store = EntityStore::default();
+        let owner = Uuid::from_u128(42);
+        let wolf = store.insert(mob::new_mob(
+            MobKind::Wolf,
+            Vec3::new(3.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, wolf).unwrap().owner = Some(owner);
+        let attacked = store.insert(mob::new_mob(
+            MobKind::Cow,
+            Vec3::new(4.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, attacked).unwrap().no_ai = true;
+        let other = store.insert(mob::new_mob(
+            MobKind::Cow,
+            Vec3::new(4.5, 64.0, 1.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, other).unwrap().no_ai = true;
+        let players = [Target {
+            uuid: owner,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+        }];
+        let health = mob::state(&store, attacked).unwrap().health;
+        let other_health = mob::state(&store, other).unwrap().health;
+
+        tick_with_owner_attacks(&mut store, &world, &players, &[(owner, attacked)], &mut rng);
+
+        assert!(mob::state(&store, attacked).unwrap().health < health);
+        assert_eq!(mob::state(&store, other).unwrap().health, other_health);
     }
 
     #[test]

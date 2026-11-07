@@ -134,15 +134,24 @@ The profile is flat. 26.3 already restructured noise (`GradientNoise`, `DensityB
 permutation table would win a few percent at most. Threads were the large lever
 (4 -> 8 -> 16 = 60 -> 102 -> 153 chunks/s).
 
-## Rust worldgen (planned, requested 2026-11-07)
+## Rust worldgen (planned, requested 2026-11-08)
 
-**Who does this: the user, locally, on their own machine (needs their `eula=true`). Cloud/agent sessions
-must not start or change Rust worldgen code; this section is the plan only.**
+**Order: last, after the remaining gameplay/system work. This section records the plan only; do not
+start implementation early. When that phase begins, the coordinator may split independent
+algorithms into parallel workers with separate file ownership and integration tests.**
 
-Goal: move the hot parts of terrain generation out of the JVM host into Rust (`ferrite-world` /
-`ferrite-server::game::vanilla_gen`), one piece at a time, until the host is only needed for what is
-not yet ported. The policy above applies: each Rust piece is written **from the behaviour** (inputs
-and outputs measured on the user's own jar), never from Mojang's, decompiled or Paper-patch code.
+Goal: move the hot parts of terrain generation out of the JVM host into an independently written
+Rust implementation (`ferrite-world` / `ferrite-server::game::vanilla_gen`), one piece at a time,
+until the host is only needed for what is not yet ported. Parallelize by algorithm/data boundary
+(noise and density evaluation, surface rules, biome lookup, features/structures, lighting and chunk
+serialization), not by letting multiple workers edit the same core files. Each piece is specified
+from observable inputs and outputs measured against the user's local reference jar; do not copy or
+closely translate Mojang or third-party implementation code. Review licenses before reusing any
+external code. Performance work informed by C2ME- and Moonrise-style techniques happens in this same
+final Rust phase, alongside each corresponding algorithm, rather than as a later Java patch port.
+Use those projects to identify optimization targets (parallel chunk stages, scheduling, caches and
+I/O), check the version and license of each reference, and implement independently against
+Ferrite's ownership model and measured behavior.
 
 Order (by the JFR profile above, biggest first):
 
@@ -152,19 +161,25 @@ Order (by the JFR profile above, biggest first):
 3. Features (9%) and structures (3%): placed features and structure starts from the data pack.
 4. Lighting (4%) and chunk serialisation (11%): ferrite-world already owns the chunk format.
 
+Use [Cubiomes](https://github.com/Cubitect/cubiomes) as a research and comparison reference for
+biome/feature-generation behavior, version coverage, and test vectors. It is a C library focused on
+biome and feature generation, not a complete block-level terrain generator; check its current
+version coverage and license before relying on it. Do not copy its code into Ferrite without a
+separate license and provenance review.
+
 Per piece, the definition of done is the same as for patches: (1) a test compares the Rust output
 with the unmodified jar over many positions and seeds and finds **no difference**, (2) a
 measurement shows it is faster, (3) it runs behind a `[worldgen]` switch that falls back to the host.
 The host stays the reference and the fallback; nothing of Mojang's is copied into the repository.
 Needs the user's `eula=true` on the dev machine to produce the reference output.
 
-### Storage idea for the Rust world: ASWM / Slime-style single blob (note only, not implemented)
+### Storage idea for the Rust world: compressed world blob and in-memory chunk access (note only, not implemented)
 
 Requested 2026-11-07 as a **note to remember** for the new Rust worldgen. Nothing here is built, and
 **no database is being added** (no MySQL/Mongo/Redis); like the rest of this section it is the user's
 local work.
 
-The technique (as in Advanced Slime World Manager's Slime format):
+The desired model is informed by ASWM / Slime-style compressed world storage:
 
 - A world is **one compact, compressed blob** (chunks, block entities, entities and world data
   together, e.g. zstd) instead of a directory of per-chunk Anvil region files.
