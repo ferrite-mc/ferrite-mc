@@ -973,12 +973,16 @@ impl TraderSync<'_> {
         player.set_trader_offers(offers);
     }
 
-    /// Merges the sales the player made since the last refresh into the merchant.
+    /// Merges the sales the player made since the last refresh into the merchant and applies
+    /// the villager XP those sales earned.
     fn commit(&mut self, player: &mut Player) {
         let Some((trader, trades)) = player.open_trader() else {
             return;
         };
-        if merge_trader_trades(self.entities, player.uuid, trader, &trades) > 0 {
+        let xp = player.take_trader_xp();
+        let sold = merge_trader_trades(self.entities, player.uuid, trader, &trades);
+        if sold > 0 || xp > 0 {
+            add_trader_xp(self.entities, trader, xp);
             self.refresh(player);
         }
     }
@@ -1022,6 +1026,24 @@ fn merge_trader_trades(
         }
     }
     sold
+}
+
+/// Adds trade XP to a villager after its menu sales were merged. Wandering traders do not
+/// level up, so only `MobKind::Villager` records receive the XP.
+fn add_trader_xp(entities: &mut EntityStore, trader: Uuid, xp: i32) {
+    if xp <= 0 {
+        return;
+    }
+    let Some(key) = trader_key(entities, trader) else {
+        return;
+    };
+    if entities.data(key).is_some_and(|data| {
+        data.mob
+            .as_ref()
+            .is_some_and(|mob| mob.kind == MobKind::Villager)
+    }) {
+        ferrite_entity::villager::add_trade_xp(entities, key, xp);
+    }
 }
 
 impl Player {
@@ -4055,6 +4077,13 @@ impl Region {
     /// Ticks the modelled mobs: goals, movement, fall damage, despawn, natural spawning and
     /// death loot.
     fn tick_mobs(&mut self, ctx: &TickContext, blocks: &TickBlocks<'_>) {
+        // The villager schedule runs before AI so each villager has this tick's activity and
+        // destination. `/tick freeze` already guards this call at the region level.
+        let (day_time, game_time) = {
+            let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            (state.clock_time, state.game_time)
+        };
+        ferrite_entity::villager::tick_all(&mut self.entities, blocks, day_time, game_time);
         let positions: Vec<_> = self
             .players
             .values()
@@ -4612,14 +4641,16 @@ impl Region {
     fn sync_trades(&mut self) {
         let open: Vec<_> = self
             .players
-            .iter()
+            .iter_mut()
             .filter_map(|(player, p)| {
-                p.open_trader()
-                    .map(|(trader, trades)| (*player, trader, trades))
+                let (trader, trades) = p.open_trader()?;
+                let xp = p.take_trader_xp();
+                Some((*player, trader, trades, xp))
             })
             .collect();
-        for (player, trader, trades) in open {
+        for (player, trader, trades, xp) in open {
             merge_trader_trades(&mut self.entities, player, trader, &trades);
+            add_trader_xp(&mut self.entities, trader, xp);
         }
     }
 
@@ -7481,6 +7512,27 @@ mod tests {
     }
 
     #[test]
+    fn merchant_trade_xp_levels_the_villager() {
+        let mut store = ferrite_entity::EntityStore::default();
+        let key = store.insert(mob::new_mob(
+            mob::MobKind::Villager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        ));
+        let uuid = store.data(key).unwrap().uuid;
+        {
+            let villager = store.data_mut(key).unwrap().villager.as_mut().unwrap();
+            villager.profession = ferrite_entity::villager::Profession::Farmer;
+            villager.offers = ferrite_entity::villager::offers_for(villager.profession, 1, uuid);
+        }
+        add_trader_xp(&mut store, uuid, ferrite_entity::villager::NEXT_LEVEL_XP[0]);
+        let villager = store.data(key).unwrap().villager.as_ref().unwrap();
+        assert_eq!(villager.level, 2);
+        assert_eq!(villager.xp, ferrite_entity::villager::NEXT_LEVEL_XP[0]);
+        assert_eq!(villager.offers.len(), 4);
+    }
+
+    #[test]
     fn player_metadata_broadcast_stays_in_dimension_and_excludes_source() {
         let source = Uuid::from_u128(1);
         let viewer = Uuid::from_u128(2);
@@ -7554,6 +7606,68 @@ mod tests {
         assert!(mob::state(&region.entities, cow).unwrap().health < mob::MobKind::Cow.max_health());
         region.explode([8.5, 66.5, 8.5], 4.0, true, &ctx);
         assert_ne!(source.block(8, 65, 9), Some(stone));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn region_tick_assigns_a_villager_profession_and_schedule() {
+        use ferrite_math::Vec3;
+
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        let mut ready = false;
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ready, "chunk never loaded");
+        let composter =
+            u32::from(ferrite_data::blocks::default_state("minecraft:composter").unwrap());
+        source.set_block(2, 66, 0, composter).unwrap();
+
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let key = region.entities.insert(mob::new_mob(
+            mob::MobKind::Villager,
+            Vec3::new(0.5, 66.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        ));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(Mutex::new(super::super::commands::GameState::new(0, 0, 10)));
+        {
+            let mut state = state.lock().unwrap();
+            state.clock_time = 2000;
+            state.game_time = 2000;
+        }
+        let ctx = TickContext {
+            signals,
+            tracking: Default::default(),
+            source: Some(source),
+            dimension: super::super::Dimension::Overworld,
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state,
+            tree: None,
+        };
+        region.tick(&ctx);
+        let villager = region
+            .entities
+            .data(key)
+            .unwrap()
+            .villager
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            villager.profession,
+            ferrite_entity::villager::Profession::Farmer
+        );
+        assert_eq!(villager.workstation, Some([2, 66, 0]));
+        assert_eq!(villager.activity, ferrite_entity::villager::Activity::Work);
+        assert_eq!(villager.destination, Some([2, 66, 0]));
     }
 
     #[test]

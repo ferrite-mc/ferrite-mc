@@ -167,6 +167,15 @@ fn int(c: &Compound, key: &str) -> Option<i32> {
     }
 }
 
+fn long(c: &Compound, key: &str) -> Option<i64> {
+    match c.get(key) {
+        Some(Tag::Long(value)) => Some(*value),
+        Some(Tag::Int(value)) => Some(i64::from(*value)),
+        Some(Tag::Short(value)) => Some(i64::from(*value)),
+        _ => None,
+    }
+}
+
 fn float(c: &Compound, key: &str) -> Option<f32> {
     match c.get(key) {
         Some(Tag::Float(value)) => Some(*value),
@@ -259,7 +268,15 @@ fn villager_to_nbt(state: &ferrite_entity::villager::VillagerState, c: &mut Comp
     if let Some([x, y, z]) = state.workstation {
         c.insert("Workstation".into(), Tag::IntArray(vec![x, y, z]));
     }
-    c.insert("RestockTimer".into(), Tag::Int(state.restock_timer as i32));
+    if let Some([x, y, z]) = state.bed {
+        c.insert("Bed".into(), Tag::IntArray(vec![x, y, z]));
+    }
+    c.insert("LastRestock".into(), Tag::Long(state.last_restock));
+    c.insert(
+        "RestocksToday".into(),
+        Tag::Int(i32::from(state.restocks_today)),
+    );
+    c.insert("RestockDay".into(), Tag::Long(state.restock_day));
     c.insert(
         "SearchTimer".into(),
         Tag::Int(i32::from(state.search_timer)),
@@ -337,9 +354,15 @@ fn villager_from_nbt(
         Some(Tag::IntArray(words)) if words.len() == 3 => Some([words[0], words[1], words[2]]),
         _ => None,
     };
-    state.restock_timer = int(c, "RestockTimer")
-        .unwrap_or(villager::RESTOCK_TICKS as i32)
-        .max(0) as u32;
+    state.bed = match c.get("Bed") {
+        Some(Tag::IntArray(words)) if words.len() == 3 => Some([words[0], words[1], words[2]]),
+        _ => None,
+    };
+    state.last_restock = long(c, "LastRestock").unwrap_or(-villager::RESTOCK_COOLDOWN_TICKS);
+    state.restocks_today = int(c, "RestocksToday")
+        .unwrap_or(0)
+        .clamp(0, i32::from(villager::RESTOCKS_PER_DAY)) as u8;
+    state.restock_day = long(c, "RestockDay").unwrap_or(-1);
     state.search_timer = int(c, "SearchTimer")
         .unwrap_or(0)
         .clamp(0, i32::from(u16::MAX)) as u16;
@@ -790,7 +813,10 @@ mod tests {
             state.level = 2;
             state.xp = 30;
             state.workstation = Some([2, 64, 3]);
-            state.restock_timer = 1234;
+            state.bed = Some([4, 64, 5]);
+            state.last_restock = 4321;
+            state.restocks_today = 1;
+            state.restock_day = 2;
             state.offers =
                 ferrite_entity::villager::offers_for(state.profession, state.level, uuid);
             state.offers[0].uses = 3;
@@ -818,7 +844,10 @@ mod tests {
         assert_eq!(state.level, 2);
         assert_eq!(state.xp, 30);
         assert_eq!(state.workstation, Some([2, 64, 3]));
-        assert_eq!(state.restock_timer, 1234);
+        assert_eq!(state.bed, Some([4, 64, 5]));
+        assert_eq!(state.last_restock, 4321);
+        assert_eq!(state.restocks_today, 1);
+        assert_eq!(state.restock_day, 2);
         assert_eq!(state.offers.len(), 4, "level 1 and 2 offers are restored");
         assert_eq!(state.offers[0].uses, 3);
         assert_eq!(state.offers[0].demand, 2);

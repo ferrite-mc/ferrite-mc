@@ -71,8 +71,10 @@ same block near a region boundary because there is no global POI table in this t
 
 ### Beds and meeting
 
-- An adult or baby without a bed searches up to 48 blocks horizontally and 4 vertically for an
-  unclaimed bed, canonicalizing head halves to the foot position.
+- An adult or baby without a bed searches up to 32 blocks horizontally and 4 vertically for an
+  unclaimed bed, canonicalizing head halves to the foot position. The shared pathfinder keeps 16
+  waypoints, so a distant destination may need a shorter path or a direct approach; this is a
+  known path-budget limit, not a silent teleport.
 - A bed has at most one owner in its region; a removed bed clears the claim.
 - During `Rest` the villager walks to its bed and stops there. The sleeping pose/occupied bed
   block state is not modelled.

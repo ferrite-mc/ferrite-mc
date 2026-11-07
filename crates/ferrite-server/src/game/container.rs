@@ -523,6 +523,20 @@ impl Player {
             .then(|| (*trader, menu.trades().to_vec()))
     }
 
+    /// Takes the villager XP accumulated by the open merchant menu, if it is a villager trade.
+    pub fn take_trader_xp(&mut self) -> i32 {
+        if !matches!(&self.menus.open_at, Some(OpenAt::Trader(_))) {
+            return 0;
+        }
+        let Some(menu) = self.menus.open.as_mut() else {
+            return 0;
+        };
+        if menu.kind() != ferrite_inventory::MenuKind::Merchant {
+            return 0;
+        }
+        menu.take_villager_xp()
+    }
+
     /// Replaces an open merchant screen's offers with the merchant's current state, so a click
     /// made after another viewer's purchase validates against newer uses and prices.
     pub fn set_trader_offers(&mut self, offers: Vec<ferrite_inventory::Trade>) {
