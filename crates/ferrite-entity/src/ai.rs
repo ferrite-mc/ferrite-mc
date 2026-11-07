@@ -62,17 +62,22 @@ const CARAVAN_SPEED: f64 = 2.1;
 const CARAVAN_LIMIT: usize = 10;
 
 /// Where the holder of a leashed animal is when it is more than six blocks away; a lead that
-/// stretches past twelve snaps. `None` when the animal is not on a lead, the holder is not in
-/// this region, or the lead is slack.
+/// stretches past twelve snaps. `None` when the animal is not on a lead or the lead is slack.
+///
+/// The holder may be a player in this region, another mob in this store (a wandering trader),
+/// or an entity owned by another region, whose last known position the caller passes in
+/// `holders`. A holder that is gone takes the lead with it: the mob clears it once and breaks.
 fn leash_pull(
     store: &mut EntityStore,
     key: crate::EntityKey,
     players: &[Target],
+    holders: &[(Uuid, Vec3)],
     start: Vec3,
     events: &mut Vec<MobEvent>,
 ) -> Option<Vec3> {
     let (holder, _) = mob::state(store, key)?.leash?;
-    // The holder is a player in this region, or another mob (a wandering trader).
+    // The holder is a player in this region, another mob, or an entity owned by another
+    // region whose position the server resolved into `holders`.
     let holder_pos = players
         .iter()
         .find(|t| t.uuid == holder)
@@ -84,7 +89,19 @@ fn leash_pull(
                 .copied()
                 .find(|&k| store.data(k).is_some_and(|d| d.uuid == holder))?;
             store.pos(k)
-        })?;
+        })
+        .or_else(|| {
+            holders
+                .iter()
+                .find(|(uuid, _)| *uuid == holder)
+                .map(|(_, pos)| *pos)
+        });
+    let Some(holder_pos) = holder_pos else {
+        // Removed, logged out or its region unloaded: never keep a stale holder.
+        mob::state_mut(store, key)?.leash = None;
+        events.push(MobEvent::LeashBroke { key });
+        return None;
+    };
     let dx = holder_pos.x - start.x;
     let dz = holder_pos.z - start.z;
     let distance = (dx * dx + dz * dz).sqrt();
@@ -305,6 +322,19 @@ pub fn tick_with(
     store: &mut EntityStore,
     blocks: &impl BlockGetter,
     players: &[Target],
+    rng: &mut Rng,
+) -> Vec<MobEvent> {
+    tick_with_holders(store, blocks, players, &[], rng)
+}
+
+/// Like [`tick_with`], with the last known positions of leash holders owned by other regions.
+/// A lead whose holder is not in this store and not one of `players` follows `holders` and
+/// snaps at the same distances as a local holder.
+pub fn tick_with_holders(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[Target],
+    holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
     let mut events = Vec::new();
@@ -554,7 +584,9 @@ pub fn tick_with(
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                     speed = 1.5;
                 }
-            } else if let Some(holder) = leash_pull(store, key, players, start, &mut events) {
+            } else if let Some(holder) =
+                leash_pull(store, key, players, holders, start, &mut events)
+            {
                 // A lead pulls its animal along once it is more than six blocks from the holder.
                 directed = true;
                 walking = Some(yaw_towards(holder.x - start.x, holder.z - start.z));
@@ -1140,6 +1172,95 @@ mod tests {
                 .any(|e| matches!(e, MobEvent::LeashBroke { key } if *key == far))
         );
         assert!(mob::state(&store, far).unwrap().leash.is_none());
+    }
+
+    #[test]
+    fn a_lead_follows_a_holder_in_another_region() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(9.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let holder = Uuid::from_u128(77);
+        mob::state_mut(&mut store, cow).unwrap().leash = Some((holder, 5));
+        let holders = [(holder, Vec3::new(0.5, 64.0, 0.5))];
+        let mut rng = Rng::new(2);
+        let before = store.pos(cow).unwrap().x;
+        for _ in 0..40 {
+            tick_with_holders(&mut store, &world, &[], &holders, &mut rng);
+        }
+        assert!(
+            store.pos(cow).unwrap().x < before,
+            "the lead drags the cow towards the other region"
+        );
+        assert!(
+            mob::state(&store, cow).unwrap().leash.is_some(),
+            "a reachable holder keeps the lead"
+        );
+    }
+
+    #[test]
+    fn a_lead_snaps_once_when_its_cross_region_holder_is_too_far() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(30.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let holder = Uuid::from_u128(78);
+        mob::state_mut(&mut store, cow).unwrap().leash = Some((holder, 5));
+        let holders = [(holder, Vec3::new(0.5, 64.0, 0.5))];
+        let mut rng = Rng::new(2);
+        let events = tick_with_holders(&mut store, &world, &[], &holders, &mut rng);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, MobEvent::LeashBroke { key } if *key == cow))
+                .count(),
+            1,
+            "the stretched lead snaps"
+        );
+        assert!(mob::state(&store, cow).unwrap().leash.is_none());
+        let again = tick_with_holders(&mut store, &world, &[], &holders, &mut rng);
+        assert!(
+            !again
+                .iter()
+                .any(|event| matches!(event, MobEvent::LeashBroke { key } if *key == cow)),
+            "a snapped lead does not break a second time"
+        );
+    }
+
+    #[test]
+    fn a_lead_breaks_once_when_its_holder_is_gone() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(9.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::state_mut(&mut store, cow).unwrap().leash = Some((Uuid::from_u128(79), 5));
+        let mut rng = Rng::new(2);
+        let events = tick_with_holders(&mut store, &world, &[], &[], &mut rng);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, MobEvent::LeashBroke { key } if *key == cow))
+                .count(),
+            1,
+            "a removed holder breaks the lead"
+        );
+        assert!(mob::state(&store, cow).unwrap().leash.is_none());
+        let again = tick_with_holders(&mut store, &world, &[], &[], &mut rng);
+        assert!(
+            !again
+                .iter()
+                .any(|event| matches!(event, MobEvent::LeashBroke { key } if *key == cow)),
+            "only one break event"
+        );
     }
 
     #[test]
