@@ -42,6 +42,7 @@ pub enum MobKind {
     EnderDragon,
     Wolf,
     Cat,
+    Parrot,
 }
 
 impl MobKind {
@@ -56,7 +57,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 13] = [
+    pub const ALL_MOBS: [Self; 14] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -70,6 +71,7 @@ impl MobKind {
         Self::EnderDragon,
         Self::Wolf,
         Self::Cat,
+        Self::Parrot,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -88,12 +90,13 @@ impl MobKind {
             Self::EnderDragon => "minecraft:ender_dragon",
             Self::Wolf => "minecraft:wolf",
             Self::Cat => "minecraft:cat",
+            Self::Parrot => "minecraft:parrot",
         }
     }
 
     /// Whether an owner can tame, seat and call this kind (`TamableAnimal`).
     pub fn is_tameable(self) -> bool {
-        matches!(self, Self::Wolf | Self::Cat)
+        matches!(self, Self::Wolf | Self::Cat | Self::Parrot)
     }
 
     /// Whether this kind hunts players (vanilla `Monster`/`Enemy`).
@@ -173,6 +176,7 @@ impl MobKind {
             // A wolf drops nothing.
             Self::Wolf => "",
             Self::Cat => "minecraft:entities/cat",
+            Self::Parrot => "minecraft:entities/parrot",
         }
     }
 
@@ -204,6 +208,7 @@ impl MobKind {
             Self::EnderDragon => "Ender Dragon",
             Self::Wolf => "Wolf",
             Self::Cat => "Cat",
+            Self::Parrot => "Parrot",
         }
     }
 

@@ -87,7 +87,20 @@ pub fn is_cat_food(item: &str) -> bool {
     )
 }
 
-/// Vanilla `Wolf.mobInteract` / `Cat.mobInteract`, taming and sitting only.
+/// Seeds, which tame parrots (`#minecraft:parrot_food`).
+pub fn is_parrot_food(item: &str) -> bool {
+    matches!(
+        item.strip_prefix("minecraft:").unwrap_or(item),
+        "wheat_seeds"
+            | "melon_seeds"
+            | "pumpkin_seeds"
+            | "beetroot_seeds"
+            | "torchflower_seeds"
+            | "pitcher_pod"
+    )
+}
+
+/// Vanilla `Wolf.mobInteract` / `Cat.mobInteract` / `Parrot.mobInteract`, taming and sitting only.
 pub fn use_on(
     store: &mut EntityStore,
     key: EntityKey,
@@ -101,16 +114,10 @@ pub fn use_on(
     if !state.kind.is_tameable() {
         return Used::No;
     }
-    let (tamer, tame_health) = match state.kind {
-        MobKind::Cat => ("minecraft:cod", 20.0),
-        _ => ("minecraft:bone", TAMED_HEALTH),
-    };
-    let cat = state.kind == MobKind::Cat;
-    let tames = item == tamer || (cat && item == "minecraft:salmon");
-    let food = if cat {
-        is_cat_food(item)
-    } else {
-        is_wolf_food(item)
+    let (tame_health, tames, food) = match state.kind {
+        MobKind::Cat => (20.0, is_cat_food(item), is_cat_food(item)),
+        MobKind::Parrot => (6.0, is_parrot_food(item), is_parrot_food(item)),
+        _ => (TAMED_HEALTH, item == "minecraft:bone", is_wolf_food(item)),
     };
     let used = match state.owner {
         None if tames => {
@@ -251,6 +258,32 @@ mod tests {
         );
         mob::state_mut(&mut store, wolf).unwrap().sitting = true;
         assert!(defend_target(&store, wolf, &owners, from).is_none());
+    }
+
+    #[test]
+    fn seeds_tame_a_parrot_but_it_never_breeds() {
+        let mut rng = Rng::new(3);
+        let mut store = EntityStore::default();
+        let key = store.insert(mob::new_mob(
+            MobKind::Parrot,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let player = Uuid::from_u128(1);
+        assert_eq!(
+            crate::breed::feed(&mut store, key, "minecraft:wheat_seeds", player),
+            crate::breed::Fed::No
+        );
+        let mut tries = 0;
+        while use_on(&mut store, key, "minecraft:wheat_seeds", player, &mut rng) != Used::Tamed {
+            tries += 1;
+            assert!(tries < 100);
+        }
+        assert_eq!(mob::state(&store, key).unwrap().owner, Some(player));
+        assert_eq!(
+            crate::breed::feed(&mut store, key, "minecraft:wheat_seeds", player),
+            crate::breed::Fed::No
+        );
     }
 
     #[test]
