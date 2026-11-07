@@ -4123,12 +4123,19 @@ impl Region {
         }
         let mut reconnected = Vec::new();
         for (holder, pos, id, session) in current {
-            if table.get(&holder).is_some_and(|entry| {
-                matches!(
-                    (entry.session, session),
-                    (Some(old), Some(new)) if old != new
-                )
-            }) {
+            let old_id = table
+                .get(&holder)
+                .and_then(|entry| match (entry.session, session) {
+                    (Some(old), Some(new)) if old != new => Some(entry.id),
+                    _ => None,
+                });
+            // Keep blocking the old session while a lead still points at its entity id. If
+            // only a newly attached lead remains, the old session's cache can be replaced.
+            if let Some(old_id) = old_id
+                && referenced.iter().any(|&(referenced_holder, stored)| {
+                    referenced_holder == holder && stored == old_id
+                })
+            {
                 reconnected.push(holder);
                 continue;
             }
@@ -8118,6 +8125,24 @@ mod tests {
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
         region.tick_mobs(&ctx, &blocks);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
+
+        // Once the stale lead is gone, the reconnected session can attach a new lead.
+        mob::state_mut(&mut region.entities, cow).unwrap().leash = Some((holder, 456));
+        assert_eq!(
+            region.leash_holders(&ctx).get(&holder).copied(),
+            Some((ferrite_math::Vec3::new(7.5, 64.0, 0.5), 456)),
+            "the new session can be leashed again"
+        );
+        region.tick_mobs(&ctx, &blocks);
+        assert!(
+            mob::state(&region.entities, cow).unwrap().leash.is_some(),
+            "the new lead survives"
+        );
+        assert_eq!(
+            dropped_leads(&region),
+            1,
+            "the old break is not repeated for the new lead"
+        );
     }
 
     #[test]
