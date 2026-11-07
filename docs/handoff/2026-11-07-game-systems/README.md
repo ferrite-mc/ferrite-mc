@@ -22,10 +22,11 @@ ASWM / Advanced Slime World Manager and Rust world generation are not assigned i
 
 ## Coordinator audit — 2026-11-08
 
-The completed wave is integrated on `yxshadxw/plan1104`: End staged respawn, wandering-trader
+The completed wave is integrated on `main` at `a34e8dd`: End staged respawn, wandering-trader
 lifecycle, structure transformers, equine pack/death behavior, cat/parrot taming, riptide viewer
 metadata, and the earlier map/projectile/plugin-event slices. Full Rust workspace tests, workspace
 clippy with warnings denied, formatting check, and the Java API Gradle suite passed after integration.
+The pushed `main` commit also passed Linux and Windows CI (`42398148054`).
 No real Minecraft client was available, so visual packet behavior remains unverified. Llama caravan
 parity, multi-world plugin block-entity access, and item PDC/flags remain future task specs (`26`,
 `28`, `29`). ASWM and Rust world generation remain excluded/deferred.

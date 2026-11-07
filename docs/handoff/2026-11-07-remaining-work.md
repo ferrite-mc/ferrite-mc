@@ -3,7 +3,9 @@
 ## 2026-11-08 integration audit
 
 This audit supersedes the initial open-item snapshot below for the items explicitly listed here.
-The integration is on `yxshadxw/plan1104`; final main push and remote CI confirmation are pending.
+The integration is on `main` at `a34e8dd`. GitHub CI run
+[`42398148054`](https://github.com/yxshadxw/ferrite-mc/actions/runs/42398148054) passed on both
+Windows and Linux.
 
 - Integrated End dragon staged respawn and saved phase (`7ad4e42`), wandering-trader lifecycle
   (`a3a1199`), structure block transformers (`09d7963`), horse equipment/death drops and pack
