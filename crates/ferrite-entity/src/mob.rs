@@ -43,6 +43,7 @@ pub enum MobKind {
     Wolf,
     Cat,
     Parrot,
+    Horse,
 }
 
 impl MobKind {
@@ -57,7 +58,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 14] = [
+    pub const ALL_MOBS: [Self; 15] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -72,6 +73,7 @@ impl MobKind {
         Self::Wolf,
         Self::Cat,
         Self::Parrot,
+        Self::Horse,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -91,6 +93,7 @@ impl MobKind {
             Self::Wolf => "minecraft:wolf",
             Self::Cat => "minecraft:cat",
             Self::Parrot => "minecraft:parrot",
+            Self::Horse => "minecraft:horse",
         }
     }
 
@@ -177,6 +180,7 @@ impl MobKind {
             Self::Wolf => "",
             Self::Cat => "minecraft:entities/cat",
             Self::Parrot => "minecraft:entities/parrot",
+            Self::Horse => "minecraft:entities/horse",
         }
     }
 
@@ -209,6 +213,7 @@ impl MobKind {
             Self::Wolf => "Wolf",
             Self::Cat => "Cat",
             Self::Parrot => "Parrot",
+            Self::Horse => "Horse",
         }
     }
 
@@ -278,6 +283,10 @@ pub struct MobState {
     pub following: bool,
     /// Ticks a wild wolf stays angry at its target (`NeutralMob` anger time).
     pub anger: u16,
+    /// A tame horse wears a saddle and can be steered.
+    pub saddled: bool,
+    /// How much a wild horse has come to accept riders (`AbstractHorse.temper`).
+    pub temper: i32,
 }
 
 impl MobState {
@@ -314,6 +323,8 @@ impl MobState {
             sitting: false,
             following: false,
             anger: 0,
+            saddled: false,
+            temper: 0,
         }
     }
 
@@ -354,6 +365,11 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         && let Some(state) = data.mob.as_ref()
     {
         crate::tame::define_metadata(&mut data.metadata, state);
+    }
+    if kind == MobKind::Horse
+        && let Some(state) = data.mob.as_ref()
+    {
+        crate::horse::define_metadata(&mut data.metadata, state);
     }
     if kind == MobKind::Villager {
         let state = crate::villager::VillagerState::new(

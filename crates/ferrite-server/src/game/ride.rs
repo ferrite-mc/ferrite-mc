@@ -15,6 +15,26 @@ use super::commands::{GameState, OnlinePlayer};
 const SEAT_LIFT: f64 = 0.6;
 
 static RIDES: Mutex<BTreeMap<Uuid, Uuid>> = Mutex::new(BTreeMap::new());
+/// Vehicles whose rider steers them from the client (a saddled horse): the vehicle follows the
+/// rider packets instead of the rider following the vehicle.
+static CONTROLLED: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
+
+/// Marks or unmarks `vehicle` as steered by its rider.
+pub fn set_controlled(vehicle: Uuid, controlled: bool) {
+    let mut all = CONTROLLED.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|v| *v != vehicle);
+    if controlled {
+        all.push(vehicle);
+    }
+}
+
+fn is_controlled(vehicle: Uuid) -> bool {
+    CONTROLLED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&vehicle)
+}
+
 static DISMOUNTS: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
 
 fn rides() -> MutexGuard<'static, BTreeMap<Uuid, Uuid>> {
@@ -183,6 +203,9 @@ pub fn plan(state: &GameState) -> Vec<Step> {
             steps.push(Step::Detach { vehicle });
             continue;
         };
+        if is_controlled(vehicle) {
+            continue;
+        }
         let to = [vehicle_pos[0], vehicle_pos[1] + SEAT_LIFT, vehicle_pos[2]];
         let moved = (0..3).any(|i| (rider_pos[i] - to[i]).abs() > 0.01);
         if moved {

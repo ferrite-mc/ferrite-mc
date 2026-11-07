@@ -175,6 +175,8 @@ impl Packet for PlayerInfo {
 packet!(ConfirmTeleport,0,Serverbound,{id:VarInt,x:f64,y:f64,z:f64,yaw:f32,pitch:f32});
 packet!(MovePosition,30,Serverbound,{x:f64,y:f64,z:f64,flags:u8});
 packet!(MovePositionRotation,31,Serverbound,{x:f64,y:f64,z:f64,yaw:f32,pitch:f32,flags:u8});
+// Vanilla `ServerboundMoveVehiclePacket`: where the client moved the vehicle it steers.
+packet!(ServerboundMoveVehicle,34,Serverbound,{x:f64,y:f64,z:f64,yaw:f32,pitch:f32,on_ground:bool});
 packet!(MoveRotation,32,Serverbound,{yaw:f32,pitch:f32,flags:u8});
 packet!(MoveFlags,33,Serverbound,{flags:u8});
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1998,6 +2000,15 @@ mod interaction_tests {
             data: VarInt(0),
         });
         roundtrip(PlayerInput { flags: 0b0110_0001 });
+        assert_eq!(ServerboundMoveVehicle::ID, 34);
+        roundtrip(ServerboundMoveVehicle {
+            x: 1.5,
+            y: 64.0,
+            z: -3.25,
+            yaw: 90.0,
+            pitch: 5.0,
+            on_ground: true,
+        });
         roundtrip(UpdateAttributes {
             entity_id: VarInt(3),
             attributes: vec![AttributeSnapshot {

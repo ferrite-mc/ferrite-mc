@@ -260,6 +260,8 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             c.insert("Owner".into(), Tag::IntArray(uuid_words(owner)));
         }
         c.insert("Sitting".into(), Tag::Byte(mob.sitting as i8));
+        c.insert("Saddled".into(), Tag::Byte(mob.saddled as i8));
+        c.insert("Temper".into(), Tag::Int(mob.temper));
         c.insert("InLove".into(), Tag::Int(i32::from(mob.love)));
         c.insert("WanderYaw".into(), Tag::Float(mob.wander_yaw));
         c.insert("Moving".into(), Tag::Byte(mob.moving as i8));
@@ -388,6 +390,11 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.love = int(c, "InLove").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
                 mob.owner = uuid_field(c, "Owner");
                 mob.sitting = boolean(c, "Sitting");
+                mob.saddled = boolean(c, "Saddled");
+                mob.temper = int(c, "Temper").unwrap_or(0);
+                if kind == MobKind::Horse {
+                    ferrite_entity::horse::define_metadata(&mut data.metadata, &mob);
+                }
                 if kind.is_animal() {
                     ferrite_entity::breed::define_metadata(&mut data.metadata, &mob);
                 }

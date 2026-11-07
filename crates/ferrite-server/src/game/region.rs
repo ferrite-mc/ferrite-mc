@@ -678,6 +678,8 @@ pub struct Player {
     pub using_bow: bool,
     /// The drawn item is a trident (thrown on release instead of an arrow).
     pub trident_draw: bool,
+    /// Where the client moved the horse it rides since the region last looked (x, y, z, yaw).
+    pub vehicle_moves: Vec<[f64; 4]>,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
     /// The dimension registry, used to swap the chunk source on a dimension change.
@@ -3637,6 +3639,21 @@ impl Player {
                         super::ride::request_dismount(self.uuid);
                     }
                 }
+                ServerboundPlay::MoveVehicle(p) => {
+                    let to = [p.x, p.y, p.z];
+                    if self.pending_teleport.is_none()
+                        && valid_move(start, to)
+                        && p.yaw.is_finite()
+                        && p.pitch.is_finite()
+                        && super::ride::vehicle_of(self.uuid).is_some()
+                    {
+                        self.pos = to;
+                        self.yaw = p.yaw;
+                        self.pitch = p.pitch;
+                        self.vehicle_moves.push([p.x, p.y, p.z, f64::from(p.yaw)]);
+                        changed = true;
+                    }
+                }
                 ServerboundPlay::PlayerCommand(p) => {
                     // Vanilla `ServerboundPlayerCommandPacket.Action.STOP_SLEEPING` (2).
                     if p.action.0 == 2 {
@@ -4340,6 +4357,13 @@ impl Region {
                 let slot = p.hand_slot(hand);
                 let held = p.inventory.get(slot).clone();
                 let name = held.name().unwrap_or("minecraft:air");
+                let gamemode = p.gamemode;
+                if ferrite_entity::mob::state(&self.entities, key)
+                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Horse)
+                    && self.use_horse(ctx, uuid, key, name, slot, gamemode)
+                {
+                    continue;
+                }
                 if ferrite_entity::breed::feed(&mut self.entities, key, name, uuid)
                     == ferrite_entity::breed::Fed::No
                 {
@@ -4372,11 +4396,175 @@ impl Region {
                 if held.is_empty() {
                     continue;
                 }
-                if p.gamemode != 1
+                if gamemode != 1
                     && let Some(p) = self.players.get_mut(&uuid)
                 {
                     p.inventory.set(slot, held.copy_with_count(held.count - 1));
                 }
+            }
+        }
+    }
+
+    /// A right-click on a horse: a saddle goes on a tame horse; anything else mounts it.
+    /// Returns whether the click was used up.
+    fn use_horse(
+        &mut self,
+        ctx: &TickContext,
+        uuid: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held == "minecraft:saddle" && ferrite_entity::horse::saddle(&mut self.entities, key) {
+            if gamemode != 1
+                && let Some(p) = self.players.get_mut(&uuid)
+            {
+                p.inventory.remove(slot, 1);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            self.send_saddle(ctx, key);
+            return true;
+        }
+        let Some(horse) = self.entities.data(key).map(|d| d.uuid) else {
+            return false;
+        };
+        if super::ride::mount(uuid, horse, false).is_err() {
+            return false;
+        }
+        let steerable = ferrite_entity::horse::is_steerable(&self.entities, key);
+        super::ride::set_controlled(horse, steerable);
+        if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+            state.no_ai = true;
+        }
+        if steerable {
+            self.send_saddle(ctx, key);
+        }
+        self.send_passengers(ctx, key);
+        true
+    }
+
+    /// Tells everyone tracking the horse it wears a saddle (the client only lets the rider
+    /// steer a saddled horse).
+    fn send_saddle(&self, ctx: &TickContext, key: ferrite_entity::EntityKey) {
+        let Some(id) = self.entities.data(key).map(|d| d.id) else {
+            return;
+        };
+        let Some(saddle) = ferrite_item::ItemStack::from_name("minecraft:saddle") else {
+            return;
+        };
+        let players = &self.players;
+        tracker::broadcast(
+            &self.entities,
+            key,
+            &SetEquipment {
+                entity_id: VarInt(id),
+                slots: vec![(ferrite_entity::horse::SADDLE_SLOT, saddle)],
+            },
+            &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+        );
+    }
+
+    /// Sends the horse's current rider list (empty after a dismount).
+    fn send_passengers(&self, ctx: &TickContext, key: ferrite_entity::EntityKey) {
+        let Some(data) = self.entities.data(key) else {
+            return;
+        };
+        let passengers = super::ride::passengers_of(data.uuid)
+            .into_iter()
+            .filter_map(|rider| self.players.get(&rider).map(|p| VarInt(p.entity)))
+            .collect();
+        let players = &self.players;
+        tracker::broadcast(
+            &self.entities,
+            key,
+            &SetPassengers {
+                vehicle: VarInt(data.id),
+                passengers,
+            },
+            &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+        );
+    }
+
+    /// Moves ridden horses to where their riders steered them, and lets wild horses buck or
+    /// accept their riders.
+    fn tick_horses(&mut self, ctx: &TickContext) {
+        let riders: Vec<Uuid> = self.players.keys().copied().collect();
+        for rider in riders {
+            let moves = self
+                .players
+                .get_mut(&rider)
+                .map(|p| std::mem::take(&mut p.vehicle_moves))
+                .unwrap_or_default();
+            let (Some(last), Some(vehicle)) = (moves.last(), super::ride::vehicle_of(rider)) else {
+                continue;
+            };
+            let Some(key) = self
+                .entities
+                .keys()
+                .iter()
+                .copied()
+                .find(|&k| self.entities.data(k).is_some_and(|d| d.uuid == vehicle))
+            else {
+                continue;
+            };
+            if ferrite_entity::horse::is_steerable(&self.entities, key) {
+                self.entities
+                    .set_pos(key, ferrite_math::Vec3::new(last[0], last[1], last[2]));
+                if let Some(data) = self.entities.data_mut(key) {
+                    data.yaw = last[3] as f32;
+                }
+            }
+        }
+        let horses: Vec<ferrite_entity::EntityKey> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&k| {
+                ferrite_entity::mob::state(&self.entities, k)
+                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Horse)
+            })
+            .collect();
+        for key in horses {
+            let Some(horse) = self.entities.data(key).map(|d| d.uuid) else {
+                continue;
+            };
+            let rider = super::ride::passengers_of(horse).into_iter().next();
+            let Some(rider) = rider else {
+                if ferrite_entity::mob::state(&self.entities, key).is_some_and(|s| s.no_ai) {
+                    super::ride::set_controlled(horse, false);
+                    if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                        state.no_ai = false;
+                    }
+                }
+                continue;
+            };
+            let outcome =
+                ferrite_entity::horse::tick_rider(&mut self.entities, key, rider, &mut self.rng);
+            if outcome != ferrite_entity::horse::Bucked::No {
+                super::ride::dismount(rider);
+                super::ride::set_controlled(horse, false);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = false;
+                }
+                self.send_passengers(ctx, key);
+                // Entity events: 7 hearts when tamed, 6 smoke when the horse threw its rider.
+                self.broadcast_status(
+                    ctx,
+                    key,
+                    if outcome == ferrite_entity::horse::Bucked::Tamed {
+                        7
+                    } else {
+                        6
+                    },
+                );
             }
         }
     }
@@ -6182,6 +6370,7 @@ impl Region {
         self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
+            self.tick_horses(ctx);
             self.land_tridents();
             self.tick_dragon_effects(ctx);
             self.tick_mobs(ctx, &blocks);

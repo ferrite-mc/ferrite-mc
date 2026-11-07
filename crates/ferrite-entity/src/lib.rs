@@ -26,6 +26,7 @@ pub mod dragon;
 pub mod effect;
 pub mod experience;
 pub mod falling;
+pub mod horse;
 mod id;
 mod index;
 pub mod item;

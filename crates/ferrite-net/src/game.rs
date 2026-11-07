@@ -16,6 +16,8 @@ pub enum ServerboundPlay {
     PlayerCommand(ServerboundPlayerCommand),
     /// Vanilla `ServerboundPlayerInputPacket`: the movement keys currently held.
     PlayerInput(PlayerInput),
+    /// Vanilla `ServerboundMoveVehiclePacket`: the vehicle a rider steers moved.
+    MoveVehicle(ferrite_protocol::packets::play::ServerboundMoveVehicle),
     /// Vanilla `ServerboundResourcePackPacket`: how the client is doing with a pushed pack.
     ResourcePackResponse(ResourcePackResponse),
     /// Vanilla `ServerboundCookieResponsePacket`: the answer to a cookie request.
@@ -320,6 +322,9 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         52 => Some(ServerboundPlay::SelectTrade(SelectTrade::decode(&mut b)?)),
         41 => Some(ServerboundPlay::PlayerAction(PlayerAction::decode(&mut b)?)),
         43 => Some(ServerboundPlay::PlayerInput(PlayerInput::decode(&mut b)?)),
+        34 => Some(ServerboundPlay::MoveVehicle(
+            ferrite_protocol::packets::play::ServerboundMoveVehicle::decode(&mut b)?,
+        )),
         21 => Some(ServerboundPlay::CookieResponse(CookieResponse::decode(
             &mut b,
         )?)),

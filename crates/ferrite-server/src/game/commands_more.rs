@@ -246,6 +246,7 @@ pub fn counts_as_activity(packet: &ferrite_net::game::ServerboundPlay) -> bool {
             | P::UseItemOn(_)
             | P::PlayerCommand(_)
             | P::PlayerInput(_)
+            | P::MoveVehicle(_)
             | P::SetHeldItem(_)
             | P::CreativeSlot(_)
             | P::ContainerClick(_)
