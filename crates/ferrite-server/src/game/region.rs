@@ -3006,20 +3006,34 @@ impl Player {
             }
             (super::Dimension::End, super::Dimension::Overworld) => Some(scaled),
             (super::Dimension::End, super::Dimension::End) => {
-                // A gateway: land on top of whatever the outer island offers there.
+                // Vanilla picks a spot on the nearest outer island rather than the exact point
+                // 1024 blocks out. Give the 3x3 chunks around the ideal point time to load,
+                // then search them for ground; an all-void neighbourhood cancels the trip.
                 let (x, z) = (scaled[0].floor() as i32, scaled[2].floor() as i32);
-                match super::end_fight::podium_floor(|y| target_source.block(x, y, z)) {
-                    None => None,
-                    Some(top) if top > 0 => {
-                        Some([f64::from(x) + 0.5, f64::from(top) + 1.0, f64::from(z) + 0.5])
+                let (chunk_x, chunk_z) = (x.div_euclid(16), z.div_euclid(16));
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        target_source.prefetch(chunk_x + dx, chunk_z + dz, self.biome);
                     }
-                    // Empty void out there: give up rather than drop the player into it.
-                    Some(_) => {
+                }
+                let landing = super::end_fight::gateway_landing([x, z], |x, y, z| {
+                    target_source.block(x, y, z)
+                });
+                if landing.is_none() {
+                    let loaded = (-1..=1).all(|dx| {
+                        (-1..=1).all(|dz| {
+                            target_source
+                                .with_loaded_chunk(chunk_x + dx, chunk_z + dz, |_| ())
+                                .is_some()
+                        })
+                    });
+                    if loaded {
                         self.portal_pending = None;
                         self.portal_cooldown = super::portal::COOLDOWN_TICKS;
                         return;
                     }
                 }
+                landing
             }
             _ => super::portal::find_portal(
                 target_source.as_ref(),
@@ -4870,6 +4884,7 @@ impl Region {
                 }
             }
         }
+        self.repair_end_structures(ctx);
         self.run_end_fight(ctx);
         let mut state = ctx.state.lock().unwrap();
         let fight = &mut state.more.end_fight;
@@ -4898,6 +4913,60 @@ impl Region {
                 tracing::warn!("could not save the dragon fight: {error:#}");
             }
             fight.on_disk = Some(now);
+        }
+    }
+
+    /// Restores the fixed End structures the saved fight says must exist: the exit portal after
+    /// a kill (the dragon can die in another region, or the server can stop between the fight
+    /// save and the block writes) and any opened gateway whose chunk this region holds.
+    fn repair_end_structures(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let (killed, dragon_alive, respawn_stage, exit_portal_level, gateways) = {
+            let state = ctx.state.lock().unwrap();
+            let fight = &state.more.end_fight;
+            (
+                fight.killed,
+                fight.dragon_alive,
+                fight.respawn_stage,
+                fight.exit_portal_level,
+                fight.gateways,
+            )
+        };
+        let mut blocks = Vec::new();
+        if self.held_chunks.contains_key(&ChunkPos(0, 0)) {
+            let portal = ferrite_data::blocks::default_state("minecraft:end_portal").map(u32::from);
+            let present = portal.is_some_and(|portal| {
+                exit_portal_level.is_some_and(|level| source.block(1, level, 0) == Some(portal))
+            });
+            if super::end_fight::needs_exit_portal(killed, dragon_alive, respawn_stage, present) {
+                let level = exit_portal_level
+                    .or_else(|| super::end_fight::podium_floor(|y| source.block(0, y, 0)));
+                if let Some(level) = level {
+                    ctx.state.lock().unwrap().more.end_fight.exit_portal_level = Some(level);
+                    blocks.extend(super::end_fight::podium_blocks([0, level, 0], true));
+                }
+            }
+        }
+        for index in 0..gateways {
+            let at = super::end_fight::gateway_position(index);
+            if !self
+                .held_chunks
+                .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+            {
+                continue;
+            }
+            let present = source
+                .block(at[0], at[1], at[2])
+                .and_then(|state| u16::try_from(state).ok())
+                .is_some_and(super::portal::is_end_gateway);
+            if !present {
+                blocks.extend(super::end_fight::gateway_blocks(at));
+            }
+        }
+        if !blocks.is_empty() {
+            self.place_blocks(ctx, &blocks);
         }
     }
 
@@ -5237,31 +5306,8 @@ impl Region {
             .find(|&y| source.block(0, y, 0).is_some_and(|state| state != 0))
             .unwrap_or(63);
         let origin = [0, floor, 0];
-        let mut placed = super::end_fight::podium_blocks(origin, true);
-        if let Some(egg) = super::end_fight::dragon_egg() {
-            placed.push((super::end_fight::egg_position(origin), egg));
-        }
-        {
-            let mut world =
-                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
-            for (at, state) in &placed {
-                let chunk = ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16));
-                if !self.held_chunks.contains_key(&chunk) {
-                    continue;
-                }
-                ferrite_fluid::FluidWorld::set_block(
-                    &mut world,
-                    at[0],
-                    at[1],
-                    at[2],
-                    u32::from(*state),
-                );
-            }
-        }
-        for (at, _) in &placed {
-            self.updates.block_changed(*at);
-        }
         let first;
+        let gateway;
         {
             let mut state = ctx.state.lock().unwrap();
             let fight = &mut state.more.end_fight;
@@ -5269,12 +5315,13 @@ impl Region {
             fight.dragon_alive = false;
             fight.exit_portal_level = Some(floor);
             fight.abort_respawn();
-            // The next gateway of the ring opens; chunks that are not loaded keep the old air.
-            if let Some(at) = fight.open_next_gateway() {
-                for ([x, y, z], block) in super::end_fight::gateway_blocks(at) {
-                    let _ = source.set_block(x, y, z, u32::from(block));
-                }
-            }
+            // The next gateway of the ring opens; a chunk that is not loaded here keeps the old
+            // air and `repair_end_structures` writes the gateway once it is loaded.
+            gateway = fight.open_next_gateway();
+        }
+        self.place_blocks(ctx, &super::end_fight::dragon_death_blocks(origin, first));
+        if let Some(at) = gateway {
+            self.place_blocks(ctx, &super::end_fight::gateway_blocks(at));
         }
         for record in experience::award(pos, super::end_fight::dragon_experience(first) as i32) {
             self.entities.insert(record);

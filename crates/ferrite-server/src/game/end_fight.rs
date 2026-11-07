@@ -287,8 +287,20 @@ pub fn spike_column(index: u8) -> [i32; 2] {
     ]
 }
 
-/// The highest solid block of a column: where the exit podium or a spike top stands. `block`
-/// answers the state at a height, or `None` while the chunk is not loaded.
+/// The highest non-air block of a column, or `None` for a column that is all air (the void).
+/// `block` answers the state at a height, or `None` while the chunk is not loaded.
+pub fn highest_solid(mut block: impl FnMut(i32) -> Option<u32>) -> Option<i32> {
+    for y in (0..=255).rev() {
+        if block(y)? != 0 {
+            return Some(y);
+        }
+    }
+    None
+}
+
+/// The highest solid block of a column: where the exit podium or a spike top stands. An empty
+/// loaded column falls back to y 63, the island's approximate surface; an unloaded chunk stays
+/// `None` so the caller can retry.
 pub fn podium_floor(block: impl Fn(i32) -> Option<u32>) -> Option<i32> {
     for y in (0..=255).rev() {
         if block(y)? != 0 {
@@ -306,6 +318,28 @@ fn distance_squared(origin: [i32; 3], at: [i32; 3]) -> f64 {
         f64::from(at[2] - origin[2]),
     ];
     d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+}
+
+/// After a kill the podium becomes the exit portal. The dragon egg appears only on the very
+/// first kill of the world (vanilla `EnderDragonFight.dragonKilled`); later kills leave no egg.
+pub fn dragon_death_blocks(origin: [i32; 3], first_kill: bool) -> Vec<([i32; 3], u16)> {
+    let mut blocks = podium_blocks(origin, true);
+    if first_kill && let Some(egg) = dragon_egg() {
+        blocks.push((egg_position(origin), egg));
+    }
+    blocks
+}
+
+/// Whether the exit portal must be put back: the fight is over, no respawn is running, and the
+/// portal block at the remembered level is gone (a death in another region, or a save taken
+/// between the fight state and the block writes).
+pub fn needs_exit_portal(
+    killed: bool,
+    dragon_alive: bool,
+    respawn_stage: Option<RespawnStage>,
+    portal_present: bool,
+) -> bool {
+    killed && !dragon_alive && respawn_stage.is_none() && !portal_present
 }
 
 /// Vanilla `EndPodiumFeature`: the bedrock fountain around `origin`. With `active` the middle
@@ -437,6 +471,47 @@ pub fn egg_position(origin: [i32; 3]) -> [i32; 3] {
 
 pub fn dragon_egg() -> Option<u16> {
     default_state(DRAGON_EGG)
+}
+
+/// How far around the ideal gateway exit to look for the outer island.
+pub const GATEWAY_LANDING_RADIUS: i32 = 16;
+
+/// Where a player stepping into a gateway lands: the nearest loaded column with ground and two
+/// blocks of air above it, searched outward from the point 1024 blocks out. Vanilla searches
+/// the nearest outer island; the ideal point can be over the void between islands. `None`
+/// means no loaded column offered a safe landing.
+pub fn gateway_landing(
+    [center_x, center_z]: [i32; 2],
+    mut block: impl FnMut(i32, i32, i32) -> Option<u32>,
+) -> Option<[f64; 3]> {
+    for radius in 0..=GATEWAY_LANDING_RADIUS {
+        let mut best: Option<([i32; 3], i32)> = None;
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if radius > 0 && dx.abs() != radius && dz.abs() != radius {
+                    continue;
+                }
+                let (x, z) = (center_x + dx, center_z + dz);
+                let Some(top) = highest_solid(|y| block(x, y, z)) else {
+                    continue;
+                };
+                if !(1..=253).contains(&top)
+                    || block(x, top + 1, z) != Some(0)
+                    || block(x, top + 2, z) != Some(0)
+                {
+                    continue;
+                }
+                let distance = dx * dx + dz * dz;
+                if best.is_none_or(|(_, nearest)| distance < nearest) {
+                    best = Some(([x, top, z], distance));
+                }
+            }
+        }
+        if let Some(([x, top, z], _)) = best {
+            return Some([f64::from(x) + 0.5, f64::from(top) + 1.0, f64::from(z) + 0.5]);
+        }
+    }
+    None
 }
 
 /// The position of gateway number `index` (0-based, wrapping at twenty): vanilla spaces them
@@ -589,6 +664,60 @@ mod tests {
         assert_eq!(named(dragon_egg().unwrap()), DRAGON_EGG);
         assert_eq!(dragon_experience(true), 12_000);
         assert_eq!(dragon_experience(false), 500);
+    }
+
+    #[test]
+    fn only_the_first_kill_leaves_a_dragon_egg() {
+        let first = layout(dragon_death_blocks([0, 64, 0], true));
+        assert_eq!(named(first[&[2, 64, 0]]), END_PORTAL);
+        assert_eq!(named(first[&[0, 68, 0]]), DRAGON_EGG);
+        let later = layout(dragon_death_blocks([0, 64, 0], false));
+        assert_eq!(named(later[&[2, 64, 0]]), END_PORTAL);
+        assert_eq!(later.get(&[0, 68, 0]), None, "the egg is not duplicated");
+    }
+
+    #[test]
+    fn a_void_column_has_no_top_but_the_podium_still_has_a_floor() {
+        assert_eq!(highest_solid(|_| Some(0)), None);
+        assert_eq!(podium_floor(|_| Some(0)), Some(63));
+        assert_eq!(highest_solid(|y| Some(u32::from(y <= 70))), Some(70));
+    }
+
+    #[test]
+    fn a_gateway_landing_finds_the_nearest_ground_and_skips_the_void() {
+        let mut ground = HashMap::new();
+        ground.insert((5, 0), 64);
+        ground.insert((-4, 4), 80);
+        // The nearer column is full to the build height, so there is no room to stand.
+        ground.insert((2, 0), 255);
+        let mut block = |x: i32, y: i32, z: i32| -> Option<u32> {
+            match ground.get(&(x, z)) {
+                Some(&top) if y == top => Some(1),
+                Some(&top) if y > top => Some(0),
+                _ => Some(0),
+            }
+        };
+        assert_eq!(
+            gateway_landing([0, 0], &mut block),
+            Some([-3.5, 81.0, 4.5]),
+            "the column without room and the farther one are skipped"
+        );
+        let mut void = |_: i32, _: i32, _: i32| Some(0);
+        assert_eq!(gateway_landing([0, 0], &mut void), None);
+    }
+
+    #[test]
+    fn the_exit_portal_is_repaired_only_after_the_dragon_is_gone() {
+        assert!(needs_exit_portal(true, false, None, false));
+        assert!(!needs_exit_portal(true, false, None, true));
+        assert!(!needs_exit_portal(false, false, None, false));
+        assert!(!needs_exit_portal(true, true, None, false));
+        assert!(!needs_exit_portal(
+            true,
+            false,
+            Some(RespawnStage::SummoningPillars),
+            false
+        ));
     }
 }
 

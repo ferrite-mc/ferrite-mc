@@ -20,6 +20,9 @@ pub struct Saved {
     pub yaw: f32,
     pub pitch: f32,
     pub gamemode: i32,
+    /// The End credits were already seen, so a first trip home does not replay them.
+    #[serde(default)]
+    pub seen_credits: bool,
     /// The dimension the player logged out in, as a dimension key. Older saves default to
     /// the overworld.
     #[serde(default = "default_dimension")]
@@ -76,6 +79,7 @@ impl Saved {
         pitch: f32,
         gamemode: i32,
         dimension: super::Dimension,
+        seen_credits: bool,
         inventory: &PlayerInventory,
     ) -> Self {
         let items = inventory
@@ -96,6 +100,7 @@ impl Saved {
             yaw,
             pitch,
             gamemode,
+            seen_credits,
             dimension: dimension.key().to_owned(),
             items,
             selected: inventory.selected_slot() as u8,
@@ -184,6 +189,7 @@ mod tests {
             0.0,
             0,
             crate::game::Dimension::Overworld,
+            false,
             &PlayerInventory::new(),
         );
         save_to(&dir, &uuid, &saved).unwrap();
@@ -217,11 +223,13 @@ mod tests {
             -15.0,
             1,
             crate::game::Dimension::Nether,
+            true,
             &inventory,
         );
         save_to(&dir, &uuid, &saved).unwrap();
         let loaded = load_from(&dir, &uuid).unwrap();
         assert_eq!(loaded, saved);
+        assert!(loaded.seen_credits);
         assert_eq!(loaded.inventory(), inventory);
         assert_eq!(loaded.inventory().get(ferrite_inventory::OFFHAND), &sword);
         let _ = std::fs::remove_dir_all(dir);
@@ -246,6 +254,7 @@ mod tests {
                 "items":[[99,"0101"],[3,"zz"]]}"#,
         )
         .unwrap();
+        assert!(!saved.seen_credits, "older saves have not seen the credits");
         let inventory = saved.inventory();
         assert_eq!(inventory.get(0).count, 5);
         assert_eq!(inventory.get(ferrite_inventory::HEAD).count, 1);
