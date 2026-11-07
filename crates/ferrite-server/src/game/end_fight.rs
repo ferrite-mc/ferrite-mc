@@ -5,6 +5,8 @@
 //! and the entities live elsewhere.
 
 use ferrite_data::blocks::{default_state, state_id};
+use ferrite_entity::EntityData;
+use ferrite_protocol::packets::play::MetaValue;
 
 const BEDROCK: &str = "minecraft:bedrock";
 const END_STONE: &str = "minecraft:end_stone";
@@ -19,6 +21,38 @@ pub const GATEWAY_Y: i32 = 75;
 /// How many gateways a fight can open before the ring repeats.
 pub const GATEWAY_COUNT: u32 = 20;
 
+/// The four vanilla `DragonRespawnStage`s. `End` is represented by `respawn_stage: None`
+/// after [`FightState::finish_respawn`] has run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RespawnStage {
+    Start,
+    PreparingToSummonPillars,
+    SummoningPillars,
+    SummoningDragon,
+}
+
+impl RespawnStage {
+    /// Vanilla's serialized stage name (`DragonRespawnStage.getSerializedName`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::PreparingToSummonPillars => "preparing_to_summon_pillars",
+            Self::SummoningPillars => "summoning_pillars",
+            Self::SummoningDragon => "summoning_dragon",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "start" => Self::Start,
+            "preparing_to_summon_pillars" => Self::PreparingToSummonPillars,
+            "summoning_pillars" => Self::SummoningPillars,
+            "summoning_dragon" => Self::SummoningDragon,
+            _ => return None,
+        })
+    }
+}
+
 /// What the server remembers of the fight while it runs.
 #[derive(Debug, Clone, Default)]
 pub struct FightState {
@@ -32,6 +66,12 @@ pub struct FightState {
     pub crystals: std::collections::BTreeSet<u8>,
     /// A dragon is flying (spawned or respawned and not dead yet).
     pub dragon_alive: bool,
+    /// The staged four-crystal respawn in flight, if any.
+    pub respawn_stage: Option<RespawnStage>,
+    /// Ticks spent in [`FightState::respawn_stage`], vanilla `respawnTime`.
+    pub respawn_ticks: u32,
+    /// The exit portal's y level, remembered after the portal is removed during the sequence.
+    pub exit_portal_level: Option<i32>,
     /// The file was read (or found missing) already.
     pub loaded: bool,
     /// What the file holds right now, so only a change is written.
@@ -46,6 +86,9 @@ pub struct Saved {
     pub dragon_alive: bool,
     pub gateways: u32,
     pub crystals: Vec<u8>,
+    pub respawn_stage: Option<RespawnStage>,
+    pub respawn_ticks: u32,
+    pub exit_portal_level: Option<i32>,
 }
 
 impl Saved {
@@ -58,6 +101,16 @@ impl Saved {
             "dragon_alive".into(),
             Tag::Byte(i8::from(self.dragon_alive)),
         );
+        if let Some(stage) = self.respawn_stage {
+            c.insert("respawn_stage".into(), Tag::String(stage.name().into()));
+        }
+        c.insert(
+            "respawn_time".into(),
+            Tag::Int(i32::try_from(self.respawn_ticks).unwrap_or(i32::MAX)),
+        );
+        if let Some(level) = self.exit_portal_level {
+            c.insert("exit_portal_level".into(), Tag::Int(level));
+        }
         c.insert(
             "gateways_opened".into(),
             Tag::Int(self.gateways.min(GATEWAY_COUNT) as i32),
@@ -76,6 +129,18 @@ impl Saved {
             started: flag("started"),
             killed: flag("previously_killed"),
             dragon_alive: flag("dragon_alive"),
+            respawn_stage: match c.get("respawn_stage") {
+                Some(Tag::String(name)) => RespawnStage::from_name(name),
+                _ => None,
+            },
+            respawn_ticks: match c.get("respawn_time") {
+                Some(Tag::Int(ticks)) if *ticks >= 0 => *ticks as u32,
+                _ => 0,
+            },
+            exit_portal_level: match c.get("exit_portal_level") {
+                Some(Tag::Int(level)) => Some(*level),
+                _ => None,
+            },
             gateways: match c.get("gateways_opened") {
                 Some(Tag::Int(n)) => u32::try_from(*n).ok()?.min(GATEWAY_COUNT),
                 _ => 0,
@@ -89,6 +154,88 @@ impl Saved {
 }
 
 impl FightState {
+    /// Starts vanilla's four-crystal respawn. The caller has already verified the layout.
+    pub fn begin_respawn(&mut self, exit_portal_level: i32) -> bool {
+        if !self.killed || self.dragon_alive || self.respawn_stage.is_some() {
+            return false;
+        }
+        self.respawn_stage = Some(RespawnStage::Start);
+        self.respawn_ticks = 0;
+        self.exit_portal_level = Some(exit_portal_level);
+        self.crystals.clear();
+        true
+    }
+
+    /// Vanilla `abortRespawnSequence`: stop the animation without spawning a dragon.
+    pub fn abort_respawn(&mut self) {
+        self.respawn_stage = None;
+        self.respawn_ticks = 0;
+    }
+
+    /// Vanilla `setRespawnStage(END)`: the dragon exists and the fight is running again.
+    pub fn finish_respawn(&mut self) {
+        self.respawn_stage = None;
+        self.respawn_ticks = 0;
+        self.dragon_alive = true;
+    }
+
+    /// Advances one vanilla stage tick. The returned actions are applied by the region; the state
+    /// machine itself never spawns entities or sends packets.
+    pub fn tick_respawn(&mut self) -> Vec<RespawnAction> {
+        let Some(stage) = self.respawn_stage else {
+            return Vec::new();
+        };
+        let time = self.respawn_ticks;
+        let mut actions = Vec::new();
+        match stage {
+            RespawnStage::Start => {
+                self.respawn_stage = Some(RespawnStage::PreparingToSummonPillars);
+                self.respawn_ticks = 0;
+                actions.push(RespawnAction::SetBeams(Some(RESPAWN_BEAM_TARGET)));
+            }
+            RespawnStage::PreparingToSummonPillars => {
+                if time >= RESPAWN_PREPARING_TICKS {
+                    self.respawn_stage = Some(RespawnStage::SummoningPillars);
+                    self.respawn_ticks = 0;
+                } else {
+                    if matches!(time, 0 | 50 | 51 | 52 | 95) {
+                        actions.push(RespawnAction::Roar);
+                    }
+                    self.respawn_ticks = time + 1;
+                }
+            }
+            RespawnStage::SummoningPillars => {
+                if time >= RESPAWN_PILLAR_TICKS {
+                    self.respawn_stage = Some(RespawnStage::SummoningDragon);
+                    self.respawn_ticks = 0;
+                } else {
+                    let index = (time / RESPAWN_PILLAR_INTERVAL) as u8;
+                    if time.is_multiple_of(RESPAWN_PILLAR_INTERVAL) {
+                        actions.push(RespawnAction::AimAtSpike { index });
+                    } else if time % RESPAWN_PILLAR_INTERVAL == RESPAWN_PILLAR_INTERVAL - 1 {
+                        actions.push(RespawnAction::RestoreSpike { index });
+                    }
+                    self.respawn_ticks = time + 1;
+                }
+            }
+            RespawnStage::SummoningDragon => {
+                if time >= RESPAWN_SUMMONING_TICKS {
+                    self.respawn_stage = None;
+                    self.respawn_ticks = 0;
+                    actions.push(RespawnAction::SpawnDragon);
+                } else {
+                    if time == 0 {
+                        actions.push(RespawnAction::SetBeams(Some(RESPAWN_BEAM_TARGET)));
+                    } else if time < 5 || time == 80 {
+                        actions.push(RespawnAction::Roar);
+                    }
+                    self.respawn_ticks = time + 1;
+                }
+            }
+        }
+        actions
+    }
+
     /// Records and returns the next End gateway position. A fight opens each of the twenty
     /// vanilla gateways once; asking again after the ring is complete does not place duplicates.
     pub fn open_next_gateway(&mut self) -> Option<[i32; 3]> {
@@ -108,6 +255,9 @@ impl FightState {
             dragon_alive: self.dragon_alive,
             gateways: self.gateways.min(GATEWAY_COUNT),
             crystals: self.crystals.iter().copied().collect(),
+            respawn_stage: self.respawn_stage,
+            respawn_ticks: self.respawn_ticks,
+            exit_portal_level: self.exit_portal_level,
         }
     }
 
@@ -117,6 +267,9 @@ impl FightState {
         self.dragon_alive = saved.dragon_alive;
         self.gateways = saved.gateways.min(GATEWAY_COUNT);
         self.crystals = saved.crystals.iter().copied().collect();
+        self.respawn_stage = saved.respawn_stage;
+        self.respawn_ticks = saved.respawn_ticks;
+        self.exit_portal_level = saved.exit_portal_level;
         self.on_disk = Some(saved);
     }
 }
@@ -216,6 +369,65 @@ pub fn respawn_crystal_cells(level: i32) -> [[i32; 3]; 4] {
         [0, level + 1, 3],
         [0, level + 1, -3],
     ]
+}
+
+/// Vanilla `DragonRespawnStage` timings: 100 ticks preparing, one spike every 40 ticks for ten
+/// spikes, then 100 ticks summoning the dragon.
+pub const RESPAWN_PREPARING_TICKS: u32 = 100;
+pub const RESPAWN_PILLAR_INTERVAL: u32 = 40;
+pub const RESPAWN_PILLAR_TICKS: u32 = 400;
+pub const RESPAWN_SUMMONING_TICKS: u32 = 100;
+/// The beam target used by `START` and `SUMMONING_DRAGON` (vanilla `BlockPos(0, 128, 0)`).
+pub const RESPAWN_BEAM_TARGET: [i32; 3] = [0, 128, 0];
+/// Vanilla `LevelEvent.ANIMATION_DRAGON_SUMMON_ROAR` in 26.3.
+pub const DRAGON_SUMMON_ROAR_EVENT: i32 = 3001;
+/// `EndCrystal` synched data: optional beam target and whether the bottom is drawn.
+pub const END_CRYSTAL_BEAM_TARGET: u8 = 8;
+pub const END_CRYSTAL_SHOW_BOTTOM: u8 = 9;
+
+/// One action for the region to perform after a respawn stage tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RespawnAction {
+    SetBeams(Option<[i32; 3]>),
+    Roar,
+    AimAtSpike { index: u8 },
+    RestoreSpike { index: u8 },
+    SpawnDragon,
+}
+
+/// Picks one crystal from each of the four required cells. `None` means the layout is invalid
+/// and `tryRespawn` must not start.
+pub fn require_respawn_crystals<T>(
+    cells: [[i32; 3]; 4],
+    mut crystal_at: impl FnMut([i32; 3]) -> Option<T>,
+) -> Option<[T; 4]> {
+    Some([
+        crystal_at(cells[0])?,
+        crystal_at(cells[1])?,
+        crystal_at(cells[2])?,
+        crystal_at(cells[3])?,
+    ])
+}
+
+/// Sets an End crystal's beam target (and the placed-crystal `show_bottom = false`), mirroring
+/// vanilla `EndCrystal.setBeamTarget` + `EndCrystalItem.useOn`.
+pub fn set_crystal_beam(data: &mut EntityData, target: Option<[i32; 3]>) {
+    if data.metadata.get(END_CRYSTAL_BEAM_TARGET).is_none() {
+        data.metadata
+            .define(END_CRYSTAL_BEAM_TARGET, MetaValue::OptionalBlockPos(None));
+    }
+    if data.metadata.get(END_CRYSTAL_SHOW_BOTTOM).is_none() {
+        data.metadata
+            .define(END_CRYSTAL_SHOW_BOTTOM, MetaValue::Boolean(true));
+    }
+    data.metadata
+        .set(END_CRYSTAL_SHOW_BOTTOM, MetaValue::Boolean(false));
+    data.metadata.set(
+        END_CRYSTAL_BEAM_TARGET,
+        MetaValue::OptionalBlockPos(
+            target.map(|[x, y, z]| ferrite_protocol::types::BlockPos::new(x, y, z).pack()),
+        ),
+    );
 }
 
 /// Where the dragon egg appears once the dragon dies.
@@ -403,6 +615,9 @@ mod respawn_tests {
             started: true,
             killed: true,
             gateways: 3,
+            respawn_stage: Some(RespawnStage::SummoningPillars),
+            respawn_ticks: 39,
+            exit_portal_level: Some(64),
             ..Default::default()
         };
         fight.crystals.extend([0, 4, 9]);
@@ -411,6 +626,158 @@ mod respawn_tests {
         let mut fresh = FightState::default();
         fresh.restore(back);
         assert!(fresh.started && fresh.killed && fresh.crystals.len() == 3);
+        assert_eq!(fresh.respawn_stage, Some(RespawnStage::SummoningPillars));
+        assert_eq!(fresh.respawn_ticks, 39);
+        assert_eq!(fresh.exit_portal_level, Some(64));
+    }
+
+    #[test]
+    fn the_respawn_layout_requires_all_four_cells() {
+        let cells = respawn_crystal_cells(64);
+        assert_eq!(
+            require_respawn_crystals(cells, |cell| Some(cell)),
+            Some(cells)
+        );
+        for missing in 0..4 {
+            assert_eq!(
+                require_respawn_crystals(cells, |cell| (cell != cells[missing]).then_some(cell)),
+                None,
+                "missing cell {missing} must not start the sequence"
+            );
+        }
+    }
+
+    #[test]
+    fn the_respawn_stage_matches_vanilla_delay_and_event_order() {
+        let mut fight = FightState {
+            started: true,
+            killed: true,
+            ..Default::default()
+        };
+        assert!(fight.begin_respawn(64));
+        let mut events = Vec::new();
+        for tick in 1..=700 {
+            for action in fight.tick_respawn() {
+                events.push((tick, action));
+            }
+            if fight.respawn_stage.is_none() {
+                break;
+            }
+        }
+        let roars: Vec<u32> = events
+            .iter()
+            .filter(|(_, action)| *action == RespawnAction::Roar)
+            .map(|(tick, _)| *tick)
+            .collect();
+        assert_eq!(roars, vec![2, 52, 53, 54, 97, 505, 506, 507, 508, 584]);
+        let aimed: Vec<u8> = events
+            .iter()
+            .filter_map(|(_, action)| match action {
+                RespawnAction::AimAtSpike { index } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(aimed, (0..SPIKE_COUNT).collect::<Vec<_>>());
+        let restored: Vec<u8> = events
+            .iter()
+            .filter_map(|(_, action)| match action {
+                RespawnAction::RestoreSpike { index } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restored, (0..SPIKE_COUNT).collect::<Vec<_>>());
+        let spawns: Vec<u32> = events
+            .iter()
+            .filter_map(|(tick, action)| (*action == RespawnAction::SpawnDragon).then_some(*tick))
+            .collect();
+        assert_eq!(spawns, vec![604], "one dragon after the vanilla delay");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(_, action)| {
+                    *action == RespawnAction::SetBeams(Some(RESPAWN_BEAM_TARGET))
+                })
+                .map(|(tick, _)| *tick)
+                .collect::<Vec<_>>(),
+            vec![1, 504]
+        );
+        assert!(fight.tick_respawn().is_empty());
+        fight.finish_respawn();
+        assert!(fight.dragon_alive);
+        assert!(fight.tick_respawn().is_empty(), "the spawn is not repeated");
+    }
+
+    #[test]
+    fn an_interrupted_respawn_aborts_and_can_start_again() {
+        let mut fight = FightState {
+            started: true,
+            killed: true,
+            ..Default::default()
+        };
+        assert!(fight.begin_respawn(64));
+        for _ in 0..50 {
+            fight.tick_respawn();
+        }
+        assert_eq!(
+            fight.respawn_stage,
+            Some(RespawnStage::PreparingToSummonPillars)
+        );
+        fight.abort_respawn();
+        assert_eq!(fight.respawn_stage, None);
+        assert_eq!(fight.respawn_ticks, 0);
+        assert!(fight.tick_respawn().is_empty());
+        assert!(fight.begin_respawn(64), "the sequence can be retried");
+        assert_eq!(fight.respawn_stage, Some(RespawnStage::Start));
+    }
+
+    #[test]
+    fn a_saved_respawn_resumes_at_its_stage() {
+        let mut fight = FightState {
+            started: true,
+            killed: true,
+            gateways: 7,
+            ..Default::default()
+        };
+        assert!(fight.begin_respawn(64));
+        for _ in 0..102 {
+            fight.tick_respawn();
+        }
+        assert_eq!(fight.respawn_stage, Some(RespawnStage::SummoningPillars));
+        assert_eq!(fight.respawn_ticks, 0);
+        let saved = fight.saved();
+        let mut resumed = FightState::default();
+        resumed.restore(saved.clone());
+        assert_eq!(resumed.saved(), saved);
+        assert_eq!(resumed.respawn_stage, Some(RespawnStage::SummoningPillars));
+        assert_eq!(resumed.exit_portal_level, Some(64));
+        assert_eq!(resumed.gateways, 7);
+        assert!(resumed.killed && !resumed.dragon_alive);
+        assert!(matches!(
+            resumed.tick_respawn().as_slice(),
+            [RespawnAction::AimAtSpike { index: 0 }]
+        ));
+    }
+
+    #[test]
+    fn respawn_crystals_show_a_beam_and_hide_their_bottom() {
+        let mut crystal =
+            ferrite_entity::dragon::new_crystal(ferrite_math::Vec3::new(0.5, 65.0, 0.5));
+        set_crystal_beam(&mut crystal.data, Some([0, 128, 0]));
+        assert_eq!(
+            crystal.data.metadata.get(END_CRYSTAL_BEAM_TARGET),
+            Some(&MetaValue::OptionalBlockPos(Some(
+                ferrite_protocol::types::BlockPos::new(0, 128, 0).pack()
+            )))
+        );
+        assert_eq!(
+            crystal.data.metadata.get(END_CRYSTAL_SHOW_BOTTOM),
+            Some(&MetaValue::Boolean(false))
+        );
+        set_crystal_beam(&mut crystal.data, None);
+        assert_eq!(
+            crystal.data.metadata.get(END_CRYSTAL_BEAM_TARGET),
+            Some(&MetaValue::OptionalBlockPos(None))
+        );
     }
 
     #[test]
@@ -431,6 +798,9 @@ mod respawn_tests {
             dragon_alive: false,
             gateways: u32::MAX,
             crystals: Vec::new(),
+            respawn_stage: None,
+            respawn_ticks: 0,
+            exit_portal_level: None,
         };
         let restored = Saved::from_nbt(&oversized.to_nbt()).unwrap();
         assert_eq!(restored.gateways, GATEWAY_COUNT);

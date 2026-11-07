@@ -4355,8 +4355,27 @@ impl Region {
         self.run_end_fight(ctx);
         let mut state = ctx.state.lock().unwrap();
         let fight = &mut state.more.end_fight;
+        // Stage transitions are the durable checkpoints; saving the per-tick timer would rewrite
+        // the fight file 600 times during one respawn.
+        let stage = fight.respawn_stage;
+        let stage_changed = fight
+            .on_disk
+            .as_ref()
+            .is_none_or(|saved| saved.respawn_stage != stage);
+        // Spike crystals are restored one at a time; checkpoint those too, but not the timer.
+        let crystals_changed = fight.on_disk.as_ref().is_some_and(|saved| {
+            saved.crystals.len() != fight.crystals.len()
+                || saved
+                    .crystals
+                    .iter()
+                    .copied()
+                    .ne(fight.crystals.iter().copied())
+        });
         let now = fight.saved();
-        if fight.started && fight.on_disk.as_ref() != Some(&now) {
+        if fight.started
+            && (stage.is_none() || stage_changed || crystals_changed)
+            && fight.on_disk.as_ref() != Some(&now)
+        {
             if let Err(error) = source.save_fight(&now) {
                 tracing::warn!("could not save the dragon fight: {error:#}");
             }
@@ -4376,6 +4395,7 @@ impl Region {
                 return;
             };
             fight.started = true;
+            fight.exit_portal_level = Some(floor);
             let portal = ferrite_data::blocks::default_state("minecraft:end_portal");
             // A portal on the podium means an earlier dragon already died.
             if portal.is_some_and(|p| source.block(1, floor, 0) == Some(u32::from(p))) {
@@ -4393,45 +4413,57 @@ impl Region {
         if !fight.started {
             return;
         }
+        // A staged respawn keeps ticking after the exit portal was taken down. Only the region
+        // holding the origin owns the sequence; other End regions have no crystals in the four
+        // cells and must not mistake that for an aborted sequence.
+        if fight.respawn_stage.is_some() && self.held_chunks.contains_key(&ChunkPos(0, 0)) {
+            let Some(level) = fight.exit_portal_level else {
+                fight.abort_respawn();
+                return;
+            };
+            let keys: Vec<_> = super::end_fight::respawn_crystal_cells(level)
+                .iter()
+                .filter_map(|&cell| self.crystal_at(cell))
+                .collect();
+            if keys.is_empty() {
+                // Vanilla `abortRespawnSequence`: no tracked crystal survived, so put the exit
+                // portal back and leave the spike crystals to the normal placement pass.
+                fight.abort_respawn();
+                drop(state);
+                self.place_blocks(ctx, &super::end_fight::podium_blocks([0, level, 0], true));
+                return;
+            }
+            let actions = fight.tick_respawn();
+            drop(state);
+            self.apply_respawn_actions(ctx, &keys, actions);
+            return;
+        }
+
         // Four end crystals around the exit portal bring the dragon back (`tryRespawn`).
         if fight.killed && !fight.dragon_alive && self.held_chunks.contains_key(&ChunkPos(0, 0)) {
             let portal = ferrite_data::blocks::default_state("minecraft:end_portal").map(u32::from);
             let level = (0..=255).find(|&y| portal.is_some() && source.block(1, y, 0) == portal);
             if let Some(level) = level {
                 let cells = super::end_fight::respawn_crystal_cells(level);
-                let found: Vec<_> = cells
-                    .iter()
-                    .filter_map(|&[x, y, z]| {
-                        let cell = ferrite_math::AABB::new(
-                            f64::from(x),
-                            f64::from(y),
-                            f64::from(z),
-                            f64::from(x + 1),
-                            f64::from(y + 1),
-                            f64::from(z + 1),
-                        );
-                        self.entities
-                            .query_vec(cell)
-                            .into_iter()
-                            .find(|&key| ferrite_entity::dragon::is_crystal(&self.entities, key))
-                    })
-                    .collect();
-                if found.len() == cells.len() {
-                    fight.dragon_alive = true;
-                    fight.crystals.clear();
+                let found =
+                    super::end_fight::require_respawn_crystals(cells, |cell| self.crystal_at(cell));
+                if let Some(keys) = found {
+                    fight.begin_respawn(level);
+                    // Consume START now so the beams appear and the portal comes down this tick.
+                    let actions = fight.tick_respawn();
                     drop(state);
-                    // The spike crystals are placed again, so every old one goes.
+                    // Vanilla rebuilds the spike crystals one by one during the sequence.
+                    let keep: std::collections::BTreeSet<_> = keys.iter().copied().collect();
                     for key in self.entities.keys().to_vec() {
-                        if ferrite_entity::dragon::is_crystal(&self.entities, key)
+                        if !keep.contains(&key)
+                            && ferrite_entity::dragon::is_crystal(&self.entities, key)
                             && let Some(flags) = self.entities.flags_mut(key)
                         {
                             flags.set(ferrite_entity::Flags::REMOVED, true);
                         }
                     }
-                    let (spot, _) = ferrite_entity::dragon::position_at(0);
-                    let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
-                    self.entities.insert(dragon);
                     self.place_blocks(ctx, &super::end_fight::podium_blocks([0, level, 0], false));
+                    self.apply_respawn_actions(ctx, &keys, actions);
                     return;
                 }
             }
@@ -4468,6 +4500,118 @@ impl Region {
             self.entities.insert(record);
         }
     }
+    /// One end crystal whose box is inside the one-block respawn cell, if any.
+    fn crystal_at(&self, [x, y, z]: [i32; 3]) -> Option<ferrite_entity::EntityKey> {
+        let cell = ferrite_math::AABB::new(
+            f64::from(x),
+            f64::from(y),
+            f64::from(z),
+            f64::from(x + 1),
+            f64::from(y + 1),
+            f64::from(z + 1),
+        );
+        self.entities
+            .query_vec(cell)
+            .into_iter()
+            .find(|&key| ferrite_entity::dragon::is_crystal(&self.entities, key))
+    }
+
+    /// Applies the actions a staged respawn tick produced: the four crystals' beams, the fixed
+    /// summon roar, one restored spike crystal every 40 ticks, and the single final spawn.
+    fn apply_respawn_actions(
+        &mut self,
+        ctx: &TickContext,
+        keys: &[ferrite_entity::EntityKey],
+        actions: Vec<super::end_fight::RespawnAction>,
+    ) {
+        use super::end_fight::{RESPAWN_BEAM_TARGET, RespawnAction};
+        for action in actions {
+            match action {
+                RespawnAction::SetBeams(target) => {
+                    for &key in keys {
+                        if let Some(data) = self.entities.data_mut(key) {
+                            super::end_fight::set_crystal_beam(data, target);
+                        }
+                    }
+                }
+                RespawnAction::Roar => {
+                    let event = LevelEvent {
+                        event: super::end_fight::DRAGON_SUMMON_ROAR_EVENT,
+                        location: ferrite_protocol::types::BlockPos::new(
+                            RESPAWN_BEAM_TARGET[0],
+                            RESPAWN_BEAM_TARGET[1],
+                            RESPAWN_BEAM_TARGET[2],
+                        )
+                        .pack(),
+                        data: 0,
+                        global: false,
+                    };
+                    for player in self.players.values() {
+                        send(player, &event);
+                    }
+                }
+                RespawnAction::AimAtSpike { index } => {
+                    let [x, z] = super::end_fight::spike_column(index);
+                    let Some(top) = ctx.source.as_deref().and_then(|source| {
+                        super::end_fight::podium_floor(|y| source.block(x, y, z))
+                    }) else {
+                        continue;
+                    };
+                    for &key in keys {
+                        if let Some(data) = self.entities.data_mut(key) {
+                            super::end_fight::set_crystal_beam(data, Some([x, top + 1, z]));
+                        }
+                    }
+                }
+                RespawnAction::RestoreSpike { index } => {
+                    let [x, z] = super::end_fight::spike_column(index);
+                    if !self
+                        .held_chunks
+                        .contains_key(&ChunkPos(x.div_euclid(16), z.div_euclid(16)))
+                    {
+                        continue;
+                    }
+                    let Some(top) = ctx.source.as_deref().and_then(|source| {
+                        super::end_fight::podium_floor(|y| source.block(x, y, z))
+                    }) else {
+                        continue;
+                    };
+                    // A respawn resumed after a restart may already have this spike's crystal.
+                    if self.crystal_at([x, top + 1, z]).is_none() {
+                        self.entities.insert(ferrite_entity::dragon::new_crystal(
+                            ferrite_math::Vec3::new(
+                                f64::from(x) + 0.5,
+                                f64::from(top) + 1.0,
+                                f64::from(z) + 0.5,
+                            ),
+                        ));
+                    }
+                    ctx.state
+                        .lock()
+                        .unwrap()
+                        .more
+                        .end_fight
+                        .crystals
+                        .insert(index);
+                }
+                RespawnAction::SpawnDragon => {
+                    for &key in keys {
+                        if let Some(data) = self.entities.data_mut(key) {
+                            super::end_fight::set_crystal_beam(data, None);
+                        }
+                        if let Some(flags) = self.entities.flags_mut(key) {
+                            flags.set(ferrite_entity::Flags::REMOVED, true);
+                        }
+                    }
+                    let (spot, _) = ferrite_entity::dragon::position_at(0);
+                    let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
+                    self.entities.insert(dragon);
+                    ctx.state.lock().unwrap().more.end_fight.finish_respawn();
+                }
+            }
+        }
+    }
+
     /// Writes blocks into the chunks this region holds and tells the viewers.
     fn place_blocks(&mut self, ctx: &TickContext, blocks: &[([i32; 3], u16)]) {
         let Some(source) = ctx.source.as_deref() else {
@@ -4605,6 +4749,8 @@ impl Region {
             let fight = &mut state.more.end_fight;
             first = !std::mem::replace(&mut fight.killed, true);
             fight.dragon_alive = false;
+            fight.exit_portal_level = Some(floor);
+            fight.abort_respawn();
             // The next gateway of the ring opens; chunks that are not loaded keep the old air.
             if let Some(at) = fight.open_next_gateway() {
                 for ([x, y, z], block) in super::end_fight::gateway_blocks(at) {
