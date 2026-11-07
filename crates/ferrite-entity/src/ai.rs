@@ -336,7 +336,30 @@ pub fn tick_with(
             } else {
                 None
             };
-            if let Some(target) = angry_at {
+            let defend = if kind == MobKind::Wolf && angry_at.is_none() {
+                crate::tame::defend_target(store, key, &owners, start)
+            } else {
+                None
+            };
+            if let Some((victim, victim_pos)) = defend {
+                // A tamed wolf bites the monster hunting its owner.
+                directed = true;
+                let dx = victim_pos.x - start.x;
+                let dz = victim_pos.z - start.z;
+                if (dx * dx + dz * dz).sqrt() <= kind.attack_reach() {
+                    let ready =
+                        mob::state(store, key).is_some_and(|state| state.attack_cooldown == 0);
+                    if ready {
+                        mob::hurt(store, victim, crate::tame::TAMED_BITE, Some(start));
+                        if let Some(state) = mob::state_mut(store, key) {
+                            state.attack_cooldown = MELEE_COOLDOWN;
+                        }
+                    }
+                } else {
+                    walking = follow_path(store, key, blocks, start, victim_pos);
+                    speed = CHASE_ACCELERATION;
+                }
+            } else if let Some(target) = angry_at {
                 // A wild wolf chases and bites the player who hurt it.
                 directed = true;
                 let dx = target.pos.x - start.x;
@@ -703,6 +726,42 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_tamed_wolf_bites_the_zombie_hunting_its_owner() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(5);
+        let mut store = EntityStore::default();
+        let owner = Uuid::from_u128(1);
+        let wolf = store.insert(mob::new_mob(
+            MobKind::Wolf,
+            Vec3::new(2.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        {
+            let state = mob::state_mut(&mut store, wolf).unwrap();
+            state.owner = Some(owner);
+            state.sitting = false;
+        }
+        let zombie = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(4.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, zombie).unwrap().no_ai = true;
+        mob::state_mut(&mut store, zombie).unwrap().target = Some(owner);
+        let targets = [Target {
+            uuid: owner,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+        }];
+        let before = mob::state(&store, zombie).unwrap().health;
+        for _ in 0..200 {
+            tick_with(&mut store, &world, &targets, &mut rng);
+            mob::state_mut(&mut store, zombie).unwrap().target = Some(owner);
+        }
+        let after = mob::state(&store, zombie).map_or(0.0, |m| m.health);
+        assert!(after < before, "{after} >= {before}");
     }
 
     #[test]

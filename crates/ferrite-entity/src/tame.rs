@@ -141,12 +141,97 @@ pub fn follow_target(
     following.then_some(*at)
 }
 
+/// Damage a tamed wolf bites for (`Wolf.setTame`: 4 attack damage once tamed).
+pub const TAMED_BITE: f32 = 4.0;
+/// A tamed wolf only defends an owner this close (`OwnerHurtByTargetGoal` target range).
+const DEFEND_RANGE_SQ: f64 = 16.0 * 16.0;
+
+/// The hostile mob a tamed, standing wolf should fight: the nearest one hunting its owner while
+/// both are within 16 blocks (vanilla `OwnerHurtByTargetGoal`). shortcut: a mob hunting the owner
+/// stands in for "hurt the owner", and the owner hitting a mob (`OwnerHurtTargetGoal`) is not
+/// tracked yet.
+pub fn defend_target(
+    store: &EntityStore,
+    key: EntityKey,
+    owners: &[(Uuid, Vec3)],
+    from: Vec3,
+) -> Option<(EntityKey, Vec3)> {
+    let state = mob::state(store, key)?;
+    let owner = state.owner?;
+    if state.sitting {
+        return None;
+    }
+    let (_, at) = owners.iter().find(|(uuid, _)| *uuid == owner)?;
+    let near = |p: Vec3, o: Vec3| (p.x - o.x).powi(2) + (p.z - o.z).powi(2) <= DEFEND_RANGE_SQ;
+    if !near(*at, from) {
+        return None;
+    }
+    store
+        .keys()
+        .iter()
+        .copied()
+        .filter(|&other| other != key)
+        .filter_map(|other| {
+            let m = mob::state(store, other)?;
+            if m.is_dead() || !m.kind.is_hostile() || m.target != Some(owner) {
+                return None;
+            }
+            let pos = store.pos(other)?;
+            near(pos, from).then_some((other, pos))
+        })
+        .min_by(|a, b| {
+            let da = (a.1.x - from.x).powi(2) + (a.1.z - from.z).powi(2);
+            let db = (b.1.x - from.x).powi(2) + (b.1.z - from.z).powi(2);
+            da.total_cmp(&db)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn wolf(store: &mut EntityStore, rng: &mut Rng) -> EntityKey {
         store.insert(mob::new_mob(MobKind::Wolf, Vec3::new(0.5, 64.0, 0.5), rng))
+    }
+
+    #[test]
+    fn a_tamed_standing_wolf_picks_the_nearest_mob_hunting_its_owner() {
+        let mut rng = Rng::new(3);
+        let mut store = EntityStore::default();
+        let owner = Uuid::from_u128(1);
+        let wolf = wolf(&mut store, &mut rng);
+        {
+            let state = mob::state_mut(&mut store, wolf).unwrap();
+            state.owner = Some(owner);
+            state.sitting = false;
+        }
+        let near = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(4.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let far = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(9.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let idle = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(2.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        for key in [near, far] {
+            mob::state_mut(&mut store, key).unwrap().target = Some(owner);
+        }
+        let owners = [(owner, Vec3::new(0.5, 64.0, 0.5))];
+        let from = Vec3::new(0.5, 64.0, 0.5);
+        let _ = idle;
+        assert_eq!(
+            defend_target(&store, wolf, &owners, from).map(|t| t.0),
+            Some(near)
+        );
+        mob::state_mut(&mut store, wolf).unwrap().sitting = true;
+        assert!(defend_target(&store, wolf, &owners, from).is_none());
     }
 
     #[test]
