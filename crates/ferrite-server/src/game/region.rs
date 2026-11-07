@@ -4826,6 +4826,7 @@ impl Region {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .extend(shot);
+        let mut fires: Vec<[i32; 3]> = Vec::new();
         for landing in arrow::tick_thrown(&mut self.entities, &blocks, &players) {
             // Vanilla large fireball: a power-1 explosion that sets fires.
             if landing.kind == arrow::Kind::Fireball {
@@ -4854,8 +4855,15 @@ impl Region {
                     at.z + 1.0,
                 );
                 for key in self.entities.query_vec(reach) {
-                    mob::hurt(&mut self.entities, key, 5.0, Some(at));
+                    if mob::hurt(&mut self.entities, key, 5.0, Some(at)).is_some() {
+                        mob::ignite(&mut self.entities, key, 100);
+                    }
                 }
+                fires.push([
+                    at.x.floor() as i32,
+                    at.y.floor() as i32,
+                    at.z.floor() as i32,
+                ]);
             }
             if landing.kind == arrow::Kind::Egg {
                 ferrite_entity::breed::hatch_egg(&mut self.entities, landing.pos, &mut self.rng);
@@ -4870,6 +4878,9 @@ impl Region {
                     p.hurt(DamageKind::Fall, 5.0);
                 }
             }
+        }
+        for pos in fires {
+            self.ignite_block(pos, ctx);
         }
         // An arrow that reaches an end crystal breaks it and is used up.
         let mut blasts = Vec::new();
@@ -5465,7 +5476,14 @@ impl Region {
                 super::dispenser::Action::Splash { pos, stack } => {
                     self.splash_potion(pos, &stack);
                 }
-                super::dispenser::Action::Fire { pos } => self.ignite_block(pos, ctx),
+                super::dispenser::Action::Fire { pos, velocity } => {
+                    self.entities.insert(arrow::new_thrown(
+                        arrow::Kind::SmallFireball,
+                        ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                        ferrite_math::Vec3::new(velocity[0], velocity[1], velocity[2]),
+                        None,
+                    ));
+                }
                 super::dispenser::Action::Nothing => {}
             }
         }

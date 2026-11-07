@@ -53,8 +53,8 @@ pub enum Action {
     },
     /// A splash or lingering potion to burst at the facing block.
     Splash { pos: [f64; 3], stack: ItemStack },
-    /// A fire charge to light the facing block.
-    Fire { pos: [i32; 3] },
+    /// A fire charge: a small fireball leaves the dispenser face (`DispenserBlock` fire charge).
+    Fire { pos: [f64; 3], velocity: [f64; 3] },
     /// A dropper (or an ordinary dispenser item) to eject.
     Drop {
         pos: [f64; 3],
@@ -197,7 +197,14 @@ pub fn dispense(source: &AnvilChunkSource, pos: [i32; 3], kind: Kind) -> Action 
             pos: center(pos, offset),
             stack: one(data.items[slot].clone()),
         },
-        "fire_charge" => Action::Fire { pos: target },
+        "fire_charge" => Action::Fire {
+            pos: center(pos, offset),
+            velocity: [
+                f64::from(offset[0]) * 0.3,
+                f64::from(offset[1]) * 0.3,
+                f64::from(offset[2]) * 0.3,
+            ],
+        },
         _ => return eject(&mut data, source, pos, kind, slot, offset),
     };
     data.items[slot].count -= 1;
@@ -411,10 +418,10 @@ mod tests {
         assert!(load(&source, [7, 70, 7]).items.iter().all(|s| s.is_empty()));
 
         put(&source, [7, 70, 7], Kind::Dispenser, "fire_charge");
-        assert_eq!(
+        assert!(matches!(
             dispense(&source, [7, 70, 7], Kind::Dispenser),
-            Action::Fire { pos: [8, 70, 7] }
-        );
+            Action::Fire { velocity, .. } if velocity[0] > 0.0 && velocity[1] == 0.0
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -450,6 +457,15 @@ mod tests {
         };
         let record = item_entity(&action, &mut rng).unwrap();
         assert_eq!(record.pos.y, 65.5);
-        assert!(item_entity(&Action::Fire { pos: [0, 0, 0] }, &mut rng).is_none());
+        assert!(
+            item_entity(
+                &Action::Fire {
+                    pos: [0.0; 3],
+                    velocity: [0.0; 3]
+                },
+                &mut rng
+            )
+            .is_none()
+        );
     }
 }

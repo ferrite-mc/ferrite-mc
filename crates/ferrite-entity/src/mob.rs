@@ -230,6 +230,8 @@ pub struct MobState {
     pub loot_dropped: bool,
     /// Vanilla `NoAI`: no goals, so the mob never walks, looks or attacks; gravity still applies.
     pub no_ai: bool,
+    /// Ticks the mob keeps burning (`Entity.remainingFireTicks`); it takes 1 damage a second.
+    pub fire: u16,
     /// Ticks until the wander goal picks a new direction; zero picks now.
     pub wander_timer: u32,
     /// Yaw the wander goal walks along, in degrees.
@@ -285,6 +287,7 @@ impl MobState {
             despawns: kind.despawns_when_far(),
             loot_dropped: false,
             no_ai: false,
+            fire: 0,
             wander_timer: 0,
             wander_yaw: 0.0,
             moving: false,
@@ -540,9 +543,24 @@ pub fn tick_clock(store: &mut EntityStore, key: EntityKey) {
         return;
     };
     data.tick_count = data.tick_count.saturating_add(1);
+    let mut burn = false;
     if let Some(mob) = &mut data.mob {
         mob.hurt_time = mob.hurt_time.saturating_sub(1);
         mob.no_action_time = mob.no_action_time.saturating_add(1);
+        if mob.fire > 0 {
+            mob.fire -= 1;
+            burn = mob.fire % 20 == 0;
+        }
+    }
+    if burn {
+        hurt(store, key, 1.0, None);
+    }
+}
+
+/// Sets a mob on fire for `ticks` (vanilla `Entity.igniteForSeconds`); it keeps the longer time.
+pub fn ignite(store: &mut EntityStore, key: EntityKey, ticks: u16) {
+    if let Some(mob) = state_mut(store, key) {
+        mob.fire = mob.fire.max(ticks);
     }
 }
 
@@ -652,6 +670,20 @@ mod tests {
             hurt(&mut store, key, 2.0, None),
             Some(Hurt::Survived { health: 7.0 })
         );
+    }
+
+    #[test]
+    fn a_burning_mob_takes_one_damage_a_second_and_stops_after_its_time() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(MobKind::Cow, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        ignite(&mut store, key, 100);
+        for _ in 0..100 {
+            tick_clock(&mut store, key);
+        }
+        let state = state(&store, key).unwrap();
+        assert_eq!(state.fire, 0);
+        assert_eq!(state.health, MobKind::Cow.max_health() - 5.0);
     }
 
     #[test]
