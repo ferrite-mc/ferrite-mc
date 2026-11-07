@@ -1258,6 +1258,25 @@ fn add_trader_xp(entities: &mut EntityStore, trader: Uuid, xp: i32) {
 }
 
 impl Player {
+    /// Sends the riptide spin flag to this player and the other viewers in its dimension.
+    fn broadcast_spin(&self, spin: bool) {
+        send(self, &spin_metadata(self.entity, spin));
+        broadcast_player_metadata(&self.tracking, self.dimension, self.uuid, self.entity, spin);
+    }
+
+    /// Clears a riptide spin before the synced player state loses it.
+    fn stop_spin(&mut self) {
+        if end_player_spin(
+            &mut self.spin_ticks,
+            &self.tracking,
+            self.dimension,
+            self.uuid,
+            self.entity,
+        ) {
+            send(self, &spin_metadata(self.entity, false));
+        }
+    }
+
     pub fn refresh_chunks(&mut self) {
         send(
             self,
@@ -3043,6 +3062,7 @@ impl Player {
     /// Vanilla `ServerPlayer.respawn`: a fresh survival state at the world spawn. The client
     /// discards every chunk on `respawn`, so the loaded set is released and re-queued.
     pub(crate) fn respawn(&mut self, spawn: [f64; 3]) {
+        self.stop_spin();
         let spawn = match self.plugins.clone() {
             Some(plugins) => plugins
                 .player_respawned(self.uuid, &self.name, spawn, 0.0, 0.0)
@@ -3161,6 +3181,7 @@ impl Player {
         yaw: f32,
         pitch: f32,
     ) {
+        self.stop_spin();
         if matches!(
             self.menus.open_at,
             Some(super::container::OpenAt::Trader(_))
@@ -4218,6 +4239,16 @@ fn should_broadcast_player_metadata(
     source != viewer && source_dimension == viewer_dimension
 }
 
+fn spin_metadata(entity: i32, spin: bool) -> SetEntityData {
+    SetEntityData {
+        id: VarInt(entity),
+        values: vec![MetaEntry {
+            index: 8,
+            value: MetaValue::Byte(if spin { 4 } else { 0 }),
+        }],
+    }
+}
+
 fn broadcast_player_metadata(
     tracking: &Tracking,
     dimension: super::Dimension,
@@ -4225,18 +4256,29 @@ fn broadcast_player_metadata(
     entity: i32,
     spin: bool,
 ) {
-    let bytes = packet(&SetEntityData {
-        id: VarInt(entity),
-        values: vec![MetaEntry {
-            index: 8,
-            value: MetaValue::Byte(if spin { 4 } else { 0 }),
-        }],
-    });
+    let bytes = packet(&spin_metadata(entity, spin));
     for (uuid, (viewer_dimension, _, outbound)) in tracking.lock().unwrap().iter() {
         if should_broadcast_player_metadata(source, *uuid, dimension, *viewer_dimension) {
             let _ = outbound.send(bytes.clone());
         }
     }
+}
+
+/// Ends a spin immediately for an interruption, respawn or dimension change. Returns `false`
+/// when the player was not spinning, so the clear packet is sent only once.
+fn end_player_spin(
+    spin_ticks: &mut u8,
+    tracking: &Tracking,
+    dimension: super::Dimension,
+    source: Uuid,
+    entity: i32,
+) -> bool {
+    if *spin_ticks == 0 {
+        return false;
+    }
+    *spin_ticks = 0;
+    broadcast_player_metadata(tracking, dimension, source, entity, false);
+    true
 }
 
 fn trader_spawning_enabled(rules: &ferrite_command::gamerule::GameRules) -> bool {
@@ -5858,23 +5900,7 @@ impl Region {
             if p.spin_ticks > 0 {
                 p.spin_ticks -= 1;
                 if p.spin_ticks == 0 {
-                    send(
-                        p,
-                        &SetEntityData {
-                            id: VarInt(p.entity),
-                            values: vec![MetaEntry {
-                                index: 8,
-                                value: MetaValue::Byte(0),
-                            }],
-                        },
-                    );
-                    broadcast_player_metadata(
-                        &ctx.tracking,
-                        ctx.dimension,
-                        p.uuid,
-                        p.entity,
-                        false,
-                    );
+                    p.broadcast_spin(false);
                 }
             }
         }
@@ -6110,7 +6136,7 @@ impl Region {
                             .state
                             .lock()
                             .is_ok_and(|s| s.weather != super::commands::Weather::Clear);
-                        self.throw_trident(ctx, uuid, yaw, pitch, wet);
+                        self.throw_trident(uuid, yaw, pitch, wet);
                     }
                 } else if charge >= 0.1 {
                     self.fire_bow(uuid, charge, yaw, pitch);
@@ -6249,15 +6275,8 @@ impl Region {
 
     /// `TridentItem.releaseUsing`: the held trident leaves the hand and flies where the player
     /// looks. shortcut: loyalty returns it the moment it lands (no flight back); riptide launches the
-    /// player without the spin pose; channeling calls lightning on a mob during thunder. Without loyalty it drops as an item where it ends.
-    fn throw_trident(
-        &mut self,
-        ctx: &TickContext,
-        uuid: Uuid,
-        yaw: f32,
-        pitch: f32,
-        raining: bool,
-    ) {
+    /// player and starts the spin pose; channeling calls lightning on a mob during thunder. Without loyalty it drops as an item where it ends.
+    fn throw_trident(&mut self, uuid: Uuid, yaw: f32, pitch: f32, raining: bool) {
         let Some(p) = self.players.get_mut(&uuid) else {
             return;
         };
@@ -6308,17 +6327,7 @@ impl Region {
             );
             // The living-entity flag 0x04 plays the spin for the twenty ticks of the launch.
             p.spin_ticks = 20;
-            send(
-                p,
-                &SetEntityData {
-                    id: VarInt(p.entity),
-                    values: vec![MetaEntry {
-                        index: 8,
-                        value: MetaValue::Byte(4),
-                    }],
-                },
-            );
-            broadcast_player_metadata(&ctx.tracking, ctx.dimension, p.uuid, p.entity, true);
+            p.broadcast_spin(true);
             if p.gamemode != 1
                 && let Some(worn) = worn_stack(stack.clone(), stack.damage() + 1)
             {
@@ -7665,6 +7674,7 @@ impl Region {
         if p.survival.death_processed {
             return;
         }
+        p.stop_spin();
         p.survival.death_processed = true;
         p.survival.eating = None;
         p.breaking = None;
@@ -9080,6 +9090,115 @@ mod tests {
         ));
     }
 
+    fn outbound_packets(rx: &mut ferrite_net::game::OutboundReceiver) -> Vec<Vec<u8>> {
+        std::iter::from_fn(|| rx.try_recv())
+            .map(|out| match out {
+                Outbound::Packet(bytes) => bytes.to_vec(),
+                Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
+            })
+            .collect()
+    }
+
+    fn spin_packet(entity: i32, spin: bool) -> Vec<u8> {
+        match packet(&spin_metadata(entity, spin)) {
+            Outbound::Packet(bytes) => bytes.to_vec(),
+            Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
+        }
+    }
+
+    #[test]
+    fn riptide_spin_metadata_reaches_all_same_dimension_viewers() {
+        use super::super::Dimension::{Nether, Overworld};
+
+        let source = Uuid::from_u128(1);
+        let (first, mut first_rx) = OutboundSender::channel(1024);
+        let (second, mut second_rx) = OutboundSender::channel(1024);
+        let (nether, mut nether_rx) = OutboundSender::channel(1024);
+        let tracking: Tracking = Arc::new(Mutex::new(HashMap::from([
+            (Uuid::from_u128(2), (Overworld, HashSet::new(), first)),
+            (Uuid::from_u128(3), (Overworld, HashSet::new(), second)),
+            (Uuid::from_u128(4), (Nether, HashSet::new(), nether)),
+        ])));
+        let entity = 42;
+
+        broadcast_player_metadata(&tracking, Overworld, source, entity, true);
+        assert_eq!(
+            outbound_packets(&mut first_rx),
+            vec![spin_packet(entity, true)]
+        );
+        assert_eq!(
+            outbound_packets(&mut second_rx),
+            vec![spin_packet(entity, true)]
+        );
+        assert!(outbound_packets(&mut nether_rx).is_empty());
+
+        broadcast_player_metadata(&tracking, Overworld, source, entity, true);
+        assert_eq!(
+            outbound_packets(&mut first_rx),
+            vec![spin_packet(entity, true)]
+        );
+        assert_eq!(
+            outbound_packets(&mut second_rx),
+            vec![spin_packet(entity, true)]
+        );
+        assert!(outbound_packets(&mut nether_rx).is_empty());
+
+        broadcast_player_metadata(&tracking, Overworld, source, entity, false);
+        assert_eq!(
+            outbound_packets(&mut first_rx),
+            vec![spin_packet(entity, false)]
+        );
+        assert_eq!(
+            outbound_packets(&mut second_rx),
+            vec![spin_packet(entity, false)]
+        );
+        assert!(outbound_packets(&mut nether_rx).is_empty());
+    }
+
+    #[test]
+    fn ending_a_riptide_spin_clears_state_for_the_old_dimension() {
+        use super::super::Dimension::{Nether, Overworld};
+
+        let source = Uuid::from_u128(1);
+        let (viewer, mut viewer_rx) = OutboundSender::channel(1024);
+        let (nether, mut nether_rx) = OutboundSender::channel(1024);
+        let tracking: Tracking = Arc::new(Mutex::new(HashMap::from([
+            (Uuid::from_u128(2), (Overworld, HashSet::new(), viewer)),
+            (Uuid::from_u128(3), (Nether, HashSet::new(), nether)),
+        ])));
+        let entity = 42;
+        let mut spin_ticks = 20;
+
+        broadcast_player_metadata(&tracking, Overworld, source, entity, true);
+        assert_eq!(
+            outbound_packets(&mut viewer_rx),
+            vec![spin_packet(entity, true)]
+        );
+
+        assert!(end_player_spin(
+            &mut spin_ticks,
+            &tracking,
+            Overworld,
+            source,
+            entity
+        ));
+        assert_eq!(spin_ticks, 0);
+        assert_eq!(
+            outbound_packets(&mut viewer_rx),
+            vec![spin_packet(entity, false)]
+        );
+        assert!(outbound_packets(&mut nether_rx).is_empty());
+
+        assert!(!end_player_spin(
+            &mut spin_ticks,
+            &tracking,
+            Overworld,
+            source,
+            entity
+        ));
+        assert!(outbound_packets(&mut viewer_rx).is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plugin_explosion_can_preserve_blocks_and_still_push_entities() {
         use ferrite_entity::{EntityData, EntityRecord, allocate_id, random_uuid};
@@ -9677,10 +9796,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 
@@ -9762,10 +9881,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 
@@ -9816,10 +9935,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 
@@ -9869,10 +9988,10 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(dropped_leads(&region), 1, "the lead drops once");
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
 
         // Once the stale lead is gone, the reconnected session can attach a new lead.
@@ -9882,7 +10001,7 @@ mod tests {
             Some((ferrite_math::Vec3::new(7.5, 64.0, 0.5), 456)),
             "the new session can be leashed again"
         );
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert!(
             mob::state(&region.entities, cow).unwrap().leash.is_some(),
             "the new lead survives"
@@ -9950,14 +10069,14 @@ mod tests {
             source: None,
             seen: Default::default(),
         };
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert!(mob::state(&region.entities, cow).unwrap().leash.is_none());
         assert_eq!(
             dropped_leads(&region),
             1,
             "the removed holder drops one lead"
         );
-        region.tick_mobs(&ctx, &blocks);
+        region.tick_mobs(&ctx, &blocks, &[]);
         assert_eq!(dropped_leads(&region), 1, "the break is not repeated");
     }
 
