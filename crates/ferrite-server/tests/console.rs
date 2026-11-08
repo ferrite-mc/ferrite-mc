@@ -16,6 +16,7 @@ fn stop_on_stdin_shuts_down_server() {
     // The server refuses to start without `eula=true`; this fixture runs only Ferrite.
     std::fs::write(dir.join("eula.txt"), "eula=true\n").unwrap();
     let mut server = Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
+        .arg("--headless")
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

@@ -283,6 +283,16 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(windows)]
 fn main() {
+    // Keep a console-capable mode for service managers, scripts and the integration tests.
+    // Normal Windows launches use the embedded GUI; Linux always enters the headless path above.
+    if std::env::args().any(|arg| arg == "--headless") {
+        if let Err(error) = run_headless() {
+            eprintln!("Ferrite Server failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Err(error) = windows_gui::run() {
         native_windows_gui::simple_message(
             "Ferrite Server 시작 실패",
@@ -291,7 +301,20 @@ fn main() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(windows)]
+fn run_headless() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run_server(stdin_commands()))
+}
+
 fn stdin_commands() -> tokio::sync::mpsc::UnboundedReceiver<String> {
     let (console_tx, console_rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
