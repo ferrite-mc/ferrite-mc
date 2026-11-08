@@ -952,6 +952,7 @@ async fn run(
             raining: settings.raining && dimension == Dimension::Overworld,
             command_entities: command_entities.clone(),
             state: command_state.clone(),
+            trader_spawner: Default::default(),
             profiler: Some(profiler.clone()),
             tree: Some(Arc::clone(&command_tree)),
         };

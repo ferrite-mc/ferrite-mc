@@ -1771,6 +1771,7 @@ fn entities_follow_region_merges_splits_and_hand_offs() {
         spawn: [0.0, 65.0, 0.0],
         command_entities: Default::default(),
         state: Default::default(),
+        trader_spawner: Default::default(),
         profiler: None,
         tree: None,
     };

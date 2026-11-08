@@ -9,7 +9,8 @@
 //!
 //! The 26.3 trader does not despawn with a potion. At night it drinks an invisibility potion
 //! and by day it drinks milk, which removes the invisibility; the entity and its offers stay
-//! in place. Its separate 48000-tick despawn delay is handled by the mob AI.
+//! in place. Its separate 48000-tick despawn delay is handled by the region trader lifecycle,
+//! which pauses while a player has its trade screen open.
 
 use ferrite_entity::{
     BlockGetter, EntityData, Rng,
@@ -38,6 +39,36 @@ pub const INVISIBILITY_TICKS: i32 = 3600;
 pub const NIGHT_START: i64 = 13_000;
 pub const NIGHT_END: i64 = 23_000;
 
+/// Per-dimension state for the wandering trader spawner. It is shared by every region in a
+/// dimension so concurrent region ticks cannot each perform the same daily roll.
+#[derive(Debug, Default)]
+pub struct SpawnerState {
+    chance: u32,
+    last_roll_at: Option<i64>,
+}
+
+impl SpawnerState {
+    /// Performs at most one daily roll for a given world clock value.
+    pub fn roll(&mut self, enabled: bool, tick_clock: i64, rng: &mut Rng) -> bool {
+        if !enabled
+            || tick_clock <= 0
+            || tick_clock % 24_000 != 0
+            || self.last_roll_at == Some(tick_clock)
+        {
+            return false;
+        }
+        self.last_roll_at = Some(tick_clock);
+        roll_spawn(enabled, tick_clock, &mut self.chance, rng)
+    }
+
+    /// Resets the chance after a spawn only if it belongs to the roll that authorized it.
+    pub fn spawn_succeeded(&mut self, tick_clock: i64) {
+        if self.last_roll_at == Some(tick_clock) {
+            spawn_succeeded(&mut self.chance);
+        }
+    }
+}
+
 /// Lower bound for the spawn column's light. The vanilla spawner only reads the heightmap and
 /// has no light predicate; this keeps cave floors found by the wider column scan out while
 /// preserving normal surface spawns (stored sky light is 15 at the surface at any time).
@@ -49,6 +80,52 @@ pub trait SpawnWorld: BlockGetter {
     fn light(&self, x: i32, y: i32, z: i32) -> u8;
     /// Namespaced biome key at a block position.
     fn biome_name(&self, x: i32, y: i32, z: i32) -> Option<String>;
+    /// Whether the chunk containing `(x, z)` is already loaded. The spawner must never ask the
+    /// world to generate a chunk just to place a trader.
+    fn is_chunk_loaded(&self, _x: i32, _z: i32) -> bool {
+        true
+    }
+}
+
+/// The border and build-height limits for one spawn search.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnBounds {
+    pub min_y: i32,
+    /// Exclusive top of the dimension.
+    pub max_y: i32,
+    pub border_center_x: f64,
+    pub border_center_z: f64,
+    pub border_diameter: f64,
+}
+
+impl SpawnBounds {
+    /// The overworld limits, with the vanilla default world border. Used by focused tests.
+    #[cfg(test)]
+    pub const OVERWORLD: Self = Self {
+        min_y: -64,
+        max_y: 320,
+        border_center_x: 0.0,
+        border_center_z: 0.0,
+        border_diameter: 59_999_968.0,
+    };
+
+    /// Whether a block column lies inside the world border. Matches the border check used by
+    /// piston movement: the minimum is inclusive and the maximum is exclusive.
+    pub fn contains_column(self, x: i32, z: i32) -> bool {
+        const LIMIT: f64 = 29_999_984.0;
+        let half = self.border_diameter / 2.0;
+        let x = f64::from(x);
+        let z = f64::from(z);
+        x >= (self.border_center_x - half).clamp(-LIMIT, LIMIT)
+            && x < (self.border_center_x + half).clamp(-LIMIT, LIMIT)
+            && z >= (self.border_center_z - half).clamp(-LIMIT, LIMIT)
+            && z < (self.border_center_z + half).clamp(-LIMIT, LIMIT)
+    }
+
+    /// Whether a two-block-tall entity can stand at feet level `y`.
+    pub fn fits_two_blocks(self, y: i32) -> bool {
+        y >= self.min_y && y + 1 < self.max_y
+    }
 }
 
 /// A daily spawn roll, including the vanilla chance growth and reset rules.
@@ -74,23 +151,41 @@ pub fn spawn_succeeded(chance: &mut u32) {
     *chance = MIN_SPAWN_CHANCE;
 }
 
+/// Advances a trader or trader llama despawn clock by one tick.
+///
+/// Vanilla only decrements `WanderingTrader.despawnDelay` while no player is trading with the
+/// trader, so an open trade screen pauses the clock at its current value. A zero clock means
+/// "not managed here" (for example an entity loaded from an older save) and is left alone.
+/// Returns whether the clock just reached zero and the entity should disappear this tick.
+pub fn tick_despawn_delay(lifetime: &mut u32, trading: bool) -> bool {
+    if trading || *lifetime == 0 {
+        return false;
+    }
+    *lifetime -= 1;
+    *lifetime == 0
+}
+
 /// Finds a trader position near `anchor`, up to 48 blocks horizontally and from 16 above to 32
-/// below the anchor (the 48-block search depth is inclusive).
+/// below the anchor (the 48-block search depth is inclusive). Candidates outside the world
+/// border or build height, or in a chunk that is not loaded, are skipped without generating
+/// anything.
 pub fn find_spawn<W: SpawnWorld + ?Sized>(
     world: &W,
     anchor: [f64; 3],
+    bounds: SpawnBounds,
     rng: &mut Rng,
 ) -> Option<[i32; 3]> {
-    find_spawn_with(world, anchor, SPAWN_RADIUS, rng)
+    find_spawn_with(world, anchor, SPAWN_RADIUS, bounds, rng)
 }
 
 /// Finds a position for one trader llama within four blocks of its trader.
 pub fn find_llama_spawn<W: SpawnWorld + ?Sized>(
     world: &W,
     center: [f64; 3],
+    bounds: SpawnBounds,
     rng: &mut Rng,
 ) -> Option<[i32; 3]> {
-    find_spawn_with(world, center, 4, rng).filter(|pos| {
+    find_spawn_with(world, center, 4, bounds, rng).filter(|pos| {
         // A llama has a slightly wider collision box than a trader; require its second air
         // block as well.
         world
@@ -107,16 +202,24 @@ fn find_spawn_with<W: SpawnWorld + ?Sized>(
     world: &W,
     anchor: [f64; 3],
     radius: i32,
+    bounds: SpawnBounds,
     rng: &mut Rng,
 ) -> Option<[i32; 3]> {
     let anchor_y = anchor[1].floor() as i32;
+    let top = (anchor_y + SEARCH_ABOVE).min(bounds.max_y.saturating_sub(1));
     for _ in 0..SPAWN_ATTEMPTS {
         let x = anchor[0].floor() as i32 + rng.next_int(radius * 2) - radius;
         let z = anchor[2].floor() as i32 + rng.next_int(radius * 2) - radius;
-        let Some(ground) = find_ground(world, x, z, anchor_y + SEARCH_ABOVE) else {
+        if !bounds.contains_column(x, z) || !world.is_chunk_loaded(x, z) {
+            continue;
+        }
+        let Some(ground) = find_ground(world, x, z, top) else {
             continue;
         };
         let pos = [x, ground + 1, z];
+        if !bounds.fits_two_blocks(pos[1]) {
+            continue;
+        }
         if candidate_is_valid(world, pos) {
             return Some(pos);
         }
@@ -252,6 +355,7 @@ mod tests {
         ceiling: bool,
         light: u8,
         biome: &'static str,
+        loaded: bool,
     }
 
     impl TestWorld {
@@ -261,6 +365,7 @@ mod tests {
                 ceiling: false,
                 light: 15,
                 biome: "minecraft:plains",
+                loaded: true,
             }
         }
     }
@@ -285,6 +390,10 @@ mod tests {
         fn biome_name(&self, _x: i32, _y: i32, _z: i32) -> Option<String> {
             Some(self.biome.into())
         }
+
+        fn is_chunk_loaded(&self, _x: i32, _z: i32) -> bool {
+            self.loaded
+        }
     }
 
     #[test]
@@ -293,6 +402,48 @@ mod tests {
         let mut rng = Rng::new(7);
         assert!(!roll_spawn(false, 24_000, &mut chance, &mut rng));
         assert_eq!(chance, 25);
+    }
+
+    #[test]
+    fn turning_the_gamerule_back_on_resumes_the_next_daily_roll() {
+        let mut chance = 25;
+        let mut rng = Rng::new(2);
+        assert!(!roll_spawn(false, 24_000, &mut chance, &mut rng));
+        assert_eq!(chance, 25, "a disabled day must not advance the chance");
+
+        // The disabled day is skipped entirely; a non-boundary tick still does nothing.
+        assert!(!roll_spawn(true, 47_999, &mut chance, &mut rng));
+        assert_eq!(chance, 25);
+
+        // Seed 2 misses the percentage roll (10 < 25) and the one-in-ten roll (6), so the
+        // next day grows the chance even though no trader appears.
+        assert!(!roll_spawn(true, 48_000, &mut chance, &mut rng));
+        assert_eq!(chance, 50, "the first enabled daily roll must run normally");
+
+        assert!(!roll_spawn(true, 72_000, &mut chance, &mut rng));
+        assert_eq!(chance, 75);
+    }
+
+    #[test]
+    fn failed_rolls_grow_the_chance_and_a_successful_spawn_resets_it() {
+        // Seed 2: 10 < 25 and 6 != 0, a failed one-in-ten roll.
+        let mut chance = 25;
+        assert!(!roll_spawn(true, 24_000, &mut chance, &mut Rng::new(2)));
+        assert_eq!(chance, 50);
+
+        // Seed 41: 13 < 25 and 0 == 0, a successful one-in-ten roll.
+        let mut chance = 25;
+        assert!(roll_spawn(true, 24_000, &mut chance, &mut Rng::new(41)));
+        assert_eq!(chance, 50, "the chance advances before the reset");
+        spawn_succeeded(&mut chance);
+        assert_eq!(chance, 25);
+    }
+
+    #[test]
+    fn the_daily_chance_caps_at_seventy_five() {
+        let mut chance = 75;
+        let _ = roll_spawn(true, 24_000, &mut chance, &mut Rng::new(2));
+        assert_eq!(chance, 75);
     }
 
     #[test]
@@ -313,6 +464,43 @@ mod tests {
         // as zero.
         let _ = roll_spawn(true, 24_000, &mut chance, &mut rng);
         assert!(matches!(chance, 50 | 75), "chance was {chance}");
+    }
+
+    #[test]
+    fn concurrent_regions_share_one_daily_roll_and_one_chance_increment() {
+        use std::sync::{Arc, Mutex};
+
+        let state = Arc::new(Mutex::new(SpawnerState::default()));
+        let threads: Vec<_> = (0..12)
+            .map(|seed| {
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    state
+                        .lock()
+                        .unwrap()
+                        .roll(true, 24_000, &mut Rng::new(seed))
+                })
+            })
+            .collect();
+        for thread in threads {
+            let _ = thread.join().unwrap();
+        }
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.chance, 50, "the shared chance advances only once");
+        assert_eq!(state.last_roll_at, Some(24_000));
+    }
+
+    #[test]
+    fn a_successful_spawn_resets_only_its_daily_roll() {
+        let mut state = SpawnerState::default();
+        let _ = state.roll(true, 24_000, &mut Rng::new(2));
+        state.spawn_succeeded(24_000);
+        assert_eq!(state.chance, MIN_SPAWN_CHANCE);
+
+        let _ = state.roll(true, 48_000, &mut Rng::new(2));
+        state.spawn_succeeded(24_000);
+        assert_eq!(state.chance, 50, "an old spawn must not reset a newer roll");
     }
 
     #[test]
@@ -371,7 +559,8 @@ mod tests {
         let world = TestWorld::surface(64);
         let anchor = [1.5, 64.0, 2.5];
         let mut rng = Rng::new(19);
-        let pos = find_spawn(&world, anchor, &mut rng).expect("flat surface is valid");
+        let pos = find_spawn(&world, anchor, SpawnBounds::OVERWORLD, &mut rng)
+            .expect("flat surface is valid");
         assert_eq!(pos[1], 65);
         assert!((pos[0] - 1).abs() <= SPAWN_RADIUS);
         assert!((pos[2] - 2).abs() <= SPAWN_RADIUS);
@@ -384,9 +573,100 @@ mod tests {
             ..TestWorld::surface(64)
         };
         assert_eq!(
-            find_spawn(&world, [0.5, 64.0, 0.5], &mut Rng::new(19)),
+            find_spawn(
+                &world,
+                [0.5, 64.0, 0.5],
+                SpawnBounds::OVERWORLD,
+                &mut Rng::new(19)
+            ),
             None
         );
+    }
+
+    #[test]
+    fn candidates_outside_the_border_height_or_loaded_chunks_are_rejected() {
+        let world = TestWorld::surface(64);
+        let anchor = [100.5, 64.0, 100.5];
+
+        // A ten-block border around the origin cannot contain any column in the 100 +/- 48
+        // search box.
+        let border = SpawnBounds {
+            border_diameter: 10.0,
+            ..SpawnBounds::OVERWORLD
+        };
+        assert_eq!(find_spawn(&world, anchor, border, &mut Rng::new(19)), None);
+
+        // The only floor is at y = 63, so the candidate feet row would be y = 64 and the
+        // exclusive top at 64 leaves no room for a two-block entity.
+        let low = SpawnBounds {
+            max_y: 64,
+            ..SpawnBounds::OVERWORLD
+        };
+        assert_eq!(
+            find_spawn(
+                &TestWorld::surface(63),
+                [0.5, 64.0, 0.5],
+                low,
+                &mut Rng::new(19)
+            ),
+            None
+        );
+
+        // An unloaded chunk must be skipped even though a fake block source could describe it.
+        let unloaded = TestWorld {
+            loaded: false,
+            ..TestWorld::surface(64)
+        };
+        assert_eq!(
+            find_spawn(
+                &unloaded,
+                [0.5, 64.0, 0.5],
+                SpawnBounds::OVERWORLD,
+                &mut Rng::new(19)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn border_edges_are_inclusive_at_the_minimum_and_exclusive_at_the_maximum() {
+        let bounds = SpawnBounds {
+            border_diameter: 10.0,
+            ..SpawnBounds::OVERWORLD
+        };
+        assert!(bounds.contains_column(-5, -5));
+        assert!(bounds.contains_column(4, 4));
+        assert!(!bounds.contains_column(5, 0));
+        assert!(!bounds.contains_column(0, 5));
+        assert!(!bounds.contains_column(-6, 0));
+
+        assert!(!bounds.fits_two_blocks(bounds.min_y - 1));
+        assert!(bounds.fits_two_blocks(bounds.min_y));
+        assert!(!bounds.fits_two_blocks(bounds.max_y - 1));
+        assert!(bounds.fits_two_blocks(bounds.max_y - 2));
+    }
+
+    #[test]
+    fn trading_pauses_the_despawn_clock_until_the_screen_closes() {
+        let mut lifetime = 2;
+        assert!(!tick_despawn_delay(&mut lifetime, true));
+        assert_eq!(lifetime, 2, "an open trade screen pauses the clock");
+
+        assert!(!tick_despawn_delay(&mut lifetime, false));
+        assert_eq!(lifetime, 1);
+
+        assert!(!tick_despawn_delay(&mut lifetime, true));
+        assert_eq!(
+            lifetime, 1,
+            "the last tick is held while the player is still trading"
+        );
+
+        assert!(tick_despawn_delay(&mut lifetime, false));
+        assert_eq!(lifetime, 0, "closing the screen lets the next tick expire");
+
+        let mut unmanaged = 0;
+        assert!(!tick_despawn_delay(&mut unmanaged, false));
+        assert_eq!(unmanaged, 0);
     }
 
     #[test]

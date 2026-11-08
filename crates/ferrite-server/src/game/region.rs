@@ -597,6 +597,8 @@ pub struct TickContext {
     pub command_entities: Arc<Mutex<super::entity_index::EntityIndex>>,
     /// Server command state, used by command blocks (storage, scores, `/function`).
     pub state: Arc<Mutex<super::commands::GameState>>,
+    /// Shared per-dimension wandering-trader roll; region-local copies would spawn duplicates.
+    pub trader_spawner: Arc<Mutex<super::wandering_trader::SpawnerState>>,
     pub profiler: Option<Arc<super::profile::Profiler>>,
     /// The server's command tree, for command blocks; `None` in tests that do not need it.
     pub tree: Option<Arc<ferrite_command::CommandDispatcher<super::commands::Source>>>,
@@ -738,6 +740,15 @@ impl super::wandering_trader::SpawnWorld for TickBlocks<'_> {
 
     fn biome_name(&self, x: i32, y: i32, z: i32) -> Option<String> {
         self.source?.biome_name(x, y, z)
+    }
+
+    fn is_chunk_loaded(&self, x: i32, z: i32) -> bool {
+        // `AnvilChunkSource::block` only reads an already-loaded column; it never starts a
+        // generation task. Asking for the bottom block is a cheap loaded-chunk probe.
+        let Some(source) = self.source else {
+            return false;
+        };
+        source.block(x, source.dimension().min_y(), z).is_some()
     }
 }
 impl SpawnEnv for TickBlocks<'_> {
@@ -907,9 +918,6 @@ pub struct Region {
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Dragon breath clouds: vanilla growth, wait and damage schedule.
     pub breath_clouds: Vec<ferrite_entity::dragon::BreathCloud>,
-    /// Chance in percent that a wandering trader turns up at the next daily roll
-    /// (`WanderingTraderSpawner`: starts at 25, grows by 25 per miss, caps at 75).
-    pub trader_chance: u32,
     /// Final block updates held back until the client finished the push animation. Keyed by
     /// position through [`Region::queue_delayed_update`] so a reversal replaces stale updates.
     pub delayed_updates: Vec<DelayedUpdate>,
@@ -1000,7 +1008,6 @@ impl RegionData for Region {
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
-            trader_chance: 25,
             delayed_updates,
             moving_pistons,
             thrown_tridents: HashMap::new(),
@@ -4414,6 +4421,13 @@ fn trader_spawning_enabled(rules: &ferrite_command::gamerule::GameRules) -> bool
     rules.get_bool("spawn_wandering_traders").unwrap_or(true)
 }
 
+fn trader_spawning_enabled_in_dimension(
+    rules: &ferrite_command::gamerule::GameRules,
+    dimension: super::Dimension,
+) -> bool {
+    dimension == super::Dimension::Overworld && trader_spawning_enabled(rules)
+}
+
 #[cfg(test)]
 pub(super) fn apply_trade_sync(
     entities: &mut EntityStore,
@@ -4825,6 +4839,8 @@ impl Region {
                 pos: ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             })
             .collect();
+        let trading = self.trading_traders();
+        self.tick_trader_lifetimes(&trading, ctx);
         let holders = self.leash_holders(ctx);
         self.refresh_leash_ids(ctx, &holders);
         let holder_positions: Vec<(Uuid, ferrite_math::Vec3)> = holders
@@ -4912,17 +4928,33 @@ impl Region {
             }
         }
         let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
-        self.tick_trader_drinks(day_time, ctx);
+        self.tick_trader_drinks(day_time, &trading, ctx);
         let trader_spawning = {
             let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
-            trader_spawning_enabled(&rules)
+            trader_spawning_enabled_in_dimension(&rules, ctx.dimension)
         };
-        let clock_time = ctx
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clock_time;
-        self.tick_trader_spawn(blocks, trader_spawning, clock_time);
+        let (clock_time, bounds) = {
+            let state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
+            let border = &state.border;
+            (
+                state.clock_time,
+                super::wandering_trader::SpawnBounds {
+                    min_y: ctx.dimension.min_y(),
+                    max_y: ctx.dimension.min_y() + ctx.dimension.height(),
+                    border_center_x: border.center_x,
+                    border_center_z: border.center_z,
+                    border_diameter: border.diameter,
+                },
+            )
+        };
+        self.tick_trader_spawn(
+            blocks,
+            trader_spawning,
+            clock_time,
+            bounds,
+            &positions,
+            &ctx.trader_spawner,
+        );
         for record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1) {
             self.entities.insert(record);
         }
@@ -5650,25 +5682,36 @@ impl Region {
 
     /// The daily wandering trader roll (`WanderingTraderSpawner`): near a random player, with two
     /// trader llamas on leads, gone after 48000 ticks.
-    fn tick_trader_spawn(&mut self, blocks: &TickBlocks<'_>, enabled: bool, clock_time: i64) {
+    fn tick_trader_spawn(
+        &mut self,
+        blocks: &TickBlocks<'_>,
+        enabled: bool,
+        clock_time: i64,
+        bounds: super::wandering_trader::SpawnBounds,
+        anchors: &[ferrite_math::Vec3],
+        spawner: &Arc<Mutex<super::wandering_trader::SpawnerState>>,
+    ) {
         use super::wandering_trader;
         use ferrite_entity::mob::{MobKind, new_mob};
-        if self.players.is_empty()
-            || !wandering_trader::roll_spawn(
-                enabled,
-                clock_time,
-                &mut self.trader_chance,
-                &mut self.rng,
-            )
-        {
+        if anchors.is_empty() {
             return;
         }
-        let anchors: Vec<_> = self.players.values().map(|p| p.pos).collect();
+        let should_spawn = spawner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .roll(enabled, clock_time, &mut self.rng);
+        if !should_spawn {
+            return;
+        }
         let anchor = anchors[self.rng.next_int(anchors.len() as i32) as usize];
-        let Some(pos) = wandering_trader::find_spawn(blocks, anchor, &mut self.rng) else {
+        let anchor = [anchor.x, anchor.y, anchor.z];
+        let Some(pos) = wandering_trader::find_spawn(blocks, anchor, bounds, &mut self.rng) else {
             return;
         };
-        wandering_trader::spawn_succeeded(&mut self.trader_chance);
+        spawner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .spawn_succeeded(clock_time);
         let at = ferrite_math::Vec3::new(
             f64::from(pos[0]) + 0.5,
             f64::from(pos[1]),
@@ -5681,9 +5724,12 @@ impl Region {
         let (trader_uuid, trader_id) = (trader.data.uuid, trader.data.id);
         self.entities.insert(trader);
         for _ in 0..2 {
-            let Some(llama_pos) =
-                wandering_trader::find_llama_spawn(blocks, [at.x, at.y, at.z], &mut self.rng)
-            else {
+            let Some(llama_pos) = wandering_trader::find_llama_spawn(
+                blocks,
+                [at.x, at.y, at.z],
+                bounds,
+                &mut self.rng,
+            ) else {
                 continue;
             };
             let llama_at = ferrite_math::Vec3::new(
@@ -5700,15 +5746,142 @@ impl Region {
         }
     }
 
-    /// Night makes a trader drink invisibility; daylight makes it drink milk. The transition
-    /// changes only its effects, never its villager offers or trade uses.
-    fn tick_trader_drinks(&mut self, day_time: i64, ctx: &TickContext) {
-        use super::wandering_trader;
-        let trading: HashSet<Uuid> = self
-            .players
+    /// The traders whose trade screen is open for one of this region's players.
+    fn trading_traders(&self) -> HashSet<Uuid> {
+        self.players
             .values()
             .filter_map(|p| p.open_trader().map(|(trader, _)| trader))
+            .collect()
+    }
+
+    /// Advances the 48000-tick clock for wandering traders and their llama companions. Vanilla
+    /// pauses the trader clock while a player has its trade screen open; the llamas share the
+    /// same clock so they do not vanish from under an active trade. An expired entity disappears
+    /// without loot, and any leash or caravan link aimed at it is cleared in the same tick so no
+    /// orphaned link reaches the next AI pass.
+    fn tick_trader_lifetimes(&mut self, trading: &HashSet<Uuid>, ctx: &TickContext) {
+        use super::wandering_trader;
+        use ferrite_entity::mob::MobKind;
+
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|key| {
+                self.entities.flags(*key).is_some_and(|flags| {
+                    !flags.has(Flags::REMOVED)
+                        && self.entities.data(*key).is_some_and(|data| {
+                            data.mob.as_ref().is_some_and(|mob| {
+                                matches!(mob.kind, MobKind::WanderingTrader | MobKind::TraderLlama)
+                            })
+                        })
+                })
+            })
             .collect();
+
+        let mut expired = Vec::new();
+        for key in keys {
+            let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
+                continue;
+            };
+            let Some(data) = self.entities.data_mut(key) else {
+                continue;
+            };
+            let Some(mob) = data.mob.as_mut() else {
+                continue;
+            };
+            let paused = match mob.kind {
+                MobKind::WanderingTrader => trading.contains(&uuid),
+                MobKind::TraderLlama => mob
+                    .leash
+                    .is_some_and(|(holder, _)| trading.contains(&holder)),
+                _ => false,
+            };
+            if wandering_trader::tick_despawn_delay(&mut mob.lifetime, paused) {
+                mob.health = 0.0;
+                mob.loot_dropped = true;
+                expired.push(key);
+            }
+        }
+        if expired.is_empty() {
+            return;
+        }
+
+        let expired_keys: HashSet<_> = expired.iter().copied().collect();
+        let expired_uuids: HashSet<Uuid> = expired
+            .iter()
+            .filter_map(|key| self.entities.data(*key).map(|data| data.uuid))
+            .collect();
+        for key in &expired {
+            if let Some(flags) = self.entities.flags_mut(*key) {
+                flags.set(Flags::REMOVED, true);
+            }
+        }
+
+        // Clear every stored link that points at an entity removed by this pass. The generic
+        // leash code would break a lead one tick later, after a lead item had a chance to drop;
+        // an expiry should leave no item and no stale caravan head behind.
+        let linked: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|key| {
+                !expired_keys.contains(key)
+                    && self.entities.data(*key).is_some_and(|data| {
+                        data.mob.as_ref().is_some_and(|mob| {
+                            mob.leash
+                                .is_some_and(|(holder, _)| expired_uuids.contains(&holder))
+                                || mob
+                                    .caravan
+                                    .is_some_and(|head| expired_uuids.contains(&head))
+                        })
+                    })
+            })
+            .collect();
+        for key in linked {
+            let detached = self
+                .entities
+                .data_mut(key)
+                .and_then(|data| data.mob.as_mut())
+                .map(|mob| {
+                    let leash = mob
+                        .leash
+                        .is_some_and(|(holder, _)| expired_uuids.contains(&holder));
+                    if leash {
+                        mob.leash = None;
+                    }
+                    if mob
+                        .caravan
+                        .is_some_and(|head| expired_uuids.contains(&head))
+                    {
+                        mob.caravan = None;
+                    }
+                    leash
+                })
+                .unwrap_or(false);
+            if detached {
+                self.send_link(ctx, key, 0);
+            }
+        }
+
+        // A trader that expires outside the trade screen has no menu, but an entity removed by a
+        // concurrent path must not leave a client menu pointing at a gone entity.
+        for player in self.players.values_mut() {
+            if player
+                .open_trader()
+                .is_some_and(|(trader, _)| expired_uuids.contains(&trader))
+            {
+                player.close_open_menu();
+            }
+        }
+    }
+
+    /// Night makes a trader drink invisibility; daylight makes it drink milk. The transition
+    /// changes only its effects, never its villager offers or trade uses.
+    fn tick_trader_drinks(&mut self, day_time: i64, trading: &HashSet<Uuid>, ctx: &TickContext) {
+        use super::wandering_trader;
         let keys: Vec<_> = self
             .entities
             .keys()
@@ -8708,9 +8881,84 @@ mod tests {
     fn wandering_trader_spawning_obeys_its_gamerule() {
         let mut rules = ferrite_command::gamerule::GameRules::default();
         assert!(trader_spawning_enabled(&rules));
+        assert!(trader_spawning_enabled_in_dimension(
+            &rules,
+            super::super::Dimension::Overworld
+        ));
+        assert!(!trader_spawning_enabled_in_dimension(
+            &rules,
+            super::super::Dimension::Nether
+        ));
+        assert!(!trader_spawning_enabled_in_dimension(
+            &rules,
+            super::super::Dimension::End
+        ));
 
         rules.set("spawn_wandering_traders", "false").unwrap();
         assert!(!trader_spawning_enabled(&rules));
+        assert!(!trader_spawning_enabled_in_dimension(
+            &rules,
+            super::super::Dimension::Overworld
+        ));
+    }
+
+    #[test]
+    fn expiring_a_trader_removes_it_without_drops_and_detaches_its_llama() {
+        let mut region = Region::default();
+        let trader = region.entities.insert(mob::new_mob(
+            MobKind::WanderingTrader,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let trader_uuid = region.entities.data(trader).unwrap().uuid;
+        mob::state_mut(&mut region.entities, trader)
+            .unwrap()
+            .lifetime = 1;
+
+        let llama = region.entities.insert(mob::new_mob(
+            MobKind::TraderLlama,
+            ferrite_math::Vec3::new(1.5, 64.0, 0.5),
+            &mut Rng::new(2),
+        ));
+        {
+            let state = mob::state_mut(&mut region.entities, llama).unwrap();
+            state.lifetime = 5;
+            state.leash = Some((trader_uuid, 1));
+            state.caravan = Some(trader_uuid);
+        }
+
+        region.tick_trader_lifetimes(&HashSet::new(), &tick_context());
+
+        let trader_state = mob::state(&region.entities, trader).unwrap();
+        assert!(trader_state.is_dead());
+        assert!(trader_state.loot_dropped, "expiry must suppress mob loot");
+        assert!(region.entities.flags(trader).unwrap().has(Flags::REMOVED));
+        let llama_state = mob::state(&region.entities, llama).unwrap();
+        assert_eq!(llama_state.leash, None);
+        assert_eq!(llama_state.caravan, None);
+        assert_eq!(llama_state.lifetime, 4);
+        assert!(dropped_items(&region).is_empty());
+    }
+
+    #[test]
+    fn an_open_trade_keeps_a_trader_alive_until_the_trade_closes() {
+        let mut region = Region::default();
+        let trader = region.entities.insert(mob::new_mob(
+            MobKind::WanderingTrader,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(3),
+        ));
+        let uuid = region.entities.data(trader).unwrap().uuid;
+        mob::state_mut(&mut region.entities, trader)
+            .unwrap()
+            .lifetime = 1;
+
+        region.tick_trader_lifetimes(&HashSet::from([uuid]), &tick_context());
+        assert_eq!(mob::state(&region.entities, trader).unwrap().lifetime, 1);
+        assert!(!region.entities.flags(trader).unwrap().has(Flags::REMOVED));
+
+        region.tick_trader_lifetimes(&HashSet::new(), &tick_context());
+        assert!(region.entities.flags(trader).unwrap().has(Flags::REMOVED));
     }
 
     #[test]
@@ -8949,6 +9197,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: Default::default(),
+            trader_spawner: Default::default(),
             profiler: None,
             tree: None,
         }
@@ -9534,6 +9783,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: Default::default(),
+            trader_spawner: Default::default(),
             profiler: None,
             tree: None,
         };
@@ -9588,6 +9838,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state,
+            trader_spawner: Default::default(),
             profiler: None,
             tree: None,
         };
@@ -9783,6 +10034,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: Default::default(),
+            trader_spawner: Default::default(),
             profiler: None,
             tree: None,
         });
@@ -9808,6 +10060,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: state.clone(),
+            trader_spawner: Default::default(),
             profiler: None,
             tree: None,
         };
@@ -9887,6 +10140,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: entities,
             state: Default::default(),
+            trader_spawner: Default::default(),
             profiler: None,
             tree: None,
         }

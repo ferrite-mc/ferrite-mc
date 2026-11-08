@@ -532,12 +532,6 @@ pub fn tick_with_owner_attacks_and_holders(
             state.bow_timer = state.bow_timer.saturating_sub(1);
             state.panic = state.panic.saturating_sub(1);
             state.path_timer = state.path_timer.saturating_sub(1);
-            if state.lifetime == 1 {
-                // Gone without a trace and without loot.
-                state.loot_dropped = true;
-                state.health = 0.0;
-            }
-            state.lifetime = state.lifetime.saturating_sub(1);
             if matches!(
                 state.kind,
                 MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama
@@ -1362,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trader_llama_follows_the_trader_that_leads_it_and_vanishes_when_its_time_is_up() {
+    fn a_trader_llama_follows_the_trader_that_leads_it() {
         let world = TestWorld::flat(64);
         let player = target(0.5, 0.5);
         let mut store = EntityStore::default();
@@ -1377,9 +1371,7 @@ mod tests {
             &mut Rng::new(2),
         ));
         let holder = store.data(trader).unwrap().uuid;
-        let state = mob::state_mut(&mut store, llama).unwrap();
-        state.leash = Some((holder, 1));
-        state.lifetime = 50;
+        mob::state_mut(&mut store, llama).unwrap().leash = Some((holder, 1));
         let mut rng = Rng::new(3);
         for _ in 0..40 {
             tick_with(&mut store, &world, &[player], &mut rng);
@@ -1388,14 +1380,7 @@ mod tests {
             store.pos(llama).unwrap().x < 9.5,
             "the led llama is pulled to its trader"
         );
-        for _ in 0..20 {
-            tick_with(&mut store, &world, &[player], &mut rng);
-        }
-        assert!(mob::state(&store, llama).unwrap().is_dead());
-        assert!(
-            mob::state(&store, llama).unwrap().loot_dropped,
-            "it leaves no loot"
-        );
+        assert_eq!(mob::state(&store, llama).unwrap().leash, Some((holder, 1)));
     }
 
     #[test]
