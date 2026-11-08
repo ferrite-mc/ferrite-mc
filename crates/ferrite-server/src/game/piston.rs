@@ -116,6 +116,43 @@ pub(super) fn within_height(dimension: super::Dimension, pos: [i32; 3]) -> bool 
     pos[1] >= dimension.min_y() && pos[1] < dimension.min_y() + dimension.height()
 }
 
+/// Whether `bbox` is clear of every collision shape in the region-owned blocks it covers.
+/// Vanilla piston pushes displace an entity into blocks with no collision (air, water, plants)
+/// but leave it in place when a solid shape overlaps its destination.
+pub fn entity_space_clear(world: &impl PistonWorld, bbox: ferrite_math::AABB) -> bool {
+    // Touching a block face is not an overlap, so exclude the boundary cell at the box maximum.
+    const EPSILON: f64 = 1.0e-7;
+    let min_x = bbox.min.x.floor() as i32;
+    let min_y = bbox.min.y.floor() as i32;
+    let min_z = bbox.min.z.floor() as i32;
+    let max_x = (bbox.max.x - EPSILON).floor() as i32;
+    let max_y = (bbox.max.y - EPSILON).floor() as i32;
+    let max_z = (bbox.max.z - EPSILON).floor() as i32;
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let Some(state) = world.block([x, y, z]) else {
+                    return false;
+                };
+                for shape in block_props::collision_shape(state) {
+                    let block = ferrite_math::AABB::new(
+                        f64::from(x) + shape[0],
+                        f64::from(y) + shape[1],
+                        f64::from(z) + shape[2],
+                        f64::from(x) + shape[3],
+                        f64::from(y) + shape[4],
+                        f64::from(z) + shape[5],
+                    );
+                    if block.intersects(bbox) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Check direct and quasi-connected power using the redstone engine's directional signal.
 pub fn powered(
     pos: [i32; 3],
@@ -169,13 +206,32 @@ fn reaction(world: &impl PistonWorld, pos: [i32; 3], state: u16) -> Reaction {
     }
 }
 
-fn sticky(state: u16) -> Option<&'static str> {
+/// The sticky material of a block (`SlimeBlock`/`HoneyBlock`).
+fn sticky_kind(state: u16) -> Option<&'static str> {
     let (name, _) = blocks::state(state)?;
     match name.strip_prefix("minecraft:").unwrap_or(name) {
         "slime_block" => Some("slime"),
         "honey_block" => Some("honey"),
         _ => None,
     }
+}
+
+fn is_sticky(state: u16) -> bool {
+    sticky_kind(state).is_some()
+}
+
+/// `PistonStructureResolver.canStickToEachOther`: slime and honey never stick to each other,
+/// and a pair sticks when at least one side is sticky.
+fn can_stick(first: u16, second: u16) -> bool {
+    match (sticky_kind(first), sticky_kind(second)) {
+        (Some("slime"), Some("honey")) | (Some("honey"), Some("slime")) => false,
+        _ => is_sticky(first) || is_sticky(second),
+    }
+}
+
+fn displaced([x, y, z]: [i32; 3], direction: Direction, distance: i32) -> [i32; 3] {
+    let (dx, dy, dz) = direction.step();
+    [x + dx * distance, y + dy * distance, z + dz * distance]
 }
 
 fn head_state(facing: Direction, sticky: bool) -> Option<u16> {
@@ -190,72 +246,219 @@ fn head_state(facing: Direction, sticky: bool) -> Option<u16> {
 }
 
 /// Resolve an extension or a sticky retraction without mutating the world.
+///
+/// This follows `PistonStructureResolver`: a sticky block pulls the contiguous line behind it,
+/// branches only to its perpendicular sides, and a `PUSH` block is only pushable along the
+/// piston's facing. The head cell reads as air during retraction because vanilla removes the
+/// head before it builds the pull plan.
 pub fn resolve(
     world: &impl PistonWorld,
     base: [i32; 3],
     facing: Direction,
     extending: bool,
 ) -> Option<Plan> {
-    let direction = if extending { facing } else { facing.opposite() };
-    let first = if extending {
-        offset(base, facing)
-    } else {
-        offset(offset(base, facing), facing)
+    let mut resolver = Resolver {
+        world,
+        base,
+        extending,
+        piston_facing: facing,
+        push_direction: if extending { facing } else { facing.opposite() },
+        head_cell: offset(base, facing),
+        air: blocks::default_state("air")?,
+        plan: Plan::default(),
     };
-    let mut plan = Plan::default();
-    let mut visited = HashSet::new();
-    let mut pending = vec![(first, true)];
-    while let Some((pos, required)) = pending.pop() {
-        if pos == base || visited.contains(&pos) {
-            continue;
-        }
-        // Retraction removes the head before the pulled block enters its cell.
-        if !extending && pos == offset(base, facing) {
-            continue;
-        }
-        let state = world.block(pos)?;
-        match reaction(world, pos, state) {
-            Reaction::Air => continue,
-            Reaction::Block | Reaction::PushOnly if !required => continue,
-            Reaction::Block => return None,
-            Reaction::PushOnly if !extending => return None,
-            Reaction::Destroy if required && extending => {
-                plan.to_destroy.push(pos);
-                continue;
+    resolver.run().then_some(resolver.plan)
+}
+
+struct Resolver<'a, W: PistonWorld> {
+    world: &'a W,
+    base: [i32; 3],
+    extending: bool,
+    piston_facing: Direction,
+    push_direction: Direction,
+    head_cell: [i32; 3],
+    air: u16,
+    plan: Plan,
+}
+
+impl<W: PistonWorld> Resolver<'_, W> {
+    fn run(&mut self) -> bool {
+        let start = if self.extending {
+            offset(self.base, self.piston_facing)
+        } else {
+            offset(self.head_cell, self.piston_facing)
+        };
+        let Some(state) = self.block(start) else {
+            return false;
+        };
+        if !self.pushable(start, state, false, self.piston_facing) {
+            if self.extending && reaction(self.world, start, state) == Reaction::Destroy {
+                self.plan.to_destroy.push(start);
+                return true;
             }
-            Reaction::Destroy => continue,
-            _ => {}
+            return false;
         }
-        if plan.to_move.len() == 12 {
-            return None;
+        if !self.add_block_line(start, self.push_direction) {
+            return false;
         }
-        visited.insert(pos);
-        plan.to_move.push(pos);
-        pending.push((offset(pos, direction), true));
-        if let Some(kind) = sticky(state) {
-            for side in Direction::ALL {
-                if side == direction {
-                    continue;
-                }
-                let adjacent = offset(pos, side);
-                if adjacent == base {
-                    continue;
-                }
-                let other = world.block(adjacent)?;
-                if sticky(other).is_some_and(|other_kind| other_kind != kind) {
-                    continue;
-                }
-                pending.push((adjacent, false));
+        let mut index = 0;
+        while index < self.plan.to_move.len() {
+            let pos = self.plan.to_move[index];
+            let Some(state) = self.block(pos) else {
+                return false;
+            };
+            if is_sticky(state) && !self.add_branching_blocks(pos) {
+                return false;
             }
+            index += 1;
+        }
+        true
+    }
+
+    /// Region-owned state, with the retracting head cell already treated as removed.
+    fn block(&self, pos: [i32; 3]) -> Option<u16> {
+        if !self.extending && pos == self.head_cell {
+            return Some(self.air);
+        }
+        self.world.block(pos)
+    }
+
+    fn pushable(
+        &self,
+        pos: [i32; 3],
+        state: u16,
+        allow_destroy: bool,
+        connection_direction: Direction,
+    ) -> bool {
+        match reaction(self.world, pos, state) {
+            Reaction::Air | Reaction::Move => true,
+            Reaction::PushOnly => self.push_direction == connection_direction,
+            Reaction::Destroy => allow_destroy,
+            Reaction::Block => false,
         }
     }
-    plan.to_move.sort_by_key(|pos| {
-        let (x, y, z) = direction.step();
-        -(i64::from(pos[0]) * i64::from(x)
-            + i64::from(pos[1]) * i64::from(y)
-            + i64::from(pos[2]) * i64::from(z))
-    });
-    Some(plan)
+
+    /// One push line, including the contiguous sticky blocks behind its first block.
+    fn add_block_line(&mut self, start: [i32; 3], connection: Direction) -> bool {
+        let Some(state) = self.block(start) else {
+            return false;
+        };
+        if reaction(self.world, start, state) == Reaction::Air {
+            return true;
+        }
+        if !self.pushable(start, state, false, connection)
+            || start == self.base
+            || self.plan.to_move.contains(&start)
+        {
+            return true;
+        }
+
+        let mut line_added = 1usize;
+        if line_added + self.plan.to_move.len() > 12 {
+            return false;
+        }
+
+        let mut next_state = state;
+        while is_sticky(next_state) {
+            let pos = displaced(start, self.push_direction.opposite(), line_added as i32);
+            let previous = next_state;
+            let Some(state) = self.block(pos) else {
+                return false;
+            };
+            next_state = state;
+            if reaction(self.world, pos, state) == Reaction::Air
+                || !can_stick(previous, state)
+                || !self.pushable(pos, state, false, self.push_direction.opposite())
+                || pos == self.base
+            {
+                break;
+            }
+            line_added += 1;
+            if line_added + self.plan.to_move.len() > 12 {
+                return false;
+            }
+        }
+
+        for offset in (0..line_added).rev() {
+            self.plan.to_move.push(displaced(
+                start,
+                self.push_direction.opposite(),
+                offset as i32,
+            ));
+        }
+
+        let mut distance = 1;
+        loop {
+            let pos = displaced(start, self.push_direction, distance);
+            if let Some(collision) = self.plan.to_move.iter().position(|queued| *queued == pos) {
+                self.reorder_list_at_collision(line_added, collision);
+                let end = collision + line_added;
+                for index in 0..=end {
+                    let branch = self.plan.to_move[index];
+                    let Some(state) = self.block(branch) else {
+                        return false;
+                    };
+                    if is_sticky(state) && !self.add_branching_blocks(branch) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            let Some(state) = self.block(pos) else {
+                return false;
+            };
+            if reaction(self.world, pos, state) == Reaction::Air {
+                return true;
+            }
+            if !self.pushable(pos, state, true, self.push_direction) || pos == self.base {
+                return false;
+            }
+            if reaction(self.world, pos, state) == Reaction::Destroy {
+                if !self.plan.to_destroy.contains(&pos) {
+                    self.plan.to_destroy.push(pos);
+                }
+                return true;
+            }
+            if self.plan.to_move.len() >= 12 {
+                return false;
+            }
+            self.plan.to_move.push(pos);
+            line_added += 1;
+            distance += 1;
+        }
+    }
+
+    /// Sticky blocks branch only to their perpendicular sides; the line along the push axis is
+    /// already handled by [`Self::add_block_line`].
+    fn add_branching_blocks(&mut self, from: [i32; 3]) -> bool {
+        let Some(from_state) = self.block(from) else {
+            return false;
+        };
+        for direction in Direction::ALL {
+            if direction == self.push_direction || direction == self.push_direction.opposite() {
+                continue;
+            }
+            let neighbour = offset(from, direction);
+            let Some(state) = self.block(neighbour) else {
+                return false;
+            };
+            if can_stick(state, from_state) && !self.add_block_line(neighbour, direction) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `PistonStructureResolver.reorderListAtCollision`: keep the newly discovered line in front
+    /// of the line it ran into so the later blocks move first.
+    fn reorder_list_at_collision(&mut self, line_added: usize, collision: usize) {
+        let last_line_start = self.plan.to_move.len() - line_added;
+        let mut reordered = Vec::with_capacity(self.plan.to_move.len());
+        reordered.extend_from_slice(&self.plan.to_move[..collision]);
+        reordered.extend_from_slice(&self.plan.to_move[last_line_start..]);
+        reordered.extend_from_slice(&self.plan.to_move[collision..last_line_start]);
+        self.plan.to_move = reordered;
+    }
 }
 
 /// Convert a movement plan into expected-state changes for an atomic block batch.
@@ -995,6 +1198,201 @@ mod tests {
                 "sticky_piston",
                 &[("facing", "east"), ("extended", "false")]
             )
+        );
+    }
+
+    #[test]
+    fn glazed_terracotta_is_pushed_but_never_pulled() {
+        let mut grid = Grid::default();
+        let base = [0, 64, 0];
+        let glazed = state("white_glazed_terracotta");
+        grid.0.insert([1, 64, 0], glazed);
+        let extension = resolve(&grid, base, Direction::East, true).unwrap();
+        assert_eq!(extension.to_move, vec![[1, 64, 0]]);
+
+        grid.0.insert(
+            base,
+            blocks::state_id("sticky_piston", &[("facing", "east"), ("extended", "true")]).unwrap(),
+        );
+        grid.0.insert(
+            [1, 64, 0],
+            blocks::state_id("piston_head", &[("facing", "east"), ("type", "sticky")]).unwrap(),
+        );
+        grid.0.insert([2, 64, 0], glazed);
+        let retraction = operation(&grid, base, Direction::East, false).unwrap();
+        assert!(retraction.moves.is_empty());
+        assert_eq!(grid.block([2, 64, 0]), Some(glazed));
+    }
+
+    #[test]
+    fn retraction_requires_a_matching_piston_head() {
+        let mut grid = Grid::default();
+        let base = [0, 64, 0];
+        grid.0.insert(
+            base,
+            blocks::state_id("sticky_piston", &[("facing", "east"), ("extended", "true")]).unwrap(),
+        );
+        grid.0.insert([2, 64, 0], state("stone"));
+        assert!(operation(&grid, base, Direction::East, false).is_none());
+
+        grid.0.insert(
+            [1, 64, 0],
+            blocks::state_id("piston_head", &[("facing", "west"), ("type", "sticky")]).unwrap(),
+        );
+        assert!(operation(&grid, base, Direction::East, false).is_none());
+    }
+
+    #[test]
+    fn entity_space_clear_uses_collision_shapes() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("stone"));
+        grid.0.insert([2, 64, 0], state("water"));
+        let box_at = |x: f64, y: f64, z: f64| {
+            ferrite_math::AABB::new(x + 0.2, y + 0.2, z + 0.2, x + 0.8, y + 1.8, z + 0.8)
+        };
+        assert!(!entity_space_clear(&grid, box_at(1.0, 64.0, 0.0)));
+        assert!(entity_space_clear(&grid, box_at(2.0, 64.0, 0.0)));
+        // Standing exactly on the stone is not an overlap.
+        assert!(entity_space_clear(
+            &grid,
+            ferrite_math::AABB::new(1.2, 65.0, 0.2, 1.8, 66.8, 0.8)
+        ));
+    }
+
+    #[test]
+    fn entity_space_clear_rejects_unowned_cells() {
+        struct Boundary;
+        impl PistonWorld for Boundary {
+            fn block(&self, pos: [i32; 3]) -> Option<u16> {
+                (pos != [3, 64, 0]).then_some(state("air"))
+            }
+            fn has_block_entity(&self, _: [i32; 3]) -> bool {
+                false
+            }
+        }
+        let bbox = ferrite_math::AABB::new(3.2, 64.2, 0.2, 3.8, 65.8, 0.8);
+        assert!(!entity_space_clear(&Boundary, bbox));
+    }
+
+    #[test]
+    fn animations_split_and_merge_with_a_region() {
+        let mut animations = Animations::default();
+        let near = MovingBlock::new(
+            [1, 64, 0],
+            [2, 64, 0],
+            state("stone"),
+            Direction::East,
+            true,
+            false,
+        );
+        let far = MovingBlock::new(
+            [20, 64, 0],
+            [21, 64, 0],
+            state("stone"),
+            Direction::East,
+            true,
+            false,
+        );
+        animations.start(vec![near.clone(), far.clone()], &HashSet::new());
+        let moved = animations.split(|pos| pos[0] < 16);
+        assert_eq!(moved.active(), std::slice::from_ref(&near));
+        assert_eq!(animations.active(), std::slice::from_ref(&far));
+        animations.merge(moved);
+        assert_eq!(animations.active().len(), 2);
+        assert!(animations.active().contains(&near));
+        assert!(animations.active().contains(&far));
+    }
+
+    #[test]
+    fn a_sticky_line_stops_at_the_other_sticky_material() {
+        let mut grid = Grid::default();
+        grid.0.insert([1, 64, 0], state("slime_block"));
+        grid.0.insert([1, 65, 0], state("slime_block"));
+        grid.0.insert([0, 65, 0], state("slime_block"));
+        grid.0.insert([-1, 65, 0], state("honey_block"));
+        let plan = resolve(&grid, [0, 64, 0], Direction::East, true).unwrap();
+        assert!(plan.to_move.contains(&[0, 65, 0]));
+        assert!(plan.to_move.contains(&[1, 65, 0]));
+        assert!(!plan.to_move.contains(&[-1, 65, 0]));
+    }
+
+    #[test]
+    fn a_line_that_runs_into_a_queued_block_moves_before_it() {
+        let grid = Grid::default();
+        let mut resolver = Resolver {
+            world: &grid,
+            base: [0, 64, 0],
+            extending: true,
+            piston_facing: Direction::East,
+            push_direction: Direction::East,
+            head_cell: [1, 64, 0],
+            air: state("air"),
+            plan: Plan {
+                to_move: vec![[1, 64, 0], [2, 64, 0], [3, 64, 0], [4, 64, 0]],
+                to_destroy: Vec::new(),
+            },
+        };
+        resolver.reorder_list_at_collision(2, 1);
+        assert_eq!(
+            resolver.plan.to_move,
+            vec![[1, 64, 0], [3, 64, 0], [4, 64, 0], [2, 64, 0]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sticky_side_branch_into_an_unowned_chunk_rejects_the_plan() {
+        use std::sync::{Arc, Mutex};
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        loop {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let piston =
+            blocks::state_id("piston", &[("facing", "east"), ("extended", "false")]).unwrap();
+        let slime = state("slime_block");
+        let stone = state("stone");
+        source.set_block(13, 70, 14, u32::from(piston)).unwrap();
+        source.set_block(14, 70, 14, u32::from(slime)).unwrap();
+        source.set_block(14, 70, 15, u32::from(stone)).unwrap();
+        source.set_block(15, 70, 15, u32::from(stone)).unwrap();
+        let held = HashMap::from([(ferrite_region::ChunkPos(0, 0), 1)]);
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let world = super::super::fluid::RegionFluidWorld::new(&source, &held, &tracking);
+        assert!(operation(&world, [13, 70, 14], Direction::East, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_sticky_retraction_across_an_unowned_chunk_retracts_without_a_pull() {
+        use std::sync::{Arc, Mutex};
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        loop {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let sticky =
+            blocks::state_id("sticky_piston", &[("facing", "east"), ("extended", "true")]).unwrap();
+        let head =
+            blocks::state_id("piston_head", &[("facing", "east"), ("type", "sticky")]).unwrap();
+        source.set_block(14, 70, 0, u32::from(sticky)).unwrap();
+        source.set_block(15, 70, 0, u32::from(head)).unwrap();
+        let held = HashMap::from([(ferrite_region::ChunkPos(0, 0), 1)]);
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let world = super::super::fluid::RegionFluidWorld::new(&source, &held, &tracking);
+        let operation = operation(&world, [14, 70, 0], Direction::East, false).unwrap();
+        assert!(operation.moves.is_empty());
+        assert_eq!(
+            operation
+                .edits
+                .iter()
+                .map(|&(pos, _, _)| pos)
+                .collect::<HashSet<_>>(),
+            HashSet::from([[14, 70, 0], [15, 70, 0]])
         );
     }
 }

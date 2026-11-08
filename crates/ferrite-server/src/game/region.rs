@@ -63,6 +63,52 @@ fn piston_entity_collision_box(cell: [i32; 3], extending: bool) -> ferrite_math:
     )
 }
 
+/// Build the overlay packets for one moving block. The block update and block entity share the
+/// destination position; the entity is optional only if the data tables are unavailable.
+fn moving_piston_packets(
+    block: &super::piston::MovingBlock,
+) -> Option<(BlockUpdate, Option<BlockEntityData>)> {
+    let state = block.moving_state()?;
+    let location = ferrite_protocol::types::BlockPos::new(
+        block.destination[0],
+        block.destination[1],
+        block.destination[2],
+    )
+    .pack();
+    let update = BlockUpdate {
+        location,
+        block_state: VarInt(state as i32),
+    };
+    let entity = block.entity_nbt().and_then(|nbt| {
+        let type_id =
+            ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:piston")?;
+        Some(BlockEntityData {
+            location,
+            block_type: VarInt(type_id as i32),
+            nbt,
+        })
+    });
+    Some((update, entity))
+}
+
+/// Pick the live overlays a player needs after a chunk batch. A player who starts tracking a
+/// destination chunk during the two-tick animation missed the original broadcast.
+fn moving_piston_replay(
+    moving: &[super::piston::MovingBlock],
+    sent: &[(i32, i32)],
+) -> Vec<(BlockUpdate, Option<BlockEntityData>)> {
+    moving
+        .iter()
+        .filter(|block| {
+            sent.contains(&(
+                block.destination[0].div_euclid(16),
+                block.destination[2].div_euclid(16),
+            ))
+        })
+        .filter_map(moving_piston_packets)
+        .collect()
+}
+
 /// How `/item` writes stacks into a player's slots.
 #[derive(Debug, Clone)]
 pub enum SlotFill {
@@ -1341,7 +1387,11 @@ impl Player {
             },
         );
     }
-    fn chunks_tick(&mut self, generator: &mut FlatGenerator) {
+    fn chunks_tick(
+        &mut self,
+        generator: &mut FlatGenerator,
+        moving_pistons: &[super::piston::MovingBlock],
+    ) {
         if self.awaiting_batch || self.queue.is_empty() {
             return;
         }
@@ -1419,7 +1469,7 @@ impl Player {
         }
         // Held only for this insert: loading and encoding above must not serialize the regions.
         if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
-            loaded.extend(sent);
+            loaded.extend(sent.iter().copied());
         }
         send(
             self,
@@ -1427,6 +1477,15 @@ impl Player {
                 size: VarInt(count as i32),
             },
         );
+        // A player who starts tracking a chunk during the animation missed the original
+        // broadcast. Replay the still-live overlay after the batch; the scheduled final update
+        // will reach it through the normal tracked-chunk broadcast.
+        for (update, entity) in moving_piston_replay(moving_pistons, &sent) {
+            send(self, &update);
+            if let Some(entity) = entity {
+                send(self, &entity);
+            }
+        }
         self.awaiting_batch = true;
     }
     fn interaction_ready(&self, location: i64) -> bool {
@@ -7378,47 +7437,26 @@ impl Region {
             }
             // `PistonMovingBlockEntity` is attached to the destination cell; its NBT carries the
             // moved state, direction and progress the client interpolates over two ticks.
-            let piston_type =
-                ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:piston");
             for block in &moving {
-                let Some(state) = block.moving_state() else {
+                let Some((update, entity)) = moving_piston_packets(block) else {
                     continue;
                 };
-                let location = ferrite_protocol::types::BlockPos::new(
-                    block.destination[0],
-                    block.destination[1],
-                    block.destination[2],
-                )
-                .pack();
-                let update = BlockUpdate {
-                    location,
-                    block_state: VarInt(state as i32),
-                };
+                let chunk = (
+                    block.destination[0].div_euclid(16),
+                    block.destination[2].div_euclid(16),
+                );
                 broadcast_tracked_chunk(
                     &ctx.tracking.lock().unwrap(),
                     ctx.dimension,
-                    (
-                        block.destination[0].div_euclid(16),
-                        block.destination[2].div_euclid(16),
-                    ),
+                    chunk,
                     &packet(&update),
                 );
-                if let Some(type_id) = piston_type
-                    && let Some(nbt) = block.entity_nbt()
-                {
-                    let update = BlockEntityData {
-                        location,
-                        block_type: VarInt(type_id),
-                        nbt,
-                    };
+                if let Some(entity) = entity {
                     broadcast_tracked_chunk(
                         &ctx.tracking.lock().unwrap(),
                         ctx.dimension,
-                        (
-                            block.destination[0].div_euclid(16),
-                            block.destination[2].div_euclid(16),
-                        ),
-                        &packet(&update),
+                        chunk,
+                        &packet(&entity),
                     );
                 }
             }
@@ -7469,20 +7507,18 @@ impl Region {
                             continue;
                         }
                         let moved = pos + delta;
-                        let free = |y: f64| {
-                            let state = super::redstone::RedstoneWorld::block(
-                                &world,
-                                [
-                                    moved.x.floor() as i32,
-                                    (moved.y + y).floor() as i32,
-                                    moved.z.floor() as i32,
-                                ],
-                            );
-                            state == Some(0)
-                        };
-                        // Feet and head cells must be air, or the entity stays where it is.
-                        let height = bbox.max.y - bbox.min.y;
-                        if free(0.0) && free(height.min(1.8) - 0.01) {
+                        // Vanilla `PistonMovingBlockEntity.moveCollidedEntities`: only a
+                        // destination with no collision shape for the entity's full box moves
+                        // it. Water and plants are replaceable and do not block the push.
+                        let moved_bbox = ferrite_math::AABB::new(
+                            bbox.min.x + delta.x,
+                            bbox.min.y + delta.y,
+                            bbox.min.z + delta.z,
+                            bbox.max.x + delta.x,
+                            bbox.max.y + delta.y,
+                            bbox.max.z + delta.z,
+                        );
+                        if super::piston::entity_space_clear(&world, moved_bbox) {
                             self.entities.set_pos(key, moved);
                             if let Some(flags) = self.entities.flags_mut(key) {
                                 flags.set(ferrite_entity::Flags::TELEPORTED, true);
@@ -7508,17 +7544,15 @@ impl Region {
                             player.pos[1] + delta.y,
                             player.pos[2] + delta.z,
                         ];
-                        let free = |y: f64| {
-                            super::redstone::RedstoneWorld::block(
-                                &world,
-                                [
-                                    moved[0].floor() as i32,
-                                    (moved[1] + y).floor() as i32,
-                                    moved[2].floor() as i32,
-                                ],
-                            ) == Some(0)
-                        };
-                        if free(0.0) && free(1.79) {
+                        let moved_bbox = ferrite_math::AABB::new(
+                            moved[0] - 0.3,
+                            moved[1],
+                            moved[2] - 0.3,
+                            moved[0] + 0.3,
+                            moved[1] + 1.8,
+                            moved[2] + 0.3,
+                        );
+                        if super::piston::entity_space_clear(&world, moved_bbox) {
                             player.pos = moved;
                             player.teleport();
                         }
@@ -8010,6 +8044,9 @@ impl Region {
             .into_iter()
             .map(|(center, power, fire, breaks)| (center, power, fire, breaks, None))
             .collect();
+        // Snapshot the live overlay so chunk streaming can replay it without borrowing the
+        // region's animation state while players are removed for their turn.
+        let moving_pistons = self.moving_pistons.active().to_vec();
         for id in ids {
             let mut p = self.players.remove(&id).unwrap();
             let updated = {
@@ -8098,9 +8135,9 @@ impl Region {
             match &timings {
                 Some(timings) => {
                     let _scope = timings.scope("chunk-stream");
-                    p.chunks_tick(&mut self.generator);
+                    p.chunks_tick(&mut self.generator, &moving_pistons);
                 }
-                None => p.chunks_tick(&mut self.generator),
+                None => p.chunks_tick(&mut self.generator, &moving_pistons),
             }
             self.drop_broken_blocks(&mut p);
             self.players.insert(id, p);
@@ -9577,6 +9614,82 @@ mod tests {
         region.queue_delayed_update(update(7));
         assert_eq!(region.delayed_updates.len(), 1);
         assert_eq!(region.delayed_updates[0].due, 7);
+    }
+
+    #[test]
+    fn delayed_piston_updates_for_different_positions_are_kept() {
+        let mut region = Region::default();
+        let update = |pos, due| DelayedUpdate {
+            pos,
+            due,
+            chunk: (0, 0),
+            expected_state: 1,
+            packet: Outbound::Packet(vec![42].into()),
+        };
+        region.queue_delayed_update(update([1, 64, 2], 5));
+        region.queue_delayed_update(update([2, 64, 2], 6));
+        assert_eq!(region.delayed_updates.len(), 2);
+    }
+
+    #[test]
+    fn late_tracking_replays_only_moving_pistons_in_the_sent_chunks() {
+        use ferrite_protocol::types::BlockPos;
+        let stone = ferrite_data::blocks::default_state("stone").unwrap();
+        let near = super::super::piston::MovingBlock::new(
+            [1, 64, 0],
+            [2, 64, 0],
+            stone,
+            ferrite_math::Direction::East,
+            true,
+            false,
+        );
+        let far = super::super::piston::MovingBlock::new(
+            [20, 64, 0],
+            [21, 64, 0],
+            stone,
+            ferrite_math::Direction::East,
+            true,
+            false,
+        );
+        let replay = moving_piston_replay(&[near.clone(), far], &[(0, 0)]);
+        assert_eq!(replay.len(), 1);
+        let (update, entity) = &replay[0];
+        let destination = BlockPos::unpack(update.location);
+        assert_eq!((destination.x, destination.y, destination.z), (2, 64, 0));
+        assert_eq!(
+            update.block_state.0,
+            i32::from(near.moving_state().unwrap())
+        );
+        assert!(
+            entity.is_some(),
+            "the overlay needs its piston block entity"
+        );
+    }
+
+    #[test]
+    fn piston_animation_survives_a_region_split_and_merge() {
+        let stone = ferrite_data::blocks::default_state("stone").unwrap();
+        let mut block = super::super::piston::MovingBlock::new(
+            [255, 64, 0],
+            [256, 64, 0],
+            stone,
+            ferrite_math::Direction::East,
+            true,
+            false,
+        );
+        block.progress = 0.5;
+        let mut region = Region::default();
+        region
+            .moving_pistons
+            .start(vec![block], &HashSet::from([[255, 64, 0], [256, 64, 0]]));
+        let sections = HashSet::from([SectionPos(1, 0)]);
+        let split = RegionData::split(&mut region, &sections);
+        assert!(region.moving_pistons.active().is_empty());
+        assert_eq!(split.moving_pistons.active().len(), 1);
+        assert_eq!(split.moving_pistons.active()[0].progress, 0.5);
+        RegionData::merge(&mut region, split);
+        assert_eq!(region.moving_pistons.active().len(), 1);
+        assert_eq!(region.moving_pistons.active()[0].progress, 0.5);
     }
 
     #[test]
