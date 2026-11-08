@@ -44,6 +44,11 @@ jobs:
           distribution: temurin
           java-version: "25"
 
+      # The plugin integration test invokes Gradle from inside `cargo test`. Cache its
+      # wrapper distribution and dependencies before that subprocess runs.
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v6
+
       # vanilla/ is generated locally and gitignored; only cache the produced
       # data, keyed on the generator script that defines its layout.
       - name: Cache vanilla data
