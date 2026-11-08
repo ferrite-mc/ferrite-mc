@@ -124,6 +124,22 @@ pub enum WorldCommand {
     },
 }
 pub type WorldHandler = std::sync::Arc<dyn Fn(WorldCommand) + Send + Sync>;
+/// One block entity's world position and its binary NBT (a named root compound).
+pub type BlockEntityData = ([i32; 3], Vec<u8>);
+/// Why a block-entity box query could not be answered. A host reports every variant as a
+/// failed query rather than as an empty list, so a plugin never mistakes unavailable data for
+/// a structure that has no block entities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockEntityError {
+    /// The server does not own a world with this UUID.
+    UnknownWorld,
+    /// At least one chunk covering the queried box is not loaded.
+    ChunkNotLoaded,
+    /// A block entity's NBT could not be encoded.
+    Unreadable,
+    /// The box covers more chunks than one host call will inspect.
+    TooLarge,
+}
 /// Read-only world access for `World#getBlockAt`, `Block#getLightFromSky`, `World#getBiome`
 /// and `World#getHighestBlockYAt`.
 ///
@@ -139,15 +155,16 @@ pub trait WorldView: Send + Sync {
     /// The biome key at a position, for example `minecraft:plains`.
     fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String>;
     /// The block entities inside the box `min..=max` of the loaded chunks, each as its position
-    /// and binary NBT (a named root compound). `None` means the world is unknown; an empty
-    /// vector means the world exists but the box has no block entities.
+    /// and binary NBT (a named root compound). `Ok` with an empty vector means the world and
+    /// every chunk in the box are loaded but the box has no block entities; an error means the
+    /// query could not be answered and must not be treated as an empty result.
     fn block_entities(
         &self,
         _world: uuid::Uuid,
         _min: [i32; 3],
         _max: [i32; 3],
-    ) -> Option<Vec<([i32; 3], Vec<u8>)>> {
-        None
+    ) -> Result<Vec<BlockEntityData>, BlockEntityError> {
+        Err(BlockEntityError::UnknownWorld)
     }
 }
 

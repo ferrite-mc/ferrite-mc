@@ -27,7 +27,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use anyhow::Context;
-use ferrite_plugin::{PluginConfig, PluginHost, ServerHooks, ServerSnapshot, WorldSnapshot};
+use ferrite_plugin::{
+    BlockEntityData, BlockEntityError, PluginConfig, PluginHost, ServerHooks, ServerSnapshot,
+    WorldSnapshot,
+};
 
 /// Everything the plugin bridge needs from the server's startup configuration.
 pub struct Settings {
@@ -413,6 +416,10 @@ pub fn world_dimension(world: Uuid) -> Option<crate::game::Dimension> {
         .find(|dimension| world_id(*dimension) == world)
 }
 
+/// A single box query inspects at most this many chunks, so an unbounded plugin request cannot
+/// walk the whole coordinate space.
+const MAX_QUERY_CHUNKS: i64 = 4096;
+
 /// Live world reads for the Bukkit block API, backed by the server's chunk sources.
 struct SourceWorldView {
     worlds: HashMap<Uuid, Arc<crate::game::AnvilChunkSource>>,
@@ -450,24 +457,45 @@ impl ferrite_plugin::WorldView for SourceWorldView {
         world: uuid::Uuid,
         min: [i32; 3],
         max: [i32; 3],
-    ) -> Option<Vec<([i32; 3], Vec<u8>)>> {
-        let source = self.source(world)?;
-        Some(
-            source
-                .block_entities()
-                .into_iter()
-                .filter(|(at, _)| (0..3).all(|axis| at[axis] >= min[axis] && at[axis] <= max[axis]))
-                .filter_map(|(at, entity)| {
-                    let bytes = ferrite_nbt::binary::write_named(
-                        "",
-                        &ferrite_nbt::Tag::Compound(entity.data),
-                    )
-                    .ok()?;
-                    Some((at, bytes))
-                })
-                .collect(),
-        )
+    ) -> Result<Vec<BlockEntityData>, BlockEntityError> {
+        let source = self.source(world).ok_or(BlockEntityError::UnknownWorld)?;
+        let min_chunk = [min[0].div_euclid(16), min[2].div_euclid(16)];
+        let max_chunk = [max[0].div_euclid(16), max[2].div_euclid(16)];
+        let chunks = (i64::from(max_chunk[0]) - i64::from(min_chunk[0]) + 1)
+            .saturating_mul(i64::from(max_chunk[1]) - i64::from(min_chunk[1]) + 1);
+        if chunks > MAX_QUERY_CHUNKS {
+            return Err(BlockEntityError::TooLarge);
+        }
+        // A box query is only answerable when every chunk it covers is loaded; otherwise an
+        // unloaded chunk would look exactly like a chunk with no block entities.
+        for x in min_chunk[0]..=max_chunk[0] {
+            for z in min_chunk[1]..=max_chunk[1] {
+                if source.block(x * 16, 0, z * 16).is_none() {
+                    return Err(BlockEntityError::ChunkNotLoaded);
+                }
+            }
+        }
+        encode_block_entities(source.block_entities(), min, max)
     }
+}
+
+/// Serializes the block entities of one query. Any entity whose NBT cannot be encoded fails the
+/// whole query, so a plugin never receives a partial capture that silently lost block data.
+fn encode_block_entities(
+    entities: impl IntoIterator<Item = ([i32; 3], ferrite_world::BlockEntity)>,
+    min: [i32; 3],
+    max: [i32; 3],
+) -> Result<Vec<BlockEntityData>, BlockEntityError> {
+    let mut out = Vec::new();
+    for (at, entity) in entities {
+        if !(0..3).all(|axis| at[axis] >= min[axis] && at[axis] <= max[axis]) {
+            continue;
+        }
+        let bytes = ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(entity.data))
+            .map_err(|_| BlockEntityError::Unreadable)?;
+        out.push((at, bytes));
+    }
+    Ok(out)
 }
 
 /// Build the live world view handed to the plugin bridge.
@@ -1224,6 +1252,24 @@ mod tests {
         assert_eq!(
             server_console_line(&ServerCommand::SetWhitelist { enabled: false }),
             "whitelist off"
+        );
+    }
+
+    #[test]
+    fn block_entity_encoding_fails_the_query_on_bad_nbt() {
+        let mut data = ferrite_nbt::Compound::new();
+        data.insert(
+            "id".into(),
+            ferrite_nbt::Tag::String("minecraft:chest".into()),
+        );
+        data.insert(
+            "oversized".into(),
+            ferrite_nbt::Tag::String("x".repeat(70_000)),
+        );
+        let entity = ferrite_world::BlockEntity { type_id: 1, data };
+        assert_eq!(
+            super::encode_block_entities([([0, 64, 0], entity)], [0; 3], [15, 319, 15]),
+            Err(BlockEntityError::Unreadable)
         );
     }
 }
