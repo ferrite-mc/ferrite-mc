@@ -37,6 +37,13 @@ fn repo_root() -> PathBuf {
         .to_owned()
 }
 
+fn server_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrite-server"));
+    #[cfg(windows)]
+    command.arg("--headless");
+    command
+}
+
 /// Gradle builds share one daemon and project directory; serialize the test helpers that invoke it.
 static GRADLE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -503,7 +510,7 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
     )
     .unwrap();
     let mut process = Process(
-        Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
+        server_command()
             .current_dir(dir.path())
             .env("JAVA_HOME", &java_home)
             .stdin(Stdio::piped())
@@ -779,7 +786,7 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
     )
     .unwrap();
     let mut process = Process(
-        Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
+        server_command()
             .current_dir(dir.path())
             .env("JAVA_HOME", &java_home)
             .stdin(Stdio::piped())
@@ -1072,7 +1079,7 @@ fn plugin_api_calls_reach_the_client_as_packets() {
     )
     .unwrap();
     let mut process = Process(
-        Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
+        server_command()
             .current_dir(dir.path())
             .env("JAVA_HOME", &java_home)
             .stdin(Stdio::piped())
