@@ -8533,8 +8533,11 @@ impl Region {
         };
         // `/kill` is lethal damage, not just a tracker removal: the death pass must still run
         // loot, the dragon fight, and advancements.
-        if !mob::kill(&mut self.entities, key) {
-            return false;
+        if !mob::kill(&mut self.entities, key)
+            && let Some(flags) = self.entities.flags_mut(key)
+        {
+            // `/kill` also applies to non-living entities such as projectiles and dropped items.
+            flags.set(Flags::REMOVED, true);
         }
         if let Some(flags) = self.entities.flags_mut(key) {
             flags.set(Flags::NEEDS_SYNC, true);
