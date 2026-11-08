@@ -647,24 +647,16 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
         .console_command("/tick sprint 650".into())
         .await
         .unwrap();
-    let mut seen = 0usize;
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    // The respawn advances one stage tick per region tick (100 + 400 + 100 ticks), while
+    // `/tick sprint` only speeds up the game-loop clock: the sequence still needs about 30s at
+    // 20 TPS. Allow a loaded CI runner several times that before calling it a failure.
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
         loop {
-            let (id, body) = bot.next_play().await;
-            seen += 1;
-            if id == 124 {
-                let text = SystemChat::decode(&mut body.as_slice()).unwrap().content.0;
-                if text.to_lowercase().contains("sprint") || text.contains("TPS") {
-                    eprintln!("PHASE sprint report #{seen}: {text}");
-                }
-            }
-            if id == BossBar::ID
-                && matches!(
-                    BossBar::decode(&mut body.as_slice()).unwrap().action,
-                    BossBarAction::Add { .. }
-                )
-            {
-                eprintln!("PHASE respawn add #{seen}");
+            let body = bot.until(BossBar::ID).await;
+            if matches!(
+                BossBar::decode(&mut body.as_slice()).unwrap().action,
+                BossBarAction::Add { .. }
+            ) {
                 break;
             }
         }
