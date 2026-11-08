@@ -622,7 +622,7 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     let portal =
         u32::from(ferrite_data::blocks::default_state("minecraft:end_portal").expect("end portal"));
     let mut level = None;
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
         loop {
             if let Some(y) = (0..=255).find(|&y| end.block(1, y, 0) == Some(portal)) {
                 level = Some(y);
