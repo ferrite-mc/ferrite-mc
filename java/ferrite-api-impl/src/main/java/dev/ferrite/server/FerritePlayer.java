@@ -235,17 +235,7 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
         return new org.bukkit.potion.PotionEffect(type, left, base.getAmplifier(), base.isAmbient(), base.hasParticles(), base.hasIcon());
     }
     @Override public java.util.Collection<org.bukkit.potion.PotionEffect> getActivePotionEffects() { expireEffects(); var list = new java.util.ArrayList<org.bukkit.potion.PotionEffect>(); for (var type : effects.keySet()) { var effect = getPotionEffect(type); if (effect != null) list.add(effect); } return list; }
-    // Bans and the whitelist run the vanilla commands; /ban cannot express an expiry, so a timed ban is refused.
-    private void ban(String reason, boolean timed) {
-        if (timed) throw new UnsupportedOperationException("Ferrite: timed profile bans are not implemented: Player#ban");
-        if (!server.dispatchCommand(server.getConsoleSender(), "ban " + name + (reason == null || reason.isBlank() ? "" : " " + reason.replace('\n', ' ')))) throw new IllegalStateException("ban command failed");
-    }
-    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.util.Date expires, String source) { ban(reason, expires != null); return null; }
-    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.util.Date expires, String source, boolean kickPlayer) { ban(reason, expires != null); return null; }
-    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Instant expires, String source) { ban(reason, expires != null); return null; }
-    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Instant expires, String source, boolean kickPlayer) { ban(reason, expires != null); return null; }
-    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source) { ban(reason, duration != null); return null; }
-    @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source, boolean kickPlayer) { ban(reason, duration != null); return null; }
+    // Bans and the whitelist run through the profile ban list and vanilla commands.
     private boolean whitelisted;
     @Override public void setWhitelisted(boolean value) { if (!server.dispatchCommand(server.getConsoleSender(), "whitelist " + (value ? "add " : "remove ") + name)) throw new IllegalStateException("whitelist command failed"); whitelisted = value; }
     @Override public boolean isWhitelisted() { return whitelisted; }

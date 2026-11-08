@@ -13,8 +13,8 @@ import org.bukkit.potion.PotionType;
  * Potion brewing (Server#getPotionBrewer).
  *
  * <p>Plugin mixes are recipe-managed like CraftBukkit does, so they show up in
- * {@link org.bukkit.Server#getRecipe} and can be removed again. The effects of the vanilla
- * potion types live in the host's potion registry, which the bridge does not expose yet.
+ * {@link org.bukkit.Server#getRecipe} and can be removed again. Vanilla potion effects come from
+ * {@link FerritePotionTypeData}, which backs {@code UnsafeValues#getInternalPotionData}.
  */
 final class FerritePotionBrewer implements PotionBrewer {
     /** Mixes added through this brewer, so {@link #resetPotionMixes()} can remove exactly those. */
@@ -38,6 +38,24 @@ final class FerritePotionBrewer implements PotionBrewer {
     }
 
     @Override public Collection<PotionEffect> getEffects(PotionType type, boolean upgrade, boolean extended) {
-        throw new UnsupportedOperationException("Ferrite: not implemented: PotionBrewer#getEffects");
+        java.util.Objects.requireNonNull(type, "type");
+        if (upgrade && extended) throw new IllegalArgumentException("A potion cannot be both upgraded and extended");
+        if (upgrade) {
+            if (!type.isUpgradeable()) throw new IllegalArgumentException(type + " cannot be upgraded");
+            type = variant("STRONG_" + type.name(), type);
+        } else if (extended) {
+            if (!type.isExtendable()) throw new IllegalArgumentException(type + " cannot be extended");
+            type = variant("LONG_" + type.name(), type);
+        }
+        return java.util.List.copyOf(type.getPotionEffects());
+    }
+
+    /** Vanilla stores the strong and long variants as separate enum values. */
+    private static PotionType variant(String name, PotionType base) {
+        try {
+            return PotionType.valueOf(name);
+        } catch (IllegalArgumentException missing) {
+            throw new IllegalArgumentException(base + " has no " + name + " variant", missing);
+        }
     }
 }

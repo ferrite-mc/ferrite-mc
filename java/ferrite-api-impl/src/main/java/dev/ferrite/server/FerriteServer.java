@@ -368,7 +368,13 @@ public class FerriteServer extends ServerStubs {
     }
     @Override public java.util.Iterator<org.bukkit.boss.KeyedBossBar> getBossBars() { return java.util.List.copyOf(bossBars.values()).iterator(); }
     @Override public org.bukkit.boss.KeyedBossBar getBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return bossBars.get(key); }
-    @Override public boolean removeBossBar(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return bossBars.remove(key) != null; }
+    @Override public boolean removeBossBar(org.bukkit.NamespacedKey key) {
+        java.util.Objects.requireNonNull(key, "key");
+        var removed = bossBars.remove(key);
+        // Hide it for every viewer before dropping the registry entry so clients do not keep a stale bar.
+        if (removed instanceof FerriteBossBar bar) bar.removeAll();
+        return removed != null;
+    }
     @Override public java.util.Iterator<org.bukkit.inventory.Recipe> recipeIterator() { return FerriteRecipes.all().iterator(); }
     @Override public org.bukkit.inventory.Recipe getRecipe(org.bukkit.NamespacedKey key) { java.util.Objects.requireNonNull(key, "key"); return FerriteRecipes.get(key); }
     @Override public boolean hasRecipe(org.bukkit.NamespacedKey key) { return getRecipe(key) != null; }

@@ -13,6 +13,42 @@
 단위 테스트(Rust, JUnit)도 있다.
 CMI가 동작한다고 말할 수 없다.
 
+## 2026-11-08 — fb-32 (Bukkit 보스바 연결 + 스텁 인벤토리)
+
+- **Bukkit `org.bukkit.boss.BossBar`가 실제 클라이언트에 표시된다.** `FerriteBossBar`가 Adventure
+  `BossBar`를 소유하고, 뷰어 추가/제거는 `Player#showBossBar`/`hideBossBar`(기존
+  `bossBarAdd`/`bossBarRemove` → `PluginPacket::BossBar` 경로)로 나간다. 제목·진행도·색·스타일·
+  플래그 변경도 같은 경로로 전달되고, `Server#removeBossBar`는 레지스트리에서 지우기 전에 모든
+  뷰어에게 숨긴다. 보스바별 Java 상태만 다루며 월드/엔티티 리전 상태는 읽지 않는다(플레이어별
+  패킷 경로라 리전을 직렬화하지 않음).
+- 검증: `FerriteBossBarTest`(JUnit, 뷰어/속성/숨김·재표시), `typical_plugin_uses_config_commands_listener_and_repeating_task`
+  (실제 서버+JVM+봇이 `/typical surface` 뒤 `BossBar` 추가·제거 패킷 수신), `./gradlew test` 전체 통과.
+- 남은 스텁의 정확한 생성 목록과 소유자는 [`docs/plugin-api-stubs.md`](plugin-api-stubs.md)에 있다.
+  2026-11-08 프로브 기준 Player 106, Server 5, World 61개가 호스트 없이 실패했고, 이 중 상당수는
+  실제 Rust 호스트(`facts.rs`, `network.rs`, `extra.rs`)가 답한다. 실제 서버 기준 남은 경로는
+  `plugin-api-stubs.md`의 "남은 명시적 미지원 경로" 표와 아래 "오늘 못한 것"을 따른다.
+- **Paper/NMS 호환 전체가 완료된 것은 아니다.** NMS-타입 `CraftItemStack.asNMSCopy`,
+  `CraftWorld#getHandle`, `CraftMagicNumbers`는 계속 의도적 미지원이며, 비플레이어 엔티티 조회와
+  구조물 엔티티는 호스트 경계가 아직 없다.
+
+## 2026-11-08 — fb-32 후속 (advancement/potion/timed bans)
+
+- **Advancement 표시 정보:** `data/minecraft/advancement`의 `display`를 읽어
+  `Advancement#getDisplay`와 `displayName`이 동작한다. frame/title/description/icon/show_toast/
+  announce_to_chat/hidden/background를 Paper `AdvancementDisplay`로 돌려준다. 표시가 없는
+  advancement는 `getDisplay()`가 null이고, `displayName`은 key 문자열을 쓴다.
+- **포션 효과:** `PotionBrewer#getEffects`가 vanilla 26.3의 base/strong/long 효과를 돌려준다.
+  `UnsafeValues#getInternalPotionData`를 `FerritePotionTypeData`가 Java에서 답하며, 46개
+  `PotionType`의 effect/duration/amplifier와 upgradeable/extendable/max level을 제공한다.
+  `PotionEffectType#isInstant`도 instant_health/instant_damage를 Java에서 판별한다.
+- **기간 지정 프로필 밴:** `Player#ban(..., Date/Instant/Duration, ...)`가
+  `FerriteProfileBanList`에 만료 시각을 저장하고, daemon 만료 스레드가 로컬 밴을 지운 뒤 호스트에
+  `pardonProfile`을 보낸다. `setExpiration`/`save`도 스케줄을 갱신하고, 명시적 `pardon`은 예약을
+  취소한다.
+- 검증: JUnit `FerriteAdvancementsTest`, `FerriteServerObjectsTest`(potion, timed ban), 전체
+  `./gradlew test` **170개 통과**. 이번 라운드에 Rust 변경은 없었다.
+- 실제 클라이언트에서 advancement 화면·포션 효과 표시·밴 만료를 확인한 것은 아니다.
+
 ## 구현됨 (게임에 실제 효과가 있는 것)
 
 - 최대 체력(`setMaxHealth`/`getMaxHealth`): 클라이언트에 `UpdateAttributes`를 보낸다.

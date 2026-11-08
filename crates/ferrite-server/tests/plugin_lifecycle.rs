@@ -19,10 +19,10 @@ use ferrite_protocol::{
         handshake::{Intent, Intention},
         login::{LoginAcknowledged, LoginStart},
         play::{
-            BlockUpdate, ChunkBatchReceived, ClientboundPlayerChat, ConfirmTeleport,
-            ContainerClick, CreativeSlot, ItemStack, LastSeenUpdate, MovePosition, MoveRotation,
-            OpenScreen, PlayerAction, PositionSync, ServerboundChat, ServerboundContainerClose,
-            SetExperience, SetHealth, SystemChat, UseItemOn,
+            BlockUpdate, BossBar, BossBarAction, ChunkBatchReceived, ClientboundPlayerChat,
+            ConfirmTeleport, ContainerClick, CreativeSlot, ItemStack, LastSeenUpdate, MovePosition,
+            MoveRotation, OpenScreen, PlayerAction, PositionSync, ServerboundChat,
+            ServerboundContainerClose, SetExperience, SetHealth, SystemChat, UseItemOn,
         },
     },
     types::BlockPos,
@@ -856,6 +856,36 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         &stderr,
     );
     wait_for_line(&events, "boss true 0.25 Boss true true", &stdout, &stderr);
+    // The same Bukkit bar is a live client bar: /surface added the sender as a viewer before
+    // removing the registry entry, so an add packet with the plugin's value must reach the bot.
+    let boss_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let packet = BossBar::decode(&mut bot.until(BossBar::ID).as_slice()).unwrap();
+        match packet.action {
+            BossBarAction::Add { name, progress, .. }
+                if name.0 == "Boss" && (progress - 0.25).abs() < f32::EPSILON =>
+            {
+                break;
+            }
+            _ => {}
+        }
+        assert!(
+            Instant::now() < boss_deadline,
+            "no Bukkit boss bar packet with the plugin's value"
+        );
+    }
+    // removeBossBar must hide the bar again rather than leaving a stale client entry.
+    let remove_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let packet = BossBar::decode(&mut bot.until(BossBar::ID).as_slice()).unwrap();
+        if matches!(packet.action, BossBarAction::Remove) {
+            break;
+        }
+        assert!(
+            Instant::now() < remove_deadline,
+            "no Bukkit boss bar remove packet"
+        );
+    }
     // On-demand world reads: the superflat test world has grass at y=64 over dirt and air
     // above it, full sky light in the open column, and the plains biome.
     bot.raw(7, "typical world");

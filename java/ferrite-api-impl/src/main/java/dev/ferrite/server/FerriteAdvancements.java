@@ -2,6 +2,8 @@ package dev.ferrite.server;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import io.papermc.paper.advancement.AdvancementDisplay;
+import io.papermc.paper.advancement.AdvancementDisplay.Frame;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -12,11 +14,16 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
+import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.advancement.Advancement;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.advancement.AdvancementRequirement;
 import org.bukkit.advancement.AdvancementRequirements;
 
@@ -75,6 +82,7 @@ final class FerriteAdvancements {
         private final Set<String> criteria;
         private final AdvancementRequirements requirements;
         private final NamespacedKey parentKey;
+        private final Display display;
 
         VanillaAdvancement(NamespacedKey key, JsonObject json) {
             this.key = key;
@@ -83,6 +91,8 @@ final class FerriteAdvancements {
             if (criteriaJson != null) names.addAll(criteriaJson.keySet());
             this.criteria = Collections.unmodifiableSet(names);
             this.parentKey = json.has("parent") ? NamespacedKey.fromString(json.get("parent").getAsString()) : null;
+            this.display = json.has("display") && json.get("display").isJsonObject()
+                    ? new Display(json.getAsJsonObject("display")) : null;
 
             var groups = new ArrayList<AdvancementRequirement>();
             var requirementsJson = json.getAsJsonArray("requirements");
@@ -103,12 +113,10 @@ final class FerriteAdvancements {
         @Override public Collection<String> getCriteria() { return criteria; }
         @Override public AdvancementRequirements getRequirements() { return requirements; }
 
-        @Override public io.papermc.paper.advancement.AdvancementDisplay getDisplay() {
-            throw new UnsupportedOperationException("Ferrite: not implemented: Advancement#getDisplay");
-        }
+        @Override public AdvancementDisplay getDisplay() { return display; }
 
-        @Override public net.kyori.adventure.text.Component displayName() {
-            throw new UnsupportedOperationException("Ferrite: not implemented: Advancement#displayName");
+        @Override public Component displayName() {
+            return display == null ? Component.text(key.toString()) : display.title();
         }
 
         @Override public Advancement getParent() { return parentKey == null ? null : FerriteAdvancements.get(parentKey); }
@@ -128,6 +136,74 @@ final class FerriteAdvancements {
         }
 
         @Override public String toString() { return "Advancement[" + key + "]"; }
+    }
+
+    /** The display fields in the vanilla advancement JSON that the Paper interface exposes. */
+    private static final class Display implements AdvancementDisplay {
+        private final JsonObject json;
+
+        Display(JsonObject json) { this.json = json; }
+
+        private String string(String field) {
+            var value = json.get(field);
+            return value == null || value.isJsonNull() ? null : value.getAsString();
+        }
+
+        private boolean bool(String field, boolean fallback) {
+            var value = json.get(field);
+            return value == null || value.isJsonNull() ? fallback : value.getAsBoolean();
+        }
+
+        private Component text(String field) {
+            var value = json.get(field);
+            if (value == null || value.isJsonNull()) return Component.empty();
+            try {
+                return GsonComponentSerializer.gson().deserialize(value.toString());
+            } catch (RuntimeException malformed) {
+                return Component.text(value.toString());
+            }
+        }
+
+        @Override public Frame frame() {
+            var frame = string("frame");
+            if (frame == null) return Frame.TASK;
+            return switch (frame.toLowerCase(Locale.ROOT)) {
+                case "challenge" -> Frame.CHALLENGE;
+                case "goal" -> Frame.GOAL;
+                default -> Frame.TASK;
+            };
+        }
+
+        @Override public Component title() { return text("title"); }
+        @Override public Component description() { return text("description"); }
+
+        @Override public ItemStack icon() {
+            var value = json.get("icon");
+            if (value == null || !value.isJsonObject()) return new ItemStack(Material.AIR);
+            var icon = value.getAsJsonObject();
+            var id = icon.get("id");
+            if (id == null || id.isJsonNull()) return new ItemStack(Material.AIR);
+            var material = Material.matchMaterial(id.getAsString());
+            if (material == null) return new ItemStack(Material.AIR);
+            int count = icon.has("count") ? icon.get("count").getAsInt() : 1;
+            return new FerriteItemStack(material, count);
+        }
+
+        @Override public boolean doesShowToast() { return bool("show_toast", true); }
+        @Override public boolean doesAnnounceToChat() { return bool("announce_to_chat", true); }
+        @Override public boolean isHidden() { return bool("hidden", false); }
+
+        @Override public NamespacedKey backgroundPath() {
+            var background = string("background");
+            if (background == null) return null;
+            try {
+                return NamespacedKey.fromString(background.contains(":") ? background : "minecraft:" + background);
+            } catch (IllegalArgumentException malformed) {
+                return null;
+            }
+        }
+
+        @Override public Component displayName() { return title(); }
     }
 
     /** One alternative set from the advancement's {@code requirements} array. */

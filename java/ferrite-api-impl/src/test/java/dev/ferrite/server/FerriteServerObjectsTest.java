@@ -53,9 +53,55 @@ class FerriteServerObjectsTest {
         assertEquals(200, effect.getDuration());
         assertEquals(1, effect.getAmplifier());
         assertTrue(brewer.getEffectsFromDamage(4).isEmpty());
-        var unsupported = assertThrows(UnsupportedOperationException.class,
-                () -> brewer.getEffects(PotionType.SWIFTNESS, false, false));
-        assertEquals("Ferrite: not implemented: PotionBrewer#getEffects", unsupported.getMessage());
+        var base = brewer.getEffects(PotionType.SWIFTNESS, false, false);
+        assertEquals(1, base.size());
+        var baseEffect = base.iterator().next();
+        assertEquals(PotionEffectType.SPEED, baseEffect.getType());
+        assertEquals(0, baseEffect.getAmplifier());
+        var upgraded = brewer.getEffects(PotionType.SWIFTNESS, true, false).iterator().next();
+        assertEquals(1, upgraded.getAmplifier());
+        var extended = brewer.getEffects(PotionType.SWIFTNESS, false, true).iterator().next();
+        assertTrue(extended.getDuration() > baseEffect.getDuration());
+        assertThrows(IllegalArgumentException.class, () -> brewer.getEffects(PotionType.WATER, true, false));
+
+        assertTrue(PotionType.SWIFTNESS.isUpgradeable());
+        assertTrue(PotionType.SWIFTNESS.isExtendable());
+        assertEquals(2, PotionType.SWIFTNESS.getMaxLevel());
+        assertEquals(PotionEffectType.SPEED, PotionType.SWIFTNESS.getEffectType());
+        assertFalse(PotionType.SWIFTNESS.isInstant());
+        assertFalse(PotionType.LONG_SWIFTNESS.isUpgradeable());
+        assertFalse(PotionType.LONG_SWIFTNESS.isExtendable());
+        assertEquals(1, PotionType.LONG_SWIFTNESS.getMaxLevel());
+        assertTrue(PotionType.HEALING.isInstant());
+        assertNull(PotionType.WATER.getEffectType());
+        assertTrue(PotionType.WATER.getPotionEffects().isEmpty());
+        var turtle = PotionType.TURTLE_MASTER.getPotionEffects();
+        assertEquals(List.of(PotionEffectType.SLOWNESS, PotionEffectType.RESISTANCE),
+                turtle.stream().map(org.bukkit.potion.PotionEffect::getType).toList());
+        assertEquals(List.of(400, 400), turtle.stream().map(org.bukkit.potion.PotionEffect::getDuration).toList());
+        assertEquals(List.of(3, 2), turtle.stream().map(org.bukkit.potion.PotionEffect::getAmplifier).toList());
+        assertThrows(IllegalArgumentException.class,
+                () -> server.getUnsafe().getInternalPotionData(NamespacedKey.minecraft("not_a_potion")));
+    }
+
+    @Test void timedProfileBansExpireAndPardonTheHost() throws Exception {
+        var calls = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
+        var id = UUID.fromString("00000000-0000-0000-0000-00000000ba11");
+        var player = FerritePlayer.create(server, id, "TimedBan", false, 20.0, 20, 0, null);
+        server.registerPlayer(player);
+        try {
+            assertNotNull(player.ban("later", java.time.Duration.ofMillis(50), "test", false));
+            assertTrue(player.isBanned());
+            var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+            while (player.isBanned() && System.nanoTime() < deadline) Thread.sleep(10);
+            assertFalse(player.isBanned(), "the timed ban expires");
+            assertTrue(calls.contains("banProfile(String,String)"));
+            assertTrue(calls.contains("pardonProfile(String)"));
+        } finally {
+            server.unregisterPlayer(id);
+            HostBridge.transport = null;
+        }
     }
 
     @Test void serverConfigReflectsTheMissingProxy() {

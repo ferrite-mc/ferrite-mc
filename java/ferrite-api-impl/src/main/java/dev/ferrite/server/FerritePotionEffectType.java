@@ -1,5 +1,9 @@
 package dev.ferrite.server;
 final class FerritePotionEffectType extends org.bukkit.potion.PotionEffectType {
+    /** Vanilla effects that apply once; every other mob effect is a timed effect. */
+    private static final java.util.Set<String> INSTANT_EFFECTS =
+            java.util.Set.of("instant_health", "instant_damage");
+
     private final org.bukkit.NamespacedKey key;
     FerritePotionEffectType(org.bukkit.NamespacedKey key) { this.key = key; }
     public org.bukkit.NamespacedKey getKey() { return key; }
@@ -8,7 +12,9 @@ final class FerritePotionEffectType extends org.bukkit.potion.PotionEffectType {
     public String getTranslationKey() { return translationKey(); }
     private UnsupportedOperationException unsupported() { return new UnsupportedOperationException("Ferrite: effect properties not implemented: " + key); }
     public org.bukkit.potion.PotionEffect createEffect(int duration, int amplifier) { return new org.bukkit.potion.PotionEffect(this, duration, amplifier); }
-    public boolean isInstant() { return HostBridge.callBoolean("PotionEffectType", key, "isInstant()"); }
+    public boolean isInstant() {
+        return key.getNamespace().equals("minecraft") && INSTANT_EFFECTS.contains(key.getKey());
+    }
     public org.bukkit.potion.PotionEffectTypeCategory getCategory() { return (org.bukkit.potion.PotionEffectTypeCategory) HostBridge.call("PotionEffectType", key, "getCategory()", org.bukkit.potion.PotionEffectTypeCategory.class); }
     public org.bukkit.Color getColor() { return (org.bukkit.Color) HostBridge.call("PotionEffectType", key, "getColor()", org.bukkit.Color.class); }
     public double getDurationModifier() { return HostBridge.callDouble("PotionEffectType", key, "getDurationModifier()"); }

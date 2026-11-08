@@ -9,11 +9,21 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /** Player bans: remembered here and applied through the console ban and pardon commands. */
 @SuppressWarnings({"unchecked", "rawtypes"})
 final class FerriteProfileBanList implements org.bukkit.ban.ProfileBanList {
     private final Map<String, Entry> bans = new ConcurrentHashMap<>();
+    /** Expiry runs off the server threads: it only removes local state and asks the host to pardon. */
+    private static final ScheduledExecutorService EXPIRY = Executors.newSingleThreadScheduledExecutor(task -> {
+        var thread = new Thread(task, "ferrite-ban-expiry");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private static String key(String name) { return name.toLowerCase(Locale.ROOT); }
     private static String nameOf(org.bukkit.profile.PlayerProfile profile) {
@@ -23,7 +33,7 @@ final class FerriteProfileBanList implements org.bukkit.ban.ProfileBanList {
     }
     private Entry current(String name) {
         var entry = bans.get(key(name));
-        if (entry != null && entry.expires != null && entry.expires.before(new Date())) { bans.remove(key(name)); return null; }
+        if (entry != null && entry.expires != null && entry.expires.before(new Date())) { expire(entry); return null; }
         return entry;
     }
 
@@ -62,7 +72,19 @@ final class FerriteProfileBanList implements org.bukkit.ban.ProfileBanList {
     @Override public void pardon(org.bukkit.profile.PlayerProfile profile) { pardon(nameOf(profile)); }
     @Override public void pardon(String target) {
         HostBridge.callVoid("Server", "server", "pardonProfile(String)", target);
-        bans.remove(key(target));
+        var entry = bans.remove(key(target));
+        if (entry != null) entry.cancelExpiry();
+    }
+
+    /** Drops an expired entry and tells the host, without failing the expiry thread. */
+    private void expire(Entry entry) {
+        if (!bans.remove(key(entry.name), entry)) return;
+        entry.cancelExpiry();
+        try {
+            HostBridge.callVoid("Server", "server", "pardonProfile(String)", entry.name);
+        } catch (UnsupportedOperationException offline) {
+            // No host is attached; the local ban is still gone.
+        }
     }
 
     private final class Entry implements org.bukkit.BanEntry<PlayerProfile> {
@@ -71,6 +93,7 @@ final class FerriteProfileBanList implements org.bukkit.ban.ProfileBanList {
         private Date created = new Date();
         private String reason, source;
         private Date expires;
+        private ScheduledFuture<?> expiryTask;
         Entry(String name, PlayerProfile profile, String reason, Date expires, String source) {
             this.name = name; this.profile = profile; this.reason = reason; this.source = source;
             this.expires = expires == null ? null : new Date(expires.getTime());
@@ -82,10 +105,22 @@ final class FerriteProfileBanList implements org.bukkit.ban.ProfileBanList {
         @Override public String getSource() { return source; }
         @Override public void setSource(String value) { source = value; }
         @Override public Date getExpiration() { return expires == null ? null : new Date(expires.getTime()); }
-        @Override public void setExpiration(Date value) { expires = value == null ? null : new Date(value.getTime()); }
+        @Override public void setExpiration(Date value) { expires = value == null ? null : new Date(value.getTime()); schedule(); }
         @Override public String getReason() { return reason; }
         @Override public void setReason(String value) { reason = value; }
-        @Override public void save() { HostBridge.callVoid("Server", "server", "banProfile(String,String)", name, reason == null ? "" : reason); }
+        @Override public void save() {
+            HostBridge.callVoid("Server", "server", "banProfile(String,String)", name, reason == null ? "" : reason);
+            schedule();
+        }
+        private synchronized void schedule() {
+            if (expiryTask != null) { expiryTask.cancel(false); expiryTask = null; }
+            if (expires == null) return;
+            long delay = Math.max(0, expires.getTime() - System.currentTimeMillis());
+            expiryTask = EXPIRY.schedule(() -> FerriteProfileBanList.this.expire(this), delay, TimeUnit.MILLISECONDS);
+        }
+        private synchronized void cancelExpiry() {
+            if (expiryTask != null) { expiryTask.cancel(false); expiryTask = null; }
+        }
         @Override public void remove() { pardon(name); }
     }
 }
