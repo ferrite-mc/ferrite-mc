@@ -37,11 +37,16 @@ fn repo_root() -> PathBuf {
         .to_owned()
 }
 
+#[cfg(windows)]
 fn server_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ferrite-server"));
-    #[cfg(windows)]
     command.arg("--headless");
     command
+}
+
+#[cfg(not(windows))]
+fn server_command() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
 }
 
 /// Gradle builds share one daemon and project directory; serialize the test helpers that invoke it.
