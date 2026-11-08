@@ -22,7 +22,8 @@ use ferrite_protocol::{
             BlockUpdate, BossBar, BossBarAction, ChunkBatchReceived, ClientboundPlayerChat,
             ConfirmTeleport, ContainerClick, CreativeSlot, ItemStack, LastSeenUpdate, MovePosition,
             MoveRotation, OpenScreen, PlayerAction, PositionSync, ServerboundChat,
-            ServerboundContainerClose, SetExperience, SetHealth, SystemChat, UseItemOn,
+            ServerboundContainerClose, SetExperience, SetHealth, SetPlayerInventory, SystemChat,
+            UseItemOn,
         },
     },
     types::BlockPos,
@@ -1107,6 +1108,10 @@ fn plugin_api_calls_reach_the_client_as_packets() {
             .any(|line| line == "verify chunk-sent true sent-chunks>0 true"),
         "chunks the client was sent were not reported:\n{report}"
     );
+    // The plugin writes PDC and item flags through a real inventory slot update; the host must
+    // forward that slot to the client with both components intact.
+    bot.raw(7, "verify-item");
+    wait_for_line(&events, "verify-item set", &stdout, &stderr);
 
     let mut lightning = false;
     let mut thunder = false;
@@ -1116,6 +1121,7 @@ fn plugin_api_calls_reach_the_client_as_packets() {
     let mut team_added = None;
     let mut boss = None;
     let mut helmet = None;
+    let mut slot_item = None;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         let Some((id, body)) = bot.next_play() else {
@@ -1143,6 +1149,19 @@ fn plugin_api_calls_reach_the_client_as_packets() {
             SetEquipment::<ItemStack>::ID => {
                 helmet = Some(SetEquipment::<ItemStack>::decode(&mut b).unwrap());
             }
+            SetPlayerInventory::<ferrite_item::ItemStack>::ID => {
+                let packet = SetPlayerInventory::<ferrite_item::ItemStack>::decode(&mut b).unwrap();
+                if packet.slot.0 == 8
+                    && packet.item.count > 0
+                    && packet
+                        .item
+                        .components
+                        .get(ferrite_item::component_ids::CUSTOM_DATA)
+                        .is_some()
+                {
+                    slot_item = Some(packet);
+                }
+            }
             _ => {}
         }
         if lightning
@@ -1151,6 +1170,7 @@ fn plugin_api_calls_reach_the_client_as_packets() {
             && team_added.is_some()
             && boss.is_some()
             && helmet.is_some()
+            && slot_item.is_some()
         {
             break;
         }
@@ -1201,4 +1221,45 @@ fn plugin_api_calls_reach_the_client_as_packets() {
     assert_eq!(helmet.slots.len(), 1);
     assert_eq!(helmet.slots[0].0, 5, "head slot");
     assert!(helmet.slots[0].1.count > 0, "the helmet was sent empty");
+
+    let slot_item = slot_item.expect("the plugin-set slot 8 never reached the client");
+    assert_eq!(slot_item.slot.0, 8);
+    assert_eq!(
+        slot_item.item.item,
+        ferrite_item::item_id("diamond_sword").expect("diamond sword id")
+    );
+    assert_eq!(slot_item.item.count, 1);
+    let data = match slot_item
+        .item
+        .components
+        .get(ferrite_item::component_ids::CUSTOM_DATA)
+    {
+        Some(ferrite_item::Component::CustomData(data)) => data,
+        other => panic!("slot 8 carries no custom_data component: {other:?}"),
+    };
+    assert_eq!(
+        data.get("ferrite:owner"),
+        Some(&ferrite_nbt::Tag::String("bot\nline".into()))
+    );
+    assert_eq!(data.get("ferrite:level"), Some(&ferrite_nbt::Tag::Int(12)));
+    assert_eq!(data.get("ferrite:flag"), Some(&ferrite_nbt::Tag::Byte(1)));
+    assert_eq!(
+        data.get("ferrite:arc"),
+        Some(&ferrite_nbt::Tag::IntArray(vec![3, -4]))
+    );
+    assert_eq!(
+        slot_item
+            .item
+            .components
+            .get(ferrite_item::component_ids::TOOLTIP_DISPLAY),
+        Some(&ferrite_item::Component::TooltipDisplay(
+            ferrite_item::TooltipDisplay {
+                hide_tooltip: true,
+                hidden_components: vec![
+                    ferrite_item::component_ids::ENCHANTMENTS,
+                    ferrite_item::component_ids::DYED_COLOR,
+                ],
+            }
+        ))
+    );
 }

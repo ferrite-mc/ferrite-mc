@@ -631,7 +631,7 @@ class PlayerExtrasTest {
             pdc.set(bytesKey, org.bukkit.persistence.PersistentDataType.BYTE_ARRAY, new byte[]{1, -2});
             pdc.set(intsKey, org.bukkit.persistence.PersistentDataType.INTEGER_ARRAY, new int[]{3, -4});
             pdc.set(longsKey, org.bukkit.persistence.PersistentDataType.LONG_ARRAY, new long[]{5L, -6L});
-            meta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ENCHANTS, org.bukkit.inventory.ItemFlag.HIDE_DYE);
+            meta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ENCHANTS, org.bukkit.inventory.ItemFlag.HIDE_DYE, org.bukkit.inventory.ItemFlag.HIDE_DESTROYS);
             assertEquals((byte) 4, pdc.get(byteKey, org.bukkit.persistence.PersistentDataType.BYTE));
             assertEquals((short) 5, pdc.get(shortKey, org.bukkit.persistence.PersistentDataType.SHORT));
             assertEquals(6, pdc.get(intKey, org.bukkit.persistence.PersistentDataType.INTEGER));
@@ -648,6 +648,7 @@ class PlayerExtrasTest {
             assertThrows(UnsupportedOperationException.class, () -> pdc.set(new org.bukkit.NamespacedKey("ferrite", "unsupported"), org.bukkit.persistence.PersistentDataType.TAG_CONTAINER, new FerriteDataContainer()));
             pdc.remove(longKey);
             assertFalse(pdc.has(longKey));
+            meta.removeItemFlags(org.bukkit.inventory.ItemFlag.HIDE_DESTROYS);
             assertTrue(item.setItemMeta(meta));
             var clone = item.clone();
             assertTrue(clone.isSimilar(item));
@@ -658,7 +659,11 @@ class PlayerExtrasTest {
             assertArrayEquals(new int[]{3, -4}, reloaded.get(intsKey, org.bukkit.persistence.PersistentDataType.INTEGER_ARRAY));
             assertTrue(reloaded.get(boolKey, org.bukkit.persistence.PersistentDataType.BOOLEAN));
             try { player.getInventory().setItem(6, clone); } catch (IllegalStateException noNative) { /* no host in unit tests */ }
-            assertTrue(calls.stream().anyMatch(c -> c.startsWith("setItemMeta(int,String)[6") && c.contains("HIDE_ENCHANTS") && c.contains("ferrite:string")), calls.toString());
+            var payload = calls.stream().filter(c -> c.startsWith("setItemMeta(int,String)[6")).findFirst().orElseThrow();
+            assertTrue(payload.contains("HIDE_ENCHANTS") && payload.contains("ferrite:string"), payload);
+            assertFalse(payload.contains("HIDE_DESTROYS"), "a removed item flag reached the host: " + payload);
+            assertFalse(payload.contains("\"ferrite:long\":"), "a removed PDC key reached the host: " + payload);
+            assertTrue(payload.contains("HIDE_DYE"), payload);
         } finally { HostBridge.transport = null; }
     }
 

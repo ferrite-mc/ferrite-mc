@@ -645,6 +645,76 @@ mod tests {
     }
 
     #[test]
+    fn item_pdc_keeps_every_typed_value_and_escaped_strings() {
+        let data = item_pdc(concat!(
+            r#"{"ferrite:byte":{type:"BYTE",value:4b},"#,
+            r#""ferrite:short":{type:"SHORT",value:5s},"#,
+            r#""ferrite:int":{type:"INTEGER",value:6},"#,
+            r#""ferrite:long":{type:"LONG",value:7l},"#,
+            r#""ferrite:float":{type:"FLOAT",value:1.5f},"#,
+            r#""ferrite:double":{type:"DOUBLE",value:2.5d},"#,
+            r#""ferrite:bool":{type:"BOOLEAN",value:1b},"#,
+            r#""ferrite:text":{type:"STRING",value:"line\nquote\"slash\\tab\t"},"#,
+            r#""ferrite:nan":{type:"FLOAT",value:NaNf},"#,
+            r#""ferrite:inf":{type:"DOUBLE",value:-Infinityd},"#,
+            r#""ferrite:bytes":{type:"BYTE_ARRAY",value:[B;1b,-2b]},"#,
+            r#""ferrite:ints":{type:"INTEGER_ARRAY",value:[I;3,-4]},"#,
+            r#""ferrite:longs":{type:"LONG_ARRAY",value:[L;5l,-6l]}"#,
+            "}"
+        ))
+        .expect("valid PDC SNBT");
+        assert_eq!(data.get("ferrite:byte"), Some(&ferrite_nbt::Tag::Byte(4)));
+        assert_eq!(data.get("ferrite:short"), Some(&ferrite_nbt::Tag::Short(5)));
+        assert_eq!(data.get("ferrite:int"), Some(&ferrite_nbt::Tag::Int(6)));
+        assert_eq!(data.get("ferrite:long"), Some(&ferrite_nbt::Tag::Long(7)));
+        assert_eq!(
+            data.get("ferrite:float"),
+            Some(&ferrite_nbt::Tag::Float(1.5))
+        );
+        assert_eq!(
+            data.get("ferrite:double"),
+            Some(&ferrite_nbt::Tag::Double(2.5))
+        );
+        assert_eq!(data.get("ferrite:bool"), Some(&ferrite_nbt::Tag::Byte(1)));
+        assert_eq!(
+            data.get("ferrite:text"),
+            Some(&ferrite_nbt::Tag::String(
+                "line\nquote\"slash\\tab\t".into()
+            ))
+        );
+        let Some(ferrite_nbt::Tag::Float(nan)) = data.get("ferrite:nan") else {
+            panic!("NaN float was not preserved");
+        };
+        assert!(nan.is_nan(), "NaN float was not preserved");
+        assert_eq!(
+            data.get("ferrite:inf"),
+            Some(&ferrite_nbt::Tag::Double(f64::NEG_INFINITY))
+        );
+        assert_eq!(
+            data.get("ferrite:bytes"),
+            Some(&ferrite_nbt::Tag::ByteArray(vec![1, -2]))
+        );
+        assert_eq!(
+            data.get("ferrite:ints"),
+            Some(&ferrite_nbt::Tag::IntArray(vec![3, -4]))
+        );
+        assert_eq!(
+            data.get("ferrite:longs"),
+            Some(&ferrite_nbt::Tag::LongArray(vec![5, -6]))
+        );
+
+        for invalid in [
+            r#"{"ferrite":{type:"STRING",value:"x"}}"#,
+            r#"{":key":{type:"STRING",value:"x"}}"#,
+            r#"{"ferrite:key":{type:"STRING",value:"x",extra:1}}"#,
+            r#"{"ferrite:key":{type:"BOOLEAN",value:2b}}"#,
+            r#"{"ferrite:key":{type:"BYTE_ARRAY",value:[I;1]}}"#,
+        ] {
+            assert_eq!(item_pdc(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
     fn item_use_calls_become_use_commands() {
         let call = |method: &str, args: &[&str]| HostCall {
             owner: "Player".into(),

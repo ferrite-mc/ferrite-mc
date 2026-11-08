@@ -17,5 +17,8 @@ commands:
   test-inventory:
     description: Opens a plugin inventory for the lifecycle integration test
     usage: /test-inventory
+  verify-item:
+    description: Sets PDC and item flags through the real inventory slot path
+    usage: /verify-item
 depend: [FerriteAlias]
 folia-supported: true
