@@ -546,8 +546,21 @@ pub struct TickContext {
     pub command_entities: Arc<Mutex<super::entity_index::EntityIndex>>,
     /// Server command state, used by command blocks (storage, scores, `/function`).
     pub state: Arc<Mutex<super::commands::GameState>>,
+    pub profiler: Option<Arc<super::profile::Profiler>>,
     /// The server's command tree, for command blocks; `None` in tests that do not need it.
     pub tree: Option<Arc<ferrite_command::CommandDispatcher<super::commands::Source>>>,
+}
+
+fn lock_game_state<'a>(
+    state: &'a Arc<Mutex<super::commands::GameState>>,
+    profiler: Option<&super::profile::Profiler>,
+) -> std::sync::MutexGuard<'a, super::commands::GameState> {
+    let started = std::time::Instant::now();
+    let guard = state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(profiler) = profiler {
+        profiler.record_state_lock_wait(started.elapsed());
+    }
+    guard
 }
 
 /// Runs a command block's command on the region thread. World edits and block-entity data are
@@ -4426,7 +4439,7 @@ impl Region {
     /// that no owner currently reports may be served from the last sighting.
     fn leash_holder(&self, ctx: &TickContext, holder: Uuid) -> LeashHolderLookup {
         let player = {
-            let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             state
                 .players
                 .iter()
@@ -4643,7 +4656,7 @@ impl Region {
         // The villager schedule runs before AI so each villager has this tick's activity and
         // destination. `/tick freeze` already guards this call at the region level.
         let (day_time, game_time) = {
-            let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             (state.clock_time, state.game_time)
         };
         ferrite_entity::villager::tick_all(&mut self.entities, blocks, day_time, game_time);
@@ -4748,7 +4761,7 @@ impl Region {
                 }
             }
         }
-        let day_time = ctx.state.lock().unwrap().clock_time;
+        let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
         self.tick_trader_drinks(day_time, ctx);
         let trader_spawning = {
             let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
@@ -4861,7 +4874,7 @@ impl Region {
             return;
         }
         {
-            let mut state = ctx.state.lock().unwrap();
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             let fight = &mut state.more.end_fight;
             if !fight.loaded {
                 fight.loaded = true;
@@ -4871,7 +4884,7 @@ impl Region {
             }
         }
         self.run_end_fight(ctx);
-        let mut state = ctx.state.lock().unwrap();
+        let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
         let fight = &mut state.more.end_fight;
         // Stage transitions are the durable checkpoints; saving the per-tick timer would rewrite
         // the fight file 600 times during one respawn.
@@ -4905,7 +4918,7 @@ impl Region {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
-        let mut state = ctx.state.lock().unwrap();
+        let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
         let fight = &mut state.more.end_fight;
         // The region that holds the chunk at the origin starts the fight.
         if !fight.started && self.held_chunks.contains_key(&ChunkPos(0, 0)) {
@@ -5124,7 +5137,10 @@ impl Region {
                     let (spot, _) = ferrite_entity::dragon::position_at(0);
                     let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
                     self.entities.insert(dragon);
-                    ctx.state.lock().unwrap().more.end_fight.finish_respawn();
+                    lock_game_state(&ctx.state, ctx.profiler.as_deref())
+                        .more
+                        .end_fight
+                        .finish_respawn();
                 }
             }
         }
@@ -5263,7 +5279,7 @@ impl Region {
         }
         let first;
         {
-            let mut state = ctx.state.lock().unwrap();
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             let fight = &mut state.more.end_fight;
             first = !std::mem::replace(&mut fight.killed, true);
             fight.dragon_alive = false;
@@ -7111,7 +7127,9 @@ impl Region {
         let actions = self.redstone.take_piston_actions(&world);
         let mut piston_changes = Vec::new();
         let mut destroyed = Vec::new();
-        let border = ctx.state.lock().unwrap().border.clone();
+        let border = lock_game_state(&ctx.state, ctx.profiler.as_deref())
+            .border
+            .clone();
         for (pos, facing, extending) in actions {
             let Some(operation) = super::piston::operation(&world, pos, facing, extending) else {
                 continue;
@@ -8087,7 +8105,10 @@ impl Region {
             seen: Default::default(),
         };
         // `/tick freeze` stops every entity but players (vanilla `TickRateManager.isEntityFrozen`).
-        let entities_run = ctx.state.lock().unwrap().more.tick.simulating();
+        let entities_run = lock_game_state(&ctx.state, ctx.profiler.as_deref())
+            .more
+            .tick
+            .simulating();
         if entities_run {
             item::tick_items(&mut self.entities, &blocks, &mut self.rng);
         }
@@ -8642,6 +8663,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: Default::default(),
+            profiler: None,
             tree: None,
         }
     }
@@ -9226,6 +9248,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: Default::default(),
+            profiler: None,
             tree: None,
         };
         region.explode([8.5, 66.5, 8.5], 4.0, false, &ctx);
@@ -9279,6 +9302,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state,
+            profiler: None,
             tree: None,
         };
         region.tick(&ctx);
@@ -9397,6 +9421,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: Default::default(),
+            profiler: None,
             tree: None,
         });
 
@@ -9421,6 +9446,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: Default::default(),
             state: state.clone(),
+            profiler: None,
             tree: None,
         };
         let mut region = Region::default();
@@ -9499,6 +9525,7 @@ mod tests {
             spawn: [0.0, 65.0, 0.0],
             command_entities: entities,
             state: Default::default(),
+            profiler: None,
             tree: None,
         }
     }
@@ -9638,7 +9665,7 @@ mod tests {
         let holder = Uuid::from_u128(0x1ea5_1003);
         let ctx = leash_context(Default::default());
         {
-            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             state.join(holder, "Holder".into(), 0, 20);
             state.set_position(holder, [0.5, 64.0, 0.5], 0.0, 0.0);
         }
@@ -9794,7 +9821,7 @@ mod tests {
         let holder = Uuid::from_u128(0x1ea5_1008);
         let ctx = leash_context(Default::default());
         {
-            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             state.join(holder, "Holder".into(), 0, 20);
             state.set_position(holder, [0.5, 64.0, 0.5], 0.0, 0.0);
             state.set_dimension(holder, super::super::Dimension::Nether);
@@ -9828,7 +9855,7 @@ mod tests {
         let holder = Uuid::from_u128(0x1ea5_1007);
         let ctx = leash_context(Default::default());
         {
-            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             state.join(holder, "Holder".into(), 0, 20);
             state.set_position(holder, [0.5, 64.0, 0.5], 0.0, 0.0);
         }
@@ -9889,7 +9916,7 @@ mod tests {
         );
         let ctx = leash_context(index);
         {
-            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             state.join(holder, "Holder".into(), 0, 20);
             state.set_position(holder, [0.5, 64.0, 0.5], 0.0, 0.0);
             state.set_dimension(holder, super::super::Dimension::Overworld);
@@ -9933,7 +9960,7 @@ mod tests {
         let holder = Uuid::from_u128(0x1ea5_1009);
         let ctx = leash_context(Default::default());
         {
-            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             state.join(holder, "Holder".into(), 0, 20);
             state.set_position(holder, [0.5, 64.0, 0.5], 0.0, 0.0);
         }
@@ -9959,7 +9986,7 @@ mod tests {
         // Logging out and back in within the grace window is a new session: the cached
         // holder must not be revived even though the UUID and saved position match.
         {
-            let mut state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             state.leave(holder);
             state.join(holder, "Holder".into(), 0, 20);
             state.set_position(holder, [7.5, 64.0, 0.5], 0.0, 0.0);

@@ -31,6 +31,9 @@ pub struct Profiler {
     /// When each slot last ticked, so retired regions do not linger in `/tps`.
     last_region_tick: Mutex<[Option<Instant>; REGION_SLOTS]>,
     session: Mutex<Option<Session>>,
+    state_lock_active: std::sync::atomic::AtomicBool,
+    state_lock_calls: AtomicU64,
+    state_lock_nanos: AtomicU64,
 }
 
 struct Session {
@@ -104,6 +107,9 @@ impl Profiler {
             next_region: AtomicU64::new(0),
             last_region_tick: Mutex::new([None; REGION_SLOTS]),
             session: Mutex::new(None),
+            state_lock_active: std::sync::atomic::AtomicBool::new(false),
+            state_lock_calls: AtomicU64::new(0),
+            state_lock_nanos: AtomicU64::new(0),
         }
     }
 
@@ -178,6 +184,9 @@ impl Profiler {
             return Err("a profile is already running".into());
         }
         self.timings.reset();
+        self.state_lock_calls.store(0, Ordering::Relaxed);
+        self.state_lock_nanos.store(0, Ordering::Relaxed);
+        self.state_lock_active.store(true, Ordering::Relaxed);
         *session = Some(Session {
             started: Instant::now(),
             global_ticks: self.monitor.ticks(),
@@ -192,6 +201,7 @@ impl Profiler {
         let session = lock(&self.session)
             .take()
             .ok_or_else(|| "no profile is running; use /profile start".to_owned())?;
+        self.state_lock_active.store(false, Ordering::Relaxed);
         let elapsed = session.started.elapsed();
         let ticks = self.monitor.ticks().saturating_sub(session.global_ticks);
         let mut rows: Vec<ProfileRow> = self
@@ -206,6 +216,16 @@ impl Profiler {
                 self_ms: row.self_ms,
             })
             .collect();
+        let lock_calls = self.state_lock_calls.load(Ordering::Relaxed);
+        if lock_calls > 0 {
+            let wait_ms = self.state_lock_nanos.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+            rows.push(ProfileRow {
+                path: "game-state-lock-wait".into(),
+                calls: lock_calls,
+                total_ms: wait_ms,
+                self_ms: wait_ms,
+            });
+        }
         rows.sort_by(|left, right| {
             right
                 .self_ms
@@ -223,6 +243,16 @@ impl Profiler {
     /// Whether a profiling period is running.
     pub fn profile_running(&self) -> bool {
         lock(&self.session).is_some()
+    }
+
+    pub fn record_state_lock_wait(&self, wait: Duration) {
+        if self.state_lock_active.load(Ordering::Relaxed) {
+            self.state_lock_calls.fetch_add(1, Ordering::Relaxed);
+            self.state_lock_nanos.fetch_add(
+                wait.as_nanos().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     fn tps_lines_with(&self, colored: bool) -> Vec<String> {
@@ -424,6 +454,21 @@ mod tests {
         assert!(lines[0].contains("2 systems"), "{lines:?}");
         assert!(lines[1].contains("slow"), "{lines:?}");
         assert!(lines[1].contains("ms self"), "{lines:?}");
+    }
+
+    #[test]
+    fn profile_reports_game_state_lock_wait() {
+        let profiler = Profiler::new();
+        profiler.start_profile().unwrap();
+        profiler.record_state_lock_wait(Duration::from_millis(3));
+        let report = profiler.stop_profile().unwrap();
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.path == "game-state-lock-wait")
+            .unwrap();
+        assert_eq!(row.calls, 1);
+        assert!(row.total_ms >= 3.0);
     }
 
     #[test]
