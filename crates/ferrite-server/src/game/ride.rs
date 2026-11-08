@@ -162,6 +162,17 @@ fn position(state: &GameState, uuid: Uuid) -> Option<([f64; 3], bool, (f32, f32)
         .map(|e| (e.pos, false, (e.yaw, e.pitch)))
 }
 
+/// Serializes tests that use the process-global ride table with the world loop's [`plan`],
+/// which forgets rides whose entities are not in its state. A concurrently running test
+/// world would otherwise clear another test's rides mid-sequence.
+#[cfg(test)]
+static TEST_TURN: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_turn() -> MutexGuard<'static, ()> {
+    TEST_TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// One tick of bookkeeping: sneaks and vanished vehicles end rides, everything else follows.
 pub fn plan(state: &GameState) -> Vec<Step> {
     let mut steps = Vec::new();
@@ -247,6 +258,7 @@ pub fn passengers_packet(
 mod tests {
     #[test]
     fn spectator_follow_ends_on_unfollow_and_when_either_side_leaves() {
+        let _turn = test_turn();
         let (viewer, target) = (Uuid::from_u128(901), Uuid::from_u128(902));
         follow(viewer, target);
         assert!(unfollow(viewer));
@@ -258,12 +270,10 @@ mod tests {
 
     use super::*;
 
-    /// The ride table is global, so the tests take turns.
-    static TURN: Mutex<()> = Mutex::new(());
-
+    /// The ride table is global, so the tests take turns with the world loop's plans.
     #[test]
     fn mount_rules_match_the_command_errors() {
-        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = test_turn();
         let (a, b, c) = (
             Uuid::from_u128(901),
             Uuid::from_u128(902),
@@ -282,7 +292,7 @@ mod tests {
 
     #[test]
     fn sneaking_ends_the_ride_on_the_next_plan() {
-        let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let _turn = test_turn();
         let (a, b) = (Uuid::from_u128(911), Uuid::from_u128(912));
         mount(a, b, false).unwrap();
         request_dismount(a);

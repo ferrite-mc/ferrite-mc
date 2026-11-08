@@ -78,6 +78,7 @@ mod tests {
 
     #[test]
     fn riding_follows_the_shared_ride_table() {
+        let _turn = crate::game::ride::test_turn();
         let (vehicle, rider) = (Uuid::from_u128(0x71de1), Uuid::from_u128(0x71de2));
         let ask = |owner, subject, method: &str, args: &[Uuid]| {
             handle(&call(owner, subject, method, args)).unwrap()

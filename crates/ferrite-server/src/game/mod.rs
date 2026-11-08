@@ -1677,7 +1677,13 @@ async fn run(
         laps.lap("scan");
                      drop(_scan);
                      let _ride = CoordinatorTimer::new(8);
-                     let ride_steps = ride::plan(&command_state.lock().unwrap());
+                     let ride_steps = {
+                         // Plan forgets rides for entities this world does not know, so in
+                         // tests it must not run while another test is using the shared table.
+                         #[cfg(test)]
+                         let _turn = ride::test_turn();
+                         ride::plan(&command_state.lock().unwrap())
+                     };
                      for step in ride_steps {
                          match step {
                              ride::Step::Move { rider, rider_is_player, rider_pos, rider_rot, to } => {
