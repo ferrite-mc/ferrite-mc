@@ -644,13 +644,15 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
             .unwrap();
     }
     world
-        .console_command("/tick sprint 650".into())
+        .console_command("/tick rate 10000".into())
         .await
         .unwrap();
-    // The respawn advances one stage tick per region tick (100 + 400 + 100 ticks), while
-    // `/tick sprint` only speeds up the game-loop clock: the sequence still needs about 30s at
-    // 20 TPS. Allow a loaded CI runner several times that before calling it a failure.
-    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+    // The respawn advances one stage tick per region tick (100 + 400 + 100 ticks). `/tick sprint`
+    // would not help here: its budget counts game-loop ticks, which run far faster than the region
+    // can tick, so the sprint ends long before the sequence is done. Raising the rate instead keeps
+    // the region at 10k TPS until the sequence finishes. Loaded CI runners still tick the region
+    // slowly sometimes, so allow five minutes before calling it a failure.
+    tokio::time::timeout(std::time::Duration::from_secs(300), async {
         loop {
             let body = bot.until(BossBar::ID).await;
             if matches!(

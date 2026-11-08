@@ -26,6 +26,10 @@ jobs:
             python: python
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      # The Rust plugin tests build the Java fixtures. Use the Gradle installed by
+      # `setup-gradle` below instead of the wrapper, which would download the same
+      # distribution a second time; that download failed transiently with HTTP 504.
+      FERRITE_USE_SYSTEM_GRADLE: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -45,9 +49,12 @@ jobs:
           java-version: "25"
 
       # The plugin integration test invokes Gradle from inside `cargo test`. Cache its
-      # wrapper distribution and dependencies before that subprocess runs.
-      - name: Set up Gradle cache
+      # pinned Gradle distribution and dependencies before that subprocess runs. The test
+      # uses this installation directly so it does not depend on a second wrapper download.
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.8.1'
 
       # vanilla/ is generated locally and gitignored; only cache the produced
       # data, keyed on the generator script that defines its layout.

@@ -32,7 +32,7 @@ What works, how it is built, and what is still missing.
   origin chunk aborts the sequence and puts the exit portal back. The stage and timer are saved and
   a restart resumes at the same stage. `/summon minecraft:end_crystal` creates the crystals for
   this path. The full 604-tick sequence is covered by an integration test using
-  `/tick sprint`.
+  `/tick rate 10000`.
 - **Repair after a crash.** The exit portal and every opened gateway are part of the saved fight;
   the region holding the origin puts a missing portal back once the dragon is gone, and any End
   region restores a gateway whose chunk it holds.

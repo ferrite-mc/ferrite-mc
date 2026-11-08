@@ -52,6 +52,37 @@ fn server_command() -> Command {
 /// Gradle builds share one daemon and project directory; serialize the test helpers that invoke it.
 static GRADLE_LOCK: Mutex<()> = Mutex::new(());
 
+/// A Gradle invocation in `java/ferrite-api-impl`. CI installs the pinned Gradle and sets
+/// `FERRITE_USE_SYSTEM_GRADLE`, because the wrapper would download that same distribution a
+/// second time and that download failed transiently with HTTP 504 in CI.
+fn gradle(project: &Path, java_home: &Path, args: &[&str]) -> std::process::Output {
+    let use_system_gradle = std::env::var_os("FERRITE_USE_SYSTEM_GRADLE").is_some();
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args([
+            "/C",
+            if use_system_gradle {
+                "gradle"
+            } else {
+                ".\\gradlew.bat"
+            },
+        ]);
+        command
+    } else {
+        Command::new(if use_system_gradle {
+            "gradle"
+        } else {
+            "./gradlew"
+        })
+    };
+    command
+        .args(args)
+        .current_dir(project)
+        .env("JAVA_HOME", java_home)
+        .output()
+        .expect("running Gradle")
+}
+
 fn snapshot_bridge(source: &Path, directory: &Path) -> PathBuf {
     let target = directory.join(source.file_name().expect("jar filename"));
     fs::copy(source, &target).expect("copy jar into isolated test directory");
@@ -74,32 +105,16 @@ fn bridge_snapshot_survives_a_later_build() {
 fn build_jars(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.args([
-            "/C",
-            ".\\gradlew.bat",
+    let output = gradle(
+        &project,
+        java_home,
+        &[
             "--console=plain",
             ":test-plugin:jar",
             ":test-dependency:jar",
             "shadedJar",
-        ]);
-        command
-    } else {
-        let mut command = Command::new("./gradlew");
-        command.args([
-            "--console=plain",
-            ":test-plugin:jar",
-            ":test-dependency:jar",
-            "shadedJar",
-        ]);
-        command
-    };
-    let output = command
-        .current_dir(&project)
-        .env("JAVA_HOME", java_home)
-        .output()
-        .expect("running the Gradle wrapper");
+        ],
+    );
     assert!(
         output.status.success(),
         "gradle build failed in {}:\n{}\n{}",
@@ -727,26 +742,11 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
 fn build_typical_jar(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf) {
     let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.args([
-            "/C",
-            r".\gradlew.bat",
-            "--console=plain",
-            ":test-plugin-typical:jar",
-            "shadedJar",
-        ]);
-        command
-    } else {
-        let mut command = Command::new("./gradlew");
-        command.args(["--console=plain", ":test-plugin-typical:jar", "shadedJar"]);
-        command
-    };
-    let output = command
-        .current_dir(&project)
-        .env("JAVA_HOME", java_home)
-        .output()
-        .expect("running the Gradle wrapper");
+    let output = gradle(
+        &project,
+        java_home,
+        &["--console=plain", ":test-plugin-typical:jar", "shadedJar"],
+    );
     assert!(
         output.status.success(),
         "gradle typical plugin build failed:\n{}\n{}",

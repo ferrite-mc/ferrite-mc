@@ -40,13 +40,24 @@ fn plugin_lifecycle() {
         .expect("crate lives in <repo>/crates/<name>")
         .to_owned();
     let project = repo_root.join("java").join("ferrite-api-impl");
+    let use_system_gradle = std::env::var_os("FERRITE_USE_SYSTEM_GRADLE").is_some();
     let mut command = if cfg!(windows) {
         let mut c = Command::new("cmd");
         // `cmd` may not search the cwd (NoDefaultCurrentDirectoryInExePath), so be explicit.
-        c.args(["/C", ".\\gradlew.bat", "build"]);
+        let launcher = if use_system_gradle {
+            "gradle"
+        } else {
+            ".\\gradlew.bat"
+        };
+        c.args(["/C", launcher, "build"]);
         c
     } else {
-        let mut c = Command::new("./gradlew");
+        let launcher = if use_system_gradle {
+            "gradle"
+        } else {
+            "./gradlew"
+        };
+        let mut c = Command::new(launcher);
         c.arg("build");
         c
     };
