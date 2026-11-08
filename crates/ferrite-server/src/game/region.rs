@@ -957,8 +957,8 @@ impl RegionData for Region {
         other
             .fluid_ticks
             .transfer_to(&mut self.fluid_ticks, |_| true);
-        for chunk in other.held_chunks.keys() {
-            self.held_chunks.entry(*chunk).or_insert(1);
+        for (chunk, count) in other.held_chunks {
+            *self.held_chunks.entry(chunk).or_default() += count;
         }
         self.gravity.merge(other.gravity);
         self.fire.merge(other.fire);
@@ -4454,13 +4454,17 @@ pub(super) fn apply_trade_sync(
 }
 
 impl Region {
-    /// Marks the chunk as active. A chunk is either held or not; the coordinator's view count
-    /// decides when the last viewer leaves and the hold is released.
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
-        self.held_chunks.entry(chunk).or_insert(1);
+        *self.held_chunks.entry(chunk).or_default() += 1;
     }
+    /// Drops one viewer's hold; the chunk leaves the region when the last one goes.
     pub fn release_chunk(&mut self, chunk: ChunkPos) {
-        self.held_chunks.remove(&chunk);
+        if let Some(count) = self.held_chunks.get_mut(&chunk) {
+            *count -= 1;
+            if *count == 0 {
+                self.held_chunks.remove(&chunk);
+            }
+        }
     }
     pub fn has_chunk_hold(&self, chunk: ChunkPos) -> bool {
         self.held_chunks.contains_key(&chunk)
@@ -10819,13 +10823,14 @@ mod event_policy_tests {
     }
 
     #[test]
-    fn a_chunk_hold_survives_other_viewers_and_drops_when_released() {
+    fn a_chunk_stays_held_until_the_last_viewer_releases_it() {
         let mut region = Region::default();
         let chunk = ChunkPos(2, 3);
         region.hold_chunk(chunk);
-        // A second viewer's batch does not add a second hold: the coordinator counts viewers.
         region.hold_chunk(chunk);
-        assert!(region.has_chunk_hold(chunk));
+        assert_eq!(region.held_chunks.get(&chunk), Some(&2));
+        region.release_chunk(chunk);
+        assert!(region.has_chunk_hold(chunk), "one viewer still sees it");
         region.release_chunk(chunk);
         assert!(!region.has_chunk_hold(chunk));
     }

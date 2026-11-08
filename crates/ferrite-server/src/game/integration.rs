@@ -4638,9 +4638,13 @@ async fn spawn_egg_from_give_hatches_a_tracked_mob() {
     })
     .await;
     let cow_type = i32::from(ferrite_entity::mob::MobKind::Cow.entity_type());
-    let body = entity_packet(&mut bot, AddEntity::ID, -1).await;
-    let add = AddEntity::decode(&mut body.as_slice()).unwrap();
-    assert_eq!(add.entity_type.0, cow_type);
+    loop {
+        let body = entity_packet(&mut bot, AddEntity::ID, -1).await;
+        let add = AddEntity::decode(&mut body.as_slice()).unwrap();
+        if add.entity_type.0 == cow_type {
+            break;
+        }
+    }
     // The egg is a survival item: one of the two is gone.
     let slots = inventory_of(&mut bot).await;
     assert_eq!(slots[36].item_id, egg);

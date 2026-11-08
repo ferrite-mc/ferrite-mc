@@ -1465,7 +1465,7 @@ async fn run(
                     }
                     worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
                   },
-                  Signal::Transfer{dimension,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;let first=!holds.contains_key(&(dimension,to));worlds.schedule_at_chunk(dimension,to,move |r|{if first{r.hold_chunk(to);}r.players.insert(id,*player);});},
+                  Signal::Transfer{dimension,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;worlds.schedule_at_chunk(dimension,to,move |r|{r.players.insert(id,*player);});},
                   Signal::EntityTransfer{dimension,to,entity}=>hand_off(worlds.scheduler(dimension), to, entity),
                   Signal::Summon{dimension,chunk,kind,pos}=>{
                     if worlds.owner(dimension,chunk).is_some(){
@@ -1474,8 +1474,7 @@ async fn run(
                   },
                   Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let chunk=player.chunk;let id=player.uuid;
-                    let first=!holds.contains_key(&(dimension,chunk));
-                    worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{if first{r.hold_chunk(chunk);}r.players.insert(id,*player);});
+                    worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{r.players.insert(id,*player);});
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
                     command_state.lock().unwrap().set_dimension(id,dimension);
