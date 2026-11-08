@@ -47,8 +47,10 @@ cargo run --release -p ferrite-server      # 오프라인 모드 로컬 서버
 기본 월드 디렉터리는 서버 작업 폴더의 `world/`입니다. 청크는 플레이 중 메모리 캐시에
 유지되고, 60초마다 저장되며 언로드와 정상 종료 때도 Anvil 형식으로 기록됩니다. 엔티티는
 로드된 청크별 스냅샷을, 접속 중인 플레이어 상태도 60초마다 저장합니다. 강제 종료 직전의
-자동 저장 주기 안 변경분은 유실될 수 있습니다. Windows GUI 실행기는
-[`tools/FerriteLauncher.cmd`](tools/FerriteLauncher.cmd)이며,
+자동 저장 주기 안 변경분은 유실될 수 있습니다. Windows에서 `ferrite-server.exe`를
+직접 실행하면 서버 시작·종료와 명령 입력, 로그 보기를 제공하는 Rust GUI가 열립니다.
+실행 파일은 `vanilla/26.3/generated/`가 준비된 Ferrite 작업 폴더에 두어야 합니다.
+Linux에서는 GUI 없이 터미널의 표준 입력을 받는 헤드리스 서버로 실행됩니다.
 처음 실행 전 EULA를 읽고 동의한 경우에만 `eula.txt`를 직접 수정해야 합니다.
 
 ## 검증

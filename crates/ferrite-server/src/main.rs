@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! Ferrite server entry point.
 use anyhow::Context;
 use ferrite_server::game;
@@ -267,6 +269,7 @@ fn effective_view_distance(configured: u8) -> u8 {
     configured.clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE)
 }
 
+#[cfg(not(windows))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -275,6 +278,41 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    run_server(stdin_commands()).await
+}
+
+#[cfg(windows)]
+fn main() {
+    if let Err(error) = windows_gui::run() {
+        native_windows_gui::simple_message(
+            "Ferrite Server 시작 실패",
+            &format!("Ferrite Server GUI를 시작하지 못했습니다.\n\n{error:#}"),
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn stdin_commands() -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (console_tx, console_rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            match line {
+                Ok(line) => {
+                    if console_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    console_rx
+}
+
+async fn run_server(
+    mut console_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> anyhow::Result<()> {
     let (config, _created) = load_config()?;
     // Ferrite never accepts the Mojang EULA for the user; the world generation host reads the
     // same `eula.txt`.
@@ -483,20 +521,6 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
     ));
-    let (console_tx, mut console_rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        for line in std::io::stdin().lock().lines() {
-            match line {
-                Ok(line) => {
-                    if console_tx.send(line).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
     let mut stopped = world.stop_signal();
     let result = loop {
         tokio::select! {
@@ -697,5 +721,323 @@ mod tests {
             configured.world.as_deref(),
             Some(std::path::Path::new("fixture-world"))
         );
+    }
+}
+
+#[cfg(windows)]
+mod windows_gui {
+    use std::cell::RefCell;
+    use std::io::{self, Write};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::thread;
+    use std::time::Duration;
+
+    use anyhow::Context;
+    use native_windows_derive::NwgUi;
+    use native_windows_gui as nwg;
+    use nwg::NativeUi;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::run_server;
+
+    enum Action {
+        Start,
+        Stop,
+        Command(String),
+        Exit,
+    }
+
+    enum UiMessage {
+        Log(String),
+        ServerStarted,
+        ServerStopped,
+    }
+
+    #[derive(Default)]
+    struct UiState {
+        actions: Option<Sender<Action>>,
+        messages: Option<Receiver<UiMessage>>,
+        running: bool,
+    }
+
+    #[derive(Default, NwgUi)]
+    pub struct FerriteServerGui {
+        state: RefCell<UiState>,
+
+        #[nwg_control(size: (900, 620), position: (240, 160), title: "Ferrite Server", flags: "WINDOW|VISIBLE")]
+        #[nwg_events(OnWindowClose: [FerriteServerGui::close])]
+        window: nwg::Window,
+
+        #[nwg_layout(parent: window, spacing: 6)]
+        layout: nwg::GridLayout,
+
+        #[nwg_control(text: "서버가 중지되었습니다.")]
+        #[nwg_layout_item(layout: layout, col: 0, row: 0, col_span: 2)]
+        status: nwg::Label,
+
+        #[nwg_control(text: "서버 시작")]
+        #[nwg_layout_item(layout: layout, col: 2, row: 0)]
+        #[nwg_events(OnButtonClick: [FerriteServerGui::start])]
+        start_button: nwg::Button,
+
+        #[nwg_control(text: "서버 종료", enabled: false)]
+        #[nwg_layout_item(layout: layout, col: 3, row: 0)]
+        #[nwg_events(OnButtonClick: [FerriteServerGui::stop])]
+        stop_button: nwg::Button,
+
+        #[nwg_control(text: "Ferrite 서버 로그\r\n", readonly: true)]
+        #[nwg_layout_item(layout: layout, col: 0, row: 1, col_span: 4)]
+        log: nwg::TextBox,
+
+        #[nwg_control(focus: true)]
+        #[nwg_layout_item(layout: layout, col: 0, row: 2, col_span: 3)]
+        #[nwg_events(OnKeyEnter: [FerriteServerGui::send_command])]
+        command: nwg::TextInput,
+
+        #[nwg_control(text: "명령 보내기")]
+        #[nwg_layout_item(layout: layout, col: 3, row: 2)]
+        #[nwg_events(OnButtonClick: [FerriteServerGui::send_command])]
+        send_button: nwg::Button,
+
+        #[nwg_control(parent: window, interval: Duration::from_millis(150), active: true)]
+        #[nwg_events(OnTimerTick: [FerriteServerGui::poll_messages])]
+        poll_timer: nwg::AnimationTimer,
+    }
+
+    impl FerriteServerGui {
+        fn start(&self) {
+            let state = self.state.borrow();
+            if !state.running
+                && let Some(actions) = &state.actions
+            {
+                let _ = actions.send(Action::Start);
+                self.status.set_text("서버를 시작하는 중…");
+                self.start_button.set_enabled(false);
+                self.stop_button.set_enabled(true);
+            }
+        }
+
+        fn stop(&self) {
+            if let Some(actions) = &self.state.borrow().actions {
+                let _ = actions.send(Action::Stop);
+                self.status.set_text("저장 후 정상 종료를 기다리는 중…");
+            }
+        }
+
+        fn send_command(&self) {
+            let command = self.command.text().trim().to_owned();
+            if command.is_empty() {
+                return;
+            }
+            if let Some(actions) = &self.state.borrow().actions {
+                let _ = actions.send(Action::Command(command));
+                self.command.set_text("");
+            }
+        }
+
+        fn close(&self) {
+            if let Some(actions) = &self.state.borrow().actions {
+                let _ = actions.send(Action::Exit);
+            }
+            nwg::stop_thread_dispatch();
+        }
+
+        fn poll_messages(&self) {
+            let messages = self
+                .state
+                .borrow()
+                .messages
+                .as_ref()
+                .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            for message in messages {
+                match message {
+                    UiMessage::Log(line) => {
+                        self.log.appendln(&line);
+                        if self.log.linecount() > 4000 {
+                            self.log.set_text("로그가 길어 이전 내용은 지웠습니다.\r\n");
+                        }
+                    }
+                    UiMessage::ServerStarted => {
+                        self.state.borrow_mut().running = true;
+                        self.status.set_text("서버 실행 중");
+                        self.start_button.set_enabled(false);
+                        self.stop_button.set_enabled(true);
+                    }
+                    UiMessage::ServerStopped => {
+                        self.state.borrow_mut().running = false;
+                        self.status.set_text("서버가 중지되었습니다.");
+                        self.start_button.set_enabled(true);
+                        self.stop_button.set_enabled(false);
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct GuiLogWriter(Sender<UiMessage>);
+
+    struct GuiLogBuffer {
+        sender: Sender<UiMessage>,
+        bytes: Vec<u8>,
+    }
+
+    impl<'a> MakeWriter<'a> for GuiLogWriter {
+        type Writer = GuiLogBuffer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            GuiLogBuffer {
+                sender: self.0.clone(),
+                bytes: Vec::with_capacity(256),
+            }
+        }
+    }
+
+    impl Write for GuiLogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if !self.bytes.is_empty() {
+                let line = String::from_utf8_lossy(&self.bytes).trim_end().to_owned();
+                self.bytes.clear();
+                if !line.is_empty() {
+                    let _ = self.sender.send(UiMessage::Log(line));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for GuiLogBuffer {
+        fn drop(&mut self) {
+            let _ = self.flush();
+        }
+    }
+
+    struct RunningServer {
+        commands: tokio::sync::mpsc::UnboundedSender<String>,
+        thread: thread::JoinHandle<()>,
+    }
+
+    fn server_manager(actions: Receiver<Action>, messages: Sender<UiMessage>) {
+        let mut running: Option<RunningServer> = None;
+        let mut exiting = false;
+
+        while !exiting || running.is_some() {
+            match actions.recv_timeout(Duration::from_millis(100)) {
+                Ok(Action::Start) if running.is_none() => {
+                    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let server_thread = thread::Builder::new()
+                        .name("ferrite-server-runtime".into())
+                        .spawn(move || {
+                            let result = tokio::runtime::Builder::new_multi_thread()
+                                .enable_all()
+                                .build()
+                                .map(|runtime| runtime.block_on(run_server(command_rx)));
+                            match result {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    tracing::error!(error = %format!("{error:#}"), "server stopped with an error");
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "could not create the server runtime");
+                                }
+                            }
+                        });
+
+                    match server_thread {
+                        Ok(server_thread) => {
+                            running = Some(RunningServer {
+                                commands: command_tx,
+                                thread: server_thread,
+                            });
+                            let _ = messages.send(UiMessage::ServerStarted);
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "could not start the server thread");
+                            let _ = messages.send(UiMessage::ServerStopped);
+                        }
+                    }
+                }
+                Ok(Action::Stop) => {
+                    if let Some(server) = &running {
+                        let _ = server.commands.send("stop".into());
+                    }
+                }
+                Ok(Action::Command(command)) => {
+                    if let Some(server) = &running {
+                        let _ = server.commands.send(command);
+                    }
+                }
+                Ok(Action::Exit) => {
+                    exiting = true;
+                    if let Some(server) = &running {
+                        let _ = server.commands.send("stop".into());
+                    }
+                }
+                Ok(Action::Start) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    exiting = true;
+                    if let Some(server) = &running {
+                        let _ = server.commands.send("stop".into());
+                    }
+                }
+            }
+
+            if running
+                .as_ref()
+                .is_some_and(|server| server.thread.is_finished())
+                && let Some(server) = running.take()
+            {
+                let _ = server.thread.join();
+                let _ = messages.send(UiMessage::ServerStopped);
+            }
+        }
+    }
+
+    pub(super) fn run() -> anyhow::Result<()> {
+        let executable = std::env::current_exe().context("locating ferrite-server.exe")?;
+        if let Some(directory) = executable.parent() {
+            std::env::set_current_dir(directory)
+                .with_context(|| format!("using server directory {}", directory.display()))?;
+        }
+
+        nwg::init().context("initializing the Windows GUI")?;
+        nwg::Font::set_global_family("Segoe UI").context("setting the GUI font")?;
+
+        let (actions_tx, actions_rx) = mpsc::channel();
+        let (messages_tx, messages_rx) = mpsc::channel();
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .with_ansi(false)
+            .with_writer(GuiLogWriter(messages_tx.clone()))
+            .try_init()
+            .map_err(|error| anyhow::anyhow!("initializing GUI log capture: {error}"))?;
+
+        let app = FerriteServerGui::build_ui(Default::default())
+            .map_err(|error| anyhow::anyhow!("building the server window: {error}"))?;
+        *app.state.borrow_mut() = UiState {
+            actions: Some(actions_tx),
+            messages: Some(messages_rx),
+            running: false,
+        };
+        let manager = thread::Builder::new()
+            .name("ferrite-server-manager".into())
+            .spawn(move || server_manager(actions_rx, messages_tx))
+            .context("starting the server manager")?;
+
+        nwg::dispatch_thread_events();
+        manager
+            .join()
+            .map_err(|_| anyhow::anyhow!("server manager thread panicked"))?;
+        Ok(())
     }
 }
