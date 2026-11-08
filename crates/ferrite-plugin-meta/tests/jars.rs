@@ -522,3 +522,44 @@ fn invalid_descriptors_are_reported_per_jar() {
         "{messages:?}"
     );
 }
+
+#[test]
+fn oversized_compressed_plugin_descriptor_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let oversized = format!(
+        "name: Oversized\nversion: '1'\nmain: com.example.Oversized\n#{}",
+        "x".repeat(1024 * 1024),
+    );
+    plugin_jar(dir.path(), "oversized.jar", &oversized);
+
+    let mut state = 0x1234_5678_u32;
+    let noisy_comment: String = (0..2 * 1024 * 1024)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            char::from(b'a' + ((state >> 24) % 26) as u8)
+        })
+        .collect();
+    let oversized_compressed = format!(
+        "name: OversizedCompressed\nversion: '1'\nmain: com.example.OversizedCompressed\n#{noisy_comment}"
+    );
+    plugin_jar(
+        dir.path(),
+        "oversized-compressed.jar",
+        &oversized_compressed,
+    );
+
+    let plan = scan_directory(dir.path()).unwrap();
+
+    assert!(postworld_names(&plan).is_empty());
+    assert_eq!(plan.failed.len(), 2);
+    for failure in &plan.failed {
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("exceeds the maximum size of 1048576 bytes"),
+            "unexpected error: {}",
+            failure.error
+        );
+    }
+}

@@ -80,6 +80,15 @@ pub enum PluginError {
         entry: &'static str,
         source: std::io::Error,
     },
+    /// A plugin descriptor exceeds the size limit.
+    DescriptorTooLarge {
+        /// Jar path.
+        path: PathBuf,
+        /// Descriptor file name.
+        entry: &'static str,
+        /// Maximum accepted uncompressed size.
+        max_bytes: u64,
+    },
     /// A descriptor entry is not valid UTF-8.
     NotUtf8 {
         /// Jar path.
@@ -155,6 +164,15 @@ impl fmt::Display for PluginError {
                     path.display()
                 )
             }
+            Self::DescriptorTooLarge {
+                path,
+                entry,
+                max_bytes,
+            } => write!(
+                f,
+                "{entry} in '{}' exceeds the maximum size of {max_bytes} bytes",
+                path.display()
+            ),
             Self::NotUtf8 { path, entry } => {
                 write!(f, "{entry} in '{}' is not valid UTF-8", path.display())
             }
@@ -197,6 +215,7 @@ impl std::error::Error for PluginError {
             Self::Entry { source, .. } => Some(source),
             Self::Metadata { source, .. } => Some(source),
             Self::MissingManifest { .. }
+            | Self::DescriptorTooLarge { .. }
             | Self::NotUtf8 { .. }
             | Self::DuplicateName { .. }
             | Self::MissingDependencies { .. }
