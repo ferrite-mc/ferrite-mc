@@ -1598,6 +1598,34 @@ mod tests {
     }
 
     #[test]
+    fn a_long_caravan_walks_slower_than_a_short_one() {
+        let mut store = EntityStore::default();
+        let head = llama_at(&mut store, 0.5, 1);
+        mob::state_mut(&mut store, head).unwrap().leash = Some((Uuid::nil(), 1));
+        let mut parent = head;
+        let mut parent_uuid = store.data(head).unwrap().uuid;
+        for (index, seed) in [2_u64, 3, 4, 5].into_iter().enumerate() {
+            let member = llama_at(&mut store, 2.5 + index as f64 * 2.0, seed);
+            mob::state_mut(&mut store, member).unwrap().caravan = Some(parent_uuid);
+            parent = member;
+            parent_uuid = store.data(member).unwrap().uuid;
+        }
+        let tail = llama_at(&mut store, 12.0, 6);
+        mob::state_mut(&mut store, tail).unwrap().caravan = Some(parent_uuid);
+
+        let start = store.pos(tail).unwrap();
+        match caravan_action(&mut store, tail, start) {
+            Some(CaravanAction::Walk { target, speed }) => {
+                assert_eq!(target, store.pos(parent).unwrap());
+                assert!(speed < CARAVAN_SPEED, "the long line is slower: {speed}");
+                let expected = CARAVAN_SPEED - 4.0 * CARAVAN_SPEED_PER_LINK;
+                assert!((speed - expected).abs() < 1e-9, "{speed} != {expected}");
+            }
+            other => panic!("expected a long-line follow step, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_caravan_follower_keeps_its_gap_instead_of_bumping_its_head() {
         let mut store = EntityStore::default();
         let head = llama_at(&mut store, 0.5, 1);
@@ -1655,6 +1683,34 @@ mod tests {
         let start = store.pos(tail).unwrap();
         assert_eq!(caravan_action(&mut store, tail, start), None);
         assert_eq!(mob::state(&store, tail).unwrap().caravan, None);
+    }
+
+    #[test]
+    fn a_caravan_rejoins_a_new_line_after_its_head_leaves_the_region() {
+        let mut store = EntityStore::default();
+        let old_head = llama_at(&mut store, 0.5, 1);
+        mob::state_mut(&mut store, old_head).unwrap().leash = Some((Uuid::nil(), 1));
+        let old_uuid = store.data(old_head).unwrap().uuid;
+        let tail = llama_at(&mut store, 2.0, 2);
+        mob::state_mut(&mut store, tail).unwrap().caravan = Some(old_uuid);
+        let replacement = llama_at(&mut store, 5.5, 3);
+        mob::state_mut(&mut store, replacement).unwrap().leash = Some((Uuid::nil(), 1));
+        let replacement_uuid = store.data(replacement).unwrap().uuid;
+
+        // The old head moved to another region, so it is no longer in this store.
+        store.remove(old_head);
+        let start = store.pos(tail).unwrap();
+        match caravan_action(&mut store, tail, start) {
+            Some(CaravanAction::Walk { target, speed }) => {
+                assert_eq!(target.x, 5.5);
+                assert_eq!(speed, CARAVAN_SPEED);
+            }
+            other => panic!("expected the tail to follow the replacement line, got {other:?}"),
+        }
+        assert_eq!(
+            mob::state(&store, tail).unwrap().caravan,
+            Some(replacement_uuid)
+        );
     }
 
     #[test]
