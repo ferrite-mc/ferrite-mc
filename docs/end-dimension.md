@@ -58,13 +58,14 @@ What works, how it is built, and what is still missing.
 
 ## Remaining gaps
 
-- **Dragon phase machine.** The dragon still follows a simplified circle/dive/fireball/perch
-  cycle instead of vanilla's full phase machine; strafing and perched attack timings are
-  approximations. It smashes every block in its body except `#minecraft:dragon_immune`.
+- **Dragon phase machine.** The landing cycle is modelled as `Holding` -> `LandingApproach` ->
+  `Perched` -> `Takeoff` with vanilla-length perch and holding decisions, but strafing, the full
+  per-phase attack schedule and exact perched timings remain approximations. The dragon smashes
+  every block in its body except `#minecraft:dragon_immune`.
 - **Outer islands.** A gateway landing searches up to 16 blocks around the point 1024 blocks out
   for the nearest loaded column with ground and two air above; an all-void 3x3 chunk area cancels
-  the trip instead of dropping the player into the void. Vanilla searches farther for the nearest
-  outer island and plays the beam animation, which is not modelled.
+  the trip instead of dropping the player into the void. The search radius is smaller than
+  vanilla's and the client-side gateway beam animation is not modelled.
 - **Guarded-spike choice.** The cage pair follows the two shortest loaded spike tops. On a host
   terrain without vanilla's spike podiums the choice can differ from the generated world's
   shuffled sizes.

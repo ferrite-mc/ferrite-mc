@@ -4,7 +4,7 @@ Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레
 Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **상태 (2026-11-08, `main` `dd4d4e1`)**: 생존·게임 시스템을 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 전체 Rust 테스트, clippy, fmt, Java Gradle 테스트와 Linux/Windows CI가 통과했습니다. **실제 26.3 클라이언트 접속은 아직 검증하지 않았습니다.**
+- **상태 (2026-11-08)**: 생존·게임 시스템을 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 이제 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. 전체 Rust 테스트, clippy, fmt, Java Gradle 테스트와 Linux/Windows CI가 통과했습니다. **실제 26.3 클라이언트 접속은 아직 검증하지 않았습니다.**
 - **라이선스**: GPL-3.0-or-later
 
 > **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
@@ -16,7 +16,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 | 구분 | 내용 |
 |---|---|
-| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명, 블록·아이템, 인벤토리·제작·레시피북·컨테이너, 생존·전투·몹(바이옴별 자연 스폰, 번식, 늑대 길들이기), 주민 거래, 주크박스·밀랍·로드스톤 같은 블록 사용과 그 발전과제, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
+| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명과 기본 월드 저장(`world/`), 블록·아이템, 인벤토리·제작·레시피북·컨테이너, 생존·전투·몹(바이옴별 자연 스폰, 번식, 늑대 길들이기), 스폰 알, 몹·아이템 추적, 주민 거래, 주크박스·밀랍·로드스톤 같은 블록 사용과 그 발전과제, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/give`·`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
 | 🟡 부분 구현 | 피스톤(움직이는 블록·엔티티 이동과 클라이언트 오버레이; 애니메이션은 실제 클라이언트 미검증, [`docs/pistons.md`](docs/pistons.md)), 엔드 전투(아래, [`docs/end-dimension.md`](docs/end-dimension.md)) |
 | 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API 일부, NMS 일부; 미지원 호출은 명시적으로 실패) |
 | ⛔ 아직 없음 | 실제 클라이언트 검증 |
@@ -43,6 +43,13 @@ cargo run --release -p ferrite-server      # 오프라인 모드 로컬 서버
 
 `vanilla/`는 git에 포함되지 않습니다. 패킷 ID·블록·레지스트리 수치는 추측하지 말고
 `vanilla/<버전>/generated/` 리포트에서 읽습니다. 설정 키는 [`docs/CONFIG.md`](docs/CONFIG.md).
+
+기본 월드 디렉터리는 서버 작업 폴더의 `world/`입니다. 청크는 플레이 중 메모리 캐시에
+유지되고, 60초마다 저장되며 언로드와 정상 종료 때도 Anvil 형식으로 기록됩니다. 엔티티는
+로드된 청크별 스냅샷을, 접속 중인 플레이어 상태도 60초마다 저장합니다. 강제 종료 직전의
+자동 저장 주기 안 변경분은 유실될 수 있습니다. Windows GUI 실행기는
+[`tools/FerriteLauncher.cmd`](tools/FerriteLauncher.cmd)이며,
+처음 실행 전 EULA를 읽고 동의한 경우에만 `eula.txt`를 직접 수정해야 합니다.
 
 ## 검증
 
@@ -97,8 +104,8 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 
 ## 해야 할 일
 
-- 남은 게임·플러그인 작업: llama caravan 이동 세부 동작, 여러 월드의 플러그인 블록 엔티티 접근,
-  아이템 PDC/플래그 전달, Paper/Bukkit 및 NMS 호환 범위 확대.
+- 남은 게임·플러그인 작업: 드래곤의 바닐라 선회(strafe) 단계와 게이트웨이 빔, 여러 월드의
+  플러그인 블록 엔티티 접근, Paper/Bukkit 및 NMS 호환 범위 확대.
 - 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
   피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI, 플러그인 동작을 통합 서버에서 확인.
 - 최적화 조사 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),

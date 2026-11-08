@@ -516,7 +516,6 @@ pub(super) fn broadcast_tracked_chunk(
 pub enum Signal {
     Transfer {
         dimension: super::Dimension,
-        from: ChunkPos,
         to: ChunkPos,
         player: Box<Player>,
     },
@@ -538,11 +537,7 @@ pub enum Signal {
     },
     /// The player left its old region for another dimension; the world loop inserts it into
     /// the target dimension's region scheduler.
-    ChangeDimension {
-        from_dimension: super::Dimension,
-        from: ChunkPos,
-        player: Box<Player>,
-    },
+    ChangeDimension { player: Box<Player> },
     Update {
         uuid: Uuid,
         pos: [f64; 3],
@@ -569,6 +564,13 @@ pub enum Signal {
         dimension: super::Dimension,
         to: ChunkPos,
         entity: Box<EntityRecord>,
+    },
+    /// A player used a spawn egg; the target region owns creation of the new entity.
+    Summon {
+        dimension: super::Dimension,
+        chunk: ChunkPos,
+        kind: MobKind,
+        pos: [f64; 3],
     },
 }
 /// A queued explosion: center, power, fire, block damage, player credit.
@@ -955,8 +957,8 @@ impl RegionData for Region {
         other
             .fluid_ticks
             .transfer_to(&mut self.fluid_ticks, |_| true);
-        for (chunk, count) in other.held_chunks {
-            *self.held_chunks.entry(chunk).or_default() += count;
+        for chunk in other.held_chunks.keys() {
+            self.held_chunks.entry(*chunk).or_insert(1);
         }
         self.gravity.merge(other.gravity);
         self.fire.merge(other.fire);
@@ -1102,6 +1104,12 @@ pub(super) fn send<P: ferrite_protocol::Packet>(p: &Player, msg: &P) {
     let _ = p.outbound.send(packet(msg));
 }
 /// Namespaced block id of a global state id, for Bukkit event materials.
+/// The mob a spawn egg places (`SpawnEggItem.getType`), e.g. `minecraft:cow_spawn_egg`.
+fn spawn_egg_kind(item: Option<&str>) -> Option<MobKind> {
+    let name = item?;
+    MobKind::from_name(name.strip_suffix("_spawn_egg")?)
+}
+
 fn material_name(state: u32) -> &'static str {
     u16::try_from(state)
         .ok()
@@ -1804,6 +1812,38 @@ impl Player {
                     self.inventory
                         .set(slot, held.copy_with_count(held.count - 1));
                 }
+            }
+            return;
+        }
+        // Vanilla `SpawnEggItem.useOn`: spawn the egg's mob on the clicked face and, in
+        // survival, use the egg up. A replaceable block is spawned inside, like any placement.
+        if let Some(kind) = spawn_egg_kind(held.name()) {
+            let face = ferrite_math::Direction::ALL[p.face.0 as usize];
+            let (dx, dy, dz) = if ferrite_data::block_props::get(clicked_state).replaceable {
+                (0, 0, 0)
+            } else {
+                face.step()
+            };
+            let pos = [
+                f64::from(clicked.x + dx) + 0.5,
+                f64::from(clicked.y + dy),
+                f64::from(clicked.z + dz) + 0.5,
+            ];
+            let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+            if self
+                .signals
+                .send(Signal::Summon {
+                    dimension: self.dimension,
+                    chunk,
+                    kind,
+                    pos,
+                })
+                .is_ok()
+                && self.gamemode == 0
+            {
+                let slot = self.hand_slot(p.hand.0);
+                self.inventory
+                    .set(slot, held.copy_with_count(held.count - 1));
             }
             return;
         }
@@ -4414,16 +4454,13 @@ pub(super) fn apply_trade_sync(
 }
 
 impl Region {
+    /// Marks the chunk as active. A chunk is either held or not; the coordinator's view count
+    /// decides when the last viewer leaves and the hold is released.
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
-        *self.held_chunks.entry(chunk).or_default() += 1;
+        self.held_chunks.entry(chunk).or_insert(1);
     }
     pub fn release_chunk(&mut self, chunk: ChunkPos) {
-        if let Some(count) = self.held_chunks.get_mut(&chunk) {
-            *count -= 1;
-            if *count == 0 {
-                self.held_chunks.remove(&chunk);
-            }
-        }
+        self.held_chunks.remove(&chunk);
     }
     pub fn has_chunk_hold(&self, chunk: ChunkPos) -> bool {
         self.held_chunks.contains_key(&chunk)
@@ -4444,6 +4481,27 @@ impl Region {
             .collect();
         keys.into_iter()
             .filter_map(|key| self.entities.remove(key))
+            .collect()
+    }
+    /// Copies every entity currently in a held chunk for periodic persistence without unloading
+    /// it or changing its live in-memory state.
+    pub fn snapshot_chunk_entities(&self, chunk: ChunkPos) -> Vec<EntityRecord> {
+        self.entities
+            .keys()
+            .iter()
+            .copied()
+            .filter_map(|key| {
+                let pos = self.entities.pos(key)?;
+                if ferrite_entity::chunk_of(pos) != (chunk.0, chunk.1) {
+                    return None;
+                }
+                Some(EntityRecord {
+                    pos,
+                    vel: self.entities.vel(key)?,
+                    flags: self.entities.flags(key)?,
+                    data: self.entities.data(key)?.clone(),
+                })
+            })
             .collect()
     }
     /// Puts entities loaded from a chunk sidecar back into this region.
@@ -8107,10 +8165,7 @@ impl Region {
                 // The command/portal moved this player to another dimension; the source region
                 // family owns the player only until the world loop hands it to the target one.
                 let signals = p.signals.clone();
-                let from = p.chunk;
                 let _ = signals.send(Signal::ChangeDimension {
-                    from_dimension: ctx.dimension,
-                    from,
                     player: Box::new(p),
                 });
                 continue;
@@ -8120,13 +8175,11 @@ impl Region {
                 (p.pos[2].floor() as i32).div_euclid(16),
             );
             if next != p.chunk {
-                let from = p.chunk;
                 p.chunk = next;
                 p.refresh_chunks();
                 let tx = p.signals.clone();
                 let _ = tx.send(Signal::Transfer {
                     dimension: p.dimension,
-                    from,
                     to: next,
                     player: Box::new(p),
                 });
@@ -10719,6 +10772,62 @@ mod event_policy_tests {
             }),
             Some(5.0)
         );
+    }
+
+    #[test]
+    fn spawn_eggs_map_to_the_modelled_mobs() {
+        assert_eq!(
+            spawn_egg_kind(Some("minecraft:cow_spawn_egg")),
+            Some(MobKind::Cow)
+        );
+        assert_eq!(
+            spawn_egg_kind(Some("minecraft:trader_llama_spawn_egg")),
+            Some(MobKind::TraderLlama)
+        );
+        // An egg exists only for the entity types the server simulates.
+        assert_eq!(spawn_egg_kind(Some("minecraft:mooshroom_spawn_egg")), None);
+        assert_eq!(spawn_egg_kind(Some("minecraft:cow")), None);
+        assert_eq!(spawn_egg_kind(None), None);
+    }
+
+    #[test]
+    fn autosave_entity_snapshot_copies_only_its_chunk_without_unloading() {
+        let mut region = Region::default();
+        let first = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        region.entities.insert(mob::new_mob(
+            MobKind::Pig,
+            ferrite_math::Vec3::new(16.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+
+        let snapshot = region.snapshot_chunk_entities(ChunkPos(0, 0));
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot[0].data.uuid,
+            region.entities.data(first).unwrap().uuid
+        );
+        assert_eq!(
+            region.entities.len(),
+            2,
+            "autosave keeps live entities loaded"
+        );
+    }
+
+    #[test]
+    fn a_chunk_hold_survives_other_viewers_and_drops_when_released() {
+        let mut region = Region::default();
+        let chunk = ChunkPos(2, 3);
+        region.hold_chunk(chunk);
+        // A second viewer's batch does not add a second hold: the coordinator counts viewers.
+        region.hold_chunk(chunk);
+        assert!(region.has_chunk_hold(chunk));
+        region.release_chunk(chunk);
+        assert!(!region.has_chunk_hold(chunk));
     }
 
     #[test]

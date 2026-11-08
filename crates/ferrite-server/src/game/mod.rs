@@ -9,7 +9,7 @@ pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
 mod waypoints;
-pub use anvil::{AnvilChunkSource, read_spawn as load_spawn};
+pub use anvil::{AnvilChunkSource, read_spawn as load_spawn, write_spawn};
 #[cfg(test)]
 mod block_tests;
 mod blocks;
@@ -1092,9 +1092,12 @@ async fn run(
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
+    // Keep the live world in memory, but persist the cached Anvil columns often enough that a
+    // process crash does not discard several minutes of block changes.
+    let autosave_period = std::time::Duration::from_secs(60);
     let mut autosave = tokio::time::interval_at(
-        tokio::time::Instant::now() + std::time::Duration::from_secs(300),
-        std::time::Duration::from_secs(300),
+        tokio::time::Instant::now() + autosave_period,
+        autosave_period,
     );
     autosave.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut holds: HashMap<(Dimension, ChunkPos), usize> = HashMap::new();
@@ -1417,6 +1420,29 @@ async fn run(
                      if let Some(source) = &source && let Err(error) = source.flush_all().await {
                          tracing::error!(%error, "autosave failed");
                      }
+                     if entity_world.is_some() || settings.playerdata.is_some() {
+                         let held: Vec<_> = holds.keys().copied().collect();
+                         let mut player_save_regions = HashSet::new();
+                         for (dimension, chunk) in held {
+                             let save_players = worlds
+                                 .owner(dimension, chunk)
+                                 .is_some_and(|owner| player_save_regions.insert((dimension, owner)));
+                             let signals = signal_tx.clone();
+                             worlds.schedule_at_chunk(dimension, chunk, move |region| {
+                                 if save_players {
+                                     for player in region.players.values() {
+                                         player.save_player_data();
+                                     }
+                                 }
+                                 let entities = region.snapshot_chunk_entities(chunk);
+                                 let _ = signals.send(Signal::SaveEntities {
+                                     dimension,
+                                     chunk,
+                                     entities,
+                                 });
+                             });
+                         }
+                     }
                  },
                  signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
                   Signal::Hold{dimension,chunk,add}=>if add{if dimension==Dimension::Overworld{crate::plugins::chunks::set_loaded(chunk.0,chunk.1,true);}let first={let count=holds.entry((dimension,chunk)).or_default();*count += 1;*count == 1};worlds.add_chunk(dimension,chunk);let dir=entity_world.clone();let transient=worlds.transient_entities.clone();worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);if let Some(transient)=transient {if let Some(entities)=transient.lock().unwrap().remove(&(dimension,chunk)){r.add_entities(entities);}} else if first && let Some(dir)=dir{r.add_entities(entity_save::load(&dimension.storage_root(&dir), (chunk.0, chunk.1)));}});}else{release_hold(&worlds, &mut holds, &signal_tx, dimension, chunk);},
@@ -1439,18 +1465,23 @@ async fn run(
                     }
                     worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
                   },
-                  Signal::Transfer{dimension,from,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;worlds.schedule_at_chunk(dimension,to,move |r|{r.hold_chunk(to);r.players.insert(id,*player);});defer_release(&worlds,&signal_tx,dimension,from,false);},
+                  Signal::Transfer{dimension,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;let first=!holds.contains_key(&(dimension,to));worlds.schedule_at_chunk(dimension,to,move |r|{if first{r.hold_chunk(to);}r.players.insert(id,*player);});},
                   Signal::EntityTransfer{dimension,to,entity}=>hand_off(worlds.scheduler(dimension), to, entity),
-                  Signal::ChangeDimension{from_dimension,from,player}=>{
+                  Signal::Summon{dimension,chunk,kind,pos}=>{
+                    if worlds.owner(dimension,chunk).is_some(){
+                      worlds.schedule_at_chunk(dimension,chunk,move |region|{region.summon(kind,pos,false);});
+                    }
+                  },
+                  Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let chunk=player.chunk;let id=player.uuid;
-                    worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);r.players.insert(id,*player);});
-                    defer_release(&worlds,&signal_tx,from_dimension,from,false);
+                    let first=!holds.contains_key(&(dimension,chunk));
+                    worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{if first{r.hold_chunk(chunk);}r.players.insert(id,*player);});
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_dimension(id, dimension));
                   },
-                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}defer_release(&worlds,&signal_tx,dimension,chunk,false);
+                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(dimension,chunk));for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}if preheld {defer_release(&worlds,&signal_tx,dimension,chunk,false);}
                     let name = names.remove(&uuid).unwrap_or_default();
                     crate::plugins::facts::forget(uuid);
                     if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
@@ -4051,18 +4082,20 @@ fn release_hold(
     dimension: Dimension,
     chunk: ChunkPos,
 ) {
-    let mut flush = false;
-    if let Some(count) = holds.get_mut(&(dimension, chunk)) {
-        *count -= 1;
-        if *count == 0 {
-            holds.remove(&(dimension, chunk));
-            if dimension == Dimension::Overworld {
-                crate::plugins::chunks::set_loaded(chunk.0, chunk.1, false);
-            }
-            flush = true;
-        }
+    let Some(count) = holds.get_mut(&(dimension, chunk)) else {
+        return;
+    };
+    *count -= 1;
+    if *count > 0 {
+        // Another player still views the chunk, so its region hold stays: dropping it here
+        // would unload the chunk and remove every mob for the remaining viewers.
+        return;
     }
-    defer_release(worlds, signals, dimension, chunk, flush);
+    holds.remove(&(dimension, chunk));
+    if dimension == Dimension::Overworld {
+        crate::plugins::chunks::set_loaded(chunk.0, chunk.1, false);
+    }
+    defer_release(worlds, signals, dimension, chunk, true);
 }
 #[cfg(test)]
 mod integration;

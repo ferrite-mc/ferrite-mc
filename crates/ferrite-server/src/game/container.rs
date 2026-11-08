@@ -752,6 +752,12 @@ impl Player {
     /// (a pending transfer is completed at its destination position).
     pub fn save_on_exit(&mut self) {
         self.close_container();
+        self.save_player_data();
+    }
+
+    /// Persists the current player snapshot while they remain online. Unlike `save_on_exit`, this
+    /// does not close menus or fire container events.
+    pub fn save_player_data(&self) {
         if let Some(dir) = &self.playerdata
             && let Err(error) = super::playerdata::save_to(
                 dir,

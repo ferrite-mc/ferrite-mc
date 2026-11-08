@@ -172,7 +172,7 @@ impl Default for Config {
             compression_threshold: 256,
             forwarding: ForwardingMode::None,
             forwarding_secret: String::new(),
-            world: None,
+            world: Some(std::path::PathBuf::from("world")),
             generator: WorldGenerator::Superflat,
             gamemode: GameMode::Creative,
             ops: Vec::new(),
@@ -182,6 +182,80 @@ impl Default for Config {
             whitelist: false,
             worldgen: WorldgenSettings::default(),
         }
+    }
+}
+
+/// Written next to the executable (or wherever the server was started) when `ferrite.toml` is
+/// missing. Keeping the full default here means the first run produces an editable file instead
+/// of silently using in-memory defaults that leave no world behind.
+const DEFAULT_CONFIG: &str = r#"# Ferrite server configuration.
+# Relative paths (world, plugins-dir, server-icon, ...) are resolved against the process
+# working directory. Start the server from this folder to keep them next to the executable.
+
+bind-address = "0.0.0.0:25565"
+online-mode = true
+enforce-secure-profile = true
+motd = "A Ferrite server"
+server-icon = "server-icon.png"
+max-players = 20
+view-distance = 10
+compression-threshold = 256
+
+# World directory. It is created on first start and saved on chunk unload, autosave and a
+# clean shutdown. Use "generator = 'vanilla'" for Mojang terrain, or "superflat" for tests.
+world = "world"
+generator = "superflat"
+gamemode = "creative"
+
+plugins-dir = "plugins"
+
+# Player forwarding: "none", "velocity" or "bungee".
+forwarding = "none"
+forwarding-secret = ""
+whitelist = false
+
+[plugins]
+on-event-error = "allow"
+"#;
+
+/// Reads `ferrite.toml`, creating it with [`DEFAULT_CONFIG`] on the first run. A failed write is
+/// only a warning: the server still starts with the same defaults.
+fn load_config() -> anyhow::Result<(Config, bool)> {
+    let path = std::path::Path::new("ferrite.toml");
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let config = toml::from_str(&content).context("invalid ferrite.toml")?;
+            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            tracing::info!(config = %absolute.display(), "loaded server configuration");
+            Ok((config, false))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let config: Config = toml::from_str(DEFAULT_CONFIG).expect("built-in config is valid");
+            match std::fs::write(path, DEFAULT_CONFIG) {
+                Ok(()) => tracing::info!(
+                    config = %std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).display(),
+                    "created the default ferrite.toml; it saves to ./world"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "could not create ferrite.toml; using the defaults without saving the file"
+                ),
+            }
+            Ok((config, true))
+        }
+        Err(error) => Err(error).context("reading ferrite.toml"),
+    }
+}
+
+/// First-run spawn: an existing world's `level.dat` wins; a new world starts at the fixed flat
+/// spawn and gets a `level.dat` written after the terrain spawn is known.
+fn spawn_for_world(path: &std::path::Path) -> anyhow::Result<[i32; 3]> {
+    if path.join("level.dat").exists() {
+        game::load_spawn(path).context("reading world spawn")
+    } else {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("creating world {}: ", path.display()))?;
+        Ok([0, 65, 0])
     }
 }
 
@@ -201,11 +275,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    let config: Config = match std::fs::read_to_string("ferrite.toml") {
-        Ok(content) => toml::from_str(&content).context("invalid ferrite.toml")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(error) => return Err(error).context("reading ferrite.toml"),
-    };
+    let (config, _created) = load_config()?;
     // Ferrite never accepts the Mojang EULA for the user; the world generation host reads the
     // same `eula.txt`.
     ferrite_server::eula::ensure_accepted(std::path::Path::new("eula.txt"))?;
@@ -230,10 +300,9 @@ async fn main() -> anyhow::Result<()> {
         .context("binding server listener")?;
     tracing::info!(address = %listener.local_addr()?, online_mode = config.online_mode, view_distance = view_distance, "Ferrite listener started");
 
-    let spawn = if let Some(path) = &config.world {
-        game::load_spawn(path).context("reading world spawn")?
-    } else {
-        [0, 65, 0]
+    let spawn = match &config.world {
+        Some(path) => spawn_for_world(path)?,
+        None => [0, 65, 0],
     };
     let bind_host = config
         .bind_address
@@ -274,7 +343,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let terrain_for_plugins = terrain.clone();
     let source = if let Some(path) = &config.world {
-        let registry = ferrite_world::RuntimeRegistry::load("vanilla/26.3/generated")
+        let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
             .context("loading vanilla registry")?;
         game::new_anvil_source_with(path.clone(), registry, terrain)
     } else {
@@ -287,6 +356,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         [0, source.spawn_height(0, 0).unwrap_or(100), 0]
     };
+    if let Some(path) = &config.world {
+        // The vanilla save format puts the world spawn in `level.dat`. Write it once for a new
+        // world so a restart (and `read_spawn`) sees the same position.
+        if !path.join("level.dat").exists()
+            && let Err(error) = game::write_spawn(path, spawn)
+        {
+            tracing::warn!(%error, world = %path.display(), "could not write level.dat");
+        }
+    }
     ferrite_server::plugins::chunks::set_world_dir(config.world.clone());
     // The plugin bridge and the game loop share these sources, so a plugin write lands in the
     // same chunk data the server ticks.
@@ -567,7 +645,10 @@ mod tests {
         assert_eq!(defaults.compression_threshold, 256);
         assert_eq!(defaults.forwarding, ForwardingMode::None);
         assert!(defaults.forwarding_secret.is_empty());
-        assert_eq!(defaults.world, None);
+        assert_eq!(
+            defaults.world.as_deref(),
+            Some(std::path::Path::new("world"))
+        );
         assert_eq!(defaults.generator, WorldGenerator::Superflat);
         assert_eq!(
             toml::from_str::<Config>("generator = 'superflat'")

@@ -647,13 +647,24 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
         .console_command("/tick sprint 650".into())
         .await
         .unwrap();
+    let mut seen = 0usize;
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
-            let body = bot.until(BossBar::ID).await;
-            if matches!(
-                BossBar::decode(&mut body.as_slice()).unwrap().action,
-                BossBarAction::Add { .. }
-            ) {
+            let (id, body) = bot.next_play().await;
+            seen += 1;
+            if id == 124 {
+                let text = SystemChat::decode(&mut body.as_slice()).unwrap().content.0;
+                if text.to_lowercase().contains("sprint") || text.contains("TPS") {
+                    eprintln!("PHASE sprint report #{seen}: {text}");
+                }
+            }
+            if id == BossBar::ID
+                && matches!(
+                    BossBar::decode(&mut body.as_slice()).unwrap().action,
+                    BossBarAction::Add { .. }
+                )
+            {
+                eprintln!("PHASE respawn add #{seen}");
                 break;
             }
         }
@@ -1330,6 +1341,65 @@ async fn bot_break_is_saved_on_shutdown() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_world_is_saved_on_clean_shutdown_and_reloads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let registry_path = root.join("vanilla/26.3/generated");
+    if !registry_path.join("reports/blocks.json").exists() {
+        eprintln!("SKIP storage test: vanilla/26.3/generated is absent");
+        return;
+    }
+    let temp = std::env::temp_dir().join(format!("ferrite-world-save-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let registry = ferrite_world::RuntimeRegistry::load(&registry_path).unwrap();
+    let source = super::anvil::AnvilChunkSource::new(temp.clone(), registry);
+    let world = World::start_with(Some(source), [0, 65, 0]);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Saver").await;
+    // Wait for at least one generated chunk to reach the client, then stop cleanly.
+    bot.until(46).await;
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+
+    // A generated (never edited) chunk has to reach disk on shutdown, not only modified ones.
+    let region_path = temp.join("dimensions/minecraft/overworld/region/r.0.0.mca");
+    assert!(region_path.exists(), "missing {}", region_path.display());
+    let region = ferrite_world::RegionFile::open(&region_path, 0, 0).unwrap();
+    assert!(
+        region.read_chunk(0, 0).unwrap().is_some(),
+        "the spawn chunk was not written"
+    );
+
+    // "Restart": a fresh source over the same directory serves the saved column.
+    let registry = ferrite_world::RuntimeRegistry::load(&registry_path).unwrap();
+    let source = super::anvil::AnvilChunkSource::new(temp.clone(), registry);
+    loop {
+        if let Some(result) = source.get(0, 0, 0) {
+            result.expect("reload the saved spawn chunk");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        source.block(0, 64, 0),
+        Some(u32::from(
+            ferrite_data::blocks::default_state("minecraft:grass_block").unwrap()
+        ))
+    );
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_packet_decodes_and_filters_permissions() {
     let world = World::start();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1948,6 +2018,89 @@ async fn the_ender_dragon_shows_a_boss_bar_that_goes_away_when_it_dies() {
             break;
         }
     }
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn moving_one_chunk_keeps_another_players_entities_loaded() {
+    use ferrite_protocol::packets::play::{AddEntity, MovePosition, RemoveEntities};
+    let world = World::start();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 4,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut alice = Bot::join(addr, "Alice").await;
+    let mut bob = Bot::join(addr, "Bob").await;
+    alice.until(46).await;
+    bob.until(46).await;
+    world
+        .console_command("/summon minecraft:cow 8.5 64 8.5".into())
+        .await
+        .unwrap();
+    let cow_type = i32::from(ferrite_entity::mob::MobKind::Cow.entity_type());
+    let mut cow = None;
+    for bot in [&mut alice, &mut bob] {
+        loop {
+            let body = entity_packet(bot, AddEntity::ID, -1).await;
+            let add = AddEntity::decode(&mut body.as_slice()).unwrap();
+            if add.entity_type.0 == cow_type {
+                cow = Some(add.id.0);
+                break;
+            }
+        }
+    }
+    let cow = cow.expect("the cow was tracked");
+    // Alice walks into the next chunk. Chunk 0 is still within her view distance, so Bob's
+    // view of it must keep the chunk and its entities loaded.
+    alice
+        .send(&MovePosition {
+            x: 16.5,
+            y: 65.0,
+            z: 0.5,
+            flags: 1,
+        })
+        .await;
+    // Prove the move crossed a chunk boundary (the server answers with the new center).
+    let moved = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let (id, body) = alice.next_play().await;
+            if id == ferrite_protocol::packets::play::CenterChunk::ID {
+                let center =
+                    ferrite_protocol::packets::play::CenterChunk::decode(&mut body.as_slice())
+                        .unwrap();
+                if center.x.0 == 1 {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(moved.is_ok(), "Alice never entered chunk 1");
+    let removed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let (id, body) = bob.next_play().await;
+            if id == RemoveEntities::ID {
+                let packet = RemoveEntities::decode(&mut body.as_slice()).unwrap();
+                if packet.ids.contains(&ferrite_protocol::VarInt(cow)) {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        removed.is_err(),
+        "Bob's cow was removed when Alice crossed a chunk boundary"
+    );
+    drop((alice, bob));
     world.shutdown().await.unwrap();
     server.abort();
 }
@@ -4451,6 +4604,61 @@ async fn clear_give_and_xp_commands_act_on_a_bot_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_egg_from_give_hatches_a_tracked_mob() {
+    use ferrite_inventory::ClickInput::Pickup;
+    use ferrite_protocol::{
+        packets::play::{AddEntity, MoveRotation, SetHeldItem, UseItemOn},
+        types::BlockPos,
+    };
+    let (world, addr, server) = op_world(None, 0, &["Hatcher"]).await;
+    let mut bot = join_with_inventory(addr, "Hatcher").await;
+    bot.until(46).await;
+    bot.send(&MoveRotation {
+        yaw: 0.0,
+        pitch: 90.0,
+        flags: 1,
+    })
+    .await;
+    // `/give` puts the egg in the live inventory; move it to the selected hotbar slot.
+    bot.raw(7, "give @s cow_spawn_egg 2").await;
+    bot.chat_containing("Gave 2 Cow Spawn Egg to Hatcher").await;
+    let egg = ferrite_data::registries::id("minecraft:item", "minecraft:cow_spawn_egg").unwrap();
+    let slot = inventory_of(&mut bot)
+        .await
+        .iter()
+        .position(|stack| stack.item_id == egg && stack.count == 2)
+        .expect("the given egg is in the inventory");
+    if slot != 36 {
+        click(&mut bot, slot as i16, 0, Pickup).await;
+        click(&mut bot, 36, 0, Pickup).await;
+    }
+    bot.send(&SetHeldItem { slot: 0 }).await;
+    bot.send(&UseItemOn {
+        hand: VarInt(0),
+        location: BlockPos::new(0, 64, 0).pack(),
+        face: VarInt(1),
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside: false,
+        world_border_hit: false,
+        sequence: VarInt(1),
+    })
+    .await;
+    let cow_type = i32::from(ferrite_entity::mob::MobKind::Cow.entity_type());
+    let body = entity_packet(&mut bot, AddEntity::ID, -1).await;
+    let add = AddEntity::decode(&mut body.as_slice()).unwrap();
+    assert_eq!(add.entity_type.0, cow_type);
+    // The egg is a survival item: one of the two is gone.
+    let slots = inventory_of(&mut bot).await;
+    assert_eq!(slots[36].item_id, egg);
+    assert_eq!(slots[36].count, 1);
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn survival_fall_damage_and_natural_regeneration_with_bot() {
     use ferrite_protocol::packets::play::{MovePosition, SetHealth};
     // Survival mode: creative ignores fall damage (`Player.isInvulnerableTo`).
@@ -4573,7 +4781,8 @@ async fn survival_eating_uses_food_component_after_use_duration() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn survival_kill_death_screen_and_keep_inventory_respawn() {
     use ferrite_protocol::packets::play::{
-        PlayerCombatKill, PositionSync, Respawn, ServerboundClientCommand, SetExperience, SetHealth,
+        ChunkData, PlayerCombatKill, PositionSync, Respawn, ServerboundClientCommand,
+        SetExperience, SetHealth,
     };
     // The in-memory world keeps `gamerule` changes off the read-only fixture world.
     let spawn = [0, 65, 0];
@@ -4648,6 +4857,13 @@ async fn survival_kill_death_screen_and_keep_inventory_respawn() {
             f64::from(spawn[2]) + 0.5
         ]
     );
+    // A respawn makes the client discard its chunks; the server must stream the spawn area
+    // again or the client stays on the "Loading terrain" screen forever.
+    let body = tokio::time::timeout(std::time::Duration::from_secs(30), bot.until(ChunkData::ID))
+        .await
+        .expect("chunks after respawn");
+    let chunk = ChunkData::decode(&mut body.as_slice()).unwrap();
+    assert!(chunk.x.abs() <= 2 && chunk.z.abs() <= 2, "{chunk:?}");
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();
@@ -4674,16 +4890,46 @@ async fn survival_void_damage_kills_and_sends_the_death_screen() {
         .console_command("tp Voider 0 -200 0".into())
         .await
         .unwrap();
-    let body = bot.until(PlayerCombatKill::ID).await;
-    let kill = PlayerCombatKill::decode(&mut body.as_slice()).unwrap();
+    // Vanilla does not kill instantly: the player keeps falling and takes 4 damage a tick.
+    let mut healths = Vec::new();
+    let mut kill: Option<PlayerCombatKill> = None;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let (id, body) = bot.next_play().await;
+            if id == SetHealth::ID {
+                let health = SetHealth::decode(&mut body.as_slice()).unwrap();
+                healths.push(health.health);
+                if health.health == 0.0 && kill.is_some() {
+                    break;
+                }
+            } else if id == PlayerCombatKill::ID {
+                kill = Some(PlayerCombatKill::decode(&mut body.as_slice()).unwrap());
+                if healths.last() == Some(&0.0) {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("void death");
+    assert!(
+        !healths.is_empty(),
+        "the health bar is synced while falling"
+    );
+    assert!(
+        healths
+            .windows(2)
+            .all(|pair| pair[0] >= pair[1] && pair[0] - pair[1] <= 4.0),
+        "void damage must tick at 4 or less: {healths:?}"
+    );
+    assert!(healths.len() >= 4, "{healths:?}");
+    assert_eq!(healths.last(), Some(&0.0));
+    let kill = kill.expect("the death screen");
     assert!(
         kill.message.0.contains("fell out of the world"),
         "{}",
         kill.message.0
     );
-    let body = bot.until(SetHealth::ID).await;
-    let health = SetHealth::decode(&mut body.as_slice()).unwrap();
-    assert_eq!(health.health, 0.0);
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();

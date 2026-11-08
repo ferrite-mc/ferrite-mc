@@ -144,6 +144,10 @@ struct Column {
     /// every player that receives this chunk, exactly like Paper's packet
     /// cache: encoded once, copied only when it is handed to a connection.
     packet: Arc<[u8]>,
+    /// This column was generated (or read from a flat source) rather than read back from an
+    /// Anvil file. A disk-backed source writes it on chunk unload or server shutdown even when
+    /// no block changed, matching vanilla, which saves every generated chunk.
+    generated: bool,
 }
 struct Cache {
     entries: HashMap<(i32, i32, i32), Entry>,
@@ -1058,14 +1062,25 @@ impl AnvilChunkSource {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
+        // A generated column has no dirty entry: it is still cached and has to reach disk like
+        // a modified one. `dirty_version` distinguishes the two cases for the cleanup below.
         let item = {
             let cache = self.cache.lock().unwrap();
-            cache
-                .dirty
-                .get(&(x, z))
-                .map(|d| (d.chunk.clone(), d.light.clone(), d.version))
+            if let Some(d) = cache.dirty.get(&(x, z)) {
+                Some((d.chunk.clone(), d.light.clone(), Some(d.version)))
+            } else {
+                cache
+                    .entries
+                    .iter()
+                    .find_map(|(&(cx, cz, _), entry)| match entry {
+                        Entry::Ready(Ok(column), _) if (cx, cz) == (x, z) && column.generated => {
+                            Some((column.chunk.clone(), column.light.clone(), None))
+                        }
+                        _ => None,
+                    })
+            }
         };
-        let Some((chunk, light, version)) = item else {
+        let Some((chunk, light, dirty_version)) = item else {
             return Ok(());
         };
         let source = Arc::clone(self);
@@ -1100,12 +1115,25 @@ impl AnvilChunkSource {
         })
         .await??;
         let mut cache = self.cache.lock().unwrap();
-        if cache
-            .dirty
-            .get(&(x, z))
-            .is_some_and(|d| d.version == version)
-        {
-            cache.dirty.remove(&(x, z));
+        match dirty_version {
+            Some(version) => {
+                if cache
+                    .dirty
+                    .get(&(x, z))
+                    .is_some_and(|d| d.version == version)
+                {
+                    cache.dirty.remove(&(x, z));
+                }
+            }
+            None => {
+                for (&(cx, cz, _), entry) in cache.entries.iter_mut() {
+                    if let Entry::Ready(Ok(column), _) = entry
+                        && (cx, cz) == (x, z)
+                    {
+                        column.generated = false;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1114,7 +1142,18 @@ impl AnvilChunkSource {
             return Ok(());
         }
         loop {
-            let next = { self.cache.lock().unwrap().dirty.keys().next().copied() };
+            let next = {
+                let cache = self.cache.lock().unwrap();
+                cache.dirty.keys().next().copied().or_else(|| {
+                    cache
+                        .entries
+                        .iter()
+                        .find_map(|(&(x, z, _), entry)| match entry {
+                            Entry::Ready(Ok(column), _) if column.generated => Some((x, z)),
+                            _ => None,
+                        })
+                })
+            };
             let Some((x, z)) = next else { return Ok(()) };
             self.flush_chunk(x, z).await?;
         }
@@ -1204,6 +1243,7 @@ impl AnvilChunkSource {
                     }
                     None => None,
                 };
+                let generated = loaded.is_none() && source.path.is_some();
                 let (chunk, light) = match loaded {
                     Some(column) => column,
                     None => {
@@ -1239,6 +1279,7 @@ impl AnvilChunkSource {
                     chunk,
                     light,
                     packet,
+                    generated,
                 })
             })()
             .map_err(|e| format!("{e:#}"));
@@ -1285,6 +1326,23 @@ fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
         tracing::debug!(x, z, "chunk packet cache invalidated");
     }
 }
+/// Writes the minimal vanilla `level.dat` a new world needs to remember its spawn. Existing
+/// fields from a real vanilla `level.dat` are not modeled here; callers only use this for a
+/// freshly created Ferrite world.
+pub fn write_spawn(world: &Path, spawn: [i32; 3]) -> anyhow::Result<()> {
+    let mut data = ferrite_nbt::Compound::new();
+    let mut pos = ferrite_nbt::Compound::new();
+    pos.insert("pos".into(), Tag::IntArray(spawn.to_vec()));
+    data.insert("spawn".into(), Tag::Compound(pos));
+    data.insert("DataVersion".into(), Tag::Int(5023));
+    let mut root = ferrite_nbt::Compound::new();
+    root.insert("Data".into(), Tag::Compound(data));
+    let bytes = binary::write_compressed("", &Tag::Compound(root), binary::Compression::Gzip)?;
+    std::fs::create_dir_all(world)?;
+    std::fs::write(world.join("level.dat"), bytes)?;
+    Ok(())
+}
+
 pub fn read_spawn(world: &Path) -> anyhow::Result<[i32; 3]> {
     let bytes = std::fs::read(world.join("level.dat"))?;
     let (_, tag) = binary::read_compressed(&bytes, binary::Compression::Gzip)?;
