@@ -705,6 +705,11 @@ pub enum Action {
         pos: [f64; 3],
         stacks: Vec<ferrite_item::ItemStack>,
     },
+    /// `/summon minecraft:end_crystal`: the crystal is not a mob, so it has its own action.
+    SummonCrystal {
+        pos: [f64; 3],
+        dimension: super::Dimension,
+    },
     /// `/ride <target> mount <vehicle>` or `dismount` (`vehicle` is `None`).
     Ride {
         target: EntityTarget,
@@ -727,6 +732,8 @@ pub enum Action {
     },
     Kill {
         targets: EntityTarget,
+        /// Dimension the selection was resolved in (`/execute in`).
+        dimension: super::Dimension,
     },
     Op {
         targets: EntityTarget,
@@ -1212,6 +1219,7 @@ fn kill_builder() -> ferrite_command::NodeBuilder<Source> {
                 ctx.source(),
                 Action::Kill {
                     targets: self_target(),
+                    dimension: ctx.source().dimension,
                 },
             )
         })
@@ -1221,6 +1229,7 @@ fn kill_builder() -> ferrite_command::NodeBuilder<Source> {
                     ctx.source(),
                     Action::Kill {
                         targets: entity(ctx, "targets")?,
+                        dimension: ctx.source().dimension,
                     },
                 )
             }),
@@ -1249,6 +1258,20 @@ fn summon_action(ctx: &CommandContext<Source>, with_pos: bool) -> Result<i32, Co
     let name = ctx
         .string("entity")
         .ok_or_else(|| CommandError::failed("missing entity argument 'entity'"))?;
+    let pos = if with_pos {
+        coordinates(ctx, "pos")?.resolve(ctx.source().origin, ctx.source().yaw, ctx.source().pitch)
+    } else {
+        ctx.source().origin
+    };
+    if name == "minecraft:end_crystal" || name == "end_crystal" {
+        return send(
+            ctx.source(),
+            Action::SummonCrystal {
+                pos,
+                dimension: ctx.source().dimension,
+            },
+        );
+    }
     let kind = MobKind::from_name(name).ok_or_else(|| {
         if ferrite_data::entity_props::by_name(name).is_some() {
             CommandError::failed(format!("Unable to summon entity {name}"))
@@ -1256,11 +1279,6 @@ fn summon_action(ctx: &CommandContext<Source>, with_pos: bool) -> Result<i32, Co
             CommandError::failed(format!("Invalid entity {name}"))
         }
     })?;
-    let pos = if with_pos {
-        coordinates(ctx, "pos")?.resolve(ctx.source().origin, ctx.source().yaw, ctx.source().pitch)
-    } else {
-        ctx.source().origin
-    };
     // Only `NoAI` is understood of the data tag; a malformed tag is an error as in vanilla.
     let no_ai = match ctx.string("nbt") {
         Some(text) => {
@@ -3268,12 +3286,14 @@ mod tests {
                     kind: SelectorKind::AllPlayers,
                     options: Vec::new(),
                 },
+                dimension: crate::game::Dimension::Overworld,
             }
         );
         assert_eq!(
             only("kill", 2),
             Action::Kill {
                 targets: self_target(),
+                dimension: crate::game::Dimension::Overworld,
             }
         );
     }
@@ -3290,6 +3310,7 @@ mod tests {
                         value: "#minecraft:zombies".into(),
                     }],
                 },
+                dimension: crate::game::Dimension::Overworld,
             }
         );
     }

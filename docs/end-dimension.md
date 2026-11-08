@@ -23,29 +23,51 @@ What works, how it is built, and what is still missing.
     dimension and removed when the dragon dies.
   - The dragon flies a circle (radius 40, around y 90) and hurts players within 5 blocks for 6
     every second.
-  - On death the podium turns into the exit portal, a dragon egg appears on the pillar and 12000
-    experience drops.
+  - On death the podium turns into the exit portal, a dragon egg appears on the pillar on the
+    first kill only, and 12000 experience drops.
+- **Respawning the dragon.** Four end crystals in the cells three blocks from the centre start
+  vanilla's staged sequence: the crystals' beam targets, the roars, ten spike crystals restored
+  one every 40 ticks, and one dragon after 604 ticks. At completion the four summon crystals
+  explode with power 6 without breaking blocks, then are removed. Breaking a crystal or losing the
+  origin chunk aborts the sequence and puts the exit portal back. The stage and timer are saved and
+  a restart resumes at the same stage. `/summon minecraft:end_crystal` creates the crystals for
+  this path. The full 604-tick sequence is covered by an integration test using
+  `/tick sprint`.
+- **Repair after a crash.** The exit portal and every opened gateway are part of the saved fight;
+  the region holding the origin puts a missing portal back once the dragon is gone, and any End
+  region restores a gateway whose chunk it holds.
 
-## Missing
+- **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
+  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Breath clouds use
+  vanilla's shape: radius 3 growing to 5 over 600 ticks, a 20-tick fireball wait, and 3 damage
+  every 20 ticks.
+- **Guarded spikes.** The two shortest spikes (the vanilla guarded pair) get a 73-block iron-bar
+  cage when their crystal is placed; the cage is restored with the spike on a respawn.
+- **Credits and advancement.** The first trip home through the exit portal sends `WIN_GAME` and
+  waits for the client's respawn request before moving. The seen flag is saved in
+  `playerdata/<uuid>.json`, so a relog or restart does not replay the credits. Paper's
+  `misc.disable-end-credits` in `config/paper-world-defaults.yml` suppresses the screen while the
+  return trip still happens. The "Free the End" advancement credits melee, arrow and explosion
+  kills by recording the last attacker on the mob and resolving it in the death pass. (Later kills
+  give 500 xp, first kills 12000; the first-kill flag is remembered from the exit portal.)
+- **Persistence.** The fight (started, killed before, dragon alive, gateways, placed spike
+  crystals, respawn stage/timer, exit portal level) is written to
+  `DIM1/data/minecraft/ender_dragon_fight.dat` whenever it changes and read on the first tick in
+  the end. The dragon, its landing phase and the crystals are saved as ordinary entities; the
+  credits flag lives in the player data.
 
-- **Dragon behaviour.** A simplified cycle instead of vanilla's phase machine: it circles, dives
-  at the nearest player every 30 seconds, spits a `dragon_fireball` every 20 seconds (a breath
-  cloud forms where it lands) and every 75 seconds perches on the portal for 10 seconds, breathing a
-  cloud each second. The clouds keep their radius and hurt for a flat 6 every second. It smashes every
-  block in its body except `#minecraft:dragon_immune`. No separate head/wing hitboxes.
-- **Crystals.** Arrows, melee and explosions break them (a blast chains to the next crystal). The healing beam is drawn by the client. No iron
-  bar cages on the guarded spikes unless the terrain provides them.
-- **Respawning the dragon** works in a simplified form: end crystals can be placed on obsidian or bedrock, and four of them on the bedrock ring around the exit portal (3 blocks from the centre) bring a new dragon, remove the portal and replace the spike crystals at once. Vanilla's beam animation, the ~10 second delay and the crystal explosions are missing, and this path has only unit tests (the cells are checked against the podium layout), no bot test.
-- **Gateways.** Each dragon kill opens the next gateway of the 20-ring (radius 96, y 75), when
-  its chunk is loaded. Standing in one sends a player to the top of the ground 1024 blocks out
-  in the same direction (or does nothing over empty void); vanilla instead searches for the
-  nearest outer island and plays the beam animation, which is not modelled.
-- **Credits**: the first trip home through the exit portal sends `WIN_GAME` and waits for the client's
-  respawn request before moving (seen-flag is in memory only, not saved). The "Free the End"
-  advancement completes on a dragon kill (melee path, covered by a test). (Later kills give 500 xp,
-  first kills 12000; the first-kill flag is remembered from the exit portal.)
-- **Persistence.** The fight (started, killed before, gateways, placed spike crystals) is written
-  to `DIM1/data/minecraft/ender_dragon_fight.dat` whenever it changes and read on the first tick
-  in the end. The dragon and crystals are saved as ordinary entities.
-- **Not verified with a real client.** The boss bar, dragon movement and the platform were only
-  exercised with protocol bots, and the End terrain through the real host needs the user's EULA.
+## Remaining gaps
+
+- **Dragon phase machine.** The dragon still follows a simplified circle/dive/fireball/perch
+  cycle instead of vanilla's full phase machine; strafing and perched attack timings are
+  approximations. It smashes every block in its body except `#minecraft:dragon_immune`.
+- **Outer islands.** A gateway landing searches up to 16 blocks around the point 1024 blocks out
+  for the nearest loaded column with ground and two air above; an all-void 3x3 chunk area cancels
+  the trip instead of dropping the player into the void. Vanilla searches farther for the nearest
+  outer island and plays the beam animation, which is not modelled.
+- **Guarded-spike choice.** The cage pair follows the two shortest loaded spike tops. On a host
+  terrain without vanilla's spike podiums the choice can differ from the generated world's
+  shuffled sizes.
+- **Not verified with a real client.** The boss bar, dragon movement, breath radius and the
+  platform were only exercised with protocol bots and unit tests, and the End terrain through the
+  real host needs the user's EULA.

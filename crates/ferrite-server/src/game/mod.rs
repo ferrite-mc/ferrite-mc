@@ -515,6 +515,9 @@ pub struct WorldSettings {
     /// Per-dimension chunk sources. `None` opens the standard three dimensions from the
     /// primary source's world directory (or in memory for a world without one).
     pub dimensions: Option<Arc<DimensionRegistry>>,
+    /// Paper's `misc.disable-end-credits`: suppress the credits screen after the exit portal
+    /// while still moving the player home.
+    pub disable_end_credits: bool,
 }
 impl WorldSettings {
     fn permission(&self, uuid: Uuid) -> u8 {
@@ -539,6 +542,7 @@ impl Default for WorldSettings {
             playerdata: None,
             plugin_commands: None,
             dimensions: None,
+            disable_end_credits: false,
         }
     }
 }
@@ -1169,7 +1173,7 @@ async fn run(
                    online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: view_distance as i32 });
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_dimension, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:false,watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
                    worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
                    {
@@ -1303,6 +1307,14 @@ async fn run(
                           commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: Some(outbound.clone()) }); } } },
                           commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: Some(outbound.clone()) }); } } },
                           commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: Some(outbound.clone()) }); } } },
+                          commands::Action::SummonCrystal { pos, dimension } => {
+                              let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+                              if worlds.owner(dimension, chunk).is_some() {
+                                  worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon_end_crystal(pos); });
+                              } else {
+                                  chat(outbound, "That position is not loaded");
+                              }
+                          }
                           commands::Action::Summon { kind, pos, no_ai } => {
                               let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                               let dimension = runtime.dimension;
@@ -1377,6 +1389,14 @@ async fn run(
                           commands::Action::Clear { targets, item, max_count } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Clear { target, target_name, item, max_count, feedback: None }); } } },
                           commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: None }); } } },
                           commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: None }); } } },
+                          commands::Action::SummonCrystal { pos, dimension } => {
+                              let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+                              if worlds.owner(dimension, chunk).is_some() {
+                                  worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon_end_crystal(pos); });
+                              } else {
+                                  tracing::warn!("summon end crystal target chunk is not loaded");
+                              }
+                          }
                           commands::Action::Summon { kind, pos, no_ai } => {
                               let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                               if worlds.owner(Dimension::Overworld, chunk).is_some() {
@@ -2625,7 +2645,7 @@ impl CommandRuntime<'_> {
         }
     }
 
-    fn kill_entity(&self, uuid: Uuid, from: [f64; 3]) {
+    fn kill_entity(&self, uuid: Uuid, from: [f64; 3], dimension: Dimension) {
         let from = self
             .state
             .lock()
@@ -2636,9 +2656,9 @@ impl CommandRuntime<'_> {
             .get(uuid)
             .map_or(from, |entity| entity.pos);
         let chunk = ChunkPos((from[0].floor() as i32) >> 4, (from[2].floor() as i32) >> 4);
-        if self.worlds.owner(self.dimension, chunk).is_some() {
+        if self.worlds.owner(dimension, chunk).is_some() {
             self.worlds
-                .schedule_at_chunk(self.dimension, chunk, move |region| {
+                .schedule_at_chunk(dimension, chunk, move |region| {
                     region.kill_entity(uuid);
                 });
         }
@@ -2812,6 +2832,7 @@ impl CommandRuntime<'_> {
             | Action::Give { .. }
             | Action::Experience { .. }
             | Action::Summon { .. }
+            | Action::SummonCrystal { .. }
             | Action::GameRule(..)
             | Action::Enchant { .. } => false,
             Action::World(command) => {
@@ -3501,7 +3522,7 @@ impl CommandRuntime<'_> {
                 }
                 false
             }
-            Action::Kill { targets } => {
+            Action::Kill { targets, dimension } => {
                 let targets = match self.selection(&targets) {
                     Ok(targets) => targets,
                     Err(error) => {
@@ -3516,7 +3537,7 @@ impl CommandRuntime<'_> {
                             mailbox.lock().unwrap().push_back(Command::Kill);
                         }
                     } else {
-                        self.kill_entity(target.uuid, target.pos);
+                        self.kill_entity(target.uuid, target.pos, dimension);
                     }
                 }
                 if targets.len() == 1 {

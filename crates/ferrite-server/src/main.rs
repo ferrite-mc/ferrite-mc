@@ -350,7 +350,15 @@ async fn main() -> anyhow::Result<()> {
             console: Some(plugin_console_tx),
         })
         .context("starting plugins")?;
+    let disable_end_credits = match ferrite_config::FerriteConfig::load("config") {
+        Ok(config) => config.world_settings("world").misc.disable_end_credits,
+        Err(error) => {
+            tracing::warn!(%error, "reading Paper world config failed; End credits stay enabled");
+            false
+        }
+    };
     let settings = game::WorldSettings {
+        disable_end_credits,
         dimension: game::Dimension::Overworld,
         raining: false,
         gamemode: match config.gamemode {

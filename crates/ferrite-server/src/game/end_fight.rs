@@ -13,6 +13,7 @@ const END_STONE: &str = "minecraft:end_stone";
 const END_PORTAL: &str = "minecraft:end_portal";
 const END_GATEWAY: &str = "minecraft:end_gateway";
 const DRAGON_EGG: &str = "minecraft:dragon_egg";
+const IRON_BARS: &str = "minecraft:iron_bars";
 const WALL_TORCH: &str = "minecraft:wall_torch";
 
 /// Radius of the circle of end gateways around the main island, and their height.
@@ -64,6 +65,9 @@ pub struct FightState {
     pub gateways: u32,
     /// Spike numbers whose crystal was already placed (or that have none).
     pub crystals: std::collections::BTreeSet<u8>,
+    /// Spike numbers that get a guarded iron-bar cage. Recomputed by the origin region; not
+    /// persisted because it follows the generated spike heights.
+    pub guarded: std::collections::BTreeSet<u8>,
     /// A dragon is flying (spawned or respawned and not dead yet).
     pub dragon_alive: bool,
     /// The staged four-crystal respawn in flight, if any.
@@ -287,8 +291,79 @@ pub fn spike_column(index: u8) -> [i32; 2] {
     ]
 }
 
-/// The highest solid block of a column: where the exit podium or a spike top stands. `block`
-/// answers the state at a height, or `None` while the chunk is not loaded.
+/// Vanilla's default spike sizes are shuffled per world; the two shortest after the 76-block
+/// spike are guarded by an iron-bar cage. `tops` must contain a height for all ten columns;
+/// `None` means the chunk is not loaded and no decision is made yet.
+pub fn guarded_spike_indices(tops: &[Option<i32>]) -> Vec<u8> {
+    if tops.len() != usize::from(SPIKE_COUNT) || tops.iter().any(Option::is_none) {
+        return Vec::new();
+    }
+    let mut heights: Vec<(i32, u8)> = tops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, top)| Some(((*top)?, u8::try_from(index).ok()?)))
+        .collect();
+    heights.sort_by_key(|&(height, index)| (height, index));
+    heights
+        .into_iter()
+        .skip(1)
+        .take(2)
+        .map(|(_, index)| index)
+        .collect()
+}
+
+/// Vanilla `SpikeFeature`: the 73 iron bars around a guarded spike's crystal. The cage is a
+/// 5x5 ring from the spike top to three blocks above it, with a solid lid.
+pub fn spike_cage_blocks([x, top, z]: [i32; 3]) -> Vec<([i32; 3], u16)> {
+    let mut blocks = Vec::new();
+    for dx in -2_i32..=2 {
+        for dz in -2_i32..=2 {
+            for dy in 0_i32..=3 {
+                let x_edge = dx.abs() == 2 || dy == 3;
+                let z_edge = dz.abs() == 2 || dy == 3;
+                if !x_edge && !z_edge {
+                    continue;
+                }
+                let north = x_edge && dz != -2;
+                let south = x_edge && dz != 2;
+                let west = z_edge && dx != -2;
+                let east = z_edge && dx != 2;
+                let Some(state) = state_id(
+                    IRON_BARS,
+                    &[
+                        ("north", bool_name(north)),
+                        ("south", bool_name(south)),
+                        ("west", bool_name(west)),
+                        ("east", bool_name(east)),
+                    ],
+                ) else {
+                    return Vec::new();
+                };
+                blocks.push(([x + dx, top + dy, z + dz], state));
+            }
+        }
+    }
+    blocks
+}
+
+fn bool_name(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+/// The highest non-air block of a column, or `None` for a column that is all air (the void).
+/// `block` answers the state at a height, or `None` while the chunk is not loaded.
+pub fn highest_solid(mut block: impl FnMut(i32) -> Option<u32>) -> Option<i32> {
+    for y in (0..=255).rev() {
+        if block(y)? != 0 {
+            return Some(y);
+        }
+    }
+    None
+}
+
+/// The highest solid block of a column: where the exit podium or a spike top stands. An empty
+/// loaded column falls back to y 63, the island's approximate surface; an unloaded chunk stays
+/// `None` so the caller can retry.
 pub fn podium_floor(block: impl Fn(i32) -> Option<u32>) -> Option<i32> {
     for y in (0..=255).rev() {
         if block(y)? != 0 {
@@ -306,6 +381,28 @@ fn distance_squared(origin: [i32; 3], at: [i32; 3]) -> f64 {
         f64::from(at[2] - origin[2]),
     ];
     d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+}
+
+/// After a kill the podium becomes the exit portal. The dragon egg appears only on the very
+/// first kill of the world (vanilla `EnderDragonFight.dragonKilled`); later kills leave no egg.
+pub fn dragon_death_blocks(origin: [i32; 3], first_kill: bool) -> Vec<([i32; 3], u16)> {
+    let mut blocks = podium_blocks(origin, true);
+    if first_kill && let Some(egg) = dragon_egg() {
+        blocks.push((egg_position(origin), egg));
+    }
+    blocks
+}
+
+/// Whether the exit portal must be put back: the fight is over, no respawn is running, and the
+/// portal block at the remembered level is gone (a death in another region, or a save taken
+/// between the fight state and the block writes).
+pub fn needs_exit_portal(
+    killed: bool,
+    dragon_alive: bool,
+    respawn_stage: Option<RespawnStage>,
+    portal_present: bool,
+) -> bool {
+    killed && !dragon_alive && respawn_stage.is_none() && !portal_present
 }
 
 /// Vanilla `EndPodiumFeature`: the bedrock fountain around `origin`. With `active` the middle
@@ -369,6 +466,12 @@ pub fn respawn_crystal_cells(level: i32) -> [[i32; 3]; 4] {
         [0, level + 1, 3],
         [0, level + 1, -3],
     ]
+}
+
+/// Centers of the four explosions vanilla spawns when the respawn sequence finishes
+/// (`DragonRespawnAnimation.SUMMONING_DRAGON`, power 6, no block destruction).
+pub fn respawn_crystal_explosions(cells: [[i32; 3]; 4]) -> [[f64; 3]; 4] {
+    cells.map(|[x, y, z]| [f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5])
 }
 
 /// Vanilla `DragonRespawnStage` timings: 100 ticks preparing, one spike every 40 ticks for ten
@@ -437,6 +540,47 @@ pub fn egg_position(origin: [i32; 3]) -> [i32; 3] {
 
 pub fn dragon_egg() -> Option<u16> {
     default_state(DRAGON_EGG)
+}
+
+/// How far around the ideal gateway exit to look for the outer island.
+pub const GATEWAY_LANDING_RADIUS: i32 = 16;
+
+/// Where a player stepping into a gateway lands: the nearest loaded column with ground and two
+/// blocks of air above it, searched outward from the point 1024 blocks out. Vanilla searches
+/// the nearest outer island; the ideal point can be over the void between islands. `None`
+/// means no loaded column offered a safe landing.
+pub fn gateway_landing(
+    [center_x, center_z]: [i32; 2],
+    mut block: impl FnMut(i32, i32, i32) -> Option<u32>,
+) -> Option<[f64; 3]> {
+    for radius in 0..=GATEWAY_LANDING_RADIUS {
+        let mut best: Option<([i32; 3], i32)> = None;
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if radius > 0 && dx.abs() != radius && dz.abs() != radius {
+                    continue;
+                }
+                let (x, z) = (center_x + dx, center_z + dz);
+                let Some(top) = highest_solid(|y| block(x, y, z)) else {
+                    continue;
+                };
+                if !(1..=253).contains(&top)
+                    || block(x, top + 1, z) != Some(0)
+                    || block(x, top + 2, z) != Some(0)
+                {
+                    continue;
+                }
+                let distance = dx * dx + dz * dz;
+                if best.is_none_or(|(_, nearest)| distance < nearest) {
+                    best = Some(([x, top, z], distance));
+                }
+            }
+        }
+        if let Some(([x, top, z], _)) = best {
+            return Some([f64::from(x) + 0.5, f64::from(top) + 1.0, f64::from(z) + 0.5]);
+        }
+    }
+    None
 }
 
 /// The position of gateway number `index` (0-based, wrapping at twenty): vanilla spaces them
@@ -589,6 +733,116 @@ mod tests {
         assert_eq!(named(dragon_egg().unwrap()), DRAGON_EGG);
         assert_eq!(dragon_experience(true), 12_000);
         assert_eq!(dragon_experience(false), 500);
+    }
+
+    #[test]
+    fn only_the_first_kill_leaves_a_dragon_egg() {
+        let first = layout(dragon_death_blocks([0, 64, 0], true));
+        assert_eq!(named(first[&[2, 64, 0]]), END_PORTAL);
+        assert_eq!(named(first[&[0, 68, 0]]), DRAGON_EGG);
+        let later = layout(dragon_death_blocks([0, 64, 0], false));
+        assert_eq!(named(later[&[2, 64, 0]]), END_PORTAL);
+        assert_eq!(later.get(&[0, 68, 0]), None, "the egg is not duplicated");
+    }
+
+    #[test]
+    fn a_void_column_has_no_top_but_the_podium_still_has_a_floor() {
+        assert_eq!(highest_solid(|_| Some(0)), None);
+        assert_eq!(podium_floor(|_| Some(0)), Some(63));
+        assert_eq!(highest_solid(|y| Some(u32::from(y <= 70))), Some(70));
+    }
+
+    #[test]
+    fn a_gateway_landing_finds_the_nearest_ground_and_skips_the_void() {
+        let mut ground = HashMap::new();
+        ground.insert((5, 0), 64);
+        ground.insert((-4, 4), 80);
+        // The nearer column is full to the build height, so there is no room to stand.
+        ground.insert((2, 0), 255);
+        let mut block = |x: i32, y: i32, z: i32| -> Option<u32> {
+            match ground.get(&(x, z)) {
+                Some(&top) if y == top => Some(1),
+                Some(&top) if y > top => Some(0),
+                _ => Some(0),
+            }
+        };
+        assert_eq!(
+            gateway_landing([0, 0], &mut block),
+            Some([-3.5, 81.0, 4.5]),
+            "the column without room and the farther one are skipped"
+        );
+        let mut void = |_: i32, _: i32, _: i32| Some(0);
+        assert_eq!(gateway_landing([0, 0], &mut void), None);
+    }
+
+    #[test]
+    fn the_two_shortest_pillars_are_guarded() {
+        let tops = [
+            Some(100),
+            Some(20),
+            Some(30),
+            Some(40),
+            Some(50),
+            Some(60),
+            Some(70),
+            Some(80),
+            Some(90),
+            Some(110),
+        ];
+        assert_eq!(guarded_spike_indices(&tops), vec![2, 3]);
+        assert!(guarded_spike_indices(&tops[..9]).is_empty());
+        let mut unloaded = tops;
+        unloaded[4] = None;
+        assert!(guarded_spike_indices(&unloaded).is_empty());
+    }
+
+    #[test]
+    fn a_guarded_spike_is_wrapped_in_seventy_three_iron_bars() {
+        let bars = spike_cage_blocks([10, 60, 20]);
+        assert_eq!(bars.len(), 73);
+        let blocks = layout(bars.clone());
+        assert_eq!(named(blocks[&[12, 60, 20]]), IRON_BARS, "ring bottom");
+        assert_eq!(named(blocks[&[12, 62, 20]]), IRON_BARS, "ring side");
+        assert_eq!(named(blocks[&[10, 63, 20]]), IRON_BARS, "lid");
+        assert!(
+            !blocks.contains_key(&[10, 61, 20]),
+            "the crystal stays clear"
+        );
+        assert!(!blocks.contains_key(&[10, 60, 20]), "the spike stays clear");
+        assert_eq!(
+            bars.iter()
+                .filter(|(_, state)| named(*state) == IRON_BARS)
+                .count(),
+            73
+        );
+    }
+
+    #[test]
+    fn summoning_explodes_the_four_crystals_at_their_centres() {
+        let cells = respawn_crystal_cells(64);
+        assert_eq!(
+            respawn_crystal_explosions(cells),
+            [
+                [3.5, 65.0, 0.5],
+                [-2.5, 65.0, 0.5],
+                [0.5, 65.0, 3.5],
+                [0.5, 65.0, -2.5],
+            ]
+        );
+    }
+
+    #[test]
+    fn the_exit_portal_is_repaired_only_after_the_dragon_is_gone() {
+        assert!(needs_exit_portal(true, false, None, false));
+        assert!(!needs_exit_portal(true, false, None, true));
+        assert!(!needs_exit_portal(false, false, None, false));
+        assert!(!needs_exit_portal(true, true, None, false));
+        assert!(!needs_exit_portal(
+            true,
+            false,
+            Some(RespawnStage::SummoningPillars),
+            false
+        ));
     }
 }
 

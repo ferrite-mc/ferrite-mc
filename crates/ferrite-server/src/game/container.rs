@@ -762,6 +762,7 @@ impl Player {
                     self.pitch,
                     self.gamemode,
                     self.dimension,
+                    self.seen_credits,
                     &self.inventory,
                 ),
             )

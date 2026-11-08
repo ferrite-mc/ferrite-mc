@@ -127,12 +127,124 @@ pub const PERCH_SPOT: Vec3 = Vec3::new(0.0, 68.0, 0.0);
 pub const BREATH_INTERVAL: u32 = 20;
 /// The distance to the circling path at which takeoff ends.
 pub const TAKEOFF_REACH: f64 = 4.0;
-/// A breath cloud lasts 30 seconds, reaches 3 blocks and hurts everyone in it every 20 ticks.
-/// shortcut: the cloud keeps its radius instead of shrinking, and hurts for a flat 6.
+/// A dragon fireball's cloud starts at radius 3, waits 20 ticks, then grows to radius 5 over its
+/// 30-second life (vanilla `DragonFireball`). The perched breath uses the same cloud shape with
+/// no initial wait. The harmful part hurts for 3 every 20 ticks, 3 health per second.
 pub const BREATH_TICKS: u32 = 600;
 pub const BREATH_RADIUS: f64 = 3.0;
+pub const BREATH_MAX_RADIUS: f64 = 5.0;
+pub const BREATH_WAIT_TICKS: u32 = 20;
 pub const BREATH_HIT_INTERVAL: u32 = 20;
-pub const BREATH_DAMAGE: f32 = 6.0;
+pub const BREATH_DAMAGE: f32 = 3.0;
+
+/// A vanilla `AreaEffectCloud` of dragon's breath. It remains visible for its whole duration;
+/// only after `wait` does the cloud start hurting players inside its growing radius.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BreathCloud {
+    pub center: Vec3,
+    pub age: u32,
+    pub duration: u32,
+    pub wait: u32,
+    pub initial_radius: f64,
+    pub max_radius: f64,
+}
+
+impl BreathCloud {
+    pub fn fireball(center: Vec3) -> Self {
+        Self {
+            center,
+            age: 0,
+            duration: BREATH_TICKS,
+            wait: BREATH_WAIT_TICKS,
+            initial_radius: BREATH_RADIUS,
+            max_radius: BREATH_MAX_RADIUS,
+        }
+    }
+
+    pub fn perched(center: Vec3) -> Self {
+        Self {
+            center,
+            age: 0,
+            duration: BREATH_TICKS,
+            wait: 0,
+            initial_radius: BREATH_RADIUS,
+            max_radius: BREATH_MAX_RADIUS,
+        }
+    }
+
+    /// The visible and harmful radius at the current age.
+    pub fn radius(&self) -> f64 {
+        let progress = f64::from(self.age.min(self.duration)) / f64::from(self.duration.max(1));
+        self.initial_radius + (self.max_radius - self.initial_radius) * progress
+    }
+
+    /// Advances one tick and returns the damage to apply this tick (0 while waiting or between
+    /// hit intervals). `None` means the cloud has expired and must be removed.
+    pub fn advance(&mut self) -> Option<f32> {
+        if self.age >= self.duration {
+            return None;
+        }
+        self.age += 1;
+        if self.age <= self.wait || !self.age.is_multiple_of(BREATH_HIT_INTERVAL) {
+            return Some(0.0);
+        }
+        Some(BREATH_DAMAGE)
+    }
+}
+
+/// The eight damageable vanilla sub-hitboxes of the dragon. Their boxes are axis-aligned and
+/// move with the dragon; they do not rotate with its yaw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragonPart {
+    Head,
+    Neck,
+    Body,
+    Tail,
+    Wing,
+}
+
+pub const DRAGON_PART_COUNT: usize = 8;
+
+/// Vanilla hitboxes: head 1x1, neck 3x3, body 3 high x 5 wide, three 2x2 tail parts and two
+/// 2 high x 4 wide wings. Local offsets approximate the vanilla model around the entity feet.
+pub fn part_boxes(pos: Vec3, yaw: f32) -> [(DragonPart, AABB); DRAGON_PART_COUNT] {
+    let angle = f64::from(yaw).to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let forward = Vec3::new(-sin, 0.0, cos);
+    let right = Vec3::new(cos, 0.0, sin);
+    let part = |part_forward: f64, part_right: f64, height: f64, width: f64, tall: f64| {
+        let center = pos + forward * part_forward + right * part_right;
+        let center = Vec3::new(center.x, pos.y + height, center.z);
+        AABB::new(
+            center.x - width * 0.5,
+            center.y - tall * 0.5,
+            center.z - width * 0.5,
+            center.x + width * 0.5,
+            center.y + tall * 0.5,
+            center.z + width * 0.5,
+        )
+    };
+    [
+        (DragonPart::Head, part(5.0, 0.0, 3.0, 1.0, 1.0)),
+        (DragonPart::Neck, part(3.0, 0.0, 3.0, 3.0, 3.0)),
+        (DragonPart::Body, part(0.0, 0.0, 3.0, 5.0, 3.0)),
+        (DragonPart::Tail, part(-3.0, 0.0, 2.0, 2.0, 2.0)),
+        (DragonPart::Tail, part(-5.0, 0.0, 2.0, 2.0, 2.0)),
+        (DragonPart::Tail, part(-7.0, 0.0, 2.0, 2.0, 2.0)),
+        (DragonPart::Wing, part(0.0, 4.0, 4.0, 4.0, 2.0)),
+        (DragonPart::Wing, part(0.0, -4.0, 4.0, 4.0, 2.0)),
+    ]
+}
+
+/// Vanilla `EnderDragon.hurt`: only the head takes full damage. Every other part scales the hit
+/// to `damage / 4 + min(1, damage)`.
+pub fn damage_on_part(part: DragonPart, damage: f32) -> f32 {
+    if part == DragonPart::Head {
+        damage
+    } else {
+        damage * 0.25 + damage.min(1.0)
+    }
+}
 /// The dragon smashes blocks every this many ticks.
 pub const SMASH_INTERVAL: u64 = 3;
 /// A fireball is spat at the nearest player in [`FIREBALL_RANGE`] every `FIREBALL_PERIOD` ticks.
@@ -644,6 +756,48 @@ mod tests {
             mob::state(&store, key).unwrap().dragon_phase,
             DragonPhase::Holding
         );
+    }
+
+    #[test]
+    fn only_the_head_takes_full_damage() {
+        let parts = part_boxes(Vec3::new(0.0, 80.0, 0.0), 0.0);
+        let head = parts
+            .iter()
+            .find(|(part, _)| *part == DragonPart::Head)
+            .unwrap()
+            .1;
+        assert_eq!(head.center(), Vec3::new(0.0, 83.0, 5.0));
+        let wings: Vec<_> = parts
+            .iter()
+            .filter(|(part, _)| *part == DragonPart::Wing)
+            .collect();
+        assert_eq!(wings.len(), 2);
+        assert_eq!(wings[0].1.center().x, 4.0);
+        assert_eq!(wings[1].1.center().x, -4.0);
+        assert_eq!(damage_on_part(DragonPart::Head, 10.0), 10.0);
+        assert_eq!(damage_on_part(DragonPart::Body, 10.0), 3.5);
+        assert_eq!(damage_on_part(DragonPart::Wing, 1.0), 1.25);
+    }
+
+    #[test]
+    fn breath_cloud_grows_and_hits_after_its_wait() {
+        let mut cloud = BreathCloud::fireball(Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(cloud.radius(), BREATH_RADIUS);
+        for _ in 0..BREATH_WAIT_TICKS {
+            assert_eq!(cloud.advance(), Some(0.0), "still waiting");
+        }
+        for _ in 0..(BREATH_HIT_INTERVAL - 1) {
+            assert_eq!(cloud.advance(), Some(0.0), "between hits");
+        }
+        assert_eq!(cloud.advance(), Some(BREATH_DAMAGE));
+        assert!(cloud.radius() > BREATH_RADIUS);
+        for _ in 0..BREATH_TICKS {
+            if cloud.advance().is_none() {
+                break;
+            }
+        }
+        assert_eq!(cloud.advance(), None, "the cloud expires");
+        assert!((cloud.radius() - BREATH_MAX_RADIUS).abs() < 1e-9);
     }
 
     #[test]
