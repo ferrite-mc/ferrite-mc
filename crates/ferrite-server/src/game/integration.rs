@@ -612,21 +612,29 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
         BossBar::decode(&mut body.as_slice()).unwrap().action,
         BossBarAction::Add { .. }
     ));
-    world
-        .console_command(
-            "/execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]".into(),
-        )
-        .await
-        .unwrap();
     let end = world.dimensions().source(super::Dimension::End);
     let portal =
         u32::from(ferrite_data::blocks::default_state("minecraft:end_portal").expect("end portal"));
     let mut level = None;
+    let mut last_kill = None;
     tokio::time::timeout(std::time::Duration::from_secs(180), async {
         loop {
             if let Some(y) = (0..=255).find(|&y| end.block(1, y, 0) == Some(portal)) {
                 level = Some(y);
                 break;
+            }
+            // The dragon bar can reach the bot before the region publishes the dragon into the
+            // command snapshot, so the first kill may select nothing. Keep asking; a kill that
+            // matches nothing is harmless, and the fresh snapshot also fixes its routing.
+            if last_kill.is_none_or(|last: std::time::Instant| last.elapsed().as_secs() >= 1) {
+                world
+                    .console_command(
+                        "/execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]"
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+                last_kill = Some(std::time::Instant::now());
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
