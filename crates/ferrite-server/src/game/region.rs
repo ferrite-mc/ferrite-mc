@@ -358,6 +358,43 @@ enum LeashHolderLookup {
 /// ticking a leashed mob resolves the holder here instead of reading another region's store.
 static LEASH_HOLDERS: Mutex<BTreeMap<Uuid, LeashHolder>> = Mutex::new(BTreeMap::new());
 
+/// Serializes tests that use the process-global leash table with a region tick, which prunes
+/// entries against its own world clock. A concurrently running test world would otherwise
+/// expire another test's last sighting.
+#[cfg(test)]
+static LEASH_TEST_TURN: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static LEASH_TURN_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A reentrant turnstile: a leash test holds it across several lookups, and the mob tick it
+/// calls takes it again on the same thread.
+#[cfg(test)]
+struct LeashTestTurn(Option<std::sync::MutexGuard<'static, ()>>);
+
+#[cfg(test)]
+impl Drop for LeashTestTurn {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            LEASH_TURN_HELD.with(|held| held.set(false));
+        }
+    }
+}
+
+#[cfg(test)]
+fn leash_test_turn() -> LeashTestTurn {
+    if LEASH_TURN_HELD.with(|held| held.get()) {
+        return LeashTestTurn(None);
+    }
+    let guard = LEASH_TEST_TURN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    LEASH_TURN_HELD.with(|held| held.set(true));
+    LeashTestTurn(Some(guard))
+}
+
 /// A written book with plain-text pages, as the client reads it from a hand.
 pub(super) fn written_book(
     title: &str,
@@ -4841,7 +4878,12 @@ impl Region {
             .collect();
         let trading = self.trading_traders();
         self.tick_trader_lifetimes(&trading, ctx);
-        let holders = self.leash_holders(ctx);
+        let holders = {
+            // A test world's clock must not prune another test's last sighting.
+            #[cfg(test)]
+            let _turn = leash_test_turn();
+            self.leash_holders(ctx)
+        };
         self.refresh_leash_ids(ctx, &holders);
         let holder_positions: Vec<(Uuid, ferrite_math::Vec3)> = holders
             .iter()
@@ -10125,9 +10167,6 @@ mod tests {
         assert_eq!(out[0].chunk(), (18, 0));
     }
 
-    /// The leash-holder table is global, so these tests take turns.
-    static LEASH_TURN: Mutex<()> = Mutex::new(());
-
     fn leash_context(entities: Arc<Mutex<super::super::entity_index::EntityIndex>>) -> TickContext {
         let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
         TickContext {
@@ -10195,7 +10234,7 @@ mod tests {
 
     #[test]
     fn a_lead_resolves_a_holder_published_by_another_region() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1001);
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
@@ -10230,7 +10269,7 @@ mod tests {
 
     #[test]
     fn a_lead_drags_its_animal_towards_a_holder_in_another_region() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1002);
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
@@ -10277,7 +10316,7 @@ mod tests {
 
     #[test]
     fn a_lead_follows_a_player_owned_by_another_region() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1003);
         let ctx = leash_context(Default::default());
         {
@@ -10320,7 +10359,7 @@ mod tests {
 
     #[test]
     fn a_lead_refreshes_its_holders_position_during_a_region_hand_off() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1005);
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
@@ -10380,7 +10419,7 @@ mod tests {
 
     #[test]
     fn a_lead_rejects_a_holder_that_crossed_to_another_dimension() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1006);
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
@@ -10433,7 +10472,7 @@ mod tests {
 
     #[test]
     fn a_lead_rejects_a_player_holder_that_moved_to_another_dimension() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1008);
         let ctx = leash_context(Default::default());
         {
@@ -10467,7 +10506,7 @@ mod tests {
 
     #[test]
     fn a_lead_stops_following_a_logged_out_player_after_the_grace_window() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1007);
         let ctx = leash_context(Default::default());
         {
@@ -10518,7 +10557,7 @@ mod tests {
 
     #[test]
     fn a_lead_rejects_a_player_that_moved_to_another_dimension() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1008);
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
@@ -10572,7 +10611,7 @@ mod tests {
 
     #[test]
     fn a_lead_breaks_once_when_its_player_reconnects() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1009);
         let ctx = leash_context(Default::default());
         {
@@ -10643,7 +10682,7 @@ mod tests {
 
     #[test]
     fn a_lead_outlives_a_holder_hand_off_and_breaks_once_on_removal() {
-        let _turn = LEASH_TURN.lock().unwrap_or_else(|error| error.into_inner());
+        let _turn = leash_test_turn();
         let holder = Uuid::from_u128(0x1ea5_1004);
         let index = Arc::new(Mutex::new(
             super::super::entity_index::EntityIndex::default(),
