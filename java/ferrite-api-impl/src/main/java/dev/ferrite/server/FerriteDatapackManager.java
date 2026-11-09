@@ -20,8 +20,9 @@ final class FerriteDatapackManager implements DatapackManager {
     private final Datapack vanilla = new VanillaDatapack();
     private final List<Datapack> packs = List.of(vanilla);
 
+    /** Rebuilds the host's datapack function store from disk; the built-in vanilla pack is fixed. */
     @Override public void refreshPacks() {
-        throw new UnsupportedOperationException("Ferrite: not implemented: DatapackManager#refreshPacks");
+        HostBridge.callVoid("Server", "server", "reloadData()");
     }
 
     @Override public Datapack getPack(String name) {

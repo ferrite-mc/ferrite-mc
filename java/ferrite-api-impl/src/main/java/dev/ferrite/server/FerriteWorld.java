@@ -69,13 +69,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         heights.remove(new Column(pos.x(), pos.z()));
     }
     private org.bukkit.block.Block relative(Pos pos, org.bukkit.block.BlockFace face) {
-        int x = pos.x(), y = pos.y(), z = pos.z();
-        switch (face) {
-            case UP -> y++; case DOWN -> y--; case NORTH -> z--; case SOUTH -> z++;
-            case EAST -> x++; case WEST -> x--;
-            default -> throw new UnsupportedOperationException("Ferrite: relative block face " + face + " is not implemented");
-        }
-        return block(new Pos(x, y, z));
+        return block(new Pos(pos.x() + face.getModX(), pos.y() + face.getModY(), pos.z() + face.getModZ()));
     }
     private org.bukkit.block.Block block(Pos pos) {
         return (org.bukkit.block.Block) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.block.Block.class}, (self, method, args) -> switch (method.getName()) {

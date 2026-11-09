@@ -165,7 +165,8 @@ class FerriteServerObjectsTest {
         assertNull(manager.getPack("ferrite_test_missing"));
         assertThrows(IllegalArgumentException.class, () -> pack.setEnabled(false), "the vanilla pack is required");
         assertTrue(pack.isEnabled());
-        assertEquals("Ferrite: not implemented: DatapackManager#refreshPacks",
+        // The unit test runs without the Rust host, so the reload reaches the bridge and fails there.
+        assertEquals("Ferrite: not implemented: Server#reloadData()",
                 assertThrows(UnsupportedOperationException.class, manager::refreshPacks).getMessage());
     }
 

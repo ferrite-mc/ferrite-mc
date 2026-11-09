@@ -52,8 +52,15 @@ final class FerriteChunkSnapshot implements org.bukkit.ChunkSnapshot {
 
     /** The deprecated 2D query reads the biome at y=0, as CraftBukkit does. */
     @Override public Biome getBiome(int bx, int bz) { return getBiome(bx, 0, bz); }
-    @Override public double getRawBiomeTemperature(int bx, int bz) { throw new UnsupportedOperationException("Ferrite: not implemented: ChunkSnapshot#getRawBiomeTemperature"); }
-    @Override public double getRawBiomeTemperature(int bx, int by, int bz) { throw new UnsupportedOperationException("Ferrite: not implemented: ChunkSnapshot#getRawBiomeTemperature"); }
+    /** The biome's vanilla `temperature` value, without the altitude cooling a live block applies. */
+    @Override public double getRawBiomeTemperature(int bx, int by, int bz) {
+        check(bx, by, bz);
+        String biome = Native.biomeAt(worldId, x * 16 + bx, by, z * 16 + bz);
+        if (biome == null) throw new UnsupportedOperationException("Ferrite: no biome data at chunk " + x + "," + z);
+        String reply = (String) HostBridge.call("World", worldId, "biomeClimate(String)", String.class, biome);
+        return Double.parseDouble(reply.split(String.valueOf(HostBridge.ITEM))[0]);
+    }
+    @Override public double getRawBiomeTemperature(int bx, int bz) { return getRawBiomeTemperature(bx, 0, bz); }
     @Override public long getCaptureFullTime() { return fullTime; }
     @Override public boolean isSectionEmpty(int section) { return true; }
     @Override public boolean contains(BlockData block) { return block.getMaterial().isAir(); }
