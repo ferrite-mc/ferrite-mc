@@ -125,6 +125,8 @@ pub enum Command {
     Input(ServerboundPlay),
     Leave,
     SetMode(i32),
+    /// `Player.Spigot#respawn`: respawn the player if they are dead.
+    Respawn,
     /// Plugin-chosen abilities; the game mode still decides instant build and creative flight.
     /// A client-only game event a plugin asked for.
     PluginVisualExperience {
@@ -3527,6 +3529,12 @@ impl Player {
                             value: mode as f32,
                         },
                     );
+                    continue;
+                }
+                Command::Respawn => {
+                    if self.survival.dead {
+                        self.respawn_requested = true;
+                    }
                     continue;
                 }
                 Command::PluginVisualExperience { progress, level } => {

@@ -99,6 +99,12 @@ pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
 /// An operation a plugin asks of an entity it holds a handle to.
 pub fn entity_command(call: &HostCall) -> Option<PlayerCommand> {
     use ferrite_plugin::EntityOperation as Op;
+    // `Player.Spigot#respawn`: the region only acts on it while the player is dead.
+    if call.owner == "Player" && call.method == "respawn()" {
+        return Some(PlayerCommand::Respawn {
+            player: Uuid::parse_str(&call.subject).ok()?,
+        });
+    }
     // `Player#attack(Entity)`: a bare-handed hit of one health point.
     if call.owner == "Player" && call.method == "attack(String)" {
         return Some(PlayerCommand::EntityOp {

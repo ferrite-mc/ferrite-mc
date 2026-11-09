@@ -460,6 +460,10 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         location: PlayerLocation,
     },
+    /// `Player.Spigot#respawn`: respawn a dead player at the world spawn.
+    Respawn {
+        player: uuid::Uuid,
+    },
     SetInventorySlot {
         player: uuid::Uuid,
         slot: u8,

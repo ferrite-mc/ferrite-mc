@@ -1910,6 +1910,11 @@ fn route_plugin_command(
                 });
             }
         }
+        PlayerCommand::Respawn { player } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox.lock().unwrap().push_back(Command::Respawn);
+            }
+        }
         PlayerCommand::SetGameMode { player, mode } => {
             let mode = match mode {
                 ferrite_plugin::GameMode::Survival => 0,

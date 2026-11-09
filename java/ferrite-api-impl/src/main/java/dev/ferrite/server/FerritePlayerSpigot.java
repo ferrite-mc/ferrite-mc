@@ -61,8 +61,8 @@ final class FerritePlayerSpigot extends org.bukkit.entity.Player.Spigot {
 
     @Override public int getPing() { return player.getPing(); }
 
-    /** Resending the spawn sequence needs host support that Ferrite does not expose yet. */
+    /** Respawns a dead player at the world spawn; the host ignores living players. */
     @Override public void respawn() {
-        throw new UnsupportedOperationException("Ferrite: not implemented: Player.Spigot#respawn");
+        HostBridge.callVoid("Player", player.getUniqueId(), "respawn()");
     }
 }
