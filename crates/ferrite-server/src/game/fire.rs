@@ -373,10 +373,14 @@ impl FireTicks {
         out
     }
 
+    /// Merges another region's fire ticks. Due times are absolute in the source region's
+    /// clock, so each one is re-based on this region's clock by its remaining delay.
     pub fn merge(&mut self, other: Self) {
+        let base = self.clock;
         for (pos, due) in other.due {
+            let remaining = due.saturating_sub(other.clock);
             if self.scheduled.insert(pos) {
-                self.due.push((pos, due));
+                self.due.push((pos, base.saturating_add(remaining)));
             }
         }
     }
@@ -580,6 +584,22 @@ mod tests {
             }
         }
         assert!(removed, "rain never extinguished the fire");
+    }
+
+    /// Regions tick on their own clocks; merging work must keep the remaining delay.
+    #[test]
+    fn merge_keeps_remaining_delay_across_different_region_clocks() {
+        let mut left = FireTicks {
+            clock: 100,
+            ..FireTicks::default()
+        };
+        let mut right = FireTicks {
+            clock: 10,
+            ..FireTicks::default()
+        };
+        right.schedule([1, 64, 0], 3);
+        left.merge(right);
+        assert_eq!(left.due, vec![([1, 64, 0], 103)]);
     }
 
     #[test]

@@ -102,6 +102,24 @@ pub fn block_for(fluid: FluidState) -> u32 {
     )
 }
 
+/// Whether a block state is a standalone vanilla `LiquidBlock` (`water` or `lava`).
+///
+/// Waterlogged containers also report a source fluid state, but they are not liquid blocks:
+/// vanilla never schedules a fluid tick for them and `FlowingFluid` never spreads from them.
+/// Callers that schedule or tick fluid must use this instead of [`fluid_state`].
+pub fn is_liquid_block(state: u32) -> bool {
+    let Ok(id) = u16::try_from(state) else {
+        return false;
+    };
+    matches!(fluid_state(state).kind, FluidKind::Water | FluidKind::Lava)
+        && blocks::state(id).is_some_and(|(name, _)| {
+            matches!(
+                name.strip_prefix("minecraft:").unwrap_or(name),
+                "water" | "lava"
+            )
+        })
+}
+
 /// Base fluid tick delay in game ticks; empty has no scheduled fluid tick.
 pub const fn tick_delay(kind: FluidKind, ultrawarm: bool) -> u32 {
     match kind {
