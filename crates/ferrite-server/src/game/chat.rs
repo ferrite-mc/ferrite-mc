@@ -462,7 +462,7 @@ mod tests {
     ) -> ServerboundChat {
         let (private, _) = keys();
         // The salt only has to agree between the signed payload and the packet.
-        let salt = i64::from(index);
+        let salt = rand::random::<i64>();
         let payload = signature_payload(
             sender, session_id, index, content, timestamp, salt, last_seen,
         );
