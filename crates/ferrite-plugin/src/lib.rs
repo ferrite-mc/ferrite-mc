@@ -36,6 +36,7 @@ pub const BLOCK_PLACE_EVENT: &str = "org.bukkit.event.block.BlockPlaceEvent";
 pub const PLAYER_COMMAND_PREPROCESS_EVENT: &str =
     "org.bukkit.event.player.PlayerCommandPreprocessEvent";
 pub const INVENTORY_CLICK_EVENT: &str = "org.bukkit.event.inventory.InventoryClickEvent";
+pub const INVENTORY_DRAG_EVENT: &str = "org.bukkit.event.inventory.InventoryDragEvent";
 pub const INVENTORY_CLOSE_EVENT: &str = "org.bukkit.event.inventory.InventoryCloseEvent";
 pub const PLAYER_DEATH_EVENT: &str = "org.bukkit.event.entity.PlayerDeathEvent";
 pub const PLAYER_RESPAWN_EVENT: &str = "org.bukkit.event.player.PlayerRespawnEvent";
@@ -1017,6 +1018,19 @@ pub trait ServerHooks: Send + Sync {
         _slot: i32,
         _click: &str,
         _action: &str,
+    ) -> Result<bool, Error> {
+        Ok(true)
+    }
+    /// Fires Bukkit's `InventoryDragEvent` once for a whole drag; `false` cancels it.
+    ///
+    /// `slots` are menu slot indices in the order the client added them, and `even` is vanilla's
+    /// `QUICK_CRAFT` type 1 (spread evenly) rather than one item per slot.
+    fn inventory_dragged(
+        &self,
+        _id: uuid::Uuid,
+        _name: &str,
+        _slots: &[i32],
+        _even: bool,
     ) -> Result<bool, Error> {
         Ok(true)
     }
@@ -3346,6 +3360,39 @@ impl PluginHost {
         })?)
     }
 
+    /// Fires Bukkit's `InventoryDragEvent` once for a whole drag; `false` cancels it.
+    pub fn fire_inventory_drag(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        slots: &[i32],
+        even: bool,
+    ) -> Result<bool, Error> {
+        if !self.listens_for(INVENTORY_DRAG_EVENT) {
+            return Ok(true);
+        }
+        Ok(self.jvm.with_env(|env| {
+            let id = env.new_string(id.to_string())?;
+            let name = env.new_string(name)?;
+            let array = env.new_int_array(slots.len() as i32)?;
+            env.set_int_array_region(&array, 0, slots)?;
+            let allowed = env
+                .call_static_method(
+                    BOOTSTRAP,
+                    "fireInventoryDrag",
+                    "(Ljava/lang/String;Ljava/lang/String;[IZ)Z",
+                    &[
+                        JValue::Object(id.as_ref()),
+                        JValue::Object(name.as_ref()),
+                        JValue::Object(array.as_ref()),
+                        JValue::Bool(u8::from(even)),
+                    ],
+                )?
+                .z()?;
+            Ok(allowed)
+        })?)
+    }
+
     /// Fires Bukkit's `InventoryCloseEvent`.
     pub fn fire_inventory_close(&self, id: uuid::Uuid, name: &str) -> Result<(), Error> {
         if !self.listens_for(INVENTORY_CLOSE_EVENT) {
@@ -3499,6 +3546,15 @@ impl ServerHooks for PluginHost {
         action: &str,
     ) -> Result<bool, Error> {
         self.fire_inventory_click(id, name, slot, click, action)
+    }
+    fn inventory_dragged(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        slots: &[i32],
+        even: bool,
+    ) -> Result<bool, Error> {
+        self.fire_inventory_drag(id, name, slots, even)
     }
     fn inventory_closed(&self, id: uuid::Uuid, name: &str) -> Result<(), Error> {
         self.fire_inventory_close(id, name)

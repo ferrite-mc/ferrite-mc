@@ -34,6 +34,40 @@ pub struct Containers {
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
     pub spilled: Vec<([i32; 3], ItemStack)>,
+    /// The drag in progress, if the client is dragging a stack across slots.
+    pub drag: Option<DragSession>,
+}
+
+/// The slots a vanilla drag has touched so far, collected between its start and end packets.
+#[derive(Debug, Default)]
+pub struct DragSession {
+    /// Vanilla's `QUICK_CRAFT` type 1 spreads evenly instead of one item per slot.
+    even: bool,
+    /// Menu slot indices, in the order the client added them.
+    slots: Vec<i32>,
+}
+
+/// Splits a vanilla `QUICK_CRAFT` button into its phase (0 start, 1 add, 2 end) and whether the
+/// drag spreads evenly (type 1) instead of one item per slot.
+fn drag_parts(button: i8) -> (i8, bool) {
+    (button & 3, (button >> 2) & 3 == 1)
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::drag_parts;
+
+    #[test]
+    fn drag_buttons_split_into_phase_and_even_spread() {
+        assert_eq!(drag_parts(0), (0, false));
+        assert_eq!(drag_parts(1), (1, false));
+        assert_eq!(drag_parts(2), (2, false));
+        assert_eq!(drag_parts(4), (0, true));
+        assert_eq!(drag_parts(4 | 1), (1, true));
+        assert_eq!(drag_parts(8 | 2), (2, false));
+        // Type 3 is not a vanilla drag type and never spreads evenly.
+        assert_eq!(drag_parts(12), (0, false));
+    }
 }
 
 /// What an open menu is attached to.
@@ -97,6 +131,7 @@ impl Default for Containers {
             launched: Vec::new(),
             open_at: None,
             spilled: Vec::new(),
+            drag: None,
         }
     }
 }
@@ -171,6 +206,52 @@ fn emit(player: &Player, out: Vec<Sync>) {
 impl Player {
     fn infinite_materials(&self) -> bool {
         self.gamemode == 1
+    }
+
+    /// Collects the slots of a vanilla drag and fires Bukkit's `InventoryDragEvent` when the drag
+    /// ends. Returns true when a listener cancelled it: the click is then dropped and the client
+    /// is shown the unchanged menu, so none of the drag is applied.
+    fn cancelled_drag(&mut self, button: i8, slot: i32) -> bool {
+        let (phase, even) = drag_parts(button);
+        match phase {
+            0 => {
+                self.menus.drag = Some(DragSession {
+                    even,
+                    slots: Vec::new(),
+                });
+                false
+            }
+            1 => {
+                if let Some(drag) = self.menus.drag.as_mut()
+                    && slot >= 0
+                    && !drag.slots.contains(&slot)
+                {
+                    drag.slots.push(slot);
+                }
+                false
+            }
+            2 => {
+                let Some(drag) = self.menus.drag.take() else {
+                    return false;
+                };
+                if drag.slots.is_empty() {
+                    return false;
+                }
+                let Some(plugins) = self.plugins.clone() else {
+                    return false;
+                };
+                let allowed = plugins
+                    .inventory_dragged(self.uuid, &self.name, &drag.slots, drag.even)
+                    .unwrap_or(true);
+                if allowed {
+                    return false;
+                }
+                let full = self.menus.current().broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Sends the whole inventory menu (vanilla `initInventoryMenu`), on join.
@@ -300,6 +381,16 @@ impl Player {
         };
         if !self.container_still_valid() {
             return;
+        }
+        // A vanilla drag is one click per slot: start (0), add (1), end (2). Bukkit fires a
+        // single `InventoryDragEvent` for the whole drag, so the slots are collected and the
+        // event fires before the end click applies anything.
+        if input == ClickInput::QuickCraft {
+            if self.cancelled_drag(p.button, i32::from(p.slot)) {
+                return;
+            }
+        } else {
+            self.menus.drag = None;
         }
         // Bukkit's `InventoryClickEvent`: a listener that cancels it leaves the menu as it was
         // and the client is shown the real contents again. Drags (`QuickCraft`) are

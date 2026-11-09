@@ -103,6 +103,19 @@ CMI가 동작한다고 말할 수 없다.
   `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk`는 월드 뷰로 블록 하나를 읽어 생성을 유도한다.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.
 
+## 2026-11-09 — 드래그 이벤트 (`InventoryDragEvent`)
+
+- 바닐라 드래그(`QUICK_CRAFT`)는 슬롯마다 클릭 패킷이 오지만 Bukkit은 드래그 전체에 대해
+  `InventoryDragEvent`를 한 번 발화한다. `game/container.rs`가 시작(0)/추가(1)/끝(2) 단계를
+  모아 끝 단계에서 한 번 보내고, 리스너가 취소하면 클릭을 적용하지 않고 메뉴 전체 상태를
+  다시 보낸다(드래그 시작 전 상태 그대로).
+- `getRawSlots()`/`getInventorySlots()`는 실제로 드래그한 슬롯을 담는다. 다만 `getCursor()`,
+  `getOldCursor()`와 `getNewItems()`의 값은 빈 아이템이다. 드래그 결과 스택을 미리 계산하지
+  않으므로 리스너가 `getNewItems()`를 고쳐도 서버에는 적용되지 않는다.
+- 검증: Rust 단위 테스트(`drag_buttons_split_into_phase_and_even_spread`), `cargo check`,
+  scoped clippy, `./gradlew compileJava`. `./gradlew test`와 실제 26.3 클라이언트 드래그 화면은
+  아직 확인하지 않았다.
+
 ## 다음 단계 제안
 
 1. 실제 클라이언트로 위 기능(보스바, 스코어보드, 아이템 드롭, 화살)을 확인한다.

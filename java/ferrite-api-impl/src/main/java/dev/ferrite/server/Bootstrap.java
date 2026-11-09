@@ -302,6 +302,17 @@ public final class Bootstrap {
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
         return !event.isCancelled();
     }
+    /** Fires Bukkit's {@code InventoryDragEvent} once for a whole drag; false cancels it. */
+    public static boolean fireInventoryDrag(String id, String name, int[] slots, boolean even) {
+        var player = ensurePlayer(id, name);
+        var view = openView(player);
+        var air = new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR);
+        var newItems = new java.util.HashMap<Integer, org.bukkit.inventory.ItemStack>();
+        for (int slot : slots) newItems.put(slot, air);
+        var event = new org.bukkit.event.inventory.InventoryDragEvent(view, air, air, even, newItems);
+        synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
+        return !event.isCancelled();
+    }
     /** Fires Bukkit's {@code InventoryCloseEvent} when the host closes a player's menu. */
     public static void fireInventoryClose(String id, String name) {
         var player = ensurePlayer(id, name);
