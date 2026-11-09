@@ -21,6 +21,9 @@ pub const GATEWAY_RADIUS: f64 = 96.0;
 pub const GATEWAY_Y: i32 = 75;
 /// How many gateways a fight can open before the ring repeats.
 pub const GATEWAY_COUNT: u32 = 20;
+/// Vanilla `TheEndGatewayBlockEntity.SPAWN_TIME`: the client renders the magenta creation beam
+/// while the gateway's `Age` (a long) is below this value.
+pub const GATEWAY_SPAWN_TICKS: i64 = 200;
 
 /// The four vanilla `DragonRespawnStage`s. `End` is represented by `respawn_stage: None`
 /// after [`FightState::finish_respawn`] has run.
@@ -627,6 +630,30 @@ pub fn gateway_blocks(origin: [i32; 3]) -> Vec<([i32; 3], u16)> {
     blocks
 }
 
+/// The block entity a gateway needs to draw its beam. Vanilla stores the age as a long and
+/// renders the creation beam while `0 <= Age < 200`; `Age` 200 starts a gateway that was already
+/// open on an older save without replaying the beam.
+pub fn gateway_block_entity(age: i64) -> Option<ferrite_world::BlockEntity> {
+    let type_id = ferrite_data::registries::id("minecraft:block_entity_type", END_GATEWAY)
+        .and_then(|id| u32::try_from(id).ok())?;
+    let mut data = ferrite_nbt::Compound::new();
+    data.insert(
+        "Age".into(),
+        ferrite_nbt::Tag::Long(age.clamp(0, GATEWAY_SPAWN_TICKS)),
+    );
+    Some(ferrite_world::BlockEntity { type_id, data })
+}
+
+/// The tag sent in `ClientboundBlockEntityDataPacket`: the stored data without the chunk-local
+/// coordinates the chunk save adds.
+pub fn gateway_update_tag(entity: &ferrite_world::BlockEntity) -> ferrite_nbt::Compound {
+    let mut data = entity.data.clone();
+    data.shift_remove("x");
+    data.shift_remove("y");
+    data.shift_remove("z");
+    data
+}
+
 /// Experience the dragon drops: 12000 for the first kill of a fight world, 500 afterwards.
 pub fn dragon_experience(first_kill: bool) -> u32 {
     if first_kill { 12_000 } else { 500 }
@@ -708,6 +735,26 @@ mod tests {
         assert_eq!(blocks[&[11, 75, 20]], 0, "air beside it");
         assert_eq!(blocks[&[11, 74, 21]], 0, "air in the corners");
         assert_eq!(blocks.len(), 3 * 5 * 3);
+    }
+
+    #[test]
+    fn a_gateway_block_entity_carries_the_age_that_drives_its_beam() {
+        let entity = gateway_block_entity(0).expect("the vanilla block entity registry");
+        let expected = ferrite_data::registries::id("minecraft:block_entity_type", END_GATEWAY)
+            .and_then(|id| u32::try_from(id).ok())
+            .expect("the end gateway block entity type");
+        assert_eq!(entity.type_id, expected);
+        assert_eq!(entity.data.get("Age"), Some(&ferrite_nbt::Tag::Long(0)));
+        let tag = gateway_update_tag(&entity);
+        assert_eq!(tag.get("Age"), Some(&ferrite_nbt::Tag::Long(0)));
+        assert!(tag.get("x").is_none());
+        assert!(tag.get("y").is_none());
+        assert!(tag.get("z").is_none());
+        let finished = gateway_block_entity(GATEWAY_SPAWN_TICKS).unwrap();
+        assert_eq!(
+            finished.data.get("Age"),
+            Some(&ferrite_nbt::Tag::Long(GATEWAY_SPAWN_TICKS))
+        );
     }
 
     #[test]
@@ -956,6 +1003,96 @@ mod respawn_tests {
         fight.finish_respawn();
         assert!(fight.dragon_alive);
         assert!(fight.tick_respawn().is_empty(), "the spawn is not repeated");
+    }
+
+    fn resumed(stage: RespawnStage, ticks: u32) -> FightState {
+        let mut fight = FightState {
+            started: true,
+            killed: true,
+            ..Default::default()
+        };
+        let mut saved = fight.saved();
+        saved.respawn_stage = Some(stage);
+        saved.respawn_ticks = ticks;
+        fight.restore(saved);
+        fight
+    }
+
+    #[test]
+    fn a_restart_resumes_each_respawn_stage_at_its_saved_tick() {
+        let mut start = resumed(RespawnStage::Start, 0);
+        assert_eq!(
+            start.tick_respawn(),
+            vec![RespawnAction::SetBeams(Some(RESPAWN_BEAM_TARGET))]
+        );
+        assert_eq!(
+            start.respawn_stage,
+            Some(RespawnStage::PreparingToSummonPillars),
+            "START resumes into preparing, not after it"
+        );
+
+        let mut preparing = resumed(RespawnStage::PreparingToSummonPillars, 49);
+        assert!(preparing.tick_respawn().is_empty());
+        assert_eq!(preparing.respawn_ticks, 50);
+        assert_eq!(
+            preparing.tick_respawn(),
+            vec![RespawnAction::Roar],
+            "the roar at tick 50 is not skipped after a restart"
+        );
+
+        let mut pillars = resumed(RespawnStage::SummoningPillars, 39);
+        assert_eq!(
+            pillars.tick_respawn(),
+            vec![RespawnAction::RestoreSpike { index: 0 }],
+            "the crystal for spike 0 is restored at tick 39"
+        );
+        assert_eq!(
+            pillars.tick_respawn(),
+            vec![RespawnAction::AimAtSpike { index: 1 }],
+            "the next spike is aimed at tick 40"
+        );
+
+        let mut summoning = resumed(RespawnStage::SummoningDragon, 79);
+        assert!(summoning.tick_respawn().is_empty());
+        assert_eq!(summoning.respawn_ticks, 80);
+        assert_eq!(summoning.tick_respawn(), vec![RespawnAction::Roar]);
+        let mut near_spawn = resumed(RespawnStage::SummoningDragon, 99);
+        assert!(near_spawn.tick_respawn().is_empty());
+        assert_eq!(near_spawn.respawn_ticks, 100);
+        assert_eq!(
+            near_spawn.tick_respawn(),
+            vec![RespawnAction::SpawnDragon],
+            "the dragon spawns once the saved timer reaches 100"
+        );
+        let mut due = resumed(RespawnStage::SummoningDragon, 100);
+        assert_eq!(
+            due.tick_respawn(),
+            vec![RespawnAction::SpawnDragon],
+            "a save taken exactly at tick 100 spawns immediately"
+        );
+    }
+
+    #[test]
+    fn every_fight_field_survives_the_saved_file() {
+        for stage in [
+            None,
+            Some(RespawnStage::Start),
+            Some(RespawnStage::PreparingToSummonPillars),
+            Some(RespawnStage::SummoningPillars),
+            Some(RespawnStage::SummoningDragon),
+        ] {
+            let saved = Saved {
+                started: true,
+                killed: true,
+                dragon_alive: stage.is_none(),
+                gateways: 19,
+                crystals: vec![0, 9],
+                respawn_stage: stage,
+                respawn_ticks: 399,
+                exit_portal_level: Some(63),
+            };
+            assert_eq!(Saved::from_nbt(&saved.to_nbt()), Some(saved));
+        }
     }
 
     #[test]
