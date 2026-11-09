@@ -27,6 +27,9 @@ impl FluidWorld for World {
         false
     }
 }
+fn state(name: &str, props: &[(&str, &str)]) -> u32 {
+    u32::from(blocks::state_id(name, props).unwrap())
+}
 fn world() -> World {
     World {
         cells: HashMap::from([((999, 999, 999), id("stone")), ((998, 998, 998), id("air"))]),
@@ -163,6 +166,44 @@ fn moving_pending_ticks_preserves_remaining_delay() {
     assert_eq!(fluid_state(w.block(1, 0, 0)).kind, FluidKind::Empty);
     to.run_until(&mut w, 56);
     assert_eq!(fluid_state(w.block(1, 0, 0)).kind, FluidKind::Water);
+}
+
+/// Vanilla waterlogged blocks carry a source fluid state but are not `LiquidBlock`s, so the
+/// fluid manager never schedules or spreads them. A waterlogged slab above a hole stays dry.
+#[test]
+fn waterlogged_block_never_ticks_as_water() {
+    let mut w = world();
+    w.holes.insert((0, 0));
+    let wet = state("stone_slab", &[("type", "bottom"), ("waterlogged", "true")]);
+    w.set_block(0, 0, 0, wet);
+    let mut ticks = FluidTicks::default();
+    ticks.schedule((0, 0, 0), 0);
+    ticks.on_block_change(&mut w, (0, 0, 0));
+    ticks.run_until(&mut w, 40);
+    assert_eq!(w.block(0, 0, 0), wet);
+    for pos in [(0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)] {
+        assert_eq!(
+            fluid_state(w.block(pos.0, pos.1, pos.2)).kind,
+            FluidKind::Empty,
+            "water spread to {pos:?}"
+        );
+    }
+}
+
+/// A waterlogged block still counts as water for `LiquidBlock.neighborChanged` lava rules.
+#[test]
+fn waterlogged_block_beside_lava_still_solidifies_it() {
+    let mut w = world();
+    w.set_block(
+        0,
+        0,
+        0,
+        state("stone_slab", &[("type", "bottom"), ("waterlogged", "true")]),
+    );
+    w.set_block(1, 0, 0, id("lava"));
+    let mut ticks = FluidTicks::default();
+    ticks.on_block_change(&mut w, (0, 0, 0));
+    assert_eq!(w.block(1, 0, 0), id("obsidian"));
 }
 
 #[test]

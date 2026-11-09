@@ -92,10 +92,14 @@ impl Gravity {
         out
     }
 
+    /// Merges another region's checks. Due times are absolute in the source region's clock,
+    /// so each one is re-based on this region's clock by its remaining delay.
     pub fn merge(&mut self, other: Self) {
+        let base = self.clock;
         for (pos, due) in other.due {
+            let remaining = due.saturating_sub(other.clock);
             if self.scheduled.insert(pos) {
-                self.due.push((pos, due));
+                self.due.push((pos, base.saturating_add(remaining)));
             }
         }
     }
@@ -189,6 +193,23 @@ mod tests {
         assert!(is_free(Some(state("fire"))));
         assert!(!is_free(Some(state("stone"))));
         assert!(!is_free(None));
+    }
+
+    /// Every region counts its own ticks, so an entry merged from a region that has ticked a
+    /// different number of times must keep its remaining delay, not its absolute due tick.
+    #[test]
+    fn merge_keeps_remaining_delay_across_different_region_clocks() {
+        let mut left = Gravity {
+            clock: 100,
+            ..Gravity::default()
+        };
+        let mut right = Gravity {
+            clock: 10,
+            ..Gravity::default()
+        };
+        right.schedule([1, 70, 0]);
+        left.merge(right);
+        assert_eq!(left.due, vec![([1, 70, 0], 102)]);
     }
 
     #[tokio::test]
