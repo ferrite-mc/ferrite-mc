@@ -20,5 +20,8 @@ commands:
   verify-item:
     description: Sets PDC and item flags through the real inventory slot path
     usage: /verify-item
+  drag-setup:
+    description: Puts a stack in the hotbar so the bot can drag it
+    usage: /drag-setup
 depend: [FerriteAlias]
 folia-supported: true

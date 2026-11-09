@@ -34,40 +34,18 @@ pub struct Containers {
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
     pub spilled: Vec<([i32; 3], ItemStack)>,
-    /// The drag in progress, if the client is dragging a stack across slots.
-    pub drag: Option<DragSession>,
+    /// State from the start of a drag, kept only long enough to give a listener the chance to
+    /// cancel the finished drag.
+    drag: Option<DragStart>,
 }
 
-/// The slots a vanilla drag has touched so far, collected between its start and end packets.
-#[derive(Debug, Default)]
-pub struct DragSession {
-    /// Vanilla's `QUICK_CRAFT` type 1 spreads evenly instead of one item per slot.
-    even: bool,
-    /// Menu slot indices, in the order the client added them.
-    slots: Vec<i32>,
-}
-
-/// Splits a vanilla `QUICK_CRAFT` button into its phase (0 start, 1 add, 2 end) and whether the
-/// drag spreads evenly (type 1) instead of one item per slot.
-fn drag_parts(button: i8) -> (i8, bool) {
-    (button & 3, (button >> 2) & 3 == 1)
-}
-
-#[cfg(test)]
-mod drag_tests {
-    use super::drag_parts;
-
-    #[test]
-    fn drag_buttons_split_into_phase_and_even_spread() {
-        assert_eq!(drag_parts(0), (0, false));
-        assert_eq!(drag_parts(1), (1, false));
-        assert_eq!(drag_parts(2), (2, false));
-        assert_eq!(drag_parts(4), (0, true));
-        assert_eq!(drag_parts(4 | 1), (1, true));
-        assert_eq!(drag_parts(8 | 2), (2, false));
-        // Type 3 is not a vanilla drag type and never spreads evenly.
-        assert_eq!(drag_parts(12), (0, false));
-    }
+/// The menu and inventory as they were when a client started a QuickCraft drag. A cancelled
+/// `InventoryDragEvent` restores this, so the client is sent the whole menu again.
+#[derive(Debug)]
+struct DragStart {
+    container_id: i32,
+    menu: Menu,
+    inventory: PlayerInventory,
 }
 
 /// What an open menu is attached to.
@@ -109,6 +87,16 @@ fn click_names(input: ClickInput, button: i8) -> (&'static str, &'static str) {
         (ClickInput::Throw, _) => ("DROP", "DROP_ONE_SLOT"),
         (ClickInput::PickupAll, _) => ("DOUBLE_CLICK", "COLLECT_TO_CURSOR"),
         (ClickInput::QuickCraft, _) => ("UNKNOWN", "UNKNOWN"),
+    }
+}
+
+/// The plugin-facing form of a stack, for `InventoryDragEvent`'s cursors and slot map.
+fn item_snapshot(stack: &ItemStack) -> ferrite_plugin::ItemSnapshot {
+    ferrite_plugin::ItemSnapshot {
+        material: ferrite_item::item_name(stack.item)
+            .unwrap_or("minecraft:air")
+            .to_owned(),
+        amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
     }
 }
 
@@ -206,52 +194,6 @@ fn emit(player: &Player, out: Vec<Sync>) {
 impl Player {
     fn infinite_materials(&self) -> bool {
         self.gamemode == 1
-    }
-
-    /// Collects the slots of a vanilla drag and fires Bukkit's `InventoryDragEvent` when the drag
-    /// ends. Returns true when a listener cancelled it: the click is then dropped and the client
-    /// is shown the unchanged menu, so none of the drag is applied.
-    fn cancelled_drag(&mut self, button: i8, slot: i32) -> bool {
-        let (phase, even) = drag_parts(button);
-        match phase {
-            0 => {
-                self.menus.drag = Some(DragSession {
-                    even,
-                    slots: Vec::new(),
-                });
-                false
-            }
-            1 => {
-                if let Some(drag) = self.menus.drag.as_mut()
-                    && slot >= 0
-                    && !drag.slots.contains(&slot)
-                {
-                    drag.slots.push(slot);
-                }
-                false
-            }
-            2 => {
-                let Some(drag) = self.menus.drag.take() else {
-                    return false;
-                };
-                if drag.slots.is_empty() {
-                    return false;
-                }
-                let Some(plugins) = self.plugins.clone() else {
-                    return false;
-                };
-                let allowed = plugins
-                    .inventory_dragged(self.uuid, &self.name, &drag.slots, drag.even)
-                    .unwrap_or(true);
-                if allowed {
-                    return false;
-                }
-                let full = self.menus.current().broadcast_full_state(&self.inventory);
-                emit(self, vec![full]);
-                true
-            }
-            _ => false,
-        }
     }
 
     /// Sends the whole inventory menu (vanilla `initInventoryMenu`), on join.
@@ -382,19 +324,8 @@ impl Player {
         if !self.container_still_valid() {
             return;
         }
-        // A vanilla drag is one click per slot: start (0), add (1), end (2). Bukkit fires a
-        // single `InventoryDragEvent` for the whole drag, so the slots are collected and the
-        // event fires before the end click applies anything.
-        if input == ClickInput::QuickCraft {
-            if self.cancelled_drag(p.button, i32::from(p.slot)) {
-                return;
-            }
-        } else {
-            self.menus.drag = None;
-        }
         // Bukkit's `InventoryClickEvent`: a listener that cancels it leaves the menu as it was
-        // and the client is shown the real contents again. Drags (`QuickCraft`) are
-        // `InventoryDragEvent`s in Bukkit, which are not fired yet.
+        // and the client is shown the real contents again.
         if input != ClickInput::QuickCraft
             && let Some(plugins) = self.plugins.clone()
         {
@@ -413,6 +344,29 @@ impl Player {
                 return;
             }
         }
+        // Bukkit's `InventoryDragEvent`: a QuickCraft drag starts with status 0, adds slots
+        // with status 1 and applies with status 2. Remember the menu before the drag applies
+        // so a listener that cancels gets the pre-drag state back; the drag math itself stays
+        // in `ferrite-inventory`.
+        let drag_status = (input == ClickInput::QuickCraft).then(|| i32::from(p.button) & 3);
+        if drag_status == Some(0) {
+            let snapshot = self.plugins.as_ref().map(|_| {
+                let menu = self.menus.open.as_ref().unwrap_or(&self.menus.inventory);
+                DragStart {
+                    container_id: menu.container_id(),
+                    menu: menu.clone(),
+                    inventory: self.inventory.clone(),
+                }
+            });
+            self.menus.drag = snapshot;
+        } else if !matches!(drag_status, Some(1) | Some(2)) {
+            self.menus.drag = None;
+        }
+        // Take the start state before the mutable menu borrow; it is only used after the
+        // existing drag math has run, to describe and possibly undo the drag.
+        let finished_drag = (drag_status == Some(2))
+            .then(|| self.menus.drag.take())
+            .flatten();
         // Vanilla `AnvilMenu.stillValid` cost check: a player without enough levels cannot take
         // the result (creative may).
         if p.slot == 2
@@ -459,7 +413,12 @@ impl Player {
             &p.changed,
             p.carried,
         );
+        // Read the clicker out before touching `self.inventory` again: it holds the only
+        // mutable borrow of the player inventory.
         let drops = clicker.drops;
+        let xp = clicker.xp;
+        let levels = clicker.levels;
+        let crafted = clicker.crafted;
         if let (Some(OpenAt::Inventory(opened)), Some(source)) = (&self.menus.open_at, &self.source)
         {
             block_container::store(source, opened, menu.container());
@@ -467,10 +426,46 @@ impl Player {
         if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
             super::equine_chest::store(*animal, &menu.container()[2..]);
         }
+        // One `InventoryDragEvent` for the slots whose contents the drag changed. Cancelling
+        // restores the menu from the start of the drag and resends its whole state.
+        if let Some(start) = finished_drag
+            && start.container_id == menu.container_id()
+            && let Some(plugins) = self.plugins.clone()
+        {
+            let before = start.menu.items(&start.inventory);
+            let after = menu.items(&self.inventory);
+            let changed: Vec<(i32, ferrite_plugin::ItemSnapshot)> = after
+                .iter()
+                .enumerate()
+                .filter(|(slot, item)| before.get(*slot) != Some(*item))
+                .map(|(slot, item)| (slot as i32, item_snapshot(item)))
+                .collect();
+            if !changed.is_empty() {
+                let old_cursor = item_snapshot(start.menu.carried());
+                let new_cursor = item_snapshot(menu.carried());
+                let allowed = plugins
+                    .inventory_dragged(self.uuid, &self.name, &old_cursor, &new_cursor, &changed)
+                    .unwrap_or(true);
+                if !allowed {
+                    // The click was already persisted for chests and animal inventories;
+                    // restore the start-of-drag container as well as the menu.
+                    if let (Some(OpenAt::Inventory(opened)), Some(source)) =
+                        (&self.menus.open_at, &self.source)
+                    {
+                        block_container::store(source, opened, start.menu.container());
+                    }
+                    if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
+                        super::equine_chest::store(*animal, &start.menu.container()[2..]);
+                    }
+                    *menu = start.menu;
+                    self.inventory = start.inventory;
+                    let full = menu.broadcast_full_state(&self.inventory);
+                    emit(self, vec![full]);
+                    return;
+                }
+            }
+        }
         self.menus.thrown.extend(drops);
-        let xp = clicker.xp;
-        let levels = clicker.levels;
-        let crafted = clicker.crafted;
         if !crafted.is_empty() {
             let uuid = self.uuid;
             super::recipe_unlock::CRAFTED
@@ -869,6 +864,7 @@ impl Player {
     }
 
     pub fn close_container(&mut self) {
+        self.menus.drag = None;
         if let Some(plugins) = self.plugins.clone() {
             let _ = plugins.inventory_closed(self.uuid, &self.name);
         }

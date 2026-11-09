@@ -245,6 +245,28 @@ class BootstrapTest {
         } catch (InterruptedException e) { throw new AssertionError(e); }
         finally { release.countDown(); try { first.join(); second.join(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
         assertEquals(2, count.get());
+        // InventoryDragEvent reaches listeners with the host's slot set and cursor, and a
+        // cancelled drag is reported back to the host.
+        UUID dragId = UUID.randomUUID();
+        Bootstrap.registerPlayer(dragId.toString(), "DragProbe", false);
+        var dragSlots = new ArrayList<Integer>();
+        var dragCursor = new java.util.concurrent.atomic.AtomicReference<org.bukkit.inventory.ItemStack>();
+        Bukkit.getPluginManager().registerEvents(new org.bukkit.event.Listener() {
+            @org.bukkit.event.EventHandler public void onDrag(org.bukkit.event.inventory.InventoryDragEvent event) {
+                dragSlots.addAll(event.getRawSlots());
+                dragCursor.set(event.getOldCursor());
+                if (event.getRawSlots().contains(9)) event.setCancelled(true);
+            }
+        }, Bukkit.getPluginManager().getPlugin("FerriteDependency"));
+        String oldCursor = "minecraft:stone\u001d40";
+        assertFalse(Bootstrap.fireInventoryDrag(dragId.toString(), "DragProbe", oldCursor, "", "9\u001dminecraft:stone\u001d20\u001e10\u001dminecraft:stone\u001d20\u001e"));
+        assertEquals(List.of(9, 10), dragSlots.stream().sorted().toList());
+        assertEquals(org.bukkit.Material.STONE, dragCursor.get().getType());
+        assertEquals(40, dragCursor.get().getAmount());
+        dragSlots.clear();
+        assertTrue(Bootstrap.fireInventoryDrag(dragId.toString(), "DragProbe", oldCursor, "", "10\u001dminecraft:stone\u001d20\u001e"));
+        assertEquals(List.of(10), dragSlots);
+        ((FerriteServer) Bukkit.getServer()).unregisterPlayer(dragId);
         assertTrue(log.contains("dependency visible"));
         var bukkitAsync = new java.util.concurrent.CountDownLatch(1);
         Bukkit.getScheduler().runTaskAsynchronously(Bukkit.getPluginManager().getPlugin("FerriteTest"), bukkitAsync::countDown);

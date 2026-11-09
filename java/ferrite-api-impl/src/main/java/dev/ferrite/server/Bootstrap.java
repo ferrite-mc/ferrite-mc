@@ -302,16 +302,39 @@ public final class Bootstrap {
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
         return !event.isCancelled();
     }
-    /** Fires Bukkit's {@code InventoryDragEvent} once for a whole drag; false cancels it. */
-    public static boolean fireInventoryDrag(String id, String name, int[] slots, boolean even) {
+    /**
+     * Fires Bukkit's {@code InventoryDragEvent} once the host applied a drag; false means a
+     * listener cancelled it and the host restores the menu from the start of the drag.
+     *
+     * <p>The host sends the cursor fields as {@code material<U+001D>amount} and each affected
+     * slot as {@code slot<U+001D>material<U+001D>amount}, entries separated by U+001E.
+     */
+    public static boolean fireInventoryDrag(String id, String name, String oldCursor, String newCursor, String items) {
         var player = ensurePlayer(id, name);
         var view = openView(player);
-        var air = new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR);
-        var newItems = new java.util.HashMap<Integer, org.bukkit.inventory.ItemStack>();
-        for (int slot : slots) newItems.put(slot, air);
-        var event = new org.bukkit.event.inventory.InventoryDragEvent(view, air, air, even, newItems);
+        var changed = new java.util.HashMap<Integer, org.bukkit.inventory.ItemStack>();
+        for (String field : items.split("\u001e", -1)) {
+            if (field.isEmpty()) continue;
+            var parts = field.split("\u001d", -1);
+            if (parts.length != 3) throw new UnsupportedOperationException("Ferrite: malformed drag slot: " + field);
+            changed.put(Integer.parseInt(parts[0]), dragItem(parts[1], parts[2]));
+        }
+        var event = new org.bukkit.event.inventory.InventoryDragEvent(view, cursorItem(newCursor), cursorItem(oldCursor), false, changed);
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
         return !event.isCancelled();
+    }
+    /** A drag cursor: {@code material<U+001D>amount}, or null when the cursor is empty. */
+    private static org.bukkit.inventory.ItemStack cursorItem(String field) {
+        if (field.isEmpty()) return null;
+        var parts = field.split("\u001d", -1);
+        return dragItem(parts[0], parts.length > 1 ? parts[1] : "");
+    }
+    /** One item the host named in a drag event. */
+    private static org.bukkit.inventory.ItemStack dragItem(String material, String amount) {
+        if (material.isEmpty()) return null;
+        var type = org.bukkit.Material.matchMaterial(material);
+        if (type == null) throw new UnsupportedOperationException("Ferrite: unknown material in drag event: " + material);
+        return new org.bukkit.inventory.ItemStack(type, amount.isEmpty() ? 1 : Integer.parseInt(amount));
     }
     /** Fires Bukkit's {@code InventoryCloseEvent} when the host closes a player's menu. */
     public static void fireInventoryClose(String id, String name) {

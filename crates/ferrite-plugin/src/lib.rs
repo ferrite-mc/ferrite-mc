@@ -1021,16 +1021,16 @@ pub trait ServerHooks: Send + Sync {
     ) -> Result<bool, Error> {
         Ok(true)
     }
-    /// Fires Bukkit's `InventoryDragEvent` once for a whole drag; `false` cancels it.
-    ///
-    /// `slots` are menu slot indices in the order the client added them, and `even` is vanilla's
-    /// `QUICK_CRAFT` type 1 (spread evenly) rather than one item per slot.
+    /// Fires Bukkit's `InventoryDragEvent` once a drag finishes; `false` cancels it and the
+    /// menu is restored to its state when the drag began. The default keeps hosts that do not
+    /// care about drags working unchanged.
     fn inventory_dragged(
         &self,
         _id: uuid::Uuid,
         _name: &str,
-        _slots: &[i32],
-        _even: bool,
+        _old_cursor: &ItemSnapshot,
+        _new_cursor: &ItemSnapshot,
+        _items: &[(i32, ItemSnapshot)],
     ) -> Result<bool, Error> {
         Ok(true)
     }
@@ -3360,32 +3360,42 @@ impl PluginHost {
         })?)
     }
 
-    /// Fires Bukkit's `InventoryDragEvent` once for a whole drag; `false` cancels it.
+    /// Fires Bukkit's `InventoryDragEvent`; `false` cancels the drag.
     pub fn fire_inventory_drag(
         &self,
         id: uuid::Uuid,
         name: &str,
-        slots: &[i32],
-        even: bool,
+        old_cursor: &ItemSnapshot,
+        new_cursor: &ItemSnapshot,
+        items: &[(i32, ItemSnapshot)],
     ) -> Result<bool, Error> {
         if !self.listens_for(INVENTORY_DRAG_EVENT) {
             return Ok(true);
         }
+        let mut fields = String::new();
+        for (slot, item) in items {
+            fields.push_str(&format!(
+                "{slot}\u{1d}{}\u{1d}{}\u{1e}",
+                item.material, item.amount
+            ));
+        }
         Ok(self.jvm.with_env(|env| {
             let id = env.new_string(id.to_string())?;
             let name = env.new_string(name)?;
-            let array = env.new_int_array(slots.len() as i32)?;
-            env.set_int_array_region(&array, 0, slots)?;
+            let old = env.new_string(item_field(old_cursor))?;
+            let new = env.new_string(item_field(new_cursor))?;
+            let fields = env.new_string(&fields)?;
             let allowed = env
                 .call_static_method(
                     BOOTSTRAP,
                     "fireInventoryDrag",
-                    "(Ljava/lang/String;Ljava/lang/String;[IZ)Z",
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z",
                     &[
                         JValue::Object(id.as_ref()),
                         JValue::Object(name.as_ref()),
-                        JValue::Object(array.as_ref()),
-                        JValue::Bool(u8::from(even)),
+                        JValue::Object(old.as_ref()),
+                        JValue::Object(new.as_ref()),
+                        JValue::Object(fields.as_ref()),
                     ],
                 )?
                 .z()?;
@@ -3551,10 +3561,11 @@ impl ServerHooks for PluginHost {
         &self,
         id: uuid::Uuid,
         name: &str,
-        slots: &[i32],
-        even: bool,
+        old_cursor: &ItemSnapshot,
+        new_cursor: &ItemSnapshot,
+        items: &[(i32, ItemSnapshot)],
     ) -> Result<bool, Error> {
-        self.fire_inventory_drag(id, name, slots, even)
+        self.fire_inventory_drag(id, name, old_cursor, new_cursor, items)
     }
     fn inventory_closed(&self, id: uuid::Uuid, name: &str) -> Result<(), Error> {
         self.fire_inventory_close(id, name)
@@ -3598,6 +3609,15 @@ impl ServerHooks for PluginHost {
         PluginHost::update_player_location(self, id, location)
     }
 }
+/// `material<U+001D>amount`, or empty for an empty cursor, as `fireInventoryDrag` expects.
+fn item_field(item: &ItemSnapshot) -> String {
+    if item.amount == 0 || item.material == "minecraft:air" {
+        String::new()
+    } else {
+        format!("{}\u{1d}{}", item.material, item.amount)
+    }
+}
+
 fn consume_task<T: PartialEq>(issued: &Mutex<Vec<T>>, task: &T) -> Result<(), Error> {
     let mut issued = issued
         .lock()

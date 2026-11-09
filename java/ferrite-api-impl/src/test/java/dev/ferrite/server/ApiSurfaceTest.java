@@ -149,6 +149,63 @@ class ApiSurfaceTest {
         assertSame(player.getInventory(), close.getInventory());
     }
 
+    @Test void inventoryDragEventCarriesSlotsAndCursors() {
+        var view = FerriteInventoryView.create(player, player.getInventory());
+        var oldCursor = new org.bukkit.inventory.ItemStack(Material.STONE, 40);
+        var newCursor = new org.bukkit.inventory.ItemStack(Material.AIR);
+        var newItems = new java.util.HashMap<Integer, org.bukkit.inventory.ItemStack>();
+        newItems.put(9, new org.bukkit.inventory.ItemStack(Material.STONE, 20));
+        newItems.put(10, new org.bukkit.inventory.ItemStack(Material.STONE, 20));
+        var drag = new org.bukkit.event.inventory.InventoryDragEvent(view, newCursor, oldCursor, false, newItems);
+        assertEquals(java.util.Set.of(9, 10), drag.getRawSlots());
+        assertSame(player, drag.getWhoClicked());
+        assertSame(player.getInventory(), drag.getInventory());
+        assertEquals(Material.STONE, drag.getOldCursor().getType());
+        assertEquals(40, drag.getOldCursor().getAmount());
+        assertEquals(Material.AIR, drag.getCursor().getType());
+        assertEquals(20, drag.getNewItems().get(9).getAmount());
+        assertEquals(20, drag.getNewItems().get(10).getAmount());
+        drag.setCancelled(true);
+        assertTrue(drag.isCancelled());
+    }
+
+    @Test void helpMapBuildsTopicsFromCommandsAndFactories() {
+        var help = server.getHelpMap();
+        var probe = new org.bukkit.command.Command("ferrite-help-probe") {
+            @Override public boolean execute(org.bukkit.command.CommandSender sender, String label, String[] args) { return true; }
+        };
+        server.getCommandMap().register("ferrite", probe);
+        var topic = help.getHelpTopic("ferrite-help-probe");
+        assertNotNull(topic);
+        assertEquals("/ferrite-help-probe", topic.getName());
+        assertTrue(help.getHelpTopics().stream().anyMatch(candidate -> candidate.getName().equals("/ferrite-help-probe")));
+        var custom = new org.bukkit.help.HelpTopic() {
+            @Override public String getName() { return "/ferrite-help-probe"; }
+            @Override public String getShortText() { return "probe"; }
+            @Override public String getFullText(org.bukkit.command.CommandSender sender) { return "probe full text"; }
+            @Override public boolean canSee(org.bukkit.command.CommandSender sender) { return true; }
+        };
+        help.registerHelpTopicFactory(org.bukkit.command.Command.class, new org.bukkit.help.HelpTopicFactory<org.bukkit.command.Command>() {
+            @Override public org.bukkit.help.HelpTopic createTopic(org.bukkit.command.Command command) { return custom; }
+        });
+        assertSame(custom, help.getHelpTopic("ferrite-help-probe"));
+    }
+
+    @Test void serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest() {
+        var stick = new org.bukkit.inventory.ItemStack(Material.STICK, 1);
+        assertNotNull(server.getRecipesFor(stick));
+        assertTrue(server.getRecipesFor(new org.bukkit.inventory.ItemStack(Material.AIR)).isEmpty());
+        var map = server.createMap(world);
+        assertTrue(map.getId() > 0);
+        assertSame(map, server.getMap(map.getId()));
+        assertNull(server.getMap(-12345));
+        assertSame(world, server.createWorld(new org.bukkit.WorldCreator(world.getName())));
+        var missing = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_missing_world")));
+        assertTrue(missing.getMessage().contains("creating worlds at runtime"));
+        var snapshot = assertThrows(UnsupportedOperationException.class, () -> server.getEntityFactory().createEntitySnapshot("{}"));
+        assertTrue(snapshot.getMessage().contains("not implemented: EntityFactory#createEntitySnapshot"));
+    }
+
     @Test void damageEventsExposeMutableDamage() {
         var damage = new org.bukkit.event.entity.EntityDamageEvent(player, EntityDamageEvent.DamageCause.FALL, 5.0);
         assertSame(player, damage.getEntity());
