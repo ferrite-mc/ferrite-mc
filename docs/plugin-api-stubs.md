@@ -86,17 +86,14 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 
 | 영역 | 예시 (정확한 이름) | 소유자 / 선행 작업 |
 |---|---|---|
-| 플레이어 respawn | `Player.Spigot#respawn` | Java API + respawn 흐름 |
 | 다른 구현 인벤토리 | `Player#openInventory(Inventory)` (Ferrite 인벤토리 아님) | Java API (직렬화 불가) |
 | 맵 캔버스 | `MapCanvas`의 기본 메서드 | Java `FerriteMapView` |
 | 아이템 핸들 | `DroppedItem#<미지원 Item 메서드>` | Java 핸들 |
 | HostBridge 반환 변환 | `HostBridge#call`의 미지원 반환 타입 | Java 브리지 |
 | BlockData | `BlockData#<미지원 메서드>` (재질별) | Java `FerriteBlockData` |
-| 청크 스냅샷/청크 데이터 | `ChunkSnapshot#getWorldKey`, `getBiome`, `getRawBiomeTemperature`, `contains`; `ChunkData#getBiome` | 호스트 청크/바이옴 데이터 |
-| 데이터팩 | `DatapackManager#refreshPacks` | Rust 데이터팩 재로드 |
+| 청크 스냅샷/청크 데이터 | `ChunkSnapshot#contains(Biome)`; `ChunkData#getBiome` | 호스트 청크/바이옴 데이터 |
 | Paper 생명주기 | `InternalAPIBridge#createPluginLifecycleEventManager` | Paper lifecycle API |
 | 포션/인챈트/레지스트리 | `PotionEffectType` 속성(색·카테고리·지속시간 보정·attribute), `Enchantment` 속성, `RegistryAccess` 미지원 레지스트리 | `ferrite-data` 데이터/호스트 |
-| 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Rust 루트 + 인벤토리 |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
 | NMS/Unsafe | `UnsafeValues`의 NMS 의존 멤버, `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` | 의도적 미지원 (가짜 구현 금지); 계속 `NoSuchMethodError` |
 | 투사체/타일/장비/효과 | `Player#launchProjectile`(화살 외), `sendBlockUpdate`(표지판 외), `EntityEquipment`(미지원), `Player#playEffect`(데이터 있는 효과) | Rust 호스트/프로토콜 |
