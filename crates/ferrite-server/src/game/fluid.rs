@@ -1,8 +1,12 @@
 //! Region-bounded fluid access to loaded chunk columns.
-use super::{anvil::AnvilChunkSource, region::Tracking};
+use super::{
+    anvil::AnvilChunkSource,
+    region::{Signal, Tracking},
+};
 use ferrite_fluid::FluidWorld;
 use ferrite_region::ChunkPos;
 use std::collections::HashMap;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub(super) struct RegionFluidWorld<'a> {
     pub(super) source: &'a AnvilChunkSource,
@@ -10,6 +14,8 @@ pub(super) struct RegionFluidWorld<'a> {
     tracking: &'a Tracking,
     water_conversion: bool,
     lava_conversion: bool,
+    /// Where cross-region placements and redstone wakes are handed to the world loop.
+    pub(super) signals: Option<UnboundedSender<Signal>>,
 }
 impl<'a> RegionFluidWorld<'a> {
     pub fn new(
@@ -32,7 +38,13 @@ impl<'a> RegionFluidWorld<'a> {
             tracking,
             water_conversion,
             lava_conversion,
+            signals: None,
         }
+    }
+    /// Lets the world hand cross-region writes to the chunk owner instead of dropping them.
+    pub fn with_signals(mut self, signals: UnboundedSender<Signal>) -> Self {
+        self.signals = Some(signals);
+        self
     }
     pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> u8 {
         if self.owns(x, z) {
@@ -48,15 +60,27 @@ impl<'a> RegionFluidWorld<'a> {
 }
 impl FluidWorld for RegionFluidWorld<'_> {
     fn block(&self, x: i32, y: i32, z: i32) -> u32 {
-        if self.owns(x, z)
-            && let Some(state) = self.source.block(x, y, z)
-        {
+        // A loaded chunk another region owns is still the authoritative world state. Reading
+        // it is safe and lets a fluid decide to spread across the boundary; only writes move
+        // through the region scheduler.
+        if let Some(state) = self.source.block(x, y, z) {
             return state;
         }
         u32::from(ferrite_data::blocks::default_state("stone").expect("vanilla stone"))
     }
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) {
         if !self.owns(x, z) {
+            // Folia ownership: only the owning region writes its chunks. A placement into a
+            // loaded neighbour is handed to that region through the world loop.
+            if let (Some(signals), Some(_)) = (&self.signals, self.source.block(x, y, z)) {
+                let _ = signals.send(Signal::FluidPlace {
+                    dimension: self.source.dimension(),
+                    x,
+                    y,
+                    z,
+                    state,
+                });
+            }
             return;
         }
         let Some(old) = self.source.block(x, y, z) else {
@@ -89,6 +113,9 @@ impl FluidWorld for RegionFluidWorld<'_> {
     }
     fn water_conversion(&self) -> bool {
         self.water_conversion
+    }
+    fn owns(&self, x: i32, z: i32) -> bool {
+        RegionFluidWorld::owns(self, x, z)
     }
 }
 
@@ -147,7 +174,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let before = source.block(16, 65, 0).unwrap();
-        assert_eq!(world.block(16, 65, 0), stone);
+        // A loaded neighbour is readable as a snapshot, but still not writable by this region.
+        assert_eq!(world.block(16, 65, 0), before);
         world.set_block(
             16,
             65,
@@ -179,5 +207,38 @@ mod tests {
         ticks.run_until(&mut world, 20);
         assert_eq!(source.block(16, 65, 0), None);
         assert_eq!(world.block(16, 65, 0), stone);
+    }
+
+    #[tokio::test]
+    async fn cross_region_fluid_writes_are_handed_off() {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        loop {
+            if let Some(result) = source.get(1, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let before = source.block(16, 65, 0).unwrap();
+        let held = HashMap::from([(ferrite_region::ChunkPos(0, 0), 1)]);
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut world = RegionFluidWorld::new(&source, &held, &tracking).with_signals(signals);
+        let water = u32::from(ferrite_data::blocks::default_state("water").unwrap());
+        world.set_block(16, 65, 0, water);
+        assert_eq!(source.block(16, 65, 0), Some(before));
+        match received.try_recv().expect("hand-off signal") {
+            Signal::FluidPlace {
+                dimension,
+                x,
+                y,
+                z,
+                state,
+            } => {
+                assert_eq!(dimension, source.dimension());
+                assert_eq!((x, y, z, state), (16, 65, 0, water));
+            }
+            _ => panic!("unexpected hand-off signal"),
+        }
     }
 }

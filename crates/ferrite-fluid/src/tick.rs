@@ -107,13 +107,13 @@ impl FluidTicks {
         // Vanilla schedules fluid ticks on `LiquidBlock` only: a waterlogged slab or stairs
         // carries water but is not a fluid block and must not tick or spread.
         let delay = u64::from(tick_delay(kind, world.ultrawarm()));
-        if delay > 0 && is_liquid_block(block(world, pos)) {
+        if delay > 0 && world.owns(pos.0, pos.2) && is_liquid_block(block(world, pos)) {
             self.schedule(pos, delay);
         }
         for d in NEIGHBORS {
             if let Some(n) = offset(pos, d) {
                 let state = block(world, n);
-                if is_liquid_block(state) {
+                if world.owns(n.0, n.2) && is_liquid_block(state) {
                     let f = fluid_state(state);
                     self.schedule(n, u64::from(tick_delay(f.kind, world.ultrawarm())));
                 }
@@ -150,6 +150,11 @@ impl FluidTicks {
         }
     }
     fn tick(&mut self, world: &mut impl FluidWorld, pos: Position) {
+        // Entries transferred by a region split are selected by section; an entry left behind
+        // for a chunk this region no longer owns must not simulate it.
+        if !world.owns(pos.0, pos.2) {
+            return;
+        }
         let state = block(world, pos);
         let mut current = fluid_state(state);
         if current.kind == FluidKind::Empty || !is_liquid_block(state) {

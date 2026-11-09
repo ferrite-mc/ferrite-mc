@@ -26,6 +26,13 @@ pub trait FluidWorld {
             .map(|id| block_props::collision_shape(id).to_vec())
             .unwrap_or_else(|| vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
     }
+
+    /// Whether this world owns the column at `(x, z)` and may schedule or write it. A
+    /// regionized world returns false for a chunk another region owns, so the simulation is
+    /// handed off instead of touching foreign state.
+    fn owns(&self, _x: i32, _z: i32) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

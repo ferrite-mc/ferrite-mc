@@ -567,6 +567,19 @@ pub enum Signal {
         y: i32,
         z: i32,
     },
+    /// A fluid tick in another region placed a block in this region's chunk.
+    FluidPlace {
+        dimension: super::Dimension,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: u32,
+    },
+    /// Redstone blocks on the other side of a region boundary need a re-evaluation.
+    RedstoneChange {
+        dimension: super::Dimension,
+        positions: Vec<[i32; 3]>,
+    },
     FinishRelease {
         dimension: super::Dimension,
         chunk: ChunkPos,
@@ -4582,15 +4595,23 @@ impl Region {
         &mut self,
         source: &super::anvil::AnvilChunkSource,
         tracking: &Tracking,
+        signals: UnboundedSender<Signal>,
         speed: u32,
     ) {
-        self.random_ticks
-            .tick(source, &self.held_chunks, tracking, speed, &mut self.fire);
+        self.random_ticks.tick(
+            source,
+            &self.held_chunks,
+            tracking,
+            signals,
+            speed,
+            &mut self.fire,
+        );
     }
     pub fn tick_fluids(
         &mut self,
         source: &super::anvil::AnvilChunkSource,
         tracking: &Tracking,
+        signals: UnboundedSender<Signal>,
         water_conversion: bool,
         lava_conversion: bool,
     ) {
@@ -4600,8 +4621,71 @@ impl Region {
             tracking,
             water_conversion,
             lava_conversion,
-        );
+        )
+        .with_signals(signals);
         self.fluid_ticks.advance(&mut world);
+    }
+
+    /// Applies a fluid placement handed over by the region that simulated it. The world loop
+    /// schedules this on the chunk owner, so only the owner writes the block.
+    pub fn apply_fluid_place(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        (x, y, z): (i32, i32, i32),
+        state: u32,
+    ) {
+        let chunk = ChunkPos(x.div_euclid(16), z.div_euclid(16));
+        if !self.held_chunks.contains_key(&chunk) {
+            return;
+        }
+        let Some(old) = source.block(x, y, z) else {
+            return;
+        };
+        if old == state {
+            return;
+        }
+        if let Err(error) = source.compare_set_block(x, y, z, Some(old), state) {
+            tracing::warn!(x, y, z, %error, "handed-off fluid block update failed");
+            return;
+        }
+        let update = BlockUpdate {
+            location: ferrite_protocol::types::BlockPos::new(x, y, z).pack(),
+            block_state: VarInt(state as i32),
+        };
+        broadcast_tracked_chunk(
+            &tracking.lock().unwrap(),
+            source.dimension(),
+            (chunk.0, chunk.1),
+            &packet(&update),
+        );
+        for (dx, dy, dz) in [
+            (0, 0, 0),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let (Some(x), Some(y), Some(z)) =
+                (x.checked_add(dx), y.checked_add(dy), z.checked_add(dz))
+            else {
+                continue;
+            };
+            self.schedule_fluid((x, y, z));
+        }
+    }
+
+    /// Re-evaluates redstone around a change another region made at the boundary.
+    pub fn wake_redstone(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        pos: [i32; 3],
+    ) {
+        let mut world = super::fluid::RegionFluidWorld::new(source, &self.held_chunks, tracking);
+        self.redstone.foreign_changed(&mut world, pos);
     }
     /// Creates a mob at an absolute position (`/summon`).
     pub fn summon(&mut self, kind: MobKind, pos: [f64; 3], no_ai: bool) -> bool {
@@ -7264,7 +7348,8 @@ impl Region {
         removed: &mut Vec<([i32; 3], u16)>,
     ) {
         let mut world =
-            super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+            super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking)
+                .with_signals(ctx.signals.clone());
         self.updates.apply(&mut world, removed);
     }
 
@@ -7606,7 +7691,8 @@ impl Region {
         let now = self.tick_clock;
         let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
         let mut world =
-            super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+            super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking)
+                .with_signals(ctx.signals.clone());
         let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.delayed_updates)
             .into_iter()
             .partition(|update| update.due <= now);
@@ -7943,7 +8029,8 @@ impl Region {
         };
         let placed = {
             let mut world =
-                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking)
+                    .with_signals(ctx.signals.clone());
             super::fire::placement_state(&world, pos).map(|state| {
                 ferrite_fluid::FluidWorld::set_block(
                     &mut world,
@@ -8425,7 +8512,8 @@ impl Region {
                     center[2].floor() as i32,
                 ];
                 let mut world =
-                    super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+                    super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking)
+                        .with_signals(ctx.signals.clone());
                 if let Some(state) = super::fire::placement_state(&world, pos) {
                     ferrite_fluid::FluidWorld::set_block(
                         &mut world,
@@ -8560,7 +8648,8 @@ impl Region {
         let mut fire_changed = Vec::new();
         if let Some(source) = ctx.source.as_deref() {
             let mut world =
-                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking)
+                    .with_signals(ctx.signals.clone());
             self.fire.tick(
                 &mut world,
                 ctx.dimension,

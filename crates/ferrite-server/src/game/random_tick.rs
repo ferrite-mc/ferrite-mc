@@ -1,6 +1,10 @@
 //! Region-local random ticking. Sampling follows ServerLevel.tickChunk; empty
 //! sections are skipped as in Lithium's chunk-section random-tick counters.
-use super::{anvil::AnvilChunkSource, fluid::RegionFluidWorld, region::Tracking};
+use super::{
+    anvil::AnvilChunkSource,
+    fluid::RegionFluidWorld,
+    region::{Signal, Tracking},
+};
 use ferrite_entity::Rng;
 use ferrite_fluid::FluidWorld;
 use ferrite_region::ChunkPos;
@@ -12,6 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 type Pos = (i32, i32, i32);
 trait RandomWorld {
@@ -36,7 +41,10 @@ fn state_name(state: u32) -> Option<(&'static str, &'static [(&'static str, &'st
     ferrite_data::blocks::state(u16::try_from(state).ok()?)
 }
 fn named(state: u32, name: &str) -> bool {
-    state_name(state).is_some_and(|(n, _)| n.strip_prefix("minecraft:").unwrap_or(n) == name)
+    short_name(state) == Some(name)
+}
+fn short_name(state: u32) -> Option<&'static str> {
+    state_name(state).map(|(n, _)| n.strip_prefix("minecraft:").unwrap_or(n))
 }
 fn property(state: u32, key: &str, value: &str) -> bool {
     state_name(state).is_some_and(|(_, props)| props.iter().any(|&(k, v)| k == key && v == value))
@@ -157,6 +165,156 @@ fn leaves_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
         );
     }
 }
+
+fn property_value(state: u32, key: &str) -> Option<&'static str> {
+    state_name(state)?
+        .1
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| *value)
+}
+
+fn age(state: u32) -> u32 {
+    property_value(state, "age")
+        .and_then(|age| age.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The same block state at another age, keeping its other properties (`BlockState.setValue`).
+fn with_age(state: u32, new_age: u32) -> Option<u32> {
+    let (name, properties) = state_name(state)?;
+    let age = new_age.to_string();
+    let properties: Vec<(&str, &str)> = properties
+        .iter()
+        .map(|&(key, value)| {
+            if key == "age" {
+                (key, age.as_str())
+            } else {
+                (key, value)
+            }
+        })
+        .collect();
+    ferrite_data::blocks::state_id(name, &properties).map(u32::from)
+}
+
+/// `CropBlock.getMaxAge` for the subclasses handled here.
+fn crop_max_age(name: &str) -> Option<u32> {
+    match name {
+        "wheat" | "carrots" | "potatoes" => Some(7),
+        "beetroots" => Some(3),
+        "torchflower_crop" => Some(1),
+        _ => None,
+    }
+}
+
+/// Vanilla 26.3 `CropBlock.getGrowthSpeed`: farmland under the 3x3 area below, then the
+/// neighbouring-crop penalty (`f / 2` when two perpendicular neighbours are the same crop).
+fn growth_speed(world: &dyn RandomWorld, p: Pos, crop: &str) -> f32 {
+    let mut speed = 1.0f32;
+    let below = (p.0, p.1 - 1, p.2);
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let mut factor = 0.0f32;
+            let state = world.block((below.0 + dx, below.1, below.2 + dz));
+            if named(state, "farmland") {
+                factor = 1.0;
+                if property_value(state, "moisture")
+                    .and_then(|moisture| moisture.parse::<u8>().ok())
+                    .unwrap_or(0)
+                    > 0
+                {
+                    factor = 3.0;
+                }
+            }
+            if dx != 0 || dz != 0 {
+                factor /= 4.0;
+            }
+            speed += factor;
+        }
+    }
+    let west = (p.0 - 1, p.1, p.2);
+    let east = (p.0 + 1, p.1, p.2);
+    let north = (p.0, p.1, p.2 - 1);
+    let south = (p.0, p.1, p.2 + 1);
+    let same = |pos| named(world.block(pos), crop);
+    let horizontal = same(west) || same(east);
+    let vertical = same(north) || same(south);
+    let diagonal = [
+        (p.0 - 1, p.2 - 1),
+        (p.0 + 1, p.2 - 1),
+        (p.0 + 1, p.2 + 1),
+        (p.0 - 1, p.2 + 1),
+    ]
+    .iter()
+    .any(|&(x, z)| same((x, p.1, z)));
+    if (horizontal && vertical) || diagonal {
+        speed /= 2.0;
+    }
+    speed
+}
+
+/// Vanilla `CropBlock.randomTick`, including torchflower's extra one-in-three gate.
+fn crop_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    let Some(name) = short_name(state) else {
+        return;
+    };
+    let Some(max_age) = crop_max_age(name) else {
+        return;
+    };
+    let current = age(state);
+    if current >= max_age {
+        return;
+    }
+    if name == "torchflower_crop" && rng.next_int(3) != 0 {
+        return;
+    }
+    if world.brightness(p) < 9 {
+        return;
+    }
+    let speed = growth_speed(world, p, name);
+    if rng.next_int((25.0 / speed) as i32 + 1) != 0 {
+        return;
+    }
+    if let Some(next) = with_age(state, current + 1) {
+        world.set_block(p, next);
+    }
+}
+
+/// Vanilla `NetherWartBlock.randomTick`: no light requirement, one in ten per random tick.
+fn nether_wart_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    let current = age(state);
+    if current < 3
+        && rng.next_int(10) == 0
+        && let Some(next) = with_age(state, current + 1)
+    {
+        world.set_block(p, next);
+    }
+}
+
+/// Vanilla `SweetBerryBushBlock.randomTick`.
+fn sweet_berry_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    let current = age(state);
+    if current < 3
+        && rng.next_int(5) == 0
+        && world.brightness((p.0, p.1 + 1, p.2)) >= 9
+        && let Some(next) = with_age(state, current + 1)
+    {
+        world.set_block(p, next);
+    }
+}
+
+/// Vanilla `CocoaBlock.randomTick`: no light requirement.
+fn cocoa_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    if rng.next_int(5) != 0 {
+        return;
+    }
+    let current = age(state);
+    if current < 2
+        && let Some(next) = with_age(state, current + 1)
+    {
+        world.set_block(p, next);
+    }
+}
 fn handlers() -> &'static HashMap<u32, Handler> {
     static TABLE: OnceLock<HashMap<u32, Handler>> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -171,6 +329,14 @@ fn handlers() -> &'static HashMap<u32, Handler> {
                     grass_tick
                 } else if state_name(state).is_some_and(|(n, _)| n.ends_with("_leaves")) {
                     leaves_tick
+                } else if short_name(state).and_then(crop_max_age).is_some() {
+                    crop_tick
+                } else if named(state, "nether_wart") {
+                    nether_wart_tick
+                } else if named(state, "sweet_berry_bush") {
+                    sweet_berry_tick
+                } else if named(state, "cocoa") {
+                    cocoa_tick
                 } else {
                     no_op
                 };
@@ -228,10 +394,11 @@ impl RandomTicks {
         source: &AnvilChunkSource,
         held: &HashMap<ChunkPos, usize>,
         tracking: &Tracking,
+        signals: UnboundedSender<Signal>,
         speed: u32,
         fire: &mut super::fire::FireTicks,
     ) {
-        let mut world = RegionFluidWorld::new(source, held, tracking);
+        let mut world = RegionFluidWorld::new(source, held, tracking).with_signals(signals);
         for chunk in held.keys() {
             let Some(sections) = source.with_loaded_chunk(chunk.0, chunk.1, ticking_sections)
             else {
@@ -363,6 +530,93 @@ mod tests {
         }
         assert_eq!(grid.block(target), grass);
     }
+    fn block_state(name: &str, age: u32) -> u32 {
+        let age = age.to_string();
+        u32::from(
+            ferrite_data::blocks::state_id(name, &[("age", age.as_str())])
+                .unwrap_or_else(|| panic!("vanilla {name}")),
+        )
+    }
+
+    fn farmland(moisture: u8) -> u32 {
+        let moisture = moisture.to_string();
+        u32::from(
+            ferrite_data::blocks::state_id("farmland", &[("moisture", moisture.as_str())])
+                .expect("vanilla farmland"),
+        )
+    }
+
+    #[test]
+    fn wheat_grows_in_light_to_max_age_and_stops() {
+        assert!(handlers().contains_key(&block_state("wheat", 0)));
+        assert!(handlers().contains_key(&block_state("nether_wart", 0)));
+        assert!(handlers().contains_key(&block_state("cocoa", 0)));
+        let mut grid = Grid {
+            light: 15,
+            ..Grid::default()
+        };
+        let p = (0, 0, 0);
+        grid.set_block((0, -1, 0), farmland(7));
+        grid.set_block(p, block_state("wheat", 0));
+        let mut rng = Rng::new(7);
+        for _ in 0..5000 {
+            let state = grid.block(p);
+            crop_tick(&mut grid, p, state, &mut rng);
+        }
+        assert_eq!(age(grid.block(p)), 7);
+        let max = grid.block(p);
+        for _ in 0..1000 {
+            crop_tick(&mut grid, p, max, &mut rng);
+        }
+        assert_eq!(grid.block(p), max);
+    }
+
+    #[test]
+    fn wheat_does_not_grow_without_light() {
+        let mut grid = Grid::default();
+        let p = (0, 0, 0);
+        grid.set_block((0, -1, 0), farmland(7));
+        grid.set_block(p, block_state("wheat", 0));
+        let mut rng = Rng::new(11);
+        for _ in 0..1000 {
+            let state = grid.block(p);
+            crop_tick(&mut grid, p, state, &mut rng);
+        }
+        assert_eq!(age(grid.block(p)), 0);
+    }
+
+    #[test]
+    fn nether_wart_grows_without_light() {
+        let mut grid = Grid::default();
+        let p = (0, 0, 0);
+        grid.set_block(p, block_state("nether_wart", 0));
+        let mut rng = Rng::new(3);
+        for _ in 0..5000 {
+            let state = grid.block(p);
+            nether_wart_tick(&mut grid, p, state, &mut rng);
+        }
+        assert_eq!(age(grid.block(p)), 3);
+    }
+
+    #[test]
+    fn cocoa_keeps_its_facing_when_it_ages() {
+        let mut grid = Grid::default();
+        let p = (0, 0, 0);
+        let cocoa = u32::from(
+            ferrite_data::blocks::state_id("cocoa", &[("age", "1"), ("facing", "east")])
+                .expect("vanilla cocoa"),
+        );
+        grid.set_block(p, cocoa);
+        let mut rng = Rng::new(5);
+        for _ in 0..1000 {
+            let state = grid.block(p);
+            cocoa_tick(&mut grid, p, state, &mut rng);
+        }
+        let grown = grid.block(p);
+        assert_eq!(age(grown), 2);
+        assert_eq!(property_value(grown, "facing"), Some("east"));
+    }
+
     #[test]
     fn leaves_decay_only_when_nonpersistent_and_distance_seven() {
         let mut grid = Grid::default();
