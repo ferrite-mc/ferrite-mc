@@ -1124,6 +1124,31 @@ fn plugin_api_calls_reach_the_client_as_packets() {
     // forward that slot to the client with both components intact.
     bot.raw(7, "verify-item");
     wait_for_line(&events, "verify-item set", &stdout, &stderr);
+    // A QuickCraft drag (pick up, drag over two slots, release) must reach the plugin as one
+    // InventoryDragEvent naming the slots the drag changed.
+    bot.raw(7, "drag-setup");
+    wait_for_line(&events, "drag-setup", &stdout, &stderr);
+    bot.send(&ContainerClick::<ferrite_item::HashedSlot> {
+        window: VarInt(0),
+        state: VarInt(-1),
+        slot: 36,
+        button: 0,
+        input: VarInt(0),
+        changed: Vec::new(),
+        carried: None,
+    });
+    for (slot, button) in [(-999i16, 0i8), (9, 1), (10, 1), (-999, 2)] {
+        bot.send(&ContainerClick::<ferrite_item::HashedSlot> {
+            window: VarInt(0),
+            state: VarInt(-1),
+            slot,
+            button,
+            input: VarInt(5),
+            changed: Vec::new(),
+            carried: None,
+        });
+    }
+    wait_for_line(&events, "drag 9,10", &stdout, &stderr);
 
     let mut lightning = false;
     let mut thunder = false;

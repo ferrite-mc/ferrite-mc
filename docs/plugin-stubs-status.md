@@ -13,6 +13,29 @@
 단위 테스트(Rust, JUnit)도 있다.
 CMI가 동작한다고 말할 수 없다.
 
+## 2026-11-09 — fb-plugin (InventoryDragEvent + Server 경계 정리)
+
+- **`InventoryDragEvent` 발화.** `container.rs`가 `ClickInput::QuickCraft`를 건너뛰지 않는다.
+  드래그 시작(status 0)에 메뉴/인벤토리 스냅샷을 잡고, 끝(status 2)에 기존 `quick_craft` 분배를
+  적용한 뒤 바뀐 슬롯만 모아 `ServerHooks::inventory_dragged`를 한 번 부른다. 취소되면 스냅샷을
+  복원하고 `container_set_content`로 전체 상태를 재전송한다. 트레이트 메서드는 기본 `Ok(true)`라
+  기존 구현체가 깨지지 않는다. 호출은 플레이어를 소유한 리전 스레드에서만 일어나고 새 락/대기는 없다.
+- 검증: JUnit `BootstrapTest`(9번 슬롯이 포함된 드래그를 리스너가 취소 → `false`, 10번만 있으면
+  `true`, 슬롯 집합과 old cursor 확인), `ApiSurfaceTest.inventoryDragEventCarriesSlotsAndCursors`;
+  실제 서버+JVM 통합 테스트 `plugin_api_calls_reach_the_client_as_packets`가 봇의 QuickCraft
+  드래그 뒤 `TestPlugin/events.txt`에 `drag 9,10`을 확인한다.
+- **Server 경계 정리.** help map(명령 맵 기반 + `registerHelpTopicFactory`), recipes(바닐라
+  데이터팩), maps(메모리 `MapView`), tags(block/item/fluid/entity_type/game_event)는 기존 경계로
+  구현되어 있음을 확인하고 JUnit `serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest`로
+  고정했다. `createWorld`(런타임 월드 없음)와 `EntityFactory#createEntitySnapshot`(비플레이어
+  엔티티 NBT 경계 없음)은 구현하지 않았고 소유자/이유/선행 작업을 `docs/plugin-api-stubs.md`에 적었다.
+- **구조물 엔티티는 계속 미지원.** `Structure#getEntities`는 빈 목록, `EntityTransformer` 목록은
+  명시적 거부다. 필요한 선행 작업 3가지(호스트 비플레이어 엔티티 조회 경계, 템플릿 `entities`
+  저장, 변환 위치 스폰 경로)를 `docs/plugin-api-stubs.md`에 정확히 적었다.
+- **Paper/NMS 전체 호환이 아니다.** `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
+  `CraftMagicNumbers`는 계속 `NoSuchMethodError`이고, 실제 클라이언트로 드래그 화면을 확인한
+  것은 아니다.
+
 ## 2026-11-08 — fb-32 (Bukkit 보스바 연결 + 스텁 인벤토리)
 
 - **Bukkit `org.bukkit.boss.BossBar`가 실제 클라이언트에 표시된다.** `FerriteBossBar`가 Adventure

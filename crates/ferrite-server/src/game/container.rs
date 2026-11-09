@@ -34,6 +34,18 @@ pub struct Containers {
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
     pub spilled: Vec<([i32; 3], ItemStack)>,
+    /// State from the start of a drag, kept only long enough to give a listener the chance to
+    /// cancel the finished drag.
+    drag: Option<DragStart>,
+}
+
+/// The menu and inventory as they were when a client started a QuickCraft drag. A cancelled
+/// `InventoryDragEvent` restores this, so the client is sent the whole menu again.
+#[derive(Debug)]
+struct DragStart {
+    container_id: i32,
+    menu: Menu,
+    inventory: PlayerInventory,
 }
 
 /// What an open menu is attached to.
@@ -78,6 +90,16 @@ fn click_names(input: ClickInput, button: i8) -> (&'static str, &'static str) {
     }
 }
 
+/// The plugin-facing form of a stack, for `InventoryDragEvent`'s cursors and slot map.
+fn item_snapshot(stack: &ItemStack) -> ferrite_plugin::ItemSnapshot {
+    ferrite_plugin::ItemSnapshot {
+        material: ferrite_item::item_name(stack.item)
+            .unwrap_or("minecraft:air")
+            .to_owned(),
+        amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
+    }
+}
+
 /// The block name at a position (vanilla `Level.getBlockState`).
 fn block_name(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> Option<&'static str> {
     source
@@ -97,6 +119,7 @@ impl Default for Containers {
             launched: Vec::new(),
             open_at: None,
             spilled: Vec::new(),
+            drag: None,
         }
     }
 }
@@ -302,8 +325,7 @@ impl Player {
             return;
         }
         // Bukkit's `InventoryClickEvent`: a listener that cancels it leaves the menu as it was
-        // and the client is shown the real contents again. Drags (`QuickCraft`) are
-        // `InventoryDragEvent`s in Bukkit, which are not fired yet.
+        // and the client is shown the real contents again.
         if input != ClickInput::QuickCraft
             && let Some(plugins) = self.plugins.clone()
         {
@@ -322,6 +344,29 @@ impl Player {
                 return;
             }
         }
+        // Bukkit's `InventoryDragEvent`: a QuickCraft drag starts with status 0, adds slots
+        // with status 1 and applies with status 2. Remember the menu before the drag applies
+        // so a listener that cancels gets the pre-drag state back; the drag math itself stays
+        // in `ferrite-inventory`.
+        let drag_status = (input == ClickInput::QuickCraft).then(|| i32::from(p.button) & 3);
+        if drag_status == Some(0) {
+            let snapshot = self.plugins.as_ref().map(|_| {
+                let menu = self.menus.open.as_ref().unwrap_or(&self.menus.inventory);
+                DragStart {
+                    container_id: menu.container_id(),
+                    menu: menu.clone(),
+                    inventory: self.inventory.clone(),
+                }
+            });
+            self.menus.drag = snapshot;
+        } else if !matches!(drag_status, Some(1) | Some(2)) {
+            self.menus.drag = None;
+        }
+        // Take the start state before the mutable menu borrow; it is only used after the
+        // existing drag math has run, to describe and possibly undo the drag.
+        let finished_drag = (drag_status == Some(2))
+            .then(|| self.menus.drag.take())
+            .flatten();
         // Vanilla `AnvilMenu.stillValid` cost check: a player without enough levels cannot take
         // the result (creative may).
         if p.slot == 2
@@ -368,7 +413,12 @@ impl Player {
             &p.changed,
             p.carried,
         );
+        // Read the clicker out before touching `self.inventory` again: it holds the only
+        // mutable borrow of the player inventory.
         let drops = clicker.drops;
+        let xp = clicker.xp;
+        let levels = clicker.levels;
+        let crafted = clicker.crafted;
         if let (Some(OpenAt::Inventory(opened)), Some(source)) = (&self.menus.open_at, &self.source)
         {
             block_container::store(source, opened, menu.container());
@@ -376,10 +426,46 @@ impl Player {
         if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
             super::equine_chest::store(*animal, &menu.container()[2..]);
         }
+        // One `InventoryDragEvent` for the slots whose contents the drag changed. Cancelling
+        // restores the menu from the start of the drag and resends its whole state.
+        if let Some(start) = finished_drag
+            && start.container_id == menu.container_id()
+            && let Some(plugins) = self.plugins.clone()
+        {
+            let before = start.menu.items(&start.inventory);
+            let after = menu.items(&self.inventory);
+            let changed: Vec<(i32, ferrite_plugin::ItemSnapshot)> = after
+                .iter()
+                .enumerate()
+                .filter(|(slot, item)| before.get(*slot) != Some(*item))
+                .map(|(slot, item)| (slot as i32, item_snapshot(item)))
+                .collect();
+            if !changed.is_empty() {
+                let old_cursor = item_snapshot(start.menu.carried());
+                let new_cursor = item_snapshot(menu.carried());
+                let allowed = plugins
+                    .inventory_dragged(self.uuid, &self.name, &old_cursor, &new_cursor, &changed)
+                    .unwrap_or(true);
+                if !allowed {
+                    // The click was already persisted for chests and animal inventories;
+                    // restore the start-of-drag container as well as the menu.
+                    if let (Some(OpenAt::Inventory(opened)), Some(source)) =
+                        (&self.menus.open_at, &self.source)
+                    {
+                        block_container::store(source, opened, start.menu.container());
+                    }
+                    if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
+                        super::equine_chest::store(*animal, &start.menu.container()[2..]);
+                    }
+                    *menu = start.menu;
+                    self.inventory = start.inventory;
+                    let full = menu.broadcast_full_state(&self.inventory);
+                    emit(self, vec![full]);
+                    return;
+                }
+            }
+        }
         self.menus.thrown.extend(drops);
-        let xp = clicker.xp;
-        let levels = clicker.levels;
-        let crafted = clicker.crafted;
         if !crafted.is_empty() {
             let uuid = self.uuid;
             super::recipe_unlock::CRAFTED
@@ -778,6 +864,7 @@ impl Player {
     }
 
     pub fn close_container(&mut self) {
+        self.menus.drag = None;
         if let Some(plugins) = self.plugins.clone() {
             let _ = plugins.inventory_closed(self.uuid, &self.name);
         }

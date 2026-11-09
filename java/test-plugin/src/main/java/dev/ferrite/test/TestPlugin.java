@@ -77,6 +77,10 @@ public final class TestPlugin extends JavaPlugin implements Listener {
     @EventHandler public void onLevel(org.bukkit.event.player.PlayerLevelChangeEvent event) { appendEvent("level " + event.getOldLevel() + " " + event.getNewLevel()); }
     @EventHandler public void onExp(org.bukkit.event.player.PlayerExpChangeEvent event) { appendEvent("exp " + event.getAmount()); }
     @EventHandler public void onInventoryClick(org.bukkit.event.inventory.InventoryClickEvent event) { appendEvent("click " + event.getSlot()); }
+    @EventHandler public void onInventoryDrag(org.bukkit.event.inventory.InventoryDragEvent event) {
+        var slots = event.getRawSlots().stream().sorted().map(String::valueOf).collect(java.util.stream.Collectors.joining(","));
+        appendEvent("drag " + slots);
+    }
     @EventHandler public void onInventoryClose(org.bukkit.event.inventory.InventoryCloseEvent event) { appendEvent("close " + event.getPlayer().getName()); }
     @EventHandler public void onLegacyChat(org.bukkit.event.player.AsyncPlayerChatEvent event) {
         appendEvent("legacy-chat " + event.getMessage());
@@ -96,6 +100,13 @@ public final class TestPlugin extends JavaPlugin implements Listener {
             inventory.setItem(0, new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 1));
             player.openInventory(inventory);
             appendEvent("inventory-open " + player.getName());
+            return true;
+        });
+        var dragSetup = getCommand("drag-setup");
+        if (dragSetup != null) dragSetup.setExecutor((sender, command, label, args) -> {
+            if (!(sender instanceof org.bukkit.entity.Player player)) return false;
+            player.getInventory().setItem(0, new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 40));
+            appendEvent("drag-setup");
             return true;
         });
         var verify = getCommand("verify-features");
