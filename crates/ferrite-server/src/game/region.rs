@@ -5170,6 +5170,8 @@ impl Region {
             )
         };
         let mut blocks = Vec::new();
+        let mut new_gateways = Vec::new();
+        let mut gateway_entities = Vec::new();
         if self.held_chunks.contains_key(&ChunkPos(0, 0)) {
             let portal = ferrite_data::blocks::default_state("minecraft:end_portal").map(u32::from);
             let present = portal.is_some_and(|portal| {
@@ -5198,10 +5200,21 @@ impl Region {
                 .is_some_and(super::portal::is_end_gateway);
             if !present {
                 blocks.extend(super::end_fight::gateway_blocks(at));
+                new_gateways.push(at);
+            } else if source.block_entity(at[0], at[1], at[2]).is_none() {
+                // The block survived but an older save never wrote its block entity; do not
+                // replay the creation beam for a gateway that has been open for a while.
+                gateway_entities.push(at);
             }
         }
         if !blocks.is_empty() {
             self.place_blocks(ctx, &blocks);
+        }
+        for at in new_gateways {
+            self.set_gateway_age(ctx, at, 0);
+        }
+        for at in gateway_entities {
+            self.set_gateway_age(ctx, at, super::end_fight::GATEWAY_SPAWN_TICKS);
         }
     }
 
@@ -5518,6 +5531,52 @@ impl Region {
             self.updates.block_changed(*at);
         }
     }
+    /// Writes a gateway's block entity and sends it to the chunk's viewers. Vanilla has no block
+    /// event for the gateway beam: `TheEndGatewayRenderer` reads `Age` from the block entity, and
+    /// the client animates the magenta creation beam itself while `Age < 200`.
+    fn set_gateway_age(&mut self, ctx: &TickContext, at: [i32; 3], age: i64) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+        {
+            return;
+        }
+        let Some(entity) = super::end_fight::gateway_block_entity(age) else {
+            return;
+        };
+        let written = source.update_block_entity(at[0], at[1], at[2], |slot| {
+            let same = slot.as_ref().is_some_and(|current| {
+                current.type_id == entity.type_id && current.data == entity.data
+            });
+            if same {
+                return (false, false);
+            }
+            *slot = Some(entity.clone());
+            (true, true)
+        });
+        match written {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(?at, %error, "could not write the end gateway block entity");
+                return;
+            }
+        }
+        let update = packet(&BlockEntityData {
+            location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+            block_type: VarInt(i32::try_from(entity.type_id).unwrap_or(0)),
+            nbt: super::end_fight::gateway_update_tag(&entity),
+        });
+        broadcast_tracked_chunk(
+            &ctx.tracking.lock().unwrap(),
+            ctx.dimension,
+            (at[0].div_euclid(16), at[2].div_euclid(16)),
+            &update,
+        );
+    }
     /// Shows the living dragon's health to every player of the dimension as a boss bar, keeps
     /// it current and takes it away when the dragon is gone (vanilla `EnderDragon.bossEvent`).
     fn update_dragon_bar(&mut self) {
@@ -5616,6 +5675,7 @@ impl Region {
         self.place_blocks(ctx, &super::end_fight::dragon_death_blocks(origin, first));
         if let Some(at) = gateway {
             self.place_blocks(ctx, &super::end_fight::gateway_blocks(at));
+            self.set_gateway_age(ctx, at, 0);
         }
         for record in experience::award(pos, super::end_fight::dragon_experience(first) as i32) {
             self.entities.insert(record);
