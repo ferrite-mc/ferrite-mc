@@ -2026,6 +2026,148 @@ async fn the_ender_dragon_shows_a_boss_bar_that_goes_away_when_it_dies() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
+    use ferrite_protocol::packets::play::{BlockEntityData, BossBar, BossBarAction, Respawn};
+    use ferrite_protocol::types::BlockPos;
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    loop {
+        if let Some(result) = source.get(0, 0, 0) {
+            result.expect("load spawn chunk");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let world = World::start_with(Some(source.clone()), [0, 65, 0]);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Gateway").await;
+    source
+        .set_block(
+            0,
+            65,
+            0,
+            u32::from(ferrite_data::blocks::default_state("minecraft:end_portal").unwrap()),
+        )
+        .unwrap();
+    let packet = tokio::time::timeout(std::time::Duration::from_secs(60), bot.until(Respawn::ID))
+        .await
+        .expect("end portal travel");
+    assert_eq!(
+        Respawn::decode(&mut packet.as_slice()).unwrap().dimension,
+        "minecraft:the_end"
+    );
+    bot.until(PositionSync::ID).await;
+    // The origin region owns the fight; stand there so it starts and the dragon can die.
+    world
+        .console_command("/execute in minecraft:the_end run tp Gateway 0.5 65 0.5".into())
+        .await
+        .unwrap();
+    bot.until(PositionSync::ID).await;
+    let body = tokio::time::timeout(std::time::Duration::from_secs(30), bot.until(BossBar::ID))
+        .await
+        .expect("the initial dragon bar");
+    assert!(matches!(
+        BossBar::decode(&mut body.as_slice()).unwrap().action,
+        BossBarAction::Add { .. }
+    ));
+    let end = world.dimensions().source(super::Dimension::End);
+    let portal =
+        u32::from(ferrite_data::blocks::default_state("minecraft:end_portal").expect("end portal"));
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        while !(0..=255).any(|y| end.block(1, y, 0) == Some(portal)) {
+            world
+                .console_command(
+                    "/execute in minecraft:the_end run kill @e[type=minecraft:ender_dragon]".into(),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("the exit portal appears");
+    // The first gateway is at x 96, z 0. Its chunk had no player when the dragon died, so this
+    // also exercises the repair path that writes a missing gateway when its chunk loads.
+    world
+        .console_command("/execute in minecraft:the_end run tp Gateway 96.5 80 0.5".into())
+        .await
+        .unwrap();
+    bot.until(PositionSync::ID).await;
+    let packet = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let body = bot.until(BlockEntityData::ID).await;
+            let packet = BlockEntityData::decode(&mut body.as_slice()).unwrap();
+            let at = BlockPos::unpack(packet.location);
+            if (at.x, at.y, at.z) == (96, 75, 0) {
+                return packet;
+            }
+        }
+    })
+    .await
+    .expect("the gateway block entity packet");
+    assert_eq!(
+        packet.nbt.get("Age"),
+        Some(&ferrite_nbt::Tag::Long(0)),
+        "a newly opened gateway starts its magenta creation beam"
+    );
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_dragon_fight_file_survives_a_restart() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+    if !root.join("reports/blocks.json").exists() {
+        eprintln!("SKIP: vanilla/26.3/generated is absent");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let registry = std::sync::Arc::new(ferrite_world::RuntimeRegistry::load(&root).unwrap());
+    let saved = super::end_fight::Saved {
+        started: true,
+        killed: true,
+        dragon_alive: false,
+        gateways: 7,
+        crystals: vec![0, 3, 9],
+        respawn_stage: Some(super::end_fight::RespawnStage::SummoningPillars),
+        respawn_ticks: 239,
+        exit_portal_level: Some(64),
+    };
+    {
+        let source = super::anvil::AnvilChunkSource::with_dimension(
+            dir.path().to_path_buf(),
+            registry.clone(),
+            None,
+            super::Dimension::End,
+        );
+        source.save_fight(&saved).unwrap();
+        assert!(
+            dir.path()
+                .join("DIM1/data/minecraft/ender_dragon_fight.dat")
+                .is_file()
+        );
+    }
+    let source = super::anvil::AnvilChunkSource::with_dimension(
+        dir.path().to_path_buf(),
+        registry,
+        None,
+        super::Dimension::End,
+    );
+    assert_eq!(source.load_fight(), Some(saved));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn moving_one_chunk_keeps_another_players_entities_loaded() {
     use ferrite_protocol::packets::play::{AddEntity, MovePosition, RemoveEntities};
     let world = World::start();
