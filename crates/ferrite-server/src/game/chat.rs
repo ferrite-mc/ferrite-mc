@@ -1,5 +1,6 @@
 //! Secure chat: profile-key sessions, message signatures, the per-sender signature chain, and
-//! the last-seen acknowledgement tracking described by `docs/HANDOFF.md`.
+//! the last-seen acknowledgement tracking described in the signed-chat notes (the old handoff
+//! documents were removed; recover them with `git log --all -- docs/handoff`).
 //!
 //! Wire formats and semantics mirror vanilla 26.3:
 //! * `ServerboundChatSessionUpdatePacket` registers a 2048-bit RSA profile key for a session.

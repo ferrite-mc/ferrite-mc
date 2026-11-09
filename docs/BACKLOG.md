@@ -1,181 +1,96 @@
-# Backlog — remaining work by family
+# Backlog — remaining work
 
-State of `main` when this list was written: **2026-10-31, `3a43753`** — `cargo test --workspace`
-reports 782 passed / 0 failed / 2 ignored (97 test binaries); see `docs/HANDOFF.md` for the measured
-Day-5 checks. Everything below is *not* done; each family names the crate or document to start
-from. Tick items off in the commit that finishes them.
+Single list of open work, checked against source on **2026-11-09**. `README.md` holds the status
+table; this file holds the plan. The old session handoffs (`docs/HANDOFF.md`, `docs/handoff/**`,
+`docs/sessions.md`) were deleted on 2026-11-09 — recover them with
+`git log --all -- docs/handoff` if you need the archaeology.
 
-## World generation
+## Contract for every task
 
-Not implemented in Rust, on purpose. The server has the `ChunkGenerator` seam
-(`crates/ferrite-server/src/game/generator.rs`); `generator = "vanilla"` runs the official generator
-from the user's own server jar in a separate JVM host process (`docs/worldgen-host.md`). Done: host,
-Rust client, shared `eula.txt` gate, end-to-end test. Open:
+Ferrite's Folia-style regionized concurrency is a correctness requirement, not a later optimization.
 
-- Bytecode patcher (`java.lang.classfile`, applied on the user's machine) that removes network,
-  tick, player handling and other dimensions, keeping only world generation. Keep it only if
-  measurements beat the unpatched jar.
-- Load measurement: hundreds of chunks, requested in sequence and concurrently, for resident
-  memory, CPU and chunks per second; pick defaults for `[worldgen]` from the numbers.
-- `/locate biome` and a prefetch of chunks ahead of players.
-- Rust worldgen: port the hot terrain pieces (noise/surface, biomes, features, structures) to Rust,
-  piece by piece, behaviour-compatible with the user's jar and verified against it
-  (`docs/worldgen-host.md`, section "Rust worldgen").
-- Rust world storage (note only, no database): ASWM/Slime-style single compressed blob loaded wholly
-  into memory as another chunk source, with a swappable storage backend
-  (`docs/worldgen-host.md`, "Storage idea for the Rust world").
-- `worldgen.mode = embedded | process | remote` so large deployments can run several hosts.
-- Chunk loading and encoding optimizations (baseline in `crates/ferrite-world/benches`).
+- Keep mutable world and entity state owned by its region thread. Never read or mutate another
+  region's live state directly; use the region scheduler and the existing ownership-transfer paths
+  (`Signal::EntityTransfer`, the per-player mailboxes, `RegionData::{merge, split}`).
+- Cross-region interactions (entities, leads, mounts, projectiles, portals, block entities, plugin
+  calls) need explicit handoff, cancellation, unload and reconnect behaviour, and tests for it.
+- No global lock, shared mutable registry, or synchronous cross-region wait that can serialize
+  ticking or deadlock. A global index needs a bounded, documented synchronization strategy and
+  immutable or snapshot data where possible.
+- Tests must cover same-region and cross-region cases, region split/merge, and persistence. Do not
+  claim Folia compatibility from single-region tests.
+- No Mojang code or assets. Real-client visual checks are excluded and must be reported as a
+  limitation, not replaced with a claim.
 
-## Entities and mobs
+## Landed since this file was last rewritten (do not re-implement)
 
-`ferrite-entity` has the region-local store, the vanilla tracker and item entities (M1–M3).
-`ferrite-loot` supplies drops.
+- Redstone family including observers, hoppers, droppers/dispensers, command blocks, repeaters,
+  comparators and torches — `game/{redstone,hopper,dispenser,command_block}.rs`.
+- Pistons: resolver, entity pushes, two-tick overlay, region split/merge — `docs/pistons.md`.
+- Nether and End dimensions, portals, the dragon fight, respawn stages, exit portal, gateways —
+  `docs/end-dimension.md`.
+- Containers: furnace/blast furnace/smoker, anvil, enchanting, grindstone, stonecutter, smithing,
+  loom, brewing, beacon, chests/barrels, villager and trader menus —
+  `game/{furnace,container,brewing,beacon}.rs`.
+- Villagers and deterministic trades, wandering trader spawn/lifetime with the llama caravan,
+  horse/llama riding and inventories — `game/{wandering_trader,ride,container}.rs`.
+- Entity and block-entity persistence across restarts; the world is saved as Anvil under `world/`.
+- All 94 vanilla command roots are registered, many only partly — `docs/COMMANDS-STATUS.md`.
+- Signed chat, Velocity/Bungee forwarding, the per-connection writer task, the chunk packet cache.
 
-- Mob AI goals, spawning (light/biome rules), combat, despawn rules.
-- Metadata breadth per entity type; attribute packets; passengers/vehicles.
-- Projectiles, TNT, experience orbs, falling blocks, boats/minecarts.
-- Entity persistence (`playerdata`-style save for entities) and chunk-unload hand-off under load.
-- Regional hand-off under sustained motion: `game/region.rs` `Signal::EntityTransfer`.
+## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
-## Blocks, redstone and gameplay
+Run `python tools/wirecheck/run.py` against a real client after any packet change, then check by
+hand: dimension travel, arrival platform, void death, End boss bar/dragon/gateways, piston
+animation, animal interaction, vault and trading screens, plugin output. Everything below is
+server-side only.
 
-- Neighbour-update ordering and placement rules (`ferrite-server` `game/interaction.rs`,
-  `game/region.rs`), gravity blocks, fire spread, crop growth.
-- Redstone: wire, torch, repeater, comparator, piston, observer, hopper, dropper/dispenser.
-- Fluids exist (`ferrite-fluid`); still missing waterlogged edge cases, fluid/redstone interaction,
-  and flow into unloaded chunks.
-- Containers: furnace smelting, anvil, enchanting, brewing, beacon, stonecutter, loom,
-  cartography, smithing, grindstone, shulker boxes.
-- Villagers/trading, portals, nether and end dimensions (`dimension` is fixed to overworld today).
+## 2. Entity and mob parity
 
-## Commands
+- Dragon: vanilla strafe phases and the gateway beam (`docs/end-dimension.md`).
+- Projectiles beyond arrow, snowball, egg, ender pearl and fireball: potion, experience bottle,
+  thrown trident, wind charge, fishing bobber.
+- Shoulder parrot is bookkeeping only (`set/get/releaseShoulderEntity*`): no entity, no display.
+- Structure entities: `Structure#getEntities()` is always empty and `EntityTransformer` lists are
+  refused. This needs host-side non-player entity snapshots inside a structure region first.
+- Metadata breadth per entity type, attribute packets, passengers/vehicles beyond `/ride`.
 
-`ferrite-command` parses the generated 26.3 tree and serializes it to clients; many nodes are
-still stubs that answer "Command not implemented".
+## 3. Plugin API breadth
 
-- Families: `execute`, `scoreboard`, `team`, `bossbar`, `title`, `tellraw`, `data`, `summon`,
-  `effect`, `setblock`, `fill`, `clone`, `worldborder`, `difficulty` aliases, `help`, `trigger`.
-- Selector options: distance, volume, scores, tags, sort, limit flattening, entity type negation.
-- Suggestions and `ParserRegistry` coverage per node; `/execute` store/if/unless.
-- Command blocks and functions (`function`, `schedule`).
-- Permission tree: `requires` levels and redirects must match `commands.json` for every node.
+- Bukkit `Server` still throws for the help map, recipes, maps, world creation, tags and entity
+  serialization; `docs/plugin-api-stubs.md` is the generated inventory.
+- `InventoryDragEvent` is not fired: `container.rs` skips `ClickInput::QuickCraft` ("which are not
+  fired yet"). The drag mechanics themselves already exist in `ferrite-inventory`.
+- `World#sendBlockUpdate` supports signs only, `unloadChunk` cannot force-unload, and an ender pearl
+  crossing a region boundary does not move its thrower.
+- NMS-typed CraftBukkit methods (`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
+  `CraftMagicNumbers`) stay `NoSuchMethodError` by design.
+- Block snapshots are opt-in, so `Block#getType` for arbitrary coordinates throws.
 
-## Inventory and items
+## 4. World interaction and gameplay
 
-`ferrite-inventory` (menus, clicks, hashed slots) and `ferrite-item` (components, wire codec).
+- Waterlogged edge cases, fluid/redstone interaction, flow into unloaded chunks.
+- Neighbour-update ordering and placement rules; audit crop growth and gravity-block chains against
+  vanilla before implementing.
+- Enchanting/anvil edge cases, shulker boxes, cartography table.
+- Maps: only the visible cursor decoration is sent; hidden cursors and styled captions are refused.
 
-- Remaining menu layouts and click validation (see containers above).
-- Drag distribution, double-click collection, shift-click between arbitrary menus.
-- Creative inventory actions, equipment/armor packets, offhand.
-- Item components beyond the current set; predicates and `item_model`.
+## 5. Protocol and networking
 
-## Plugins (embedded JVM)
+- Multi-version translation layer (the WIP branch `wip/day2-2026-10-28` has the start).
+- Compression and encryption off the reader and writer threads.
+- Keepalive/read-timeout parity (30 s), chat and command rate limits.
+- Chunk packet cache invalidation when a block entity changes (`game/anvil.rs` cache stats).
 
-`ferrite-plugin`, `ferrite-plugin-meta`, `ferrite-jvm`, `java/ferrite-api-impl`.
+## 6. Performance and operations
 
-- Bukkit API breadth: `Server` is ~26/206 methods; add blocks, worlds, inventories, scoreboards.
-- Events beyond player/chat: block break/place (exists), inventory, entity, world, scheduler.
-- Bukkit scheduler and async tasks; plugin resource loading; `/reload` and plugin disable order.
-- EssentialsX needs a CraftBukkit shim; compat results are on `wip/day4-oc2` history and
-  `java/ferrite-api-impl` notes.
-- Event error policy is wired (`plugin-event-errors`); add per-event tests for new events.
+- Regionizer: deferred mutations still go through one shared queue.
+- Coordinator: `Signal::Update` takes the `command_state` mutex every tick; split it by concern.
+- Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
 
-## Protocol and networking
+## 7. Release and tooling hygiene
 
-`ferrite-protocol`, `ferrite-net`.
-
-- Multi-version translation layer (started on `wip/day2-2026-10-28`; notes in
-  `docs/handoff/protocol-translate.md`).
-- Compression and encryption off the reader/writer thread (libdeflate is in; batching exists).
-- Read timeout / keepalive parity with vanilla (30 s), rate limits on chat and commands.
-- `tools/wirecheck/run.py` against a real client after **any** packet change; put it in CI once a
-  headless client can be started there.
-- Chunk packet cache invalidation when block entities change (`game/anvil.rs` cache stats).
-
-## World storage and lighting
-
-`ferrite-world`, `ferrite-light`.
-
-- Entity and block-entity persistence beyond chests; region-file compaction; dimension directories.
-- Lighting persistence for chunks modified in memory.
-- Light differential: the fixture must be regenerated with `python tools/make_fixture_world.py`
-  (stable double flush, 120 s+) before `compare_fixture_light_when_available` compares 256 chunks;
-  the checked-in fixture used on 2026-10-30 only has 196 comparable chunks.
-
-## Performance and operations
-
-- Re-run the 200-bot load test (`crates/ferrite-server/examples/bots.rs`, `LOAD_TEST.md`) after the
-  per-connection writer task and inventory merges; record MSPT/RSS.
-- Profiler: `/tps` `/mspt` `/profile` exist; add a `/spark`-style sampling view and per-system
-  attribution outside regions.
-- Regionizer: move deferred mutations into per-region queues (a shared queue is still scanned).
-- Folia reference: <https://docs.papermc.io/folia/reference/overview/#_top>. The cloud session could not
-  open it (`docs.papermc.io` is outside its network allow-list), so the API list below was checked against
-  the code, not against that page. Compare them when working locally.
-- Threading (checked in code): regions tick in parallel on a worker pool and Folia's Region, Entity,
-  Global and Async schedulers plus `isOwnedByCurrentRegion` exist. Still serialized on the one
-  coordinator task in `game/mod.rs`: join/leave, every inbound packet dispatch, the clock tick, the
-  advancement/recipe sync and the `command_state` mutex. Moved off it so far: the locator bar
-  (`offload::Latest`, a one-slot snapshot mailbox that never blocks the coordinator), and the
-  advancement and recipe book sync including their progress files (completions return through an
-  mpsc channel and are rewarded on the coordinator). Gameplay packets already go straight into the
-  player's region mailbox. Next candidates: `Signal::Update` (every player's position, every tick,
-  takes the `command_state` mutex and the plugin snapshot), splitting `command_state` by concern. Measured 2026-11-06 with `cargo run --release -p ferrite-server --example bots -- N` (bots share the
-  process, 20-thread PC): the coordinator is not the bottleneck. At 200 bots it is busy about 2% of the
-  run, at 800 bots about 12% (events 2%, `Signal` handling 8%, clock arm 2% with a 1.1 ms mean tick),
-  so it would saturate near 8000 bots. Region ticks are the load at 800 bots (mean 26 ms, p99 65 ms
-  against the 50 ms budget). A 4 s coordinator stall on the first tick (the advancement rules were parsed
-  on it) is fixed by `recipe_unlock::preload` and by skipping rule lookups until `recipe_unlock::ready`.
-  The real serialized cost was the global region's entity tracking (`global-tick/entity-tracking`):
-  405 ms per tick at 800 clustered players (about 3 TPS for the global region). It now uses a 48-block
-  grid, keeps a `Copy` pose per observed pair instead of cloning the player, encodes each movement
-  packet once per tick, and splits observers across up to 8 scoped threads: 13 ms per tick, global
-  region back at 20 TPS. Region ticks: `region-tick` now has per-stage scopes. On superflat the
-  entity tracker (`ferrite_entity::tracker::track`) took 22 ms per tick because it searched each
-  entity's viewer list linearly per viewer; hashing that took it to 8.6 ms and the superflat 800-bot
-  run from mean 26.5 / p99 83.5 ms to mean 12.5 / p99 37 ms. The rest is the entity x viewer
-  pairing itself (a viewer grid would cut it) and, on the fixture world, `chunk-stream` (about
-  3 ms per tick).
-
-## Quality and release
-
-- CI (`.github/workflows/ci.yml`): Linux overrides the MSVC toolchain via `RUSTUP_TOOLCHAIN`;
-  fixture-dependent tests skip when `vanilla/26.3/fixture-world` is absent. Re-check after toolchain
-  or test-harness changes.
-- Integration tests: player data is per world now (Day 5). New tests must not share process state;
-  keep `WorldSettings::playerdata` at `None` unless the test is about persistence.
-- Release: choose the repository name, tag `v0.1.0`, publish the first release notes; review
-  `LICENSE`, `NOTICE.md` and every ported-code header.
-- Docs: keep `docs/CONFIG.md` and `docs/CONFIG-PAPER.md` in step with `ferrite-config`.
-
-### Plugin bridge status (2026-10-31)
-
-- Fixed: the game loop drives `PluginHost::tick` from the 50 ms clock, so Bukkit
-  `runTask`/`runTaskLater`/`runTaskTimer` and Paper's global scheduler tasks execute on the
-  live server; the typical fixture's repeating task reaches tick 5 and cancels itself.
-- Fixed: the main world is published before plugins load and every joining player is registered
-  with location, mode and operator state, so `Player#getLocation`, `World#getSpawnLocation`,
-  `World#getPlayers` and join-time chat work against real values.
-- Fixed: `plugin.yml` permissions are registered on load and removed on disable, so
-  `default: true` reaches players and command permission gates pass.
-- Fixed: `Native.playerInventory` is wired end to end. `main` forwards every `PlayerCommand`
-  through a channel; the game loop routes inventory writes, gamemode, operator and chat to the
-  owning region/player, and `PlayerInventory#setItem` now replaces the slot, sends
-  `SetPlayerInventory` and resyncs the menu. Teleports reuse the `/tp` mailbox path. Health,
-  food, titles, display names, sounds and kicks are still logged as unrouted.
-- Fixed: Paper's region scheduler is live. `RegionScheduler#run`, `runDelayed` and
-  `runAtFixedRate` tasks come back from `PluginHost::take_region_tasks` and the game loop runs
-  each on the region that owns its chunk (a task for a world the server does not own is dropped
-  with a debug log). Bukkit's sync scheduler stays on the global tick, and
-  `runTaskAsynchronously`, `runTaskLaterAsynchronously` and `runTaskTimerAsynchronously` run on
-  Paper's async scheduler.
-- Fixed: the Bukkit server is created before plugins enable and the main world is published
-  first, so `onEnable` can already call `getWorlds()`; every accepted movement now refreshes the
-  player snapshot (`updatePlayerLocation`), so `Player#getLocation` follows the live player and
-  `registerPlayer` updates the existing `FerritePlayer` instead of replacing it.
-- Open: block snapshots are still opt-in via `setBlockSnapshot`, so `Block#getType` for arbitrary
-  coordinates throws; and the remaining `Server` stubs throw (help map, recipes, boss bars, maps,
-  world creation, tags, entity serialization). CraftBukkit shims cannot declare NMS-typed methods
-  (`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`); those stay
-  NoSuchMethodError by design.
+- `v0.1.3` is prepared in-tree (`f6a381d`); tagging and publishing the notes are still open.
+- Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md` and `docs/plugin-stubs-status.md` in step with code.
+- The Windows console window (`mod windows_gui` in `crates/ferrite-server/src/main.rs`, built on
+  `native-windows-gui`) has no documented or designed UI surface yet.

@@ -1,3 +1,5 @@
+**한국어** · [English](README.en.md)
+
 # Ferrite
 
 Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레딩을 쓰고, 내장 JVM으로
@@ -115,7 +117,7 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
   [최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization),
   [Pumpkin Rust 서버](https://github.com/Pumpkin-MC/Pumpkin),
   [Pumpkin PatchBukkit 브리지](https://github.com/Pumpkin-MC/PatchBukkit).
-  한국어 조사 메모: [`optimization-references.md`](docs/handoff/2026-11-07-game-systems/optimization-references.md).
+  최적화 조사 메모: [`OPTIMIZATIONS.md`](docs/OPTIMIZATIONS.md).
   최적화와 브리지 설계 참고 자료로 조사하고, 구현·호환성을 그대로 가정하지 않는다.
 
 ## 후속 로드맵
@@ -131,4 +133,4 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
   측정으로 검증한다. OpenCL은 CPU 경로와 결과 동등성 및 장치 호환성을 확인한 뒤 선택적으로 평가한다.
 
 Rust 월드젠을 제외한 작업은 독립된 파일 소유권과 명시적인 인수 조건을 정해 병렬 처리한다.
-현재 세션과 다음 독립 트랙: [`parallel-work-plan.md`](docs/handoff/2026-11-07-game-systems/parallel-work-plan.md).
+남은 작업 목록은 [`docs/BACKLOG.md`](docs/BACKLOG.md)가 유일한 기준이다.
