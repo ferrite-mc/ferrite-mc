@@ -69,7 +69,7 @@ mod container;
 mod crafting;
 pub use crafting::match_for_plugin as match_crafting_for_plugin;
 mod dispenser;
-mod drops;
+pub(crate) mod drops;
 mod entity_index;
 mod entity_save;
 pub use explosion::{CHARGED_CREEPER_POWER, CREEPER_POWER, TNT_POWER};

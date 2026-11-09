@@ -11,6 +11,7 @@ mod extra;
 pub mod facts;
 mod inventory;
 mod items;
+mod loot;
 mod messaging;
 mod motion;
 mod network;
@@ -150,6 +151,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = facts::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = loot::answer(call) {
                                 return Some(reply);
                             }
                             if let Some(reply) = craft::answer(call) {
