@@ -85,6 +85,10 @@ CMI가 동작한다고 말할 수 없다.
   라이브 월드 드롭 경로로 위임한다 — Java 테스트로 호스트 호출까지 확인했다.
 - 엔티티 핸들: 스폰·드롭이 돌려주는 핸들은 실제 엔티티의 id를 가지며 위치·유효성·속도·체력 읽기와
   `remove`/`setVelocity`/`teleport`/`damage`가 실제 엔티티에 닿는다. `Player#attack`은 1점 피해.
+- 월드 엔티티 조회: `World#getEntities`, `getLivingEntities`, `getEntity`, `getEntitiesByClass(es)`,
+  `getNearbyEntities`가 온라인 플레이어와 오버월드의 비플레이어 엔티티를 함께 본다. 같은 UUID는 같은
+  프록시를 돌려주고, 제거·청크 언로드·종료 뒤에는 목록에서 빠지며 기존 프록시의 `isValid`는 false가 된다.
+  지원하지 않는 엔티티 종류는 generic 프록시를 만들지 않고 `UnsupportedOperationException`으로 실패한다.
 - 클라이언트가 가진 청크: `Player#isChunkSent`, `getSentChunks`는 실제로 보낸/버린 청크를 따라간다.
 - 광선 추적: `World#rayTraceBlocks`/`rayTraceEntities`/`rayTrace`는 칸 단위로 따라가 정확한 적중 위치·면을 준다. 고체 블록은 꽉 찬 정육면체로 본다(반블록·계단 모양은 모델링하지 않음). 엔티티는 접속한 플레이어만 대상이다. `Player#collidesAt`/`wouldCollideUsing`도 같은 방식이다.
 - 바이옴: `World#setBiome`은 `/fillbiome`으로 연결되고(4×4×4 칸 단위, 기본 월드만), `getComputedBiome`은 `getBiome`과 같다.
@@ -106,7 +110,9 @@ CMI가 동작한다고 말할 수 없다.
 - `openMerchant`의 거래 횟수가 플러그인 레시피에 반영되지 않는다.
 - 스코어보드: 접속할 때 메인 스코어보드를 보여 준다. 팀은 `setScoreboard` 때 클라이언트에 보내고 변경을 따라간다(이름 색·충돌·네임태그 설정, 접두/접미사는 일반 텍스트만).
 - 핸들 읽기는 소유 리전이 한 틱 뒤 공개하는 값이라, 스폰 직후에는 처음 위치를 돌려줄 수 있다.
-- 엔티티 연산은 오버월드만 지원한다.
+- 엔티티 연산과 월드 엔티티 조회는 오버월드만 지원한다. 네더/엔드 엔티티는 플러그인 월드 id가 없어
+  조회 목록에서 제외된다.
+- 월드 엔티티 조회는 JUnit/Rust 단위 테스트로만 확인했고 실제 마인크래프트 클라이언트에서는 확인하지 않았다.
 - 패킷 구조는 바닐라 jar와 대조했지만, 실제 클라이언트가 그려 주는 모습(색·위치·소리 크기)은 확인하지 못했다.
 
 ## 오늘 못한 것 (구현 안 됨)

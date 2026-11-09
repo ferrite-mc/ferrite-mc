@@ -1106,6 +1106,18 @@ impl RegionData for Region {
             published_entities: HashSet::new(),
             published_facts: HashSet::new(),
         };
+        // Facts follow the entities into the new region. Otherwise the old region's next tick
+        // would remove the new region's entries from the shared registry.
+        for key in result.entities.keys() {
+            if let Some(data) = result.entities.data(*key) {
+                if self.published_facts.remove(&data.uuid) {
+                    result.published_facts.insert(data.uuid);
+                }
+                if self.published_entities.remove(&data.uuid) {
+                    result.published_entities.insert(data.uuid);
+                }
+            }
+        }
         let moving: Vec<_> = self
             .held_chunks
             .keys()
@@ -4578,9 +4590,15 @@ impl Region {
                     .is_some_and(|pos| chunk_of(pos) == (chunk.0, chunk.1))
             })
             .collect();
-        keys.into_iter()
+        let records: Vec<_> = keys
+            .into_iter()
             .filter_map(|key| self.entities.remove(key))
-            .collect()
+            .collect();
+        for record in &records {
+            self.published_facts.remove(&record.data.uuid);
+        }
+        crate::plugins::facts::forget_entities(records.iter().map(|record| record.data.uuid));
+        records
     }
     /// Copies every entity currently in a held chunk for periodic persistence without unloading
     /// it or changing its live in-memory state.
@@ -4612,9 +4630,12 @@ impl Region {
     /// Removes every entity from the region, for the shutdown save.
     pub fn drain_entities(&mut self) -> Vec<EntityRecord> {
         let keys: Vec<_> = self.entities.keys().to_vec();
-        keys.into_iter()
+        let records: Vec<_> = keys
+            .into_iter()
             .filter_map(|key| self.entities.remove(key))
-            .collect()
+            .collect();
+        crate::plugins::facts::forget_entities(self.published_facts.drain());
+        records
     }
     pub fn schedule_fluid(&mut self, pos: (i32, i32, i32)) {
         let chunk = ChunkPos(pos.0.div_euclid(16), pos.2.div_euclid(16));
@@ -9041,7 +9062,11 @@ impl Region {
             .lock()
             .unwrap()
             .sync(&mut self.published_entities, &self.entities, dimension);
-        crate::plugins::facts::publish_entities(&mut self.published_facts, &self.entities);
+        crate::plugins::facts::publish_entities(
+            &mut self.published_facts,
+            &self.entities,
+            dimension,
+        );
     }
 
     /// A plugin's operation on one entity of this region. Returns whether the entity was here.
@@ -9124,6 +9149,10 @@ impl Region {
         let Some(key) = key else {
             return false;
         };
+        if let Some(data) = self.entities.data(key) {
+            self.published_facts.remove(&data.uuid);
+            crate::plugins::facts::forget_entities([data.uuid]);
+        }
         // `/kill` is lethal damage, not just a tracker removal: the death pass must still run
         // loot, the dragon fight, and advancements.
         if !mob::kill(&mut self.entities, key)
