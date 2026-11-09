@@ -17,7 +17,7 @@
 //! keeping a stale value. Delayed components use the region's own scheduled block ticks
 //! (`Level.scheduleTick`), advanced once per region tick.
 
-use super::fluid::RegionFluidWorld;
+use super::{fluid::RegionFluidWorld, region::Signal};
 use ferrite_data::blocks;
 use ferrite_math::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -51,6 +51,17 @@ pub trait RedstoneWorld {
     fn set_block(&mut self, pos: [i32; 3], state: u16);
     fn brightness(&self, pos: [i32; 3]) -> u8;
 
+    /// Read a block across a region boundary for power computation. Unlike [`Self::block`],
+    /// this may see a loaded chunk another region owns. The read is never accompanied by a
+    /// write, so a network still stops at the boundary.
+    fn signal_block(&self, pos: [i32; 3]) -> Option<u16> {
+        self.block(pos)
+    }
+
+    /// Ask the regions owning `positions` to re-evaluate redstone there. The default is a
+    /// no-op for local worlds and tests.
+    fn wake_redstone(&mut self, _positions: &[[i32; 3]]) {}
+
     /// Vanilla `BlockState.getAnalogOutputSignal` for a container (`hasAnalogOutputSignal`),
     /// which a comparator compares instead of the block's weak power.
     fn container_signal(&self, _pos: [i32; 3]) -> Option<u8> {
@@ -76,8 +87,31 @@ impl RedstoneWorld for RegionFluidWorld<'_> {
         RegionFluidWorld::brightness(self, pos[0], pos[1], pos[2])
     }
 
+    fn signal_block(&self, pos: [i32; 3]) -> Option<u16> {
+        self.source
+            .block(pos[0], pos[1], pos[2])
+            .and_then(|state| u16::try_from(state).ok())
+    }
+
+    fn wake_redstone(&mut self, positions: &[[i32; 3]]) {
+        let Some(signals) = &self.signals else {
+            return;
+        };
+        let positions: Vec<_> = positions
+            .iter()
+            .copied()
+            .filter(|pos| self.source.block(pos[0], pos[1], pos[2]).is_some())
+            .collect();
+        if !positions.is_empty() {
+            let _ = signals.send(Signal::RedstoneChange {
+                dimension: self.source.dimension(),
+                positions,
+            });
+        }
+    }
+
     fn container_signal(&self, pos: [i32; 3]) -> Option<u8> {
-        let state = self.block(pos)?;
+        let state = self.signal_block(pos)?;
         let (name, _) = blocks::state(state)?;
         let size = super::block_container::inventory_slots(name)?;
         let items = super::block_container::load_slots(self.source, pos, size);
@@ -284,7 +318,7 @@ fn strong_block_power(
     let mut power = 0;
     for direction in Direction::ALL {
         let neighbour = offset(pos, direction);
-        let Some(state) = world.block(neighbour) else {
+        let Some(state) = world.signal_block(neighbour) else {
             continue;
         };
         let signal = if is_comparator(state) {
@@ -305,7 +339,7 @@ fn power_from(
     analog: &HashMap<[i32; 3], u8>,
 ) -> u8 {
     let neighbour = offset(pos, direction);
-    let Some(state) = world.block(neighbour) else {
+    let Some(state) = world.signal_block(neighbour) else {
         return 0;
     };
     if is_wire(state) {
@@ -429,7 +463,7 @@ fn wire_powers(
         let mut target = 0;
         // `getBlockSignal`: wire on a conductive block reads the strong power it carries.
         let below = offset(pos, Direction::Down);
-        if let Some(state) = world.block(below) {
+        if let Some(state) = world.signal_block(below) {
             if is_conductor(state) {
                 target = target.max(strong_block_power(world, below, analog));
             } else {
@@ -441,10 +475,14 @@ fn wire_powers(
             if members.contains(&neighbour) {
                 continue;
             }
-            let Some(state) = world.block(neighbour) else {
+            let Some(state) = world.signal_block(neighbour) else {
                 continue;
             };
-            if is_conductor(state) {
+            if is_wire(state) {
+                // A wire across the boundary feeds this component with vanilla attenuation.
+                // Its own region keeps its power up to date and wakes this one on changes.
+                target = target.max(property_u8(state, "power").unwrap_or(0).saturating_sub(1));
+            } else if is_conductor(state) {
                 target = target.max(strong_block_power(world, neighbour, analog));
             } else {
                 let analog = if is_comparator(state) {
@@ -527,8 +565,14 @@ impl Redstone {
     /// `Level.markAndNotifyBlock`: notify the changed block and its six neighbours.
     pub fn blocks_changed(&mut self, world: &mut impl RedstoneWorld, positions: &[[i32; 3]]) {
         for &pos in positions {
-            self.after_change(world, pos);
+            self.after_change(world, pos, true);
         }
+    }
+
+    /// Re-evaluates a change another region made across the boundary. It never wakes back to
+    /// the source, so two regions cannot ping-pong the same edge forever.
+    pub fn foreign_changed(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
+        self.after_change(world, pos, false);
     }
 
     pub fn take_primed(&mut self) -> Vec<([i32; 3], i32)> {
@@ -626,7 +670,7 @@ impl Redstone {
                 break;
             }
             budget -= 1;
-            self.after_change(world, pos);
+            self.after_change(world, pos, true);
         }
     }
 
@@ -675,7 +719,8 @@ impl Redstone {
         self.dirty.push_back(pos);
     }
 
-    fn after_change(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
+    fn after_change(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], wake: bool) {
+        let mut wakes = Vec::new();
         // A piston can be powered by a neighbour or by quasi-connectivity above it.
         for dx in -2..=2 {
             for dy in -2..=1 {
@@ -697,6 +742,9 @@ impl Redstone {
         for direction in Direction::ALL {
             let neighbour = offset(pos, direction);
             let Some(state) = world.block(neighbour) else {
+                if wake {
+                    wakes.push(neighbour);
+                }
                 continue;
             };
             if is_wire(state) {
@@ -712,7 +760,13 @@ impl Redstone {
         // powers the stone behind it, which in turn powers the torch standing on that stone.
         for direction in Direction::ALL {
             let carrier = offset(pos, direction);
-            if !world.block(carrier).is_some_and(is_conductor) {
+            let Some(carrier_state) = world.block(carrier) else {
+                if wake {
+                    wakes.push(carrier);
+                }
+                continue;
+            };
+            if !is_conductor(carrier_state) {
                 continue;
             }
             for inner in Direction::ALL {
@@ -728,6 +782,11 @@ impl Redstone {
                     }
                 }
             }
+        }
+        wakes.sort_unstable();
+        wakes.dedup();
+        if !wakes.is_empty() {
+            world.wake_redstone(&wakes);
         }
     }
 
@@ -972,14 +1031,14 @@ impl Redstone {
         // A torch must not read its own direct signal through the block it is attached to.
         let mut input = 0;
         let attach_pos = offset(pos, attach);
-        if let Some(attach_state) = world.block(attach_pos) {
+        if let Some(attach_state) = world.signal_block(attach_pos) {
             input = direct_signal(attach_state, None);
             for direction in Direction::ALL {
                 let neighbour = offset(attach_pos, direction);
                 if neighbour == pos {
                     continue;
                 }
-                let Some(other) = world.block(neighbour) else {
+                let Some(other) = world.signal_block(neighbour) else {
                     continue;
                 };
                 let signal = if is_comparator(other) {
@@ -1206,7 +1265,7 @@ fn rebase(time: u64, from: u64, to: u64) -> u64 {
 fn is_locked(world: &impl RedstoneWorld, pos: [i32; 3], direction: Direction) -> bool {
     perpendicular(direction).into_iter().any(|side| {
         let neighbour = offset(pos, side);
-        world.block(neighbour).is_some_and(|other| {
+        world.signal_block(neighbour).is_some_and(|other| {
             is_diode(other)
                 && facing(other) == Some(side.opposite())
                 && property_bool(other, "powered")
@@ -1300,6 +1359,80 @@ mod tests {
             redstone
                 .take_piston_actions(&grid)
                 .contains(&(pos, Direction::East, true))
+        );
+    }
+
+    /// A region owning one side of the x=15/16 boundary. `signal_block` sees the other side.
+    struct Edge {
+        owns_left: bool,
+        blocks: HashMap<[i32; 3], u16>,
+        wakes: Vec<[i32; 3]>,
+    }
+
+    impl Edge {
+        fn new(owns_left: bool) -> Self {
+            Self {
+                owns_left,
+                blocks: HashMap::new(),
+                wakes: Vec::new(),
+            }
+        }
+
+        fn state(&self, pos: [i32; 3]) -> u16 {
+            self.blocks.get(&pos).copied().unwrap_or_else(air)
+        }
+    }
+
+    impl RedstoneWorld for Edge {
+        fn block(&self, pos: [i32; 3]) -> Option<u16> {
+            ((pos[0] <= 15) == self.owns_left).then(|| self.state(pos))
+        }
+
+        fn set_block(&mut self, pos: [i32; 3], state: u16) {
+            self.blocks.insert(pos, state);
+        }
+
+        fn brightness(&self, _pos: [i32; 3]) -> u8 {
+            15
+        }
+
+        fn signal_block(&self, pos: [i32; 3]) -> Option<u16> {
+            Some(self.state(pos))
+        }
+
+        fn wake_redstone(&mut self, positions: &[[i32; 3]]) {
+            self.wakes.extend_from_slice(positions);
+        }
+    }
+
+    #[test]
+    fn an_edge_change_wakes_the_neighbouring_region_once() {
+        let mut world = Edge::new(true);
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut world, &[[15, 64, 0]]);
+        assert_eq!(world.wakes, [[16, 64, 0]]);
+        world.wakes.clear();
+        // Handling a foreign change must not bounce the wake back to its source.
+        redstone.foreign_changed(&mut world, [15, 64, 0]);
+        assert!(world.wakes.is_empty());
+    }
+
+    #[test]
+    fn a_lever_across_the_boundary_lights_a_lamp_on_this_side() {
+        let mut world = Edge::new(false);
+        world.blocks.insert(
+            [15, 64, 0],
+            make(
+                "lever",
+                &[("face", "floor"), ("facing", "east"), ("powered", "true")],
+            ),
+        );
+        world.blocks.insert([16, 64, 0], lamp());
+        let mut redstone = Redstone::default();
+        redstone.foreign_changed(&mut world, [16, 64, 0]);
+        assert_eq!(
+            world.state([16, 64, 0]),
+            make("redstone_lamp", &[("lit", "true")])
         );
     }
 

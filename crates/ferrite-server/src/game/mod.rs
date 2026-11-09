@@ -977,12 +977,14 @@ async fn run(
                 region.tick_fluids(
                     &fluid_source,
                     &fluid_tracking,
+                    ctx.signals.clone(),
                     water_conversion,
                     lava_conversion,
                 );
                 region.tick_random(
                     &fluid_source,
                     &fluid_tracking,
+                    ctx.signals.clone(),
                     speed.load(Ordering::Relaxed),
                 );
             }
@@ -1454,6 +1456,24 @@ async fn run(
                       let (Some(x),Some(y),Some(z))=(x.checked_add(dx),y.checked_add(dy),z.checked_add(dz)) else {continue;};
                       let chunk=ChunkPos(x.div_euclid(16),z.div_euclid(16));
                       if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.schedule_fluid((x,y,z)));}
+                    }
+                  },
+                  Signal::FluidPlace{dimension,x,y,z,state}=>{
+                    let chunk=ChunkPos(x.div_euclid(16),z.div_euclid(16));
+                    if worlds.owner(dimension,chunk).is_some(){
+                      let source=dimensions.source(dimension).clone();
+                      let tracking=tracking.clone();
+                      worlds.schedule_at_chunk(dimension,chunk,move |r|r.apply_fluid_place(&source,&tracking,(x,y,z),state));
+                    }
+                  },
+                  Signal::RedstoneChange{dimension,positions}=>{
+                    for pos in positions {
+                      let chunk=ChunkPos(pos[0].div_euclid(16),pos[2].div_euclid(16));
+                      if worlds.owner(dimension,chunk).is_some(){
+                        let source=dimensions.source(dimension).clone();
+                        let tracking=tracking.clone();
+                        worlds.schedule_at_chunk(dimension,chunk,move |r|r.wake_redstone(&source,&tracking,pos));
+                      }
                     }
                   },
                   Signal::Update{uuid,pos,yaw,pitch,ground}=>{
