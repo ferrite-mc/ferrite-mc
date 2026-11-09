@@ -94,6 +94,7 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | 청크 스냅샷/청크 데이터 | `ChunkSnapshot#contains(Biome)`; `ChunkData#getBiome` | 호스트 청크/바이옴 데이터 |
 | Paper 생명주기 | `InternalAPIBridge#createPluginLifecycleEventManager` | Paper lifecycle API |
 | 포션/인챈트/레지스트리 | `PotionEffectType` 속성(색·카테고리·지속시간 보정·attribute), `Enchantment` 속성, `RegistryAccess` 미지원 레지스트리 | `ferrite-data` 데이터/호스트 |
+| 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Java `FerriteLoot` — 생성 데이터팩의 `loot_table`/`predicate`/`tags`를 읽고 `FerriteItemStack`/`FerriteItemMeta`로 스택을 만든다. luck·bonus rolls·looting·killer/this_entity를 반영하고, `enchant_randomly`의 최대 레벨/호환성은 호스트의 `Enchantment` 응답을 쓴다(호스트가 없으면 1레벨/호환으로 폴백). 폭발 반경·블록 엔티티 데이터·미모델링 컴포넌트는 불투명 처리한다. |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
 | NMS/Unsafe | `UnsafeValues`의 NMS 의존 멤버, `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` | 의도적 미지원 (가짜 구현 금지); 계속 `NoSuchMethodError` |
 | 투사체/타일/장비/효과 | `Player#launchProjectile`(화살 외), `sendBlockUpdate`(표지판 외), `EntityEquipment`(미지원), `Player#playEffect`(데이터 있는 효과) | Rust 호스트/프로토콜 |

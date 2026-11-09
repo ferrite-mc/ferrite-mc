@@ -309,6 +309,107 @@ class PlayerExtrasTest {
         assertEquals(java.util.List.of("bossBarAdd(String,String,float,int,int,int)", "bossBarProgress(String,float)", "bossBarName(String,String)", "bossBarStyle(String,int,int)", "bossBarRemove(String)"), calls);
     }
 
+    @Test void droppedItemStateRoundTripsAndStaysSafeWhenTheEntityIsGone() {
+        var calls = new java.util.ArrayList<String>();
+        var stack = new java.util.concurrent.atomic.AtomicReference<>(new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 1));
+        var delay = new java.util.concurrent.atomic.AtomicInteger(10);
+        var owner = new java.util.concurrent.atomic.AtomicReference<java.util.UUID>();
+        HostBridge.transport = (hostOwner, subject, method, args) -> {
+            calls.add(hostOwner + "#" + method);
+            if (hostOwner.equals("World")) return "";
+            if (hostOwner.equals("Entity") && method.equals("isValid()")) return "true";
+            return switch (method) {
+                case "getItemStack()" -> stack.get().getType().name() + HostBridge.ITEM + stack.get().getAmount();
+                case "setItemStack(ItemStack)" -> {
+                    var parts = args.split(String.valueOf(HostBridge.ITEM));
+                    stack.set(new org.bukkit.inventory.ItemStack(org.bukkit.Material.matchMaterial(parts[0]), Integer.parseInt(parts[1])));
+                    yield "";
+                }
+                case "getPickupDelay()" -> Integer.toString(delay.get());
+                case "setPickupDelay(int)" -> { delay.set(Integer.parseInt(args)); yield ""; }
+                case "getOwner()" -> owner.get() == null ? HostBridge.NULL : owner.get().toString();
+                case "setOwner(UUID)" -> { owner.set(args.equals(HostBridge.NULL) ? null : java.util.UUID.fromString(args)); yield ""; }
+                case "setUnlimitedLifetime(boolean)", "setCanMobPickup(boolean)", "setCanPlayerPickup(boolean)", "setWillAge(boolean)" -> "";
+                case "isUnlimitedLifetime()", "canMobPickup()", "canPlayerPickup()", "willAge()" -> "true";
+                case "getHealth()" -> "5";
+                case "setHealth(int)" -> "";
+                default -> null;
+            };
+        };
+        try {
+            var world = player.getWorld();
+            var item = world.dropItemNaturally(new org.bukkit.Location(world, 1, 70, 2), new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 1));
+            assertEquals(1, item.getItemStack().getAmount());
+            item.setItemStack(new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 2));
+            assertEquals(org.bukkit.Material.STONE, item.getItemStack().getType());
+            assertEquals(2, item.getItemStack().getAmount());
+            assertEquals(10, item.getPickupDelay());
+            item.setPickupDelay(4);
+            assertEquals(4, item.getPickupDelay());
+            var ownerId = java.util.UUID.randomUUID();
+            item.setOwner(ownerId);
+            assertEquals(ownerId, item.getOwner());
+            item.setOwner(null);
+            assertNull(item.getOwner());
+            item.setUnlimitedLifetime(true);
+            item.setCanMobPickup(false);
+            item.setCanPlayerPickup(false);
+            item.setWillAge(false);
+            item.setHealth(9);
+
+            HostBridge.transport = (hostOwner, subject, method, args) -> method.equals("isValid()") ? "false" : null;
+            assertFalse(item.isValid());
+            assertTrue(item.isDead());
+            assertEquals(2, item.getItemStack().getAmount(), "a vanished item keeps its last known stack");
+        } finally { HostBridge.transport = null; }
+        assertTrue(calls.contains("Item#setItemStack(ItemStack)"));
+        assertTrue(calls.contains("Item#setPickupDelay(int)"));
+        assertTrue(calls.contains("Item#setOwner(UUID)"));
+        assertTrue(calls.contains("Item#setUnlimitedLifetime(boolean)"));
+        assertTrue(calls.contains("Item#setCanMobPickup(boolean)"));
+        assertTrue(calls.contains("Item#setCanPlayerPickup(boolean)"));
+        assertTrue(calls.contains("Item#setWillAge(boolean)"));
+        assertTrue(calls.contains("Item#setHealth(int)"));
+    }
+
+    @Test void entitySnapshotsFollowTheLiveEntityAndStayReadableAfterShutdown() {
+        var world = player.getWorld();
+        var position = "4.0" + HostBridge.ITEM + "65.0" + HostBridge.ITEM + "6.0" + HostBridge.ITEM + "90.0" + HostBridge.ITEM + "10.0";
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "spawnEntity(Location,EntityType,String)" -> "";
+            case "getEntityPosition()" -> position;
+            case "getVelocity()" -> "0.0" + HostBridge.ITEM + "0.5" + HostBridge.ITEM + "0.0";
+            case "getHealth()" -> "8.0";
+            case "isValid()" -> "true";
+            default -> null;
+        };
+        try {
+            var cow = world.spawnEntity(new org.bukkit.Location(world, 4, 65, 6), org.bukkit.entity.EntityType.COW);
+            var snapshot = (FerriteEntitySnapshot) cow.createSnapshot();
+            assertEquals(org.bukkit.entity.EntityType.COW, snapshot.getEntityType());
+            assertEquals(4.0, snapshot.getLocation().getX());
+            assertEquals(6.0, snapshot.getLocation().getZ());
+            assertEquals(8.0, snapshot.getHealth());
+            assertEquals(0.5, snapshot.getVelocity().getY());
+            assertTrue(snapshot.isValid());
+            assertTrue(snapshot.getAsString().contains("minecraft:cow"));
+
+            HostBridge.transport = (owner, subject, method, args) -> method.equals("isValid()") ? "false" : null;
+            var gone = (FerriteEntitySnapshot) cow.createSnapshot();
+            assertFalse(gone.isValid());
+            assertEquals(org.bukkit.entity.EntityType.COW, gone.getEntityType());
+
+            HostBridge.transport = null;
+            Native.close();
+            assertEquals(org.bukkit.entity.EntityType.COW, snapshot.getEntityType());
+            assertEquals(4.0, snapshot.getLocation().getX());
+            assertThrows(IllegalStateException.class, () -> ((FerriteServer) org.bukkit.Bukkit.getServer()).getEntityFactory().createEntitySnapshot("{}"));
+        } finally {
+            HostBridge.transport = null;
+            Native.link();
+        }
+    }
+
     @Test void droppedItemsGoToTheHostAndComeBackAsAHandle() {
         var calls = new java.util.ArrayList<String>();
         HostBridge.transport = (owner, subject, method, args) -> { calls.add(method); return ""; };
@@ -321,7 +422,7 @@ class PlayerExtrasTest {
             player.getWorld().dropItem(at, new org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 1));
             assertThrows(IllegalArgumentException.class, () -> player.getWorld().dropItem(at, new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR, 1)));
         } finally { HostBridge.transport = null; }
-        assertEquals(java.util.List.of("dropItemNaturally(Location,ItemStack,String)", "dropItem(Location,ItemStack,String)"), calls);
+        assertEquals(java.util.List.of("getItemStack()", "dropItemNaturally(Location,ItemStack,String)", "getItemStack()", "dropItem(Location,ItemStack,String)"), calls);
     }
 
     @Test void craftWorldDropMethodsUseTheLiveWorldPath() {
@@ -354,7 +455,7 @@ class PlayerExtrasTest {
             assertEquals(java.util.List.of(2), seen);
             assertThrows(IllegalArgumentException.class, () -> player.dropItem(new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR, 1), true, null));
         } finally { HostBridge.transport = null; }
-        assertEquals(java.util.List.of("dropStack(ItemStack)"), calls);
+        assertEquals(java.util.List.of("getItemStack()", "dropStack(ItemStack)", "getItemStack()"), calls);
     }
 
     @Test void spawnedEntitiesGoToTheHost() {

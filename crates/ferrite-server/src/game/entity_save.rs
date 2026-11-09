@@ -493,8 +493,21 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("Age".into(), Tag::Int(item.age));
         c.insert("PickupDelay".into(), Tag::Int(item.pickup_delay));
         c.insert("ItemHealth".into(), Tag::Int(item.health));
+        c.insert(
+            "UnlimitedLifetime".into(),
+            Tag::Byte(item.unlimited_lifetime as i8),
+        );
+        c.insert("CanMobPickup".into(), Tag::Byte(item.can_mob_pickup as i8));
+        c.insert(
+            "CanPlayerPickup".into(),
+            Tag::Byte(item.can_player_pickup as i8),
+        );
+        c.insert("WillAge".into(), Tag::Byte(item.will_age as i8));
         if let Some(target) = item.target {
             c.insert("PickupTarget".into(), Tag::IntArray(uuid_words(target)));
+        }
+        if let Some(thrower) = item.thrower {
+            c.insert("Thrower".into(), Tag::IntArray(uuid_words(thrower)));
         }
     }
 
@@ -643,6 +656,11 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             pickup_delay: int(c, "PickupDelay").unwrap_or(0),
             health: int(c, "ItemHealth").unwrap_or(5),
             target: uuid_field(c, "PickupTarget"),
+            thrower: uuid_field(c, "Thrower"),
+            unlimited_lifetime: boolean(c, "UnlimitedLifetime"),
+            can_mob_pickup: !c.contains_key("CanMobPickup") || boolean(c, "CanMobPickup"),
+            can_player_pickup: !c.contains_key("CanPlayerPickup") || boolean(c, "CanPlayerPickup"),
+            will_age: !c.contains_key("WillAge") || boolean(c, "WillAge"),
         });
     }
 

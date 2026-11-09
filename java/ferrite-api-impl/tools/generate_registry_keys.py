@@ -10,7 +10,7 @@ if not report.exists():
     raise SystemExit(f"Missing {report}; run tools/fetch_vanilla.py first")
 registries = json.loads(report.read_text(encoding="utf-8"))
 keys = {}
-for name in ("item", "block", "menu", "mob_effect", "sound_event", "attribute", "entity_type", "fluid", "game_event"):
+for name in ("item", "block", "menu", "mob_effect", "sound_event", "attribute", "entity_type", "fluid", "game_event", "worldgen/structure_type"):
     keys[name] = set(registries["minecraft:" + name]["entries"])
 for name, directory in (("enchantment", "enchantment"), ("worldgen/biome", "worldgen/biome"), ("worldgen/structure", "worldgen/structure"), ("damage_type", "damage_type")):
     base = root / "data" / "minecraft" / directory

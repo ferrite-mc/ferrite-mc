@@ -84,6 +84,19 @@ fn mutations_wait_for_inflight_tick_and_tasks_follow_merge() {
         mpsc,
     };
     use std::time::Duration;
+
+    /// Unblocks a tick that is waiting on `release_tx` even when an assertion
+    /// panics. The guard is declared after the scheduler, so it is dropped
+    /// first; otherwise `Scheduler::drop` joins a worker that can never stop.
+    struct ReleaseOnDrop(Option<mpsc::Sender<()>>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
     let mut topology = Regionizer::<Data>::new(0, 1);
     topology.add_chunk(ChunkPos(0, 0));
     topology.add_chunk(ChunkPos(2, 0));
@@ -91,10 +104,13 @@ fn mutations_wait_for_inflight_tick_and_tasks_follow_merge() {
     let (release_tx, release_rx) = mpsc::channel();
     let release = Arc::new(std::sync::Mutex::new(release_rx));
     let first = Arc::new(AtomicBool::new(true));
+    // One worker: the second region cannot tick at the same time, so adding the
+    // bridge always has exactly one idle destination and the test cannot
+    // observe a transient third region depending on thread scheduling.
     let scheduler = Scheduler::new(
         topology,
         (),
-        2,
+        1,
         move |_| {
             if first.swap(false, Ordering::SeqCst) {
                 entered_tx.send(()).unwrap();
@@ -103,6 +119,7 @@ fn mutations_wait_for_inflight_tick_and_tasks_follow_merge() {
         },
         |_| {},
     );
+    let mut release_tx = ReleaseOnDrop(Some(release_tx));
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     scheduler.add_chunk(ChunkPos(1, 0));
     assert_eq!(scheduler.region_count(), 2);
@@ -110,7 +127,7 @@ fn mutations_wait_for_inflight_tick_and_tasks_follow_merge() {
     scheduler.schedule_at_chunk(ChunkPos(2, 0), move |_| {
         tx.send(()).unwrap();
     });
-    release_tx.send(()).unwrap();
+    release_tx.0.take().unwrap().send(()).unwrap();
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(scheduler.region_count(), 1);
     assert_eq!(scheduler.shutdown().regions.len(), 1);

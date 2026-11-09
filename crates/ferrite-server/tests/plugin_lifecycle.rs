@@ -52,6 +52,12 @@ fn server_command() -> Command {
 /// Gradle builds share one daemon and project directory; serialize the test helpers that invoke it.
 static GRADLE_LOCK: Mutex<()> = Mutex::new(());
 
+/// CI builds the bridge and fixture jars once before `cargo test`. Test binaries run in
+/// parallel, so letting each one invoke Gradle would serialize on the same project directory.
+fn java_prebuilt() -> bool {
+    std::env::var_os("FERRITE_JAVA_PREBUILT").is_some()
+}
+
 /// A Gradle invocation in `java/ferrite-api-impl`. CI installs the pinned Gradle and sets
 /// `FERRITE_USE_SYSTEM_GRADLE`, because the wrapper would download that same distribution a
 /// second time and that download failed transiently with HTTP 504 in CI.
@@ -103,25 +109,27 @@ fn bridge_snapshot_survives_a_later_build() {
 
 /// Build the Java bridge, the test plugin and its dependency with the Gradle wrapper.
 fn build_jars(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
-    let output = gradle(
-        &project,
-        java_home,
-        &[
-            "--console=plain",
-            ":test-plugin:jar",
-            ":test-dependency:jar",
-            "shadedJar",
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "gradle build failed in {}:\n{}\n{}",
-        project.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if !java_prebuilt() {
+        let _guard = GRADLE_LOCK.lock().unwrap();
+        let output = gradle(
+            &project,
+            java_home,
+            &[
+                "--console=plain",
+                ":test-plugin:jar",
+                ":test-dependency:jar",
+                "shadedJar",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "gradle build failed in {}:\n{}\n{}",
+            project.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let plugin = repo.join("java/test-plugin/build/libs/test-plugin.jar");
     let dependency = repo.join("java/test-dependency/build/libs/test-dependency.jar");
     let bridge = project.join("build/libs/ferrite-api-impl-all.jar");
@@ -740,22 +748,25 @@ fn server_loads_plugins_at_startup_and_disables_them_on_stop() {
 
 /// Build the typical-plugin fixture together with the shaded bridge.
 fn build_typical_jar(repo: &Path, java_home: &Path, runtime: &Path) -> (PathBuf, PathBuf) {
-    let _guard = GRADLE_LOCK.lock().unwrap();
     let project = repo.join("java").join("ferrite-api-impl");
-    let output = gradle(
-        &project,
-        java_home,
-        &["--console=plain", ":test-plugin-typical:jar", "shadedJar"],
-    );
-    assert!(
-        output.status.success(),
-        "gradle typical plugin build failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if !java_prebuilt() {
+        let _guard = GRADLE_LOCK.lock().unwrap();
+        let output = gradle(
+            &project,
+            java_home,
+            &["--console=plain", ":test-plugin-typical:jar", "shadedJar"],
+        );
+        assert!(
+            output.status.success(),
+            "gradle typical plugin build failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let jar = repo.join("java/test-plugin-typical/build/libs/test-plugin-typical.jar");
     assert!(jar.exists(), "missing built jar: {}", jar.display());
     let bridge = project.join("build/libs/ferrite-api-impl-all.jar");
+    assert!(bridge.exists(), "missing built jar: {}", bridge.display());
     (
         snapshot_bridge(&jar, runtime),
         snapshot_bridge(&bridge, runtime),

@@ -182,6 +182,21 @@ fn cookie_answer(call: &HostCall) -> Option<String> {
     })
 }
 
+/// What a plugin may read about an item entity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemFact {
+    pub material: &'static str,
+    pub amount: u8,
+    pub pickup_delay: i32,
+    pub owner: Option<Uuid>,
+    pub thrower: Option<Uuid>,
+    pub unlimited_lifetime: bool,
+    pub can_mob_pickup: bool,
+    pub can_player_pickup: bool,
+    pub will_age: bool,
+    pub health: i32,
+}
+
 /// What a plugin may read about an entity of the world.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityFact {
@@ -193,6 +208,7 @@ pub struct EntityFact {
     pub health: Option<f32>,
     /// The plugin world this entity belongs to; `None` for dimensions plugins cannot address.
     pub world: Option<Uuid>,
+    pub item: Option<ItemFact>,
 }
 
 fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
@@ -224,6 +240,24 @@ pub fn publish_entities(
             continue;
         }
         owned.insert(data.uuid);
+        let item = data.item.as_ref().map(|item| {
+            let stack = ferrite_entity::item::stack(data);
+            ItemFact {
+                material: u16::try_from(stack.item_id)
+                    .ok()
+                    .and_then(ferrite_item::item_name)
+                    .unwrap_or("minecraft:air"),
+                amount: u8::try_from(stack.count).unwrap_or(0),
+                pickup_delay: item.pickup_delay,
+                owner: item.target,
+                thrower: item.thrower,
+                unlimited_lifetime: item.unlimited_lifetime,
+                can_mob_pickup: item.can_mob_pickup,
+                can_player_pickup: item.can_player_pickup,
+                will_age: item.will_age,
+                health: item.health,
+            }
+        });
         registry.insert(
             data.uuid,
             EntityFact {
@@ -234,6 +268,7 @@ pub fn publish_entities(
                 pitch: data.pitch,
                 health: data.mob.as_ref().map(|mob| mob.health),
                 world,
+                item,
             },
         );
     }
@@ -246,6 +281,26 @@ pub fn forget_entities(uuids: impl IntoIterator<Item = Uuid>) {
     for uuid in uuids {
         registry.remove(&uuid);
     }
+}
+
+/// What the host last published about one entity, or `None` once it left the world.
+pub fn fact(uuid: Uuid) -> Option<EntityFact> {
+    entity_registry().lock().unwrap().get(&uuid).cloned()
+}
+
+/// The NBT-free snapshot of a live entity handle, encoded for Java.
+pub fn entity_snapshot(subject: &str) -> Option<String> {
+    let uuid = Uuid::parse_str(subject).ok()?;
+    let fact = fact(uuid)?;
+    Some(super::snapshot::wire(
+        fact.kind,
+        fact.pos,
+        [f64::from(fact.yaw), f64::from(fact.pitch)],
+        Some(uuid),
+        fact.health.map(f64::from),
+        fact.vel,
+        None,
+    ))
 }
 
 /// Where an entity was last published, for routing an operation to the region that owns it.

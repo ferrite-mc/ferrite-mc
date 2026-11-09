@@ -127,7 +127,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getEmptyChunkSnapshot" -> {
                 var world = (org.bukkit.World) proxy;
                 var key = world.getKey();
-                yield new FerriteChunkSnapshot((int) args[0], (int) args[1], name, id.toString(), net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()), world.getMinHeight(), world.getMaxHeight(), hostLong("getFullTime()", time));
+                yield new FerriteChunkSnapshot((int) args[0], (int) args[1], name, id.toString(), net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()), world.getMinHeight(), world.getMaxHeight(), hostLong("getFullTime()", time), (boolean) args[3]);
             }
             case "getChunkAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield chunk(l.getBlockX() >> 4, l.getBlockZ() >> 4); yield chunk((int) args[0], (int) args[1]); }
             case "getPlayers" -> playersHere();

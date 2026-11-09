@@ -2,7 +2,21 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  workflow_dispatch:
+
+# A new push to a branch makes the previous run obsolete. Without this, every
+# push (and every merge of the same commit) leaves another full matrix queued.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -15,6 +29,9 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A blocked integration test used to sit on the runner until GitHub's
+    # six-hour limit. Normal runs are ~15 minutes; fail fast instead.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +50,10 @@ jobs:
       # `setup-gradle` below instead of the wrapper, which would download the same
       # distribution a second time; that download failed transiently with HTTP 504.
       FERRITE_USE_SYSTEM_GRADLE: "1"
+      # Build the bridge and fixture jars once in the dedicated step below. Tests
+      # otherwise invoke Gradle from several binaries at the same time, which can
+      # block on the same project directory and hide failures inside cargo test.
+      FERRITE_JAVA_PREBUILT: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -60,12 +81,14 @@ jobs:
           gradle-version: '9.8.1'
 
       # vanilla/ is generated locally and gitignored; only cache the produced
-      # data, keyed on the generator script that defines its layout.
+      # data, keyed on the scripts that define its layout. Both `generated/` and
+      # `fixture-world/` carry completion markers, so a restored cache skips the
+      # expensive data generator and fixture-server passes.
       - name: Cache vanilla data
         uses: actions/cache@v4
         with:
           path: vanilla
-          key: vanilla-${{ runner.os }}-${{ hashFiles('tools/fetch_vanilla.py') }}
+          key: vanilla-${{ runner.os }}-${{ hashFiles('tools/fetch_vanilla.py', 'tools/make_fixture_world.py', 'tools/extractor/**') }}
 
       - name: Fetch vanilla data
         run: ${{ matrix.python }} tools/fetch_vanilla.py
@@ -75,6 +98,15 @@ jobs:
 
       - name: Generate fixture world
         run: ${{ matrix.python }} tools/make_fixture_world.py
+
+      # Build every jar the Rust integration tests copy, once, before cargo test.
+      # Doing it here gives Gradle failures their own step and keeps the fixture
+      # builds serialized instead of racing through separate test binaries.
+      - name: Build Java fixtures
+        shell: bash
+        run: |
+          cd java/ferrite-api-impl
+          gradle --console=plain build :test-plugin-typical:jar
 
       # The vanilla/ tree is generated locally and must never be committed; only code that
       # reads it is tracked.
@@ -93,4 +125,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
+        timeout-minutes: 25
         run: cargo test --workspace

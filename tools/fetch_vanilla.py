@@ -1,6 +1,10 @@
 """Download the official vanilla server jar and run its data generator.
 
-Usage:  python tools/fetch_vanilla.py [version]      (default: version in ferrite-protocol)
+Usage:  python tools/fetch_vanilla.py [version] [--force]
+        (default: version in ferrite-protocol)
+
+A completed `generated/.complete` marker is reused unless --force is given, so CI
+can restore the cached tree without rerunning the data generator.
 
 Output (gitignored):
   vanilla/<version>/server.jar
@@ -172,7 +176,9 @@ def extract_structures(out: pathlib.Path, version: str) -> int:
 
 def main() -> None:
     global version_label
-    version = sys.argv[1] if len(sys.argv) > 1 else default_version()
+    force = "--force" in sys.argv
+    args = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
+    version = args[0] if args else default_version()
     version_label = f"Minecraft {version}"
     entry = next((v for v in fetch_json(MANIFEST)["versions"] if v["id"] == version), None)
     if entry is None:
@@ -184,8 +190,11 @@ def main() -> None:
     server = meta["downloads"]["server"]
     download(server["url"], jar, server["sha1"])
 
-    java = find_java(meta.get("javaVersion", {}).get("majorVersion", 21))
     gen = out / "generated"
+    if (gen / ".complete").exists() and not force:
+        print(f"ok: cached {gen}")
+        return
+    java = find_java(meta.get("javaVersion", {}).get("majorVersion", 21))
     if gen.exists():
         shutil.rmtree(gen)
     subprocess.run(
@@ -196,6 +205,7 @@ def main() -> None:
     run_extractor(java, version, out)
     extract_resources(out, version)
     print(f"extracted {extract_structures(out, version)} structure templates")
+    (gen / ".complete").write_text(f"{version}\n", encoding="utf-8")
     print(f"ok: {gen}")
 
 

@@ -1,6 +1,10 @@
 """Generate the vanilla fixture world used by world/light/server tests.
 
-Usage:  python tools/make_fixture_world.py [version]   (run tools/fetch_vanilla.py first)
+Usage:  python tools/make_fixture_world.py [version] [--force]
+        (run tools/fetch_vanilla.py first)
+
+A completed `fixture-world/.complete` marker is reused unless --force is given, so CI
+can restore the cached world without starting the vanilla server again.
 
 Starts the official server jar twice with a fixed seed:
 
@@ -299,12 +303,17 @@ def run_server(jar, out, *, pin_spawn: bool, settle_seconds: int) -> None:
 
 
 def main() -> None:
-    version = sys.argv[1] if len(sys.argv) > 1 else default_version()
+    force = "--force" in sys.argv
+    args = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
+    version = args[0] if args else default_version()
     base = ROOT / "vanilla" / version
     jar = base / "server.jar"
     if not jar.exists():
         sys.exit(f"missing {jar}; run python tools/fetch_vanilla.py first")
     out = base / "fixture-world"
+    if (out / ".complete").exists() and not force:
+        print(f"ok: cached {out}")
+        return
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -323,6 +332,7 @@ def main() -> None:
     stale = unlit_chunks(out)
     if stale:
         sys.exit(f"{stale} chunk(s) are still marked unlit after the relight pass")
+    (out / ".complete").write_text(f"{version}\n", encoding="utf-8")
     print(f"ok: {out / 'world'} (seed {SEED!r})")
 
 

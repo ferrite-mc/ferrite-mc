@@ -112,4 +112,50 @@ final class FerriteTags {
     private static String normalize(String id) {
         return id.contains(":") ? id : "minecraft:" + id;
     }
+
+    /** The item members of one item tag, or null when the tag does not exist. */
+    static Set<org.bukkit.Material> itemTag(org.bukkit.NamespacedKey key) {
+        for (var tag : tags("item", org.bukkit.Material.class)) {
+            if (tag.getKey().equals(key)) return tag.getValues();
+        }
+        return null;
+    }
+
+    /** Vanilla enchantment tags, resolved through their `#tag` references. */
+    private static final java.util.concurrent.ConcurrentMap<String, Set<String>> ENCHANTMENT_TAGS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    static boolean enchantmentTagged(org.bukkit.NamespacedKey tag, org.bukkit.NamespacedKey enchantment) {
+        if (tag == null) return false;
+        var values = ENCHANTMENT_TAGS.computeIfAbsent(tag.toString(), FerriteTags::loadEnchantmentTag);
+        return values.contains(enchantment.toString());
+    }
+
+    private static Set<String> loadEnchantmentTag(String name) {
+        var values = new HashSet<String>();
+        collectEnchantmentTag(normalize(name), values, new HashSet<>());
+        return Set.copyOf(values);
+    }
+
+    private static void collectEnchantmentTag(String name, Set<String> out, Set<String> visiting) {
+        if (!visiting.add(name)) return;
+        var file = Bootstrap.dataFile("data/minecraft/tags/enchantment/" + name.substring("minecraft:".length()) + ".json");
+        if (file == null || !file.isFile()) return;
+        try {
+            var json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(file.toPath())).getAsJsonObject();
+            var values = json.getAsJsonArray("values");
+            if (values == null) return;
+            for (var entry : values) {
+                String id = entry.isJsonPrimitive() ? entry.getAsString()
+                        : entry.isJsonObject() && entry.getAsJsonObject().has("id") ? entry.getAsJsonObject().get("id").getAsString() : null;
+                if (id == null) continue;
+                if (id.startsWith("#")) collectEnchantmentTag(normalize(id.substring(1)), out, visiting);
+                else out.add(normalize(id));
+            }
+        } catch (java.io.IOException | RuntimeException error) {
+            throw new IllegalStateException("Cannot read enchantment tag " + name, error);
+        } finally {
+            visiting.remove(name);
+        }
+    }
 }

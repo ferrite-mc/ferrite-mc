@@ -25,7 +25,7 @@ public final class Bootstrap {
      * players before {@code onEnable} runs. Pair it with {@link #enablePlugins}.
      */
     public static void startServer() {
-        if (org.bukkit.Bukkit.getServer() != null) { server = (FerriteServer) org.bukkit.Bukkit.getServer(); return; }
+        if (org.bukkit.Bukkit.getServer() != null) { server = (FerriteServer) org.bukkit.Bukkit.getServer(); Native.link(); return; }
         Native.link();
         if (!"false".equals(System.getProperty("ferrite.native"))) java.util.logging.Logger.getLogger("").addHandler(new java.util.logging.Handler() {
             public void publish(java.util.logging.LogRecord record) { Native.log(record.getMessage()); }
@@ -75,7 +75,7 @@ public final class Bootstrap {
     public static void runGlobalTask(long id) { synchronized (LEGACY_LOCK) { server.scheduler.executeId(id); } }
     public static void runEntityTask(long id) { server.entitySchedulers.execute(id); }
     public static void runRegionTask(long id) { server.regionScheduler.execute(id); }
-    public static void shutdown() { synchronized (LEGACY_LOCK) { server.beginShutdown(); server.getPluginManager().disablePlugins(); server.asyncScheduler.shutdown(); } }
+    public static void shutdown() { synchronized (LEGACY_LOCK) { server.beginShutdown(); server.getPluginManager().disablePlugins(); server.asyncScheduler.shutdown(); } Native.close(); }
     /** Resolves the live player object, registering a snapshot when the server has none yet. */
     private static org.bukkit.entity.Player ensurePlayer(String id, String name) {
         var uuid = java.util.UUID.fromString(id);

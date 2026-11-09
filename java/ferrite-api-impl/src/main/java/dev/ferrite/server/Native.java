@@ -49,10 +49,14 @@ public final class Native {
     static boolean worldSetBlock(String world, int x, int y, int z, String material) { return !enabled() || Bindings.worldSetBlock(world, x, y, z, material); }
     static void playerState(String player, int kind, double value) { if (enabled()) Bindings.playerState(player, kind, value); }
     static void playerMessage(String player, String message, boolean component) { if (enabled()) Bindings.playerMessage(player, message, component); }
-    static String hostCall(String owner, String subject, String method, String args) { return enabled() ? Bindings.hostCall(owner, subject, method, args) : null; }
+    static String hostCall(String owner, String subject, String method, String args) { return !closed && enabled() ? Bindings.hostCall(owner, subject, method, args) : null; }
     private static volatile boolean linked;
+    /** Set once the server stopped: host calls return null instead of reaching a torn-down JVM. */
+    private static volatile boolean closed;
     /** Marks the native bridge as available; the host registers natives before Bootstrap.start. */
-    static void link() { linked = enabled(); }
+    static void link() { closed = false; linked = enabled(); }
+    /** Called after every plugin is disabled, so late snapshot access cannot call into the host. */
+    static void close() { closed = true; }
     static void eventRegistered(String type) { if (linked) Bindings.eventRegistered(type); }
     static void eventsCleared() { if (linked) Bindings.eventsCleared(); }
     public static void log(String message) { if (enabled()) Bindings.log(message); else System.out.println(message); }

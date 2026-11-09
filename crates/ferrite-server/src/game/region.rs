@@ -9101,6 +9101,98 @@ impl Region {
             Op::Damage(amount) => {
                 mob::hurt(&mut self.entities, key, *amount, None);
             }
+            Op::SetItem { material, amount } => {
+                let Some(item_id) = ferrite_item::item_id(material) else {
+                    return false;
+                };
+                let Some(data) = self.entities.data_mut(key) else {
+                    return false;
+                };
+                ferrite_entity::item::set_stack(
+                    data,
+                    ferrite_protocol::packets::play::ItemStack {
+                        count: i32::from(*amount),
+                        item_id: i32::from(item_id),
+                    },
+                );
+            }
+            Op::SetPickupDelay(delay) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.pickup_delay = *delay;
+                }
+            }
+            Op::SetOwner(owner) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.target = *owner;
+                }
+            }
+            Op::SetThrower(thrower) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.thrower = *thrower;
+                }
+            }
+            Op::SetUnlimitedLifetime(unlimited) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.unlimited_lifetime = *unlimited;
+                    item.age = if *unlimited {
+                        ferrite_entity::item::INFINITE_LIFETIME
+                    } else {
+                        0
+                    };
+                }
+            }
+            Op::SetCanMobPickup(allowed) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.can_mob_pickup = *allowed;
+                }
+            }
+            Op::SetCanPlayerPickup(allowed) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.can_player_pickup = *allowed;
+                }
+            }
+            Op::SetWillAge(ages) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.will_age = *ages;
+                }
+            }
+            Op::SetItemHealth(health) => {
+                if let Some(item) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.item.as_mut())
+                {
+                    item.health = *health;
+                }
+            }
         }
         true
     }

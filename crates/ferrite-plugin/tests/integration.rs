@@ -40,40 +40,50 @@ fn plugin_lifecycle() {
         .expect("crate lives in <repo>/crates/<name>")
         .to_owned();
     let project = repo_root.join("java").join("ferrite-api-impl");
-    let use_system_gradle = std::env::var_os("FERRITE_USE_SYSTEM_GRADLE").is_some();
-    let mut command = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        // `cmd` may not search the cwd (NoDefaultCurrentDirectoryInExePath), so be explicit.
-        let launcher = if use_system_gradle {
-            "gradle"
+    // CI builds every fixture jar once in its own step. Building again here would
+    // run Gradle concurrently from several test binaries against one project.
+    if std::env::var_os("FERRITE_JAVA_PREBUILT").is_none() {
+        let use_system_gradle = std::env::var_os("FERRITE_USE_SYSTEM_GRADLE").is_some();
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            // `cmd` may not search the cwd (NoDefaultCurrentDirectoryInExePath), so be explicit.
+            let launcher = if use_system_gradle {
+                "gradle"
+            } else {
+                ".\\gradlew.bat"
+            };
+            c.args(["/C", launcher, "build"]);
+            c
         } else {
-            ".\\gradlew.bat"
+            let launcher = if use_system_gradle {
+                "gradle"
+            } else {
+                "./gradlew"
+            };
+            let mut c = Command::new(launcher);
+            c.arg("build");
+            c
         };
-        c.args(["/C", launcher, "build"]);
-        c
-    } else {
-        let launcher = if use_system_gradle {
-            "gradle"
-        } else {
-            "./gradlew"
-        };
-        let mut c = Command::new(launcher);
-        c.arg("build");
-        c
-    };
-    let result = command
-        .current_dir(&project)
-        .env("JAVA_HOME", &java_home)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "gradle build failed in {}:
+        let result = command
+            .current_dir(&project)
+            .env("JAVA_HOME", &java_home)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "gradle build failed in {}:
 {}
 {}",
-        project.display(),
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
+            project.display(),
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let bridge = project.join("build/libs/ferrite-api-impl-all.jar");
+    assert!(
+        bridge.exists(),
+        "missing prebuilt bridge jar: {}",
+        bridge.display()
     );
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(

@@ -202,8 +202,8 @@ class ApiSurfaceTest {
         assertSame(world, server.createWorld(new org.bukkit.WorldCreator(world.getName())));
         var missing = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_missing_world")));
         assertTrue(missing.getMessage().contains("creating worlds at runtime"));
-        var snapshot = assertThrows(UnsupportedOperationException.class, () -> server.getEntityFactory().createEntitySnapshot("{}"));
-        assertTrue(snapshot.getMessage().contains("not implemented: EntityFactory#createEntitySnapshot"));
+        var snapshot = assertThrows(IllegalStateException.class, () -> server.getEntityFactory().createEntitySnapshot("{}"));
+        assertTrue(snapshot.getMessage().contains("no host is available"));
     }
 
     @Test void damageEventsExposeMutableDamage() {

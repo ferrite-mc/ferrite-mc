@@ -46,6 +46,7 @@ final class SpawnedEntity {
             }
             case "isValid": { String text = ask(uuid, "isValid()"); return text == null || Boolean.parseBoolean(text); }
             case "isDead": { String text = ask(uuid, "isValid()"); return text != null && !Boolean.parseBoolean(text); }
+            case "createSnapshot": { String text = ask(uuid, "getEntitySnapshot()"); return text != null ? FerriteEntitySnapshot.fromWire(text, text) : FerriteEntitySnapshot.of((org.bukkit.entity.Entity) self); }
             case "remove": tell(uuid, "remove()"); return null;
             case "isInsideVehicle", "leaveVehicle", "eject", "isEmpty": { String text = ask(uuid, name + "()"); return text != null ? Boolean.parseBoolean(text) : name.equals("isEmpty"); }
             case "addPassenger", "removePassenger": return HostBridge.callBoolean("Entity", uuid, name + "(Entity)", args[0]);

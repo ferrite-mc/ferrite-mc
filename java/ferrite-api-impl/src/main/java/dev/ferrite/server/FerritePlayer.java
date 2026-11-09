@@ -48,6 +48,7 @@ final class FerritePlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
     @Override public void closeInventory() { closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason.UNKNOWN); }
     @Override public void closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason reason) { HostBridge.callVoid("Player", id, "closeInventory(Reason)", reason); openView = null; }
     @Override public java.util.UUID getUniqueId() { return id; }
+    @Override public org.bukkit.entity.EntitySnapshot createSnapshot() { return FerriteEntitySnapshot.of(this); }
     @Override public String getName() { return name; }
     @Override public String getDisplayName() { return net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().serialize(displayName()); }
     @Override public void setDisplayName(String value) { displayName(value == null ? null : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(value)); }

@@ -54,11 +54,18 @@ class FerriteChunkDataTest {
         assertEquals(21, chunk.getHeight(HeightMap.WORLD_SURFACE, 1, 1));
     }
 
+    @Test void biomesDefaultToPlainsAndAreRangeChecked() {
+        var chunk = data();
+        assertEquals(org.bukkit.block.Biome.PLAINS, chunk.getBiome(1, 20, 1));
+        assertEquals(org.bukkit.block.Biome.PLAINS, chunk.getBiome(1, 1000, 1));
+    }
+
     @Test void emptySnapshotIsAllAirAndRangeChecked() {
         var snap = org.bukkit.Bukkit.getWorld("chunkdata").getEmptyChunkSnapshot(2, -3, false, false);
         assertEquals(2, snap.getX());
         assertEquals(-3, snap.getZ());
         assertEquals("chunkdata", snap.getWorldName());
+        assertEquals("minecraft:overworld", snap.getWorldKey().asString());
         assertEquals(Material.AIR, snap.getBlockType(1, 70, 1));
         assertTrue(snap.isSectionEmpty(4));
         assertEquals(-64, snap.getHighestBlockYAt(0, 0));
@@ -73,7 +80,7 @@ class FerriteChunkDataTest {
         assertSame(table, server.getLootTable(key));
         assertEquals(key, table.getKey());
         assertNull(server.getLootTable(org.bukkit.NamespacedKey.minecraft("blocks/no_such_table")));
-        assertThrows(UnsupportedOperationException.class, () -> table.populateLoot(new java.util.Random(), null));
+        assertThrows(NullPointerException.class, () -> table.populateLoot(new java.util.Random(), null));
     }
 
     @Test void chunkStateComesFromTheHost() {

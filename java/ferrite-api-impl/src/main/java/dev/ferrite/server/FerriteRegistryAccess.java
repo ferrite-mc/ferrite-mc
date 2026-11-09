@@ -20,7 +20,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         } catch (java.io.IOException e) { throw new IllegalStateException("Cannot read registry keys", e); }
         return result;
     }
-    private static boolean contains(String registry, org.bukkit.NamespacedKey key) { return KEYS.getOrDefault(registry, java.util.Set.of()).contains(key.toString()); }
+    static boolean contains(String registry, org.bukkit.NamespacedKey key) { return KEYS.getOrDefault(registry, java.util.Set.of()).contains(key.toString()); }
     @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) {
         if (type == org.bukkit.block.BlockType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.BLOCK);
         if (type == org.bukkit.inventory.ItemType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.ITEM);
@@ -34,6 +34,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type == org.bukkit.potion.PotionEffectType.class) return (org.bukkit.Registry<T>) cached("mob_effect", FerriteRegistryAccess::potionRegistry);
         if (type == org.bukkit.block.Biome.class) return (org.bukkit.Registry<T>) cached("worldgen/biome", () -> identityRegistry("worldgen/biome", org.bukkit.block.Biome.class));
         if (type == org.bukkit.generator.structure.Structure.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.STRUCTURE);
+        if (type == org.bukkit.generator.structure.StructureType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.STRUCTURE_TYPE);
         if (type == org.bukkit.damage.DamageType.class) return (org.bukkit.Registry<T>) cached("damage_type", FerriteRegistryAccess::damageTypeRegistry);
         if (type == org.bukkit.map.MapCursor.Type.class) return (org.bukkit.Registry<T>) cached("map_decoration_type", FerriteRegistryAccess::mapDecorationRegistry);
         return unavailable(type.getName());
@@ -51,6 +52,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type.equals(io.papermc.paper.registry.RegistryKey.SOUND_EVENT)) return cast(cached("sound_event", () -> identityRegistry("sound_event", org.bukkit.Sound.class)));
         if (type.equals(io.papermc.paper.registry.RegistryKey.BIOME)) return cast(cached("worldgen/biome", () -> identityRegistry("worldgen/biome", org.bukkit.block.Biome.class)));
         if (type.equals(io.papermc.paper.registry.RegistryKey.STRUCTURE)) return cast(cached("worldgen/structure", () -> identityRegistry("worldgen/structure", org.bukkit.generator.structure.Structure.class, FerriteStructure::new)));
+        if (type.equals(io.papermc.paper.registry.RegistryKey.STRUCTURE_TYPE)) return cast(cached("worldgen/structure_type", FerriteRegistryAccess::structureTypeRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.DAMAGE_TYPE)) return cast(cached("damage_type", FerriteRegistryAccess::damageTypeRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.MAP_DECORATION_TYPE)) return cast(cached("map_decoration_type", FerriteRegistryAccess::mapDecorationRegistry));
         return unavailable(type.key().toString());
@@ -205,8 +207,34 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                 var value = entries.get(key); if (value != null) return value;
                 value = new FerriteEnchantment(key); var prior = entries.putIfAbsent(key, value); return prior == null ? value : prior;
             }
+            @Override public int size() { return KEYS.getOrDefault("enchantment", java.util.Set.of()).size(); }
+            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { return KEYS.getOrDefault("enchantment", java.util.Set.of()).stream().sorted().map(org.bukkit.NamespacedKey::fromString); }
+            @Override public java.util.stream.Stream<org.bukkit.enchantments.Enchantment> stream() { return keyStream().map(this::get); }
+            @Override public java.util.Iterator<org.bukkit.enchantments.Enchantment> iterator() { return stream().iterator(); }
         };
     }
+    /** StructureType is an abstract class, so it cannot be proxied like the identity registries. */
+    private static org.bukkit.Registry<org.bukkit.generator.structure.StructureType> structureTypeRegistry() {
+        return new BaseRegistry<org.bukkit.generator.structure.StructureType>("worldgen/structure_type") {
+            private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.generator.structure.StructureType> entries = new java.util.concurrent.ConcurrentHashMap<>();
+            @Override public org.bukkit.generator.structure.StructureType get(org.bukkit.NamespacedKey key) {
+                if (!contains("worldgen/structure_type", key)) return null;
+                return entries.computeIfAbsent(key, RegisteredStructureType::new);
+            }
+            @Override public int size() { return KEYS.get("worldgen/structure_type").size(); }
+            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { return KEYS.get("worldgen/structure_type").stream().map(org.bukkit.NamespacedKey::fromString); }
+            @Override public java.util.stream.Stream<org.bukkit.generator.structure.StructureType> stream() { return keyStream().map(this::get); }
+            @Override public java.util.Iterator<org.bukkit.generator.structure.StructureType> iterator() { return stream().iterator(); }
+        };
+    }
+
+    private static final class RegisteredStructureType extends org.bukkit.generator.structure.StructureType {
+        private final org.bukkit.NamespacedKey key;
+        RegisteredStructureType(org.bukkit.NamespacedKey key) { this.key = key; }
+        @Override public org.bukkit.NamespacedKey getKey() { return key; }
+        @Override public String toString() { return "StructureType[" + key + "]"; }
+    }
+
     private static org.bukkit.Registry<org.bukkit.potion.PotionEffectType> potionRegistry() {
         return new BaseRegistry<>("mob_effect") {
             private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.potion.PotionEffectType> entries = new java.util.concurrent.ConcurrentHashMap<>();
@@ -215,6 +243,10 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                 var value = entries.get(key); if (value != null) return value;
                 value = new FerritePotionEffectType(key); var prior = entries.putIfAbsent(key, value); return prior == null ? value : prior;
             }
+            @Override public int size() { return KEYS.getOrDefault("mob_effect", java.util.Set.of()).size(); }
+            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { return KEYS.getOrDefault("mob_effect", java.util.Set.of()).stream().sorted().map(org.bukkit.NamespacedKey::fromString); }
+            @Override public java.util.stream.Stream<org.bukkit.potion.PotionEffectType> stream() { return keyStream().map(this::get); }
+            @Override public java.util.Iterator<org.bukkit.potion.PotionEffectType> iterator() { return stream().iterator(); }
         };
     }
     @SuppressWarnings("unchecked") private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> cast(org.bukkit.Registry<?> registry) { return (org.bukkit.Registry<T>) registry; }

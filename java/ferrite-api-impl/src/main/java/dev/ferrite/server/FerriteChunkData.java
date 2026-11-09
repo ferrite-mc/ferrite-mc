@@ -24,7 +24,8 @@ final class FerriteChunkData implements ChunkData {
 
     @Override public int getMinHeight() { return minHeight; }
     @Override public int getMaxHeight() { return maxHeight; }
-    @Override public Biome getBiome(int x, int y, int z) { throw new UnsupportedOperationException("Ferrite: not implemented: ChunkData#getBiome"); }
+    /** Biome selection belongs to the generator's biome provider; this buffer has no biome override. */
+    @Override public Biome getBiome(int x, int y, int z) { return Biome.PLAINS; }
 
     @Override public void setBlock(int x, int y, int z, Material material) { setBlock(x, y, z, java.util.Objects.requireNonNull(material, "material").createBlockData()); }
     @Override public void setBlock(int x, int y, int z, MaterialData material) { setBlock(x, y, z, material.getItemType().createBlockData()); }

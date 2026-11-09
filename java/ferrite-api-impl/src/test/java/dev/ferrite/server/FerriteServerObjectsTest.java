@@ -170,6 +170,12 @@ class FerriteServerObjectsTest {
                 assertThrows(UnsupportedOperationException.class, manager::refreshPacks).getMessage());
     }
 
+    @Test void structureTypeComesFromTheVanillaStructureFile() {
+        var structure = new FerriteStructure(NamespacedKey.minecraft("village_plains"));
+        assertEquals(org.bukkit.generator.structure.StructureType.JIGSAW, structure.getStructureType());
+        assertEquals(org.bukkit.generator.structure.StructureType.JIGSAW, structure.getStructureType(), "cached result is stable");
+    }
+
     @Test void structureManagerRegistersStructuresInMemory() {
         var structures = server.getStructureManager();
         assertSame(structures, server.getStructureManager());
@@ -199,12 +205,127 @@ class FerriteServerObjectsTest {
                 () -> structure.place((org.bukkit.Location) null, false, org.bukkit.block.structure.StructureRotation.NONE, org.bukkit.block.structure.Mirror.NONE, 0, 1.0f, new java.util.Random()));
     }
 
-    @Test void entityFactoryRejectsSnapshotsUntilTheHostParsesThem() {
+    @Test void entityFactoryBuildsSnapshotsFromHostNbt() {
         var factory = server.getEntityFactory();
         assertSame(factory, server.getEntityFactory());
-        assertEquals("Ferrite: not implemented: EntityFactory#createEntitySnapshot",
-                assertThrows(UnsupportedOperationException.class,
-                        () -> factory.createEntitySnapshot("{id:\"minecraft:pig\"}")).getMessage());
+        var uuid = UUID.fromString("00000000-0000-0000-0000-000000000009");
+        var reply = "minecraft:pig" + HostBridge.ITEM + "1.5" + HostBridge.ITEM + "64.0" + HostBridge.ITEM + "2.5"
+                + HostBridge.ITEM + "90.0" + HostBridge.ITEM + "10.0" + HostBridge.ITEM + uuid
+                + HostBridge.ITEM + "16.0" + HostBridge.ITEM + "0.0" + HostBridge.ITEM + "0.5" + HostBridge.ITEM + "0.0"
+                + HostBridge.ITEM + java.util.Base64.getEncoder().encodeToString("Piggy".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        HostBridge.transport = (owner, subject, method, args) -> {
+            assertEquals("EntityFactory", owner);
+            assertEquals("createEntitySnapshot(String)", method);
+            return args.contains("minecraft:pig") ? reply : FerriteEntitySnapshot.INVALID;
+        };
+        try {
+            var snapshot = (FerriteEntitySnapshot) factory.createEntitySnapshot("{id:\"minecraft:pig\"}");
+            assertEquals(org.bukkit.entity.EntityType.PIG, snapshot.getEntityType());
+            assertEquals(1.5, snapshot.getLocation().getX());
+            assertEquals(64.0, snapshot.getLocation().getY());
+            assertEquals(90.0f, snapshot.getLocation().getYaw());
+            assertEquals(uuid, snapshot.getUniqueId());
+            assertEquals(16.0, snapshot.getHealth());
+            assertEquals(0.5, snapshot.getVelocity().getY());
+            assertEquals("Piggy", snapshot.getName());
+            assertTrue(snapshot.isValid());
+            assertEquals("{id:\"minecraft:pig\"}", snapshot.getAsString());
+            assertThrows(IllegalArgumentException.class, () -> factory.createEntitySnapshot("{id:\"minecraft:not_a_mob\"}"));
+        } finally { HostBridge.transport = null; }
+    }
+
+    @Test void enchantmentsExposeTheirVanillaData() {
+        var sharpness = org.bukkit.enchantments.Enchantment.SHARPNESS;
+        assertEquals(5, sharpness.getMaxLevel());
+        assertEquals(1, sharpness.getStartLevel());
+        assertEquals(io.papermc.paper.enchantments.EnchantmentRarity.COMMON, sharpness.getRarity());
+        assertFalse(sharpness.isTreasure());
+        assertFalse(sharpness.isCursed());
+        assertEquals(java.util.Set.of(org.bukkit.inventory.EquipmentSlotGroup.MAINHAND), sharpness.getActiveSlotGroups());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.WEAPON, sharpness.getItemTarget());
+        assertTrue(sharpness.getSupportedItems().resolve(org.bukkit.Registry.ITEM).stream()
+                .anyMatch(item -> item.getKey().equals(NamespacedKey.minecraft("diamond_sword"))));
+        assertNotNull(sharpness.getPrimaryItems());
+        assertTrue(sharpness.getPrimaryItems().resolve(org.bukkit.Registry.ITEM).stream()
+                .anyMatch(item -> item.getKey().equals(NamespacedKey.minecraft("diamond_sword"))));
+        var exclusive = sharpness.getExclusiveWith().resolve(org.bukkit.Registry.ENCHANTMENT);
+        assertTrue(exclusive.contains(org.bukkit.enchantments.Enchantment.SMITE), exclusive.toString());
+        assertTrue(exclusive.contains(sharpness), exclusive.toString());
+        assertInstanceOf(net.kyori.adventure.text.TranslatableComponent.class, sharpness.description());
+        assertEquals("enchantment.minecraft.sharpness",
+                ((net.kyori.adventure.text.TranslatableComponent) sharpness.description()).key());
+        assertTrue(PlainTextComponentSerializer.plainText().serialize(sharpness.displayName(5))
+                .contains("enchantment.level.5"));
+
+        var protection = org.bukkit.enchantments.Enchantment.PROTECTION;
+        assertEquals(4, protection.getMaxLevel());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.ARMOR, protection.getItemTarget());
+        assertEquals(java.util.Set.of(org.bukkit.inventory.EquipmentSlotGroup.ARMOR), protection.getActiveSlotGroups());
+        assertNull(protection.getPrimaryItems(), "vanilla leaves primary_items unset for protection");
+        assertTrue(protection.getExclusiveWith().resolve(org.bukkit.Registry.ENCHANTMENT)
+                .contains(org.bukkit.enchantments.Enchantment.FIRE_PROTECTION));
+
+        assertTrue(org.bukkit.enchantments.Enchantment.MENDING.isTreasure());
+        assertTrue(org.bukkit.enchantments.Enchantment.BINDING_CURSE.isCursed());
+        assertEquals(io.papermc.paper.enchantments.EnchantmentRarity.RARE, org.bukkit.enchantments.Enchantment.MENDING.getRarity());
+        assertEquals(io.papermc.paper.enchantments.EnchantmentRarity.VERY_RARE, org.bukkit.enchantments.Enchantment.SOUL_SPEED.getRarity());
+    }
+
+    @Test void potionEffectTypesExposeTheirVanillaData() {
+        var speed = PotionEffectType.SPEED;
+        assertEquals(org.bukkit.potion.PotionEffectTypeCategory.BENEFICIAL, speed.getCategory());
+        assertEquals(org.bukkit.Color.fromRGB(0x33EBFF), speed.getColor());
+        assertEquals(PotionEffectType.Category.BENEFICIAL, speed.getEffectCategory());
+        var movementSpeed = org.bukkit.Registry.ATTRIBUTE.get(NamespacedKey.minecraft("movement_speed"));
+        assertNotNull(movementSpeed);
+        var modifier = speed.getEffectAttributes().get(movementSpeed);
+        assertNotNull(modifier, speed.getEffectAttributes().toString());
+        assertEquals(0.2, modifier.getAmount(), 1e-9);
+        assertEquals(org.bukkit.attribute.AttributeModifier.Operation.MULTIPLY_SCALAR_1, modifier.getOperation());
+        assertEquals(NamespacedKey.minecraft("effect.speed"), modifier.getKey());
+
+        var slowness = PotionEffectType.SLOWNESS;
+        assertEquals(org.bukkit.potion.PotionEffectTypeCategory.HARMFUL, slowness.getCategory());
+        assertEquals(PotionEffectType.Category.HARMFUL, slowness.getEffectCategory());
+        assertEquals(-0.15, slowness.getEffectAttributes().get(movementSpeed).getAmount(), 1e-9);
+        var attackDamage = org.bukkit.Registry.ATTRIBUTE.get(NamespacedKey.minecraft("attack_damage"));
+        assertEquals(-4.0, PotionEffectType.WEAKNESS.getEffectAttributes().get(attackDamage).getAmount(), 1e-9);
+        assertTrue(PotionEffectType.POISON.getEffectAttributes().isEmpty());
+        assertEquals(org.bukkit.potion.PotionEffectTypeCategory.NEUTRAL, PotionEffectType.GLOWING.getCategory());
+        assertEquals(org.bukkit.Color.fromRGB(0x94A061), PotionEffectType.GLOWING.getColor());
+    }
+
+    @Test void registriesIterateTheirGeneratedKeysWithCachedObjects() {
+        var enchantments = org.bukkit.Registry.ENCHANTMENT;
+        var listedEnchantments = enchantments.stream().toList();
+        assertEquals(enchantments.size(), listedEnchantments.size());
+        assertEquals(listedEnchantments.size(), (int) enchantments.keyStream().count());
+        for (var enchantment : listedEnchantments) {
+            assertSame(enchantment, enchantments.get(enchantment.getKey()));
+            assertEquals(enchantment.getKey(), enchantments.getKey(enchantment));
+        }
+        var sharpness = enchantments.get(NamespacedKey.minecraft("sharpness"));
+        assertSame(sharpness, enchantments.stream()
+                .filter(enchantment -> enchantment.getKey().equals(NamespacedKey.minecraft("sharpness")))
+                .findFirst().orElseThrow());
+
+        var effects = org.bukkit.Registry.MOB_EFFECT;
+        var listedEffects = effects.stream().toList();
+        assertEquals(effects.size(), listedEffects.size());
+        assertEquals(listedEffects.size(), (int) effects.keyStream().count());
+        for (var effect : listedEffects) assertSame(effect, effects.get(effect.getKey()));
+        assertSame(PotionEffectType.SPEED, effects.get(NamespacedKey.minecraft("speed")));
+    }
+
+    @Test void unknownRegistryKeysStayExplicitlyUnsupported() {
+        var enchantment = new FerriteEnchantment(NamespacedKey.minecraft("no_such_enchantment"));
+        var enchantmentError = assertThrows(UnsupportedOperationException.class, enchantment::getMaxLevel);
+        assertTrue(enchantmentError.getMessage().contains("no_such_enchantment"), enchantmentError.getMessage());
+        var effect = new FerritePotionEffectType(NamespacedKey.minecraft("no_such_effect"));
+        var effectError = assertThrows(UnsupportedOperationException.class, effect::getColor);
+        assertTrue(effectError.getMessage().contains("no_such_effect"), effectError.getMessage());
+        assertNull(org.bukkit.Registry.ENCHANTMENT.get(NamespacedKey.minecraft("no_such_enchantment")));
+        assertNull(org.bukkit.Registry.MOB_EFFECT.get(NamespacedKey.minecraft("no_such_effect")));
     }
 
     private static Goal<Mob> goal(GoalKey<Mob> key, GoalType... types) {

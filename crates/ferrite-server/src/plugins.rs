@@ -10,6 +10,7 @@ mod craft;
 mod extra;
 pub mod facts;
 mod inventory;
+mod item_entity;
 mod items;
 mod loot;
 mod messaging;
@@ -17,6 +18,7 @@ mod motion;
 mod network;
 mod riding;
 pub mod rules;
+mod snapshot;
 mod survival;
 mod visual;
 pub mod worldgen;
@@ -133,6 +135,12 @@ impl PluginBridge {
                         let cooldowns = std::sync::Mutex::new(cooldown::Cooldowns::default());
                         let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
                             if let Some(reply) = items::item_type_answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = snapshot::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = item_entity::answer(call) {
                                 return Some(reply);
                             }
                             if let (Some(players), Some(command)) =
@@ -278,6 +286,12 @@ impl PluginBridge {
                             }
                             if let (Some(players), Some(command)) =
                                 (&players, blasts::drop_command(call))
+                            {
+                                players(command);
+                                return Some("true".to_owned());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, item_entity::command(call))
                             {
                                 players(command);
                                 return Some("true".to_owned());

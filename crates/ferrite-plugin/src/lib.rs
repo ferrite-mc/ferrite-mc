@@ -221,6 +221,24 @@ pub enum EntityOperation {
     Teleport([f64; 3]),
     /// Hurts a mob by this many health points.
     Damage(f32),
+    /// Replaces the stack of an item entity (`Item#setItemStack`).
+    SetItem {
+        material: String,
+        amount: u8,
+    },
+    /// Sets the ticks before an item may be picked up (`Item#setPickupDelay`).
+    SetPickupDelay(i32),
+    /// Restricts pickup to one player, or clears the restriction (`Item#setOwner`).
+    SetOwner(Option<uuid::Uuid>),
+    /// Makes the item live forever, or lets it age again (`Item#setUnlimitedLifetime`).
+    SetUnlimitedLifetime(bool),
+    /// Records who threw the item (`Item#setThrower`).
+    SetThrower(Option<uuid::Uuid>),
+    SetCanMobPickup(bool),
+    SetCanPlayerPickup(bool),
+    SetWillAge(bool),
+    /// Sets an item's remaining durability (`Item#setHealth`).
+    SetItemHealth(i32),
 }
 
 /// One step of showing a scoreboard to a player.

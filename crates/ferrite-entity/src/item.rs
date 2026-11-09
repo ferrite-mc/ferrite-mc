@@ -29,13 +29,27 @@ const WIDTH: f64 = 0.25;
 const HEIGHT: f64 = 0.25;
 
 /// Item-specific state; the stack itself is the synched `ITEM` data value.
+///
+/// The plugin-visible fields (`target`, `thrower`, `unlimited_lifetime`, the pickup flags and
+/// `will_age`) mirror Bukkit's `Item` surface; the game keeps its own pickup and ageing rules
+/// on top of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemState {
     pub age: i32,
     pub pickup_delay: i32,
     pub health: i32,
-    /// Only this player may pick the item up.
+    /// Only this player may pick the item up (Bukkit `Item#getOwner`).
     pub target: Option<Uuid>,
+    /// The player that threw the item (Bukkit `Item#getThrower`).
+    pub thrower: Option<Uuid>,
+    /// The item never despawns (Bukkit `Item#isUnlimitedLifetime`).
+    pub unlimited_lifetime: bool,
+    /// Whether mobs may pick the item up.
+    pub can_mob_pickup: bool,
+    /// Whether players may pick the item up.
+    pub can_player_pickup: bool,
+    /// Whether the item ages at all (Bukkit `Item#willAge`).
+    pub will_age: bool,
 }
 
 impl Default for ItemState {
@@ -45,6 +59,11 @@ impl Default for ItemState {
             pickup_delay: 0,
             health: 5,
             target: None,
+            thrower: None,
+            unlimited_lifetime: false,
+            can_mob_pickup: true,
+            can_player_pickup: true,
+            will_age: true,
         }
     }
 }
@@ -344,10 +363,10 @@ fn tick_item(store: &mut EntityStore, key: EntityKey, blocks: &impl BlockGetter,
         return;
     };
     let item = data.item.as_mut().unwrap();
-    if item.age != INFINITE_LIFETIME {
+    if item.age != INFINITE_LIFETIME && item.will_age {
         item.age += 1;
     }
-    let expired = item.age >= LIFETIME;
+    let expired = item.age >= LIFETIME && !item.unlimited_lifetime;
     let vel = store.vel(key).unwrap();
     let flags = store.flags_mut(key).unwrap();
     if (vel - old_vel).length_sqr() > 0.01 {
@@ -395,6 +414,7 @@ pub fn pick_up(store: &mut EntityStore, picker: &mut Picker<'_>, sink: &mut Sink
         if data.kind != kind
             || flags.has(Flags::REMOVED)
             || item.pickup_delay != 0
+            || !item.can_player_pickup
             || item.target.is_some_and(|t| t != picker.uuid)
         {
             continue;
