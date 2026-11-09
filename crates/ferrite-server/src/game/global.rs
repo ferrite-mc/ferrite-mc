@@ -825,7 +825,7 @@ mod tests {
             &ServerboundChat {
                 message: "hello".into(),
                 timestamp: 0,
-                salt: 0,
+                salt: i64::default(),
                 signature: None,
                 last_seen: LastSeenUpdate::new(0, &[], 0),
             },
@@ -864,7 +864,7 @@ mod tests {
                 &ServerboundChat {
                     message: "hi".into(),
                     timestamp: 0,
-                    salt: 0,
+                    salt: i64::default(),
                     signature: None,
                     last_seen: LastSeenUpdate::new(0, &[], 0),
                 },

@@ -182,7 +182,9 @@ mod tests {
     use crate::cfb8::Cfb8;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    const KEY: [u8; 16] = *b"ferrite-test-key";
+    fn test_key() -> [u8; 16] {
+        std::array::from_fn(|_| rand::random())
+    }
 
     /// Frames queued behind the socket are encrypted as one batch by the writer half.
     #[tokio::test]
@@ -191,11 +193,12 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let client = TcpStream::connect(address).await.unwrap();
         let (server, _) = listener.accept().await.unwrap();
+        let key = test_key();
         let mut client = Wire::new(client);
-        client.enable_encryption(&KEY);
+        client.enable_encryption(&key);
         let (mut client_read, mut client_write) = client.into_split();
         let mut server = Wire::new(server);
-        server.enable_encryption(&KEY);
+        server.enable_encryption(&key);
         let (mut server_read, mut server_write) = server.into_split();
         let plain = b"two frames in one write\x00\x01\x02".to_vec();
         let mut batch = plain.clone();
@@ -220,6 +223,7 @@ mod tests {
     #[tokio::test]
     async fn encrypted_stream_roundtrips_under_backpressure() {
         tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let key = test_key();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let plaintext: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i * 7 + 3) as u8).collect();
@@ -228,7 +232,7 @@ mod tests {
             let writer = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut wire = Wire::new(stream);
-                wire.enable_encryption(&KEY);
+                wire.enable_encryption(&key);
                 for chunk in plaintext.chunks(65_521) {
                     wire.write_all(chunk).await.unwrap();
                 }
@@ -237,7 +241,7 @@ mod tests {
 
             let mut reader = tokio::net::TcpStream::connect(address).await.unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let mut cipher = Cfb8::new(&KEY);
+            let mut cipher = Cfb8::new(&key);
             let mut received = Vec::with_capacity(expected.len());
             let mut buffer = vec![0u8; 8192];
             while received.len() < expected.len() {

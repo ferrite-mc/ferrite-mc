@@ -461,8 +461,11 @@ mod tests {
         last_seen: &[MessageSignature],
     ) -> ServerboundChat {
         let (private, _) = keys();
-        let payload =
-            signature_payload(sender, session_id, index, content, timestamp, 7, last_seen);
+        // The salt only has to agree between the signed payload and the packet.
+        let salt = i64::from(index);
+        let payload = signature_payload(
+            sender, session_id, index, content, timestamp, salt, last_seen,
+        );
         let digest = Sha256::digest(&payload);
         let signature = private
             .sign(Pkcs1v15Sign::new::<Sha256>(), &digest)
@@ -471,7 +474,7 @@ mod tests {
         ServerboundChat {
             message: content.into(),
             timestamp,
-            salt: 7,
+            salt,
             signature: Some(MessageSignature(signature.as_slice().try_into().unwrap())),
             last_seen: LastSeenUpdate::new(0, &[], 0),
         }
@@ -542,7 +545,7 @@ mod tests {
         let unsigned = ServerboundChat {
             message: "hi".into(),
             timestamp: NOW,
-            salt: 0,
+            salt: i64::default(),
             signature: None,
             last_seen: LastSeenUpdate::new(0, &[], 0),
         };

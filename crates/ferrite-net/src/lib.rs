@@ -1820,7 +1820,7 @@ mod encryption_tests {
         let request = EncryptionRequest::decode(&mut body).unwrap();
         assert!(!request.should_authenticate);
         let key = RsaPublicKey::from_public_key_der(&request.public_key).unwrap();
-        let secret = [42u8; 16];
+        let secret: [u8; 16] = std::array::from_fn(|_| rand::random());
         let mut rng = rand::thread_rng();
         send_packet(
             &mut stream,
