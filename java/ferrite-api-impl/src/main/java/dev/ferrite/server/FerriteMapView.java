@@ -56,7 +56,11 @@ final class FerriteMapView implements org.bukkit.map.MapView {
             switch (method.getName()) {
                 case "getMapView": return view;
                 case "getCursors": return cursors;
-                case "setCursors": return null;
+                case "setCursors": {
+                    var incoming = (org.bukkit.map.MapCursorCollection) args[0];
+                    if (incoming != null) for (int i = 0; i < incoming.size(); i++) cursors.addCursor(incoming.getCursor(i));
+                    return null;
+                }
                 case "setPixel": { int x = (int) args[0], y = (int) args[1]; if (x >= 0 && y >= 0 && x < 128 && y < 128) pixels[y * 128 + x] = (byte) args[2]; return null; }
                 case "getPixel": { int x = (int) args[0], y = (int) args[1]; return x >= 0 && y >= 0 && x < 128 && y < 128 ? pixels[y * 128 + x] : (byte) 0; }
                 case "getBasePixel": return (byte) 0;
