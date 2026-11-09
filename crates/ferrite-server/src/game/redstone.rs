@@ -1167,8 +1167,12 @@ impl Redstone {
         out
     }
 
+    /// Merges another region's redstone work. Scheduled ticks and torch-toggle timestamps are
+    /// absolute in the source region's clock, so both are re-based on this region's clock.
     pub fn merge(&mut self, other: Self) {
         for (key, due) in other.scheduled {
+            let remaining = due.saturating_sub(other.clock);
+            let due = self.clock.saturating_add(remaining);
             self.scheduled
                 .entry(key)
                 .and_modify(|current| *current = (*current).min(due))
@@ -1181,8 +1185,20 @@ impl Redstone {
         self.daylights.extend(other.daylights);
         self.primed.extend(other.primed);
         for (pos, mut toggles) in other.toggles {
+            for time in &mut toggles {
+                *time = rebase(*time, other.clock, self.clock);
+            }
             self.toggles.entry(pos).or_default().append(&mut toggles);
         }
+    }
+}
+
+/// Moves an absolute clock value from one region timeline to another, never below zero.
+fn rebase(time: u64, from: u64, to: u64) -> u64 {
+    if to >= from {
+        time.saturating_add(to - from)
+    } else {
+        time.saturating_sub(from - to)
     }
 }
 
@@ -1791,6 +1807,23 @@ mod tests {
 
         tick(&mut redstone, &mut grid, 160);
         assert!(property_bool(grid.state([1, 64, 0]), "lit"));
+    }
+
+    /// Scheduled redstone ticks are absolute in their region's clock. A merge from a region
+    /// with a different clock must translate them by their remaining delay.
+    #[test]
+    fn merge_keeps_remaining_delay_across_different_region_clocks() {
+        let mut left = Redstone {
+            clock: 100,
+            ..Redstone::default()
+        };
+        let mut right = Redstone {
+            clock: 10,
+            ..Redstone::default()
+        };
+        right.schedule([1, 64, 0], Kind::Diode, 3);
+        left.merge(right);
+        assert_eq!(left.scheduled[&([1, 64, 0], Kind::Diode)], 103);
     }
 
     #[test]
