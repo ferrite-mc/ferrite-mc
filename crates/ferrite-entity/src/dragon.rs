@@ -1,8 +1,9 @@
-//! The ender dragon's flight: a slow circle, a dive at nearby players, a fireball, and a
-//! landing cycle around the exit portal.
+//! The ender dragon's flight: a slow circle, a strafe at nearby players, a dive, a fireball,
+//! and a landing cycle around the exit portal.
 //!
-//! The circle is still the holding pattern of vanilla's phase machine; the landing decision and
-//! its approach/perch/takeoff phases are modelled explicitly, while strafing remains simplified.
+//! The circle is the holding pattern of vanilla's phase machine. The landing decision and its
+//! approach/perch/takeoff phases plus the strafe orbit are modelled explicitly; pathfinding is
+//! still replaced by deterministic geometry.
 
 use crate::ai::{MobEvent, Target};
 use crate::id::{EntityKey, allocate_id, random_uuid};
@@ -85,6 +86,7 @@ impl Phase {
 pub enum DragonPhase {
     #[default]
     Holding,
+    Strafe,
     LandingApproach,
     Perched,
     Takeoff,
@@ -94,6 +96,7 @@ impl DragonPhase {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Holding => "holding",
+            Self::Strafe => "strafe",
             Self::LandingApproach => "landing_approach",
             Self::Perched => "perched",
             Self::Takeoff => "takeoff",
@@ -103,6 +106,7 @@ impl DragonPhase {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "holding" => Some(Self::Holding),
+            "strafe" => Some(Self::Strafe),
             "landing_approach" => Some(Self::LandingApproach),
             "perched" => Some(Self::Perched),
             "takeoff" => Some(Self::Takeoff),
@@ -119,6 +123,26 @@ pub const HOLDING_DECISION_TICKS: u32 = 1200;
 pub fn should_land(alive_crystals: u32, roll: u32) -> bool {
     roll.is_multiple_of(alive_crystals.saturating_add(3))
 }
+
+/// The holding pattern's choice when its decision window ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldingDecision {
+    Land,
+    Strafe,
+    Hold,
+}
+
+/// Vanilla `DragonHoldingPatternPhase.findNewTarget`: landing wins with probability
+/// `1 / (crystals + 3)`; otherwise the dragon strafes a nearby player or keeps circling.
+pub fn holding_decision(alive_crystals: u32, roll: u32, has_target: bool) -> HoldingDecision {
+    if should_land(alive_crystals, roll) {
+        HoldingDecision::Land
+    } else if has_target {
+        HoldingDecision::Strafe
+    } else {
+        HoldingDecision::Hold
+    }
+}
 /// The distance to the perch spot at which the approach becomes a perch.
 pub const PERCH_REACH: f64 = 4.0;
 /// How long the dragon stays perched before taking off again.
@@ -127,6 +151,26 @@ pub const PERCH_SPOT: Vec3 = Vec3::new(0.0, 68.0, 0.0);
 pub const BREATH_INTERVAL: u32 = 20;
 /// The distance to the circling path at which takeoff ends.
 pub const TAKEOFF_REACH: f64 = 4.0;
+/// Vanilla `DragonStrafePlayerPhase`: the dragon flies around the selected player and fires a
+/// fireball once it has a shot, then returns to the holding pattern.
+pub const STRAFE_RADIUS: f64 = 32.0;
+pub const STRAFE_HEIGHT: f64 = 8.0;
+pub const STRAFE_ANGULAR_SPEED: f64 = 0.04;
+/// Ticks the dragon charges its fireball while strafing (vanilla `FIREBALL_CHARGE_AMOUNT`).
+pub const STRAFE_FIREBALL_TICKS: u32 = 5;
+/// Vanilla leaves the strafe phase after a long chase; this bounds a target that never lines up.
+pub const STRAFE_TIMEOUT_TICKS: u32 = 600;
+
+/// One point of the orbit flown during [`DragonPhase::Strafe`]. Vanilla targets the player's
+/// position; Ferrite uses a deterministic circle around it so the phase is testable.
+pub fn strafe_point(anchor: Vec3, ticks: u32) -> Vec3 {
+    let angle = f64::from(ticks) * STRAFE_ANGULAR_SPEED;
+    Vec3::new(
+        anchor.x + STRAFE_RADIUS * angle.cos(),
+        anchor.y + STRAFE_HEIGHT + 2.0 * (f64::from(ticks) * 0.1).sin(),
+        anchor.z + STRAFE_RADIUS * angle.sin(),
+    )
+}
 /// A dragon fireball's cloud starts at radius 3, waits 20 ticks, then grows to radius 5 over its
 /// 30-second life (vanilla `DragonFireball`). The perched breath uses the same cloud shape with
 /// no initial wait. The harmful part hurts for 3 every 20 ticks, 3 health per second.
@@ -443,14 +487,33 @@ pub fn fly(
     // The holding-pattern decision happens only at the end of a window, not every tick.
     if phase == DragonPhase::Holding && phase_ticks >= HOLDING_DECISION_TICKS {
         let bound = i32::try_from(alive_crystals.saturating_add(3)).unwrap_or(i32::MAX);
-        if should_land(alive_crystals, rng.next_int(bound) as u32) {
-            phase = DragonPhase::LandingApproach;
+        match holding_decision(
+            alive_crystals,
+            rng.next_int(bound) as u32,
+            selected.is_some(),
+        ) {
+            HoldingDecision::Land => phase = DragonPhase::LandingApproach,
+            HoldingDecision::Strafe => phase = DragonPhase::Strafe,
+            HoldingDecision::Hold => {}
         }
         phase_ticks = 0;
     }
+    // A strafe locks onto the player it started with; losing that player ends the phase.
+    let strafe_target = if phase == DragonPhase::Strafe {
+        let wanted = saved_target.or_else(|| selected.map(|target| target.uuid));
+        players
+            .iter()
+            .copied()
+            .find(|target| Some(target.uuid) == wanted && valid_target(target, previous))
+    } else {
+        None
+    };
     // Every `CHARGE_PERIOD` ticks the dragon dives at the nearest player for a while, then
     // rejoins the circle; between those it never moves faster than `MAX_SPEED`.
     let goal = match phase {
+        DragonPhase::Strafe => {
+            strafe_target.map_or(previous, |target| strafe_point(target.pos, phase_ticks))
+        }
         DragonPhase::LandingApproach | DragonPhase::Perched => PERCH_SPOT,
         DragonPhase::Takeoff => circle,
         DragonPhase::Holding => match combat_phase {
@@ -471,7 +534,9 @@ pub fn fly(
                 step.z / length * MAX_SPEED,
             )
     };
-    let look = if phase == DragonPhase::Holding
+    let look = if phase == DragonPhase::Strafe {
+        strafe_target.map_or(step, |target| target.pos - previous)
+    } else if phase == DragonPhase::Holding
         && matches!(combat_phase, Phase::Telegraphing | Phase::Charging)
     {
         charge_target.map_or(step, |target| target.pos - previous)
@@ -486,6 +551,10 @@ pub fn fly(
     store.set_pos(key, pos);
     store.set_vel(key, pos - previous);
     match phase {
+        DragonPhase::Strafe if strafe_target.is_none() || phase_ticks >= STRAFE_TIMEOUT_TICKS => {
+            phase = DragonPhase::Holding;
+            phase_ticks = 0;
+        }
         DragonPhase::LandingApproach
             if pos.distance_to_sqr(PERCH_SPOT) <= PERCH_REACH * PERCH_REACH =>
         {
@@ -502,7 +571,24 @@ pub fn fly(
         }
         _ => {}
     }
-    // Strafing: a fireball at the nearest player now and then, from the head.
+    // A finished strafe shot returns the dragon to the holding pattern, as vanilla
+    // `DragonStrafePlayerPhase` does after launching its fireball.
+    if phase == DragonPhase::Strafe
+        && bow_timer == 0
+        && phase_ticks >= STRAFE_FIREBALL_TICKS
+        && let Some(target) = strafe_target
+            .filter(|target| target.pos.distance_to_sqr(pos) <= FIREBALL_RANGE * FIREBALL_RANGE)
+    {
+        let from = pos + Vec3::new(0.0, 1.0, 0.0);
+        let direction = (target.pos - from).normalize();
+        if direction.length_sqr() > 0.0 {
+            events.push(MobEvent::DragonFireball { from, direction });
+            bow_timer = FIREBALL_COOLDOWN;
+            phase = DragonPhase::Holding;
+            phase_ticks = 0;
+        }
+    }
+    // A fireball at the nearest player now and then, from the head, while holding.
     if phase == DragonPhase::Holding
         && combat_phase == Phase::Circling
         && bow_timer == 0
@@ -830,6 +916,156 @@ mod tests {
             mob::state(&store, key).unwrap().dragon_phase,
             DragonPhase::Holding,
             "it returns to the holding pattern after takeoff"
+        );
+    }
+
+    #[test]
+    fn every_dragon_phase_round_trips_through_its_saved_name() {
+        for phase in [
+            DragonPhase::Holding,
+            DragonPhase::Strafe,
+            DragonPhase::LandingApproach,
+            DragonPhase::Perched,
+            DragonPhase::Takeoff,
+        ] {
+            assert_eq!(DragonPhase::from_name(phase.name()), Some(phase));
+        }
+        assert_eq!(DragonPhase::from_name("unknown"), None);
+        assert_eq!(DragonPhase::default(), DragonPhase::Holding);
+    }
+
+    #[test]
+    fn the_holding_pattern_lands_strafes_or_keeps_circling() {
+        assert_eq!(holding_decision(0, 0, false), HoldingDecision::Land);
+        assert_eq!(holding_decision(0, 1, true), HoldingDecision::Strafe);
+        assert_eq!(holding_decision(0, 1, false), HoldingDecision::Hold);
+        assert_eq!(holding_decision(10, 12, true), HoldingDecision::Strafe);
+        assert_eq!(holding_decision(10, 13, true), HoldingDecision::Land);
+    }
+
+    #[test]
+    fn the_strafe_orbit_circles_the_selected_player() {
+        let anchor = Vec3::new(10.0, 70.0, -5.0);
+        for ticks in (0..400).step_by(17) {
+            let point = strafe_point(anchor, ticks);
+            let radius = (point.x - anchor.x).hypot(point.z - anchor.z);
+            assert!(
+                (radius - STRAFE_RADIUS).abs() < 1e-6,
+                "ticks {ticks}: radius {radius}"
+            );
+            assert!(point.y >= anchor.y + STRAFE_HEIGHT - 2.0);
+            assert!(point.y <= anchor.y + STRAFE_HEIGHT + 2.0);
+        }
+    }
+
+    #[test]
+    fn landing_approach_perches_within_reach() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let key = store.insert(mob::new_mob(
+            mob::MobKind::EnderDragon,
+            PERCH_SPOT + Vec3::new(1.0, 0.0, 0.0),
+            &mut rng,
+        ));
+        {
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.dragon_phase = DragonPhase::LandingApproach;
+            state.dragon_phase_ticks = 0;
+        }
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Perched);
+        assert_eq!(state.dragon_phase_ticks, 0);
+    }
+
+    #[test]
+    fn perch_takeoff_and_holding_happen_on_vanilla_ticks() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let key = store.insert(mob::new_mob(
+            mob::MobKind::EnderDragon,
+            PERCH_SPOT,
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, key).unwrap().dragon_phase = DragonPhase::LandingApproach;
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Perched
+        );
+        for _ in 0..(PERCH_TICKS - 1) {
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        }
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Perched,
+            "the perch lasts {PERCH_TICKS} ticks"
+        );
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Takeoff
+        );
+        let age = mob::state(&store, key).unwrap().wander_timer;
+        let (circle, _) = position_at(age + 1);
+        store.set_pos(key, circle);
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Holding,
+            "takeoff ends when the dragon reaches the circle"
+        );
+    }
+
+    #[test]
+    fn a_strafe_shot_returns_to_the_holding_pattern() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let (spot, _) = position_at(0);
+        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        let target = Target {
+            uuid: uuid::Uuid::from_u128(21),
+            pos: Vec3::new(20.0, 80.0, 20.0),
+        };
+        {
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.dragon_phase = DragonPhase::Strafe;
+            state.target = Some(target.uuid);
+        }
+        let mut events = Vec::new();
+        let mut returned = false;
+        for _ in 0..60 {
+            fly(&mut store, key, &[target], &mut rng, &mut events);
+            if mob::state(&store, key).unwrap().dragon_phase == DragonPhase::Holding {
+                returned = true;
+                break;
+            }
+        }
+        assert!(returned, "the strafe ends after its fireball");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, MobEvent::DragonFireball { .. })),
+            "the strafe fires at the player"
+        );
+    }
+
+    #[test]
+    fn losing_the_strafe_target_returns_to_holding() {
+        let mut rng = Rng::new(1);
+        let mut store = EntityStore::new(4);
+        let (spot, _) = position_at(0);
+        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
+        {
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.dragon_phase = DragonPhase::Strafe;
+            state.target = Some(uuid::Uuid::from_u128(22));
+        }
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Holding,
+            "a strafe without its player cannot orbit"
         );
     }
 }
