@@ -13,13 +13,14 @@ use ferrite_entity::{
     experience, item,
     mob::{self, MobKind},
     potion::PotionContents,
+    shoulder::{ShoulderParrot, ShoulderSide},
     spawn::{self, SpawnEnv},
     tracker::{self, Viewer, ViewerKey},
 };
 use ferrite_net::game::{Outbound, OutboundSender, ServerboundPlay, packet};
 use ferrite_plugin::InteractAction;
 use ferrite_profiler::Timings;
-use ferrite_protocol::{VarInt, packets::play::*};
+use ferrite_protocol::{Encode, Packet, VarInt, packets::play::*};
 use ferrite_region::{ChunkPos, RegionData, SectionPos};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -4412,6 +4413,36 @@ fn should_broadcast_player_metadata(
     source != viewer && source_dimension == viewer_dimension
 }
 
+/// The wire form of `set_entity_data` for one shoulder: packet id, entity id, metadata index,
+/// the optional-varint serializer id (19), the presence flag, the variant and the terminator.
+fn shoulder_metadata_bytes(entity: i32, side: ShoulderSide, variant: Option<i32>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    VarInt(SetEntityData::ID).encode(&mut bytes);
+    VarInt(entity).encode(&mut bytes);
+    side.metadata_index().encode(&mut bytes);
+    VarInt(19).encode(&mut bytes);
+    variant.is_some().encode(&mut bytes);
+    if let Some(variant) = variant {
+        VarInt(variant).encode(&mut bytes);
+    }
+    bytes.push(0xFF);
+    bytes
+}
+
+fn broadcast_shoulder_bytes(
+    tracking: &Tracking,
+    dimension: super::Dimension,
+    source: Uuid,
+    bytes: &[u8],
+) {
+    let packet = Outbound::Packet(bytes.to_vec().into());
+    for (uuid, (viewer_dimension, _, outbound)) in tracking.lock().unwrap().iter() {
+        if should_broadcast_player_metadata(source, *uuid, dimension, *viewer_dimension) {
+            let _ = outbound.send(packet.clone());
+        }
+    }
+}
+
 fn spin_metadata(entity: i32, spin: bool) -> SetEntityData {
     SetEntityData {
         id: VarInt(entity),
@@ -6086,6 +6117,10 @@ impl Region {
                 let name = held.name().unwrap_or("minecraft:air");
                 let gamemode = p.gamemode;
                 let sneaking = p.sneaking;
+                // A sneaking use on a tamed parrot lifts it onto a free shoulder.
+                if sneaking && self.capture_shoulder(uuid, key) {
+                    continue;
+                }
                 if self.use_lead(ctx, uuid, key, name, slot, gamemode) {
                     continue;
                 }
@@ -6141,6 +6176,115 @@ impl Region {
                 {
                     p.inventory.set(slot, held.copy_with_count(held.count - 1));
                 }
+            }
+        }
+    }
+
+    /// Lifts a tamed parrot from the entity store onto the player's first free shoulder. The
+    /// entity leaves the store (vanilla discards it) and its NBT is written immediately, so a
+    /// disconnect right after the pickup cannot lose it.
+    fn capture_shoulder(&mut self, player: Uuid, key: ferrite_entity::EntityKey) -> bool {
+        let Some(data) = self.entities.data(key) else {
+            return false;
+        };
+        let Some(parrot) = ShoulderParrot::from_data(data, player) else {
+            return false;
+        };
+        let Some(p) = self.players.get(&player) else {
+            return false;
+        };
+        let Some(side) = super::ride::shoulder_put(player, parrot) else {
+            return false;
+        };
+        self.entities.remove(key);
+        self.save_shoulders_for(p);
+        self.send_shoulder(p, side, Some(parrot.variant));
+        true
+    }
+
+    /// Writes the player's current shoulders next to their player data.
+    fn save_shoulders_for(&self, player: &Player) {
+        super::entity_save::save_shoulders(
+            player.playerdata.as_deref(),
+            player.uuid,
+            &super::ride::shoulders_of(player.uuid),
+        );
+    }
+
+    /// Tells this player and the other same-dimension viewers about one shoulder. The packet is
+    /// `set_entity_data` (101) with player metadata index 19/20 and the 26.3
+    /// `OPTIONAL_VAR_INT` serializer (19). It is built here because the shared protocol crate
+    /// does not model player shoulder metadata yet.
+    fn send_shoulder(&self, player: &Player, side: ShoulderSide, variant: Option<i32>) {
+        let bytes = shoulder_metadata_bytes(player.entity, side, variant);
+        let _ = player.outbound.send(Outbound::Packet(bytes.clone().into()));
+        broadcast_shoulder_bytes(&player.tracking, player.dimension, player.uuid, &bytes);
+    }
+
+    /// Announces both shoulders when a player logs in with saved parrots.
+    fn announce_shoulders(&self, player: &Player) {
+        for (side, parrot) in super::ride::shoulders_of(player.uuid).iter() {
+            self.send_shoulder(player, side, Some(parrot.variant));
+        }
+    }
+
+    fn release_shoulder(&mut self, player: &Player, side: ShoulderSide) -> bool {
+        let Some(parrot) = super::ride::shoulder_release(player.uuid, side) else {
+            return false;
+        };
+        let pos = ferrite_math::Vec3::new(player.pos[0], player.pos[1] + 0.05, player.pos[2]);
+        self.entities.insert(parrot.to_record(pos, &mut self.rng));
+        self.send_shoulder(player, side, None);
+        true
+    }
+
+    /// Releases both shoulders (death, sneak-jump or a plugin request).
+    fn release_shoulders(&mut self, player: &Player) {
+        let mut released = false;
+        for side in [ShoulderSide::Left, ShoulderSide::Right] {
+            released |= self.release_shoulder(player, side);
+        }
+        if released {
+            self.save_shoulders_for(player);
+        }
+    }
+
+    /// Pushes players inside a wind charge's radius away from the impact and deals one damage.
+    /// Mobs are pushed by [`ferrite_entity::arrow::wind_burst`].
+    fn wind_charge_burst(
+        &mut self,
+        center: ferrite_math::Vec3,
+        owner: Option<Uuid>,
+        players: &[(Uuid, ferrite_math::AABB)],
+    ) {
+        ferrite_entity::arrow::wind_burst(&mut self.entities, center);
+        let radius = arrow::WIND_CHARGE_RADIUS;
+        for (uuid, box_) in players {
+            if owner == Some(*uuid) {
+                continue;
+            }
+            let at = box_.center();
+            let dx = at.x - center.x;
+            let dy = at.y - center.y;
+            let dz = at.z - center.z;
+            if dx * dx + dy * dy + dz * dz > radius * radius {
+                continue;
+            }
+            let length = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0e-4);
+            let push = arrow::WIND_CHARGE_PUSH;
+            if let Some(p) = self.players.get_mut(uuid) {
+                p.hurt(DamageKind::Generic, arrow::WIND_CHARGE_DAMAGE);
+                send(
+                    p,
+                    &SetEntityMotion {
+                        id: VarInt(p.entity),
+                        velocity: ferrite_protocol::types::LpVec3([
+                            dx / length * push,
+                            (dy / length).max(0.2) * push,
+                            dz / length * push,
+                        ]),
+                    },
+                );
             }
         }
     }
@@ -7204,6 +7348,18 @@ impl Region {
             if landing.kind == arrow::Kind::Egg {
                 ferrite_entity::breed::hatch_egg(&mut self.entities, landing.pos, &mut self.rng);
             }
+            // A thrown bottle awards 3-11 experience where it breaks.
+            if landing.kind == arrow::Kind::ExperienceBottle {
+                let amount = 3 + self.rng.next_int(5) + self.rng.next_int(5);
+                for orb in experience::award(landing.pos, amount) {
+                    self.entities.insert(orb);
+                }
+            }
+            // A wind charge bursts on impact and pushes nearby players; mobs are handled by
+            // `arrow::wind_burst` inside the entity store.
+            if landing.kind == arrow::Kind::WindCharge {
+                self.wind_charge_burst(landing.pos, landing.owner, &players);
+            }
             if landing.kind == arrow::Kind::EnderPearl
                 && let Some(owner) = landing.owner
                 && let Some(p) = self.players.get_mut(&owner)
@@ -8184,6 +8340,8 @@ impl Region {
         if p.survival.death_processed {
             return;
         }
+        // Shoulder parrots leave before the inventory drops, so death cannot swallow them.
+        self.release_shoulders(p);
         p.stop_spin();
         p.survival.death_processed = true;
         p.survival.eating = None;
@@ -8326,6 +8484,20 @@ impl Region {
         let moving_pistons = self.moving_pistons.active().to_vec();
         for id in ids {
             let mut p = self.players.remove(&id).unwrap();
+            // The first tick of a login reads the parrot save, then announces it to viewers.
+            // Shoulder state is keyed by player UUID, so it survives region and dimension
+            // hand-offs without living in any one region's entity store.
+            if super::ride::ensure_shoulder_entry(p.uuid) {
+                let shoulders = super::entity_save::load_shoulders(p.playerdata.as_deref(), p.uuid);
+                if !shoulders.is_empty() {
+                    super::ride::restore_shoulders(p.uuid, shoulders);
+                }
+                self.announce_shoulders(&p);
+            }
+            // Vanilla drops the parrots when the player sneaks in the air.
+            if p.sneaking && !p.ground {
+                self.release_shoulders(&p);
+            }
             let updated = {
                 let mut trader = TraderSync {
                     entities: &mut self.entities,
@@ -9648,6 +9820,34 @@ mod tests {
                 .get(bob, ferrite_entity::villager::GossipType::Trading),
             ferrite_entity::villager::TRADING_GOSSIP
         );
+    }
+
+    #[test]
+    fn shoulder_metadata_uses_the_player_shoulder_indices_and_dimension() {
+        use super::super::Dimension::{Nether, Overworld};
+
+        let left = shoulder_metadata_bytes(42, ShoulderSide::Left, Some(2));
+        assert_eq!(
+            left,
+            [101, 42, 19, 19, 1, 2, 0xFF],
+            "set_entity_data, player entity, index 19, optional-varint, variant 2"
+        );
+        assert_eq!(
+            shoulder_metadata_bytes(42, ShoulderSide::Right, None),
+            [101, 42, 20, 19, 0, 0xFF]
+        );
+
+        let source = Uuid::from_u128(1);
+        let viewer = Uuid::from_u128(2);
+        let (sender, mut rx) = OutboundSender::channel(16);
+        let (nether, mut nether_rx) = OutboundSender::channel(16);
+        let tracking: Tracking = Arc::new(Mutex::new(HashMap::from([
+            (viewer, (Overworld, HashSet::new(), sender)),
+            (Uuid::from_u128(3), (Nether, HashSet::new(), nether)),
+        ])));
+        broadcast_shoulder_bytes(&tracking, Overworld, source, &left);
+        assert_eq!(outbound_packets(&mut rx), vec![left]);
+        assert!(outbound_packets(&mut nether_rx).is_empty());
     }
 
     #[test]

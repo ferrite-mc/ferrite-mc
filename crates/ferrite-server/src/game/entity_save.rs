@@ -21,6 +21,7 @@
 use ferrite_entity::{
     EntityData, EntityRecord, Flags, allocate_id, arrow::ArrowState, dragon::DragonPhase,
     experience::OrbState, item::ItemState, mob::MobKind, mob::MobState, random_uuid,
+    shoulder::Shoulders,
 };
 use ferrite_math::Vec3;
 use ferrite_nbt::{Compound, List, Tag, binary};
@@ -35,6 +36,72 @@ const DATA_VERSION: i32 = 5023;
 /// Sidecar path for a chunk.
 pub fn chunk_file(world: &Path, (x, z): (i32, i32)) -> PathBuf {
     world.join(DIRECTORY).join(format!("c.{x}.{z}.nbt"))
+}
+
+/// Sidecar path of a player's shoulder parrots, beside that player's JSON save.
+pub fn shoulder_file(playerdata: &Path, uuid: Uuid) -> PathBuf {
+    playerdata
+        .join(DIRECTORY)
+        .join("shoulders")
+        .join(format!("{uuid}.nbt"))
+}
+
+/// Writes the parrots on a player's shoulders. An empty pair removes the file, so a released
+/// parrot cannot come back on the next login.
+pub fn save_shoulders(playerdata: Option<&Path>, uuid: Uuid, shoulders: &Shoulders) {
+    let Some(playerdata) = playerdata else {
+        return;
+    };
+    let path = shoulder_file(playerdata, uuid);
+    if shoulders.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "failed to remove a shoulder save")
+            }
+        }
+        return;
+    }
+    let write = || -> std::io::Result<()> {
+        let bytes =
+            binary::write_compressed("shoulders", &shoulders.to_nbt(), binary::Compression::Gzip)
+                .map_err(std::io::Error::other)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temp = path.with_extension("nbt.tmp");
+        std::fs::write(&temp, bytes)?;
+        std::fs::rename(temp, path)
+    };
+    if let Err(error) = write() {
+        tracing::warn!(player = %uuid, %error, "failed to save shoulder parrots");
+    }
+}
+
+/// Reads a player's shoulder parrots; a missing or corrupt file means empty shoulders.
+pub fn load_shoulders(playerdata: Option<&Path>, uuid: Uuid) -> Shoulders {
+    let Some(playerdata) = playerdata else {
+        return Shoulders::default();
+    };
+    let path = shoulder_file(playerdata, uuid);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Shoulders::default();
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring an unreadable shoulder save");
+            return Shoulders::default();
+        }
+    };
+    match binary::read_compressed(&bytes, binary::Compression::Gzip) {
+        Ok((_, tag)) => Shoulders::from_nbt(&tag),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring a corrupt shoulder save");
+            Shoulders::default()
+        }
+    }
 }
 
 /// Writes one chunk's entities, or removes the file when there are none left.
@@ -975,6 +1042,60 @@ mod tests {
         assert!(!chunk_file(&world, (2, -3)).exists());
         assert!(load(&world, (2, -3)).is_empty());
         let _ = std::fs::remove_dir_all(world);
+    }
+
+    #[test]
+    fn new_projectile_kinds_keep_their_type_and_flight_age() {
+        for kind in [arrow::Kind::ExperienceBottle, arrow::Kind::WindCharge] {
+            let mut record = arrow::new_thrown(
+                kind,
+                Vec3::new(0.5, 64.0, 0.5),
+                Vec3::new(0.0, 0.0, 1.0),
+                Some(Uuid::from_u128(7)),
+            );
+            record.data.arrow.as_mut().unwrap().age = 37;
+            let loaded = from_nbt(&to_nbt(&[record]));
+            assert_eq!(loaded.len(), 1, "{kind:?}");
+            assert_eq!(arrow::kind_of(&loaded[0].data), Some(kind));
+            let state = loaded[0].data.arrow.as_ref().unwrap();
+            assert_eq!(state.age, 37);
+            assert_eq!(state.owner, Some(Uuid::from_u128(7)));
+        }
+    }
+
+    #[test]
+    fn shoulder_parrots_survive_a_reconnect_save() {
+        use ferrite_entity::shoulder::{ShoulderParrot, Shoulders};
+        let dir = temp_world("shoulders");
+        let uuid = Uuid::from_u128(0x5a1);
+        let mut shoulders = Shoulders::default();
+        let left = ShoulderParrot {
+            uuid: Uuid::from_u128(0xaa),
+            variant: 3,
+            owner: Some(uuid),
+        };
+        let right = ShoulderParrot {
+            uuid: Uuid::from_u128(0xbb),
+            variant: 1,
+            owner: Some(uuid),
+        };
+        shoulders.put(left);
+        shoulders.put(right);
+        save_shoulders(Some(&dir), uuid, &shoulders);
+        assert!(shoulder_file(&dir, uuid).exists());
+        assert_eq!(load_shoulders(Some(&dir), uuid), shoulders);
+
+        // Releasing a parrot removes its side from the next login too.
+        shoulders.release(ferrite_entity::shoulder::ShoulderSide::Left);
+        save_shoulders(Some(&dir), uuid, &shoulders);
+        let loaded = load_shoulders(Some(&dir), uuid);
+        assert!(loaded.left.is_none());
+        assert_eq!(loaded.right, Some(right));
+
+        save_shoulders(Some(&dir), uuid, &Shoulders::default());
+        assert!(!shoulder_file(&dir, uuid).exists());
+        assert!(load_shoulders(Some(&dir), uuid).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

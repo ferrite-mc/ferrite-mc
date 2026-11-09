@@ -84,10 +84,19 @@ pub fn new_arrow(
     }
 }
 
-/// Vanilla `ThrowableProjectile` gravity per tick (snowball, egg, ender pearl).
+/// Vanilla `ThrowableProjectile` gravity per tick (snowball, egg, ender pearl, potion).
 pub const THROWN_GRAVITY: f64 = 0.03;
-/// Box size of a thrown snowball, egg or ender pearl.
+/// `ThrownExperienceBottle.getDefaultGravity`.
+pub const EXPERIENCE_BOTTLE_GRAVITY: f64 = 0.07;
+/// Box size of a thrown snowball, egg, ender pearl or bottle.
 pub const THROWN_SIZE: f64 = 0.25;
+/// `WindCharge` disappears after five seconds (`AbstractWindCharge.getLifetime`).
+pub const WIND_CHARGE_LIFETIME: u32 = 100;
+/// How far a wind charge bursts and how hard it pushes.
+pub const WIND_CHARGE_RADIUS: f64 = 3.0;
+pub const WIND_CHARGE_PUSH: f64 = 1.2;
+/// Vanilla wind charges deal one point of damage.
+pub const WIND_CHARGE_DAMAGE: f32 = 1.0;
 
 /// Which projectile an entity of this module is, told apart by its entity type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +115,10 @@ pub enum Kind {
     Trident,
     /// `minecraft:llama_spit`: flies like an arrow for 1 damage.
     LlamaSpit,
+    /// `minecraft:experience_bottle`: arcs like a thrown item and drops experience where it lands.
+    ExperienceBottle,
+    /// `minecraft:wind_charge`: flies straight, then bursts and pushes nearby entities.
+    WindCharge,
 }
 
 impl Kind {
@@ -120,6 +133,8 @@ impl Kind {
             Self::DragonFireball => "dragon_fireball",
             Self::Trident => "trident",
             Self::LlamaSpit => "llama_spit",
+            Self::ExperienceBottle => "experience_bottle",
+            Self::WindCharge => "wind_charge",
         }
     }
 
@@ -131,6 +146,8 @@ impl Kind {
             "ender_pearl" => Some(Self::EnderPearl),
             "fireball" => Some(Self::Fireball),
             "small_fireball" => Some(Self::SmallFireball),
+            "experience_bottle" => Some(Self::ExperienceBottle),
+            "wind_charge" => Some(Self::WindCharge),
             _ => None,
         }
     }
@@ -154,6 +171,8 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::DragonFireball,
         Kind::Trident,
         Kind::LlamaSpit,
+        Kind::ExperienceBottle,
+        Kind::WindCharge,
     ]
     .into_iter()
     .find(|kind| kind.entity_type() == data.kind)
@@ -225,20 +244,35 @@ pub fn tick_thrown(
             continue;
         }
         state.age += 1;
-        if state.age > LIFETIME {
+        let lifetime = match kind {
+            Kind::WindCharge => WIND_CHARGE_LIFETIME,
+            _ => LIFETIME,
+        };
+        if state.age > lifetime {
             remove(store, key);
             continue;
         }
         let mut vel = store.vel(key).unwrap_or_default();
-        // A fireball keeps its speed and ignores gravity; the rest arc like thrown items.
-        if !matches!(
-            kind,
-            Kind::Fireball | Kind::SmallFireball | Kind::DragonFireball
-        ) {
-            vel.y -= THROWN_GRAVITY;
-            vel.x *= DRAG;
-            vel.y *= DRAG;
-            vel.z *= DRAG;
+        // A fireball and a wind charge keep their speed and ignore gravity; a thrown bottle
+        // falls faster than a snowball; the rest arc like thrown items.
+        match kind {
+            Kind::Fireball | Kind::SmallFireball | Kind::DragonFireball => {}
+            Kind::WindCharge => {
+                vel.x *= DRAG;
+                vel.z *= DRAG;
+            }
+            Kind::ExperienceBottle => {
+                vel.y -= EXPERIENCE_BOTTLE_GRAVITY;
+                vel.x *= DRAG;
+                vel.y *= DRAG;
+                vel.z *= DRAG;
+            }
+            _ => {
+                vel.y -= THROWN_GRAVITY;
+                vel.x *= DRAG;
+                vel.y *= DRAG;
+                vel.z *= DRAG;
+            }
         }
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
@@ -288,6 +322,41 @@ pub fn tick_thrown(
         }
     }
     landings
+}
+
+/// A wind charge burst: pushes every nearby mob away from the impact and hurts it for one.
+/// Players are handled by the region through `player_hits`, because they are not stored here.
+pub fn wind_burst(store: &mut EntityStore, center: Vec3) -> Vec<PlayerHit> {
+    let area = AABB::new(
+        center.x - WIND_CHARGE_RADIUS,
+        center.y - WIND_CHARGE_RADIUS,
+        center.z - WIND_CHARGE_RADIUS,
+        center.x + WIND_CHARGE_RADIUS,
+        center.y + WIND_CHARGE_RADIUS,
+        center.z + WIND_CHARGE_RADIUS,
+    );
+    for key in store.query_vec(area) {
+        if !mob::is_mob(store, key) {
+            continue;
+        }
+        let Some(pos) = store.pos(key) else {
+            continue;
+        };
+        let dx = pos.x - center.x;
+        let dy = pos.y - center.y;
+        let dz = pos.z - center.z;
+        let length = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0e-4);
+        let mut vel = store.vel(key).unwrap_or_default();
+        vel.x += dx / length * WIND_CHARGE_PUSH;
+        vel.y += (dy / length).max(0.2) * WIND_CHARGE_PUSH;
+        vel.z += dz / length * WIND_CHARGE_PUSH;
+        store.set_vel(key, vel);
+        if let Some(flags) = store.flags_mut(key) {
+            flags.set(Flags::NEEDS_SYNC, true);
+        }
+        mob::hurt(store, key, WIND_CHARGE_DAMAGE, Some(center));
+    }
+    Vec::new()
 }
 
 /// A player an arrow hit; the region applies the damage.
@@ -448,6 +517,78 @@ mod tests {
 
     fn spawn_arrow_from(store: &mut EntityStore, pos: Vec3, vel: Vec3, owner: Uuid) -> EntityKey {
         store.insert(new_arrow(pos, vel, 4.0, Some(owner), &mut Rng::new(1)))
+    }
+
+    #[test]
+    fn an_experience_bottle_arcs_faster_and_lands() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let bottle = store.insert(new_thrown(
+            Kind::ExperienceBottle,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 1.0),
+            None,
+        ));
+        tick_thrown(&mut store, &world, &[]);
+        let vel = store.vel(bottle).unwrap();
+        assert!((vel.y + EXPERIENCE_BOTTLE_GRAVITY * DRAG).abs() < 1.0e-9);
+        store.set_vel(bottle, Vec3::new(0.0, -8.0, 0.0));
+        let landed = tick_thrown(&mut store, &world, &[]);
+        assert_eq!(landed[0].kind, Kind::ExperienceBottle);
+        assert!(store.flags(bottle).unwrap().has(Flags::REMOVED));
+    }
+
+    #[test]
+    fn a_wind_charge_flies_level_and_expires_after_its_lifetime() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let charge = store.insert(new_thrown(
+            Kind::WindCharge,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 1.0),
+            None,
+        ));
+        tick_thrown(&mut store, &world, &[]);
+        assert_eq!(store.vel(charge).unwrap().y, 0.0, "no gravity");
+        let age = store.data_mut(charge).unwrap().arrow.as_mut().unwrap();
+        age.age = WIND_CHARGE_LIFETIME;
+        tick_thrown(&mut store, &world, &[]);
+        assert!(
+            store.flags(charge).unwrap().has(Flags::REMOVED),
+            "a wind charge expires after 100 ticks"
+        );
+    }
+
+    #[test]
+    fn a_wind_charge_burst_pushes_and_hurts_a_cow() {
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(2.0, 64.0, 0.0),
+            &mut Rng::new(2),
+        ));
+        wind_burst(&mut store, Vec3::new(0.0, 64.0, 0.0));
+        assert!(
+            store.vel(cow).unwrap().x > 0.1,
+            "pushed away from the burst"
+        );
+        assert_eq!(
+            mob::state(&store, cow).unwrap().health,
+            MobKind::Cow.max_health() - WIND_CHARGE_DAMAGE
+        );
+    }
+
+    #[test]
+    fn a_wind_charge_entity_type_is_mapped_from_its_item() {
+        assert_eq!(
+            Kind::thrown_from_name("minecraft:wind_charge"),
+            Some(Kind::WindCharge)
+        );
+        assert_eq!(
+            Kind::thrown_from_name("experience_bottle"),
+            Some(Kind::ExperienceBottle)
+        );
+        assert_eq!(Kind::WindCharge.entity_name(), "wind_charge");
     }
 
     #[test]
