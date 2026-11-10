@@ -41,7 +41,7 @@ world = "world"
 # "vanilla"는 사용자가 받은 공식 서버 jar의 생성기를 별도 JVM 프로세스에서 실행합니다.
 # 먼저 python tools/fetch_vanilla.py 와 python tools/build_worldgen_host.py 를 실행하세요.
 # 서버는 시작할 때 eula.txt를 확인합니다. Minecraft EULA를 읽고 직접 eula=true로 바꾸세요.
-generator = "superflat"
+generator = "vanilla"
 
 # 플러그인 브리지 설정입니다.
 [plugins]

@@ -12,7 +12,7 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 | `max-players` | 정수 (`u32`) | `20` | 최대 동시 접속자 수. 상태 응답에 표시되고 접속 제한에 사용됩니다. |
 | `view-distance` | 정수 (`u8`) | `10` | 플레이어에게 전송하는 청크 반경(단위: 청크). 실제 적용 시 2~32 범위로 제한됩니다. |
 | `compression-threshold` | 정수 (`usize`) | `256` | 이 크기(바이트) 이상인 패킷을 압축합니다. 값이 작을수록 더 많은 패킷을 압축합니다. |
-| `generator` | 문자열 (`superflat` 또는 `vanilla`) | `superflat` | 월드에 없는 새 청크를 만드는 방법. `superflat`은 평지, `vanilla`는 사용자가 받은 공식 서버 jar의 생성기를 별도 JVM 프로세스(월드 생성 호스트)에서 실행합니다. 아래 `[worldgen]` 참고. |
+| `generator` | 문자열 (`superflat` 또는 `vanilla`) | `vanilla` | 월드에 없는 새 청크를 만드는 방법. `superflat`은 평지, `vanilla`는 사용자가 받은 공식 서버 jar의 생성기를 별도 JVM 프로세스(월드 생성 호스트)에서 실행합니다. 아래 `[worldgen]` 참고. |
 
 ### `[worldgen]` (`generator = "vanilla"`일 때)
 

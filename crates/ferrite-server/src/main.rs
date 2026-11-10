@@ -143,9 +143,9 @@ fn parse_ops(ops: Vec<OpConfig>) -> anyhow::Result<Vec<game::Operator>> {
 #[serde(rename_all = "lowercase")]
 enum WorldGenerator {
     /// The superflat world used by the existing tests and examples.
-    #[default]
     Superflat,
     /// Mojang's own generator, run by the world generation host from the user's server jar.
+    #[default]
     Vanilla,
 }
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -177,7 +177,7 @@ impl Default for Config {
             forwarding: ForwardingMode::None,
             forwarding_secret: String::new(),
             world: Some(std::path::PathBuf::from("world")),
-            generator: WorldGenerator::Superflat,
+            generator: WorldGenerator::Vanilla,
             gamemode: GameMode::Creative,
             ops: Vec::new(),
             plugins_dir: Some("plugins".into()),
@@ -206,9 +206,9 @@ view-distance = 10
 compression-threshold = 256
 
 # World directory. It is created on first start and saved on chunk unload, autosave and a
-# clean shutdown. Use "generator = 'vanilla'" for Mojang terrain, or "superflat" for tests.
+# clean shutdown. Vanilla terrain is the default; use "superflat" explicitly for flat worlds.
 world = "world"
-generator = "superflat"
+generator = "vanilla"
 gamemode = "creative"
 
 plugins-dir = "plugins"
@@ -387,6 +387,10 @@ async fn run_server(
         return Ok(());
     }
 
+    let existing_world = config
+        .world
+        .as_ref()
+        .is_some_and(|path| path.join("level.dat").exists());
     let spawn = match &config.world {
         Some(path) => spawn_for_world(path)?,
         None => [0, 65, 0],
@@ -446,7 +450,7 @@ async fn run_server(
     };
     // Vanilla terrain chooses a spawn above the generated surface; the flat world keeps the
     // fixed `[0, 65, 0]` the existing tests rely on.
-    let spawn = if source.is_flat() || config.world.is_some() {
+    let spawn = if source.is_flat() || existing_world {
         spawn
     } else {
         [0, source.spawn_height(0, 0).unwrap_or(100), 0]
@@ -749,7 +753,11 @@ mod tests {
             defaults.world.as_deref(),
             Some(std::path::Path::new("world"))
         );
-        assert_eq!(defaults.generator, WorldGenerator::Superflat);
+        assert_eq!(defaults.generator, WorldGenerator::Vanilla);
+        assert_eq!(
+            toml::from_str::<Config>(DEFAULT_CONFIG).unwrap().generator,
+            WorldGenerator::Vanilla
+        );
         assert_eq!(
             toml::from_str::<Config>("generator = 'superflat'")
                 .unwrap()
