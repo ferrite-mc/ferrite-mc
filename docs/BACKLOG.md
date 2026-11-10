@@ -1,9 +1,8 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-09**. `README.md` holds the status
-table; this file holds the plan. The old session handoffs (`docs/HANDOFF.md`, `docs/handoff/**`,
-`docs/sessions.md`) were deleted on 2026-11-09 — recover them with
-`git log --all -- docs/handoff` if you need the archaeology.
+Single list of open work, checked against source on **2026-11-10**. `README.md` holds the status
+table; this file holds the open work. Worker-specific notes remain in their Orca FB worktrees;
+the open runtime-world sequence is captured below so it stays with the release branch.
 
 ## Contract for every task
 
@@ -57,12 +56,12 @@ server-side only.
 
 ## 3. Plugin API breadth
 
-- Bukkit `Server` still throws for the help map, recipes, maps, world creation, tags and entity
-  serialization; `docs/plugin-api-stubs.md` is the generated inventory.
-- `InventoryDragEvent` is not fired: `container.rs` skips `ClickInput::QuickCraft` ("which are not
-  fired yet"). The drag mechanics themselves already exist in `ferrite-inventory`.
-- `World#sendBlockUpdate` supports signs only, `unloadChunk` cannot force-unload, and an ender pearl
-  crossing a region boundary does not move its thrower.
+- `Server#createWorld`/`unloadWorld` still refuse runtime worlds; see the explicit implementation
+  sequence in `docs/plugin-api-stubs.md`.
+- `World#sendBlockUpdate` supports signs only. `World#unloadChunk` does not force-unload a live
+  chunk: it succeeds after unload and returns false while a player or `/forceload` holds it.
+- Ender pearls now route cross-region landings through the world loop to the owner's region. A
+  landing after the player changes dimension is ignored.
 - NMS-typed CraftBukkit methods (`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
   `CraftMagicNumbers`) stay `NoSuchMethodError` by design.
 - Block snapshots are opt-in, so `Block#getType` for arbitrary coordinates throws.
@@ -84,16 +83,56 @@ server-side only.
 
 ## 6. Performance and operations
 
-- Regionizer: deferred mutations still go through one shared queue.
-- Coordinator: `Signal::Update` takes the `command_state` mutex every tick; split it by concern.
+- Player chunk stream and `/forceload` holder changes are batched into one scheduler topology
+  lock/wake per packet or command batch. Regionizer tests cover batched add and remove; the
+  end-to-end throughput gain is still unmeasured.
+- `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
+  online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
 
 ## 7. Release and tooling hygiene
 
-- `v0.1.5` is prepared in-tree; tagging and publishing the release notes are still open.
+- `v0.1.5` is already tagged locally at `0132fd9`; the new plugin/performance changes are prepared
+  for `v0.1.6`. Verify the Windows ZIP and attach it to the GitHub release.
 - Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md`, `docs/windows-console.md` and
   `docs/plugin-stubs-status.md` in step with code.
 - The Windows GUI is a Tauri 2 + WebView2 shell in `crates/ferrite-server`; its layout,
   lifecycle, and known limitations are documented in `docs/windows-console.md`.
 - The portable Windows ZIP currently contains the executable and start notes; the NSIS
   bundle described by `tauri.conf.json` is not part of the ZIP.
+
+## 8. Runtime worlds (not included in v0.1.6)
+
+The storage catalog can describe runtime worlds, but Bukkit cannot create one or route a player
+into one yet. Complete these steps together before enabling `Server#createWorld` or
+`Server#unloadWorld`:
+
+1. Add the host operation and `GameMessage` dispatch for create/unload.
+2. Connect each runtime world's `AnvilChunkSource` to spawn and save callbacks and its storage
+   lifecycle.
+3. Route `Signal`, `Player`, `Tracking`, and `GlobalPlayer` by a world identifier instead of the
+   fixed `Dimension` enum.
+4. Dynamically register Java `FerriteWorld` instances and connect `WorldLoadEvent`,
+   `WorldUnloadEvent`, and `WorldView`.
+
+## 9. Orca FB integration review
+
+Reviewed the five FB worktrees through Orca on 2026-11-10. The release branch already contains the
+production behavior from their completed work. Duplicate or older patches were not applied:
+
+- `fb-cross-region-leads`: moving-piston overlays are present. Its local SmallFireball changes
+  duplicate the projectile support and tests already in the release.
+- `fb-end-respawn`: completed commits are already in the release base; its current local changes
+  are handoff notes only.
+- `fb-trader`: horse bucking and gear, cat/parrot taming and persistence, trader spawning, and the
+  cross-dimension block-entity bridge are present. The branch's trader-spawn patch uses a separate
+  per-region timer and removes traders after they drink, so that stale patch is not suitable.
+  Its local portal preflight is superseded by the release's atomic block update.
+- `fb-vault` and `fb-villager-trading`: completed code is already in the release base; local
+  changes are handoff notes only.
+- `freebuff2-plugin-api`: its API methods and inventory-click path are already implemented.
+  Event-order and death/respawn regression assertions were integrated in `fecc56a`; the earlier
+  inventory-flow test is already covered in the release source.
+
+Orca reported no live terminals for these worktrees. The full-workspace test result and the final
+release checks below are the evidence for this release; they do not certify real-client visuals.
