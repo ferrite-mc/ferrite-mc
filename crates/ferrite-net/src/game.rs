@@ -69,6 +69,8 @@ pub enum ServerboundPlay {
         filtering: bool,
     },
 }
+pub type RuntimeWorldCreateResult = Result<(Uuid, String, [i32; 3]), String>;
+
 pub enum GameMessage {
     Joined {
         session: u64,
@@ -108,7 +110,7 @@ pub enum GameMessage {
         name: String,
         dimension: String,
         spawn: [i32; 3],
-        complete: tokio::sync::oneshot::Sender<Result<(Uuid, String, [i32; 3]), String>>,
+        complete: tokio::sync::oneshot::Sender<RuntimeWorldCreateResult>,
     },
     UnloadRuntimeWorld {
         id: Uuid,
