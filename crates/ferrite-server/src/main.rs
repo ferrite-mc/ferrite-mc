@@ -252,6 +252,7 @@ fn load_config() -> anyhow::Result<(Config, bool)> {
 }
 
 /// Read the configured bind address without creating or logging `ferrite.toml`.
+#[cfg(windows)]
 fn configured_bind_address() -> String {
     std::fs::read_to_string("ferrite.toml")
         .ok()
