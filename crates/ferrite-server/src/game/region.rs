@@ -188,6 +188,11 @@ pub enum Command {
         yaw: Option<f32>,
         pitch: Option<f32>,
     },
+    /// An ender pearl landed in another region and the world loop routed it back to its owner.
+    EnderPearlTeleport {
+        dimension: super::Dimension,
+        pos: [f64; 3],
+    },
     /// Move to another dimension with the `Respawn` + position sequence.
     ChangeDimension {
         dimension: super::Dimension,
@@ -564,6 +569,18 @@ pub enum Signal {
         chunk: ChunkPos,
         add: bool,
     },
+    /// Several chunk holders changed together, usually from one streamed chunk packet batch.
+    HoldBatch {
+        dimension: super::Dimension,
+        chunks: Vec<ChunkPos>,
+        add: bool,
+    },
+    /// A pearl landed outside its owner's region; the world loop forwards this to the owner.
+    EnderPearlTeleport {
+        dimension: super::Dimension,
+        player: Uuid,
+        pos: [f64; 3],
+    },
     FluidChange {
         dimension: super::Dimension,
         x: i32,
@@ -586,6 +603,11 @@ pub enum Signal {
     FinishRelease {
         dimension: super::Dimension,
         chunk: ChunkPos,
+        flush: bool,
+    },
+    FinishReleaseBatch {
+        dimension: super::Dimension,
+        chunks: Vec<ChunkPos>,
         flush: bool,
     },
     /// The player left its old region for another dimension; the world loop inserts it into
@@ -1428,6 +1450,7 @@ impl Player {
             },
         );
         let (forget, new) = chunk_window((self.chunk.0, self.chunk.1), self.view, &self.loaded);
+        let mut released = Vec::with_capacity(forget.len());
         for (x, z) in forget {
             send(self, &ForgetChunk { z, x });
             self.loaded.remove(&(x, z));
@@ -1438,9 +1461,12 @@ impl Player {
             if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
                 loaded.remove(&(x, z));
             }
-            let _ = self.signals.send(Signal::Hold {
+            released.push(ChunkPos(x, z));
+        }
+        if !released.is_empty() {
+            let _ = self.signals.send(Signal::HoldBatch {
                 dimension: self.dimension,
-                chunk: ChunkPos(x, z),
+                chunks: released,
                 add: false,
             });
         }
@@ -1466,6 +1492,20 @@ impl Player {
                 flags: 0,
             },
         );
+    }
+    fn land_ender_pearl(&mut self, pos: [f64; 3]) -> bool {
+        if !pos
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+        {
+            return false;
+        }
+        self.pos = pos;
+        self.teleport();
+        if !matches!(self.gamemode, 1 | 3) {
+            self.hurt(DamageKind::Fall, 5.0);
+        }
+        true
     }
     fn chunks_tick(
         &mut self,
@@ -1541,9 +1581,12 @@ impl Player {
             if let Some(plugins) = self.plugins.clone() {
                 let _ = plugins.chunk_loaded(ferrite_plugin::default_world_id(), x, z, true);
             }
-            let _ = self.signals.send(Signal::Hold {
+        }
+        let held: Vec<_> = sent.iter().map(|&(x, z)| ChunkPos(x, z)).collect();
+        if !held.is_empty() {
+            let _ = self.signals.send(Signal::HoldBatch {
                 dimension: self.dimension,
-                chunk: ChunkPos(x, z),
+                chunks: held,
                 add: true,
             });
         }
@@ -3743,6 +3786,12 @@ impl Player {
                         }
                         self.teleport();
                         changed = true;
+                    }
+                    continue;
+                }
+                Command::EnderPearlTeleport { dimension, pos } => {
+                    if dimension == self.dimension {
+                        changed |= self.land_ender_pearl(pos);
                     }
                     continue;
                 }
@@ -7423,6 +7472,26 @@ impl Region {
         }
     }
 
+    fn route_ender_pearl_landing(
+        &mut self,
+        signals: &UnboundedSender<Signal>,
+        dimension: super::Dimension,
+        owner: Uuid,
+        pos: [f64; 3],
+    ) {
+        if let Some(player) = self.players.get_mut(&owner)
+            && player.dimension == dimension
+            && player.land_ender_pearl(pos)
+        {
+            return;
+        }
+        let _ = signals.send(Signal::EnderPearlTeleport {
+            dimension,
+            player: owner,
+            pos,
+        });
+    }
+
     fn tick_arrows(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
             return;
@@ -7535,13 +7604,13 @@ impl Region {
             }
             if landing.kind == arrow::Kind::EnderPearl
                 && let Some(owner) = landing.owner
-                && let Some(p) = self.players.get_mut(&owner)
             {
-                p.pos = [landing.pos.x, landing.pos.y, landing.pos.z];
-                p.teleport();
-                if !matches!(p.gamemode, 1 | 3) {
-                    p.hurt(DamageKind::Fall, 5.0);
-                }
+                self.route_ender_pearl_landing(
+                    &ctx.signals,
+                    ctx.dimension,
+                    owner,
+                    [landing.pos.x, landing.pos.y, landing.pos.z],
+                );
             }
         }
         for pos in fires {
@@ -9295,6 +9364,29 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_ender_pearl_landing_is_handed_to_the_world_loop() {
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let owner = Uuid::from_u128(0xfeed);
+        let pos = [32.5, 70.0, -16.5];
+
+        Region::default().route_ender_pearl_landing(
+            &signals,
+            super::super::Dimension::Nether,
+            owner,
+            pos,
+        );
+
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Signal::EnderPearlTeleport {
+                dimension: super::super::Dimension::Nether,
+                player,
+                pos: landing,
+            }) if player == owner && landing == pos
+        ));
+    }
 
     #[test]
     fn retracting_piston_checks_the_moved_blocks_source_cell() {

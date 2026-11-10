@@ -431,7 +431,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
     },
 };
 use tokio::sync::{mpsc, oneshot};
@@ -742,8 +742,14 @@ impl Worlds {
     fn add_chunk(&self, dimension: Dimension, chunk: ChunkPos) {
         self.scheduler(dimension).add_chunk(chunk);
     }
+    fn add_chunks(&self, dimension: Dimension, chunks: impl IntoIterator<Item = ChunkPos>) {
+        self.scheduler(dimension).add_chunks(chunks);
+    }
     fn remove_chunk(&self, dimension: Dimension, chunk: ChunkPos) {
         self.scheduler(dimension).remove_chunk(chunk);
+    }
+    fn remove_chunks(&self, dimension: Dimension, chunks: impl IntoIterator<Item = ChunkPos>) {
+        self.scheduler(dimension).remove_chunks(chunks);
     }
     fn schedule_at_chunk(
         &self,
@@ -752,6 +758,13 @@ impl Worlds {
         task: impl FnOnce(&mut Region) + Send + 'static,
     ) {
         self.scheduler(dimension).schedule_at_chunk(chunk, task);
+    }
+    fn schedule_at_chunks(
+        &self,
+        dimension: Dimension,
+        tasks: impl IntoIterator<Item = (ChunkPos, ferrite_region::RegionTask<Region>)>,
+    ) {
+        self.scheduler(dimension).schedule_at_chunks(tasks);
     }
     /// Chat, tab list and scoreboards are global; the overworld scheduler owns them.
     fn schedule_global(&self, task: impl FnOnce(&mut GlobalRegion) + Send + 'static) {
@@ -1448,9 +1461,12 @@ async fn run(
                      }
                  },
                  signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
-                  Signal::Hold{dimension,chunk,add}=>if add{if dimension==Dimension::Overworld{crate::plugins::chunks::set_loaded(chunk.0,chunk.1,true);}let first={let count=holds.entry((dimension,chunk)).or_default();*count += 1;*count == 1};worlds.add_chunk(dimension,chunk);let dir=entity_world.clone();let transient=worlds.transient_entities.clone();worlds.schedule_at_chunk(dimension,chunk,move |r|{r.hold_chunk(chunk);if let Some(transient)=transient {if let Some(entities)=transient.lock().unwrap().remove(&(dimension,chunk)){r.add_entities(entities);}} else if first && let Some(dir)=dir{r.add_entities(entity_save::load(&dimension.storage_root(&dir), (chunk.0, chunk.1)));}});}else{release_hold(&worlds, &mut holds, &signal_tx, dimension, chunk);},
+                  Signal::Hold{dimension,chunk,add}=>if add{add_holds(&worlds,&mut holds,entity_world.clone(),dimension,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,dimension,chunk);},
+                  Signal::HoldBatch{dimension,chunks,add}=>if add{add_holds(&worlds,&mut holds,entity_world.clone(),dimension,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,dimension,chunks);},
+                  Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
                   Signal::SaveEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world { let dir=dimension.storage_root(dir); if let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}}},
                   Signal::FinishRelease{dimension,chunk,flush}=>{worlds.remove_chunk(dimension,chunk);if flush {let source=dimensions.source(dimension).clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
+                  Signal::FinishReleaseBatch{dimension,chunks,flush}=>{worlds.remove_chunks(dimension,chunks.iter().copied());if flush {let source=dimensions.source(dimension).clone();for chunk in chunks{let source=source.clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}}},
                   Signal::FluidChange{dimension,x,y,z}=>{
                     for (dx,dy,dz) in [(0,0,0),(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
                       let (Some(x),Some(y),Some(z))=(x.checked_add(dx),y.checked_add(dy),z.checked_add(dz)) else {continue;};
@@ -1501,7 +1517,7 @@ async fn run(
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_dimension(id, dimension));
                   },
-                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(dimension,chunk));for pos in held {release_hold(&worlds, &mut holds, &signal_tx, dimension, pos);}if preheld {defer_release(&worlds,&signal_tx,dimension,chunk,false);}
+                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(dimension,chunk));release_holds(&worlds,&mut holds,&signal_tx,dimension,held);if preheld {defer_release(&worlds,&signal_tx,dimension,chunk,false);}
                     let name = names.remove(&uuid).unwrap_or_default();
                     crate::plugins::facts::forget(uuid);
                     if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
@@ -2371,41 +2387,98 @@ fn defer_release(
     let transient = worlds.transient_entities.clone();
     let tracking = worlds.tracking.clone();
     worlds.schedule_at_chunk(dimension, chunk, move |region| {
-        region.release_chunk(chunk);
-        // Entities leave the store before the chunk data is flushed, so a reload reads exactly
-        // what was held when the last viewer left.
-        if !region.has_chunk_hold(chunk) {
-            let mut entities = region.take_chunk_entities(chunk);
-            for entity in &mut entities {
-                let packet = game::packet(&ferrite_protocol::packets::play::RemoveEntities {
-                    ids: vec![VarInt(entity.data.id)],
-                });
-                for (uuid, _) in entity.data.tracker.viewers() {
-                    if let Some((_, _, outbound)) = tracking.lock().unwrap().get(&uuid) {
-                        let _ = outbound.send(packet.clone());
-                    }
-                }
-                entity.data.tracker = Default::default();
-            }
-            if let Some(transient) = transient {
-                transient
-                    .lock()
-                    .unwrap()
-                    .insert((dimension, chunk), entities);
-            } else {
-                let _ = signals.send(Signal::SaveEntities {
-                    dimension,
-                    chunk,
-                    entities,
-                });
-            }
-        }
+        release_chunk_entities(region, &signals, &transient, &tracking, dimension, chunk);
         let _ = signals.send(Signal::FinishRelease {
             dimension,
             chunk,
             flush,
         });
     });
+}
+fn release_chunk_entities(
+    region: &mut Region,
+    signals: &mpsc::UnboundedSender<Signal>,
+    transient: &Option<TransientEntities>,
+    tracking: &region::Tracking,
+    dimension: Dimension,
+    chunk: ChunkPos,
+) {
+    region.release_chunk(chunk);
+    // Entities leave the store before the chunk data is flushed, so a reload reads exactly
+    // what was held when the last viewer left.
+    if !region.has_chunk_hold(chunk) {
+        let mut entities = region.take_chunk_entities(chunk);
+        for entity in &mut entities {
+            let packet = game::packet(&ferrite_protocol::packets::play::RemoveEntities {
+                ids: vec![VarInt(entity.data.id)],
+            });
+            for (uuid, _) in entity.data.tracker.viewers() {
+                if let Some((_, _, outbound)) = tracking.lock().unwrap().get(&uuid) {
+                    let _ = outbound.send(packet.clone());
+                }
+            }
+            entity.data.tracker = Default::default();
+        }
+        if let Some(transient) = transient {
+            transient
+                .lock()
+                .unwrap()
+                .insert((dimension, chunk), entities);
+        } else {
+            let _ = signals.send(Signal::SaveEntities {
+                dimension,
+                chunk,
+                entities,
+            });
+        }
+    }
+}
+fn defer_release_many(
+    worlds: &Worlds,
+    signals: &mpsc::UnboundedSender<Signal>,
+    dimension: Dimension,
+    chunks: Vec<ChunkPos>,
+    flush: bool,
+) {
+    if chunks.is_empty() {
+        return;
+    }
+    if chunks.len() == 1 {
+        defer_release(worlds, signals, dimension, chunks[0], flush);
+        return;
+    }
+
+    // Regions release independently. This per-batch barrier collects their completed chunks
+    // without waiting on a region thread, so the world loop can remove all holders together.
+    let remaining = Arc::new(AtomicUsize::new(chunks.len()));
+    let completed = Arc::new(Mutex::new(Vec::with_capacity(chunks.len())));
+    let transient = worlds.transient_entities.clone();
+    let tracking = worlds.tracking.clone();
+    let tasks = chunks.into_iter().map(|chunk| {
+        let signals = signals.clone();
+        let remaining = remaining.clone();
+        let completed = completed.clone();
+        let transient = transient.clone();
+        let tracking = tracking.clone();
+        let task: ferrite_region::RegionTask<Region> = Box::new(move |region| {
+            release_chunk_entities(region, &signals, &transient, &tracking, dimension, chunk);
+            let last = {
+                let mut finished = completed.lock().unwrap();
+                finished.push(chunk);
+                remaining.fetch_sub(1, Ordering::AcqRel) == 1
+            };
+            if last {
+                let chunks = std::mem::take(&mut *completed.lock().unwrap());
+                let _ = signals.send(Signal::FinishReleaseBatch {
+                    dimension,
+                    chunks,
+                    flush,
+                });
+            }
+        });
+        (chunk, task)
+    });
+    worlds.schedule_at_chunks(dimension, tasks);
 }
 /// Hands an entity to the region owning `to`. A chunk nobody holds parks the entity in the
 /// scheduler until a region takes that chunk.
@@ -3329,17 +3402,19 @@ impl CommandRuntime<'_> {
                 add,
                 remove,
             } => {
-                for (x, z) in add {
-                    let _ = self.signals.send(Signal::Hold {
+                let add: Vec<_> = add.into_iter().map(|(x, z)| ChunkPos(x, z)).collect();
+                if !add.is_empty() {
+                    let _ = self.signals.send(Signal::HoldBatch {
                         dimension,
-                        chunk: ChunkPos(x, z),
+                        chunks: add,
                         add: true,
                     });
                 }
-                for (x, z) in remove {
-                    let _ = self.signals.send(Signal::Hold {
+                let remove: Vec<_> = remove.into_iter().map(|(x, z)| ChunkPos(x, z)).collect();
+                if !remove.is_empty() {
+                    let _ = self.signals.send(Signal::HoldBatch {
                         dimension,
-                        chunk: ChunkPos(x, z),
+                        chunks: remove,
                         add: false,
                     });
                 }
@@ -4113,20 +4188,73 @@ fn release_hold(
     dimension: Dimension,
     chunk: ChunkPos,
 ) {
-    let Some(count) = holds.get_mut(&(dimension, chunk)) else {
-        return;
-    };
-    *count -= 1;
-    if *count > 0 {
-        // Another player still views the chunk, so its region hold stays: dropping it here
-        // would unload the chunk and remove every mob for the remaining viewers.
+    release_holds(worlds, holds, signals, dimension, [chunk]);
+}
+fn release_holds(
+    worlds: &Worlds,
+    holds: &mut HashMap<(Dimension, ChunkPos), usize>,
+    signals: &mpsc::UnboundedSender<Signal>,
+    dimension: Dimension,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+) {
+    let mut released = Vec::new();
+    for chunk in chunks {
+        let Some(count) = holds.get_mut(&(dimension, chunk)) else {
+            continue;
+        };
+        *count -= 1;
+        if *count > 0 {
+            // Another player still views the chunk, so its region hold stays: dropping it here
+            // would unload the chunk and remove every mob for the remaining viewers.
+            continue;
+        }
+        holds.remove(&(dimension, chunk));
+        if dimension == Dimension::Overworld {
+            crate::plugins::chunks::set_loaded(chunk.0, chunk.1, false);
+        }
+        released.push(chunk);
+    }
+    defer_release_many(worlds, signals, dimension, released, true);
+}
+fn add_holds(
+    worlds: &Worlds,
+    holds: &mut HashMap<(Dimension, ChunkPos), usize>,
+    entity_world: Option<std::path::PathBuf>,
+    dimension: Dimension,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+) {
+    let chunks: Vec<_> = chunks.into_iter().collect();
+    if chunks.is_empty() {
         return;
     }
-    holds.remove(&(dimension, chunk));
-    if dimension == Dimension::Overworld {
-        crate::plugins::chunks::set_loaded(chunk.0, chunk.1, false);
-    }
-    defer_release(worlds, signals, dimension, chunk, true);
+    worlds.add_chunks(dimension, chunks.iter().copied());
+    let tasks = chunks.into_iter().map(|chunk| {
+        if dimension == Dimension::Overworld {
+            crate::plugins::chunks::set_loaded(chunk.0, chunk.1, true);
+        }
+        let first = {
+            let count = holds.entry((dimension, chunk)).or_default();
+            *count += 1;
+            *count == 1
+        };
+        let dir = entity_world.clone();
+        let transient = worlds.transient_entities.clone();
+        let task: ferrite_region::RegionTask<Region> = Box::new(move |region| {
+            region.hold_chunk(chunk);
+            if let Some(transient) = transient {
+                if let Some(entities) = transient.lock().unwrap().remove(&(dimension, chunk)) {
+                    region.add_entities(entities);
+                }
+            } else if first && let Some(dir) = dir {
+                region.add_entities(entity_save::load(
+                    &dimension.storage_root(&dir),
+                    (chunk.0, chunk.1),
+                ));
+            }
+        });
+        (chunk, task)
+    });
+    worlds.schedule_at_chunks(dimension, tasks);
 }
 #[cfg(test)]
 mod integration;

@@ -722,25 +722,56 @@ impl<D: RegionData, G: Send + 'static> Scheduler<D, G> {
         )
     }
     fn mutate(&self, mutation: Mutation) {
+        self.mutate_many(std::iter::once(mutation));
+    }
+    /// Applies a batch of topology mutations under one scheduler lock.
+    fn mutate_many(&self, mutations: impl IntoIterator<Item = Mutation>) {
         let mut s = self.shared.state.lock();
         assert!(!s.stopping, "scheduler is stopping");
-        submit(&mut s, mutation);
-        self.shared.wake.notify_all();
+        let mut changed = false;
+        for mutation in mutations {
+            submit(&mut s, mutation);
+            changed = true;
+        }
+        if changed {
+            self.shared.wake.notify_all();
+        }
     }
     /// Adds a holder for `chunk`. Applied immediately unless it involves a
     /// busy region, in which case it is applied at that region's next safe point.
     pub fn add_chunk(&self, chunk: ChunkPos) {
         self.mutate(Mutation::Add(chunk));
     }
+    /// Adds several chunk holders while acquiring the scheduler state lock once.
+    pub fn add_chunks(&self, chunks: impl IntoIterator<Item = ChunkPos>) {
+        self.mutate_many(chunks.into_iter().map(Mutation::Add));
+    }
     /// Removes a holder for `chunk`; deferred like [`Scheduler::add_chunk`].
     pub fn remove_chunk(&self, chunk: ChunkPos) {
         self.mutate(Mutation::Remove(chunk));
+    }
+    /// Removes several chunk holders while acquiring the scheduler state lock once.
+    pub fn remove_chunks(&self, chunks: impl IntoIterator<Item = ChunkPos>) {
+        self.mutate_many(chunks.into_iter().map(Mutation::Remove));
     }
     pub fn schedule_at_chunk(&self, chunk: ChunkPos, task: impl FnOnce(&mut D) + Send + 'static) {
         let mut s = self.shared.state.lock();
         assert!(!s.stopping, "scheduler is stopping");
         route(&mut s, chunk, Box::new(task));
         self.shared.wake.notify_all();
+    }
+    /// Routes several chunk tasks while acquiring the scheduler state lock once.
+    pub fn schedule_at_chunks(&self, tasks: impl IntoIterator<Item = (ChunkPos, RegionTask<D>)>) {
+        let mut s = self.shared.state.lock();
+        assert!(!s.stopping, "scheduler is stopping");
+        let mut changed = false;
+        for (chunk, task) in tasks {
+            route(&mut s, chunk, task);
+            changed = true;
+        }
+        if changed {
+            self.shared.wake.notify_all();
+        }
     }
     pub fn schedule_global(&self, task: impl FnOnce(&mut G) + Send + 'static) {
         let mut s = self.shared.state.lock();

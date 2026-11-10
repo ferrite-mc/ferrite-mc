@@ -50,6 +50,61 @@ fn queued_tasks_follow_chunk_ownership_and_shutdown_returns_data() {
 }
 
 #[test]
+fn batch_chunk_mutations_preserve_topology() {
+    use ferrite_region::Scheduler;
+    use std::time::{Duration, Instant};
+    let scheduler = Scheduler::new(Regionizer::<Data>::new(0, 1), (), 1, |_| {}, |_| {});
+    let chunks = [ChunkPos(0, 0), ChunkPos(8, 0), ChunkPos(16, 0)];
+    scheduler.add_chunks(chunks);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while chunks.iter().any(|&chunk| scheduler.owner(chunk).is_none()) {
+        assert!(
+            Instant::now() < deadline,
+            "batched additions were not applied"
+        );
+        std::thread::yield_now();
+    }
+    scheduler.remove_chunks(chunks);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while chunks.iter().any(|&chunk| scheduler.owner(chunk).is_some()) {
+        assert!(
+            Instant::now() < deadline,
+            "batched removals were not applied"
+        );
+        std::thread::yield_now();
+    }
+    scheduler.shutdown();
+}
+
+#[test]
+fn batch_chunk_tasks_are_routed_to_their_owners() {
+    use ferrite_region::{RegionTask, Scheduler};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::{Duration, Instant};
+    let scheduler = Scheduler::new(Regionizer::<Data>::new(0, 1), (), 1, |_| {}, |_| {});
+    let chunks = [ChunkPos(0, 0), ChunkPos(8, 0), ChunkPos(16, 0)];
+    scheduler.add_chunks(chunks);
+    let completed = Arc::new(AtomicUsize::new(0));
+    let tasks = chunks.into_iter().map(|chunk| {
+        let completed = completed.clone();
+        let task: RegionTask<Data> = Box::new(move |_| {
+            completed.fetch_add(1, Ordering::Relaxed);
+        });
+        (chunk, task)
+    });
+    scheduler.schedule_at_chunks(tasks);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while completed.load(Ordering::Relaxed) != chunks.len() {
+        assert!(Instant::now() < deadline, "batched tasks were not routed");
+        std::thread::yield_now();
+    }
+    scheduler.shutdown();
+}
+
+#[test]
 fn split_partitions_data_and_sections_use_floor_division() {
     let mut r = Regionizer::<Data>::new(1, 1);
     assert_eq!(r.section_of(ChunkPos(-1, -3)), SectionPos(-1, -2));
