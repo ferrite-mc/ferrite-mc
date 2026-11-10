@@ -2431,7 +2431,7 @@ impl PluginHost {
                 "(Ljava/lang/String;)Z",
                 &[JValue::Object(id.as_ref())],
             )?;
-            Ok(result.z()?)
+            result.z()
         })?)
     }
     /// Publish an online player snapshot for plugin lookups and command dispatch.
