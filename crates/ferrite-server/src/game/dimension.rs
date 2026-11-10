@@ -30,6 +30,49 @@ pub struct RuntimeWorldDescriptor {
 pub struct RuntimeWorldCatalog {
     by_id: HashMap<uuid::Uuid, RuntimeWorldDescriptor>,
     by_name: HashMap<String, uuid::Uuid>,
+    by_key: HashMap<String, uuid::Uuid>,
+}
+
+/// Validate a single portable directory component and derive a valid Minecraft resource key.
+fn runtime_world_identity(name: &str) -> Result<(String, String), &'static str> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.ends_with('.')
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+    {
+        return Err("invalid world name");
+    }
+    // Windows treats these device names as special even when followed by an extension.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    {
+        return Err("invalid world name");
+    }
+    let folded = name.to_lowercase();
+    let mut path = String::new();
+    for byte in folded.bytes() {
+        match byte {
+            b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.' => path.push(char::from(byte)),
+            b' ' => path.push('_'),
+            _ => {
+                use std::fmt::Write;
+                write!(path, "_{byte:02x}").expect("writing to a String cannot fail");
+            }
+        }
+    }
+    Ok((folded, format!("ferrite:{path}")))
 }
 
 impl RuntimeWorldCatalog {
@@ -44,12 +87,12 @@ impl RuntimeWorldCatalog {
         spawn: [i32; 3],
     ) -> Result<RuntimeWorldDescriptor, &'static str> {
         let name = name.trim();
-        if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
-            return Err("invalid world name");
-        }
-        let folded = name.to_ascii_lowercase();
-        if self.by_id.contains_key(&id) || self.by_name.contains_key(&folded) {
-            return Err("world id or name already loaded");
+        let (folded, key) = runtime_world_identity(name)?;
+        if self.by_id.contains_key(&id)
+            || self.by_name.contains_key(&folded)
+            || self.by_key.contains_key(&key)
+        {
+            return Err("world id, name or key already loaded");
         }
         let source = AnvilChunkSource::with_dimension(
             root.join(name),
@@ -60,11 +103,12 @@ impl RuntimeWorldCatalog {
         let descriptor = RuntimeWorldDescriptor {
             id,
             name: name.to_owned(),
-            key: format!("ferrite:{}", folded.replace(' ', "_")),
+            key: key.clone(),
             spawn,
             source,
         };
         self.by_name.insert(folded, id);
+        self.by_key.insert(key, id);
         self.by_id.insert(id, descriptor.clone());
         Ok(descriptor)
     }
@@ -74,12 +118,13 @@ impl RuntimeWorldCatalog {
     }
     pub fn by_name(&self, name: &str) -> Option<&RuntimeWorldDescriptor> {
         self.by_name
-            .get(&name.trim().to_ascii_lowercase())
+            .get(&name.trim().to_lowercase())
             .and_then(|id| self.by_id.get(id))
     }
     pub fn unload(&mut self, id: uuid::Uuid) -> Option<RuntimeWorldDescriptor> {
         let descriptor = self.by_id.remove(&id)?;
-        self.by_name.remove(&descriptor.name.to_ascii_lowercase());
+        self.by_name.remove(&descriptor.name.to_lowercase());
+        self.by_key.remove(&descriptor.key);
         Some(descriptor)
     }
 }
@@ -345,6 +390,82 @@ impl DimensionRegistry {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn runtime_world_names_are_portable_and_generate_valid_resource_keys() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "a\\b",
+            "C:drive",
+            "bad?name",
+            "name.",
+            "NUL",
+            "com1.txt",
+            "Lpt9",
+        ] {
+            assert!(runtime_world_identity(name).is_err(), "accepted {name:?}");
+        }
+        assert_eq!(
+            runtime_world_identity(" My World ").unwrap(),
+            ("my world".into(), "ferrite:my_world".into())
+        );
+        let (_, key) = runtime_world_identity("한글").unwrap();
+        assert!(key.strip_prefix("ferrite:").unwrap().bytes().all(
+            |byte| byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'-' | b'.')
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_world_catalog_rejects_colliding_keys_and_releases_them_on_unload() {
+        let Some(root) = vanilla_root() else { return };
+        let registry = Arc::new(RuntimeRegistry::load(&root).unwrap());
+        let world_dir = tempfile::tempdir().unwrap();
+        let mut catalog = RuntimeWorldCatalog::default();
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        let created = catalog
+            .create(
+                first,
+                "My World",
+                world_dir.path(),
+                Arc::clone(&registry),
+                None,
+                [0, 64, 0],
+            )
+            .unwrap();
+        assert_eq!(created.key, "ferrite:my_world");
+        assert_eq!(catalog.by_name("MY WORLD").unwrap().id, first);
+        assert!(
+            catalog
+                .create(
+                    second,
+                    "my_world",
+                    world_dir.path(),
+                    Arc::clone(&registry),
+                    None,
+                    [0, 64, 0]
+                )
+                .is_err()
+        );
+        assert!(catalog.unload(first).is_some());
+        assert!(
+            catalog
+                .create(
+                    second,
+                    "my_world",
+                    world_dir.path(),
+                    registry,
+                    None,
+                    [0, 64, 0]
+                )
+                .is_ok()
+        );
+    }
 
     fn vanilla_root() -> Option<PathBuf> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");

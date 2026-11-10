@@ -26,7 +26,7 @@ pub mod worldinfo;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 use anyhow::Context;
@@ -439,13 +439,96 @@ pub fn world_dimension(world: Uuid) -> Option<crate::game::Dimension> {
 const MAX_QUERY_CHUNKS: i64 = 4096;
 
 /// Live world reads for the Bukkit block API, backed by the server's chunk sources.
-struct SourceWorldView {
-    worlds: HashMap<Uuid, Arc<crate::game::AnvilChunkSource>>,
+pub struct SourceWorldView {
+    worlds: RwLock<HashMap<Uuid, Arc<crate::game::AnvilChunkSource>>>,
+}
+
+#[cfg(test)]
+mod source_world_view_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_sources_register_and_unregister_without_replacing_existing_worlds() {
+        let world = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        let source = crate::game::AnvilChunkSource::new_memory_dimension(
+            None,
+            crate::game::Dimension::Overworld,
+        );
+        let replacement = crate::game::AnvilChunkSource::new_memory_dimension(
+            None,
+            crate::game::Dimension::Overworld,
+        );
+        let view = SourceWorldView::new([(world, Arc::clone(&source))]);
+        assert!(view.register_world(other, Arc::clone(&replacement)));
+        assert!(!view.register_world(world, Arc::clone(&replacement)));
+        assert!(Arc::ptr_eq(&view.source(world).unwrap(), &source));
+        assert!(matches!(
+            ferrite_plugin::WorldView::block_entities(&view, other, [0; 3], [0; 3]),
+            Err(BlockEntityError::ChunkNotLoaded)
+        ));
+        let held = view.source(other).unwrap();
+        assert!(Arc::ptr_eq(
+            &view.unregister_world(other).unwrap(),
+            &replacement
+        ));
+        assert!(view.source(other).is_none());
+        assert!(matches!(
+            ferrite_plugin::WorldView::block_entities(&view, other, [0; 3], [0; 3]),
+            Err(BlockEntityError::UnknownWorld)
+        ));
+        assert!(Arc::ptr_eq(&held, &replacement));
+        assert!(view.source(world).is_some());
+    }
+
+    #[tokio::test]
+    async fn concurrent_world_source_reads_survive_registration_changes() {
+        let world = Uuid::from_u128(3);
+        let source = crate::game::AnvilChunkSource::new_memory_dimension(
+            None,
+            crate::game::Dimension::Overworld,
+        );
+        let view = Arc::new(SourceWorldView::new([]));
+        let reader = Arc::clone(&view);
+        let thread = std::thread::spawn(move || {
+            for _ in 0..1000 {
+                let _ = reader.source(world);
+            }
+        });
+        for _ in 0..1000 {
+            assert!(view.register_world(world, Arc::clone(&source)));
+            assert!(view.unregister_world(world).is_some());
+        }
+        thread.join().unwrap();
+    }
 }
 
 impl SourceWorldView {
-    fn source(&self, world: Uuid) -> Option<&Arc<crate::game::AnvilChunkSource>> {
-        self.worlds.get(&world)
+    fn new(worlds: impl IntoIterator<Item = (Uuid, Arc<crate::game::AnvilChunkSource>)>) -> Self {
+        Self {
+            worlds: RwLock::new(worlds.into_iter().collect()),
+        }
+    }
+
+    /// Adds a world source without replacing an already registered world.
+    pub fn register_world(&self, world: Uuid, source: Arc<crate::game::AnvilChunkSource>) -> bool {
+        use std::collections::hash_map::Entry;
+        match self.worlds.write().unwrap().entry(world) {
+            Entry::Vacant(entry) => {
+                entry.insert(source);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    /// Removes a source; reads already in progress retain their own source reference.
+    pub fn unregister_world(&self, world: Uuid) -> Option<Arc<crate::game::AnvilChunkSource>> {
+        self.worlds.write().unwrap().remove(&world)
+    }
+
+    fn source(&self, world: Uuid) -> Option<Arc<crate::game::AnvilChunkSource>> {
+        self.worlds.read().unwrap().get(&world).cloned()
     }
 }
 
@@ -520,25 +603,25 @@ fn encode_block_entities(
 pub fn world_view(
     dimensions: Arc<crate::game::DimensionRegistry>,
 ) -> Arc<dyn ferrite_plugin::WorldView> {
-    let worlds = crate::game::Dimension::ALL
-        .into_iter()
-        .map(|dimension| {
-            (
-                world_id(dimension),
-                Arc::clone(dimensions.source(dimension)),
-            )
-        })
-        .collect();
-    Arc::new(SourceWorldView { worlds })
+    dynamic_world_view(dimensions)
+}
+
+/// Build a world view with a handle for registering sources after startup.
+pub fn dynamic_world_view(dimensions: Arc<crate::game::DimensionRegistry>) -> Arc<SourceWorldView> {
+    let worlds = crate::game::Dimension::ALL.into_iter().map(|dimension| {
+        (
+            world_id(dimension),
+            Arc::clone(dimensions.source(dimension)),
+        )
+    });
+    Arc::new(SourceWorldView::new(worlds))
 }
 
 #[cfg(test)]
 pub(crate) fn world_view_for_sources(
     worlds: impl IntoIterator<Item = (Uuid, Arc<crate::game::AnvilChunkSource>)>,
 ) -> Arc<dyn ferrite_plugin::WorldView> {
-    Arc::new(SourceWorldView {
-        worlds: worlds.into_iter().collect(),
-    })
+    Arc::new(SourceWorldView::new(worlds))
 }
 
 /// The vanilla command that performs a plugin's world mutation, or `None` for a world the
