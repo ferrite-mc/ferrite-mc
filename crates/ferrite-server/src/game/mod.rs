@@ -83,6 +83,75 @@ mod profile;
 mod tests {
     use super::*;
     #[test]
+    fn shared_chunk_uses_one_region_holder_until_last_viewer_leaves() {
+        let scheduler = Scheduler::new(
+            Regionizer::<Region>::new(0, 1),
+            GlobalRegion::default(),
+            1,
+            |_| {},
+            |_| {},
+        );
+        let worlds = Worlds {
+            schedulers: [(Dimension::Overworld, scheduler)].into_iter().collect(),
+            transient_entities: Some(Arc::new(Mutex::new(HashMap::new()))),
+            persistent_entities: false,
+            tracking: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let mut holds = HashMap::new();
+        let (signals, _) = mpsc::unbounded_channel();
+        let chunk = ChunkPos(0, 0);
+        add_holds(&worlds, &mut holds, None, Dimension::Overworld, [chunk]);
+        add_holds(&worlds, &mut holds, None, Dimension::Overworld, [chunk]);
+        assert_eq!(
+            worlds.scheduler(Dimension::Overworld).holder_count(chunk),
+            1
+        );
+        release_hold(&worlds, &mut holds, &signals, Dimension::Overworld, chunk);
+        assert_eq!(
+            worlds.scheduler(Dimension::Overworld).holder_count(chunk),
+            1
+        );
+        worlds.shutdown();
+    }
+
+    #[test]
+    fn persistent_unload_keeps_latest_entities_available_before_disk_save() {
+        let chunk = ChunkPos(0, 0);
+        let mut region = Region::default();
+        region.hold_chunk(chunk);
+        let mut rng = ferrite_entity::Rng::default();
+        let mob = ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(1.5, 70.0, 2.5),
+            &mut rng,
+        );
+        let uuid = mob.data.uuid;
+        region.entities.insert(mob);
+        let cache: Option<TransientEntities> = Some(Arc::new(Mutex::new(HashMap::new())));
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (signals, mut received) = mpsc::unbounded_channel();
+        release_chunk_entities(
+            &mut region,
+            &signals,
+            &cache,
+            &tracking,
+            Dimension::Overworld,
+            chunk,
+            true,
+        );
+        let saved = cache
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&(Dimension::Overworld, chunk))
+            .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].data.uuid, uuid);
+        assert!(
+            matches!(received.try_recv(), Ok(Signal::SaveCachedEntities { entities, .. }) if entities.len() == 1 && entities[0].data.uuid == uuid)
+        );
+    }
+    #[test]
     fn movement_validation_rejects_large_and_nonfinite_moves() {
         assert!(valid_move([0.0, 65.0, 0.0], [5.0, 65.0, 0.0]));
         assert!(!valid_move([0.0, 65.0, 0.0], [101.0, 65.0, 0.0]));
@@ -716,13 +785,14 @@ fn apply_game_rule(
     Ok(format!("{name} = {}", result.text()))
 }
 type TransientEntities =
-    Arc<Mutex<HashMap<(Dimension, ChunkPos), Vec<ferrite_entity::EntityRecord>>>>;
+    Arc<Mutex<HashMap<(Dimension, ChunkPos), Arc<Vec<ferrite_entity::EntityRecord>>>>>;
 
 /// One region scheduler per dimension: Folia's regionizer is per world, so chunks from two
 /// dimensions never share ownership.
 struct Worlds {
     schedulers: HashMap<Dimension, Scheduler<Region, GlobalRegion>>,
     transient_entities: Option<TransientEntities>,
+    persistent_entities: bool,
     tracking: region::Tracking,
 }
 
@@ -874,6 +944,7 @@ async fn run(
         mut signals,
     } = channels;
     let tracking: region::Tracking = Arc::new(Mutex::new(HashMap::new()));
+    let positions = Arc::new(Mutex::new(HashMap::new()));
 
     let LoopMetrics {
         game_rules,
@@ -954,6 +1025,7 @@ async fn run(
         let ctx = TickContext {
             signals: signal_tx.clone(),
             tracking: tracking.clone(),
+            positions: positions.clone(),
             source: Some(dimensions.source(dimension).clone()),
             rules: Arc::clone(&game_rules),
             spawn: [
@@ -1035,9 +1107,8 @@ async fn run(
     }
     let worlds = Worlds {
         schedulers,
-        transient_entities: entity_world
-            .is_none()
-            .then(|| Arc::new(Mutex::new(HashMap::new()))),
+        transient_entities: Some(Arc::new(Mutex::new(HashMap::new()))),
+        persistent_entities: entity_world.is_some(),
         tracking: tracking.clone(),
     };
     let mut mailboxes: HashMap<Uuid, (u64, Mailbox, OutboundSender)> = HashMap::new();
@@ -1117,7 +1188,6 @@ async fn run(
     );
     autosave.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut holds: HashMap<(Dimension, ChunkPos), usize> = HashMap::new();
-    let positions = Arc::new(Mutex::new(HashMap::new()));
     let mut clock = tokio::time::interval(std::time::Duration::from_millis(50));
     let mut applied_rate = 20.0_f32;
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1464,7 +1534,9 @@ async fn run(
                   Signal::Hold{dimension,chunk,add}=>if add{add_holds(&worlds,&mut holds,entity_world.clone(),dimension,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,dimension,chunk);},
                   Signal::HoldBatch{dimension,chunks,add}=>if add{add_holds(&worlds,&mut holds,entity_world.clone(),dimension,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,dimension,chunks);},
                   Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
+                  Signal::MobMelee{dimension,player,damage,from}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from});}},
                   Signal::SaveEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world { let dir=dimension.storage_root(dir); if let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}}},
+                  Signal::SaveCachedEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world {let dir=dimension.storage_root(dir);match entity_save::save(&dir,(chunk.0,chunk.1),&entities){Ok(())=>if let Some(cache)=&worlds.transient_entities{let mut cache=cache.lock().unwrap();if cache.get(&(dimension,chunk)).is_some_and(|cached| Arc::ptr_eq(cached,&entities)){cache.remove(&(dimension,chunk));}},Err(error)=>tracing::error!(%error,chunk=?chunk,"failed to save chunk entities")}}},
                   Signal::FinishRelease{dimension,chunk,flush}=>{worlds.remove_chunk(dimension,chunk);if flush {let source=dimensions.source(dimension).clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
                   Signal::FinishReleaseBatch{dimension,chunks,flush}=>{worlds.remove_chunks(dimension,chunks.iter().copied());if flush {let source=dimensions.source(dimension).clone();for chunk in chunks{let source=source.clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}}},
                   Signal::FluidChange{dimension,x,y,z}=>{
@@ -2385,9 +2457,12 @@ fn defer_release(
 ) {
     let signals = signals.clone();
     let transient = worlds.transient_entities.clone();
+    let persistent = worlds.persistent_entities;
     let tracking = worlds.tracking.clone();
     worlds.schedule_at_chunk(dimension, chunk, move |region| {
-        release_chunk_entities(region, &signals, &transient, &tracking, dimension, chunk);
+        release_chunk_entities(
+            region, &signals, &transient, &tracking, dimension, chunk, persistent,
+        );
         let _ = signals.send(Signal::FinishRelease {
             dimension,
             chunk,
@@ -2402,6 +2477,7 @@ fn release_chunk_entities(
     tracking: &region::Tracking,
     dimension: Dimension,
     chunk: ChunkPos,
+    persistent: bool,
 ) {
     region.release_chunk(chunk);
     // Entities leave the store before the chunk data is flushed, so a reload reads exactly
@@ -2419,13 +2495,15 @@ fn release_chunk_entities(
             }
             entity.data.tracker = Default::default();
         }
+        let entities = Arc::new(entities);
         if let Some(transient) = transient {
             transient
                 .lock()
                 .unwrap()
-                .insert((dimension, chunk), entities);
-        } else {
-            let _ = signals.send(Signal::SaveEntities {
+                .insert((dimension, chunk), entities.clone());
+        }
+        if persistent {
+            let _ = signals.send(Signal::SaveCachedEntities {
                 dimension,
                 chunk,
                 entities,
@@ -2453,6 +2531,7 @@ fn defer_release_many(
     let remaining = Arc::new(AtomicUsize::new(chunks.len()));
     let completed = Arc::new(Mutex::new(Vec::with_capacity(chunks.len())));
     let transient = worlds.transient_entities.clone();
+    let persistent = worlds.persistent_entities;
     let tracking = worlds.tracking.clone();
     let tasks = chunks.into_iter().map(|chunk| {
         let signals = signals.clone();
@@ -2461,7 +2540,9 @@ fn defer_release_many(
         let transient = transient.clone();
         let tracking = tracking.clone();
         let task: ferrite_region::RegionTask<Region> = Box::new(move |region| {
-            release_chunk_entities(region, &signals, &transient, &tracking, dimension, chunk);
+            release_chunk_entities(
+                region, &signals, &transient, &tracking, dimension, chunk, persistent,
+            );
             let last = {
                 let mut finished = completed.lock().unwrap();
                 finished.push(chunk);
@@ -4223,7 +4304,14 @@ fn add_holds(
     dimension: Dimension,
     chunks: impl IntoIterator<Item = ChunkPos>,
 ) {
-    let chunks: Vec<_> = chunks.into_iter().collect();
+    let chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|&chunk| {
+            let count = holds.entry((dimension, chunk)).or_default();
+            *count += 1;
+            *count == 1
+        })
+        .collect();
     if chunks.is_empty() {
         return;
     }
@@ -4232,20 +4320,17 @@ fn add_holds(
         if dimension == Dimension::Overworld {
             crate::plugins::chunks::set_loaded(chunk.0, chunk.1, true);
         }
-        let first = {
-            let count = holds.entry((dimension, chunk)).or_default();
-            *count += 1;
-            *count == 1
-        };
         let dir = entity_world.clone();
         let transient = worlds.transient_entities.clone();
         let task: ferrite_region::RegionTask<Region> = Box::new(move |region| {
             region.hold_chunk(chunk);
-            if let Some(transient) = transient {
-                if let Some(entities) = transient.lock().unwrap().remove(&(dimension, chunk)) {
-                    region.add_entities(entities);
-                }
-            } else if first && let Some(dir) = dir {
+            let cached = transient
+                .and_then(|transient| transient.lock().unwrap().remove(&(dimension, chunk)));
+            if let Some(entities) = cached {
+                region.add_entities(
+                    Arc::try_unwrap(entities).unwrap_or_else(|cached| (*cached).clone()),
+                );
+            } else if let Some(dir) = dir {
                 region.add_entities(entity_save::load(
                     &dimension.storage_root(&dir),
                     (chunk.0, chunk.1),

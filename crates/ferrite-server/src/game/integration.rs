@@ -1774,6 +1774,7 @@ fn entities_follow_region_merges_splits_and_hand_offs() {
     let ctx = super::TickContext {
         signals: tx,
         tracking: Default::default(),
+        positions: Default::default(),
         source: None,
         dimension: super::Dimension::Overworld,
         raining: false,
