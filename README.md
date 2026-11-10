@@ -32,7 +32,8 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 ## 빌드와 실행
 
 필요: **Rust stable**(`rust-toolchain.toml`이 Windows MSVC를 고정, Linux/macOS는 `RUSTUP_TOOLCHAIN=stable`),
-**Java 25**, **Python 3**.
+**Java 25**, **Python 3**. Windows GUI에는 **Microsoft Edge WebView2 Runtime**이 필요합니다
+(Windows 10/11에는 기본 포함).
 
 ```sh
 source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
@@ -50,9 +51,11 @@ cargo run --release -p ferrite-server      # 오프라인 모드 로컬 서버
 유지되고, 60초마다 저장되며 언로드와 정상 종료 때도 Anvil 형식으로 기록됩니다. 엔티티는
 로드된 청크별 스냅샷을, 접속 중인 플레이어 상태도 60초마다 저장합니다. 강제 종료 직전의
 자동 저장 주기 안 변경분은 유실될 수 있습니다. Windows에서 `ferrite-server.exe`를
-직접 실행하면 서버 시작·종료와 명령 입력, 로그 보기를 제공하는 Rust GUI가 열립니다.
+직접 실행하면 서버 시작·종료와 명령 입력, 로그 보기를 제공하는 Tauri 2 GUI가 열립니다.
 실행 파일은 `vanilla/26.3/generated/`가 준비된 Ferrite 작업 폴더에 두어야 합니다.
-Linux에서는 GUI 없이 터미널의 표준 입력을 받는 헤드리스 서버로 실행됩니다.
+`--headless`를 붙이거나 Linux에서 실행하면 GUI 없이 터미널의 표준 입력을 받는
+헤드리스 서버로 실행됩니다. GUI 동작과 제약은 [`docs/windows-console.md`](docs/windows-console.md)에
+정리되어 있습니다.
 처음 실행 전 EULA를 읽고 동의한 경우에만 `eula.txt`를 직접 수정해야 합니다.
 
 ## 검증

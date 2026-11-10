@@ -90,7 +90,10 @@ server-side only.
 
 ## 7. Release and tooling hygiene
 
-- `v0.1.3` is prepared in-tree (`f6a381d`); tagging and publishing the notes are still open.
-- Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md` and `docs/plugin-stubs-status.md` in step with code.
-- The Windows console window (`mod windows_gui` in `crates/ferrite-server/src/main.rs`, built on
-  `native-windows-gui`) has no documented or designed UI surface yet.
+- `v0.1.5` is prepared in-tree; tagging and publishing the release notes are still open.
+- Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md`, `docs/windows-console.md` and
+  `docs/plugin-stubs-status.md` in step with code.
+- The Windows GUI is a Tauri 2 + WebView2 shell in `crates/ferrite-server`; its layout,
+  lifecycle, and known limitations are documented in `docs/windows-console.md`.
+- The portable Windows ZIP currently contains the executable and start notes; the NSIS
+  bundle described by `tauri.conf.json` is not part of the ZIP.

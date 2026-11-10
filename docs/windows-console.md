@@ -1,130 +1,118 @@
 # Windows server console
 
-`ferrite-server` opens a native Windows console window on Windows builds. The window is
-implemented in `crates/ferrite-server/src/main.rs` behind `#[cfg(windows)]`; non-Windows
-builds never compile it or link `native-windows-gui`. Closing the window is the console's
-only job, so starting and stopping the server does not restart the process.
+`ferrite-server` opens a Tauri 2 desktop window on Windows. The window is a custom,
+frameless shell around a static HTML/CSS/JavaScript frontend; the Rust backend owns the
+server and the webview only sends actions and receives events. On non-Windows targets the
+GUI is not compiled, and `ferrite-server.exe --headless` keeps the terminal console path.
+
+The GUI needs the Microsoft Edge WebView2 Runtime. It is included with current Windows 10
+and Windows 11 installations; a portable build on a machine without it cannot render the
+window.
 
 ## Layout
 
+The window is 1080 × 720 by default, resizable down to 880 × 600, and centered at launch.
+It has no native title bar.
+
 ```text
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  ● 실행 중             가동 00:04:21              서버 시작  서버 종료   │
-│  콘솔 로그                            자동 스크롤  로그 지우기            │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │ [12:00:00 INFO] server listening on 0.0.0.0:25565                 │  │
-│  │ ...                                                                │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-│  명령  ┌──────────────────────────────────────────┐  보내기             │
-│        └──────────────────────────────────────────┘                      │
-│  Enter 전송 · ↑/↓ 명령 기록 · Tab 이동 · Alt+S 시작 · Alt+T 종료        │
+│  F  Ferrite  server console                         Minecraft 26.3  v…  ─ □ × │
+├──────────────────────┬───────────────────────────────────────────────────┤
+│  ○ 중지됨             │  콘솔                    자동 스크롤  지우기      │
+│  서버가 중지되어…     │                                                   │
+│  UPTIME              │  2026-… INFO ferrite_server: …                    │
+│  00:00:00            │                                                   │
+│  [서버 시작] [중지]   │                                                   │
+│  주소 / 버전 / 프로토콜│                                                   │
+│  EULA 안내            │  › 명령어를 입력하세요                    전송 ↵  │
+│                      │  ● 대기 중              Enter 전송 · ↑/↓ 기록    │
+├──────────────────────┴───────────────────────────────────────────────────┤
+│  FERRITE                                      Minecraft Java 26.3 · 777  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Status bar** — server state plus a live uptime (`HH:MM:SS`) once the runtime reports
-  that it started. The uptime label is hidden, not blank, when there is no uptime to show.
-  Labels, the hint, and the read-only log use the console palette (light or dark, sampled at
-  launch); buttons keep their native Windows chrome. Player count is intentionally not displayed: the server runtime does not
-  expose a player count to the GUI yet, and adding one would require changes outside the
-  console module.
-- **Log** — read-only console output captured from `tracing`, using a fixed-width font.
-  `자동 스크롤` is a toggle button showing `켜짐`/`꺼짐`; it controls whether new lines follow
-  the bottom. `로그 지우기` clears the current contents without affecting server logging.
-- **Command row** — sends a command to the running server. The input and `보내기` button
-  are disabled while no server is running. Enter sends; Up and Down walk the command
-  history (the current draft is restored when you walk past the newest entry).
-- **Footer** — a short keyboard reminder in a smaller font.
+- **Title bar** — brand mark, Minecraft target, app version, and minimize/maximize/close.
+  Dragging the title bar moves the window; double-clicking it toggles maximize.
+- **Status** — current phase, a short explanation, live uptime, and start/stop buttons.
+  The address, version, and protocol come from `server_info`; the address is read from
+  `ferrite.toml` without creating or logging the file.
+- **Console** — the main output surface. `자동 스크롤` is on by default; turning it off
+  keeps the reader at the current position while new lines arrive. `지우기` restores the
+  empty-console message without affecting server logging.
+- **Command bar** — disabled until the runtime reports that the server is ready. Enter
+  sends, Up/Down walk the session history, and the current draft is restored when moving
+  past the newest entry.
+- **Footer** — the protocol hint and a compact keyboard reminder.
 
-The layout is a manual responsive grid rather than `nwg::GridLayout`: the status bar,
-toolbar, command row, and footer keep fixed heights while the log absorbs every remaining
-pixel when the window is resized.
+## Starting, stopping, and closing
+
+- **Start** moves the UI to `시작 중` immediately. The Rust runtime sends
+  `server-started` only after configuration, EULA, world, and plugin setup succeed and the
+  listener has been created. A configuration or EULA failure therefore remains in the
+  stopped phase and its error is written to the console instead of flashing `실행 중`.
+- **Stop** sends the existing `stop` command and shows `종료 중` until `server-stopped`.
+  The command input is disabled outside the running phase.
+- **Stop during startup** sets a cooperative cancellation flag as well as sending `stop`.
+  The runtime checks it after configuration, listener creation, world setup and plugin startup,
+  so the window returns to `중지됨` without waiting for the full startup path. A blocking
+  initialization step already in progress (for example the registry or plugin host) finishes
+  before that checkpoint is reached.
+- **Closing while stopped** exits immediately.
+- **Closing while running** opens a native Yes/No confirmation. `No` leaves the window and
+  server untouched. `Yes` sends the normal save-and-exit path and keeps the window open
+  until `server-stopped`. If Stop was already pressed, closing skips the duplicate prompt.
+- **Closing while starting** uses the same confirmation and cancellation path; a pending
+  startup is not allowed to leave an invisible server behind.
+- A shutdown watchdog exits the process after 30 seconds even if the server runtime does
+  not report back. Logs still go through the runtime's tracing subscriber.
+- The close confirmation uses the Win32 message box (`MB_YESNO`, default `No`), so a
+  misplaced Enter does not shut down a live server.
 
 ## Keyboard
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `Shift+Tab` | Move between controls (Windows' dialog manager handles this). |
-| `Enter` (start button focused) | Start the server. The start button is focused at launch. |
-| `Alt+S` | Start the server. |
-| `Alt+T` | Stop the server and wait for a save-and-exit. |
+| `Tab` / `Shift+Tab` | Move between focusable controls. |
 | `Enter` (command box) | Send the command. |
-| `Up` / `Down` (command box) | Previous / next command history entry. |
-| `Alt+A` | Toggle auto-scroll (the button shows `켜짐`/`꺼짐`). |
-| `Alt+L` | Clear the log. |
-| `Alt+D` | Send the command (same as Enter). |
+| `Up` / `Down` (command box) | Previous / next history entry. |
+| `Ctrl+L` | Clear the visible console. |
+| `Enter` / `Space` | Activate the focused button. |
+| `Alt+F4` | Request close (the same save-and-exit path as the close button). |
 
-After Start, focus moves to the command box. After a normal stop, focus returns to the
-start button so the whole start/stop cycle is reachable without a mouse. Button labels use
-standard Windows `&` mnemonics, and the event loop calls `IsDialogMessageW`, so mnemonic
-and Tab handling behave like a dialog.
+There are no `Alt+S`/`Alt+T` mnemonics in the Tauri shell.
 
-## Starting, stopping, and closing
+## Log behavior
 
-- **Start** asks the server manager to spawn the runtime thread. The status bar shows
-  `● 시작 중…` until `ServerStarted` arrives, then `● 실행 중` with a running uptime.
-- **Stop**, `Action::Exit`, and the close confirmation all reuse the existing `stop`
-  command path (`server_manager` sends `"stop"` to `run_server`). The UI only changes
-  presentation; server startup and shutdown are untouched.
-- **Closing while stopped** closes immediately. The manager receives `Exit` and the process
-  exits without starting a server.
-- **Closing while running** is refused first. A modal Yes/No question asks whether to save
-  and exit. `No` leaves the window and the server exactly as they were. `Yes` starts the
-  normal shutdown, shows `● 저장 후 종료 중…`, and keeps the window open until the runtime
-  reports `ServerStopped`; only then is the window destroyed. If the server is already
-  stopping (Stop was clicked first), closing skips the redundant prompt and waits for the
-  same shutdown.
-- The close prompt is a native message box, so its default button behavior is Windows'
-  (Enter activates the focused button); read the prompt before confirming.
+- The DOM console keeps at most **2,500 lines**. Once that limit is crossed, the oldest
+  rendered line is removed; the server's own log stream is not truncated.
+- `server-log` events are classified as `info`, `warn`, `error`, or `command` for
+  presentation. Error and warning rows use a subtle white background instead of color.
+- `자동 스크롤` is a per-window preference and resets to on when the process restarts.
+- Command history is session-only (up to 200 entries) and is not written to disk.
 
-## Log retention and auto-scroll
+## Theme, sizing, and platform details
 
-- The log is trimmed after the edit control reports more than **4000 lines**. Instead of
-  clearing everything, the oldest block is dropped and **3000 lines** are kept, so a long
-  session retains recent context.
-- The Win32 edit control has no partial line-deletion message, so trimming reads the text,
-  skips the oldest lines, and writes the remainder back with
-  `set_text_unix2dos`. This happens only once per ~1000 lines rather than on every append.
-- `TextBox::append` always scrolls to the bottom. With auto-scroll off, the console saves
-  the first visible line (`EM_GETFIRSTVISIBLELINE`) before appending and restores it
-  afterwards, so reading older output is not interrupted by new log lines. Turning
-  auto-scroll back on immediately jumps to the newest line.
-
-## Sizing, fonts, and DPI
-
-- All GUI code is inside `#[cfg(windows)]`; Linux and other targets do not build it.
-- The process calls `SetProcessDPIAware` before creating any window, then derives a scale
-  factor from the system DPI. Window size, minimum size, margins, control sizes, and font
-  sizes are all scaled from that factor. Fonts use `Segoe UI` for text and `Consolas` for
-  the log and command input.
-- The initial client area is **900 × 640** at 96 DPI, centered on the primary screen. The
-  minimum window size is **780 × 540**. The window is resizable and maximizable, and the log
-  grows or shrinks with it.
-- The window is created hidden, laid out, sized, and only then shown to avoid a flash of
-  unscaled controls.
-- The client surface and label background use a light or dark palette selected from the
-  system window colors at launch. A window-level `WM_CTLCOLORSTATIC` hook paints labels and
-  the read-only log with the same surface and text colors; buttons keep their native theme.
+- The interface is intentionally **white canvas + black console**. It does not sample the
+  Windows theme and does not switch palettes at runtime.
+- The custom title bar is part of the webview; only the outer window frame is native.
+  Window dragging, minimize, maximize, and close are exposed through Tauri capabilities
+  in `crates/ferrite-server/capabilities/default.json`.
+- The frontend is embedded from `crates/ferrite-server/ui` through `frontendDist`. There
+  is no Node/npm build step; edit the HTML/CSS/JS and rebuild the Rust binary.
+- `--headless` bypasses Tauri entirely and reads commands from stdin. Linux always uses
+  the terminal path.
 
 ## Known limitations
 
-- **System DPI only.** The scale is read once at launch with system DPI awareness. Moving
-  the window to a monitor with a different scale lets Windows bitmap-stretch it; it does
-  not re-layout or rebuild fonts. Restart the server to pick up a different scale.
-- **No player count.** See the status bar note above. The UI would need a new runtime data
-  feed to show it.
-- **Command history is session-only.** Up to 200 entries are kept in memory and are not
-  written to disk; starting a new process starts an empty history.
-- **No tab completion or command validation.** The console forwards whatever is typed to
-  the existing server command path; validation and feedback come from the server log.
-- **No ANSI color or rich text.** The log is plain text; `tracing` is initialized with
-  `with_ansi(false)` and the edit control has no color parser.
-- **Trim is a block operation.** Overflow is checked against the edit control's line count.
-  For pathological single lines longer than the control's width, Windows may wrap them; the
-  trim then falls back to keeping half the logical lines so the log still shrinks.
-- **Theme is sampled at launch.** The console paints its own surface from the system
-  window colors at startup. Changing the Windows theme while the console is running is
-  picked up on the next launch.
-- **Korean labels are built in.** The UI text is Korean; the underlying server log language
-  is unchanged.
-- **Close waits for the runtime.** If the server hangs during shutdown, the window stays in
-  `저장 후 종료 중…` until the runtime returns. There is no forced-kill timer.
+- **No player count.** The runtime does not expose one to the GUI yet.
+- **No tab completion or command validation.** The command is forwarded to the existing
+  server command path and feedback appears in the log.
+- **Plain text logs.** ANSI color codes are stripped; there is no rich-text renderer.
+- **Korean labels are built in.** Server log text is unchanged.
+- **No auto-update or installer flow in this document.** `tauri.conf.json` describes an
+  NSIS bundle, but the release ZIP is a portable executable plus its start notes.
+- **WebView2 is a runtime prerequisite.** It is not bundled into the portable ZIP.
+- **A wedged shutdown waits up to 30 seconds.** There is no force-kill button in the UI;
+  the watchdog is the final fallback.
+- **Startup cancellation is cooperative.** A blocking initialization step that is already
+  running can delay the transition back to `중지됨`; it is not a hard cancellation.

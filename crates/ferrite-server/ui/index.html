@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Ferrite</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-phase="stopped">
+  <div class="app-shell">
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32">
+            <rect x="1" y="1" width="30" height="30" rx="7" fill="#0a0a0a"/>
+            <path d="M8.5 7.5h16v4.4H14v3.2h8.4v4.4H14v5H8.5z" fill="#f7f7f4"/>
+          </svg>
+        </div>
+        <div class="brand-copy" data-tauri-drag-region>
+          <span class="wordmark">Ferrite</span>
+          <span class="brand-sub">server console</span>
+        </div>
+      </div>
+
+      <div class="title-meta" data-tauri-drag-region>
+        <span class="target-pill">Minecraft <b>26.3</b></span>
+        <span class="title-sep"></span>
+        <span id="titleVersion">v0.1.5</span>
+      </div>
+
+      <div class="window-actions">
+        <button id="minimizeButton" class="window-button" type="button" aria-label="최소화">
+          <svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg>
+        </button>
+        <button id="maximizeButton" class="window-button" type="button" aria-label="최대화">
+          <svg viewBox="0 0 12 12"><rect x="2.2" y="2.2" width="7.6" height="7.6" rx=".8"/></svg>
+        </button>
+        <button id="closeButton" class="window-button close-button" type="button" aria-label="닫기">
+          <svg viewBox="0 0 12 12"><path d="m2.2 2.2 7.6 7.6M9.8 2.2 2.2 9.8"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar">
+        <section class="status-card" id="statusCard">
+          <div class="status-line">
+            <span class="status-dot"></span>
+            <span id="statusLabel">중지됨</span>
+          </div>
+          <h1 id="statusHeading">서버가 중지되어 있습니다</h1>
+          <p id="statusDetail">시작 버튼을 눌러 월드와 플러그인을 불러오세요.</p>
+
+          <div class="uptime-wrap">
+            <span class="meta-label">UPTIME</span>
+            <div class="uptime" id="uptime">00:00:00</div>
+          </div>
+
+          <div class="status-actions">
+            <button id="startButton" class="btn primary" type="button">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.8v8.4L12.6 8 5 3.8Z"/></svg>
+              <span>서버 시작</span>
+            </button>
+            <button id="stopButton" class="btn ghost" type="button" disabled>중지</button>
+          </div>
+        </section>
+
+        <section class="info-card">
+          <div class="info-row">
+            <span>주소</span>
+            <strong id="addressValue">0.0.0.0:25565</strong>
+          </div>
+          <div class="info-row">
+            <span>버전</span>
+            <strong id="versionValue">0.1.5</strong>
+          </div>
+          <div class="info-row">
+            <span>프로토콜</span>
+            <strong id="protocolValue">777</strong>
+          </div>
+        </section>
+
+        <section class="tip-card">
+          <span class="tip-icon">i</span>
+          <p>처음 실행이라면 <b>eula.txt</b>에 <code>eula=true</code>를 직접 설정해야 월드가 열립니다.</p>
+        </section>
+      </aside>
+
+      <section class="console-card">
+        <div class="console-head">
+          <div class="console-title-wrap">
+            <div>
+              <h2>콘솔</h2>
+              <span id="consoleSub">서버 출력이 여기에 표시됩니다</span>
+            </div>
+          </div>
+          <div class="console-tools">
+            <button id="autoScrollButton" class="tool-toggle active" type="button" aria-pressed="true">
+              <span class="switch-track"><span></span></span>
+              자동 스크롤
+            </button>
+            <button id="clearButton" class="tool-button" type="button">지우기</button>
+          </div>
+        </div>
+
+        <div id="console" class="console" aria-live="polite">
+          <div id="welcome" class="welcome">
+            <p>서버를 시작하면 로그가 여기에 흐릅니다.</p>
+            <span>준비되면 왼쪽의 <b>서버 시작</b>을 누르세요.</span>
+          </div>
+        </div>
+
+        <form id="commandForm" class="command-bar">
+          <span class="prompt" aria-hidden="true">›</span>
+          <input id="commandInput" type="text" placeholder="명령어를 입력하세요" autocomplete="off" spellcheck="false" disabled>
+          <button id="sendButton" class="send-button" type="submit" disabled>전송 <kbd>↵</kbd></button>
+        </form>
+
+        <div class="console-foot">
+          <span id="consoleStatus"><span class="foot-dot"></span>대기 중</span>
+          <span>Enter 전송 · ↑/↓ 명령 기록</span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <span class="status-brand">FERRITE</span>
+      <span class="spacer"></span>
+      <span id="footerHint">Minecraft Java 26.3 · protocol 777</span>
+    </footer>
+
+    <div id="toast" class="toast" role="status"></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

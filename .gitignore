@@ -1,5 +1,6 @@
 /target
 /run
+crates/ferrite-server/gen/
 /vanilla
 *.jar
 !java/**/gradle-wrapper.jar

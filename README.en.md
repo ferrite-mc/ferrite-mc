@@ -25,7 +25,7 @@ The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls s
 
 ## Build and run
 
-Requires: **Rust stable** (`rust-toolchain.toml` pins Windows MSVC; Linux/macOS use `RUSTUP_TOOLCHAIN=stable`), **Java 25**, **Python 3**.
+Requires: **Rust stable** (`rust-toolchain.toml` pins Windows MSVC; Linux/macOS use `RUSTUP_TOOLCHAIN=stable`), **Java 25**, **Python 3**. The Windows GUI also needs the **Microsoft Edge WebView2 Runtime** (included with Windows 10/11).
 
 ```sh
 source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
@@ -37,7 +37,7 @@ On first run it creates `eula.txt` and exits. Read the [Minecraft EULA](https://
 
 `vanilla/` is not committed to git. Do not guess packet IDs, blocks, or registry values; read the reports under `vanilla/<version>/generated/`. Config keys are in [`docs/CONFIG.md`](docs/CONFIG.md).
 
-The default world directory is `world/` in the server working directory. Chunks stay in an in-memory cache during play, are saved every 60 seconds, and are written in Anvil format on unload and graceful shutdown. Entities are saved as per-loaded-chunk snapshots, and online player state is saved every 60 seconds as well. Changes made within the autosave interval before a hard kill may be lost. On Windows, running `ferrite-server.exe` directly opens a Rust GUI for server start/stop, command input, and log viewing. Keep the executable in a Ferrite working directory with `vanilla/26.3/generated/` prepared. On Linux it runs headless and reads stdin. Read the EULA before the first run and edit `eula.txt` yourself only if you agree.
+The default world directory is `world/` in the server working directory. Chunks stay in an in-memory cache during play, are saved every 60 seconds, and are written in Anvil format on unload and graceful shutdown. Entities are saved as per-loaded-chunk snapshots, and online player state is saved every 60 seconds as well. Changes made within the autosave interval before a hard kill may be lost. On Windows, running `ferrite-server.exe` directly opens a Tauri 2 GUI for server start/stop, command input, and log viewing. Keep the executable in a Ferrite working directory with `vanilla/26.3/generated/` prepared. Add `--headless` to use the terminal console, and note that Linux always runs headless and reads stdin. Read the EULA before the first run and edit `eula.txt` yourself only if you agree. See [`docs/windows-console.md`](docs/windows-console.md) for the GUI behavior and limitations.
 
 ## Verification
 

@@ -4,6 +4,8 @@
 use anyhow::Context;
 use ferrite_server::game;
 use serde::Deserialize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -249,6 +251,15 @@ fn load_config() -> anyhow::Result<(Config, bool)> {
     }
 }
 
+/// Read the configured bind address without creating or logging `ferrite.toml`.
+fn configured_bind_address() -> String {
+    std::fs::read_to_string("ferrite.toml")
+        .ok()
+        .and_then(|content| toml::from_str::<Config>(&content).ok())
+        .map(|config| config.bind_address)
+        .unwrap_or_else(|| Config::default().bind_address)
+}
+
 /// First-run spawn: an existing world's `level.dat` wins; a new world starts at the fixed flat
 /// spawn and gets a `level.dat` written after the terrain spawn is known.
 fn spawn_for_world(path: &std::path::Path) -> anyhow::Result<[i32; 3]> {
@@ -278,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    run_server(stdin_commands()).await
+    run_server(stdin_commands(), None, None).await
 }
 
 #[cfg(windows)]
@@ -293,11 +304,10 @@ fn main() {
         return;
     }
 
-    if let Err(error) = windows_gui::run() {
-        native_windows_gui::simple_message(
-            "Ferrite Server 시작 실패",
-            &format!("Ferrite Server GUI를 시작하지 못했습니다.\n\n{error:#}"),
-        );
+    if let Err(error) = tauri_gui::run() {
+        tauri_gui::fatal_error(&format!(
+            "Ferrite Server GUI를 시작하지 못했습니다.\n\n{error:#}"
+        ));
     }
 }
 
@@ -312,7 +322,7 @@ fn run_headless() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_server(stdin_commands()))
+    runtime.block_on(run_server(stdin_commands(), None, None))
 }
 
 fn stdin_commands() -> tokio::sync::mpsc::UnboundedReceiver<String> {
@@ -333,9 +343,20 @@ fn stdin_commands() -> tokio::sync::mpsc::UnboundedReceiver<String> {
     console_rx
 }
 
+fn startup_cancelled(cancelled: &Option<Arc<AtomicBool>>) -> bool {
+    cancelled
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
 async fn run_server(
     mut console_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    started: Option<tokio::sync::oneshot::Sender<()>>,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<()> {
+    if startup_cancelled(&cancelled) {
+        return Ok(());
+    }
     let (config, _created) = load_config()?;
     // Ferrite never accepts the Mojang EULA for the user; the world generation host reads the
     // same `eula.txt`.
@@ -360,11 +381,19 @@ async fn run_server(
         .await
         .context("binding server listener")?;
     tracing::info!(address = %listener.local_addr()?, online_mode = config.online_mode, view_distance = view_distance, "Ferrite listener started");
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
 
     let spawn = match &config.world {
         Some(path) => spawn_for_world(path)?,
         None => [0, 65, 0],
     };
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
     let bind_host = config
         .bind_address
         .rsplit_once(':')
@@ -403,6 +432,10 @@ async fn run_server(
         WorldGenerator::Superflat => None,
     };
     let terrain_for_plugins = terrain.clone();
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
     let source = if let Some(path) = &config.world {
         let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
             .context("loading vanilla registry")?;
@@ -452,6 +485,10 @@ async fn run_server(
             }
         })
         .collect();
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
     let plugin_bridge =
         ferrite_server::plugins::PluginBridge::start(ferrite_server::plugins::Settings {
             directory: config.plugins_dir.unwrap_or_else(|| "plugins".into()),
@@ -489,6 +526,10 @@ async fn run_server(
             console: Some(plugin_console_tx),
         })
         .context("starting plugins")?;
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
     let disable_end_credits = match ferrite_config::FerriteConfig::load("config") {
         Ok(config) => config.world_settings("world").misc.disable_end_credits,
         Err(error) => {
@@ -525,6 +566,10 @@ async fn run_server(
         dimensions: Some(dimensions),
     };
     let world = game::World::start_configured(Some(source), spawn, settings);
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
     ferrite_server::plugins::forward_console(plugin_console, world.sender.clone());
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
@@ -544,6 +589,13 @@ async fn run_server(
             ..Default::default()
         },
     ));
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
+    if let Some(started) = started {
+        let _ = started.send(());
+    }
     let mut stopped = world.stop_signal();
     let result = loop {
         tokio::select! {
@@ -748,1135 +800,4 @@ mod tests {
 }
 
 #[cfg(windows)]
-mod windows_gui {
-    use std::cell::RefCell;
-    use std::io::{self, Write};
-    use std::sync::mpsc::{self, Receiver, Sender};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    use anyhow::Context;
-    use native_windows_derive::NwgUi;
-    use native_windows_gui as nwg;
-    use nwg::NativeUi;
-    use tracing_subscriber::fmt::MakeWriter;
-
-    use super::run_server;
-
-    const INITIAL_WIDTH: i32 = 900;
-    const INITIAL_HEIGHT: i32 = 640;
-    const MIN_WIDTH: i32 = 780;
-    const MIN_HEIGHT: i32 = 540;
-    const POLL_INTERVAL: Duration = Duration::from_millis(150);
-    /// The console text is trimmed once the edit control reports more lines
-    /// than this. Trimming drops the oldest block instead of throwing the whole
-    /// log away.
-    const LOG_MAX_LINES: i32 = 4000;
-    /// Lines kept after a trim.
-    const LOG_KEEP_LINES: usize = 3000;
-    const HISTORY_LIMIT: usize = 200;
-    const PALETTE_HANDLER_ID: usize = 0xF000_0001;
-
-    /// Small Win32 surface that `native-windows-gui` does not expose directly.
-    mod win32 {
-        #[repr(C)]
-        #[derive(Default)]
-        pub struct Rect {
-            pub left: i32,
-            pub top: i32,
-            pub right: i32,
-            pub bottom: i32,
-        }
-
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            pub fn SetProcessDPIAware() -> i32;
-            pub fn GetSystemMetrics(index: i32) -> i32;
-            pub fn GetSysColor(index: i32) -> u32;
-            pub fn SetClassLongPtrW(hwnd: *mut std::ffi::c_void, index: i32, value: isize)
-            -> isize;
-            pub fn InvalidateRect(
-                hwnd: *mut std::ffi::c_void,
-                rect: *const std::ffi::c_void,
-                erase: i32,
-            ) -> i32;
-            pub fn GetClientRect(hwnd: *mut std::ffi::c_void, rect: *mut Rect) -> i32;
-            pub fn UpdateWindow(hwnd: *mut std::ffi::c_void) -> i32;
-            pub fn FillRect(hdc: *mut std::ffi::c_void, rect: *const Rect, brush: isize) -> i32;
-            pub fn SendMessageW(
-                hwnd: *mut std::ffi::c_void,
-                message: u32,
-                wparam: usize,
-                lparam: isize,
-            ) -> isize;
-        }
-
-        #[link(name = "gdi32")]
-        unsafe extern "system" {
-            pub fn CreateSolidBrush(color: u32) -> isize;
-            pub fn SetTextColor(hdc: *mut std::ffi::c_void, color: u32) -> u32;
-            pub fn SetBkColor(hdc: *mut std::ffi::c_void, color: u32) -> u32;
-        }
-
-        pub const COLOR_WINDOW: i32 = 5;
-        pub const COLOR_WINDOWTEXT: i32 = 8;
-        pub const EM_GETFIRSTVISIBLELINE: u32 = 0x00CE;
-        pub const GCLP_HBRBACKGROUND: i32 = -10;
-        pub const WM_ERASEBKGND: u32 = 0x0014;
-        pub const WM_CTLCOLORSTATIC: u32 = 0x0138;
-        pub const SM_CXSCREEN: i32 = 0;
-        pub const SM_CYSCREEN: i32 = 1;
-    }
-
-    enum Action {
-        Start,
-        Stop,
-        Command(String),
-        Exit,
-    }
-
-    enum UiMessage {
-        Log(String),
-        ServerStarted,
-        ServerStopped,
-    }
-
-    struct UiState {
-        actions: Option<Sender<Action>>,
-        messages: Option<Receiver<UiMessage>>,
-        /// A server session exists, from Start until ServerStopped.
-        active: bool,
-        /// The runtime reported ServerStarted and is still running.
-        running: bool,
-        /// Stop was requested and the runtime has not reported ServerStopped.
-        stopping: bool,
-        /// A close was confirmed; the window goes away after ServerStopped.
-        closing: bool,
-        /// Auto-scroll is on until the user toggles it.
-        autoscroll_enabled: bool,
-        started_at: Option<Instant>,
-        scale: f32,
-        last_status: String,
-        last_uptime: String,
-        history: Vec<String>,
-        history_cursor: Option<usize>,
-        history_draft: String,
-    }
-
-    impl Default for UiState {
-        fn default() -> Self {
-            Self {
-                actions: None,
-                messages: None,
-                active: false,
-                running: false,
-                stopping: false,
-                closing: false,
-                autoscroll_enabled: true,
-                started_at: None,
-                scale: 1.0,
-                last_status: String::new(),
-                last_uptime: String::new(),
-                history: Vec::new(),
-                history_cursor: None,
-                history_draft: String::new(),
-            }
-        }
-    }
-
-    struct UiFonts {
-        status: nwg::Font,
-        body: nwg::Font,
-        small: nwg::Font,
-        mono: nwg::Font,
-    }
-
-    impl UiFonts {
-        fn new(scale: f32) -> anyhow::Result<Self> {
-            fn build(
-                family: &str,
-                size: i32,
-                weight: u32,
-                scale: f32,
-            ) -> anyhow::Result<nwg::Font> {
-                let mut font = nwg::Font::default();
-                nwg::Font::builder()
-                    .family(family)
-                    .size(scaled(size, scale) as u32)
-                    .weight(weight)
-                    .build(&mut font)
-                    .map_err(|error| anyhow::anyhow!("building the {family} font: {error}"))?;
-                Ok(font)
-            }
-
-            Ok(Self {
-                status: build("Segoe UI", 16, 600, scale)?,
-                body: build("Segoe UI", 15, 400, scale)?,
-                small: build("Segoe UI", 12, 400, scale)?,
-                mono: build("Consolas", 14, 400, scale)?,
-            })
-        }
-    }
-
-    #[derive(Default, NwgUi)]
-    pub struct FerriteServerGui {
-        state: RefCell<UiState>,
-        /// The window-level WM_CTLCOLORSTATIC hook that paints the labels.
-        palette_handler: RefCell<Option<nwg::RawEventHandler>>,
-
-        #[nwg_control(size: (INITIAL_WIDTH, INITIAL_HEIGHT), position: (0, 0), title: "Ferrite Server 콘솔", flags: "MAIN_WINDOW")]
-        #[nwg_events(
-            OnWindowClose: [FerriteServerGui::close(SELF, EVT_DATA)],
-            OnResize: [FerriteServerGui::relayout],
-            OnMinMaxInfo: [FerriteServerGui::min_max_info(SELF, EVT_DATA)],
-            OnKeyEnter: [FerriteServerGui::send_command]
-        )]
-        window: nwg::Window,
-
-        #[nwg_control(text: "● 중지됨")]
-        status: nwg::Label,
-
-        #[nwg_control(text: "")]
-        uptime: nwg::Label,
-
-        #[nwg_control(text: "서버 시작(&S)")]
-        #[nwg_events(OnButtonClick: [FerriteServerGui::start])]
-        start_button: nwg::Button,
-
-        #[nwg_control(text: "서버 종료(&T)", enabled: false)]
-        #[nwg_events(OnButtonClick: [FerriteServerGui::stop])]
-        stop_button: nwg::Button,
-
-        #[nwg_control(text: "콘솔 로그")]
-        log_title: nwg::Label,
-
-        #[nwg_control(text: "자동 스크롤(&A): 켜짐")]
-        #[nwg_events(OnButtonClick: [FerriteServerGui::autoscroll_toggled])]
-        autoscroll: nwg::Button,
-
-        #[nwg_control(text: "로그 지우기(&L)")]
-        #[nwg_events(OnButtonClick: [FerriteServerGui::clear_log])]
-        clear_button: nwg::Button,
-
-        #[nwg_control(
-            text: "Ferrite 서버 콘솔\r\n시작을 누르면 서버 로그가 여기에 표시됩니다.\r\n",
-            readonly: true
-        )]
-        log: nwg::TextBox,
-
-        #[nwg_control(text: "명령")]
-        command_label: nwg::Label,
-
-        #[nwg_control(size: (200, 26))]
-        #[nwg_events(
-            OnKeyEnter: [FerriteServerGui::send_command],
-            OnKeyPress: [FerriteServerGui::command_key(SELF, EVT_DATA)]
-        )]
-        command: nwg::TextInput,
-
-        #[nwg_control(text: "보내기(&D)", enabled: false)]
-        #[nwg_events(OnButtonClick: [FerriteServerGui::send_command])]
-        send_button: nwg::Button,
-
-        #[nwg_control(text: "Enter 전송 · ↑/↓ 명령 기록 · Tab 이동 · Alt+S 시작 · Alt+T 종료")]
-        hint: nwg::Label,
-
-        #[nwg_control(parent: window, interval: POLL_INTERVAL, active: true)]
-        #[nwg_events(OnTimerTick: [FerriteServerGui::poll_messages])]
-        poll_timer: nwg::AnimationTimer,
-    }
-
-    impl FerriteServerGui {
-        fn start(&self) {
-            {
-                let mut state = self.state.borrow_mut();
-                if state.active {
-                    return;
-                }
-                let Some(actions) = state.actions.clone() else {
-                    return;
-                };
-                if actions.send(Action::Start).is_err() {
-                    return;
-                }
-                state.active = true;
-                state.running = false;
-                state.stopping = false;
-                state.closing = false;
-                state.started_at = None;
-            }
-
-            self.set_status("● 시작 중…");
-            self.set_uptime("");
-            self.uptime.set_visible(false);
-            self.start_button.set_enabled(false);
-            self.stop_button.set_enabled(true);
-            self.command.set_enabled(true);
-            self.send_button.set_enabled(true);
-            self.command.set_focus();
-        }
-
-        fn stop(&self) {
-            {
-                let mut state = self.state.borrow_mut();
-                if !state.active || state.stopping {
-                    return;
-                }
-                let Some(actions) = state.actions.clone() else {
-                    return;
-                };
-                if actions.send(Action::Stop).is_err() {
-                    return;
-                }
-                state.stopping = true;
-            }
-
-            self.set_shutdown_ui();
-        }
-
-        fn send_command(&self) {
-            let command = self.command.text().trim().to_owned();
-            if command.is_empty() {
-                return;
-            }
-
-            let actions = {
-                let mut state = self.state.borrow_mut();
-                if !state.active || state.stopping {
-                    return;
-                }
-                if state.history.last().map(String::as_str) != Some(command.as_str()) {
-                    state.history.push(command.clone());
-                    if state.history.len() > HISTORY_LIMIT {
-                        state.history.remove(0);
-                    }
-                }
-                state.history_cursor = None;
-                state.history_draft.clear();
-                state.actions.clone()
-            };
-
-            let Some(actions) = actions else {
-                return;
-            };
-            if actions.send(Action::Command(command)).is_ok() {
-                self.command.set_text("");
-            }
-            self.command.set_focus();
-        }
-
-        fn command_key(&self, evt_data: &nwg::EventData) {
-            if let nwg::EventData::OnKey(key) = evt_data {
-                match *key {
-                    nwg::keys::UP => self.history_previous(),
-                    nwg::keys::DOWN => self.history_next(),
-                    // The dialog manager may deliver Enter as WM_COMMAND/IDOK
-                    // instead of WM_KEYDOWN; the window-level OnKeyEnter above
-                    // covers that path. Handle the WM_KEYDOWN path here too.
-                    nwg::keys::RETURN => self.send_command(),
-                    _ => {}
-                }
-            }
-        }
-
-        fn history_previous(&self) {
-            let mut state = self.state.borrow_mut();
-            if state.history.is_empty() {
-                return;
-            }
-            let next = match state.history_cursor {
-                None => {
-                    state.history_draft = self.command.text();
-                    state.history.len() - 1
-                }
-                Some(0) => 0,
-                Some(index) => index - 1,
-            };
-            state.history_cursor = Some(next);
-            let text = state.history[next].clone();
-            drop(state);
-            self.show_history(&text);
-        }
-
-        fn history_next(&self) {
-            let mut state = self.state.borrow_mut();
-            let next = match state.history_cursor {
-                Some(index) if index + 1 < state.history.len() => Some(index + 1),
-                Some(_) => None,
-                None => return,
-            };
-            state.history_cursor = next;
-            let text = match next {
-                Some(index) => state.history[index].clone(),
-                None => std::mem::take(&mut state.history_draft),
-            };
-            drop(state);
-            self.show_history(&text);
-        }
-
-        fn show_history(&self, text: &str) {
-            self.command.set_text(text);
-            let end = self.command.len();
-            self.command.set_selection(0..end);
-            self.command.set_focus();
-        }
-
-        fn clear_log(&self) {
-            self.log.clear();
-            let can_type = {
-                let state = self.state.borrow();
-                state.active && !state.stopping
-            };
-            if can_type {
-                self.command.set_focus();
-            } else if self.start_button.enabled() {
-                self.start_button.set_focus();
-            }
-        }
-
-        fn autoscroll_toggled(&self) {
-            let enabled = {
-                let mut state = self.state.borrow_mut();
-                state.autoscroll_enabled = !state.autoscroll_enabled;
-                state.autoscroll_enabled
-            };
-            self.autoscroll.set_text(if enabled {
-                "자동 스크롤(&A): 켜짐"
-            } else {
-                "자동 스크롤(&A): 꺼짐"
-            });
-            if enabled {
-                self.log.scroll_lastline();
-            }
-        }
-
-        fn close(&self, evt_data: &nwg::EventData) {
-            let nwg::EventData::OnWindowClose(data) = evt_data else {
-                return;
-            };
-            let (active, stopping, closing) = {
-                let state = self.state.borrow();
-                (state.active, state.stopping, state.closing)
-            };
-
-            if !active {
-                data.close(true);
-                if let Some(actions) = self.state.borrow().actions.clone() {
-                    let _ = actions.send(Action::Exit);
-                }
-                nwg::stop_thread_dispatch();
-                return;
-            }
-
-            // Keep the window alive until the save-and-stop path has finished.
-            data.close(false);
-            if closing {
-                return;
-            }
-            if stopping {
-                // Stop is already in flight; don't ask twice.
-                self.begin_exit();
-                return;
-            }
-
-            let params = nwg::MessageParams {
-                title: "Ferrite Server 종료",
-                content: "실행 중인 서버를 저장하고 종료할까요?\n\n'예'를 누르면 월드 저장과 정상 종료가 끝난 뒤 창이 닫힙니다.",
-                buttons: nwg::MessageButtons::YesNo,
-                icons: nwg::MessageIcons::Question,
-            };
-            if nwg::modal_message(&self.window, &params) == nwg::MessageChoice::Yes {
-                self.begin_exit();
-            }
-        }
-
-        fn begin_exit(&self) {
-            let sent = {
-                let mut state = self.state.borrow_mut();
-                if state.closing {
-                    return;
-                }
-                state.closing = true;
-                state.stopping = true;
-                match state.actions.clone() {
-                    Some(actions) => actions.send(Action::Exit).is_ok(),
-                    None => false,
-                }
-            };
-
-            if sent {
-                self.set_shutdown_ui();
-            } else {
-                // The manager is gone, so no ServerStopped message will arrive.
-                nwg::stop_thread_dispatch();
-            }
-        }
-
-        fn set_shutdown_ui(&self) {
-            self.set_status("● 저장 후 종료 중…");
-            self.start_button.set_enabled(false);
-            self.stop_button.set_enabled(false);
-            self.command.set_enabled(false);
-            self.send_button.set_enabled(false);
-        }
-
-        fn poll_messages(&self) {
-            let messages = self
-                .state
-                .borrow()
-                .messages
-                .as_ref()
-                .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
-                .unwrap_or_default();
-
-            let mut lines = Vec::new();
-            let mut started = false;
-            let mut stopped = false;
-            for message in messages {
-                match message {
-                    UiMessage::Log(line) => lines.push(line),
-                    UiMessage::ServerStarted => started = true,
-                    UiMessage::ServerStopped => stopped = true,
-                }
-            }
-
-            if started {
-                self.server_started();
-            }
-            if stopped {
-                self.server_stopped();
-            }
-            if !lines.is_empty() {
-                self.append_log(&lines);
-            }
-            self.refresh_uptime();
-        }
-
-        fn server_started(&self) {
-            let (closing, stopping) = {
-                let mut state = self.state.borrow_mut();
-                state.running = true;
-                state.started_at = Some(Instant::now());
-                (state.closing, state.stopping)
-            };
-            if closing || stopping {
-                return;
-            }
-
-            self.set_status("● 실행 중");
-            self.set_uptime(&format_uptime(Duration::ZERO));
-            self.uptime.set_visible(true);
-            self.start_button.set_enabled(false);
-            self.stop_button.set_enabled(true);
-            self.command.set_enabled(true);
-            self.send_button.set_enabled(true);
-            self.command.set_focus();
-        }
-
-        fn server_stopped(&self) {
-            let closing = {
-                let mut state = self.state.borrow_mut();
-                state.active = false;
-                state.running = false;
-                state.stopping = false;
-                state.started_at = None;
-                state.closing
-            };
-
-            self.stop_button.set_enabled(false);
-            self.command.set_enabled(false);
-            self.send_button.set_enabled(false);
-            self.set_uptime("");
-            self.uptime.set_visible(false);
-
-            if closing {
-                self.set_status("● 종료됨");
-                if let Some(actions) = self.state.borrow().actions.clone() {
-                    let _ = actions.send(Action::Exit);
-                }
-                nwg::stop_thread_dispatch();
-            } else {
-                self.start_button.set_enabled(true);
-                self.set_status("● 중지됨");
-                self.start_button.set_focus();
-            }
-        }
-
-        fn refresh_uptime(&self) {
-            let uptime = {
-                let state = self.state.borrow();
-                if state.running {
-                    state
-                        .started_at
-                        .map(|started_at| format_uptime(started_at.elapsed()))
-                } else {
-                    None
-                }
-            };
-            if let Some(uptime) = uptime {
-                self.set_uptime(&uptime);
-            }
-        }
-
-        fn set_status(&self, text: &str) {
-            let changed = {
-                let mut state = self.state.borrow_mut();
-                if state.last_status == text {
-                    false
-                } else {
-                    state.last_status.clear();
-                    state.last_status.push_str(text);
-                    true
-                }
-            };
-            if changed {
-                self.status.set_text(text);
-            }
-        }
-
-        fn set_uptime(&self, text: &str) {
-            let changed = {
-                let mut state = self.state.borrow_mut();
-                if state.last_uptime == text {
-                    false
-                } else {
-                    state.last_uptime.clear();
-                    state.last_uptime.push_str(text);
-                    true
-                }
-            };
-            if changed {
-                self.uptime.set_text(text);
-            }
-        }
-
-        fn append_log(&self, lines: &[String]) {
-            let autoscroll = self.state.borrow().autoscroll_enabled;
-            // `TextBox::append` always scrolls to the bottom. Remember where the
-            // user was reading so auto-scroll off does not jump on every batch.
-            let anchor = if autoscroll {
-                0
-            } else {
-                self.first_visible_line()
-            };
-
-            let mut batch = String::new();
-            for line in lines {
-                batch.push_str(line);
-                batch.push_str("\r\n");
-            }
-            self.log.append(&batch);
-
-            if self.log.linecount() > LOG_MAX_LINES {
-                self.trim_log(autoscroll, anchor);
-            } else if !autoscroll {
-                self.restore_scroll(anchor);
-            }
-        }
-
-        fn trim_log(&self, autoscroll: bool, anchor: i32) {
-            // The edit control API has no "delete a range of lines" message, so
-            // take the whole text, drop the oldest block, and set it back. This
-            // only happens after thousands of lines, so the full read/write is
-            // rare and much cheaper than clearing the log outright.
-            let text = self.log.text();
-            let total = text.lines().count();
-            if total == 0 {
-                return;
-            }
-            let keep = if total > LOG_KEEP_LINES {
-                LOG_KEEP_LINES
-            } else {
-                total.div_ceil(2)
-            };
-            let drop_count = total.saturating_sub(keep);
-            if drop_count == 0 {
-                return;
-            }
-
-            let kept = keep_newest_lines(&text, drop_count);
-            self.log.set_text_unix2dos(&kept);
-            self.log.scroll(-self.log.linecount());
-            if autoscroll {
-                self.log.scroll_lastline();
-            } else {
-                let target = (anchor - drop_count as i32).max(0);
-                self.log.scroll(target);
-            }
-        }
-
-        fn first_visible_line(&self) -> i32 {
-            self.log.handle.hwnd().map_or(0, |handle| unsafe {
-                win32::SendMessageW(
-                    handle as *mut std::ffi::c_void,
-                    win32::EM_GETFIRSTVISIBLELINE,
-                    0,
-                    0,
-                ) as i32
-            })
-        }
-
-        fn restore_scroll(&self, anchor: i32) {
-            let current = self.first_visible_line();
-            let delta = anchor - current;
-            if delta != 0 {
-                self.log.scroll(delta);
-            }
-        }
-
-        fn min_max_info(&self, evt_data: &nwg::EventData) {
-            if let nwg::EventData::OnMinMaxInfo(info) = evt_data {
-                let scale = self.state.borrow().scale;
-                // The `high-dpi` feature of native-windows-gui is off, so this
-                // conversion is not done by the library.
-                info.set_min_size(scaled(MIN_WIDTH, scale), scaled(MIN_HEIGHT, scale));
-            }
-        }
-
-        /// Manual grid: the header, toolbar, command row and footer keep fixed
-        /// heights while the log takes every remaining pixel. A `GridLayout`
-        /// splits rows evenly and cannot express that.
-        fn relayout(&self) {
-            let scale = self.state.borrow().scale;
-            let window_size = self.window.size();
-            let width = (window_size.0 as i32).max(1);
-            let height = (window_size.1 as i32).max(1);
-
-            let pad = scaled(16, scale);
-            let gap = scaled(8, scale);
-            let content_width = (width - pad * 2).max(1);
-
-            let status_height = scaled(36, scale);
-            let button_width = scaled(112, scale);
-            let button_height = scaled(28, scale);
-            let action_width = button_width * 2 + gap;
-            let toolbar_height = scaled(26, scale);
-            let command_height = scaled(32, scale);
-            let footer_height = scaled(16, scale);
-            let uptime_width = scaled(190, scale)
-                .min(content_width / 2)
-                .max(scaled(120, scale));
-            let status_width =
-                (content_width - action_width - uptime_width - gap * 2).max(scaled(150, scale));
-
-            let button_y = pad + (status_height - button_height) / 2;
-            let stop_x = width - pad - button_width;
-            let start_x = width - pad - action_width;
-
-            self.status.set_position(pad, pad);
-            self.status
-                .set_size(status_width as u32, status_height as u32);
-
-            let uptime_x = start_x - gap - uptime_width;
-            self.uptime.set_position(uptime_x, pad);
-            self.uptime
-                .set_size(uptime_width as u32, status_height as u32);
-
-            self.stop_button.set_position(stop_x, button_y);
-            self.stop_button
-                .set_size(button_width as u32, button_height as u32);
-            self.start_button.set_position(start_x, button_y);
-            self.start_button
-                .set_size(button_width as u32, button_height as u32);
-
-            let toolbar_y = pad + status_height + gap;
-            self.log_title.set_position(pad, toolbar_y);
-            self.log_title
-                .set_size(scaled(140, scale) as u32, toolbar_height as u32);
-
-            let clear_width = scaled(116, scale);
-            let clear_x = width - pad - clear_width;
-            self.clear_button.set_position(clear_x, toolbar_y);
-            self.clear_button
-                .set_size(clear_width as u32, toolbar_height as u32);
-
-            let autoscroll_width = scaled(180, scale);
-            let autoscroll_x = clear_x - gap - autoscroll_width;
-            self.autoscroll.set_position(autoscroll_x, toolbar_y);
-            self.autoscroll
-                .set_size(autoscroll_width as u32, toolbar_height as u32);
-
-            let log_top = toolbar_y + toolbar_height + gap;
-            let footer_y = height - pad - footer_height;
-            let command_y = footer_y - gap - command_height;
-            let log_height = (command_y - gap - log_top).max(scaled(80, scale));
-            self.log.set_position(pad, log_top);
-            self.log.set_size(content_width as u32, log_height as u32);
-
-            let command_label_width = scaled(40, scale);
-            self.command_label
-                .set_position(pad, command_y + (command_height - scaled(20, scale)) / 2);
-            self.command_label
-                .set_size(command_label_width as u32, scaled(20, scale) as u32);
-
-            let send_width = scaled(96, scale);
-            let send_x = width - pad - send_width;
-            self.send_button
-                .set_position(send_x, command_y + (command_height - button_height) / 2);
-            self.send_button
-                .set_size(send_width as u32, button_height as u32);
-
-            let command_x = pad + command_label_width + gap;
-            let input_height = scaled(26, scale);
-            self.command
-                .set_position(command_x, command_y + (command_height - input_height) / 2);
-            self.command.set_size(
-                (send_x - gap - command_x).max(scaled(80, scale)) as u32,
-                input_height as u32,
-            );
-
-            self.hint.set_position(pad, footer_y);
-            self.hint
-                .set_size(content_width as u32, footer_height as u32);
-
-            self.repaint_surface();
-        }
-
-        /// `NativeWindowsGuiWindow` has no class background brush and does not
-        /// erase itself when it is shown. Invalidate the whole client so the
-        /// `WM_ERASEBKGND` hook paints it with the sampled surface color.
-        fn repaint_surface(&self) {
-            let Some(hwnd) = self.window.handle.hwnd() else {
-                return;
-            };
-            unsafe {
-                win32::InvalidateRect(hwnd as *mut std::ffi::c_void, std::ptr::null(), 1);
-                win32::UpdateWindow(hwnd as *mut std::ffi::c_void);
-            }
-        }
-
-        fn install_palette(&self) -> anyhow::Result<()> {
-            let background = unsafe { win32::GetSysColor(win32::COLOR_WINDOW) };
-            let system_text = unsafe { win32::GetSysColor(win32::COLOR_WINDOWTEXT) };
-            let dark = brightness(system_text) > brightness(background);
-            let surface = if dark { [37, 38, 47] } else { [255, 255, 255] };
-            let text = if dark { [240, 240, 240] } else { [24, 24, 27] };
-            let brush = unsafe { win32::CreateSolidBrush(colorref(surface)) };
-            if brush == 0 {
-                anyhow::bail!("creating the console background brush");
-            }
-            let Some(hwnd) = self.window.handle.hwnd() else {
-                anyhow::bail!("the server window has no handle");
-            };
-
-            // The class brush and the raw colour handler both own this GDI
-            // object for the life of the window. One leaked brush per process
-            // is cheaper than threading a Drop guard through the event loop.
-            unsafe {
-                win32::SetClassLongPtrW(
-                    hwnd as *mut std::ffi::c_void,
-                    win32::GCLP_HBRBACKGROUND,
-                    brush,
-                );
-                win32::InvalidateRect(hwnd as *mut std::ffi::c_void, std::ptr::null(), 1);
-            }
-
-            let handler = nwg::bind_raw_event_handler(
-                &self.window.handle,
-                PALETTE_HANDLER_ID,
-                move |hwnd, message, wparam, _lparam| match message {
-                    win32::WM_ERASEBKGND => {
-                        let hdc = wparam as *mut std::ffi::c_void;
-                        let mut rect = win32::Rect::default();
-                        unsafe {
-                            win32::GetClientRect(hwnd as *mut std::ffi::c_void, &mut rect);
-                            win32::FillRect(hdc, &rect, brush);
-                        }
-                        Some(1)
-                    }
-                    win32::WM_CTLCOLORSTATIC => {
-                        let hdc = wparam as *mut std::ffi::c_void;
-                        unsafe {
-                            win32::SetTextColor(hdc, colorref(text));
-                            win32::SetBkColor(hdc, colorref(surface));
-                        }
-                        Some(brush)
-                    }
-                    _ => None,
-                },
-            )
-            .map_err(|error| anyhow::anyhow!("installing the console palette: {error}"))?;
-            self.palette_handler.replace(Some(handler));
-            Ok(())
-        }
-
-        fn apply_fonts(&self, fonts: &UiFonts) {
-            self.status.set_font(Some(&fonts.status));
-            self.uptime.set_font(Some(&fonts.mono));
-            self.log_title.set_font(Some(&fonts.body));
-            self.autoscroll.set_font(Some(&fonts.body));
-            self.start_button.set_font(Some(&fonts.body));
-            self.stop_button.set_font(Some(&fonts.body));
-            self.clear_button.set_font(Some(&fonts.body));
-            self.log.set_font(Some(&fonts.mono));
-            self.command_label.set_font(Some(&fonts.body));
-            self.command.set_font(Some(&fonts.mono));
-            self.send_button.set_font(Some(&fonts.body));
-            self.hint.set_font(Some(&fonts.small));
-        }
-    }
-
-    #[derive(Clone)]
-    struct GuiLogWriter(Sender<UiMessage>);
-
-    struct GuiLogBuffer {
-        sender: Sender<UiMessage>,
-        bytes: Vec<u8>,
-    }
-
-    impl<'a> MakeWriter<'a> for GuiLogWriter {
-        type Writer = GuiLogBuffer;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            GuiLogBuffer {
-                sender: self.0.clone(),
-                bytes: Vec::with_capacity(256),
-            }
-        }
-    }
-
-    impl Write for GuiLogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            if !self.bytes.is_empty() {
-                let line = String::from_utf8_lossy(&self.bytes).trim_end().to_owned();
-                self.bytes.clear();
-                if !line.is_empty() {
-                    let _ = self.sender.send(UiMessage::Log(line));
-                }
-            }
-            Ok(())
-        }
-    }
-
-    impl Drop for GuiLogBuffer {
-        fn drop(&mut self) {
-            let _ = self.flush();
-        }
-    }
-
-    struct RunningServer {
-        commands: tokio::sync::mpsc::UnboundedSender<String>,
-        thread: thread::JoinHandle<()>,
-    }
-
-    fn server_manager(actions: Receiver<Action>, messages: Sender<UiMessage>) {
-        let mut running: Option<RunningServer> = None;
-        let mut exiting = false;
-
-        while !exiting || running.is_some() {
-            match actions.recv_timeout(Duration::from_millis(100)) {
-                Ok(Action::Start) if running.is_none() => {
-                    let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
-                    let server_thread = thread::Builder::new()
-                        .name("ferrite-server-runtime".into())
-                        .spawn(move || {
-                            let result = tokio::runtime::Builder::new_multi_thread()
-                                .enable_all()
-                                .build()
-                                .map(|runtime| runtime.block_on(run_server(command_rx)));
-                            match result {
-                                Ok(Ok(())) => {}
-                                Ok(Err(error)) => {
-                                    tracing::error!(error = %format!("{error:#}"), "server stopped with an error");
-                                }
-                                Err(error) => {
-                                    tracing::error!(%error, "could not create the server runtime");
-                                }
-                            }
-                        });
-
-                    match server_thread {
-                        Ok(server_thread) => {
-                            running = Some(RunningServer {
-                                commands: command_tx,
-                                thread: server_thread,
-                            });
-                            let _ = messages.send(UiMessage::ServerStarted);
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "could not start the server thread");
-                            let _ = messages.send(UiMessage::ServerStopped);
-                        }
-                    }
-                }
-                Ok(Action::Stop) => {
-                    if let Some(server) = &running {
-                        let _ = server.commands.send("stop".into());
-                    }
-                }
-                Ok(Action::Command(command)) => {
-                    if let Some(server) = &running {
-                        let _ = server.commands.send(command);
-                    }
-                }
-                Ok(Action::Exit) => {
-                    exiting = true;
-                    if let Some(server) = &running {
-                        let _ = server.commands.send("stop".into());
-                    }
-                }
-                Ok(Action::Start) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    exiting = true;
-                    if let Some(server) = &running {
-                        let _ = server.commands.send("stop".into());
-                    }
-                }
-            }
-
-            if running
-                .as_ref()
-                .is_some_and(|server| server.thread.is_finished())
-                && let Some(server) = running.take()
-            {
-                let _ = server.thread.join();
-                let _ = messages.send(UiMessage::ServerStopped);
-            }
-        }
-    }
-
-    fn scaled(value: i32, scale: f32) -> i32 {
-        (value as f32 * scale).round().max(1.0) as i32
-    }
-
-    fn colorref(color: [u8; 3]) -> u32 {
-        u32::from(color[0]) | (u32::from(color[1]) << 8) | (u32::from(color[2]) << 16)
-    }
-
-    fn brightness(color: u32) -> u32 {
-        (color & 0xFF) * 299 + ((color >> 8) & 0xFF) * 587 + ((color >> 16) & 0xFF) * 114
-    }
-
-    fn dpi_scale() -> f32 {
-        let dpi = unsafe { nwg::dpi() };
-        if dpi <= 0 {
-            1.0
-        } else {
-            (dpi as f32 / 96.0).clamp(0.75, 3.0)
-        }
-    }
-
-    /// Drop the oldest `drop_count` logical lines and keep a trailing newline so the next
-    /// `TextBox::append` starts on its own line.
-    fn keep_newest_lines(text: &str, drop_count: usize) -> String {
-        let mut kept = text.lines().skip(drop_count).collect::<Vec<_>>().join("\n");
-        if !kept.is_empty() {
-            kept.push('\n');
-        }
-        kept
-    }
-
-    fn format_uptime(elapsed: Duration) -> String {
-        let total = elapsed.as_secs();
-        let hours = total / 3600;
-        let minutes = (total % 3600) / 60;
-        let seconds = total % 60;
-        format!("가동 {hours:02}:{minutes:02}:{seconds:02}")
-    }
-
-    pub(super) fn run() -> anyhow::Result<()> {
-        let executable = std::env::current_exe().context("locating ferrite-server.exe")?;
-        if let Some(directory) = executable.parent() {
-            std::env::set_current_dir(directory)
-                .with_context(|| format!("using server directory {}", directory.display()))?;
-        }
-
-        // Opt into system DPI awareness before any window is created so the
-        // scale factor below is the real one, not a 96-DPI virtualization.
-        unsafe {
-            win32::SetProcessDPIAware();
-        }
-        nwg::init().context("initializing the Windows GUI")?;
-        nwg::Font::set_global_family("Segoe UI").context("setting the GUI font")?;
-
-        let scale = dpi_scale();
-        let fonts = UiFonts::new(scale)?;
-
-        let (actions_tx, actions_rx) = mpsc::channel();
-        let (messages_tx, messages_rx) = mpsc::channel();
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_ansi(false)
-            .with_writer(GuiLogWriter(messages_tx.clone()))
-            .try_init()
-            .map_err(|error| anyhow::anyhow!("initializing GUI log capture: {error}"))?;
-
-        let app = FerriteServerGui::build_ui(Default::default())
-            .map_err(|error| anyhow::anyhow!("building the server window: {error}"))?;
-        *app.state.borrow_mut() = UiState {
-            actions: Some(actions_tx),
-            messages: Some(messages_rx),
-            scale,
-            ..Default::default()
-        };
-
-        app.install_palette()?;
-        app.apply_fonts(&fonts);
-        app.window.set_size(
-            scaled(INITIAL_WIDTH, scale) as u32,
-            scaled(INITIAL_HEIGHT, scale) as u32,
-        );
-
-        let window_size = app.window.size();
-        let screen_width = unsafe { win32::GetSystemMetrics(win32::SM_CXSCREEN) };
-        let screen_height = unsafe { win32::GetSystemMetrics(win32::SM_CYSCREEN) };
-        if screen_width > 0 && screen_height > 0 {
-            app.window.set_position(
-                ((screen_width - window_size.0 as i32) / 2).max(0),
-                ((screen_height - window_size.1 as i32) / 2).max(0),
-            );
-        }
-
-        app.relayout();
-        app.command.set_enabled(false);
-        app.send_button.set_enabled(false);
-        app.uptime.set_visible(false);
-        app.window.set_visible(true);
-        app.repaint_surface();
-        app.start_button.set_focus();
-
-        let manager = thread::Builder::new()
-            .name("ferrite-server-manager".into())
-            .spawn(move || server_manager(actions_rx, messages_tx))
-            .context("starting the server manager")?;
-
-        nwg::dispatch_thread_events();
-        manager
-            .join()
-            .map_err(|_| anyhow::anyhow!("server manager thread panicked"))?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{format_uptime, keep_newest_lines};
-        use std::time::Duration;
-
-        #[test]
-        fn uptime_is_formatted_as_hours_minutes_seconds() {
-            assert_eq!(format_uptime(Duration::ZERO), "가동 00:00:00");
-            assert_eq!(format_uptime(Duration::from_secs(3661)), "가동 01:01:01");
-            assert_eq!(
-                format_uptime(Duration::from_secs(99 * 3600 + 59 * 60 + 59)),
-                "가동 99:59:59"
-            );
-        }
-
-        #[test]
-        fn trimmed_log_text_keeps_a_trailing_newline() {
-            assert_eq!(
-                keep_newest_lines("one\r\ntwo\r\nthree\r\n", 1),
-                "two\nthree\n"
-            );
-            assert_eq!(keep_newest_lines("one\r\n", 1), "");
-        }
-    }
-}
+mod tauri_gui;
