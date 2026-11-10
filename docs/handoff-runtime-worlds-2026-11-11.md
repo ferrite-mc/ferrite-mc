@@ -4,7 +4,7 @@
 
 Runtime-world work is in progress on branch `release/v0.1.6` in the `release-prep-v0.1.5` worktree. The worktree started from commit `08ee9e3` and had no upstream branch configured. The user asked to commit and push this checkpoint, then continue the implementation in a later session.
 
-The current implementation adds persistent world descriptors, a separate scheduler per `WorldId`, Rust world create/unload messages, and a Bukkit `Server#createWorld`/`unloadWorld` route through the plugin host. A runtime world uses the existing worldgen host and inherits its terrain settings. Java `WorldCreator` requests are currently limited to `NORMAL` type, default seed, structures enabled, and no custom generator.
+The current implementation adds persistent world descriptors, a separate scheduler per `WorldId`, Rust world create/unload messages, and a Bukkit `Server#createWorld`/`unloadWorld` route through the plugin host. A runtime world uses the existing worldgen host and inherits its terrain settings. Java `WorldCreator` requests are currently limited to `NORMAL` type, seed `0`, structures enabled, and no custom generator. Paper's `WorldCreator(String)` initializes its seed randomly, so an unconfigured creator is rejected before reaching the host; this makes the common `createWorld(new WorldCreator(name))` call unavailable until seed handling is implemented or the API contract is revised.
 
 ## Changes in this checkpoint
 
@@ -31,7 +31,7 @@ The current implementation adds persistent world descriptors, a separate schedul
 2. **Shutdown persistence is incomplete.** The shutdown path still gathers all regions together and flushes only the primary source. Runtime entity regions and runtime chunk sources must be saved/flushed separately before server shutdown.
 3. **Unload failure recovery is incomplete.** The runtime scheduler is removed before entity/chunk flushing; if persistence fails, the world remains catalogued but its scheduler is gone. Make unload transactional or restore the scheduler on save failure.
 4. **World unload lifecycle edge cases need validation.** The Java layer fires the cancellable event and removes the Java world only after the Rust response, but verify event cancellation, player-in-world refusal, `save=false`, and failed flush behavior.
-5. **Creator settings are intentionally constrained.** `WorldCreator` currently rejects custom generators, nonzero seeds, structure-disabled worlds, and non-`NORMAL` world types. Either implement those settings or document the supported subset in the API status docs.
+5. **Creator settings and seed semantics are constrained.** `WorldCreator` currently rejects custom generators, nonzero seeds, structure-disabled worlds, and non-`NORMAL` world types. Since Paper's default creator seed is random rather than zero, basic seed handling must be resolved before normal plugin world creation works.
 6. **Real plugin/client validation is outstanding.** Exercise create/reopen/unload, plugin `onEnable` creation, world lookup, block reads/writes, player travel, and chunk/entity persistence using the real client/plugin fixture.
 
 ## Important working constraints

@@ -200,8 +200,8 @@ class ApiSurfaceTest {
         assertSame(map, server.getMap(map.getId()));
         assertNull(server.getMap(-12345));
         assertSame(world, server.createWorld(new org.bukkit.WorldCreator(world.getName())));
-        var missing = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_missing_world")));
-        assertTrue(missing.getMessage().contains("createRuntimeWorld"));
+        var missing = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_missing_world").seed(0L)));
+        assertTrue(missing.getMessage().contains("createRuntimeWorld"), () -> "Unexpected runtime world failure: " + missing.getMessage());
         var snapshot = assertThrows(IllegalStateException.class, () -> server.getEntityFactory().createEntitySnapshot("{}"));
         assertTrue(snapshot.getMessage().contains("no host is available"));
     }
