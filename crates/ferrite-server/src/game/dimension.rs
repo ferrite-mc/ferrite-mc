@@ -26,6 +26,12 @@ pub struct RuntimeWorldDescriptor {
     pub source: Arc<AnvilChunkSource>,
 }
 
+#[derive(Clone, Copy)]
+struct RuntimeWorldSettings {
+    spawn: [i32; 3],
+    dimension: Dimension,
+}
+
 /// Owns runtime-world identity and disk-backed chunk sources. Names are unique ignoring case.
 #[derive(Default)]
 pub struct RuntimeWorldCatalog {
@@ -93,8 +99,10 @@ impl RuntimeWorldCatalog {
             root,
             registry,
             terrain,
-            spawn,
-            Dimension::Overworld,
+            RuntimeWorldSettings {
+                spawn,
+                dimension: Dimension::Overworld,
+            },
         )
     }
 
@@ -105,8 +113,7 @@ impl RuntimeWorldCatalog {
         root: &Path,
         registry: Arc<RuntimeRegistry>,
         terrain: Option<Arc<dyn ChunkGenerator>>,
-        spawn: [i32; 3],
-        dimension: Dimension,
+        settings: RuntimeWorldSettings,
     ) -> Result<RuntimeWorldDescriptor, &'static str> {
         let name = name.trim();
         let (folded, key) = runtime_world_identity(name)?;
@@ -116,14 +123,18 @@ impl RuntimeWorldCatalog {
         {
             return Err("world id, name or key already loaded");
         }
-        let source =
-            AnvilChunkSource::with_dimension(root.join(name), registry, terrain, dimension);
+        let source = AnvilChunkSource::with_dimension(
+            root.join(name),
+            registry,
+            terrain,
+            settings.dimension,
+        );
         let descriptor = RuntimeWorldDescriptor {
             id,
             name: name.to_owned(),
             key: key.clone(),
-            spawn,
-            dimension,
+            spawn: settings.spawn,
+            dimension: settings.dimension,
             source,
         };
         self.by_name.insert(folded, id);
@@ -191,8 +202,15 @@ impl RuntimeWorldCatalog {
             super::anvil::write_spawn(&world_root, initial_spawn)?;
             initial_spawn
         };
-        self.create_for_dimension(id, name, root, registry, terrain, spawn, dimension)
-            .map_err(anyhow::Error::msg)
+        self.create_for_dimension(
+            id,
+            name,
+            root,
+            registry,
+            terrain,
+            RuntimeWorldSettings { spawn, dimension },
+        )
+        .map_err(anyhow::Error::msg)
     }
 
     /// Flush an already quiesced world before removing it from the catalog.

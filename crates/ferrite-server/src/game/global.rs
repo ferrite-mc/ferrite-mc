@@ -714,14 +714,18 @@ mod tests {
             "a nether player must not be spawned in the overworld"
         );
 
-        g.set_dimension(bob, Dimension::Overworld);
+        g.set_world(
+            bob,
+            Dimension::Overworld,
+            WorldId::Vanilla(Dimension::Overworld),
+        );
         g.tick();
         assert!(
             tracked(&mut ar, AddEntity::ID),
             "the entity is re-added when the player enters the observer's dimension"
         );
 
-        g.set_dimension(bob, Dimension::Nether);
+        g.set_world(bob, Dimension::Nether, WorldId::Vanilla(Dimension::Nether));
         g.tick();
         assert!(
             tracked(&mut ar, RemoveEntities::ID),

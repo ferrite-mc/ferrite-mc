@@ -35,6 +35,10 @@ use ferrite_plugin::{
     WorldSnapshot,
 };
 
+pub type RuntimeWorldCreateHandler =
+    Arc<dyn Fn(&str, &str) -> Result<(Uuid, [i32; 3]), String> + Send + Sync>;
+pub type RuntimeWorldUnloadHandler = Arc<dyn Fn(Uuid, bool) -> Result<bool, String> + Send + Sync>;
+
 /// Everything the plugin bridge needs from the server's startup configuration.
 pub struct Settings {
     pub directory: PathBuf,
@@ -66,10 +70,8 @@ pub struct Settings {
     /// structure queries from plugins.
     pub terrain: Option<std::sync::Arc<dyn crate::game::ChunkGenerator>>,
     /// Creates a persistent runtime world from the synchronous Bukkit host-call thread.
-    pub runtime_world_handler:
-        Option<Arc<dyn Fn(&str, &str) -> Result<(Uuid, [i32; 3]), String> + Send + Sync>>,
-    pub runtime_world_unloader:
-        Option<Arc<dyn Fn(Uuid, bool) -> Result<bool, String> + Send + Sync>>,
+    pub runtime_world_handler: Option<RuntimeWorldCreateHandler>,
+    pub runtime_world_unloader: Option<RuntimeWorldUnloadHandler>,
 }
 
 /// A running embedded JVM with the server's plugins enabled.

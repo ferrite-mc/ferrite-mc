@@ -95,6 +95,15 @@ mod tests {
             schedulers: [(WorldId::Vanilla(Dimension::Overworld), scheduler)]
                 .into_iter()
                 .collect(),
+            scheduler_factory: Arc::new(|_, _| {
+                Scheduler::new(
+                    Regionizer::<Region>::new(0, 1),
+                    GlobalRegion::default(),
+                    1,
+                    |_| {},
+                    |_| {},
+                )
+            }),
             transient_entities: Some(Arc::new(Mutex::new(HashMap::new()))),
             persistent_entities: false,
             tracking: Arc::new(Mutex::new(HashMap::new())),
@@ -1571,12 +1580,12 @@ async fn run(
                               let _ = runtime_world_catalog.unload(id);
                               return Err("runtime scheduler already exists for this world UUID".to_owned());
                           }
-                          if let Some(view) = &settings.runtime_world_view {
-                              if !view.register_world(id, Arc::clone(&descriptor.source)) {
-                                  let _ = worlds.remove_runtime_world(id);
-                                  let _ = runtime_world_catalog.unload(id);
-                                  return Err("plugin world view already contains this UUID".to_owned());
-                              }
+                          if let Some(view) = &settings.runtime_world_view
+                              && !view.register_world(id, Arc::clone(&descriptor.source))
+                          {
+                              let _ = worlds.remove_runtime_world(id);
+                              let _ = runtime_world_catalog.unload(id);
+                              return Err("plugin world view already contains this UUID".to_owned());
                           }
                           Ok((id, descriptor.name, descriptor.spawn))
                       })();
