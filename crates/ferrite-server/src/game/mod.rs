@@ -51,7 +51,7 @@ mod equine_chest;
 mod jukebox;
 mod portal;
 mod vault;
-pub use dimension::{Dimension, DimensionRegistry};
+pub use dimension::{Dimension, DimensionRegistry, RuntimeWorldCatalog, RuntimeWorldDescriptor};
 mod commands_data;
 #[cfg(test)]
 pub(crate) use commands_data::{BlockData, apply_block};

@@ -13,6 +13,77 @@ use std::{
     sync::Arc,
 };
 
+/// Stable metadata for a non-vanilla world. This catalog is the identity/storage seam for
+/// runtime worlds; region scheduling still uses `Dimension` and must be migrated before these
+/// descriptors can be exposed through Bukkit's `Server#createWorld`.
+#[derive(Clone)]
+pub struct RuntimeWorldDescriptor {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub key: String,
+    pub spawn: [i32; 3],
+    pub source: Arc<AnvilChunkSource>,
+}
+
+/// Owns runtime-world identity and disk-backed chunk sources. Names are unique ignoring case.
+#[derive(Default)]
+pub struct RuntimeWorldCatalog {
+    by_id: HashMap<uuid::Uuid, RuntimeWorldDescriptor>,
+    by_name: HashMap<String, uuid::Uuid>,
+}
+
+impl RuntimeWorldCatalog {
+    /// Register a world backed by its own Anvil directory. This does not register ticking regions.
+    pub fn create(
+        &mut self,
+        id: uuid::Uuid,
+        name: &str,
+        root: &Path,
+        registry: Arc<RuntimeRegistry>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
+        spawn: [i32; 3],
+    ) -> Result<RuntimeWorldDescriptor, &'static str> {
+        let name = name.trim();
+        if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+            return Err("invalid world name");
+        }
+        let folded = name.to_ascii_lowercase();
+        if self.by_id.contains_key(&id) || self.by_name.contains_key(&folded) {
+            return Err("world id or name already loaded");
+        }
+        let source = AnvilChunkSource::with_dimension(
+            root.join(name),
+            registry,
+            terrain,
+            Dimension::Overworld,
+        );
+        let descriptor = RuntimeWorldDescriptor {
+            id,
+            name: name.to_owned(),
+            key: format!("ferrite:{}", folded.replace(' ', "_")),
+            spawn,
+            source,
+        };
+        self.by_name.insert(folded, id);
+        self.by_id.insert(id, descriptor.clone());
+        Ok(descriptor)
+    }
+
+    pub fn get(&self, id: uuid::Uuid) -> Option<&RuntimeWorldDescriptor> {
+        self.by_id.get(&id)
+    }
+    pub fn by_name(&self, name: &str) -> Option<&RuntimeWorldDescriptor> {
+        self.by_name
+            .get(&name.trim().to_ascii_lowercase())
+            .and_then(|id| self.by_id.get(id))
+    }
+    pub fn unload(&mut self, id: uuid::Uuid) -> Option<RuntimeWorldDescriptor> {
+        let descriptor = self.by_id.remove(&id)?;
+        self.by_name.remove(&descriptor.name.to_ascii_lowercase());
+        Some(descriptor)
+    }
+}
+
 /// The dimensions the server can run (`DimensionType`): beds only work in the overworld, and
 /// each dimension has its own `infiniburn` tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
