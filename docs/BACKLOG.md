@@ -46,6 +46,18 @@ server-side only.
 
 ## 2. Entity and mob parity
 
+- Investigate the reported entity replacement when a player leaves and returns to chunks. The
+  coordinator currently increments region/scheduler holds for every viewer but releases only
+  the last one; test overlapping viewers and repeated unload/reload with stable entity UUID,
+  position and health. Also test immediate re-entry while entity persistence is pending.
+- Vanilla mob AI parity is incomplete. Region-local AI previously saw only players in the same
+  region, allowing a nearby player across a boundary to trigger hostile-mob despawn. Verify the
+  in-progress snapshot and remote attack routing with boundary movement, despawn and combat;
+  audit pathfinding, goal selection and behavior against vanilla for each affected mob.
+- In-progress work on 2026-11-10 in `release/v0.1.6`: first/last-viewer holder accounting and an
+  in-memory handoff for entity saves were changed; cross-region player snapshots and melee
+  routing were wired. Final integration tests and real-client reproduction are still required.
+  A remotely blocked melee hit does not yet knock back the attacking mob.
 - Dragon: vanilla strafe phases and the gateway beam (`docs/end-dimension.md`).
 - Projectiles beyond arrow, snowball, egg, ender pearl and fireball: potion, experience bottle,
   thrown trident, wind charge, fishing bobber.
@@ -92,6 +104,8 @@ server-side only.
 
 ## 7. Release and tooling hygiene
 
+- Create the expected default directories, including `plugins/`, on startup. Check fresh and
+  existing installations, configured custom paths, headless mode and Windows UI startup.
 - `v0.1.5` is already tagged locally at `0132fd9`; the new plugin/performance changes are prepared
   for `v0.1.6`. Verify the Windows ZIP and attach it to the GitHub release.
 - Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md`, `docs/windows-console.md` and
@@ -114,6 +128,9 @@ into one yet. Complete these steps together before enabling `Server#createWorld`
    fixed `Dimension` enum.
 4. Dynamically register Java `FerriteWorld` instances and connect `WorldLoadEvent`,
    `WorldUnloadEvent`, and `WorldView`.
+
+Use vanilla terrain as the default for newly configured servers; superflat must remain an
+explicit choice. Verify host prerequisites, fresh-world spawn and existing-world preservation.
 
 ## 9. Orca FB integration review
 
