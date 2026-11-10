@@ -8,6 +8,7 @@ license.workspace = true
 ferrite-protocol.workspace = true
 ferrite-nbt.workspace = true
 ferrite-item = { path = "../ferrite-item", features = ["protocol"] }
+ferrite-plugin = { path = "../ferrite-plugin" }
 tokio.workspace = true
 socket2 = "0.6"
 tracing.workspace = true

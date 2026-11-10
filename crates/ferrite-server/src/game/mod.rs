@@ -92,7 +92,9 @@ mod tests {
             |_| {},
         );
         let worlds = Worlds {
-            schedulers: [(Dimension::Overworld, scheduler)].into_iter().collect(),
+            schedulers: [(WorldId::Vanilla(Dimension::Overworld), scheduler)]
+                .into_iter()
+                .collect(),
             transient_entities: Some(Arc::new(Mutex::new(HashMap::new()))),
             persistent_entities: false,
             tracking: Arc::new(Mutex::new(HashMap::new())),
@@ -127,20 +129,20 @@ mod tests {
         );
         let uuid = mob.data.uuid;
         region.entities.insert(mob);
-        let cache: Option<TransientEntities> = Some(Arc::new(Mutex::new(HashMap::new())));
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let transient = Some(Arc::clone(&cache));
         let tracking = Arc::new(Mutex::new(HashMap::new()));
         let (signals, mut received) = mpsc::unbounded_channel();
         release_chunk_entities(
             &mut region,
             &signals,
-            &cache,
+            &transient,
             &tracking,
             Dimension::Overworld,
             chunk,
             true,
         );
         let saved = cache
-            .unwrap()
             .lock()
             .unwrap()
             .remove(&(Dimension::Overworld, chunk))
@@ -505,6 +507,19 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
+
+/// Identity of an independently ticking world. `Dimension` describes its vanilla rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WorldId {
+    Vanilla(Dimension),
+    Runtime(Uuid),
+}
+
+impl From<Dimension> for WorldId {
+    fn from(dimension: Dimension) -> Self {
+        Self::Vanilla(dimension)
+    }
+}
 #[derive(Debug, Clone)]
 pub struct Operator {
     pub uuid: Uuid,
@@ -584,6 +599,8 @@ pub struct WorldSettings {
     /// Per-dimension chunk sources. `None` opens the standard three dimensions from the
     /// primary source's world directory (or in memory for a world without one).
     pub dimensions: Option<Arc<DimensionRegistry>>,
+    /// Mutable source registry shared with the plugin bridge for runtime world lifecycle.
+    pub runtime_world_view: Option<Arc<crate::plugins::SourceWorldView>>,
     /// Paper's `misc.disable-end-credits`: suppress the credits screen after the exit portal
     /// while still moving the player home.
     pub disable_end_credits: bool,
@@ -611,6 +628,7 @@ impl Default for WorldSettings {
             playerdata: None,
             plugin_commands: None,
             dimensions: None,
+            runtime_world_view: None,
             disable_end_credits: false,
         }
     }
@@ -735,6 +753,45 @@ impl World {
             .map_err(|_| anyhow::anyhow!("console response lost"))?
             .map_err(anyhow::Error::msg)
     }
+    pub async fn create_runtime_world(
+        &self,
+        name: impl Into<String>,
+        dimension: Dimension,
+        spawn: [i32; 3],
+    ) -> anyhow::Result<(Uuid, String, [i32; 3])> {
+        let (complete, done) = oneshot::channel();
+        self.sender
+            .send(GameMessage::CreateRuntimeWorld {
+                name: name.into(),
+                dimension: dimension.key().to_owned(),
+                spawn,
+                complete,
+            })
+            .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
+        done.await
+            .map_err(|_| anyhow::anyhow!("runtime world response lost"))?
+            .map_err(anyhow::Error::msg)
+    }
+    pub async fn set_plugin_hooks(
+        &self,
+        hooks: Arc<dyn ferrite_plugin::ServerHooks>,
+    ) -> anyhow::Result<()> {
+        let (complete, done) = oneshot::channel();
+        self.sender
+            .send(GameMessage::SetPluginHooks { hooks, complete })
+            .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
+        done.await
+            .map_err(|_| anyhow::anyhow!("plugin attach response lost"))
+    }
+    pub async fn unload_runtime_world(&self, id: Uuid, save: bool) -> anyhow::Result<bool> {
+        let (complete, done) = oneshot::channel();
+        self.sender
+            .send(GameMessage::UnloadRuntimeWorld { id, save, complete })
+            .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
+        done.await
+            .map_err(|_| anyhow::anyhow!("runtime world response lost"))?
+            .map_err(anyhow::Error::msg)
+    }
     pub async fn shutdown(self) -> anyhow::Result<()> {
         let result: anyhow::Result<()> = if *self.stop.borrow() {
             // `/stop` already queued the shutdown event; just wait for the loop to finish.
@@ -790,7 +847,9 @@ type TransientEntities =
 /// One region scheduler per dimension: Folia's regionizer is per world, so chunks from two
 /// dimensions never share ownership.
 struct Worlds {
-    schedulers: HashMap<Dimension, Scheduler<Region, GlobalRegion>>,
+    schedulers: HashMap<WorldId, Scheduler<Region, GlobalRegion>>,
+    scheduler_factory:
+        Arc<dyn Fn(TickContext, bool) -> Scheduler<Region, GlobalRegion> + Send + Sync>,
     transient_entities: Option<TransientEntities>,
     persistent_entities: bool,
     tracking: region::Tracking,
@@ -804,13 +863,29 @@ impl Worlds {
     }
 
     fn scheduler(&self, dimension: Dimension) -> &Scheduler<Region, GlobalRegion> {
-        &self.schedulers[&dimension]
+        self.scheduler_world(WorldId::Vanilla(dimension))
+    }
+    /// Resolve the scheduler for one concrete world identity. Runtime worlds can share the
+    /// same dimension rules while keeping region ownership isolated from vanilla worlds.
+    fn scheduler_world(&self, world: WorldId) -> &Scheduler<Region, GlobalRegion> {
+        &self.schedulers[&world]
+    }
+    fn remove_runtime_world(
+        &mut self,
+        id: Uuid,
+    ) -> Option<ferrite_region::Shutdown<Region, GlobalRegion>> {
+        self.schedulers
+            .remove(&WorldId::Runtime(id))
+            .map(Scheduler::shutdown)
     }
     fn owner(&self, dimension: Dimension, chunk: ChunkPos) -> Option<ferrite_region::RegionId> {
         self.scheduler(dimension).owner(chunk)
     }
     fn add_chunk(&self, dimension: Dimension, chunk: ChunkPos) {
         self.scheduler(dimension).add_chunk(chunk);
+    }
+    fn add_chunk_world(&self, world: WorldId, chunk: ChunkPos) {
+        self.scheduler_world(world).add_chunk(chunk);
     }
     fn add_chunks(&self, dimension: Dimension, chunks: impl IntoIterator<Item = ChunkPos>) {
         self.scheduler(dimension).add_chunks(chunks);
@@ -829,6 +904,22 @@ impl Worlds {
     ) {
         self.scheduler(dimension).schedule_at_chunk(chunk, task);
     }
+    fn schedule_at_world_chunk(
+        &self,
+        world: WorldId,
+        chunk: ChunkPos,
+        task: impl FnOnce(&mut Region) + Send + 'static,
+    ) {
+        self.scheduler_world(world).schedule_at_chunk(chunk, task);
+    }
+    fn insert_runtime_scheduler(&mut self, id: Uuid, ctx: TickContext) -> bool {
+        if ctx.world_id != WorldId::Runtime(id) || self.schedulers.contains_key(&ctx.world_id) {
+            return false;
+        }
+        let scheduler = (self.scheduler_factory)(ctx, false);
+        self.schedulers.insert(WorldId::Runtime(id), scheduler);
+        true
+    }
     fn schedule_at_chunks(
         &self,
         dimension: Dimension,
@@ -840,12 +931,80 @@ impl Worlds {
     fn schedule_global(&self, task: impl FnOnce(&mut GlobalRegion) + Send + 'static) {
         self.scheduler(Dimension::Overworld).schedule_global(task);
     }
-    fn shutdown(self) -> HashMap<Dimension, ferrite_region::Shutdown<Region, GlobalRegion>> {
+    fn shutdown(self) -> HashMap<WorldId, ferrite_region::Shutdown<Region, GlobalRegion>> {
         self.schedulers
             .into_iter()
             .map(|(dimension, scheduler)| (dimension, scheduler.shutdown()))
             .collect()
     }
+}
+
+fn create_world_scheduler(
+    ctx: TickContext,
+    profiler: Arc<profile::Profiler>,
+    speed: Arc<AtomicU32>,
+    samples: Arc<Mutex<Vec<f64>>>,
+    tick_control: Arc<commands_more::TickControl>,
+    owns_global_region: bool,
+) -> Scheduler<Region, GlobalRegion> {
+    let fluid_source = ctx
+        .source
+        .clone()
+        .expect("a ticking world needs a chunk source");
+    let fluid_tracking = ctx.tracking.clone();
+    let region_profiler = Arc::clone(&profiler);
+    let tick = move |region: &mut Region| {
+        let now = std::time::Instant::now();
+        let slot = region_profiler.region_slot(&mut region.profile_slot);
+        region
+            .timings
+            .get_or_insert_with(|| Arc::clone(region_profiler.timings()));
+        region.tick(&ctx);
+        if tick_control.simulating() {
+            let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
+            let water_conversion = rules.get_bool("water_source_conversion").unwrap_or(true);
+            let lava_conversion = rules.get_bool("lava_source_conversion").unwrap_or(false);
+            drop(rules);
+            region.tick_fluids(
+                &fluid_source,
+                &fluid_tracking,
+                ctx.signals.clone(),
+                water_conversion,
+                lava_conversion,
+            );
+            region.tick_random(
+                &fluid_source,
+                &fluid_tracking,
+                ctx.signals.clone(),
+                speed.load(Ordering::Relaxed),
+            );
+        }
+        let elapsed = now.elapsed();
+        tick_control.record_mspt(elapsed.as_secs_f64() * 1000.0);
+        region_profiler.record_region(slot, elapsed);
+        let mut samples = samples.lock().unwrap();
+        if samples.len() < 100_000 {
+            samples.push(elapsed.as_secs_f64() * 1000.0);
+        }
+    };
+    let global: Box<dyn Fn(&mut GlobalRegion) + Send + Sync> = if owns_global_region {
+        Box::new(move |region| {
+            let now = std::time::Instant::now();
+            region
+                .timings
+                .get_or_insert_with(|| Arc::clone(profiler.timings()));
+            GlobalRegion::tick(region);
+            profiler.record_global(now.elapsed());
+        })
+    } else {
+        Box::new(|_| {})
+    };
+    Scheduler::with_default_threads(
+        Regionizer::<Region>::default(),
+        GlobalRegion::default(),
+        tick,
+        global,
+    )
 }
 
 fn emit<P: ferrite_protocol::Packet>(tx: &OutboundSender, p: &P) {
@@ -972,6 +1131,7 @@ async fn run(
     commands_more::load_dialogs(&registry_dir.join("../data"));
     let world_path = source.as_ref().and_then(|source| source.path());
     let entity_world = world_path.map(std::path::Path::to_path_buf);
+    let mut runtime_world_catalog = RuntimeWorldCatalog::default();
     let disabled_packs = world_path.map(functions::read_disabled).unwrap_or_default();
     let mut initial_state = commands::GameState::new(settings.gamemode, 0, settings.max_players);
     initial_state.entities = command_entities.clone();
@@ -1019,6 +1179,24 @@ async fn run(
         })
     });
     let command_speed = Arc::clone(&random_tick_speed);
+    let tick_control = command_state.lock().unwrap().more.tick.clone();
+    let scheduler_factory: Arc<
+        dyn Fn(TickContext, bool) -> Scheduler<Region, GlobalRegion> + Send + Sync,
+    > = {
+        let profiler = Arc::clone(&profiler);
+        let speed = Arc::clone(&random_tick_speed);
+        let samples = Arc::clone(&tick_samples);
+        Arc::new(move |ctx, owns_global_region| {
+            create_world_scheduler(
+                ctx,
+                Arc::clone(&profiler),
+                Arc::clone(&speed),
+                Arc::clone(&samples),
+                Arc::clone(&tick_control),
+                owns_global_region,
+            )
+        })
+    };
     let mut schedulers = HashMap::new();
     for dimension in Dimension::ALL {
         let dimension_spawn = dimensions.spawn(dimension);
@@ -1034,6 +1212,7 @@ async fn run(
                 dimension_spawn[2] as f64 + 0.5,
             ],
             dimension,
+            world_id: WorldId::Vanilla(dimension),
             raining: settings.raining && dimension == Dimension::Overworld,
             command_entities: command_entities.clone(),
             state: command_state.clone(),
@@ -1041,72 +1220,12 @@ async fn run(
             profiler: Some(profiler.clone()),
             tree: Some(Arc::clone(&command_tree)),
         };
-        let region_profiler = Arc::clone(&profiler);
-        let fluid_tracking = tracking.clone();
-        let fluid_source = dimensions.source(dimension).clone();
-        let speed = Arc::clone(&random_tick_speed);
-        let samples = tick_samples.clone();
-        let tick_control = command_state.lock().unwrap().more.tick.clone();
-        let tick = move |region: &mut Region| {
-            let now = std::time::Instant::now();
-            let slot = region_profiler.region_slot(&mut region.profile_slot);
-            region
-                .timings
-                .get_or_insert_with(|| Arc::clone(region_profiler.timings()));
-            region.tick(&ctx);
-            if tick_control.simulating() {
-                let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
-                let water_conversion = rules.get_bool("water_source_conversion").unwrap_or(true);
-                let lava_conversion = rules.get_bool("lava_source_conversion").unwrap_or(false);
-                drop(rules);
-                region.tick_fluids(
-                    &fluid_source,
-                    &fluid_tracking,
-                    ctx.signals.clone(),
-                    water_conversion,
-                    lava_conversion,
-                );
-                region.tick_random(
-                    &fluid_source,
-                    &fluid_tracking,
-                    ctx.signals.clone(),
-                    speed.load(Ordering::Relaxed),
-                );
-            }
-            let elapsed = now.elapsed();
-            tick_control.record_mspt(elapsed.as_secs_f64() * 1000.0);
-            region_profiler.record_region(slot, elapsed);
-            let mut samples = samples.lock().unwrap();
-            if samples.len() < 100_000 {
-                samples.push(elapsed.as_secs_f64() * 1000.0);
-            }
-        };
-        let profiler_for_global = Arc::clone(&profiler);
-        let global: Box<dyn Fn(&mut GlobalRegion) + Send + Sync> =
-            if dimension == Dimension::Overworld {
-                Box::new(move |region| {
-                    let now = std::time::Instant::now();
-                    region
-                        .timings
-                        .get_or_insert_with(|| Arc::clone(profiler_for_global.timings()));
-                    GlobalRegion::tick(region);
-                    profiler_for_global.record_global(now.elapsed());
-                })
-            } else {
-                Box::new(|_| {})
-            };
-        schedulers.insert(
-            dimension,
-            Scheduler::with_default_threads(
-                Regionizer::<Region>::default(),
-                GlobalRegion::default(),
-                tick,
-                global,
-            ),
-        );
+        let scheduler = (scheduler_factory)(ctx, dimension == Dimension::Overworld);
+        schedulers.insert(WorldId::Vanilla(dimension), scheduler);
     }
-    let worlds = Worlds {
+    let mut worlds = Worlds {
         schedulers,
+        scheduler_factory,
         transient_entities: Some(Arc::new(Mutex::new(HashMap::new()))),
         persistent_entities: entity_world.is_some(),
         tracking: tracking.clone(),
@@ -1117,6 +1236,7 @@ async fn run(
     let mut names: HashMap<Uuid, String> = HashMap::new();
     let mut plugin_commands = settings.plugin_commands.take();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
+    let mut player_worlds: HashMap<Uuid, WorldId> = HashMap::new();
     // The locator bar is O(players²); it runs on its own thread from a snapshot each tick.
     let locator = {
         let mut locator = waypoints::Locator::default();
@@ -1260,9 +1380,10 @@ async fn run(
                    emit(&outbound,&DefaultSpawn{dimension:start_dimension.key().into(),position:ferrite_protocol::types::BlockPos::new(dimension_spawn[0],dimension_spawn[1],dimension_spawn[2]).pack(),yaw:0.0,pitch:0.0});emit(&outbound,&GameEvent{event:13,value:0.0});
                    let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
                    online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: view_distance as i32 });
+                   player_worlds.insert(uuid, WorldId::Vanilla(start_dimension));
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_dimension, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:WorldId::Vanilla(start_dimension),sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
                    worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
                    {
@@ -1297,7 +1418,7 @@ async fn run(
                        if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
                    }
                    if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_joined(uuid, &name) { tracing::warn!(%error, "player join event failed"); }
-                   let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; g.join(player)});tracing::info!(%uuid,"player joined");
+                   let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; player.world_id = WorldId::Vanilla(start_dimension); g.join(player)});tracing::info!(%uuid,"player joined");
                   },
                   GameMessage::Input{session,uuid,packet:ServerboundPlay::Chat(chat)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) && chat.message.chars().count()<=256 {
                       let mut chat = chat;
@@ -1421,6 +1542,69 @@ async fn run(
                   GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
                   GameMessage::Left{session,uuid}=>{ride::forget(uuid); if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
                     if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);}},
+                  GameMessage::CreateRuntimeWorld{name,dimension,spawn,complete}=>{
+                      let result = (|| -> Result<(Uuid, String, [i32; 3]), String> {
+                          let dimension = Dimension::from_key(&dimension).ok_or_else(|| format!("unknown world dimension {dimension}"))?;
+                          let root = world_path.ok_or_else(|| "runtime worlds require a persistent world directory".to_owned())?;
+                          let overworld = dimensions.source(Dimension::Overworld);
+                          let descriptor = runtime_world_catalog
+                              .open_persistent(&name, root, overworld.registry(), overworld.terrain(), dimension, spawn)
+                              .map_err(|error| error.to_string())?;
+                          let id = descriptor.id;
+                          let ctx = TickContext {
+                              signals: signal_tx.clone(),
+                              tracking: tracking.clone(),
+                              positions: positions.clone(),
+                              source: Some(Arc::clone(&descriptor.source)),
+                              dimension: descriptor.dimension,
+                              world_id: WorldId::Runtime(id),
+                              spawn: [descriptor.spawn[0] as f64 + 0.5, descriptor.spawn[1] as f64, descriptor.spawn[2] as f64 + 0.5],
+                              raining: false,
+                              rules: Arc::clone(&game_rules),
+                              command_entities: Arc::clone(&command_entities),
+                              state: Arc::clone(&command_state),
+                              trader_spawner: Default::default(),
+                              profiler: Some(Arc::clone(&profiler)),
+                              tree: Some(Arc::clone(&command_tree)),
+                          };
+                          if !worlds.insert_runtime_scheduler(id, ctx) {
+                              let _ = runtime_world_catalog.unload(id);
+                              return Err("runtime scheduler already exists for this world UUID".to_owned());
+                          }
+                          if let Some(view) = &settings.runtime_world_view {
+                              if !view.register_world(id, Arc::clone(&descriptor.source)) {
+                                  let _ = worlds.remove_runtime_world(id);
+                                  let _ = runtime_world_catalog.unload(id);
+                                  return Err("plugin world view already contains this UUID".to_owned());
+                              }
+                          }
+                          Ok((id, descriptor.name, descriptor.spawn))
+                      })();
+                      let _ = complete.send(result);
+                  },
+                  GameMessage::UnloadRuntimeWorld{id,save,complete}=>{
+                      let result = async {
+                          let Some(descriptor) = runtime_world_catalog.get(id).cloned() else { return Ok(false) };
+                          if player_worlds.values().any(|world| *world == WorldId::Runtime(id)) {
+                              anyhow::bail!("cannot unload a runtime world while players are inside it");
+                          }
+                          let Some(mut stopped) = worlds.remove_runtime_world(id) else { return Ok(false) };
+                          if save {
+                              let root = descriptor.source.path().ok_or_else(|| anyhow::anyhow!("runtime world has no persistent path"))?;
+                              let entity_root = descriptor.dimension.storage_root(root);
+                              entity_save::save_regions(&entity_root, &mut stopped.regions)?;
+                              descriptor.source.flush_quiesced().await?;
+                          }
+                          runtime_world_catalog.unload(id);
+                          if let Some(view) = &settings.runtime_world_view { view.unregister_world(id); }
+                          Ok::<bool, anyhow::Error>(true)
+                      }.await.map_err(|error| error.to_string());
+                      let _ = complete.send(result);
+                  },
+                  GameMessage::SetPluginHooks{hooks,complete}=>{
+                      settings.plugins = Some(hooks);
+                      let _ = complete.send(());
+                  },
                   GameMessage::Console{command,complete}=>{
                       let (actions, mut received) = mpsc::unbounded_channel();
                       let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
@@ -1574,22 +1758,24 @@ async fn run(
                     }
                     worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
                   },
-                  Signal::Transfer{dimension,to,player}=>{worlds.add_chunk(dimension,to);let id=player.uuid;worlds.schedule_at_chunk(dimension,to,move |r|{r.players.insert(id,*player);});},
-                  Signal::EntityTransfer{dimension,to,entity}=>hand_off(worlds.scheduler(dimension), to, entity),
-                  Signal::Summon{dimension,chunk,kind,pos}=>{
-                    if worlds.owner(dimension,chunk).is_some(){
-                      worlds.schedule_at_chunk(dimension,chunk,move |region|{region.summon(kind,pos,false);});
+                  Signal::Transfer{to,player}=>{let world=player.world_id;worlds.add_chunk_world(world,to);let id=player.uuid;worlds.schedule_at_world_chunk(world,to,move |r|{r.players.insert(id,*player);});},
+                  Signal::EntityTransfer{world_id,to,entity}=>hand_off(worlds.scheduler_world(world_id), to, entity),
+                  Signal::Summon{world_id,chunk,kind,pos}=>{
+                    if worlds.scheduler_world(world_id).owner(chunk).is_some(){
+                      worlds.schedule_at_world_chunk(world_id,chunk,move |region|{region.summon(kind,pos,false);});
                     }
                   },
                   Signal::ChangeDimension{player}=>{
-                    let dimension=player.dimension;let chunk=player.chunk;let id=player.uuid;
-                    worlds.add_chunk(dimension,chunk);worlds.schedule_at_chunk(dimension,chunk,move |r|{r.players.insert(id,*player);});
+                    let dimension=player.dimension;let world=player.world_id;let chunk=player.chunk;let id=player.uuid;
+                    worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
+                    if let Some((tracked_dimension, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_dimension = dimension; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
+                    player_worlds.insert(id, world);
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
                     command_state.lock().unwrap().set_dimension(id,dimension);
-                    worlds.schedule_global(move |g| g.set_dimension(id, dimension));
+                    worlds.schedule_global(move |g| g.set_world(id, dimension, world));
                   },
-                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(dimension,chunk));release_holds(&worlds,&mut holds,&signal_tx,dimension,held);if preheld {defer_release(&worlds,&signal_tx,dimension,chunk,false);}
+                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(dimension,chunk));release_holds(&worlds,&mut holds,&signal_tx,dimension,held);if preheld {defer_release(&worlds,&signal_tx,dimension,chunk,false);}
                     let name = names.remove(&uuid).unwrap_or_default();
                     crate::plugins::facts::forget(uuid);
                     if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }

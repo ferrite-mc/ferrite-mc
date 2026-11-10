@@ -472,6 +472,8 @@ async fn run_server(
         std::sync::Arc::clone(&source),
         spawn,
     );
+    let runtime_world_view =
+        ferrite_server::plugins::dynamic_world_view(std::sync::Arc::clone(&dimensions));
     let plugin_worlds = [game::Dimension::Nether, game::Dimension::End]
         .into_iter()
         .map(|dimension| {
@@ -490,6 +492,45 @@ async fn run_server(
             }
         })
         .collect();
+    if startup_cancelled(&cancelled) {
+        tracing::info!("server startup cancelled");
+        return Ok(());
+    }
+    let disable_end_credits = match ferrite_config::FerriteConfig::load("config") {
+        Ok(config) => config.world_settings("world").misc.disable_end_credits,
+        Err(error) => {
+            tracing::warn!(%error, "reading Paper world config failed; End credits stay enabled");
+            false
+        }
+    };
+    let settings = game::WorldSettings {
+        disable_end_credits,
+        dimension: game::Dimension::Overworld,
+        raining: false,
+        gamemode: match config.gamemode {
+            GameMode::Survival => 0,
+            GameMode::Creative => 1,
+        },
+        max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
+        ops,
+        plugins: None,
+        plugin_event_errors: match config.plugins.on_event_error {
+            EventErrorPolicy::Allow => game::PluginEventPolicy::Allow,
+            EventErrorPolicy::Deny => game::PluginEventPolicy::Deny,
+        },
+        admin: Some(admin),
+        whitelist: config.whitelist,
+        playerdata: Some(
+            config
+                .world
+                .as_ref()
+                .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
+        ),
+        plugin_commands: Some(plugin_commands),
+        dimensions: Some(dimensions),
+        runtime_world_view: Some(runtime_world_view.clone()),
+    };
+    let world = game::World::start_configured(Some(source), spawn, settings);
     if startup_cancelled(&cancelled) {
         tracing::info!("server startup cancelled");
         return Ok(());
@@ -525,52 +566,66 @@ async fn run_server(
                 let _ = plugin_command_tx.send(command);
             })),
             terrain: terrain_for_plugins,
-            world_view: Some(ferrite_server::plugins::world_view(std::sync::Arc::clone(
-                &dimensions,
-            ))),
+            world_view: Some(runtime_world_view.clone()),
             console: Some(plugin_console_tx),
+            runtime_world_handler: Some({
+                let sender = world.sender.clone();
+                std::sync::Arc::new(move |name: &str, environment: &str| {
+                    let dimension = match environment {
+                        "NORMAL" => game::Dimension::Overworld,
+                        "NETHER" => game::Dimension::Nether,
+                        "THE_END" => game::Dimension::End,
+                        _ => {
+                            return Err(format!(
+                                "unsupported Bukkit world environment {environment}"
+                            ));
+                        }
+                    };
+                    let name = name.to_owned();
+                    let runtime = tokio::runtime::Handle::current();
+                    let created = tokio::task::block_in_place(|| {
+                        runtime.block_on(async {
+                            let (complete, done) = tokio::sync::oneshot::channel();
+                            sender
+                                .send(ferrite_net::game::GameMessage::CreateRuntimeWorld {
+                                    name,
+                                    dimension: dimension.key().to_owned(),
+                                    spawn: dimension.default_spawn(),
+                                    complete,
+                                })
+                                .map_err(|_| "game loop stopped".to_owned())?;
+                            done.await
+                                .map_err(|_| "runtime world response lost".to_owned())?
+                        })
+                    })?;
+                    Ok((created.0, created.2))
+                })
+            }),
+            runtime_world_unloader: Some({
+                let sender = world.sender.clone();
+                std::sync::Arc::new(move |id, save| {
+                    let runtime = tokio::runtime::Handle::current();
+                    tokio::task::block_in_place(|| {
+                        runtime.block_on(async {
+                            let (complete, done) = tokio::sync::oneshot::channel();
+                            sender
+                                .send(ferrite_net::game::GameMessage::UnloadRuntimeWorld {
+                                    id,
+                                    save,
+                                    complete,
+                                })
+                                .map_err(|_| "game loop stopped".to_owned())?;
+                            done.await
+                                .map_err(|_| "runtime unload response lost".to_owned())?
+                        })
+                    })
+                })
+            }),
         })
         .context("starting plugins")?;
-    if startup_cancelled(&cancelled) {
-        tracing::info!("server startup cancelled");
-        return Ok(());
+    if let Some(bridge) = &plugin_bridge {
+        world.set_plugin_hooks(bridge.hooks()).await?;
     }
-    let disable_end_credits = match ferrite_config::FerriteConfig::load("config") {
-        Ok(config) => config.world_settings("world").misc.disable_end_credits,
-        Err(error) => {
-            tracing::warn!(%error, "reading Paper world config failed; End credits stay enabled");
-            false
-        }
-    };
-    let settings = game::WorldSettings {
-        disable_end_credits,
-        dimension: game::Dimension::Overworld,
-        raining: false,
-        gamemode: match config.gamemode {
-            GameMode::Survival => 0,
-            GameMode::Creative => 1,
-        },
-        max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
-        ops,
-        plugins: plugin_bridge
-            .as_ref()
-            .map(ferrite_server::plugins::PluginBridge::hooks),
-        plugin_event_errors: match config.plugins.on_event_error {
-            EventErrorPolicy::Allow => game::PluginEventPolicy::Allow,
-            EventErrorPolicy::Deny => game::PluginEventPolicy::Deny,
-        },
-        admin: Some(admin),
-        whitelist: config.whitelist,
-        playerdata: Some(
-            config
-                .world
-                .as_ref()
-                .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
-        ),
-        plugin_commands: Some(plugin_commands),
-        dimensions: Some(dimensions),
-    };
-    let world = game::World::start_configured(Some(source), spawn, settings);
     if startup_cancelled(&cancelled) {
         tracing::info!("server startup cancelled");
         return Ok(());

@@ -69,7 +69,6 @@ pub enum ServerboundPlay {
         filtering: bool,
     },
 }
-#[derive(Debug)]
 pub enum GameMessage {
     Joined {
         session: u64,
@@ -104,6 +103,21 @@ pub enum GameMessage {
     Console {
         command: String,
         complete: tokio::sync::oneshot::Sender<Result<bool, String>>,
+    },
+    CreateRuntimeWorld {
+        name: String,
+        dimension: String,
+        spawn: [i32; 3],
+        complete: tokio::sync::oneshot::Sender<Result<(Uuid, String, [i32; 3]), String>>,
+    },
+    UnloadRuntimeWorld {
+        id: Uuid,
+        save: bool,
+        complete: tokio::sync::oneshot::Sender<Result<bool, String>>,
+    },
+    SetPluginHooks {
+        hooks: Arc<dyn ferrite_plugin::ServerHooks>,
+        complete: tokio::sync::oneshot::Sender<()>,
     },
     Shutdown {
         complete: tokio::sync::oneshot::Sender<Result<(), String>>,

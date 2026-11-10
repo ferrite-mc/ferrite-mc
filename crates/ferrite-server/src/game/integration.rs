@@ -1777,6 +1777,7 @@ fn entities_follow_region_merges_splits_and_hand_offs() {
         positions: Default::default(),
         source: None,
         dimension: super::Dimension::Overworld,
+        world_id: super::WorldId::Vanilla(super::Dimension::Overworld),
         raining: false,
         rules: Default::default(),
         spawn: [0.0, 65.0, 0.0],
@@ -1923,7 +1924,7 @@ async fn tracker_spawns_and_removes_entities_by_range() {
     world
         .signals
         .send(super::Signal::EntityTransfer {
-            dimension: super::Dimension::Overworld,
+            world_id: super::WorldId::Vanilla(super::Dimension::Overworld),
             to: ferrite_region::ChunkPos(0, 0),
             entity: Box::new(record),
         })

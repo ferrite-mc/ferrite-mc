@@ -177,6 +177,7 @@ pub struct AnvilChunkSource {
     stats: Stats,
     runtime: tokio::runtime::Handle,
     flush_lock: tokio::sync::Mutex<()>,
+    pending_done: tokio::sync::Notify,
     flat: Mutex<HashMap<i32, (Chunk, LightData)>>,
     /// Vanilla generation for chunks missing from disk; `None` is the flat test world.
     terrain: Option<Arc<dyn ChunkGenerator>>,
@@ -214,6 +215,7 @@ impl AnvilChunkSource {
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
+            pending_done: tokio::sync::Notify::new(),
             flat: Mutex::new(HashMap::new()),
             terrain,
             dimension,
@@ -255,6 +257,7 @@ impl AnvilChunkSource {
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
+            pending_done: tokio::sync::Notify::new(),
             flat: Mutex::new(HashMap::new()),
             terrain,
             dimension,
@@ -1158,6 +1161,20 @@ impl AnvilChunkSource {
             self.flush_chunk(x, z).await?;
         }
     }
+    /// Flush after callers have stopped scheduling loads and mutations for this source.
+    /// Existing background loads are allowed to finish before generated columns are saved.
+    pub async fn flush_quiesced(self: &Arc<Self>) -> anyhow::Result<()> {
+        loop {
+            let notified = self.pending_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cache.lock().unwrap().pending == 0 {
+                break;
+            }
+            notified.await;
+        }
+        self.flush_all().await
+    }
     /// Encoded `level_chunk_with_light` body for `(x, z)`, starting a
     /// background load on first use. `None` means the chunk is still loading.
     pub fn get(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Option<Result<Arc<[u8]>, String>> {
@@ -1236,7 +1253,7 @@ impl AnvilChunkSource {
         let source = Arc::clone(self);
         let request = now;
         self.runtime.spawn_blocking(move || {
-            let result = (|| -> anyhow::Result<Column> {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Column> {
                 let loaded = match &source.path {
                     Some(path) => {
                         read_column(path, &source.registry, source.dimension, x, z)?
@@ -1281,8 +1298,9 @@ impl AnvilChunkSource {
                     packet,
                     generated,
                 })
-            })()
-            .map_err(|e| format!("{e:#}"));
+            }))
+            .map_err(|_| "chunk loading task panicked".to_owned())
+            .and_then(|result| result.map_err(|e| format!("{e:#}")));
             let mut cache = source.cache.lock().unwrap();
             cache.clock += 1;
             let now = cache.clock;
@@ -1291,6 +1309,8 @@ impl AnvilChunkSource {
                 cache.entries.insert(key, Entry::Ready(result.map(Box::new), now));
                 cache.pending -= 1;
             }
+            drop(cache);
+            source.pending_done.notify_waiters();
         });
         Lookup::Loading
     }

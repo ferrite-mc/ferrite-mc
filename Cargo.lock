@@ -1272,6 +1272,7 @@ dependencies = [
  "criterion 0.5.1",
  "ferrite-item",
  "ferrite-nbt",
+ "ferrite-plugin",
  "ferrite-protocol",
  "hmac",
  "md5",

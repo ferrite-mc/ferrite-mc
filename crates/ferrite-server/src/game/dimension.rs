@@ -22,6 +22,7 @@ pub struct RuntimeWorldDescriptor {
     pub name: String,
     pub key: String,
     pub spawn: [i32; 3],
+    pub dimension: Dimension,
     pub source: Arc<AnvilChunkSource>,
 }
 
@@ -86,6 +87,27 @@ impl RuntimeWorldCatalog {
         terrain: Option<Arc<dyn ChunkGenerator>>,
         spawn: [i32; 3],
     ) -> Result<RuntimeWorldDescriptor, &'static str> {
+        self.create_for_dimension(
+            id,
+            name,
+            root,
+            registry,
+            terrain,
+            spawn,
+            Dimension::Overworld,
+        )
+    }
+
+    fn create_for_dimension(
+        &mut self,
+        id: uuid::Uuid,
+        name: &str,
+        root: &Path,
+        registry: Arc<RuntimeRegistry>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
+        spawn: [i32; 3],
+        dimension: Dimension,
+    ) -> Result<RuntimeWorldDescriptor, &'static str> {
         let name = name.trim();
         let (folded, key) = runtime_world_identity(name)?;
         if self.by_id.contains_key(&id)
@@ -94,17 +116,14 @@ impl RuntimeWorldCatalog {
         {
             return Err("world id, name or key already loaded");
         }
-        let source = AnvilChunkSource::with_dimension(
-            root.join(name),
-            registry,
-            terrain,
-            Dimension::Overworld,
-        );
+        let source =
+            AnvilChunkSource::with_dimension(root.join(name), registry, terrain, dimension);
         let descriptor = RuntimeWorldDescriptor {
             id,
             name: name.to_owned(),
             key: key.clone(),
             spawn,
+            dimension,
             source,
         };
         self.by_name.insert(folded, id);
@@ -126,6 +145,69 @@ impl RuntimeWorldCatalog {
         self.by_name.remove(&descriptor.name.to_lowercase());
         self.by_key.remove(&descriptor.key);
         Some(descriptor)
+    }
+
+    /// Open or create an independent world, preserving its Bukkit UUID and spawn on restart.
+    pub fn open_persistent(
+        &mut self,
+        name: &str,
+        root: &Path,
+        registry: Arc<RuntimeRegistry>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
+        dimension: Dimension,
+        initial_spawn: [i32; 3],
+    ) -> anyhow::Result<RuntimeWorldDescriptor> {
+        use std::io::Write;
+        let name = name.trim();
+        let (folded, key) = runtime_world_identity(name).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            !self.by_name.contains_key(&folded) && !self.by_key.contains_key(&key),
+            "world name or key already loaded"
+        );
+        let world_root = root.join(name);
+        std::fs::create_dir_all(&world_root)?;
+        let uid_path = world_root.join("uid.dat");
+        let id = match std::fs::read(&uid_path) {
+            Ok(bytes) => {
+                anyhow::ensure!(bytes.len() == 16, "invalid uid.dat length");
+                uuid::Uuid::from_slice(&bytes)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let id = uuid::Uuid::new_v4();
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&uid_path)?;
+                file.write_all(id.as_bytes())?;
+                file.sync_all()?;
+                id
+            }
+            Err(error) => return Err(error.into()),
+        };
+        anyhow::ensure!(!self.by_id.contains_key(&id), "world id already loaded");
+        let spawn = if world_root.join("level.dat").exists() {
+            super::anvil::read_spawn(&world_root)?
+        } else {
+            super::anvil::write_spawn(&world_root, initial_spawn)?;
+            initial_spawn
+        };
+        self.create_for_dimension(id, name, root, registry, terrain, spawn, dimension)
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Flush an already quiesced world before removing it from the catalog.
+    pub async fn unload_saved(
+        &mut self,
+        id: uuid::Uuid,
+        save: bool,
+    ) -> anyhow::Result<Option<RuntimeWorldDescriptor>> {
+        let Some(world) = self.by_id.get(&id) else {
+            return Ok(None);
+        };
+        if save {
+            world.source.flush_quiesced().await?;
+        }
+        Ok(self.unload(id))
     }
 }
 
@@ -390,6 +472,42 @@ impl DimensionRegistry {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn runtime_world_uuid_and_spawn_survive_unload_and_reopen() {
+        let Some(root) = vanilla_root() else { return };
+        let registry = Arc::new(RuntimeRegistry::load(root).unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let mut catalog = RuntimeWorldCatalog::default();
+        let first = catalog
+            .open_persistent(
+                "extra",
+                directory.path(),
+                registry.clone(),
+                None,
+                Dimension::Overworld,
+                [3, 70, -4],
+            )
+            .unwrap();
+        let id = first.id;
+        assert_eq!(
+            std::fs::read(directory.path().join("extra/uid.dat")).unwrap(),
+            id.as_bytes()
+        );
+        assert!(catalog.unload_saved(id, true).await.unwrap().is_some());
+        let reopened = catalog
+            .open_persistent(
+                "extra",
+                directory.path(),
+                registry,
+                None,
+                Dimension::Overworld,
+                [0, 64, 0],
+            )
+            .unwrap();
+        assert_eq!(reopened.id, id);
+        assert_eq!(reopened.spawn, [3, 70, -4]);
+    }
 
     #[test]
     fn runtime_world_names_are_portable_and_generate_valid_resource_keys() {

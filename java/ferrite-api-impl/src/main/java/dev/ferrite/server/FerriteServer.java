@@ -542,16 +542,40 @@ public class FerriteServer extends ServerStubs {
     @Override public void sendPluginMessage(org.bukkit.plugin.Plugin source, String channel, byte[] message) {
         for (var player : players.values()) player.sendPluginMessage(source, channel, message);
     }
-    /** Ferrite has a fixed set of dimensions: a creator naming a loaded world returns it, any other name cannot be created. */
     @Override public org.bukkit.World createWorld(org.bukkit.WorldCreator creator) {
         java.util.Objects.requireNonNull(creator, "creator");
         var existing = getWorld(creator.name());
         if (existing == null) existing = getWorld(creator.key());
         if (existing != null) return existing;
-        throw new UnsupportedOperationException("Ferrite: creating worlds at runtime is not supported (requested '" + creator.name() + "')");
+        if (creator.generator() != null || creator.seed() != 0L || !creator.generateStructures() || creator.type() != org.bukkit.WorldType.NORMAL) {
+            throw new UnsupportedOperationException("Ferrite: custom generators, seeds, structure flags, and world types are not supported");
+        }
+        String reply;
+        try { reply = (String) HostBridge.call("Server", "server", "createRuntimeWorld(String,String)", String.class, creator.name(), creator.environment().name()); }
+        catch (RuntimeException error) { throw error; }
+        if (reply == null || reply.isBlank()) throw new IllegalStateException("Ferrite: runtime world creation failed");
+        var parts = reply.split(String.valueOf(HostBridge.ITEM), -1);
+        if (parts.length != 4) throw new IllegalStateException("Ferrite: invalid runtime world response");
+        var world = FerriteWorld.create(this, java.util.UUID.fromString(parts[0]), creator.name(), 0L,
+                Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+        registerWorld(world);
+        synchronized (Bootstrap.LEGACY_LOCK) { plugins.callEvent(new org.bukkit.event.world.WorldLoadEvent(world)); }
+        return world;
     }
-    @Override public boolean unloadWorld(String name, boolean save) { return false; }
-    @Override public boolean unloadWorld(org.bukkit.World world, boolean save) { java.util.Objects.requireNonNull(world, "world"); return false; }
+    @Override public boolean unloadWorld(String name, boolean save) { var world = getWorld(name); return world != null && unloadWorld(world, save); }
+    @Override public boolean unloadWorld(org.bukkit.World world, boolean save) {
+        java.util.Objects.requireNonNull(world, "world");
+        if (getWorld(world.getUID()) != world || getWorld("world") == world) return false;
+        synchronized (Bootstrap.LEGACY_LOCK) {
+            var event = new org.bukkit.event.world.WorldUnloadEvent(world);
+            plugins.callEvent(event);
+            if (event.isCancelled()) return false;
+        }
+        var reply = HostBridge.call("Server", "server", "unloadRuntimeWorld(String,boolean)", Boolean.class, world.getUID().toString(), save);
+        if (!Boolean.TRUE.equals(reply)) return false;
+        unregisterWorld(world.getUID());
+        return true;
+    }
     @Override public void allowPausing(org.bukkit.plugin.Plugin plugin, boolean value) { java.util.Objects.requireNonNull(plugin, "plugin"); }
     @Override public org.bukkit.util.CachedServerIcon getServerIcon() { return null; }
     @Override public void restart() { HostBridge.callVoid("Server", "server", "shutdown()"); }

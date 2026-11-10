@@ -65,6 +65,11 @@ pub struct Settings {
     /// The vanilla world generation host, when `generator = "vanilla"`; answers biome and
     /// structure queries from plugins.
     pub terrain: Option<std::sync::Arc<dyn crate::game::ChunkGenerator>>,
+    /// Creates a persistent runtime world from the synchronous Bukkit host-call thread.
+    pub runtime_world_handler:
+        Option<Arc<dyn Fn(&str, &str) -> Result<(Uuid, [i32; 3]), String> + Send + Sync>>,
+    pub runtime_world_unloader:
+        Option<Arc<dyn Fn(Uuid, bool) -> Result<bool, String> + Send + Sync>>,
 }
 
 /// A running embedded JVM with the server's plugins enabled.
@@ -124,6 +129,8 @@ impl PluginBridge {
                     host_call_handler: settings.console.map(|console| {
                         let players = player_commands;
                         let terrain = settings.terrain.clone();
+                        let runtime_world_handler = settings.runtime_world_handler.clone();
+                        let runtime_world_unloader = settings.runtime_world_unloader.clone();
                         let abilities = std::sync::Mutex::new(std::collections::HashMap::<
                             uuid::Uuid,
                             AbilityState,
@@ -134,6 +141,28 @@ impl PluginBridge {
                         >::new());
                         let cooldowns = std::sync::Mutex::new(cooldown::Cooldowns::default());
                         let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
+                            if call.owner == "Server"
+                                && call.method == "createRuntimeWorld(String,String)"
+                            {
+                                let name = call.args.first()?;
+                                let environment = call.args.get(1)?;
+                                let create = runtime_world_handler.as_ref()?;
+                                return create(name, environment).ok().map(|(id, spawn)| {
+                                    format!(
+                                        "{}\u{1d}{}\u{1d}{}\u{1d}{}",
+                                        id, spawn[0], spawn[1], spawn[2]
+                                    )
+                                });
+                            }
+                            if call.owner == "Server"
+                                && call.method == "unloadRuntimeWorld(String,boolean)"
+                            {
+                                let id = Uuid::parse_str(call.args.first()?).ok()?;
+                                let save = call.args.get(1)?.parse::<bool>().ok()?;
+                                return (runtime_world_unloader.as_ref()?)(id, save)
+                                    .ok()
+                                    .map(|ok| ok.to_string());
+                            }
                             if let Some(reply) = items::item_type_answer(call) {
                                 return Some(reply);
                             }

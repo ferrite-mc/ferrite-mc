@@ -566,7 +566,6 @@ pub(super) fn broadcast_tracked_chunk(
 }
 pub enum Signal {
     Transfer {
-        dimension: super::Dimension,
         to: ChunkPos,
         player: Box<Player>,
     },
@@ -625,7 +624,9 @@ pub enum Signal {
     },
     /// The player left its old region for another dimension; the world loop inserts it into
     /// the target dimension's region scheduler.
-    ChangeDimension { player: Box<Player> },
+    ChangeDimension {
+        player: Box<Player>,
+    },
     Update {
         uuid: Uuid,
         pos: [f64; 3],
@@ -654,13 +655,13 @@ pub enum Signal {
     /// An entity walked into another region section; the main loop hands it to the region
     /// owning `to` through that region's task queue (Folia: only the owner touches it).
     EntityTransfer {
-        dimension: super::Dimension,
+        world_id: super::WorldId,
         to: ChunkPos,
         entity: Box<EntityRecord>,
     },
     /// A player used a spawn egg; the target region owns creation of the new entity.
     Summon {
-        dimension: super::Dimension,
+        world_id: super::WorldId,
         chunk: ChunkPos,
         kind: MobKind,
         pos: [f64; 3],
@@ -681,6 +682,8 @@ pub struct TickContext {
     pub source: Option<Arc<super::anvil::AnvilChunkSource>>,
     /// The dimension this world runs, for bed and fire rules.
     pub dimension: super::Dimension,
+    /// Identity of the independently ticking world.
+    pub world_id: super::WorldId,
     /// Current weather, for fire and cauldron rules.
     #[allow(dead_code)] // the live weather is read from `state`; kept for the startup setting
     pub raining: bool,
@@ -895,6 +898,8 @@ pub struct Player {
     pub ignited: Vec<[i32; 3]>,
     /// The dimension this player is in; beds explode outside the overworld.
     pub dimension: super::Dimension,
+    /// Identity of the world that owns this player.
+    pub world_id: super::WorldId,
     /// The bed this player is sleeping in, if any.
     pub sleeping: Option<[i32; 3]>,
     /// The respawn point a bed set, if any.
@@ -1968,7 +1973,7 @@ impl Player {
             if self
                 .signals
                 .send(Signal::Summon {
-                    dimension: self.dimension,
+                    world_id: self.world_id,
                     chunk,
                     kind,
                     pos,
@@ -3469,6 +3474,7 @@ impl Player {
             *tracked_dimension = dimension;
         }
         self.dimension = dimension;
+        self.world_id = crate::game::WorldId::Vanilla(dimension);
         self.source = Some(self.dimensions.source(dimension).clone());
         self.dimension_type = dimension.dimension_type_id();
         self.pos = pos;
@@ -8874,9 +8880,9 @@ impl Region {
                 });
                 continue;
             }
-            if p.dimension != ctx.dimension {
-                // The command/portal moved this player to another dimension; the source region
-                // family owns the player only until the world loop hands it to the target one.
+            if p.dimension != ctx.dimension || p.world_id != ctx.world_id {
+                // A dimension or world transfer leaves this region family; the world loop owns
+                // inserting the player into the target world's independent scheduler.
                 let signals = p.signals.clone();
                 let _ = signals.send(Signal::ChangeDimension {
                     player: Box::new(p),
@@ -8892,7 +8898,6 @@ impl Region {
                 p.refresh_chunks();
                 let tx = p.signals.clone();
                 let _ = tx.send(Signal::Transfer {
-                    dimension: p.dimension,
                     to: next,
                     player: Box::new(p),
                 });
@@ -9137,7 +9142,7 @@ impl Region {
         for entity in self.entities.take_crossing() {
             let (x, z) = entity.chunk();
             let _ = ctx.signals.send(Signal::EntityTransfer {
-                dimension: ctx.dimension,
+                world_id: ctx.world_id,
                 to: ChunkPos(x, z),
                 entity: Box::new(entity),
             });
@@ -9854,6 +9859,7 @@ mod tests {
             positions: Default::default(),
             source: None,
             dimension: super::super::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10499,6 +10505,7 @@ mod tests {
             positions: Default::default(),
             source: Some(source.clone()),
             dimension: super::super::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10555,6 +10562,7 @@ mod tests {
             positions: Default::default(),
             source: Some(source),
             dimension: super::super::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10752,6 +10760,7 @@ mod tests {
             positions: Default::default(),
             source: None,
             dimension: crate::game::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(crate::game::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10779,6 +10788,7 @@ mod tests {
             positions: Default::default(),
             source: None,
             dimension: crate::game::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(crate::game::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10857,6 +10867,7 @@ mod tests {
             positions: Default::default(),
             source: None,
             dimension: super::super::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],

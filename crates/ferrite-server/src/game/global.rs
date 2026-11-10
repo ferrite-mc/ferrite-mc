@@ -1,4 +1,4 @@
-use super::{Dimension, chat::PlayerChatState};
+use super::{Dimension, WorldId, chat::PlayerChatState};
 use ferrite_net::game::{Outbound, OutboundSender, packet};
 use ferrite_profiler::Timings;
 use ferrite_protocol::{
@@ -42,6 +42,8 @@ pub struct GlobalPlayer {
     pub ground: bool,
     /// The dimension the player is in; entity tracking never crosses dimensions.
     pub dimension: Dimension,
+    /// Stable world identity; two worlds can share the same dimension type.
+    pub world_id: WorldId,
     /// Client `chat_mode`: 0 shown, 1 commands only, 2 hidden.
     pub chat_visibility: u8,
     /// Registry id of `minecraft:chat` used to decorate broadcast messages.
@@ -74,6 +76,7 @@ impl GlobalPlayer {
             pitch: 0.0,
             ground: true,
             dimension: Dimension::Overworld,
+            world_id: WorldId::Vanilla(Dimension::Overworld),
             chat_visibility,
             chat_type,
             chat: PlayerChatState::new(secure_chat),
@@ -203,11 +206,11 @@ impl GlobalRegion {
         self.broadcast(&format!("{} joined the game", p.name));
         self.players.insert(p.uuid, p);
     }
-    /// Moves a player between dimensions. The next tick removes its entity from observers in
-    /// the old dimension and adds it for observers in the new one.
-    pub fn set_dimension(&mut self, id: Uuid, dimension: Dimension) {
+    /// Update both the dimension rules and the world's independent identity.
+    pub fn set_world(&mut self, id: Uuid, dimension: Dimension, world_id: WorldId) {
         if let Some(player) = self.players.get_mut(&id) {
             player.dimension = dimension;
+            player.world_id = world_id;
         }
     }
     pub fn update(&mut self, id: Uuid, pos: [f64; 3], yaw: f32, pitch: f32, ground: bool) {
@@ -397,7 +400,7 @@ impl GlobalRegion {
         let sound =
             |name: &str| ferrite_data::registries::id("minecraft:sound_event", name).unwrap_or(0);
         for p in self.players.values() {
-            if p.dimension != Dimension::Overworld {
+            if p.world_id != WorldId::Vanilla(Dimension::Overworld) {
                 continue;
             }
             let dx = p.pos[0] - center[0];
@@ -504,7 +507,7 @@ impl GlobalRegion {
         const CELL: f64 = 48.0;
         let cell = |p: &GlobalPlayer| {
             (
-                p.dimension,
+                p.world_id,
                 (p.pos[0] / CELL).floor() as i32,
                 (p.pos[2] / CELL).floor() as i32,
             )
@@ -528,14 +531,14 @@ impl GlobalRegion {
             let mut moves: HashMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>> = HashMap::new();
             for (offset, seen) in chunk.iter_mut().enumerate() {
                 let observer = &players[first + offset];
-                let (dimension, cx, cz) = cell(observer);
+                let (world_id, cx, cz) = cell(observer);
                 let mut candidates: Vec<usize> = seen
                     .keys()
                     .filter_map(|target| index.get(target).copied())
                     .collect();
                 for dx in -1..=1 {
                     for dz in -1..=1 {
-                        if let Some(near) = grid.get(&(dimension, cx + dx, cz + dz)) {
+                        if let Some(near) = grid.get(&(world_id, cx + dx, cz + dz)) {
                             candidates.extend_from_slice(near);
                         }
                     }
@@ -554,7 +557,7 @@ impl GlobalRegion {
                         .map(|(a, b)| (a - b) * (a - b))
                         .sum::<f64>();
                     // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
-                    let inside = observer.dimension == target.dimension
+                    let inside = observer.world_id == target.world_id
                         && distance <= 48.0 * 48.0
                         && !hidden.contains(&key);
                     match (seen.get(&target.uuid), inside) {
@@ -699,6 +702,7 @@ mod tests {
         let mut pb = GlobalPlayer::new(bob, 2, "B".into(), vec![], b, false, 1, 0);
         pb.pos = [1.5, 64.0, 0.5];
         pb.dimension = Dimension::Nether;
+        pb.world_id = WorldId::Vanilla(Dimension::Nether);
         g.join(pa);
         g.join(pb);
         // Drop the join packets so only the tracking sends remain.
@@ -723,6 +727,32 @@ mod tests {
             tracked(&mut ar, RemoveEntities::ID),
             "the entity is removed when the player leaves the observer's dimension"
         );
+    }
+
+    #[test]
+    fn players_in_distinct_worlds_with_same_dimension_are_not_tracked() {
+        let mut global = GlobalRegion::default();
+        let (outbound, mut packets) = OutboundSender::channel(1 << 20);
+        let (other, _) = OutboundSender::channel(1 << 20);
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        let mut a = GlobalPlayer::new(alice, 1, "A".into(), vec![], outbound, false, 1, 0);
+        let mut b = GlobalPlayer::new(bob, 2, "B".into(), vec![], other, false, 1, 0);
+        a.pos = [0.5, 64.0, 0.5];
+        b.pos = [1.5, 64.0, 0.5];
+        b.world_id = WorldId::Runtime(Uuid::from_u128(3));
+        global.join(a);
+        global.join(b);
+        while packets.try_recv().is_some() {}
+        global.tick();
+        assert!(!tracked(&mut packets, AddEntity::ID));
+        global.set_world(
+            bob,
+            Dimension::Overworld,
+            WorldId::Vanilla(Dimension::Overworld),
+        );
+        global.tick();
+        assert!(tracked(&mut packets, AddEntity::ID));
     }
 
     #[test]

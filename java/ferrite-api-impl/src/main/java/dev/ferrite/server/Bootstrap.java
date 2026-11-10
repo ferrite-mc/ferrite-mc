@@ -43,6 +43,18 @@ public final class Bootstrap {
         server.registerWorld(world);
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(new org.bukkit.event.world.WorldLoadEvent(world)); }
     }
+    public static boolean unregisterWorld(String id) {
+        var uuid = java.util.UUID.fromString(id);
+        var world = server.getWorld(uuid);
+        if (world == null) return false;
+        synchronized (LEGACY_LOCK) {
+            var event = new org.bukkit.event.world.WorldUnloadEvent(world);
+            server.plugins.callEvent(event);
+            if (event.isCancelled()) return false;
+            server.unregisterWorld(uuid);
+            return true;
+        }
+    }
     public static void setHeightSnapshot(String world, int x, int z, int y) { FerriteWorld.setHeight(server.getWorld(java.util.UUID.fromString(world)), x, z, y); }
     public static void setBlockSnapshot(String world, int x, int y, int z, String material) { FerriteWorld.setSnapshot(server.getWorld(java.util.UUID.fromString(world)), x, y, z, material); }
     public static void registerPlayer(String id, String name, boolean operator) { registerPlayer(id, name, operator, 20.0, 20, 0, null, 0, 0, 0, 0, 0); }

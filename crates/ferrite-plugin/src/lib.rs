@@ -1070,6 +1070,10 @@ pub trait ServerHooks: Send + Sync {
     fn register_world(&self, _world: &WorldSnapshot) -> Result<(), Error> {
         Ok(())
     }
+    /// Fires the cancellable Bukkit unload event and removes a published runtime world.
+    fn unregister_world(&self, _id: uuid::Uuid) -> Result<bool, Error> {
+        Ok(true)
+    }
     /// Publishes an online player's location and state for plugin lookups.
     fn register_player(&self, _player: &PlayerSnapshot) -> Result<(), Error> {
         Ok(())
@@ -2418,6 +2422,18 @@ impl PluginHost {
         })?;
         Ok(())
     }
+    pub fn unregister_world(&self, id: uuid::Uuid) -> Result<bool, Error> {
+        Ok(self.jvm.with_env(|env| {
+            let id = env.new_string(id.to_string())?;
+            let result = env.call_static_method(
+                BOOTSTRAP,
+                "unregisterWorld",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(id.as_ref())],
+            )?;
+            Ok(result.z()?)
+        })?)
+    }
     /// Publish an online player snapshot for plugin lookups and command dispatch.
     pub fn register_player(&self, player: &PlayerSnapshot) -> Result<(), Error> {
         if !player.health.is_finite()
@@ -3600,6 +3616,9 @@ impl ServerHooks for PluginHost {
     }
     fn register_world(&self, world: &WorldSnapshot) -> Result<(), Error> {
         PluginHost::register_world(self, world)
+    }
+    fn unregister_world(&self, id: uuid::Uuid) -> Result<bool, Error> {
+        PluginHost::unregister_world(self, id)
     }
     fn register_player(&self, player: &PlayerSnapshot) -> Result<(), Error> {
         PluginHost::register_player(self, player)
