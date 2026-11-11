@@ -1131,7 +1131,7 @@ async fn run(
             Err(error) => tracing::warn!(%error, "plugin commands unavailable"),
         }
     }
-    let command_tree = Arc::new(tree);
+    let mut command_tree = Arc::new(tree);
     let registry_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../vanilla/26.3/generated/reports");
     let parser_registry = ferrite_command::ParserRegistry::load(&registry_dir).ok();
@@ -1611,6 +1611,14 @@ async fn run(
                       let _ = complete.send(result);
                   },
                   GameMessage::SetPluginHooks{hooks,complete}=>{
+                      // The bridge attaches after the loop starts, so the tree built at startup has
+                      // no plugin commands; rebuild it now that the hooks can list them.
+                      let mut tree = commands::dispatcher();
+                      match hooks.plugin_commands() {
+                          Ok(declared) => commands::register_plugin_commands(&mut tree, &declared),
+                          Err(error) => tracing::warn!(%error, "plugin commands unavailable"),
+                      }
+                      command_tree = Arc::new(tree);
                       settings.plugins = Some(hooks);
                       let _ = complete.send(());
                   },
