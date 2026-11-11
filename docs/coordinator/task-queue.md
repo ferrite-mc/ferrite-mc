@@ -132,3 +132,18 @@ Merge gate on the merged tree (`265c336`): `fmt --check` 0, `clippy --workspace 
 - The gap 7 Java steps in `plugin_lifecycle.rs` still use the async scheduler.
 - Dependabot moderate 1 (`/security/dependabot/10`).
 - Retired lane worktrees (`p5-gap7`, `light-deadlock`, `mob-damage-events`, `rw-player-world`, `rw-plugin-cmd-thread`) and `$HOME/ferrite/target-*` caches still on disk.
+
+## Dispatched 2026-11-11 (wave 4) — remaining code gaps, all on sonnet
+
+Base: `main` `abdb2b6`. Three concurrent lanes, `CARGO_BUILD_JOBS=4`, one target directory each.
+Briefs live on the host at `~/ferrite/briefs/<lane>.md`.
+
+| Lane | Branch / worktree | Terminal | Target | Scope |
+|---|---|---|---|---|
+| W1 | `rw-world-push` / `rw-player-world` | `term_a452282d` | `target-rw1` | join-time plugin snapshot uses the live world; `Signal::ChangeDimension` pushes the new location at once; player `/summoncrystal` routes by the player's `WorldId` |
+| W2 | `rw-world-content` / `rw-chunk-api` | `term_dffde10b` | `target-rw2` | `BlockData` properties on the runtime `setType` path; entities visible after unload/reopen without a re-entry; Java `World#loadChunk` wired to the host method; `chunk_saved` disk test and `loaded` hold |
+| W3 | `rw-bridge-safety` / `rw-plugin-cmd-thread` | `term_ec631ec3` | `target-rw3` | overlapping plugin commands on the blocking pool (prove safe or serialize); gap-7 Java steps on the sync scheduler |
+
+All three confirmed `input_accepted -> turn_started`. Each owner commits on its branch; no push,
+no merge. Not assigned to a lane (coordinator-side): Dependabot moderate 1 and the retired
+worktree/target-cache cleanup.
