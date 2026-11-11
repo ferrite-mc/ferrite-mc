@@ -711,6 +711,49 @@ pub struct TickContext {
     pub profiler: Option<Arc<super::profile::Profiler>>,
     /// The server's live command tree, for command blocks; `None` in tests that do not need it.
     pub tree: Option<Arc<SharedCommandTree>>,
+    /// The plugin bridge as it is attached right now, so events fire from regions without
+    /// players; `None` in tests that do not need it.
+    pub hooks: Option<Arc<SharedPluginHooks>>,
+}
+
+/// Picks the bridge for an event about a non-player entity: the live shared handle first, else
+/// the first player's own handle. Exactly one bridge is returned, so the event fires once.
+pub(super) fn resolve_damage_hooks(
+    shared: Option<&SharedPluginHooks>,
+    mut players: impl Iterator<Item = (Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)>,
+) -> Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)> {
+    shared
+        .and_then(SharedPluginHooks::load)
+        .or_else(|| players.next())
+}
+
+/// The plugin hooks and the failure policy that goes with them. The bridge attaches after the
+/// world loop starts, so regions read the current value when an event fires instead of
+/// capturing it at startup.
+#[derive(Default)]
+pub struct SharedPluginHooks {
+    current: Mutex<Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)>>,
+}
+
+impl SharedPluginHooks {
+    /// Replaces the bridge every later event sees.
+    pub fn publish(
+        &self,
+        hooks: Option<Arc<dyn ferrite_plugin::ServerHooks>>,
+        policy: PluginEventPolicy,
+    ) {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = hooks.map(|hooks| (hooks, policy));
+    }
+
+    pub fn load(&self) -> Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)> {
+        self.current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
 }
 
 /// The command tree as the world loop currently sees it. Plugin hooks attach after the loop
@@ -8605,6 +8648,21 @@ impl Region {
             self.spawn_block_drops(pos, state);
         }
     }
+    /// The plugin bridge for events about non-player entities: the live handle on the tick
+    /// context first (it works in a region without players), else a player's own handle.
+    fn damage_hooks(
+        &self,
+        ctx: &TickContext,
+    ) -> Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)> {
+        resolve_damage_hooks(
+            ctx.hooks.as_deref(),
+            self.players.values().filter_map(|p| {
+                p.plugins
+                    .clone()
+                    .map(|hooks| (hooks, p.plugin_event_errors))
+            }),
+        )
+    }
     /// Vanilla `Explosion` with no player to credit.
     fn explode(&mut self, center: [f64; 3], power: f32, breaks: bool, ctx: &TickContext) {
         self.explode_by(center, power, breaks, None, ctx);
@@ -8682,11 +8740,7 @@ impl Region {
             };
             let damage = super::explosion::damage(source, center, power, pos, bbox);
             if damage > 0.0 {
-                let hooks = self.players.values().find_map(|p| {
-                    p.plugins
-                        .clone()
-                        .map(|hooks| (hooks, p.plugin_event_errors))
-                });
+                let hooks = self.damage_hooks(ctx);
                 let hooks = hooks
                     .as_ref()
                     .map(|(hooks, policy)| (hooks.as_ref(), *policy));
@@ -10012,6 +10066,7 @@ mod tests {
             trader_spawner: Default::default(),
             profiler: None,
             tree: None,
+            hooks: None,
         }
     }
 
@@ -10733,6 +10788,7 @@ mod tests {
             trader_spawner: Default::default(),
             profiler: None,
             tree: None,
+            hooks: None,
         };
         region.explode([8.5, 66.5, 8.5], 4.0, false, &ctx);
         assert_eq!(source.block(8, 65, 9), Some(stone));
@@ -10790,6 +10846,7 @@ mod tests {
             trader_spawner: Default::default(),
             profiler: None,
             tree: None,
+            hooks: None,
         };
         region.tick(&ctx);
         let villager = region
@@ -10993,6 +11050,7 @@ mod tests {
             trader_spawner: Default::default(),
             profiler: None,
             tree: None,
+            hooks: None,
         });
 
         let report = timings.report_all(50.0);
@@ -11021,6 +11079,7 @@ mod tests {
             trader_spawner: Default::default(),
             profiler: None,
             tree: None,
+            hooks: None,
         };
         let mut region = Region::default();
         region.hold_chunk(ChunkPos(0, 0));
@@ -11100,6 +11159,7 @@ mod tests {
             trader_spawner: Default::default(),
             profiler: None,
             tree: None,
+            hooks: None,
         }
     }
 
@@ -11955,6 +12015,100 @@ mod event_policy_tests {
         assert!(event_allows(None, PluginEventPolicy::Deny, |_| Err(
             ferrite_plugin::Error::InvalidTask
         )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mob_hit_in_a_playerless_region_fires_a_cancellable_damage_event() {
+        use super::super::explosion::tests::Scripted;
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        let mut ready = false;
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ready, "chunk never loaded");
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let cow = region.entities.insert(mob::new_mob(
+            mob::MobKind::Cow,
+            ferrite_math::Vec3::new(8.5, 66.0, 8.5),
+            &mut region.rng,
+        ));
+        assert!(region.players.is_empty());
+        let full = mob::MobKind::Cow.max_health();
+        let blast = |region: &mut Region, hooks: &Arc<Scripted>| {
+            let shared = Arc::new(SharedPluginHooks::default());
+            shared.publish(Some(hooks.clone()), PluginEventPolicy::Allow);
+            let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let ctx = TickContext {
+                signals,
+                tracking: Default::default(),
+                positions: Default::default(),
+                source: Some(source.clone()),
+                dimension: crate::game::Dimension::Overworld,
+                world_id: crate::game::WorldId::Vanilla(crate::game::Dimension::Overworld),
+                raining: false,
+                rules: Default::default(),
+                spawn: [0.0, 65.0, 0.0],
+                command_entities: Default::default(),
+                state: Default::default(),
+                trader_spawner: Default::default(),
+                profiler: None,
+                tree: None,
+                hooks: Some(shared),
+            };
+            region.explode([8.5, 66.5, 8.5], 4.0, false, &ctx);
+        };
+
+        let cancel = Arc::new(Scripted::new(Some(0.0)));
+        blast(&mut region, &cancel);
+        assert_eq!(cancel.seen.lock().unwrap().len(), 1, "the event fired");
+        assert_eq!(cancel.seen.lock().unwrap()[0].2, "ENTITY_EXPLOSION");
+        assert_eq!(mob::state(&region.entities, cow).unwrap().health, full);
+
+        let pass = Arc::new(Scripted::new(None));
+        blast(&mut region, &pass);
+        assert_eq!(pass.seen.lock().unwrap().len(), 1);
+        assert!(mob::state(&region.entities, cow).unwrap().health < full);
+    }
+
+    #[test]
+    fn player_derived_hooks_still_fire_exactly_once() {
+        use super::super::explosion::tests::Scripted;
+        let mut store = ferrite_entity::EntityStore::default();
+        let key = store.insert(mob::new_mob(
+            mob::MobKind::Cow,
+            ferrite_math::Vec3::new(0.5, 1.0, 0.5),
+            &mut ferrite_entity::Rng::default(),
+        ));
+        let player = Arc::new(Scripted::new(None));
+        let from_players = |hooks: &Arc<Scripted>| {
+            vec![(
+                hooks.clone() as Arc<dyn ferrite_plugin::ServerHooks>,
+                PluginEventPolicy::Allow,
+            )]
+            .into_iter()
+        };
+        // No shared handle: the player's bridge is used.
+        let hooks = resolve_damage_hooks(None, from_players(&player)).expect("player hooks");
+        super::super::explosion::hurt_mob(&mut store, key, 3.0, Some((hooks.0.as_ref(), hooks.1)));
+        assert_eq!(player.seen.lock().unwrap().len(), 1);
+        // A shared handle wins, and the player's bridge is not asked as well.
+        let shared = SharedPluginHooks::default();
+        let live = Arc::new(Scripted::new(None));
+        shared.publish(Some(live.clone()), PluginEventPolicy::Allow);
+        let hooks = resolve_damage_hooks(Some(&shared), from_players(&player)).expect("hooks");
+        super::super::explosion::hurt_mob(&mut store, key, 3.0, Some((hooks.0.as_ref(), hooks.1)));
+        assert_eq!(live.seen.lock().unwrap().len(), 1);
+        assert_eq!(player.seen.lock().unwrap().len(), 1, "no second event");
+        // Nothing attached anywhere: no bridge.
+        assert!(
+            resolve_damage_hooks(Some(&SharedPluginHooks::default()), std::iter::empty()).is_none()
+        );
     }
 
     #[test]

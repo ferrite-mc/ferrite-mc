@@ -238,6 +238,7 @@ mod tests {
             trader_spawner: Default::default(),
             profiler: None,
             tree: None,
+            hooks: None,
         }
     }
 

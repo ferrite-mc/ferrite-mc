@@ -270,7 +270,7 @@ pub fn impulse(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::anvil::AnvilChunkSource;
     use super::*;
     use ferrite_plugin::{
@@ -453,12 +453,12 @@ mod tests {
     }
 
     /// A plugin bridge that records `EntityDamageEvent`s and optionally rewrites the damage.
-    struct Scripted {
-        reply: Option<f64>,
-        seen: std::sync::Mutex<Vec<(Uuid, String, String, f64)>>,
+    pub(in crate::game) struct Scripted {
+        pub(in crate::game) reply: Option<f64>,
+        pub(in crate::game) seen: std::sync::Mutex<Vec<(Uuid, String, String, f64)>>,
     }
     impl Scripted {
-        fn new(reply: Option<f64>) -> Self {
+        pub(in crate::game) fn new(reply: Option<f64>) -> Self {
             Self {
                 reply,
                 seen: Default::default(),
