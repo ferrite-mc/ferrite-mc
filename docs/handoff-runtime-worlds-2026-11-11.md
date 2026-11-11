@@ -2,9 +2,9 @@
 
 ## Current state
 
-Runtime-world work is in progress on branch `release/v0.1.6` in the `release-prep-v0.1.5` worktree. The worktree started from commit `08ee9e3` and had no upstream branch configured. The user asked to commit and push this checkpoint, then continue the implementation in a later session.
+Runtime-world work is in progress in `C:\Users\taegy\orca\workspaces\ferrite-mc-ref\plan1104\target\release-prep-v0.1.5`, on branch `release/v0.1.6`. At this handoff, `main` and `release/v0.1.6` both point to `6b711ca` and the worktree is clean. Runtime-world changes were pushed directly to both branches at the user's request. The initial implementation commit is `dceb03b`; follow-up commits address CI failures described below.
 
-The current implementation adds persistent world descriptors, a separate scheduler per `WorldId`, Rust world create/unload messages, and a Bukkit `Server#createWorld`/`unloadWorld` route through the plugin host. A runtime world uses the existing worldgen host and inherits its terrain settings. Java `WorldCreator` requests are currently limited to `NORMAL` type, seed `0`, structures enabled, and no custom generator. Paper's `WorldCreator(String)` initializes its seed randomly, so an unconfigured creator is rejected before reaching the host; this makes the common `createWorld(new WorldCreator(name))` call unavailable until seed handling is implemented or the API contract is revised.
+The current implementation adds persistent world descriptors, a separate scheduler per `WorldId`, Rust world create/unload messages, and a Bukkit `Server#createWorld`/`unloadWorld` route through the plugin host. A runtime world uses the existing worldgen host and inherits its terrain settings. Java `WorldCreator` requests are currently limited to `NORMAL` type, seed `0`, structures enabled, and no custom generator. Paper's `WorldCreator(String)` initializes its seed randomly, so an unconfigured creator is rejected before reaching the host; the common `createWorld(new WorldCreator(name))` call remains unsupported until seed handling is implemented or the API contract is revised.
 
 ## Changes in this checkpoint
 
@@ -19,11 +19,13 @@ The current implementation adds persistent world descriptors, a separate schedul
 
 ## Verification performed
 
-- `cargo fmt --all` passed.
-- `cargo check -p ferrite-server` passed after the current Rust and Java-facing API changes.
-- `java/ferrite-api-impl/gradlew.bat compileJava --console=plain` passed after correcting the `HostBridge.call` overloads.
-- `git diff --check` passed.
-- No tests have been run, per the user's instruction to defer tests until the implementation is complete.
+- Latest GitHub Actions run: [42919492436](https://github.com/ferrite-mc/ferrite-mc/actions/runs/42919492436). On both Linux and Windows, Java fixture build, `cargo fmt`, and `cargo clippy` passed. The full `cargo test --workspace` step failed on both OSes.
+- Rust server unit tests passed: 724/724 on Linux and 724/724 on Windows. Three `crates/ferrite-server/tests/plugin_lifecycle.rs` tests failed on both OSes:
+  - `server_loads_plugins_at_startup_and_disables_them_on_stop`: expected chat `pong`, got `Unknown or incomplete command`; events only showed `join Bot`.
+  - `typical_plugin_uses_config_commands_listener_and_repeating_task`: expected `ip ...` in the plugin event file; events showed only `async task` and tab completion.
+  - `plugin_api_calls_reach_the_client_as_packets`: expected `verify chunk-sent ...`; events showed `join Bot` and `chunk-load 0 0`.
+- The targeted Java test `ApiSurfaceTest.serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest` passed locally after specifying supported seed `0` in its no-host case.
+- `cargo fmt --all -- --check` passed after the Rust Clippy fixes. No local Rust workspace tests were run; the CI test job is the evidence above.
 
 ## Known gaps to finish
 
@@ -32,18 +34,20 @@ The current implementation adds persistent world descriptors, a separate schedul
 3. **Unload failure recovery is incomplete.** The runtime scheduler is removed before entity/chunk flushing; if persistence fails, the world remains catalogued but its scheduler is gone. Make unload transactional or restore the scheduler on save failure.
 4. **World unload lifecycle edge cases need validation.** The Java layer fires the cancellable event and removes the Java world only after the Rust response, but verify event cancellation, player-in-world refusal, `save=false`, and failed flush behavior.
 5. **Creator settings and seed semantics are constrained.** `WorldCreator` currently rejects custom generators, nonzero seeds, structure-disabled worlds, and non-`NORMAL` world types. Since Paper's default creator seed is random rather than zero, basic seed handling must be resolved before normal plugin world creation works.
-6. **Real plugin/client validation is outstanding.** Exercise create/reopen/unload, plugin `onEnable` creation, world lookup, block reads/writes, player travel, and chunk/entity persistence using the real client/plugin fixture.
+6. **Plugin lifecycle CI is failing.** Resolve the three `plugin_lifecycle` failures above before treating the branch as CI-clean. The test logs suggest plugin commands/events are not reaching the expected path; trace command dispatch and bridge callbacks from plugin startup through the game loop.
+7. **Real plugin/client validation is outstanding.** Exercise create/reopen/unload, plugin `onEnable` creation, world lookup, block reads/writes, player travel, and chunk/entity persistence using the real client/plugin fixture.
 
 ## Important working constraints
 
 - Do not start subagents; the user explicitly asked to stop all workers.
-- Do not run tests until the runtime-world implementation is complete. `cargo check`, formatting, and compilation are acceptable during implementation.
+- The user asked to defer tests until final validation. The final CI run has now exposed the plugin lifecycle failures above; avoid repeated full test runs until those failures have a concrete fix.
 - Preserve the shared `plan1104` and sibling worktrees. The `plan1104\target` folder contains worktrees and runtime world data; never run an unrestricted `cargo clean` or delete the target root.
 - `cargo clean -p` was used to reclaim package build outputs while preserving source worktrees and `target\debug\world`. Do not remove world data or unrelated worktrees as part of cache cleanup.
 
 ## Next implementation sequence
 
-1. Finish world-aware player commands and change-world handling; migrate holds/releases, tracking, transient entities, and save paths to `WorldId`.
-2. Make runtime unload transactional and persist each world's entities and chunks both on unload and shutdown.
-3. Add regression tests for runtime UUID/spawn persistence, same-dimension isolation, cancellation, unload failure recovery, and player travel.
-4. Run final workspace tests and lint checks, then update `docs/BACKLOG.md` and release notes with the actual supported API surface.
+1. Diagnose and fix the three `plugin_lifecycle` CI failures; rerun the focused integration test before the next full CI run.
+2. Finish world-aware player commands and change-world handling; migrate holds/releases, tracking, transient entities, and save paths to `WorldId`.
+3. Make runtime unload transactional and persist each world's entities and chunks both on unload and shutdown.
+4. Implement seed semantics for `WorldCreator` (including its random default), then validate create/reopen/unload and real plugin/client behavior.
+5. Run final workspace tests and lint checks, then update `docs/BACKLOG.md` and release notes with the actual supported API surface.
