@@ -143,6 +143,40 @@ public final class TestPlugin extends JavaPlugin implements Listener {
             appendEvent("verify-item set");
             return true;
         });
+        var gap7 = getCommand("gap7");
+        if (gap7 != null) {
+            var marker = new java.io.File(new java.io.File(getDataFolder().getParentFile(), "TestPlugin"), "gap7.enabled");
+            if (marker.exists()) {
+                var created = getServer().createWorld(new org.bukkit.WorldCreator("gap7_world").seed(1234L));
+                appendEvent("gap7 create " + (created != null) + " " + created.getName());
+            }
+            gap7.setExecutor((sender, command, label, args) -> {
+                if (!(sender instanceof org.bukkit.entity.Player player) || args.length != 1) return false;
+                var w = getServer().getWorld("gap7_world");
+                switch (args[0]) {
+                    case "check" -> {
+                        var block = w.getBlockAt(1, 200, 1);
+                        var before = block.getType();
+                        block.setType(org.bukkit.Material.GOLD_BLOCK);
+                        appendEvent("gap7 check lookup=" + (w != null) + " same=" + (getServer().getWorld(w.getUID()) == w) + " before=" + before);
+                    }
+                    case "enter" -> appendEvent("gap7 enter teleport=" + player.teleport(new org.bukkit.Location(w, 1.5, 201, 1.5)));
+                    case "leave" -> appendEvent("gap7 leave teleport=" + player.teleport(new org.bukkit.Location(getServer().getWorld("world"), 0.5, 100, 0.5)));
+                    case "spawn" -> appendEvent("gap7 spawn " + w.spawnEntity(new org.bukkit.Location(w, 5.5, 201, 5.5), org.bukkit.entity.EntityType.COW).getUniqueId());
+                    case "entities" -> appendEvent("gap7 entities cows=" + w.getEntities().stream().filter(e -> e.getType() == org.bukkit.entity.EntityType.COW).count());
+                    // createWorld and unloadWorld wait for the game loop, which is the thread running this
+                    // command, so they run on the async scheduler as a Folia plugin's would.
+                    case "unload" -> getServer().getAsyncScheduler().runNow(this, task ->
+                        appendEvent("gap7 unload " + getServer().unloadWorld(w, true) + " gone=" + (getServer().getWorld("gap7_world") == null)));
+                    case "reopen" -> getServer().getAsyncScheduler().runNow(this, task -> { try {
+                        var again = getServer().createWorld(new org.bukkit.WorldCreator("gap7_world").seed(1234L));
+                        appendEvent("gap7 reopen block=" + again.getBlockAt(1, 200, 1).getType() + " top=" + again.getHighestBlockYAt(1, 1) + " cows=" + again.getEntities().stream().filter(e -> e.getType() == org.bukkit.entity.EntityType.COW).count());
+                    } catch (Throwable t) { appendEvent("gap7 reopen error " + t); } });
+                    default -> { return false; }
+                }
+                return true;
+            });
+        }
         getCommand("ferrite-test").setTabCompleter((sender, command, alias, args) -> java.util.List.of("hello"));
         getCommand("ferrite-test").setExecutor((sender, command, label, args) -> { if (sender instanceof org.bukkit.entity.Player player) { getLogger().info("offline snapshot " + getServer().getOfflinePlayer("KnownOffline").getUniqueId().equals(java.util.UUID.fromString("00000000-0000-0000-0000-00000000002c"))); getLogger().info("player snapshot " + player.getHealth() + " " + player.getFoodLevel() + " " + player.getGameMode()); var w = getServer().getWorld("probe_world"); if (w != null) { if (player.getInventory().getItem(0).getType() != org.bukkit.Material.STONE) throw new IllegalStateException("inventory snapshot"); player.getInventory().setItem(0, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIRT, 2)); getServer().setWhitelist(false); getServer().banIP("192.0.2.2"); player.displayName(net.kyori.adventure.text.Component.text("Display")); player.sendTitle("Title", "Subtitle", 1, 2, 3); player.playSound(player.getLocation(), "minecraft:entity.player.levelup", org.bukkit.SoundCategory.PLAYERS, 1.0f, 0.5f); player.kickPlayer("bye"); player.setOp(false); player.clearActivePotionEffects(); player.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.SPEED, 200, 1)); player.setHealth(10.0); player.setFoodLevel(9); player.setGameMode(org.bukkit.GameMode.ADVENTURE); if (player.getWorld() != w || !player.teleport(new org.bukkit.Location(w, 5, 70, 6))) throw new IllegalStateException("player routing"); if (w.getHighestBlockYAt(1, 2) != 64 || w.getChunkAt(0, 0).getBlock(1, 64, 2).getType() != org.bukkit.Material.STONE) throw new IllegalStateException("chunk snapshot"); var block = w.getBlockAt(1, 64, 2); getLogger().info("world snapshot " + w.getName() + " " + block.getType()); block.setType(org.bukkit.Material.DIRT); } } var api = getServer(); getLogger().info("surface-query " + api.getCurrentTick() + " " + api.matchPlayer("Ferrite").size() + " " + (api.getOfflinePlayerIfCached("KnownOffline") != null) + " " + api.isStopping() + " " + (api.shutdownMessage() == null) + " " + api.broadcast(net.kyori.adventure.text.Component.text("surface"), "ferrite.surface")); sender.sendMessage("hello " + String.join(" ", args)); dev.ferrite.server.Native.dispatchCommand((org.bukkit.command.CommandSender) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.command.ConsoleCommandSender.class}, (p, m, a) -> null), "spoof"); dev.ferrite.server.Native.dispatchCommand(sender, "bridge-command"); return true; });
         org.bukkit.World world = (org.bukkit.World) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.World.class}, (proxy, method, args) -> {

@@ -125,15 +125,20 @@ impl PluginBridge {
                     player_handler: settings.player_handler,
                     world_view: settings.world_view,
                     world_handler: settings.console.clone().map(|console| {
+                        let players = player_commands.clone();
                         let handler: ferrite_plugin::WorldHandler =
                             Arc::new(move |command| match world_console_line(&command) {
                                 Some(line) => {
                                     let _ = console.send(line);
                                 }
-                                None => tracing::debug!(
-                                    ?command,
-                                    "plugin world command for a world the server does not own"
-                                ),
+                                // Not a vanilla dimension: a runtime world, written by the game loop.
+                                None => match (&players, runtime_world_command(&command)) {
+                                    (Some(players), Some(command)) => players(command),
+                                    _ => tracing::debug!(
+                                        ?command,
+                                        "plugin world command for a world the server does not own"
+                                    ),
+                                },
                             });
                         handler
                     }),
@@ -752,6 +757,37 @@ pub fn world_console_line(command: &ferrite_plugin::WorldCommand) -> Option<Stri
     } else {
         Some(format!("execute in {} run {line}", dimension.key()))
     }
+}
+
+/// The player command that carries a plugin's block write into a runtime world, for worlds
+/// [`world_console_line`] cannot address. `None` for a vanilla dimension or an unknown block;
+/// block-state properties are dropped, so the block gets its default state.
+pub fn runtime_world_command(
+    command: &ferrite_plugin::WorldCommand,
+) -> Option<ferrite_plugin::PlayerCommand> {
+    let ferrite_plugin::WorldCommand::SetBlock {
+        world,
+        position,
+        material,
+    } = command;
+    if world_dimension(*world).is_some() {
+        return None;
+    }
+    let key = material.split('[').next()?;
+    if !is_resource_key(key) {
+        return None;
+    }
+    let key = if key.contains(':') {
+        key.to_owned()
+    } else {
+        format!("minecraft:{key}")
+    };
+    ferrite_data::blocks::default_state(&key)?;
+    Some(ferrite_plugin::PlayerCommand::SetBlock {
+        world: *world,
+        position: [position.x, position.y, position.z],
+        material: key,
+    })
 }
 
 /// A namespaced resource key such as `minecraft:speed`; refuses anything a command could misread.
@@ -1449,6 +1485,27 @@ mod tests {
             Some("execute in minecraft:the_nether run setblock 1 -2 3 minecraft:stone")
         );
         assert_eq!(world_console_line(&set(uuid::Uuid::nil())), None);
+        // Regression: a write to a runtime world used to vanish here; it now becomes a player
+        // command for the game loop, while vanilla dimensions stay on the console path.
+        let runtime = uuid::Uuid::from_u128(0x5eed);
+        assert_eq!(
+            runtime_world_command(&set(runtime)),
+            Some(ferrite_plugin::PlayerCommand::SetBlock {
+                world: runtime,
+                position: [1, -2, 3],
+                material: "minecraft:stone".into(),
+            })
+        );
+        assert_eq!(
+            runtime_world_command(&set(ferrite_plugin::default_world_id())),
+            None
+        );
+        let unknown = WorldCommand::SetBlock {
+            world: runtime,
+            position: BlockPosition { x: 0, y: 0, z: 0 },
+            material: "minecraft:not_a_block".into(),
+        };
+        assert_eq!(runtime_world_command(&unknown), None);
 
         let address = "10.0.0.1".parse().unwrap();
         let ban = |reason: Option<&str>| ServerCommand::BanIp {

@@ -570,6 +570,9 @@ async fn run_server(
             console: Some(plugin_console_tx),
             runtime_world_handler: Some({
                 let sender = world.sender.clone();
+                // Captured here: plugin threads other than the one starting the server have no
+                // tokio context of their own.
+                let runtime = tokio::runtime::Handle::current();
                 std::sync::Arc::new(move |name: &str, environment: &str, seed: i64| {
                     let dimension = match environment {
                         "NORMAL" => game::Dimension::Overworld,
@@ -582,7 +585,6 @@ async fn run_server(
                         }
                     };
                     let name = name.to_owned();
-                    let runtime = tokio::runtime::Handle::current();
                     let created = tokio::task::block_in_place(|| {
                         runtime.block_on(async {
                             let (complete, done) = tokio::sync::oneshot::channel();
@@ -604,8 +606,8 @@ async fn run_server(
             }),
             runtime_world_unloader: Some({
                 let sender = world.sender.clone();
+                let runtime = tokio::runtime::Handle::current();
                 std::sync::Arc::new(move |id, save| {
-                    let runtime = tokio::runtime::Handle::current();
                     tokio::task::block_in_place(|| {
                         runtime.block_on(async {
                             let (complete, done) = tokio::sync::oneshot::channel();

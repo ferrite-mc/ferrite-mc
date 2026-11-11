@@ -1353,3 +1353,194 @@ fn plugin_api_calls_reach_the_client_as_packets() {
         ))
     );
 }
+
+/// Gap 7 end to end: a plugin creates a runtime world from `onEnable`, a client enters and
+/// leaves it, the plugin writes a block and spawns an entity there, and after the world is
+/// unloaded and reopened the block and the entity are still there.
+///
+/// Run: `cargo test -p ferrite-server --test plugin_lifecycle runtime_world_gap7 -- --nocapture`
+/// (needs Java 25 and a Gradle-built bridge; set `FERRITE_JAVA_PREBUILT=1` to skip Gradle).
+#[test]
+fn runtime_world_gap7_create_edit_enter_leave_unload_reopen() {
+    let java_home = match ferrite_jvm::find_java_home(None) {
+        Ok(home) => home.root().to_owned(),
+        Err(error) => {
+            eprintln!("Java 25 unavailable; skipping gap 7 verification: {error}");
+            return;
+        }
+    };
+    let repo = repo_root();
+    let dir = tempfile::tempdir().unwrap();
+    let (plugin_jar, dependency_jar, bridge_jar) = build_jars(&repo, &java_home, dir.path());
+    let plugins = dir.path().join("plugins");
+    fs::create_dir(&plugins).unwrap();
+    fs::copy(plugin_jar, plugins.join("test-plugin.jar")).unwrap();
+    fs::copy(dependency_jar, plugins.join("test-dependency.jar")).unwrap();
+    // The test plugin creates its runtime world from onEnable only when this marker exists.
+    fs::create_dir(plugins.join("TestPlugin")).unwrap();
+    fs::write(plugins.join("TestPlugin/gap7.enabled"), "").unwrap();
+    fs::write(dir.path().join("eula.txt"), "eula=true\n").unwrap();
+    let port = free_port();
+    fs::write(
+        dir.path().join("ferrite.toml"),
+        format!(
+            "bind-address = \"127.0.0.1:{port}\"\nonline-mode = false\nview-distance = 2\nmotd = \"Gap 7\"\ngenerator = \"superflat\"\nplugins-dir = \"plugins\"\nplugin-bridge = \"{}\"\n",
+            toml_path(&bridge_jar)
+        ),
+    )
+    .unwrap();
+    let mut process = Process(
+        server_command()
+            .current_dir(dir.path())
+            .env("JAVA_HOME", &java_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("starting the server"),
+    );
+    let (stdout, _stdout_reader) = capture(process.0.stdout.take().unwrap());
+    let (stderr, _stderr_reader) = capture(process.0.stderr.take().unwrap());
+    let enabled = plugins.join("TestPlugin/enabled.txt");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while !enabled.exists() {
+        assert!(
+            process.0.try_wait().unwrap().is_none() && Instant::now() < deadline,
+            "plugin did not enable:\n{}\n{}",
+            stdout.lock().unwrap(),
+            stderr.lock().unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = plugins.join("TestPlugin/events.txt");
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut bot = Bot::join(addr, "Bot", &stdout, &stderr);
+    wait_for_line(&events, "join Bot", &stdout, &stderr);
+
+    // Runs `/gap7 <step>` and returns the plugin's `gap7 <step> ...` report. The bot keeps
+    // answering the server's packets (teleport confirms, chunk batches) while it waits.
+    let respawns = std::cell::Cell::new(0_u32);
+    let pump = |bot: &mut Bot| {
+        if let Some((id, _)) = bot.next_play()
+            && id == Respawn::ID
+        {
+            respawns.set(respawns.get() + 1);
+        }
+    };
+    let step = |bot: &mut Bot, name: &str| -> String {
+        let before = fs::read_to_string(&events)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        bot.raw(7, &format!("gap7 {name}"));
+        let prefix = format!("gap7 {name}");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            pump(bot);
+            if let Ok(content) = fs::read_to_string(&events)
+                && let Some(line) = content
+                    .lines()
+                    .skip(before)
+                    .find(|line| line.starts_with(&prefix))
+            {
+                return line.to_owned();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no {prefix:?} report:\n{}\n{}\n{}",
+                fs::read_to_string(&events).unwrap_or_default(),
+                stdout.lock().unwrap(),
+                stderr.lock().unwrap()
+            );
+        }
+    };
+    // Waits until `/gap7 <step>` reports a line containing `needle`, re-issuing it between
+    // tries; the host applies world writes and spawns on the game loop, a little later.
+    let settle = |bot: &mut Bot, name: &str, needle: &str| -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let before = fs::read_to_string(&events)
+                .unwrap_or_default()
+                .lines()
+                .count();
+            bot.raw(7, &format!("gap7 {name}"));
+            let until = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < until {
+                pump(bot);
+                let content = fs::read_to_string(&events).unwrap_or_default();
+                if let Some(line) = content
+                    .lines()
+                    .skip(before)
+                    .find(|line| line.starts_with(&format!("gap7 {name}")))
+                {
+                    if line.contains(needle) {
+                        return line.to_owned();
+                    }
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "gap7 {name} never reported {needle:?}:\n{}\n{}\n{}",
+                fs::read_to_string(&events).unwrap_or_default(),
+                stdout.lock().unwrap(),
+                stderr.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    };
+
+    // 1. The plugin created the world from onEnable, and finds it again by name.
+    assert!(
+        fs::read_to_string(&events)
+            .unwrap()
+            .lines()
+            .any(|line| line == "gap7 create true gap7_world"),
+        "onEnable did not create the runtime world:\n{}",
+        fs::read_to_string(&events).unwrap()
+    );
+    // 2. It reads a block, writes one, and reads the write back.
+    let check = step(&mut bot, "check");
+    assert_eq!(check, "gap7 check lookup=true same=true before=AIR");
+    // 3. The player enters the world (the client is sent a Respawn to drop the old world's
+    // chunks, and another to enter the new one) and the plugin spawns an entity there.
+    let enter = step(&mut bot, "enter");
+    assert_eq!(enter, "gap7 enter teleport=true");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while respawns.get() < 2 && Instant::now() < deadline {
+        pump(&mut bot);
+    }
+    assert!(
+        respawns.get() >= 2,
+        "entering sent {} Respawn packets",
+        respawns.get()
+    );
+    let spawn = step(&mut bot, "spawn");
+    assert!(spawn.starts_with("gap7 spawn "), "{spawn}");
+    settle(&mut bot, "entities", "cows=1");
+    // The player leaves (the same Respawn pair again).
+    let leave = step(&mut bot, "leave");
+    assert_eq!(leave, "gap7 leave teleport=true");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while respawns.get() < 4 && Instant::now() < deadline {
+        pump(&mut bot);
+    }
+    assert!(
+        respawns.get() >= 4,
+        "leaving sent {} Respawn packets in total",
+        respawns.get()
+    );
+    // 4. Unload, then reopen: the chunk (its written block and column height) is still there.
+    let unload = step(&mut bot, "unload");
+    assert_eq!(unload, "gap7 unload true gone=true");
+    let reopen = step(&mut bot, "reopen");
+    assert!(
+        reopen.starts_with("gap7 reopen block=GOLD_BLOCK top=200 "),
+        "{reopen}"
+    );
+    // A region only holds the entities of chunks somebody holds, so the cow comes back from the
+    // world's entity storage when the player walks back in.
+    let again = step(&mut bot, "enter");
+    assert_eq!(again, "gap7 enter teleport=true");
+    settle(&mut bot, "entities", "cows=1");
+}

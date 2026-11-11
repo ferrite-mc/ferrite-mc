@@ -2039,10 +2039,27 @@ async fn run(
                                 }
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::SpawnEntity { owner, center, kind, block, velocity, uuid }) => {
+                         Some(ferrite_plugin::PlayerCommand::SpawnEntity { world, owner, center, kind, block, velocity, uuid }) => {
+                            let target = if world == ferrite_plugin::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
                             let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
-                            if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                                worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid, owner); });
+                            if worlds.owner_world(target, chunk).is_some() {
+                                worlds.schedule_at_world_chunk(target, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid, owner); });
+                            }
+                        }
+                         Some(ferrite_plugin::PlayerCommand::SetBlock { world, position, material }) => {
+                            // Written straight into the world's chunk source, so it works whether or not a
+                            // region currently holds the chunk; viewers get the block update.
+                            if let (Some((target, _, source)), Some(state)) = (travel_target(world, &dimensions, &runtime_world_catalog), ferrite_data::blocks::default_state(&material)) {
+                                match source.set_block(position[0], position[1], position[2], u32::from(state)) {
+                                    Ok(()) => {
+                                        let update = ferrite_net::game::packet(&ferrite_protocol::packets::play::BlockUpdate {
+                                            location: ferrite_protocol::types::BlockPos::new(position[0], position[1], position[2]).pack(),
+                                            block_state: ferrite_protocol::VarInt(i32::from(state)),
+                                        });
+                                        region::broadcast_tracked_chunk(&tracking.lock().unwrap(), target, (position[0].div_euclid(16), position[2].div_euclid(16)), &update);
+                                    }
+                                    Err(error) => tracing::warn!(?position, %error, "plugin block write into a runtime world failed"),
+                                }
                             }
                         }
                          Some(ferrite_plugin::PlayerCommand::SpawnSnapshot { world, snbt, uuid, pos, yaw }) => {
@@ -2816,6 +2833,7 @@ fn route_plugin_command(
         | PlayerCommand::EntityOp { .. }
         | PlayerCommand::DropItem { .. }
         | PlayerCommand::SpawnEntity { .. }
+        | PlayerCommand::SetBlock { .. }
         | PlayerCommand::SpawnSnapshot { .. } => {}
         // The game loop sends display names to the global region before calling this.
         PlayerCommand::DisplayName { .. } => {

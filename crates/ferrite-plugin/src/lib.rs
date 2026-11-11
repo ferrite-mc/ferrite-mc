@@ -563,8 +563,10 @@ pub enum PlayerCommand {
     UpdateCommands {
         player: uuid::Uuid,
     },
-    /// `World#spawnEntity` / `spawnFallingBlock` on the default world.
+    /// `World#spawnEntity` / `spawnFallingBlock` in the world with this UUID: the default world
+    /// or a runtime world.
     SpawnEntity {
+        world: uuid::Uuid,
         /// The shooter of a projectile.
         owner: Option<uuid::Uuid>,
         center: [f64; 3],
@@ -576,6 +578,13 @@ pub enum PlayerCommand {
         velocity: [f64; 3],
         /// The id the plugin handle carries, so later calls find this entity again.
         uuid: uuid::Uuid,
+    },
+    /// `Block#setType` in a world the console cannot address (a runtime world): the default
+    /// state of `material`, a `minecraft:` block key, at `position`.
+    SetBlock {
+        world: uuid::Uuid,
+        position: [i32; 3],
+        material: String,
     },
     /// `World#ferriteSpawnSnapshot`: the entity an SNBT snapshot describes, placed in a runtime
     /// world at `pos` facing `yaw` under `uuid`.

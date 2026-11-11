@@ -145,20 +145,22 @@ pub fn entity_command(call: &HostCall) -> Option<PlayerCommand> {
 }
 
 pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
-    // A player shoots from their own eyes (`Player#launchProjectile`); everything else is a
-    // `World` call on the default world.
+    // A player shoots from their own eyes (`Player#launchProjectile`), into the default world;
+    // everything else is a `World` call on the world it names.
     let from_player = call.owner == "Player"
         && matches!(
             call.method.as_str(),
             "spawnArrow(Location,double,double,double,String)"
                 | "launchThrown(Location,EntityType,double,double,double,String,String)"
         );
-    if !from_player
-        && (call.owner != "World"
-            || Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id())
-    {
+    if !from_player && call.owner != "World" {
         return None;
     }
+    let world = if from_player {
+        ferrite_plugin::default_world_id()
+    } else {
+        Uuid::parse_str(&call.subject).ok()?
+    };
     let mut parts = call
         .args
         .first()?
@@ -217,6 +219,7 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         _ => return None,
     };
     Some(PlayerCommand::SpawnEntity {
+        world,
         owner,
         center,
         kind,
@@ -298,6 +301,28 @@ mod tests {
         assert!(entity_command(&attack).is_some());
     }
 
+    /// Regression: `World#spawnEntity` on a runtime world was refused because only the default
+    /// world's UUID was accepted; the command now carries the world it was called on.
+    #[test]
+    fn spawn_in_a_runtime_world_names_that_world() {
+        let runtime = Uuid::from_u128(0x5eed);
+        let at = format!(
+            "w{0}1{0}70{0}2{0}0{0}0",
+            ferrite_plugin::HOST_ITEM_SEPARATOR
+        );
+        let mut spawn = call(
+            "spawnEntity(Location,EntityType,String)",
+            &[&at, "COW", "00000000-0000-0000-0000-000000000009"],
+        );
+        spawn.subject = runtime.to_string();
+        assert!(matches!(
+            spawn_command(&spawn),
+            Some(PlayerCommand::SpawnEntity { world, .. }) if world == runtime
+        ));
+        spawn.subject = "not-a-uuid".into();
+        assert_eq!(spawn_command(&spawn), None);
+    }
+
     #[test]
     fn spawns_are_limited_to_modelled_entities() {
         let at = format!(
@@ -313,6 +338,7 @@ mod tests {
         assert_eq!(
             spawn("spawnEntity(Location,EntityType,String)", "COW"),
             Some(PlayerCommand::SpawnEntity {
+                world: ferrite_plugin::default_world_id(),
                 owner: None,
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:cow".into(),
@@ -329,6 +355,7 @@ mod tests {
         assert_eq!(
             spawn("spawnFallingBlock(Location,Material,String)", "SAND"),
             Some(PlayerCommand::SpawnEntity {
+                world: ferrite_plugin::default_world_id(),
                 owner: None,
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:falling_block".into(),
@@ -350,6 +377,7 @@ mod tests {
         assert_eq!(
             shot,
             Some(PlayerCommand::SpawnEntity {
+                world: ferrite_plugin::default_world_id(),
                 owner: None,
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:arrow".into(),
@@ -391,6 +419,7 @@ mod tests {
                 ],
             )),
             Some(PlayerCommand::SpawnEntity {
+                world: ferrite_plugin::default_world_id(),
                 owner: Some(Uuid::from_u128(0xaa)),
                 center: [1.0, 70.0, 2.0],
                 kind: "minecraft:small_fireball".into(),
