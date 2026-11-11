@@ -273,6 +273,14 @@ fn spawn_for_world(path: &std::path::Path) -> anyhow::Result<[i32; 3]> {
     }
 }
 
+/// Creates the plugins directory when it is missing so a fresh install has a place to drop jars.
+/// A failure is logged and ignored: the server still runs without plugins.
+fn ensure_plugins_dir(path: &std::path::Path) {
+    if let Err(error) = std::fs::create_dir_all(path) {
+        tracing::warn!(%error, path = %path.display(), "could not create the plugins directory");
+    }
+}
+
 /// Clients accept 2..=32 chunks. Clamp once so the wire, chunk streaming and the server
 /// snapshot plugins read all see the same effective distance.
 const MIN_VIEW_DISTANCE: u8 = 2;
@@ -535,9 +543,11 @@ async fn run_server(
         tracing::info!("server startup cancelled");
         return Ok(());
     }
+    let plugins_dir = config.plugins_dir.unwrap_or_else(|| "plugins".into());
+    ensure_plugins_dir(&plugins_dir);
     let plugin_bridge =
         ferrite_server::plugins::PluginBridge::start(ferrite_server::plugins::Settings {
-            directory: config.plugins_dir.unwrap_or_else(|| "plugins".into()),
+            directory: plugins_dir,
             bridge_jar: config.plugin_bridge.unwrap_or_else(|| {
                 "java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar".into()
             }),
@@ -748,6 +758,17 @@ fn favicon_data_uri(png: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_plugins_directory_is_created_and_an_existing_one_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let plugins = root.path().join("nested").join("plugins");
+        ensure_plugins_dir(&plugins);
+        assert!(plugins.is_dir());
+        std::fs::write(plugins.join("keep.jar"), b"x").unwrap();
+        ensure_plugins_dir(&plugins);
+        assert!(plugins.join("keep.jar").is_file());
+    }
 
     /// A PNG signature plus an IHDR chunk with the given dimensions (payload otherwise absent).
     fn png(width: u32, height: u32) -> Vec<u8> {
