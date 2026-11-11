@@ -438,9 +438,14 @@ public final class Bootstrap {
         if (resolved == null) return 0;
         var command = server.getPluginCommand(label);
         if (command == null) return 0;
-        synchronized (LEGACY_LOCK) {
-            if (!command.testPermission(resolved)) return 2;
-            return command.execute(resolved, label, args) ? 1 : 0;
+        COMMAND_LOCK.lock();
+        try {
+            synchronized (LEGACY_LOCK) {
+                if (!command.testPermission(resolved)) return 2;
+                return command.execute(resolved, label, args) ? 1 : 0;
+            }
+        } finally {
+            COMMAND_LOCK.unlock();
         }
     }
 }
