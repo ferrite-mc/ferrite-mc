@@ -164,14 +164,13 @@ public final class TestPlugin extends JavaPlugin implements Listener {
                     case "leave" -> appendEvent("gap7 leave teleport=" + player.teleport(new org.bukkit.Location(getServer().getWorld("world"), 0.5, 100, 0.5)));
                     case "spawn" -> appendEvent("gap7 spawn " + w.spawnEntity(new org.bukkit.Location(w, 5.5, 201, 5.5), org.bukkit.entity.EntityType.COW).getUniqueId());
                     case "entities" -> appendEvent("gap7 entities cows=" + w.getEntities().stream().filter(e -> e.getType() == org.bukkit.entity.EntityType.COW).count());
-                    // createWorld and unloadWorld wait for the game loop, which is the thread running this
-                    // command, so they run on the async scheduler as a Folia plugin's would.
-                    case "unload" -> getServer().getAsyncScheduler().runNow(this, task ->
-                        appendEvent("gap7 unload " + getServer().unloadWorld(w, true) + " gone=" + (getServer().getWorld("gap7_world") == null)));
-                    case "reopen" -> getServer().getAsyncScheduler().runNow(this, task -> { try {
+                    // createWorld and unloadWorld run synchronously on the command thread: the bridge releases
+                    // its lock while they wait for the game loop, so command ordering is the real one.
+                    case "unload" -> appendEvent("gap7 unload " + getServer().unloadWorld(w, true) + " gone=" + (getServer().getWorld("gap7_world") == null));
+                    case "reopen" -> { try {
                         var again = getServer().createWorld(new org.bukkit.WorldCreator("gap7_world").seed(1234L));
                         appendEvent("gap7 reopen block=" + again.getBlockAt(1, 200, 1).getType() + " top=" + again.getHighestBlockYAt(1, 1) + " cows=" + again.getEntities().stream().filter(e -> e.getType() == org.bukkit.entity.EntityType.COW).count());
-                    } catch (Throwable t) { appendEvent("gap7 reopen error " + t); } });
+                    } catch (Throwable t) { appendEvent("gap7 reopen error " + t); } }
                     default -> { return false; }
                 }
                 return true;
