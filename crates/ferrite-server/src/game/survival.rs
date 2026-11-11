@@ -62,8 +62,8 @@ pub enum DamageKind {
     Magic,
     /// `DamageTypes.WITHER`: the wither effect.
     Wither,
-    /// `DamageTypes.EXPLOSION`: reserved for the explosion crate (bypasses armor, not invulnerability).
-    #[allow(dead_code)]
+    /// `DamageTypes.EXPLOSION`: blasts and `World#createExplosion`. Bypasses armor, but not
+    /// invulnerability; plugins see it as `ENTITY_EXPLOSION` and may cancel or change it.
     Explosion,
     /// `DamageTypes.MOB_ATTACK`: melee damage from a hostile mob.
     Mob,
@@ -76,6 +76,11 @@ pub enum DamageKind {
 }
 
 impl DamageKind {
+    /// Whether armour points are ignored (explosions in this damage model).
+    pub fn bypasses_armor(self) -> bool {
+        matches!(self, Self::Explosion)
+    }
+
     /// `DamageTypeTags.BYPASSES_INVULNERABILITY`: void damage and `/kill`.
     pub fn bypasses_invulnerability(self) -> bool {
         matches!(self, Self::Void | Self::GenericKill)

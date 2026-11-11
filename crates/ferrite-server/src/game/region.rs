@@ -1300,7 +1300,7 @@ fn event_allows(
 }
 /// Applies a Bukkit `EntityDamageEvent` result. `None` cancels the hit; a failed event follows
 /// `plugin-event-errors` (Allow keeps the original damage, Deny cancels it).
-fn plugin_damage(
+pub(super) fn plugin_damage(
     plugins: Option<&dyn ferrite_plugin::ServerHooks>,
     policy: PluginEventPolicy,
     amount: f32,
@@ -1326,7 +1326,7 @@ fn plugin_damage(
     }
 }
 /// Bukkit's damage cause for the host's internal damage kind.
-fn damage_cause(kind: DamageKind) -> &'static str {
+pub(super) fn damage_cause(kind: DamageKind) -> &'static str {
     match kind {
         DamageKind::Fall => "FALL",
         DamageKind::Drown => "DROWNING",
@@ -8666,8 +8666,17 @@ impl Region {
             };
             let damage = super::explosion::damage(source, center, power, pos, bbox);
             if damage > 0.0 {
-                mob::hurt(&mut self.entities, key, damage, None);
-                if let Some(killer) = killer {
+                let hooks = self.players.values().find_map(|p| {
+                    p.plugins
+                        .clone()
+                        .map(|hooks| (hooks, p.plugin_event_errors))
+                });
+                let hooks = hooks
+                    .as_ref()
+                    .map(|(hooks, policy)| (hooks.as_ref(), *policy));
+                if super::explosion::hurt_mob(&mut self.entities, key, damage, hooks).is_some()
+                    && let Some(killer) = killer
+                {
                     mob::credit(&mut self.entities, key, killer);
                 }
             }

@@ -212,6 +212,30 @@ pub fn damage(
     (((impact * impact + impact) / 2.0 * 7.0 * radius) + 1.0) as f32
 }
 
+/// Applies explosion damage to a mob as `DamageKind::Explosion`: the plugin damage event fires
+/// first (a cancel or a zero result drops the hit, a changed amount replaces it), and armour is
+/// bypassed. Returns `None` when nothing was applied (cancelled, not a mob, or already dead).
+pub(super) fn hurt_mob(
+    store: &mut ferrite_entity::EntityStore,
+    key: ferrite_entity::EntityKey,
+    damage: f32,
+    hooks: Option<(&dyn ferrite_plugin::ServerHooks, super::PluginEventPolicy)>,
+) -> Option<ferrite_entity::mob::Hurt> {
+    use super::region::{damage_cause, plugin_damage};
+    use super::survival::DamageKind;
+    let kind = DamageKind::Explosion;
+    let mob = ferrite_entity::mob::state(store, key)?;
+    let name = mob.kind.name();
+    let uuid = store.data(key)?.uuid;
+    let damage = match hooks {
+        Some((plugins, policy)) => plugin_damage(Some(plugins), policy, damage, |plugins| {
+            plugins.entity_damaged(uuid, name, damage_cause(kind), f64::from(damage))
+        })?,
+        None => damage,
+    };
+    ferrite_entity::mob::hurt_with(store, key, damage, None, kind.bypasses_armor())
+}
+
 /// Vanilla `Explosion` entity push: `(1 - distanceSqr / radius²) * getSeenPercent()` along the
 /// direction from the blast center. Returns the velocity delta to add to the entity.
 pub fn impulse(
@@ -249,8 +273,12 @@ pub fn impulse(
 mod tests {
     use super::super::anvil::AnvilChunkSource;
     use super::*;
+    use ferrite_plugin::{
+        BlockPosition, CommandSender, InteractAction, PluginCommand, PluginCommandResult,
+    };
     use ferrite_world::RuntimeRegistry;
     use std::collections::HashMap;
+    use uuid::Uuid;
 
     struct Grid(HashMap<[i32; 3], u16>);
 
@@ -422,5 +450,171 @@ mod tests {
             drops.iter().any(|stack| stack.item_id == dirt_id),
             "{drops:?}"
         );
+    }
+
+    /// A plugin bridge that records `EntityDamageEvent`s and optionally rewrites the damage.
+    struct Scripted {
+        reply: Option<f64>,
+        seen: std::sync::Mutex<Vec<(Uuid, String, String, f64)>>,
+    }
+    impl Scripted {
+        fn new(reply: Option<f64>) -> Self {
+            Self {
+                reply,
+                seen: Default::default(),
+            }
+        }
+    }
+    impl ferrite_plugin::ServerHooks for Scripted {
+        fn player_joined(&self, _: Uuid, _: &str) -> Result<(), ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn player_left(&self, _: Uuid, _: &str) -> Result<(), ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn chat(&self, _: Uuid, _: &str, _: &str) -> Result<Option<String>, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn player_moved(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &ferrite_plugin::PlayerMove,
+        ) -> Result<bool, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn player_interacted(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: InteractAction,
+            _: BlockPosition,
+            _: u8,
+            _: &str,
+        ) -> Result<bool, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn block_broken(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: BlockPosition,
+            _: &str,
+        ) -> Result<bool, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn block_placed(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: BlockPosition,
+            _: u8,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn player_command(&self, _: Uuid, _: &str, _: &str) -> Result<bool, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn plugin_commands(&self) -> Result<Vec<PluginCommand>, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn run_plugin_command(
+            &self,
+            _: CommandSender,
+            _: &str,
+        ) -> Result<PluginCommandResult, ferrite_plugin::Error> {
+            Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn entity_damaged(
+            &self,
+            id: Uuid,
+            name: &str,
+            cause: &str,
+            amount: f64,
+        ) -> Result<f64, ferrite_plugin::Error> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((id, name.to_owned(), cause.to_owned(), amount));
+            Ok(self.reply.unwrap_or(amount))
+        }
+    }
+
+    fn armored_cow(store: &mut ferrite_entity::EntityStore) -> ferrite_entity::EntityKey {
+        let mut rng = Rng::default();
+        let key = store.insert(ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Cow,
+            Vec3::new(0.5, 1.0, 0.5),
+            &mut rng,
+        ));
+        ferrite_entity::mob::state_mut(store, key)
+            .unwrap()
+            .armor_points = 20.0;
+        key
+    }
+
+    fn health(store: &ferrite_entity::EntityStore, key: ferrite_entity::EntityKey) -> f32 {
+        ferrite_entity::mob::state(store, key).unwrap().health
+    }
+
+    #[test]
+    fn explosion_damage_bypasses_mob_armor() {
+        let mut store = ferrite_entity::EntityStore::default();
+        let key = armored_cow(&mut store);
+        let before = health(&store, key);
+        hurt_mob(&mut store, key, 6.0, None).expect("the hit lands");
+        // Armour 20 would cut a 6-point hit to 1.2; the explosion type ignores it.
+        assert_eq!(before - health(&store, key), 6.0);
+    }
+
+    #[test]
+    fn plugin_sees_explosion_cause_and_can_change_or_cancel_the_hit() {
+        use super::super::PluginEventPolicy::Allow;
+        let mut store = ferrite_entity::EntityStore::default();
+        let key = armored_cow(&mut store);
+        let uuid = store.data(key).unwrap().uuid;
+        let before = health(&store, key);
+
+        let cancel = Scripted::new(Some(0.0));
+        assert!(hurt_mob(&mut store, key, 6.0, Some((&cancel, Allow))).is_none());
+        assert_eq!(
+            health(&store, key),
+            before,
+            "a cancelled event deals nothing"
+        );
+        assert_eq!(
+            cancel.seen.lock().unwrap()[0],
+            (
+                uuid,
+                "minecraft:cow".to_owned(),
+                "ENTITY_EXPLOSION".to_owned(),
+                6.0
+            )
+        );
+
+        let halve = Scripted::new(Some(2.0));
+        hurt_mob(&mut store, key, 6.0, Some((&halve, Allow))).expect("modified hit lands");
+        assert_eq!(
+            before - health(&store, key),
+            2.0,
+            "the modified amount is used"
+        );
+    }
+
+    #[test]
+    fn explosion_kind_bypasses_armor_but_not_invulnerability() {
+        use super::super::survival::{DamageKind, Survival};
+        assert!(DamageKind::Explosion.bypasses_armor());
+        assert!(!DamageKind::Generic.bypasses_armor());
+        assert!(!DamageKind::Explosion.bypasses_invulnerability());
+        let mut survival = Survival::default();
+        assert!(survival.damage(DamageKind::Explosion, 4.0));
+        assert!(
+            !survival.damage(DamageKind::Explosion, 4.0),
+            "the invulnerability window still protects"
+        );
+        assert_eq!(survival.health, 16.0);
     }
 }
