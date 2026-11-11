@@ -1,6 +1,8 @@
 //! World reads that take a heightmap or a light query beyond the native block/biome calls:
 //! `World#getHighestBlockYAt(x, z, HeightMap)` and `Block#getLightLevel`. They work for every
 //! world the live view knows, runtime worlds included, and read the chunk's stored data.
+//! Chunk state (`isChunkLoaded`, `isChunkGenerated`, `loadChunk`) is answered here for every
+//! world except the default one, whose loaded set `chunks` tracks.
 
 use ferrite_plugin::{HOST_NULL, Heightmap, HostCall};
 
@@ -17,6 +19,13 @@ fn answer_with_view(
         return None;
     }
     let world = uuid::Uuid::parse_str(&call.subject).ok();
+    let chunk_call = matches!(
+        call.method.as_str(),
+        "isChunkLoaded(int,int)" | "isChunkGenerated(int,int)" | "loadChunk(int,int)"
+    );
+    if chunk_call && world == Some(ferrite_plugin::default_world_id()) {
+        return None;
+    }
     let reply = match (call.method.as_str(), call.args.as_slice()) {
         ("getHighestBlockYAt(int,int,HeightMap)", [x, z, kind]) => (|| {
             let kind = Heightmap::from_bukkit(kind)?;
@@ -28,6 +37,21 @@ fn answer_with_view(
             view?
                 .light_level(world?, x.parse().ok()?, y.parse().ok()?, z.parse().ok()?)
                 .map(|level| level.to_string())
+        })(),
+        ("isChunkLoaded(int,int)", [x, z]) => (|| {
+            view?
+                .chunk_loaded(world?, x.parse().ok()?, z.parse().ok()?)
+                .map(|state| state.to_string())
+        })(),
+        ("isChunkGenerated(int,int)", [x, z]) => (|| {
+            view?
+                .chunk_generated(world?, x.parse().ok()?, z.parse().ok()?)
+                .map(|state| state.to_string())
+        })(),
+        ("loadChunk(int,int)", [x, z]) => (|| {
+            view?
+                .load_chunk(world?, x.parse().ok()?, z.parse().ok()?)
+                .map(|state| state.to_string())
         })(),
         _ => return None,
     };
@@ -155,7 +179,7 @@ mod tests {
             &["0", "0", "MOTION_BLOCKING"],
         );
         assert_eq!(answer_with_view(&no_view, None), Some(null));
-        let other = call(world, "isChunkLoaded(int,int)", &["0", "0"]);
+        let other = call(world, "refreshChunk(int,int)", &["0", "0"]);
         assert_eq!(answer_with_view(&other, None), None);
     }
 
@@ -236,6 +260,102 @@ mod tests {
             answer_with_view(&light, Some(&*view)).as_deref(),
             Some("15")
         );
+    }
+
+    fn chunk_state(
+        view: &dyn ferrite_plugin::WorldView,
+        world: Uuid,
+        method: &str,
+        x: i32,
+        z: i32,
+    ) -> String {
+        answer_with_view(
+            &call(world, method, &[&x.to_string(), &z.to_string()]),
+            Some(view),
+        )
+        .expect("a chunk state call")
+    }
+
+    #[tokio::test]
+    async fn is_chunk_generated_is_false_until_the_chunk_exists() {
+        let world = Uuid::from_u128(0x7b);
+        let source = AnvilChunkSource::new_memory_dimension(None, Dimension::Overworld);
+        let view = crate::plugins::world_view_for_sources([(world, Arc::clone(&source))]);
+        let generated = |x, z| chunk_state(&*view, world, "isChunkGenerated(int,int)", x, z);
+        assert_eq!(generated(40, -40), "false", "nothing has created it");
+        // Asking never creates the chunk.
+        assert_eq!(generated(40, -40), "false");
+        assert!(!source.chunk_resident(40, -40));
+        assert_eq!(
+            chunk_state(&*view, world, "loadChunk(int,int)", 40, -40),
+            "true"
+        );
+        assert_eq!(generated(40, -40), "true");
+        assert_eq!(generated(41, -40), "false", "a neighbour is still missing");
+    }
+
+    #[tokio::test]
+    async fn load_chunk_makes_it_loaded_and_its_blocks_readable() {
+        let world = Uuid::from_u128(0x7c);
+        let source = AnvilChunkSource::new_memory_dimension(None, Dimension::Overworld);
+        let view = crate::plugins::world_view_for_sources([(world, Arc::clone(&source))]);
+        assert_eq!(
+            chunk_state(&*view, world, "isChunkLoaded(int,int)", 7, 9),
+            "false"
+        );
+        assert_eq!(
+            chunk_state(&*view, world, "loadChunk(int,int)", 7, 9),
+            "true"
+        );
+        assert_eq!(
+            chunk_state(&*view, world, "isChunkLoaded(int,int)", 7, 9),
+            "true"
+        );
+        assert!(
+            source.block(7 * 16 + 1, 64, 9 * 16 + 1).is_some(),
+            "the block is readable without a further load"
+        );
+        assert_eq!(
+            view.block(world, 7 * 16 + 1, 64, 9 * 16 + 1).as_deref(),
+            Some("minecraft:grass_block[snowy=false]")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_that_was_never_loaded_is_not_loaded() {
+        let world = Uuid::from_u128(0x7d);
+        let source = AnvilChunkSource::new_memory_dimension(None, Dimension::Overworld);
+        assert!(source.ensure_chunk_loaded(0, 0, LOAD));
+        let view = crate::plugins::world_view_for_sources([(world, source)]);
+        assert_eq!(
+            chunk_state(&*view, world, "isChunkLoaded(int,int)", 0, 0),
+            "true"
+        );
+        assert_eq!(
+            chunk_state(&*view, world, "isChunkLoaded(int,int)", 1, 0),
+            "false"
+        );
+        assert_eq!(
+            chunk_state(&*view, world, "isChunkLoaded(int,int)", -5, 12),
+            "false"
+        );
+        // Unknown world and bad numbers answer null; the default world is left to `chunks`.
+        let unknown = call(Uuid::from_u128(0x7e), "isChunkLoaded(int,int)", &["0", "0"]);
+        assert_eq!(
+            answer_with_view(&unknown, Some(&*view)).as_deref(),
+            Some(HOST_NULL)
+        );
+        let bad = call(world, "isChunkLoaded(int,int)", &["x", "0"]);
+        assert_eq!(
+            answer_with_view(&bad, Some(&*view)).as_deref(),
+            Some(HOST_NULL)
+        );
+        let default = call(
+            ferrite_plugin::default_world_id(),
+            "isChunkLoaded(int,int)",
+            &["0", "0"],
+        );
+        assert_eq!(answer_with_view(&default, Some(&*view)), None);
     }
 
     fn vanilla_root() -> Option<std::path::PathBuf> {

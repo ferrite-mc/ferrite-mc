@@ -191,6 +191,21 @@ pub trait WorldView: Send + Sync {
     fn light_level(&self, _world: uuid::Uuid, _x: i32, _y: i32, _z: i32) -> Option<u8> {
         None
     }
+    /// Whether chunk `(x, z)` of a runtime world is resident right now (`World#isChunkLoaded`).
+    /// `None` for a world the view does not know.
+    fn chunk_loaded(&self, _world: uuid::Uuid, _x: i32, _z: i32) -> Option<bool> {
+        None
+    }
+    /// Whether chunk `(x, z)` of a runtime world exists: resident or saved on disk
+    /// (`World#isChunkGenerated`). Never creates the chunk. `None` for an unknown world.
+    fn chunk_generated(&self, _world: uuid::Uuid, _x: i32, _z: i32) -> Option<bool> {
+        None
+    }
+    /// Loads chunk `(x, z)` of a runtime world, generating it when it does not exist
+    /// (`World#loadChunk`). `Some(true)` once it is readable; `None` for an unknown world.
+    fn load_chunk(&self, _world: uuid::Uuid, _x: i32, _z: i32) -> Option<bool> {
+        None
+    }
     /// The block entities inside the box `min..=max` of the loaded chunks, each as its position
     /// and binary NBT (a named root compound). `Ok` with an empty vector means the world and
     /// every chunk in the box are loaded but the box has no block entities; an error means the
