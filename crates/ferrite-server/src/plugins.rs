@@ -3,6 +3,7 @@ mod appearance;
 mod blasts;
 mod blockdata;
 mod blocks;
+mod broadcast;
 pub mod chunks;
 mod climate;
 mod cooldown;
@@ -355,6 +356,15 @@ impl PluginBridge {
                             {
                                 players(command);
                                 return Some("true".to_owned());
+                            }
+                            if let Some(players) = &players {
+                                let commands = broadcast::broadcast_commands(call);
+                                if !commands.is_empty() {
+                                    for command in commands {
+                                        players(command);
+                                    }
+                                    return Some(String::new());
+                                }
                             }
                             if let (Some(players), Some(command)) =
                                 (&players, network::network_command(call))
