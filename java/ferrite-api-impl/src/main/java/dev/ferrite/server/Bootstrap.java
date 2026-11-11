@@ -1,6 +1,7 @@
 package dev.ferrite.server;
 public final class Bootstrap {
     static final Object LEGACY_LOCK = new Object();
+    private static final java.util.concurrent.locks.ReentrantLock COMMAND_LOCK = new java.util.concurrent.locks.ReentrantLock();
     /**
      * Runs a host call that waits on the game loop. The loop's tick takes {@link #LEGACY_LOCK}, so a thread
      * holding it (a plugin command) would deadlock the loop it waits on: release it for the duration.
@@ -107,7 +108,12 @@ public final class Bootstrap {
             try { resolved = server.getPlayer(java.util.UUID.fromString(sender)); }
             catch (IllegalArgumentException | NullPointerException e) { return false; }
         }
-        synchronized (LEGACY_LOCK) { return resolved != null && server.dispatchCommand(resolved, line); }
+        COMMAND_LOCK.lock();
+        try {
+            synchronized (LEGACY_LOCK) { return resolved != null && server.dispatchCommand(resolved, line); }
+        } finally {
+            COMMAND_LOCK.unlock();
+        }
     }
     public static void tick() { synchronized (LEGACY_LOCK) { server.scheduler.tick(); Native.tickFallback(); } }
     public static void runGlobalTask(long id) { synchronized (LEGACY_LOCK) { server.scheduler.executeId(id); } }

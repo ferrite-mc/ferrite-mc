@@ -31,7 +31,6 @@ public class FerriteServer extends ServerStubs {
     @Override public boolean getOnlineMode() { return settings.onlineMode(); }
     @Override public boolean hasWhitelist() { return whitelistEnabled; }
     private final java.util.concurrent.ConcurrentMap<java.util.UUID, org.bukkit.World> worlds = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Object worldLifecycleLock = new Object();
     public void registerWorld(org.bukkit.World world) { worlds.put(world.getUID(), world); }
     public void unregisterWorld(java.util.UUID id) { worlds.remove(id); }
     @Override public java.util.List<org.bukkit.World> getWorlds() { return java.util.List.copyOf(worlds.values()); }
@@ -544,7 +543,6 @@ public class FerriteServer extends ServerStubs {
         for (var player : players.values()) player.sendPluginMessage(source, channel, message);
     }
     @Override public org.bukkit.World createWorld(org.bukkit.WorldCreator creator) {
-        synchronized (worldLifecycleLock) {
         java.util.Objects.requireNonNull(creator, "creator");
         var existing = getWorld(creator.name());
         if (existing == null) existing = getWorld(creator.key());
@@ -573,11 +571,9 @@ public class FerriteServer extends ServerStubs {
         registerWorld(world);
         synchronized (Bootstrap.LEGACY_LOCK) { plugins.callEvent(new org.bukkit.event.world.WorldLoadEvent(world)); }
         return world;
-        }
     }
     @Override public boolean unloadWorld(String name, boolean save) { var world = getWorld(name); return world != null && unloadWorld(world, save); }
     @Override public boolean unloadWorld(org.bukkit.World world, boolean save) {
-        synchronized (worldLifecycleLock) {
         java.util.Objects.requireNonNull(world, "world");
         if (getWorld(world.getUID()) != world || getWorld("world") == world) return false;
         synchronized (Bootstrap.LEGACY_LOCK) {
@@ -589,7 +585,6 @@ public class FerriteServer extends ServerStubs {
         if (!Boolean.TRUE.equals(reply)) return false;
         unregisterWorld(world.getUID());
         return true;
-        }
     }
     @Override public void allowPausing(org.bukkit.plugin.Plugin plugin, boolean value) { java.util.Objects.requireNonNull(plugin, "plugin"); }
     @Override public org.bukkit.util.CachedServerIcon getServerIcon() { return null; }
