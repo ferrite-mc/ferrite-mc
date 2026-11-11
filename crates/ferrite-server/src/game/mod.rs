@@ -183,6 +183,52 @@ mod tests {
     }
 
     #[test]
+    fn summon_from_a_runtime_world_player_lands_in_that_world() {
+        let (worlds, runtime) = two_world_fixture();
+        let vanilla = WorldId::Vanilla(Dimension::Overworld);
+        let chunk = ChunkPos(0, 0);
+        let mut holds = HashMap::new();
+        add_holds(&worlds, &mut holds, None, vanilla, [chunk]);
+        add_holds(&worlds, &mut holds, None, runtime, [chunk]);
+        let player = Uuid::from_u128(5);
+        let player_worlds = HashMap::from([(player, runtime)]);
+        // The player's dimension is Overworld (runtime worlds reuse vanilla rules).
+        assert!(summon_for_player(
+            &worlds,
+            &player_worlds,
+            player,
+            Dimension::Overworld,
+            ferrite_entity::mob::MobKind::Cow,
+            [8.5, 64.0, 8.5],
+            false,
+        ));
+        assert_eq!(in_world(&worlds, runtime, chunk), 1);
+        assert_eq!(in_world(&worlds, vanilla, chunk), 0);
+        worlds.shutdown();
+    }
+
+    #[test]
+    fn plugin_world_id_follows_the_players_world() {
+        let id = Uuid::from_u128(77);
+        let runtime = WorldId::Runtime(id);
+        assert_eq!(plugin_world_id(runtime), id);
+        assert_eq!(
+            plugin_world_id(WorldId::Vanilla(Dimension::Overworld)),
+            ferrite_plugin::default_world_id()
+        );
+        let player = Uuid::from_u128(5);
+        let tracked = HashMap::from([(player, runtime)]);
+        assert_eq!(
+            player_world(&tracked, player, Dimension::Overworld),
+            runtime
+        );
+        assert_eq!(
+            player_world(&HashMap::new(), player, Dimension::Nether),
+            WorldId::Vanilla(Dimension::Nether)
+        );
+    }
+
+    #[test]
     fn holds_and_entities_are_keyed_per_world_across_travel() {
         let (worlds, runtime) = two_world_fixture();
         let vanilla = WorldId::Vanilla(Dimension::Overworld);
@@ -737,6 +783,47 @@ impl From<Dimension> for WorldId {
     fn from(dimension: Dimension) -> Self {
         Self::Vanilla(dimension)
     }
+}
+
+/// The world a player is in now, falling back to the vanilla dimension for players not yet tracked.
+fn player_world(
+    player_worlds: &HashMap<Uuid, WorldId>,
+    uuid: Uuid,
+    fallback: Dimension,
+) -> WorldId {
+    player_worlds
+        .get(&uuid)
+        .copied()
+        .unwrap_or(WorldId::Vanilla(fallback))
+}
+
+/// The world id plugins see for one world: runtime worlds keep their UUID, vanilla maps to the default world.
+fn plugin_world_id(world: WorldId) -> Uuid {
+    match world {
+        WorldId::Runtime(id) => id,
+        WorldId::Vanilla(_) => ferrite_plugin::default_world_id(),
+    }
+}
+
+/// `/summon` from a player: spawns in the world the player stands in. False when the chunk is not loaded.
+fn summon_for_player(
+    worlds: &Worlds,
+    player_worlds: &HashMap<Uuid, WorldId>,
+    uuid: Uuid,
+    fallback: Dimension,
+    kind: ferrite_entity::mob::MobKind,
+    pos: [f64; 3],
+    no_ai: bool,
+) -> bool {
+    let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    let world = player_world(player_worlds, uuid, fallback);
+    if worlds.owner_world(world, chunk).is_none() {
+        return false;
+    }
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
+        region.summon(kind, pos, no_ai);
+    });
+    true
 }
 #[derive(Debug, Clone)]
 pub struct Operator {
@@ -1786,10 +1873,7 @@ async fn run(
                               }
                           }
                           commands::Action::Summon { kind, pos, no_ai } => {
-                              let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                              let dimension = runtime.dimension;
-                              if worlds.owner(dimension, chunk).is_some() {
-                                  worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon(kind, pos, no_ai); });
+                              if summon_for_player(&worlds, &player_worlds, uuid, runtime.dimension, kind, pos, no_ai) {
                                   chat(outbound, &format!("Summoned new {}", kind.display_name()));
                               } else {
                                   chat(outbound, "That position is not loaded");
@@ -1996,7 +2080,7 @@ async fn run(
                     crate::plugins::facts::set_on_ground(uuid, ground);
                     command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
                     if let Some(plugins) = &settings.plugins {
-                      let location = ferrite_plugin::PlayerLocation { world: ferrite_plugin::default_world_id(), x: pos[0], y: pos[1], z: pos[2], yaw, pitch };
+                      let location = ferrite_plugin::PlayerLocation { world: plugin_world_id(player_world(&player_worlds, uuid, Dimension::Overworld)), x: pos[0], y: pos[1], z: pos[2], yaw, pitch };
                       if let Err(error) = plugins.update_player_location(uuid, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
                     }
                     worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
