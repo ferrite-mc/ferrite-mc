@@ -124,6 +124,24 @@ pub fn save(world: &Path, chunk: (i32, i32), records: &[EntityRecord]) -> std::i
     std::fs::rename(temp, path)
 }
 
+/// Every chunk of `world` that has an entity sidecar on disk, in coordinate order. A missing
+/// directory or an unrelated file yields nothing for that entry.
+pub fn saved_chunks(world: &Path) -> Vec<(i32, i32)> {
+    let Ok(entries) = std::fs::read_dir(world.join(DIRECTORY)) else {
+        return Vec::new();
+    };
+    let mut chunks: Vec<_> = entries
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            let rest = name.strip_prefix("c.")?.strip_suffix(".nbt")?;
+            let (x, z) = rest.split_once('.')?;
+            Some((x.parse().ok()?, z.parse().ok()?))
+        })
+        .collect();
+    chunks.sort_unstable();
+    chunks
+}
+
 /// Reads one chunk's entities. A missing, unreadable or corrupt file yields no entities (and a
 /// warning) instead of failing the chunk load.
 pub fn load(world: &Path, chunk: (i32, i32)) -> Vec<EntityRecord> {
@@ -799,6 +817,25 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saved_chunks_lists_only_entity_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(saved_chunks(dir.path()).is_empty(), "no directory yet");
+        let folder = dir.path().join(DIRECTORY);
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in [
+            "c.3.-2.nbt",
+            "c.-1.0.nbt",
+            "c.1.nbt",
+            "c.x.1.nbt",
+            "notes.txt",
+            "c.4.4.nbt.tmp",
+        ] {
+            std::fs::write(folder.join(name), b"").unwrap();
+        }
+        assert_eq!(saved_chunks(dir.path()), vec![(-1, 0), (3, -2)]);
+    }
+
     use super::*;
     use ferrite_entity::Rng;
     use ferrite_entity::arrow;

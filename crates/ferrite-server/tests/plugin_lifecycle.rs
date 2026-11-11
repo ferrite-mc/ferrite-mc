@@ -1538,8 +1538,8 @@ fn runtime_world_gap7_create_edit_enter_leave_unload_reopen() {
         reopen.starts_with("gap7 reopen block=GOLD_BLOCK top=200 "),
         "{reopen}"
     );
-    // A region only holds the entities of chunks somebody holds, so the cow comes back from the
-    // world's entity storage when the player walks back in.
+    // The world loads its saved entities itself: the cow is back before any player walks in.
+    settle(&mut bot, "entities", "cows=1");
     let again = step(&mut bot, "enter");
     assert_eq!(again, "gap7 enter teleport=true");
     settle(&mut bot, "entities", "cows=1");
