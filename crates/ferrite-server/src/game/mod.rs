@@ -72,6 +72,7 @@ mod dispenser;
 pub(crate) mod drops;
 mod entity_index;
 mod entity_save;
+mod runtime_persist;
 pub use explosion::{CHARGED_CREEPER_POWER, CREEPER_POWER, TNT_POWER};
 mod explosion;
 mod feedback;
@@ -1160,6 +1161,26 @@ async fn run(
         }
     }
     let command_state = Arc::new(Mutex::new(initial_state));
+    let make_runtime_ctx = |descriptor: &RuntimeWorldDescriptor| TickContext {
+        signals: signal_tx.clone(),
+        tracking: tracking.clone(),
+        positions: positions.clone(),
+        source: Some(Arc::clone(&descriptor.source)),
+        dimension: descriptor.dimension,
+        world_id: WorldId::Runtime(descriptor.id),
+        spawn: [
+            descriptor.spawn[0] as f64 + 0.5,
+            descriptor.spawn[1] as f64,
+            descriptor.spawn[2] as f64 + 0.5,
+        ],
+        raining: false,
+        rules: Arc::clone(&game_rules),
+        command_entities: Arc::clone(&command_entities),
+        state: Arc::clone(&command_state),
+        trader_spawner: Default::default(),
+        profiler: Some(Arc::clone(&profiler)),
+        tree: Some(Arc::clone(&command_tree)),
+    };
     crate::plugins::worldinfo::register({
         let state = Arc::clone(&command_state);
         Arc::new(move || {
@@ -1560,22 +1581,7 @@ async fn run(
                               .open_persistent(&name, root, overworld.registry(), overworld.terrain(), dimension, spawn)
                               .map_err(|error| error.to_string())?;
                           let id = descriptor.id;
-                          let ctx = TickContext {
-                              signals: signal_tx.clone(),
-                              tracking: tracking.clone(),
-                              positions: positions.clone(),
-                              source: Some(Arc::clone(&descriptor.source)),
-                              dimension: descriptor.dimension,
-                              world_id: WorldId::Runtime(id),
-                              spawn: [descriptor.spawn[0] as f64 + 0.5, descriptor.spawn[1] as f64, descriptor.spawn[2] as f64 + 0.5],
-                              raining: false,
-                              rules: Arc::clone(&game_rules),
-                              command_entities: Arc::clone(&command_entities),
-                              state: Arc::clone(&command_state),
-                              trader_spawner: Default::default(),
-                              profiler: Some(Arc::clone(&profiler)),
-                              tree: Some(Arc::clone(&command_tree)),
-                          };
+                          let ctx = make_runtime_ctx(&descriptor);
                           if !worlds.insert_runtime_scheduler(id, ctx) {
                               let _ = runtime_world_catalog.unload(id);
                               return Err("runtime scheduler already exists for this world UUID".to_owned());
@@ -1592,22 +1598,10 @@ async fn run(
                       let _ = complete.send(result);
                   },
                   GameMessage::UnloadRuntimeWorld{id,save,complete}=>{
-                      let result = async {
-                          let Some(descriptor) = runtime_world_catalog.get(id).cloned() else { return Ok(false) };
-                          if player_worlds.values().any(|world| *world == WorldId::Runtime(id)) {
-                              anyhow::bail!("cannot unload a runtime world while players are inside it");
-                          }
-                          let Some(mut stopped) = worlds.remove_runtime_world(id) else { return Ok(false) };
-                          if save {
-                              let root = descriptor.source.path().ok_or_else(|| anyhow::anyhow!("runtime world has no persistent path"))?;
-                              let entity_root = descriptor.dimension.storage_root(root);
-                              entity_save::save_regions(&entity_root, &mut stopped.regions)?;
-                              descriptor.source.flush_quiesced().await?;
-                          }
-                          runtime_world_catalog.unload(id);
-                          if let Some(view) = &settings.runtime_world_view { view.unregister_world(id); }
-                          Ok::<bool, anyhow::Error>(true)
-                      }.await.map_err(|error| error.to_string());
+                      let players_inside = player_worlds.values().any(|world| *world == WorldId::Runtime(id));
+                      let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, make_runtime_ctx, settings.runtime_world_view.as_ref())
+                          .await
+                          .map_err(|error| format!("{error:#}"));
                       let _ = complete.send(result);
                   },
                   GameMessage::SetPluginHooks{hooks,complete}=>{
@@ -1693,7 +1687,7 @@ async fn run(
                       }}
                       let _ = complete.send(result.map(|_| stop));
                   },
-                  GameMessage::Shutdown{complete}=>{let _=stop_tx.send(true);let (ack_tx,ack_rx)=oneshot::channel();worlds.schedule_global(move |g|{g.shutdown();let _=ack_tx.send(());});let _=ack_rx.await;let mut regions: Vec<Region> = worlds.shutdown().into_values().flat_map(|stopped| stopped.regions).collect(); for region in &mut regions { for player in region.players.values_mut() { player.save_on_exit(); } } while let Ok(signal) = signals.try_recv() { if let Signal::Transfer { mut player, .. } | Signal::ChangeDimension { mut player, .. } = signal { player.save_on_exit(); } }let entity_result = match &entity_world { Some(dir) => entity_save::save_regions(dir, &mut regions).map_err(|error| format!("failed to save entities during shutdown: {error:#}")), None => Ok(()) };let result = match (entity_result, &source) { (Err(error), _) => Err(error), (Ok(()), Some(source)) => source.flush_all().await.map_err(|error| format!("failed to save world chunks during shutdown: {error:#}")), (Ok(()), None) => Ok(()) }; let _=complete.send(result);break;}
+                  GameMessage::Shutdown{complete}=>{let _=stop_tx.send(true);let (ack_tx,ack_rx)=oneshot::channel();worlds.schedule_global(move |g|{g.shutdown();let _=ack_tx.send(());});let _=ack_rx.await;let mut stopped = worlds.shutdown(); for shutdown in stopped.values_mut() { for region in &mut shutdown.regions { for player in region.players.values_mut() { player.save_on_exit(); } } } while let Ok(signal) = signals.try_recv() { if let Signal::Transfer { mut player, .. } | Signal::ChangeDimension { mut player, .. } = signal { player.save_on_exit(); } }let mut result = runtime_persist::persist_shutdown(stopped, entity_world.as_deref(), &dimensions, &runtime_world_catalog).await; if let Some(source) = &source && !Arc::ptr_eq(source, dimensions.source(Dimension::Overworld)) && let Err(error) = source.flush_all().await { let error = format!("failed to save world chunks during shutdown: {error:#}"); result = Err(match result { Err(previous) => format!("{previous}; {error}"), Ok(()) => error }); } let _=complete.send(result);break;}
                  }},
                  _=autosave.tick(), if saving_enabled => {
                      if let Some(source) = &source && let Err(error) = source.flush_all().await {

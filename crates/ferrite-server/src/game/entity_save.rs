@@ -148,17 +148,35 @@ pub fn load(world: &Path, chunk: (i32, i32)) -> Vec<EntityRecord> {
 /// Writes every entity of every region, grouped per chunk, for shutdown. Regions are consumed by
 /// the scheduler shutdown, so this is called after the workers have stopped.
 pub fn save_regions(world: &Path, regions: &mut [super::region::Region]) -> std::io::Result<()> {
-    let mut chunks: std::collections::BTreeMap<(i32, i32), Vec<EntityRecord>> =
-        std::collections::BTreeMap::new();
+    save_chunks(world, &drain_regions(regions))
+}
+
+/// Entity records grouped by the chunk they stand in.
+pub type ChunkEntities = std::collections::BTreeMap<(i32, i32), Vec<EntityRecord>>;
+
+/// Removes every entity from `regions` and groups them by chunk. Callers that must be able to
+/// put the entities back when a later step fails keep the returned map.
+pub fn drain_regions(regions: &mut [super::region::Region]) -> ChunkEntities {
+    let mut chunks = ChunkEntities::new();
     for region in regions {
         for record in region.drain_entities() {
             chunks.entry(record.chunk()).or_default().push(record);
         }
     }
-    for (chunk, records) in chunks {
-        save(world, chunk, &records)?;
+    chunks
+}
+
+/// Writes every chunk's sidecar, attempting all of them even after a failure so one bad file
+/// does not strand the rest. Returns the first error.
+pub fn save_chunks(world: &Path, chunks: &ChunkEntities) -> std::io::Result<()> {
+    let mut first = None;
+    for (&chunk, records) in chunks {
+        if let Err(error) = save(world, chunk, records) {
+            tracing::error!(%error, ?chunk, "failed to save chunk entities");
+            first.get_or_insert(error);
+        }
     }
-    Ok(())
+    first.map_or(Ok(()), Err)
 }
 
 /// Serializes a chunk's entities into the sidecar root compound.
