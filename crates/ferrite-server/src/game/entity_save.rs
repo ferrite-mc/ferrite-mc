@@ -1082,7 +1082,11 @@ mod tests {
 
     #[test]
     fn new_projectile_kinds_keep_their_type_and_flight_age() {
-        for kind in [arrow::Kind::ExperienceBottle, arrow::Kind::WindCharge] {
+        for kind in [
+            arrow::Kind::ExperienceBottle,
+            arrow::Kind::WindCharge,
+            arrow::Kind::SplashPotion,
+        ] {
             let mut record = arrow::new_thrown(
                 kind,
                 Vec3::new(0.5, 64.0, 0.5),

@@ -29,7 +29,7 @@ pub struct Containers {
     /// Stacks the player dropped, spawned as item entities by the region this tick.
     pub thrown: Vec<ItemStack>,
     /// Snowballs, eggs and ender pearls the player threw, launched by the region this tick.
-    pub launched: Vec<ferrite_entity::arrow::Kind>,
+    pub launched: Vec<(ferrite_entity::arrow::Kind, Option<ItemStack>)>,
     /// The block the open menu belongs to, for vanilla `stillValid` and shared contents.
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.

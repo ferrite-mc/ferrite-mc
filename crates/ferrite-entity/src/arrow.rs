@@ -88,6 +88,8 @@ pub fn new_arrow(
 pub const THROWN_GRAVITY: f64 = 0.03;
 /// `ThrownExperienceBottle.getDefaultGravity`.
 pub const EXPERIENCE_BOTTLE_GRAVITY: f64 = 0.07;
+/// `ThrownPotion.getDefaultGravity`.
+pub const POTION_GRAVITY: f64 = 0.05;
 /// Box size of a thrown snowball, egg, ender pearl or bottle.
 pub const THROWN_SIZE: f64 = 0.25;
 /// `WindCharge` disappears after five seconds (`AbstractWindCharge.getLifetime`).
@@ -119,6 +121,8 @@ pub enum Kind {
     ExperienceBottle,
     /// `minecraft:wind_charge`: flies straight, then bursts and pushes nearby entities.
     WindCharge,
+    /// `minecraft:splash_potion`: arcs like a thrown item; the region bursts the potion where it lands.
+    SplashPotion,
 }
 
 impl Kind {
@@ -135,6 +139,7 @@ impl Kind {
             Self::LlamaSpit => "llama_spit",
             Self::ExperienceBottle => "experience_bottle",
             Self::WindCharge => "wind_charge",
+            Self::SplashPotion => "splash_potion",
         }
     }
 
@@ -148,6 +153,7 @@ impl Kind {
             "small_fireball" => Some(Self::SmallFireball),
             "experience_bottle" => Some(Self::ExperienceBottle),
             "wind_charge" => Some(Self::WindCharge),
+            "splash_potion" => Some(Self::SplashPotion),
             _ => None,
         }
     }
@@ -173,6 +179,7 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::LlamaSpit,
         Kind::ExperienceBottle,
         Kind::WindCharge,
+        Kind::SplashPotion,
     ]
     .into_iter()
     .find(|kind| kind.entity_type() == data.kind)
@@ -216,6 +223,8 @@ pub fn new_thrown(kind: Kind, pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> Enti
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Landing {
     pub kind: Kind,
+    /// The projectile entity's uuid, for state the region keeps beside it (a potion's contents).
+    pub uuid: Uuid,
     pub owner: Option<Uuid>,
     pub pos: Vec3,
 }
@@ -236,6 +245,7 @@ pub fn tick_thrown(
         let (Some(mut state), Some(kind)) = (data.arrow, kind_of(data)) else {
             continue;
         };
+        let data_uuid = data.uuid;
         if matches!(kind, Kind::Arrow | Kind::Trident | Kind::LlamaSpit)
             || store
                 .flags(key)
@@ -261,6 +271,12 @@ pub fn tick_thrown(
                 vel.x *= DRAG;
                 vel.z *= DRAG;
             }
+            Kind::SplashPotion => {
+                vel.y -= POTION_GRAVITY;
+                vel.x *= DRAG;
+                vel.y *= DRAG;
+                vel.z *= DRAG;
+            }
             Kind::ExperienceBottle => {
                 vel.y -= EXPERIENCE_BOTTLE_GRAVITY;
                 vel.x *= DRAG;
@@ -280,6 +296,7 @@ pub fn tick_thrown(
         let land = |store: &mut EntityStore, landings: &mut Vec<Landing>| {
             landings.push(Landing {
                 kind,
+                uuid: data_uuid,
                 owner: state.owner,
                 pos,
             });
@@ -536,6 +553,35 @@ mod tests {
         let landed = tick_thrown(&mut store, &world, &[]);
         assert_eq!(landed[0].kind, Kind::ExperienceBottle);
         assert!(store.flags(bottle).unwrap().has(Flags::REMOVED));
+    }
+
+    #[test]
+    fn a_splash_potion_arcs_with_potion_gravity_and_reports_its_uuid_on_landing() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let potion = store.insert(new_thrown(
+            Kind::SplashPotion,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 0.5),
+            Some(Uuid::from_u128(4)),
+        ));
+        let uuid = store.data(potion).unwrap().uuid;
+        assert_eq!(
+            Kind::thrown_from_name("minecraft:splash_potion"),
+            Some(Kind::SplashPotion)
+        );
+        assert_eq!(
+            kind_of(store.data(potion).unwrap()),
+            Some(Kind::SplashPotion)
+        );
+        tick_thrown(&mut store, &world, &[]);
+        let vel = store.vel(potion).unwrap();
+        assert!((vel.y + POTION_GRAVITY * DRAG).abs() < 1.0e-9);
+        store.set_vel(potion, Vec3::new(0.0, -8.0, 0.0));
+        let landed = tick_thrown(&mut store, &world, &[]);
+        assert_eq!(landed.len(), 1);
+        assert_eq!((landed[0].kind, landed[0].uuid), (Kind::SplashPotion, uuid));
+        assert_eq!(landed[0].owner, Some(Uuid::from_u128(4)));
     }
 
     #[test]

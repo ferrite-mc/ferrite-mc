@@ -416,6 +416,263 @@ mod tests {
             matches!(received.try_recv(), Ok(Signal::SaveCachedEntities { entities, .. }) if entities.len() == 1 && entities[0].data.uuid == uuid)
         );
     }
+    /// A persistent single-world fixture plus a handler that applies the world loop's entity
+    /// save and release signals, so reload races can be driven step by step.
+    fn persistent_fixture() -> (Worlds, WorldId, tempfile::TempDir) {
+        let make = || {
+            Scheduler::new(
+                Regionizer::<Region>::new(0, 1),
+                GlobalRegion::default(),
+                2,
+                |_| {},
+                |_| {},
+            )
+        };
+        let world = WorldId::Vanilla(Dimension::Overworld);
+        let worlds = Worlds {
+            schedulers: [(world, make())].into_iter().collect(),
+            scheduler_factory: Arc::new(move |_, _| make()),
+            transient_entities: Some(Arc::new(Mutex::new(HashMap::new()))),
+            persistent_entities: true,
+            tracking: Arc::new(Mutex::new(HashMap::new())),
+        };
+        (worlds, world, tempfile::tempdir().unwrap())
+    }
+
+    fn apply_signal(worlds: &Worlds, root: &std::path::Path, signal: Signal) {
+        match signal {
+            Signal::SaveCachedEntities {
+                world,
+                chunk,
+                entities,
+            } => {
+                entity_save::save(root, (chunk.0, chunk.1), &entities).unwrap();
+                if let Some(cache) = &worlds.transient_entities {
+                    let mut cache = cache.lock().unwrap();
+                    if cache
+                        .get(&(world, chunk))
+                        .is_some_and(|cached| Arc::ptr_eq(cached, &entities))
+                    {
+                        cache.remove(&(world, chunk));
+                    }
+                }
+            }
+            Signal::SaveEntities {
+                chunk, entities, ..
+            } => entity_save::save(root, (chunk.0, chunk.1), &entities).unwrap(),
+            Signal::FinishRelease { world, chunk, .. } => worlds.remove_chunk(world, chunk),
+            Signal::FinishReleaseBatch { world, chunks, .. } => worlds.remove_chunks(world, chunks),
+            _ => {}
+        }
+    }
+
+    fn drain_signals(
+        worlds: &Worlds,
+        root: &std::path::Path,
+        received: &mut mpsc::UnboundedReceiver<Signal>,
+        until_finish: bool,
+    ) {
+        loop {
+            let signal = if until_finish {
+                received
+                    .try_recv()
+                    .or_else(|_| {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        received.try_recv()
+                    })
+                    .ok()
+            } else {
+                received.try_recv().ok()
+            };
+            let Some(signal) = signal else {
+                if until_finish {
+                    continue;
+                }
+                break;
+            };
+            let finished = matches!(
+                signal,
+                Signal::FinishRelease { .. } | Signal::FinishReleaseBatch { .. }
+            );
+            apply_signal(worlds, root, signal);
+            if until_finish && finished {
+                break;
+            }
+        }
+    }
+
+    fn live_mobs(
+        worlds: &Worlds,
+        world: WorldId,
+        chunk: ChunkPos,
+    ) -> Vec<(Uuid, ferrite_math::Vec3, f32)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(world, chunk, move |region| {
+            let mut found = Vec::new();
+            for key in region.entities.keys().to_vec() {
+                let pos = region.entities.pos(key).unwrap();
+                let data = region.entities.data(key).unwrap();
+                if let Some(mob) = &data.mob {
+                    found.push((data.uuid, pos, mob.health));
+                }
+            }
+            let _ = tx.send(found);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    }
+
+    fn spawn_wounded_cow(
+        worlds: &Worlds,
+        world: WorldId,
+        chunk: ChunkPos,
+    ) -> (Uuid, ferrite_math::Vec3, f32) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(world, chunk, move |region| {
+            let mut rng = ferrite_entity::Rng::default();
+            let mut cow = ferrite_entity::mob::new_mob(
+                ferrite_entity::mob::MobKind::Cow,
+                ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+                &mut rng,
+            );
+            cow.data.mob.as_mut().unwrap().health = 3.5;
+            let _ = tx.send((cow.data.uuid, cow.pos, 3.5));
+            region.entities.insert(cow);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    }
+
+    #[test]
+    fn reload_before_the_entity_save_settles_keeps_the_same_entity() {
+        let (worlds, world, dir) = persistent_fixture();
+        let chunk = ChunkPos(0, 0);
+        let mut holds = HashMap::new();
+        let (signals, mut received) = mpsc::unbounded_channel();
+        add_holds(
+            &worlds,
+            &mut holds,
+            Some(dir.path().to_path_buf()),
+            world,
+            [chunk],
+        );
+        let expected = spawn_wounded_cow(&worlds, world, chunk);
+
+        // Leave and come straight back before the world loop handles any save signal.
+        release_holds(&worlds, &mut holds, &signals, world, [chunk]);
+        add_holds(
+            &worlds,
+            &mut holds,
+            Some(dir.path().to_path_buf()),
+            world,
+            [chunk],
+        );
+        assert_eq!(live_mobs(&worlds, world, chunk), vec![expected]);
+
+        // The late save and release signals must neither duplicate nor drop the entity.
+        drain_signals(&worlds, dir.path(), &mut received, true);
+        assert_eq!(live_mobs(&worlds, world, chunk), vec![expected]);
+        assert_eq!(worlds.scheduler_world(world).holder_count(chunk), 1);
+
+        // And a second, fully settled round trip still returns the same entity.
+        release_holds(&worlds, &mut holds, &signals, world, [chunk]);
+        drain_signals(&worlds, dir.path(), &mut received, true);
+        add_holds(
+            &worlds,
+            &mut holds,
+            Some(dir.path().to_path_buf()),
+            world,
+            [chunk],
+        );
+        assert_eq!(live_mobs(&worlds, world, chunk), vec![expected]);
+        worlds.shutdown();
+    }
+
+    #[test]
+    fn two_viewers_one_leaving_first_then_reentry_keeps_one_entity() {
+        let (worlds, world, dir) = persistent_fixture();
+        let chunk = ChunkPos(0, 0);
+        let root = Some(dir.path().to_path_buf());
+        let mut holds = HashMap::new();
+        let (signals, mut received) = mpsc::unbounded_channel();
+        add_holds(&worlds, &mut holds, root.clone(), world, [chunk]);
+        add_holds(&worlds, &mut holds, root.clone(), world, [chunk]);
+        let expected = spawn_wounded_cow(&worlds, world, chunk);
+
+        // The first viewer leaves; the second keeps the chunk and its cow loaded.
+        release_holds(&worlds, &mut holds, &signals, world, [chunk]);
+        drain_signals(&worlds, dir.path(), &mut received, false);
+        assert_eq!(live_mobs(&worlds, world, chunk), vec![expected]);
+
+        // The first viewer re-enters, then the second leaves: still one cow.
+        add_holds(&worlds, &mut holds, root.clone(), world, [chunk]);
+        release_holds(&worlds, &mut holds, &signals, world, [chunk]);
+        drain_signals(&worlds, dir.path(), &mut received, false);
+        assert_eq!(live_mobs(&worlds, world, chunk), vec![expected]);
+
+        // Last viewer leaves and one returns immediately: same uuid, position and health.
+        release_holds(&worlds, &mut holds, &signals, world, [chunk]);
+        add_holds(&worlds, &mut holds, root, world, [chunk]);
+        drain_signals(&worlds, dir.path(), &mut received, true);
+        assert_eq!(live_mobs(&worlds, world, chunk), vec![expected]);
+        worlds.shutdown();
+    }
+
+    #[test]
+    fn an_entity_handed_to_an_unheld_chunk_survives_until_the_chunk_loads() {
+        let (worlds, world, dir) = persistent_fixture();
+        let (home, away) = (ChunkPos(0, 0), ChunkPos(40, 0));
+        let root = Some(dir.path().to_path_buf());
+        let mut holds = HashMap::new();
+        let (signals, mut received) = mpsc::unbounded_channel();
+        add_holds(&worlds, &mut holds, root.clone(), world, [home]);
+        let mut rng = ferrite_entity::Rng::default();
+        let mut cow = ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Cow,
+            ferrite_math::Vec3::new(40.0 * 16.0 + 2.5, 64.0, 8.5),
+            &mut rng,
+        );
+        cow.data.mob.as_mut().unwrap().health = 4.5;
+        let expected = (cow.data.uuid, cow.pos, 4.5);
+        // The cow walked out of its region into a chunk nobody holds.
+        hand_off(worlds.scheduler_world(world), away, Box::new(cow));
+        release_holds(&worlds, &mut holds, &signals, world, [home]);
+        drain_signals(&worlds, dir.path(), &mut received, true);
+
+        add_holds(&worlds, &mut holds, root, world, [away]);
+        assert_eq!(live_mobs(&worlds, world, away), vec![expected]);
+        worlds.shutdown();
+    }
+
+    #[test]
+    fn a_blocked_cross_region_melee_knocks_the_attacking_mob_back() {
+        let (worlds, world, _dir) = persistent_fixture();
+        let chunk = ChunkPos(0, 0);
+        let mut holds = HashMap::new();
+        add_holds(&worlds, &mut holds, None, world, [chunk]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(world, chunk, move |region| {
+            let mut rng = ferrite_entity::Rng::default();
+            let zombie = ferrite_entity::mob::new_mob(
+                ferrite_entity::mob::MobKind::Zombie,
+                ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+                &mut rng,
+            );
+            let _ = tx.send(zombie.data.uuid);
+            region.entities.insert(zombie);
+        });
+        let attacker = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+        // The blocking player stands west of the zombie, in a region this one cannot reach.
+        route_mob_knockback(&worlds, world, attacker, [8.5, 64.0, 8.5], [6.5, 64.0, 8.5]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(world, chunk, move |region| {
+            let key = region.entities.keys()[0];
+            let _ = tx.send(region.entities.vel(key).unwrap());
+        });
+        let vel = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(vel.x > 0.3, "pushed away from the shield, got {vel:?}");
+        worlds.shutdown();
+    }
+
     #[test]
     fn movement_validation_rejects_large_and_nonfinite_moves() {
         assert!(valid_move([0.0, 65.0, 0.0], [5.0, 65.0, 0.0]));
@@ -2048,7 +2305,8 @@ async fn run(
                   Signal::Hold{world,chunk,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,world,chunk);},
                   Signal::HoldBatch{world,chunks,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,world,chunks);},
                   Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
-                  Signal::MobMelee{dimension,player,damage,from}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from});}},
+                  Signal::MobMelee{dimension,player,damage,from,attacker}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from,attacker});}},
+                  Signal::MobKnockback{world_id,attacker,at,source}=>route_mob_knockback(&worlds,world_id,attacker,at,source),
                   Signal::SaveEntities{world,chunk,entities}=>{if let Some(dir)=world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog) && let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}},
                   Signal::SaveCachedEntities{world,chunk,entities}=>{if let Some(dir)=world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog) {match entity_save::save(&dir,(chunk.0,chunk.1),&entities){Ok(())=>if let Some(cache)=&worlds.transient_entities{let mut cache=cache.lock().unwrap();if cache.get(&(world,chunk)).is_some_and(|cached| Arc::ptr_eq(cached,&entities)){cache.remove(&(world,chunk));}},Err(error)=>tracing::error!(%error,chunk=?chunk,"failed to save chunk entities")}}},
                   Signal::FinishRelease{world,chunk,flush}=>{worlds.remove_chunk(world,chunk);if flush&&let Some(source)=world_source(&dimensions,&runtime_world_catalog,world){tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
@@ -3136,6 +3394,25 @@ fn defer_release_many(
         (chunk, task)
     });
     worlds.schedule_at_chunks(world, tasks);
+}
+/// Sends a shield-blocked melee recoil to the region that owns the attacking mob.
+fn route_mob_knockback(
+    worlds: &Worlds,
+    world: WorldId,
+    attacker: Uuid,
+    at: [f64; 3],
+    source: [f64; 3],
+) {
+    if !worlds.schedulers.contains_key(&world) {
+        return;
+    }
+    let chunk = ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
+        region.knock_back_by_uuid(
+            attacker,
+            ferrite_math::Vec3::new(source[0], source[1], source[2]),
+        );
+    });
 }
 /// Hands an entity to the region owning `to`. A chunk nobody holds parks the entity in the
 /// scheduler until a region takes that chunk.
