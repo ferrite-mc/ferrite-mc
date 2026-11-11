@@ -1161,26 +1161,30 @@ async fn run(
         }
     }
     let command_state = Arc::new(Mutex::new(initial_state));
-    let make_runtime_ctx = |descriptor: &RuntimeWorldDescriptor| TickContext {
-        signals: signal_tx.clone(),
-        tracking: tracking.clone(),
-        positions: positions.clone(),
-        source: Some(Arc::clone(&descriptor.source)),
-        dimension: descriptor.dimension,
-        world_id: WorldId::Runtime(descriptor.id),
-        spawn: [
-            descriptor.spawn[0] as f64 + 0.5,
-            descriptor.spawn[1] as f64,
-            descriptor.spawn[2] as f64 + 0.5,
-        ],
-        raining: false,
-        rules: Arc::clone(&game_rules),
-        command_entities: Arc::clone(&command_entities),
-        state: Arc::clone(&command_state),
-        trader_spawner: Default::default(),
-        profiler: Some(Arc::clone(&profiler)),
-        tree: Some(Arc::clone(&command_tree)),
-    };
+    // The command tree is replaced when plugin hooks attach, so it is passed in per call rather
+    // than borrowed for the whole loop.
+    let make_runtime_ctx =
+        |descriptor: &RuntimeWorldDescriptor,
+         tree: &Arc<ferrite_command::CommandDispatcher<commands::Source>>| TickContext {
+            signals: signal_tx.clone(),
+            tracking: tracking.clone(),
+            positions: positions.clone(),
+            source: Some(Arc::clone(&descriptor.source)),
+            dimension: descriptor.dimension,
+            world_id: WorldId::Runtime(descriptor.id),
+            spawn: [
+                descriptor.spawn[0] as f64 + 0.5,
+                descriptor.spawn[1] as f64,
+                descriptor.spawn[2] as f64 + 0.5,
+            ],
+            raining: false,
+            rules: Arc::clone(&game_rules),
+            command_entities: Arc::clone(&command_entities),
+            state: Arc::clone(&command_state),
+            trader_spawner: Default::default(),
+            profiler: Some(Arc::clone(&profiler)),
+            tree: Some(Arc::clone(tree)),
+        };
     crate::plugins::worldinfo::register({
         let state = Arc::clone(&command_state);
         Arc::new(move || {
@@ -1581,7 +1585,7 @@ async fn run(
                               .open_persistent(&name, root, overworld.registry(), overworld.terrain(), dimension, spawn)
                               .map_err(|error| error.to_string())?;
                           let id = descriptor.id;
-                          let ctx = make_runtime_ctx(&descriptor);
+                          let ctx = make_runtime_ctx(&descriptor, &command_tree);
                           if !worlds.insert_runtime_scheduler(id, ctx) {
                               let _ = runtime_world_catalog.unload(id);
                               return Err("runtime scheduler already exists for this world UUID".to_owned());
@@ -1599,7 +1603,7 @@ async fn run(
                   },
                   GameMessage::UnloadRuntimeWorld{id,save,complete}=>{
                       let players_inside = player_worlds.values().any(|world| *world == WorldId::Runtime(id));
-                      let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, make_runtime_ctx, settings.runtime_world_view.as_ref())
+                      let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, |descriptor| make_runtime_ctx(descriptor, &command_tree), settings.runtime_world_view.as_ref())
                           .await
                           .map_err(|error| format!("{error:#}"));
                       let _ = complete.send(result);
