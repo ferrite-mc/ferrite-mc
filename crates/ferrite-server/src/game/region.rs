@@ -206,6 +206,16 @@ pub enum Command {
         yaw: f32,
         pitch: f32,
     },
+    /// Travel to a (possibly runtime) world. The sender resolves the target source, so the
+    /// owning region never has to look anything up in shared world state.
+    ChangeWorld {
+        world: super::WorldId,
+        dimension: super::Dimension,
+        source: Arc<super::anvil::AnvilChunkSource>,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    },
     World(super::commands_world::WorldCommand),
     Clear {
         target: Uuid,
@@ -334,7 +344,7 @@ pub enum Command {
     },
 }
 pub type Mailbox = Arc<Mutex<VecDeque<Command>>>;
-pub type ChunkObservers = HashMap<Uuid, (super::Dimension, HashSet<(i32, i32)>, OutboundSender)>;
+pub type ChunkObservers = HashMap<Uuid, (super::WorldId, HashSet<(i32, i32)>, OutboundSender)>;
 pub type Tracking = Arc<Mutex<ChunkObservers>>;
 
 /// How many world ticks a leash holder stays usable after its last sighting. Moving an entity
@@ -554,12 +564,13 @@ pub(super) fn worn_stack(
 
 pub(super) fn broadcast_tracked_chunk(
     players: &ChunkObservers,
-    dimension: super::Dimension,
+    world: impl Into<super::WorldId>,
     chunk: (i32, i32),
     update: &Outbound,
 ) {
-    for (player_dimension, loaded, outbound) in players.values() {
-        if *player_dimension == dimension && loaded.contains(&chunk) {
+    let world = world.into();
+    for (player_world, loaded, outbound) in players.values() {
+        if *player_world == world && loaded.contains(&chunk) {
             let _ = outbound.send(update.clone());
         }
     }
@@ -570,13 +581,13 @@ pub enum Signal {
         player: Box<Player>,
     },
     Hold {
-        dimension: super::Dimension,
+        world: super::WorldId,
         chunk: ChunkPos,
         add: bool,
     },
     /// Several chunk holders changed together, usually from one streamed chunk packet batch.
     HoldBatch {
-        dimension: super::Dimension,
+        world: super::WorldId,
         chunks: Vec<ChunkPos>,
         add: bool,
     },
@@ -613,12 +624,12 @@ pub enum Signal {
         positions: Vec<[i32; 3]>,
     },
     FinishRelease {
-        dimension: super::Dimension,
+        world: super::WorldId,
         chunk: ChunkPos,
         flush: bool,
     },
     FinishReleaseBatch {
-        dimension: super::Dimension,
+        world: super::WorldId,
         chunks: Vec<ChunkPos>,
         flush: bool,
     },
@@ -635,7 +646,7 @@ pub enum Signal {
         ground: bool,
     },
     Leave {
-        dimension: super::Dimension,
+        world: super::WorldId,
         uuid: Uuid,
         chunk: ChunkPos,
         held: Vec<ChunkPos>,
@@ -643,12 +654,12 @@ pub enum Signal {
     /// The entities a chunk held when its last holder released it, for the world loop to write
     /// to the chunk's sidecar before the chunk is unloaded.
     SaveEntities {
-        dimension: super::Dimension,
+        world: super::WorldId,
         chunk: ChunkPos,
         entities: Vec<EntityRecord>,
     },
     SaveCachedEntities {
-        dimension: super::Dimension,
+        world: super::WorldId,
         chunk: ChunkPos,
         entities: Arc<Vec<EntityRecord>>,
     },
@@ -1483,7 +1494,7 @@ impl Player {
     /// Sends the riptide spin flag to this player and the other viewers in its dimension.
     fn broadcast_spin(&self, spin: bool) {
         send(self, &spin_metadata(self.entity, spin));
-        broadcast_player_metadata(&self.tracking, self.dimension, self.uuid, self.entity, spin);
+        broadcast_player_metadata(&self.tracking, self.world_id, self.uuid, self.entity, spin);
     }
 
     /// Clears a riptide spin before the synced player state loses it.
@@ -1523,7 +1534,7 @@ impl Player {
         }
         if !released.is_empty() {
             let _ = self.signals.send(Signal::HoldBatch {
-                dimension: self.dimension,
+                world: self.world_id,
                 chunks: released,
                 add: false,
             });
@@ -1643,7 +1654,7 @@ impl Player {
         let held: Vec<_> = sent.iter().map(|&(x, z)| ChunkPos(x, z)).collect();
         if !held.is_empty() {
             let _ = self.signals.send(Signal::HoldBatch {
-                dimension: self.dimension,
+                world: self.world_id,
                 chunks: held,
                 add: true,
             });
@@ -1833,7 +1844,7 @@ impl Player {
                 location,
                 block_state: VarInt(state as i32),
             });
-            broadcast_tracked_chunk(&tracking, self.dimension, chunk, &update);
+            broadcast_tracked_chunk(&tracking, self.world_id, chunk, &update);
             let _ = self.signals.send(Signal::FluidChange {
                 dimension: self.dimension,
                 x: pos.x,
@@ -3375,7 +3386,7 @@ impl Player {
         crate::plugins::facts::clear_sent_chunks(self.uuid);
         for (x, z) in old_loaded {
             let _ = self.signals.send(Signal::Hold {
-                dimension: self.dimension,
+                world: self.world_id,
                 chunk: ChunkPos(x, z),
                 add: false,
             });
@@ -3483,6 +3494,28 @@ impl Player {
         yaw: f32,
         pitch: f32,
     ) {
+        let source = self.dimensions.source(dimension).clone();
+        self.change_world(
+            super::WorldId::Vanilla(dimension),
+            dimension,
+            source,
+            pos,
+            yaw,
+            pitch,
+        );
+    }
+
+    /// Moves the player to `world`, releasing every chunk it held in the old world and
+    /// re-pointing tracking before the new world's chunks are requested.
+    pub(crate) fn change_world(
+        &mut self,
+        world: super::WorldId,
+        dimension: super::Dimension,
+        source: Arc<super::anvil::AnvilChunkSource>,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    ) {
         self.stop_spin();
         if matches!(
             self.menus.open_at,
@@ -3490,25 +3523,25 @@ impl Player {
         ) {
             self.close_container();
         }
-        let old = self.dimension;
+        let old = self.world_id;
+        let old_dimension = self.dimension;
         let old_loaded = std::mem::take(&mut self.loaded);
         crate::plugins::facts::clear_sent_chunks(self.uuid);
         for (x, z) in old_loaded {
             let _ = self.signals.send(Signal::Hold {
-                dimension: old,
+                world: old,
                 chunk: ChunkPos(x, z),
                 add: false,
             });
         }
-        if let Some((tracked_dimension, loaded, _)) =
-            self.tracking.lock().unwrap().get_mut(&self.uuid)
+        if let Some((tracked_world, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid)
         {
             loaded.clear();
-            *tracked_dimension = dimension;
+            *tracked_world = world;
         }
         self.dimension = dimension;
-        self.world_id = crate::game::WorldId::Vanilla(dimension);
-        self.source = Some(self.dimensions.source(dimension).clone());
+        self.world_id = world;
+        self.source = Some(source);
         self.dimension_type = dimension.dimension_type_id();
         self.pos = pos;
         self.yaw = yaw;
@@ -3525,6 +3558,31 @@ impl Player {
         self.portal_ticks = 0;
         self.portal_cooldown = 200;
         self.survival.last_pos = pos;
+        if old_dimension == dimension {
+            // The client keeps its level when the dimension key is unchanged, so chunks of the
+            // old world would linger: bounce through another dimension first, as Paper does.
+            let other = if dimension == super::Dimension::Overworld {
+                super::Dimension::Nether
+            } else {
+                super::Dimension::Overworld
+            };
+            send(
+                self,
+                &Respawn {
+                    dimension_type: VarInt(other.dimension_type_id()),
+                    dimension: other.key().into(),
+                    seed: self.seed,
+                    game_mode: VarInt(self.gamemode),
+                    previous_game_mode: VarInt(0),
+                    debug: false,
+                    flat: self.flat,
+                    death_location: None,
+                    portal_cooldown: VarInt(0),
+                    sea_level: VarInt(other.sea_level()),
+                    data_to_keep: 0,
+                },
+            );
+        }
         send(
             self,
             &Respawn {
@@ -3892,6 +3950,27 @@ impl Player {
                         && pos.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
                     {
                         self.change_dimension(dimension, pos, yaw, pitch);
+                        changed = true;
+                    }
+                    continue;
+                }
+                Command::ChangeWorld {
+                    world,
+                    dimension,
+                    source,
+                    pos,
+                    yaw,
+                    pitch,
+                } => {
+                    if pos.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0) {
+                        if world == self.world_id {
+                            self.pos = pos;
+                            self.yaw = yaw;
+                            self.pitch = pitch;
+                            self.teleport();
+                        } else {
+                            self.change_world(world, dimension, source, pos, yaw, pitch);
+                        }
                         changed = true;
                     }
                     continue;
@@ -4576,10 +4655,10 @@ fn deliver(
 fn should_broadcast_player_metadata(
     source: Uuid,
     viewer: Uuid,
-    source_dimension: super::Dimension,
-    viewer_dimension: super::Dimension,
+    source_world: super::WorldId,
+    viewer_world: super::WorldId,
 ) -> bool {
-    source != viewer && source_dimension == viewer_dimension
+    source != viewer && source_world == viewer_world
 }
 
 /// The wire form of `set_entity_data` for one shoulder: packet id, entity id, metadata index,
@@ -4600,10 +4679,11 @@ fn shoulder_metadata_bytes(entity: i32, side: ShoulderSide, variant: Option<i32>
 
 fn broadcast_shoulder_bytes(
     tracking: &Tracking,
-    dimension: super::Dimension,
+    dimension: impl Into<super::WorldId>,
     source: Uuid,
     bytes: &[u8],
 ) {
+    let dimension = dimension.into();
     let packet = Outbound::Packet(bytes.to_vec().into());
     for (uuid, (viewer_dimension, _, outbound)) in tracking.lock().unwrap().iter() {
         if should_broadcast_player_metadata(source, *uuid, dimension, *viewer_dimension) {
@@ -4624,11 +4704,12 @@ fn spin_metadata(entity: i32, spin: bool) -> SetEntityData {
 
 fn broadcast_player_metadata(
     tracking: &Tracking,
-    dimension: super::Dimension,
+    dimension: impl Into<super::WorldId>,
     source: Uuid,
     entity: i32,
     spin: bool,
 ) {
+    let dimension = dimension.into();
     let bytes = packet(&spin_metadata(entity, spin));
     for (uuid, (viewer_dimension, _, outbound)) in tracking.lock().unwrap().iter() {
         if should_broadcast_player_metadata(source, *uuid, dimension, *viewer_dimension) {
@@ -4642,7 +4723,7 @@ fn broadcast_player_metadata(
 fn end_player_spin(
     spin_ticks: &mut u8,
     tracking: &Tracking,
-    dimension: super::Dimension,
+    dimension: impl Into<super::WorldId>,
     source: Uuid,
     entity: i32,
 ) -> bool {
@@ -4855,7 +4936,7 @@ impl Region {
         };
         broadcast_tracked_chunk(
             &tracking.lock().unwrap(),
-            source.dimension(),
+            source.world_id(),
             (chunk.0, chunk.1),
             &packet(&update),
         );
@@ -5152,7 +5233,7 @@ impl Region {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(&uuid, (dimension, _, _))| (*dimension == ctx.dimension).then_some(uuid))
+            .filter_map(|(&uuid, (world, _, _))| (*world == ctx.world_id).then_some(uuid))
             .collect();
         let mut players: HashMap<Uuid, ferrite_math::Vec3> = ctx
             .positions
@@ -6560,7 +6641,7 @@ impl Region {
     fn send_shoulder(&self, player: &Player, side: ShoulderSide, variant: Option<i32>) {
         let bytes = shoulder_metadata_bytes(player.entity, side, variant);
         let _ = player.outbound.send(Outbound::Packet(bytes.clone().into()));
-        broadcast_shoulder_bytes(&player.tracking, player.dimension, player.uuid, &bytes);
+        broadcast_shoulder_bytes(&player.tracking, player.world_id, player.uuid, &bytes);
     }
 
     /// Announces both shoulders when a player logs in with saved parrots.
@@ -8105,7 +8186,7 @@ impl Region {
                 block_type: VarInt(i32::try_from(type_id).unwrap_or(0)),
                 nbt: data,
             });
-            broadcast_tracked_chunk(&tracking, ctx.dimension, chunk, &update);
+            broadcast_tracked_chunk(&tracking, ctx.world_id, chunk, &update);
         }
     }
 
@@ -8910,7 +8991,7 @@ impl Region {
             if !updated {
                 let held = p.loaded.iter().map(|(x, z)| ChunkPos(*x, *z)).collect();
                 let _ = p.signals.send(Signal::Leave {
-                    dimension: p.dimension,
+                    world: p.world_id,
                     uuid: p.uuid,
                     chunk: p.chunk,
                     held,
@@ -9054,7 +9135,7 @@ impl Region {
                     let tracking = ctx.tracking.lock().unwrap();
                     broadcast_tracked_chunk(
                         &tracking,
-                        source.dimension(),
+                        source.world_id(),
                         (event.pos[0].div_euclid(16), event.pos[2].div_euclid(16)),
                         &update,
                     );
@@ -9915,7 +9996,11 @@ mod tests {
         let (outbound, _receiver) = OutboundSender::channel(4096);
         ctx.tracking.lock().unwrap().insert(
             player,
-            (super::super::Dimension::Overworld, HashSet::new(), outbound),
+            (
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+                HashSet::new(),
+                outbound,
+            ),
         );
         ctx.positions
             .lock()
@@ -9933,7 +10018,8 @@ mod tests {
         };
         region.tick_mobs(&ctx, &blocks);
         assert!(!region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
-        ctx.tracking.lock().unwrap().get_mut(&player).unwrap().0 = super::super::Dimension::Nether;
+        ctx.tracking.lock().unwrap().get_mut(&player).unwrap().0 =
+            super::super::WorldId::Vanilla(super::super::Dimension::Nether);
         region.tick_mobs(&ctx, &blocks);
         assert!(region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
     }
@@ -10363,8 +10449,22 @@ mod tests {
         let (sender, mut rx) = OutboundSender::channel(16);
         let (nether, mut nether_rx) = OutboundSender::channel(16);
         let tracking: Tracking = Arc::new(Mutex::new(HashMap::from([
-            (viewer, (Overworld, HashSet::new(), sender)),
-            (Uuid::from_u128(3), (Nether, HashSet::new(), nether)),
+            (
+                viewer,
+                (
+                    super::super::WorldId::Vanilla(Overworld),
+                    HashSet::new(),
+                    sender,
+                ),
+            ),
+            (
+                Uuid::from_u128(3),
+                (
+                    super::super::WorldId::Vanilla(Nether),
+                    HashSet::new(),
+                    nether,
+                ),
+            ),
         ])));
         broadcast_shoulder_bytes(&tracking, Overworld, source, &left);
         assert_eq!(outbound_packets(&mut rx), vec![left]);
@@ -10378,20 +10478,20 @@ mod tests {
         assert!(should_broadcast_player_metadata(
             source,
             viewer,
-            super::super::Dimension::Overworld,
-            super::super::Dimension::Overworld,
+            super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+            super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
         ));
         assert!(!should_broadcast_player_metadata(
             source,
             source,
-            super::super::Dimension::Overworld,
-            super::super::Dimension::Overworld,
+            super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+            super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
         ));
         assert!(!should_broadcast_player_metadata(
             source,
             viewer,
-            super::super::Dimension::Overworld,
-            super::super::Dimension::Nether,
+            super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+            super::super::WorldId::Vanilla(super::super::Dimension::Nether),
         ));
     }
 
@@ -10420,9 +10520,30 @@ mod tests {
         let (second, mut second_rx) = OutboundSender::channel(1024);
         let (nether, mut nether_rx) = OutboundSender::channel(1024);
         let tracking: Tracking = Arc::new(Mutex::new(HashMap::from([
-            (Uuid::from_u128(2), (Overworld, HashSet::new(), first)),
-            (Uuid::from_u128(3), (Overworld, HashSet::new(), second)),
-            (Uuid::from_u128(4), (Nether, HashSet::new(), nether)),
+            (
+                Uuid::from_u128(2),
+                (
+                    super::super::WorldId::Vanilla(Overworld),
+                    HashSet::new(),
+                    first,
+                ),
+            ),
+            (
+                Uuid::from_u128(3),
+                (
+                    super::super::WorldId::Vanilla(Overworld),
+                    HashSet::new(),
+                    second,
+                ),
+            ),
+            (
+                Uuid::from_u128(4),
+                (
+                    super::super::WorldId::Vanilla(Nether),
+                    HashSet::new(),
+                    nether,
+                ),
+            ),
         ])));
         let entity = 42;
 
@@ -10468,8 +10589,22 @@ mod tests {
         let (viewer, mut viewer_rx) = OutboundSender::channel(1024);
         let (nether, mut nether_rx) = OutboundSender::channel(1024);
         let tracking: Tracking = Arc::new(Mutex::new(HashMap::from([
-            (Uuid::from_u128(2), (Overworld, HashSet::new(), viewer)),
-            (Uuid::from_u128(3), (Nether, HashSet::new(), nether)),
+            (
+                Uuid::from_u128(2),
+                (
+                    super::super::WorldId::Vanilla(Overworld),
+                    HashSet::new(),
+                    viewer,
+                ),
+            ),
+            (
+                Uuid::from_u128(3),
+                (
+                    super::super::WorldId::Vanilla(Nether),
+                    HashSet::new(),
+                    nether,
+                ),
+            ),
         ])));
         let entity = 42;
         let mut spin_ticks = 20;
@@ -10652,7 +10787,7 @@ mod tests {
         players.insert(
             Uuid::from_u128(1),
             (
-                super::super::Dimension::Overworld,
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
                 HashSet::from([(0, 0)]),
                 overworld,
             ),
@@ -10660,7 +10795,7 @@ mod tests {
         players.insert(
             Uuid::from_u128(2),
             (
-                super::super::Dimension::Nether,
+                super::super::WorldId::Vanilla(super::super::Dimension::Nether),
                 HashSet::from([(0, 0)]),
                 nether,
             ),
@@ -10674,7 +10809,12 @@ mod tests {
         );
         assert!(overworld_rx.try_recv().is_some());
         assert!(nether_rx.try_recv().is_none());
-        broadcast_tracked_chunk(&players, super::super::Dimension::Nether, (0, 0), &update);
+        broadcast_tracked_chunk(
+            &players,
+            super::super::WorldId::Vanilla(super::super::Dimension::Nether),
+            (0, 0),
+            &update,
+        );
         assert!(nether_rx.try_recv().is_some());
         assert!(overworld_rx.try_recv().is_none());
     }

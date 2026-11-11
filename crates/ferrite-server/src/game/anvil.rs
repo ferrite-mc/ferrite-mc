@@ -183,6 +183,8 @@ pub struct AnvilChunkSource {
     terrain: Option<Arc<dyn ChunkGenerator>>,
     /// Which dimension this source reads, writes and generates.
     dimension: Dimension,
+    /// Set once for a runtime world, so code holding only the source resolves the right world.
+    runtime_id: std::sync::OnceLock<uuid::Uuid>,
 }
 impl AnvilChunkSource {
     pub fn new(path: PathBuf, registry: RuntimeRegistry) -> Arc<Self> {
@@ -219,6 +221,7 @@ impl AnvilChunkSource {
             flat: Mutex::new(HashMap::new()),
             terrain,
             dimension,
+            runtime_id: Default::default(),
         })
     }
     pub fn new_memory() -> Arc<Self> {
@@ -261,10 +264,22 @@ impl AnvilChunkSource {
             flat: Mutex::new(HashMap::new()),
             terrain,
             dimension,
+            runtime_id: Default::default(),
         })
     }
     pub fn dimension(&self) -> Dimension {
         self.dimension
+    }
+    /// The independently ticking world this source belongs to.
+    pub fn world_id(&self) -> super::WorldId {
+        self.runtime_id
+            .get()
+            .map_or(super::WorldId::Vanilla(self.dimension), |id| {
+                super::WorldId::Runtime(*id)
+            })
+    }
+    pub(super) fn bind_runtime_world(&self, id: uuid::Uuid) {
+        let _ = self.runtime_id.set(id);
     }
     pub(super) fn registry(&self) -> Arc<RuntimeRegistry> {
         Arc::clone(&self.registry)

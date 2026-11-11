@@ -1015,7 +1015,7 @@ impl Player {
                 let tracking = self.tracking.lock().unwrap();
                 super::region::broadcast_tracked_chunk(
                     &tracking,
-                    self.dimension,
+                    self.world_id,
                     (self.chunk.0, self.chunk.1),
                     &update,
                 );
@@ -1296,7 +1296,7 @@ impl Player {
                 let tracking = self.tracking.lock().unwrap();
                 super::region::broadcast_tracked_chunk(
                     &tracking,
-                    self.dimension,
+                    self.world_id,
                     (self.chunk.0, self.chunk.1),
                     &update,
                 );

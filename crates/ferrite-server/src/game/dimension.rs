@@ -143,6 +143,7 @@ impl RuntimeWorldCatalog {
             terrain,
             settings.dimension,
         );
+        source.bind_runtime_world(id);
         let descriptor = RuntimeWorldDescriptor {
             id,
             name: name.to_owned(),

@@ -100,7 +100,7 @@ impl FluidWorld for RegionFluidWorld<'_> {
         let chunk = (x.div_euclid(16), z.div_euclid(16));
         super::region::broadcast_tracked_chunk(
             &self.tracking.lock().unwrap(),
-            self.source.dimension(),
+            self.source.world_id(),
             chunk,
             &ferrite_net::game::packet(&packet),
         );

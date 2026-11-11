@@ -130,6 +130,9 @@ pub struct Outcome {
 /// The world state a command needs. Implemented for the chunk source and by tests.
 pub trait WorldBlocks {
     fn dimension(&self) -> super::Dimension;
+    fn world_id(&self) -> super::WorldId {
+        super::WorldId::Vanilla(self.dimension())
+    }
     fn block(&self, x: i32, y: i32, z: i32) -> Option<u32>;
     fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool;
     /// Creates the block entity a freshly placed block needs. Only command blocks are
@@ -147,6 +150,9 @@ pub trait WorldBlocks {
 impl WorldBlocks for super::anvil::AnvilChunkSource {
     fn dimension(&self) -> super::Dimension {
         super::anvil::AnvilChunkSource::dimension(self)
+    }
+    fn world_id(&self) -> super::WorldId {
+        super::anvil::AnvilChunkSource::world_id(self)
     }
     fn block(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         super::anvil::AnvilChunkSource::block(self, x, y, z)
@@ -611,7 +617,7 @@ pub fn apply_world_result(
             location: change.location,
             block_state: VarInt(change.state as i32),
         });
-        super::region::broadcast_tracked_chunk(&tracking, world.dimension(), chunk, &update);
+        super::region::broadcast_tracked_chunk(&tracking, world.world_id(), chunk, &update);
     }
     Ok(outcome)
 }
@@ -924,14 +930,18 @@ mod tests {
             players.insert(
                 uuid::Uuid::from_u128(1),
                 (
-                    super::super::Dimension::Overworld,
+                    super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
                     [(0, 0)].into(),
                     overworld,
                 ),
             );
             players.insert(
                 uuid::Uuid::from_u128(2),
-                (super::super::Dimension::Nether, [(0, 0)].into(), nether),
+                (
+                    super::super::WorldId::Vanilla(super::super::Dimension::Nether),
+                    [(0, 0)].into(),
+                    nether,
+                ),
             );
         }
         apply_world_result(

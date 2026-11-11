@@ -114,17 +114,220 @@ mod tests {
         let mut holds = HashMap::new();
         let (signals, _) = mpsc::unbounded_channel();
         let chunk = ChunkPos(0, 0);
-        add_holds(&worlds, &mut holds, None, Dimension::Overworld, [chunk]);
-        add_holds(&worlds, &mut holds, None, Dimension::Overworld, [chunk]);
+        add_holds(
+            &worlds,
+            &mut holds,
+            None,
+            WorldId::Vanilla(Dimension::Overworld),
+            [chunk],
+        );
+        add_holds(
+            &worlds,
+            &mut holds,
+            None,
+            WorldId::Vanilla(Dimension::Overworld),
+            [chunk],
+        );
         assert_eq!(
             worlds.scheduler(Dimension::Overworld).holder_count(chunk),
             1
         );
-        release_hold(&worlds, &mut holds, &signals, Dimension::Overworld, chunk);
+        release_hold(
+            &worlds,
+            &mut holds,
+            &signals,
+            WorldId::Vanilla(Dimension::Overworld),
+            chunk,
+        );
         assert_eq!(
             worlds.scheduler(Dimension::Overworld).holder_count(chunk),
             1
         );
+        worlds.shutdown();
+    }
+
+    fn two_world_fixture() -> (Worlds, WorldId) {
+        let make = || {
+            Scheduler::new(
+                Regionizer::<Region>::new(0, 1),
+                GlobalRegion::default(),
+                1,
+                |_| {},
+                |_| {},
+            )
+        };
+        let runtime = WorldId::Runtime(Uuid::from_u128(77));
+        let worlds = Worlds {
+            schedulers: [
+                (WorldId::Vanilla(Dimension::Overworld), make()),
+                (runtime, make()),
+            ]
+            .into_iter()
+            .collect(),
+            scheduler_factory: Arc::new(move |_, _| make()),
+            transient_entities: Some(Arc::new(Mutex::new(HashMap::new()))),
+            persistent_entities: false,
+            tracking: Arc::new(Mutex::new(HashMap::new())),
+        };
+        (worlds, runtime)
+    }
+
+    fn in_world(worlds: &Worlds, world: WorldId, chunk: ChunkPos) -> usize {
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(world, chunk, move |region| {
+            let _ = tx.send(region.entities.len());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    }
+
+    #[test]
+    fn holds_and_entities_are_keyed_per_world_across_travel() {
+        let (worlds, runtime) = two_world_fixture();
+        let vanilla = WorldId::Vanilla(Dimension::Overworld);
+        let chunk = ChunkPos(0, 0);
+        let mut holds = HashMap::new();
+        let (signals, mut received) = mpsc::unbounded_channel();
+
+        // The player views chunk (0, 0) of the default world, which holds a cow.
+        add_holds(&worlds, &mut holds, None, vanilla, [chunk]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(vanilla, chunk, move |region| {
+            let mut rng = ferrite_entity::Rng::default();
+            region.entities.insert(ferrite_entity::mob::new_mob(
+                ferrite_entity::mob::MobKind::Cow,
+                ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+                &mut rng,
+            ));
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+        // Travel: the same chunk coordinates in the runtime world are an independent hold.
+        add_holds(&worlds, &mut holds, None, runtime, [chunk]);
+        release_holds(&worlds, &mut holds, &signals, vanilla, [chunk]);
+        assert_eq!(holds.get(&(runtime, chunk)), Some(&1));
+        assert!(!holds.contains_key(&(vanilla, chunk)));
+        assert_eq!(worlds.scheduler_world(runtime).holder_count(chunk), 1);
+        assert_eq!(
+            in_world(&worlds, runtime, chunk),
+            0,
+            "worlds never share entities"
+        );
+
+        // The release parked the cow under the default world's key, not the runtime's.
+        let finished = loop {
+            match received.blocking_recv().unwrap() {
+                Signal::FinishRelease { world, chunk, .. } => break (world, chunk),
+                _ => continue,
+            }
+        };
+        assert_eq!(finished, (vanilla, chunk));
+        {
+            let cache = worlds.transient_entities.as_ref().unwrap().lock().unwrap();
+            assert_eq!(cache.get(&(vanilla, chunk)).map(|e| e.len()), Some(1));
+            assert!(!cache.contains_key(&(runtime, chunk)));
+        }
+        worlds.remove_chunk(finished.0, finished.1);
+
+        // Travel back: the runtime hold drops and the parked cow returns to the default world.
+        add_holds(&worlds, &mut holds, None, vanilla, [chunk]);
+        release_holds(&worlds, &mut holds, &signals, runtime, [chunk]);
+        assert_eq!(holds.get(&(vanilla, chunk)), Some(&1));
+        assert!(!holds.contains_key(&(runtime, chunk)));
+        assert_eq!(
+            in_world(&worlds, vanilla, chunk),
+            1,
+            "the cow survived the round trip"
+        );
+        assert!(
+            !worlds
+                .transient_entities
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .contains_key(&(vanilla, chunk))
+        );
+        worlds.shutdown();
+    }
+
+    #[test]
+    fn runtime_world_holds_survive_region_merge_and_split() {
+        let scheduler = Scheduler::new(
+            Regionizer::<Region>::default(),
+            GlobalRegion::default(),
+            2,
+            |_| {},
+            |_| {},
+        );
+        let runtime = WorldId::Runtime(Uuid::from_u128(78));
+        let worlds = Worlds {
+            schedulers: [(runtime, scheduler)].into_iter().collect(),
+            scheduler_factory: Arc::new(|_, _| unreachable!("no world is created here")),
+            transient_entities: None,
+            persistent_entities: false,
+            tracking: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let (west, east) = (ChunkPos(0, 0), ChunkPos(200, 0));
+        let mut holds = HashMap::new();
+        let (signals, mut received) = mpsc::unbounded_channel();
+        add_holds(&worlds, &mut holds, None, runtime, [west, east]);
+        let scheduler = worlds.scheduler_world(runtime);
+        assert_eq!(scheduler.region_count(), 2);
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(runtime, west, move |region| {
+            let mut rng = ferrite_entity::Rng::default();
+            region.entities.insert(ferrite_entity::mob::new_mob(
+                ferrite_entity::mob::MobKind::Cow,
+                ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+                &mut rng,
+            ));
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+
+        // A traveller's chunks bridge the gap: regions merge, every hold and the cow survive.
+        let bridge: Vec<_> = (1..7).map(|i| ChunkPos(i * 30, 0)).collect();
+        add_holds(&worlds, &mut holds, None, runtime, bridge.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while worlds.scheduler_world(runtime).region_count() != 1 {
+            assert!(std::time::Instant::now() < deadline, "regions never merged");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(in_world(&worlds, runtime, west), 1);
+
+        // The traveller leaves: the bridge is released, the region splits, holds stay exact.
+        release_holds(&worlds, &mut holds, &signals, runtime, bridge);
+        // The world loop would finish the release; do the same here.
+        loop {
+            match received.blocking_recv().unwrap() {
+                Signal::FinishReleaseBatch { world, chunks, .. } => {
+                    worlds.remove_chunks(world, chunks);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while worlds.scheduler_world(runtime).region_count() != 2 {
+            assert!(std::time::Instant::now() < deadline, "region never split");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(holds.len(), 2);
+        assert_eq!(in_world(&worlds, runtime, west), 1);
+        assert_eq!(in_world(&worlds, runtime, east), 0);
+        worlds.shutdown();
+    }
+
+    #[test]
+    fn holds_for_an_unloaded_world_are_dropped_instead_of_panicking() {
+        let (mut worlds, runtime) = two_world_fixture();
+        let _ = worlds.schedulers.remove(&runtime).map(Scheduler::shutdown);
+        let mut holds = HashMap::new();
+        let (signals, _rx) = mpsc::unbounded_channel();
+        add_holds(&worlds, &mut holds, None, runtime, [ChunkPos(1, 1)]);
+        assert!(holds.is_empty());
+        release_holds(&worlds, &mut holds, &signals, runtime, [ChunkPos(1, 1)]);
         worlds.shutdown();
     }
 
@@ -150,14 +353,14 @@ mod tests {
             &signals,
             &transient,
             &tracking,
-            Dimension::Overworld,
+            WorldId::Vanilla(Dimension::Overworld),
             chunk,
             true,
         );
         let saved = cache
             .lock()
             .unwrap()
-            .remove(&(Dimension::Overworld, chunk))
+            .remove(&(WorldId::Vanilla(Dimension::Overworld), chunk))
             .unwrap();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].data.uuid, uuid);
@@ -176,7 +379,7 @@ mod tests {
         let (outbound, mut rx) = OutboundSender::channel(1 << 20);
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, Mailbox::default(), outbound));
-        route_plugin_command(command, &mailboxes, &mut HashMap::new());
+        route_plugin_command(command, &mailboxes, &mut HashMap::new(), &|_| None);
         std::iter::from_fn(|| rx.try_recv()).collect()
     }
 
@@ -225,6 +428,7 @@ mod tests {
                 },
                 &mailboxes,
                 &mut HashMap::new(),
+                &|_| None,
             );
         }
         let commands: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
@@ -856,7 +1060,7 @@ fn apply_game_rule(
     Ok(format!("{name} = {}", result.text()))
 }
 type TransientEntities =
-    Arc<Mutex<HashMap<(Dimension, ChunkPos), Arc<Vec<ferrite_entity::EntityRecord>>>>>;
+    Arc<Mutex<HashMap<(WorldId, ChunkPos), Arc<Vec<ferrite_entity::EntityRecord>>>>>;
 
 /// One region scheduler per dimension: Folia's regionizer is per world, so chunks from two
 /// dimensions never share ownership.
@@ -895,20 +1099,30 @@ impl Worlds {
     fn owner(&self, dimension: Dimension, chunk: ChunkPos) -> Option<ferrite_region::RegionId> {
         self.scheduler(dimension).owner(chunk)
     }
+    fn owner_world(&self, world: WorldId, chunk: ChunkPos) -> Option<ferrite_region::RegionId> {
+        self.schedulers.get(&world)?.owner(chunk)
+    }
     fn add_chunk(&self, dimension: Dimension, chunk: ChunkPos) {
         self.scheduler(dimension).add_chunk(chunk);
     }
     fn add_chunk_world(&self, world: WorldId, chunk: ChunkPos) {
         self.scheduler_world(world).add_chunk(chunk);
     }
-    fn add_chunks(&self, dimension: Dimension, chunks: impl IntoIterator<Item = ChunkPos>) {
-        self.scheduler(dimension).add_chunks(chunks);
+    /// Chunk bookkeeping for a world that may already be unloaded is a no-op, never a panic.
+    fn add_chunks(&self, world: WorldId, chunks: impl IntoIterator<Item = ChunkPos>) {
+        if let Some(scheduler) = self.schedulers.get(&world) {
+            scheduler.add_chunks(chunks);
+        }
     }
-    fn remove_chunk(&self, dimension: Dimension, chunk: ChunkPos) {
-        self.scheduler(dimension).remove_chunk(chunk);
+    fn remove_chunk(&self, world: WorldId, chunk: ChunkPos) {
+        if let Some(scheduler) = self.schedulers.get(&world) {
+            scheduler.remove_chunk(chunk);
+        }
     }
-    fn remove_chunks(&self, dimension: Dimension, chunks: impl IntoIterator<Item = ChunkPos>) {
-        self.scheduler(dimension).remove_chunks(chunks);
+    fn remove_chunks(&self, world: WorldId, chunks: impl IntoIterator<Item = ChunkPos>) {
+        if let Some(scheduler) = self.schedulers.get(&world) {
+            scheduler.remove_chunks(chunks);
+        }
     }
     fn schedule_at_chunk(
         &self,
@@ -936,10 +1150,12 @@ impl Worlds {
     }
     fn schedule_at_chunks(
         &self,
-        dimension: Dimension,
+        world: WorldId,
         tasks: impl IntoIterator<Item = (ChunkPos, ferrite_region::RegionTask<Region>)>,
     ) {
-        self.scheduler(dimension).schedule_at_chunks(tasks);
+        if let Some(scheduler) = self.schedulers.get(&world) {
+            scheduler.schedule_at_chunks(tasks);
+        }
     }
     /// Chat, tab list and scoreboards are global; the overworld scheduler owns them.
     fn schedule_global(&self, task: impl FnOnce(&mut GlobalRegion) + Send + 'static) {
@@ -1158,7 +1374,7 @@ async fn run(
     for dimension in Dimension::ALL {
         for (key, x, z) in dimensions.source(dimension).load_forced_chunks() {
             let _ = signal_tx.send(Signal::Hold {
-                dimension,
+                world: WorldId::Vanilla(dimension),
                 chunk: ChunkPos(x, z),
                 add: true,
             });
@@ -1345,7 +1561,7 @@ async fn run(
         autosave_period,
     );
     autosave.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut holds: HashMap<(Dimension, ChunkPos), usize> = HashMap::new();
+    let mut holds: HashMap<(WorldId, ChunkPos), usize> = HashMap::new();
     let mut clock = tokio::time::interval(std::time::Duration::from_millis(50));
     let mut applied_rate = 20.0_f32;
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1420,7 +1636,7 @@ async fn run(
                    online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: view_distance as i32 });
                    player_worlds.insert(uuid, WorldId::Vanilla(start_dimension));
                    positions.lock().unwrap().insert(uuid, start_pos);
-                   tracking.lock().unwrap().insert(uuid, (start_dimension, HashSet::new(), outbound.clone()));
+                   tracking.lock().unwrap().insert(uuid, (WorldId::Vanilla(start_dimension), HashSet::new(), outbound.clone()));
                    let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:WorldId::Vanilla(start_dimension),sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
                    worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
@@ -1713,12 +1929,12 @@ async fn run(
                      if entity_world.is_some() || settings.playerdata.is_some() {
                          let held: Vec<_> = holds.keys().copied().collect();
                          let mut player_save_regions = HashSet::new();
-                         for (dimension, chunk) in held {
+                         for (world, chunk) in held {
                              let save_players = worlds
-                                 .owner(dimension, chunk)
-                                 .is_some_and(|owner| player_save_regions.insert((dimension, owner)));
+                                 .owner_world(world, chunk)
+                                 .is_some_and(|owner| player_save_regions.insert((world, owner)));
                              let signals = signal_tx.clone();
-                             worlds.schedule_at_chunk(dimension, chunk, move |region| {
+                             worlds.schedule_at_world_chunk(world, chunk, move |region| {
                                  if save_players {
                                      for player in region.players.values() {
                                          player.save_player_data();
@@ -1726,7 +1942,7 @@ async fn run(
                                  }
                                  let entities = region.snapshot_chunk_entities(chunk);
                                  let _ = signals.send(Signal::SaveEntities {
-                                     dimension,
+                                     world,
                                      chunk,
                                      entities,
                                  });
@@ -1735,14 +1951,14 @@ async fn run(
                      }
                  },
                  signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
-                  Signal::Hold{dimension,chunk,add}=>if add{add_holds(&worlds,&mut holds,entity_world.clone(),dimension,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,dimension,chunk);},
-                  Signal::HoldBatch{dimension,chunks,add}=>if add{add_holds(&worlds,&mut holds,entity_world.clone(),dimension,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,dimension,chunks);},
+                  Signal::Hold{world,chunk,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,world,chunk);},
+                  Signal::HoldBatch{world,chunks,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,world,chunks);},
                   Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
                   Signal::MobMelee{dimension,player,damage,from}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from});}},
-                  Signal::SaveEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world { let dir=dimension.storage_root(dir); if let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}}},
-                  Signal::SaveCachedEntities{dimension,chunk,entities}=>{if let Some(dir)=&entity_world {let dir=dimension.storage_root(dir);match entity_save::save(&dir,(chunk.0,chunk.1),&entities){Ok(())=>if let Some(cache)=&worlds.transient_entities{let mut cache=cache.lock().unwrap();if cache.get(&(dimension,chunk)).is_some_and(|cached| Arc::ptr_eq(cached,&entities)){cache.remove(&(dimension,chunk));}},Err(error)=>tracing::error!(%error,chunk=?chunk,"failed to save chunk entities")}}},
-                  Signal::FinishRelease{dimension,chunk,flush}=>{worlds.remove_chunk(dimension,chunk);if flush {let source=dimensions.source(dimension).clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
-                  Signal::FinishReleaseBatch{dimension,chunks,flush}=>{worlds.remove_chunks(dimension,chunks.iter().copied());if flush {let source=dimensions.source(dimension).clone();for chunk in chunks{let source=source.clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}}},
+                  Signal::SaveEntities{world,chunk,entities}=>{if let Some(dir)=world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog) && let Err(error)=entity_save::save(&dir, (chunk.0, chunk.1), &entities){tracing::error!(%error, chunk=?chunk, "failed to save chunk entities");}},
+                  Signal::SaveCachedEntities{world,chunk,entities}=>{if let Some(dir)=world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog) {match entity_save::save(&dir,(chunk.0,chunk.1),&entities){Ok(())=>if let Some(cache)=&worlds.transient_entities{let mut cache=cache.lock().unwrap();if cache.get(&(world,chunk)).is_some_and(|cached| Arc::ptr_eq(cached,&entities)){cache.remove(&(world,chunk));}},Err(error)=>tracing::error!(%error,chunk=?chunk,"failed to save chunk entities")}}},
+                  Signal::FinishRelease{world,chunk,flush}=>{worlds.remove_chunk(world,chunk);if flush&&let Some(source)=world_source(&dimensions,&runtime_world_catalog,world){tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
+                  Signal::FinishReleaseBatch{world,chunks,flush}=>{worlds.remove_chunks(world,chunks.iter().copied());if flush&&let Some(source)=world_source(&dimensions,&runtime_world_catalog,world){for chunk in chunks{let source=source.clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}}},
                   Signal::FluidChange{dimension,x,y,z}=>{
                     for (dx,dy,dz) in [(0,0,0),(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
                       let (Some(x),Some(y),Some(z))=(x.checked_add(dx),y.checked_add(dy),z.checked_add(dz)) else {continue;};
@@ -1788,14 +2004,14 @@ async fn run(
                   Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let world=player.world_id;let chunk=player.chunk;let id=player.uuid;
                     worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
-                    if let Some((tracked_dimension, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_dimension = dimension; }
+                    if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
                     player_worlds.insert(id, world);
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
                   },
-                  Signal::Leave{dimension,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(dimension,chunk));release_holds(&worlds,&mut holds,&signal_tx,dimension,held);if preheld {defer_release(&worlds,&signal_tx,dimension,chunk,false);}
+                  Signal::Leave{world,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));release_holds(&worlds,&mut holds,&signal_tx,world,held);if preheld {defer_release(&worlds,&signal_tx,world,chunk,false);}
                     let name = names.remove(&uuid).unwrap_or_default();
                     crate::plugins::facts::forget(uuid);
                     if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
@@ -1859,7 +2075,7 @@ async fn run(
                          Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
                             worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                         }
-                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions),
+                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog)),
                          // The plugin host dropped its sender (no plugins loaded): stop polling.
                          None => plugin_commands = None,
                      }
@@ -2088,10 +2304,36 @@ async fn run(
 ///
 /// Inventory and gamemode changes ride the player's mailbox so a region hand-off moves them
 /// with the player; teleports and chat go through the existing dedicated paths.
+/// A resolved travel destination: the world identity, its dimension rules and its chunk source.
+type TravelTarget = (WorldId, Dimension, Arc<anvil::AnvilChunkSource>);
+
+/// Resolves a plugin world UUID to a world that is currently loaded: the default world is the
+/// vanilla overworld, anything else must be a live runtime world.
+fn travel_target(
+    world: Uuid,
+    dimensions: &DimensionRegistry,
+    catalog: &RuntimeWorldCatalog,
+) -> Option<TravelTarget> {
+    if world == ferrite_plugin::default_world_id() {
+        return Some((
+            WorldId::Vanilla(Dimension::Overworld),
+            Dimension::Overworld,
+            dimensions.source(Dimension::Overworld).clone(),
+        ));
+    }
+    let descriptor = catalog.get(world)?;
+    Some((
+        WorldId::Runtime(world),
+        descriptor.dimension,
+        Arc::clone(&descriptor.source),
+    ))
+}
+
 fn route_plugin_command(
     command: ferrite_plugin::PlayerCommand,
     mailboxes: &HashMap<Uuid, (u64, Mailbox, OutboundSender)>,
     permissions: &mut HashMap<Uuid, u8>,
+    travel: &dyn Fn(Uuid) -> Option<TravelTarget>,
 ) {
     use ferrite_plugin::PlayerCommand;
     match command {
@@ -2194,13 +2436,18 @@ fn route_plugin_command(
             }
         }
         PlayerCommand::Teleport { player, location } => {
-            if location.world == ferrite_plugin::default_world_id()
-                && let Some((_, mailbox, _)) = mailboxes.get(&player)
+            // The owning region decides between an in-world teleport and a world change, so a
+            // player that moved regions or worlds since this was queued is still handled once.
+            if let Some((_, mailbox, _)) = mailboxes.get(&player)
+                && let Some((world, dimension, source)) = travel(location.world)
             {
-                mailbox.lock().unwrap().push_back(Command::Teleport {
+                mailbox.lock().unwrap().push_back(Command::ChangeWorld {
+                    world,
+                    dimension,
+                    source,
                     pos: [location.x, location.y, location.z],
-                    yaw: Some(location.yaw),
-                    pitch: Some(location.pitch),
+                    yaw: location.yaw,
+                    pitch: location.pitch,
                 });
             }
         }
@@ -2657,7 +2904,7 @@ fn plugin_sound_packet(
 fn defer_release(
     worlds: &Worlds,
     signals: &mpsc::UnboundedSender<Signal>,
-    dimension: Dimension,
+    world: WorldId,
     chunk: ChunkPos,
     flush: bool,
 ) {
@@ -2665,12 +2912,15 @@ fn defer_release(
     let transient = worlds.transient_entities.clone();
     let persistent = worlds.persistent_entities;
     let tracking = worlds.tracking.clone();
-    worlds.schedule_at_chunk(dimension, chunk, move |region| {
+    if !worlds.schedulers.contains_key(&world) {
+        return;
+    }
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
         release_chunk_entities(
-            region, &signals, &transient, &tracking, dimension, chunk, persistent,
+            region, &signals, &transient, &tracking, world, chunk, persistent,
         );
         let _ = signals.send(Signal::FinishRelease {
-            dimension,
+            world,
             chunk,
             flush,
         });
@@ -2681,7 +2931,7 @@ fn release_chunk_entities(
     signals: &mpsc::UnboundedSender<Signal>,
     transient: &Option<TransientEntities>,
     tracking: &region::Tracking,
-    dimension: Dimension,
+    world: WorldId,
     chunk: ChunkPos,
     persistent: bool,
 ) {
@@ -2706,11 +2956,11 @@ fn release_chunk_entities(
             transient
                 .lock()
                 .unwrap()
-                .insert((dimension, chunk), entities.clone());
+                .insert((world, chunk), entities.clone());
         }
         if persistent {
             let _ = signals.send(Signal::SaveCachedEntities {
-                dimension,
+                world,
                 chunk,
                 entities,
             });
@@ -2720,7 +2970,7 @@ fn release_chunk_entities(
 fn defer_release_many(
     worlds: &Worlds,
     signals: &mpsc::UnboundedSender<Signal>,
-    dimension: Dimension,
+    world: WorldId,
     chunks: Vec<ChunkPos>,
     flush: bool,
 ) {
@@ -2728,7 +2978,7 @@ fn defer_release_many(
         return;
     }
     if chunks.len() == 1 {
-        defer_release(worlds, signals, dimension, chunks[0], flush);
+        defer_release(worlds, signals, world, chunks[0], flush);
         return;
     }
 
@@ -2747,7 +2997,7 @@ fn defer_release_many(
         let tracking = tracking.clone();
         let task: ferrite_region::RegionTask<Region> = Box::new(move |region| {
             release_chunk_entities(
-                region, &signals, &transient, &tracking, dimension, chunk, persistent,
+                region, &signals, &transient, &tracking, world, chunk, persistent,
             );
             let last = {
                 let mut finished = completed.lock().unwrap();
@@ -2757,7 +3007,7 @@ fn defer_release_many(
             if last {
                 let chunks = std::mem::take(&mut *completed.lock().unwrap());
                 let _ = signals.send(Signal::FinishReleaseBatch {
-                    dimension,
+                    world,
                     chunks,
                     flush,
                 });
@@ -2765,7 +3015,7 @@ fn defer_release_many(
         });
         (chunk, task)
     });
-    worlds.schedule_at_chunks(dimension, tasks);
+    worlds.schedule_at_chunks(world, tasks);
 }
 /// Hands an entity to the region owning `to`. A chunk nobody holds parks the entity in the
 /// scheduler until a region takes that chunk.
@@ -3692,7 +3942,7 @@ impl CommandRuntime<'_> {
                 let add: Vec<_> = add.into_iter().map(|(x, z)| ChunkPos(x, z)).collect();
                 if !add.is_empty() {
                     let _ = self.signals.send(Signal::HoldBatch {
-                        dimension,
+                        world: WorldId::Vanilla(dimension),
                         chunks: add,
                         add: true,
                     });
@@ -3700,7 +3950,7 @@ impl CommandRuntime<'_> {
                 let remove: Vec<_> = remove.into_iter().map(|(x, z)| ChunkPos(x, z)).collect();
                 if !remove.is_empty() {
                     let _ = self.signals.send(Signal::HoldBatch {
-                        dimension,
+                        world: WorldId::Vanilla(dimension),
                         chunks: remove,
                         add: false,
                     });
@@ -4470,23 +4720,23 @@ impl CommandRuntime<'_> {
 }
 fn release_hold(
     worlds: &Worlds,
-    holds: &mut HashMap<(Dimension, ChunkPos), usize>,
+    holds: &mut HashMap<(WorldId, ChunkPos), usize>,
     signals: &mpsc::UnboundedSender<Signal>,
-    dimension: Dimension,
+    world: WorldId,
     chunk: ChunkPos,
 ) {
-    release_holds(worlds, holds, signals, dimension, [chunk]);
+    release_holds(worlds, holds, signals, world, [chunk]);
 }
 fn release_holds(
     worlds: &Worlds,
-    holds: &mut HashMap<(Dimension, ChunkPos), usize>,
+    holds: &mut HashMap<(WorldId, ChunkPos), usize>,
     signals: &mpsc::UnboundedSender<Signal>,
-    dimension: Dimension,
+    world: WorldId,
     chunks: impl IntoIterator<Item = ChunkPos>,
 ) {
     let mut released = Vec::new();
     for chunk in chunks {
-        let Some(count) = holds.get_mut(&(dimension, chunk)) else {
+        let Some(count) = holds.get_mut(&(world, chunk)) else {
             continue;
         };
         *count -= 1;
@@ -4495,25 +4745,25 @@ fn release_holds(
             // would unload the chunk and remove every mob for the remaining viewers.
             continue;
         }
-        holds.remove(&(dimension, chunk));
-        if dimension == Dimension::Overworld {
+        holds.remove(&(world, chunk));
+        if world == WorldId::Vanilla(Dimension::Overworld) {
             crate::plugins::chunks::set_loaded(chunk.0, chunk.1, false);
         }
         released.push(chunk);
     }
-    defer_release_many(worlds, signals, dimension, released, true);
+    defer_release_many(worlds, signals, world, released, true);
 }
 fn add_holds(
     worlds: &Worlds,
-    holds: &mut HashMap<(Dimension, ChunkPos), usize>,
-    entity_world: Option<std::path::PathBuf>,
-    dimension: Dimension,
+    holds: &mut HashMap<(WorldId, ChunkPos), usize>,
+    entity_root: Option<std::path::PathBuf>,
+    world: WorldId,
     chunks: impl IntoIterator<Item = ChunkPos>,
 ) {
     let chunks: Vec<_> = chunks
         .into_iter()
         .filter(|&chunk| {
-            let count = holds.entry((dimension, chunk)).or_default();
+            let count = holds.entry((world, chunk)).or_default();
             *count += 1;
             *count == 1
         })
@@ -4521,31 +4771,63 @@ fn add_holds(
     if chunks.is_empty() {
         return;
     }
-    worlds.add_chunks(dimension, chunks.iter().copied());
+    if !worlds.schedulers.contains_key(&world) {
+        // The world was unloaded while the signal was queued: drop the holds just recorded.
+        for chunk in &chunks {
+            holds.remove(&(world, *chunk));
+        }
+        return;
+    }
+    worlds.add_chunks(world, chunks.iter().copied());
     let tasks = chunks.into_iter().map(|chunk| {
-        if dimension == Dimension::Overworld {
+        if world == WorldId::Vanilla(Dimension::Overworld) {
             crate::plugins::chunks::set_loaded(chunk.0, chunk.1, true);
         }
-        let dir = entity_world.clone();
+        let dir = entity_root.clone();
         let transient = worlds.transient_entities.clone();
         let task: ferrite_region::RegionTask<Region> = Box::new(move |region| {
             region.hold_chunk(chunk);
-            let cached = transient
-                .and_then(|transient| transient.lock().unwrap().remove(&(dimension, chunk)));
+            let cached =
+                transient.and_then(|transient| transient.lock().unwrap().remove(&(world, chunk)));
             if let Some(entities) = cached {
                 region.add_entities(
                     Arc::try_unwrap(entities).unwrap_or_else(|cached| (*cached).clone()),
                 );
             } else if let Some(dir) = dir {
-                region.add_entities(entity_save::load(
-                    &dimension.storage_root(&dir),
-                    (chunk.0, chunk.1),
-                ));
+                region.add_entities(entity_save::load(&dir, (chunk.0, chunk.1)));
             }
         });
         (chunk, task)
     });
-    worlds.schedule_at_chunks(dimension, tasks);
+    worlds.schedule_at_chunks(world, tasks);
+}
+/// Where a world keeps its entity sidecars: a vanilla dimension under the main world root, a
+/// runtime world under its own directory.
+fn world_storage_root(
+    base: Option<&std::path::Path>,
+    world: WorldId,
+    catalog: &RuntimeWorldCatalog,
+) -> Option<std::path::PathBuf> {
+    match world {
+        WorldId::Vanilla(dimension) => base.map(|base| dimension.storage_root(base)),
+        WorldId::Runtime(id) => {
+            let descriptor = catalog.get(id)?;
+            Some(descriptor.dimension.storage_root(descriptor.source.path()?))
+        }
+    }
+}
+/// The chunk source behind a world identity, if that world is still loaded.
+fn world_source(
+    dimensions: &DimensionRegistry,
+    catalog: &RuntimeWorldCatalog,
+    world: WorldId,
+) -> Option<Arc<anvil::AnvilChunkSource>> {
+    match world {
+        WorldId::Vanilla(dimension) => Some(dimensions.source(dimension).clone()),
+        WorldId::Runtime(id) => catalog
+            .get(id)
+            .map(|descriptor| Arc::clone(&descriptor.source)),
+    }
 }
 #[cfg(test)]
 mod integration;

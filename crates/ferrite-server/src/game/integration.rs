@@ -5831,3 +5831,156 @@ async fn anvil_repairs_two_damaged_swords_on_fixture_world() {
     assert_eq!(resolved.parent(), Some(temp_root.as_path()));
     std::fs::remove_dir_all(resolved).unwrap();
 }
+
+/// Reads play packets until `done` returns true, feeding it each `(id, body)`.
+async fn read_until(bot: &mut Bot, mut done: impl FnMut(i32, &[u8]) -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let (id, body) = bot.next_play().await;
+            if done(id, &body) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("expected packet sequence never arrived");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities() {
+    use ferrite_protocol::packets::play::{AddEntity, RemoveEntities, Respawn};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3");
+    if !root.join("generated/reports/blocks.json").exists() {
+        eprintln!("SKIP: vanilla/26.3/generated is absent");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
+    let source = super::anvil::AnvilChunkSource::new(temp.path().to_path_buf(), registry);
+    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let world = World::start_configured(
+        Some(source),
+        [0, 65, 0],
+        super::WorldSettings {
+            plugin_commands: Some(plugin_commands),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Traveler").await;
+    let player = ferrite_net::offline_uuid("Traveler");
+    let location = |world, x| ferrite_plugin::PlayerLocation {
+        world,
+        x,
+        y: 65.0,
+        z: 8.5,
+        yaw: 0.0,
+        pitch: 0.0,
+    };
+
+    // A cow in the default world's spawn chunk, held because the player views it.
+    world
+        .console_command("/summon minecraft:cow 8.5 64 8.5".into())
+        .await
+        .unwrap();
+    let cow_type = i32::from(ferrite_entity::mob::MobKind::Cow.entity_type());
+    let mut cow = None;
+    read_until(&mut bot, |id, body| {
+        if id == AddEntity::ID {
+            let add = AddEntity::decode(&mut &body[..]).unwrap();
+            if add.entity_type.0 == cow_type {
+                cow = Some(add.id.0);
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    let cow = cow.unwrap();
+
+    // Cross-region/cross-world travel: into a runtime world sharing the overworld's rules.
+    let (runtime, _, _) = world
+        .create_runtime_world("travel", super::Dimension::Overworld, [0, 65, 0])
+        .await
+        .unwrap();
+    commands
+        .send(ferrite_plugin::PlayerCommand::Teleport {
+            player,
+            location: location(runtime, 8.5),
+        })
+        .unwrap();
+    let (mut cow_removed, mut responded, mut positioned) = (false, 0, false);
+    read_until(&mut bot, |id, body| {
+        if id == RemoveEntities::ID {
+            cow_removed |= RemoveEntities::decode(&mut &body[..])
+                .unwrap()
+                .ids
+                .contains(&ferrite_protocol::VarInt(cow));
+        }
+        if id == Respawn::ID {
+            responded += 1;
+        }
+        // The release goes through the world loop, so it may land after the new position.
+        positioned |= id == 73 && responded > 0;
+        positioned && cow_removed
+    })
+    .await;
+    assert!(
+        cow_removed,
+        "the old world's cow must be untracked on departure"
+    );
+    assert!(
+        responded >= 2,
+        "same-dimension travel bounces through another dimension so the client drops old chunks"
+    );
+
+    // The runtime world's own tracking sees entities that arrive there, and only there.
+    let visitor = item_record([8.5, 65.0, 8.5], 1);
+    let visitor_id = visitor.data.id;
+    world
+        .signals
+        .send(super::Signal::EntityTransfer {
+            world_id: super::WorldId::Runtime(runtime),
+            to: ferrite_region::ChunkPos(0, 0),
+            entity: Box::new(visitor),
+        })
+        .unwrap();
+    entity_packet(&mut bot, AddEntity::ID, visitor_id).await;
+
+    // And back: the runtime hold is released and the original world's cow is restored.
+    commands
+        .send(ferrite_plugin::PlayerCommand::Teleport {
+            player,
+            location: location(ferrite_plugin::default_world_id(), 8.5),
+        })
+        .unwrap();
+    let (mut visitor_removed, mut cow_back) = (false, false);
+    read_until(&mut bot, |id, body| {
+        if id == RemoveEntities::ID {
+            visitor_removed |= RemoveEntities::decode(&mut &body[..])
+                .unwrap()
+                .ids
+                .contains(&ferrite_protocol::VarInt(visitor_id));
+        }
+        cow_back |= id == AddEntity::ID && AddEntity::decode(&mut &body[..]).unwrap().id.0 == cow;
+        cow_back && visitor_removed
+    })
+    .await;
+    assert!(
+        visitor_removed,
+        "the runtime world's entity must be untracked on return"
+    );
+
+    // The runtime world has no player left, so it can unload.
+    assert!(world.unload_runtime_world(runtime, true).await.unwrap());
+}
