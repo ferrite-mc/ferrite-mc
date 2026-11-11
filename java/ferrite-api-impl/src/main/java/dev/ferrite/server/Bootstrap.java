@@ -1,6 +1,34 @@
 package dev.ferrite.server;
 public final class Bootstrap {
     static final Object LEGACY_LOCK = new Object();
+    /** Plugin commands enter the bridge one at a time, even while a command has released {@link #LEGACY_LOCK}. */
+    private static final java.util.concurrent.locks.ReentrantLock COMMAND_LOCK = new java.util.concurrent.locks.ReentrantLock();
+    /**
+     * Runs a host call that waits on the game loop. The loop's tick takes {@link #LEGACY_LOCK}, so a thread
+     * holding it (a plugin command) would deadlock the loop it waits on: release it for the duration.
+     */
+    @SuppressWarnings("unchecked")
+    static <T> T awaitLoop(java.util.function.Supplier<T> call) {
+        if (!Thread.holdsLock(LEGACY_LOCK)) return call.get();
+        var result = new Object[1];
+        var failure = new Throwable[1];
+        var done = new boolean[1];
+        var worker = new Thread(() -> {
+            try { result[0] = call.get(); } catch (Throwable t) { failure[0] = t; }
+            synchronized (LEGACY_LOCK) { done[0] = true; LEGACY_LOCK.notifyAll(); }
+        }, "ferrite-host-call");
+        worker.setDaemon(true);
+        worker.start();
+        boolean interrupted = false;
+        while (!done[0]) {
+            try { LEGACY_LOCK.wait(); } catch (InterruptedException e) { interrupted = true; }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+        if (failure[0] instanceof RuntimeException e) throw e;
+        if (failure[0] instanceof Error e) throw e;
+        if (failure[0] != null) throw new IllegalStateException(failure[0]);
+        return (T) result[0];
+    }
     private static FerriteServer server;
     private static final java.util.List<String> initialIpBans = new java.util.ArrayList<>();
     private static FerriteServer.Settings settings = new FerriteServer.Settings("Ferrite", 20, 25565, 10, false, true);
@@ -406,9 +434,12 @@ public final class Bootstrap {
         if (resolved == null) return 0;
         var command = server.getPluginCommand(label);
         if (command == null) return 0;
-        synchronized (LEGACY_LOCK) {
-            if (!command.testPermission(resolved)) return 2;
-            return command.execute(resolved, label, args) ? 1 : 0;
-        }
+        COMMAND_LOCK.lock();
+        try {
+            synchronized (LEGACY_LOCK) {
+                if (!command.testPermission(resolved)) return 2;
+                return command.execute(resolved, label, args) ? 1 : 0;
+            }
+        } finally { COMMAND_LOCK.unlock(); }
     }
 }

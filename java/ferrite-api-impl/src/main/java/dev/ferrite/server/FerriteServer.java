@@ -561,7 +561,7 @@ public class FerriteServer extends ServerStubs {
         }
         // Paper's WorldCreator(String) already picked a random seed, so every creator carries one. The host
         // applies it only when it creates the world; an existing world answers with the seed stored on disk.
-        String reply = (String) HostBridge.call("Server", "server", "createRuntimeWorld(String,String,long)", String.class, creator.name(), creator.environment().name(), creator.seed());
+        String reply = Bootstrap.<String>awaitLoop(() -> (String) HostBridge.call("Server", "server", "createRuntimeWorld(String,String,long)", String.class, creator.name(), creator.environment().name(), creator.seed()));
         if (reply == null || reply.isBlank()) throw new IllegalStateException("Ferrite: runtime world creation failed");
         var parts = reply.split(String.valueOf(HostBridge.ITEM), -1);
         if (parts.length != 5) throw new IllegalStateException("Ferrite: invalid runtime world response");
@@ -581,7 +581,7 @@ public class FerriteServer extends ServerStubs {
             plugins.callEvent(event);
             if (event.isCancelled()) return false;
         }
-        var reply = HostBridge.call("Server", "server", "unloadRuntimeWorld(String,boolean)", Boolean.class, world.getUID().toString(), save);
+        var reply = Bootstrap.<Object>awaitLoop(() -> HostBridge.call("Server", "server", "unloadRuntimeWorld(String,boolean)", Boolean.class, world.getUID().toString(), save));
         if (!Boolean.TRUE.equals(reply)) return false;
         unregisterWorld(world.getUID());
         return true;
