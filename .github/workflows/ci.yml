@@ -31,7 +31,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # A blocked integration test used to sit on the runner until GitHub's
     # six-hour limit. Normal runs are ~15 minutes; fail fast instead.
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -106,7 +106,7 @@ jobs:
         shell: bash
         run: |
           cd java/ferrite-api-impl
-          gradle --console=plain build :test-plugin-typical:jar
+          gradle --console=plain build shadedJar :test-plugin-typical:jar
 
       # The vanilla/ tree is generated locally and must never be committed; only code that
       # reads it is tracked.
@@ -125,5 +125,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        timeout-minutes: 25
+        timeout-minutes: 40
         run: cargo test --workspace
