@@ -49,7 +49,15 @@ final class FerriteEnchantmentData {
             RegistryKeySet<Enchantment> exclusiveWith,
             Component description,
             boolean treasure,
-            boolean cursed) {}
+            boolean cursed,
+            int anvilCost,
+            Cost minCost,
+            Cost maxCost) {}
+
+    /** Vanilla {@code Enchantment.Cost}: {@code base + per_level_above_first * (level - 1)}. */
+    record Cost(int base, int perLevelAboveFirst) {
+        int calculate(int level) { return base + perLevelAboveFirst * (level - 1); }
+    }
 
     private static final ConcurrentHashMap<NamespacedKey, Definition> DEFINITIONS = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Set<NamespacedKey>> TAGS = new ConcurrentHashMap<>();
@@ -75,7 +83,10 @@ final class FerriteEnchantmentData {
                         : keySet(RegistryKey.ENCHANTMENT, Set.of()),
                 description(json, key),
                 tagged("enchantment", NamespacedKey.minecraft("treasure"), key),
-                tagged("enchantment", NamespacedKey.minecraft("curse"), key));
+                tagged("enchantment", NamespacedKey.minecraft("curse"), key),
+                integer(json, "anvil_cost", key),
+                cost(json, "min_cost", key),
+                cost(json, "max_cost", key));
         var previous = DEFINITIONS.putIfAbsent(key, definition);
         return previous == null ? definition : previous;
     }
@@ -108,6 +119,12 @@ final class FerriteEnchantmentData {
         if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber())
             throw new UnsupportedOperationException("Ferrite: enchantment " + key + " has no " + field);
         return value.getAsInt();
+    }
+
+    private static Cost cost(JsonObject json, String field, NamespacedKey key) {
+        var value = json.get(field);
+        if (value == null || !value.isJsonObject()) throw new UnsupportedOperationException("Ferrite: enchantment " + key + " has no " + field);
+        return new Cost(integer(value.getAsJsonObject(), "base", key), integer(value.getAsJsonObject(), "per_level_above_first", key));
     }
 
     private static Component description(JsonObject json, NamespacedKey key) {

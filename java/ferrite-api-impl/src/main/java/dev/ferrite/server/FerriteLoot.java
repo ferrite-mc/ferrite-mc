@@ -878,6 +878,8 @@ final class FerriteLoot {
         }
 
         private boolean compatible(Enchantment enchantment, ItemStack stack) {
+            // Vanilla EnchantRandomlyFunction: a plain book takes any enchantment.
+            if (stack.getType() == Material.BOOK) return true;
             try {
                 return enchantment.canEnchantItem(stack);
             } catch (RuntimeException unavailable) {

@@ -15,8 +15,17 @@ final class FerriteEnchantment extends org.bukkit.enchantments.Enchantment {
     }
     public boolean isTreasure() { return FerriteEnchantmentData.get(key).treasure(); }
     public boolean isCursed() { return FerriteEnchantmentData.get(key).cursed(); }
-    public boolean conflictsWith(org.bukkit.enchantments.Enchantment other) { return HostBridge.callBoolean("Enchantment", key, "conflictsWith(Enchantment)", other); }
-    public boolean canEnchantItem(org.bukkit.inventory.ItemStack item) { return HostBridge.callBoolean("Enchantment", key, "canEnchantItem(ItemStack)", item); }
+    /** Vanilla {@code Enchantment.areCompatible}: an enchantment never combines with itself or its exclusive set. */
+    public boolean conflictsWith(org.bukkit.enchantments.Enchantment other) {
+        java.util.Objects.requireNonNull(other, "other");
+        if (other.getKey().equals(key)) return true;
+        return FerriteEnchantmentData.get(key).exclusiveWith().values().stream().anyMatch(exclusive -> exclusive.key().equals(other.getKey()));
+    }
+    public boolean canEnchantItem(org.bukkit.inventory.ItemStack item) {
+        java.util.Objects.requireNonNull(item, "item");
+        var type = item.getType().getKey();
+        return FerriteEnchantmentData.get(key).supportedItems().values().stream().anyMatch(supported -> supported.key().equals(type));
+    }
     public net.kyori.adventure.text.Component displayName(int level) {
         var definition = FerriteEnchantmentData.get(key);
         var name = definition.description().color(definition.cursed()
@@ -30,9 +39,9 @@ final class FerriteEnchantment extends org.bukkit.enchantments.Enchantment {
     }
     public boolean isTradeable() { return HostBridge.callBoolean("Enchantment", key, "isTradeable()"); }
     public boolean isDiscoverable() { return HostBridge.callBoolean("Enchantment", key, "isDiscoverable()"); }
-    public int getMinModifiedCost(int level) { return HostBridge.callInt("Enchantment", key, "getMinModifiedCost(int)", level); }
-    public int getMaxModifiedCost(int level) { return HostBridge.callInt("Enchantment", key, "getMaxModifiedCost(int)", level); }
-    public int getAnvilCost() { return HostBridge.callInt("Enchantment", key, "getAnvilCost()"); }
+    public int getMinModifiedCost(int level) { return FerriteEnchantmentData.get(key).minCost().calculate(level); }
+    public int getMaxModifiedCost(int level) { return FerriteEnchantmentData.get(key).maxCost().calculate(level); }
+    public int getAnvilCost() { return FerriteEnchantmentData.get(key).anvilCost(); }
     public io.papermc.paper.enchantments.EnchantmentRarity getRarity() { return FerriteEnchantmentData.rarity(FerriteEnchantmentData.get(key), key); }
     public float getDamageIncrease(int level, org.bukkit.entity.EntityCategory category) { return HostBridge.callFloat("Enchantment", key, "getDamageIncrease(int,EntityCategory)", level, category); }
     public float getDamageIncrease(int level, org.bukkit.entity.EntityType type) { return HostBridge.callFloat("Enchantment", key, "getDamageIncrease(int,EntityType)", level, type); }
@@ -40,6 +49,6 @@ final class FerriteEnchantment extends org.bukkit.enchantments.Enchantment {
     public net.kyori.adventure.text.Component description() { return FerriteEnchantmentData.get(key).description(); }
     public io.papermc.paper.registry.set.RegistryKeySet<org.bukkit.inventory.ItemType> getSupportedItems() { return FerriteEnchantmentData.get(key).supportedItems(); }
     public io.papermc.paper.registry.set.RegistryKeySet<org.bukkit.inventory.ItemType> getPrimaryItems() { return FerriteEnchantmentData.get(key).primaryItems(); }
-    public int getWeight() { return HostBridge.callInt("Enchantment", key, "getWeight()"); }
+    public int getWeight() { return FerriteEnchantmentData.get(key).weight(); }
     public io.papermc.paper.registry.set.RegistryKeySet<org.bukkit.enchantments.Enchantment> getExclusiveWith() { return FerriteEnchantmentData.get(key).exclusiveWith(); }
 }
