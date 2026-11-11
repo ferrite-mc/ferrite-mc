@@ -698,8 +698,41 @@ pub struct TickContext {
     /// Shared per-dimension wandering-trader roll; region-local copies would spawn duplicates.
     pub trader_spawner: Arc<Mutex<super::wandering_trader::SpawnerState>>,
     pub profiler: Option<Arc<super::profile::Profiler>>,
-    /// The server's command tree, for command blocks; `None` in tests that do not need it.
-    pub tree: Option<Arc<ferrite_command::CommandDispatcher<super::commands::Source>>>,
+    /// The server's live command tree, for command blocks; `None` in tests that do not need it.
+    pub tree: Option<Arc<SharedCommandTree>>,
+}
+
+/// The command tree as the world loop currently sees it. Plugin hooks attach after the loop
+/// starts and rebuild the tree, so region-driven commands must read the current tree per
+/// command instead of the one captured at startup. The lock is held only to clone an `Arc`, and
+/// only when a command actually runs, never per tick.
+pub struct SharedCommandTree {
+    current: Mutex<Arc<ferrite_command::CommandDispatcher<super::commands::Source>>>,
+}
+
+impl SharedCommandTree {
+    pub fn new(tree: Arc<ferrite_command::CommandDispatcher<super::commands::Source>>) -> Self {
+        Self {
+            current: Mutex::new(tree),
+        }
+    }
+
+    /// Replaces the tree every later command lookup sees.
+    pub fn publish(&self, tree: Arc<ferrite_command::CommandDispatcher<super::commands::Source>>) {
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = tree;
+    }
+
+    pub fn load(&self) -> Arc<ferrite_command::CommandDispatcher<super::commands::Source>> {
+        Arc::clone(
+            &self
+                .current
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
+    }
 }
 
 fn lock_game_state<'a>(
@@ -723,7 +756,7 @@ struct BlockCommands<'a> {
     tracking: &'a Tracking,
     state: &'a Arc<Mutex<super::commands::GameState>>,
     dimension: super::dimension::Dimension,
-    tree: &'a Arc<ferrite_command::CommandDispatcher<super::commands::Source>>,
+    tree: &'a SharedCommandTree,
 }
 
 impl super::command_block::Runner for BlockCommands<'_> {
@@ -737,6 +770,7 @@ impl super::command_block::Runner for BlockCommands<'_> {
             yaw: 0.0,
             pitch: 0.0,
         };
+        let tree = self.tree.load();
         let (actions, mut received) = tokio::sync::mpsc::unbounded_channel();
         let source = super::commands::Source {
             permission: 2,
@@ -750,11 +784,10 @@ impl super::command_block::Runner for BlockCommands<'_> {
             world: Some(Arc::clone(self.source)),
             state: Arc::clone(self.state),
             actions,
-            tree: Some(Arc::clone(self.tree)),
+            tree: Some(Arc::clone(&tree)),
             function_depth: 0,
         };
-        self.tree
-            .execute(command.trim_start_matches('/'), source)
+        tree.execute(command.trim_start_matches('/'), source)
             .map_err(|error| error.to_string())?;
         let mut output = String::new();
         let mut success = true;
@@ -8036,7 +8069,7 @@ impl Region {
         let Some(source) = ctx.source.as_ref() else {
             return;
         };
-        let Some(tree) = ctx.tree.clone() else {
+        let Some(tree) = ctx.tree.as_ref() else {
             return;
         };
         let Self {
@@ -8054,7 +8087,7 @@ impl Region {
             tracking: &ctx.tracking,
             state: &ctx.state,
             dimension: ctx.dimension,
-            tree: &tree,
+            tree,
         };
         let updated = command_blocks.tick(source, &power, &mut runner, *tick_clock);
         if updated.is_empty() {
@@ -11833,5 +11866,47 @@ mod event_policy_tests {
         assert_eq!(material_name(u32::from(stone)), "minecraft:stone");
         assert_eq!(material_name(u32::from(grass)), "minecraft:grass_block");
         assert_eq!(material_name(u32::MAX), "minecraft:air");
+    }
+    /// A plugin attaches after the loop started and rebuilds the command tree; command blocks
+    /// must see the rebuilt tree, not the one captured when the loop began.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_block_runs_a_plugin_command_registered_after_startup() {
+        use super::super::command_block::Runner;
+        let source = Arc::new(super::super::anvil::AnvilChunkSource::new_memory());
+        let tracking: Tracking = Default::default();
+        let state = Arc::new(Mutex::new(super::super::commands::GameState::new(0, 0, 10)));
+        let startup_tree = Arc::new(super::super::commands::dispatcher());
+        let shared = SharedCommandTree::new(Arc::clone(&startup_tree));
+        let run = |shared: &SharedCommandTree| {
+            BlockCommands {
+                source: &source,
+                tracking: &tracking,
+                state: &state,
+                dimension: super::super::Dimension::Overworld,
+                tree: shared,
+            }
+            .run([0, 64, 0], "/fixtureping hello world")
+        };
+        let before = run(&shared);
+        assert!(
+            before.is_err(),
+            "the plugin command does not exist yet: {before:?}"
+        );
+        let mut rebuilt = super::super::commands::dispatcher();
+        super::super::commands::register_plugin_commands(
+            &mut rebuilt,
+            &[ferrite_plugin::PluginCommand {
+                name: "fixtureping".to_owned(),
+                aliases: Vec::new(),
+                permission: None,
+                usage: None,
+            }],
+        );
+        shared.publish(Arc::new(rebuilt));
+        let after = run(&shared);
+        assert!(
+            after.is_ok(),
+            "command blocks must see the tree published after startup: {after:?}"
+        );
     }
 }

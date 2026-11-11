@@ -1133,6 +1133,7 @@ async fn run(
         }
     }
     let mut command_tree = Arc::new(tree);
+    let shared_tree = Arc::new(region::SharedCommandTree::new(Arc::clone(&command_tree)));
     let registry_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../vanilla/26.3/generated/reports");
     let parser_registry = ferrite_command::ParserRegistry::load(&registry_dir).ok();
@@ -1161,11 +1162,10 @@ async fn run(
         }
     }
     let command_state = Arc::new(Mutex::new(initial_state));
-    // The command tree is replaced when plugin hooks attach, so it is passed in per call rather
-    // than borrowed for the whole loop.
+    // Runtime worlds read the live command tree through the shared handle, so plugin commands
+    // registered after a world was created still reach its command blocks.
     let make_runtime_ctx =
-        |descriptor: &RuntimeWorldDescriptor,
-         tree: &Arc<ferrite_command::CommandDispatcher<commands::Source>>| TickContext {
+        |descriptor: &RuntimeWorldDescriptor, tree: &Arc<region::SharedCommandTree>| TickContext {
             signals: signal_tx.clone(),
             tracking: tracking.clone(),
             positions: positions.clone(),
@@ -1252,7 +1252,7 @@ async fn run(
             state: command_state.clone(),
             trader_spawner: Default::default(),
             profiler: Some(profiler.clone()),
-            tree: Some(Arc::clone(&command_tree)),
+            tree: Some(Arc::clone(&shared_tree)),
         };
         let scheduler = (scheduler_factory)(ctx, dimension == Dimension::Overworld);
         schedulers.insert(WorldId::Vanilla(dimension), scheduler);
@@ -1585,7 +1585,7 @@ async fn run(
                               .open_persistent(&name, root, overworld.registry(), overworld.terrain(), dimension, spawn)
                               .map_err(|error| error.to_string())?;
                           let id = descriptor.id;
-                          let ctx = make_runtime_ctx(&descriptor, &command_tree);
+                          let ctx = make_runtime_ctx(&descriptor, &shared_tree);
                           if !worlds.insert_runtime_scheduler(id, ctx) {
                               let _ = runtime_world_catalog.unload(id);
                               return Err("runtime scheduler already exists for this world UUID".to_owned());
@@ -1603,7 +1603,7 @@ async fn run(
                   },
                   GameMessage::UnloadRuntimeWorld{id,save,complete}=>{
                       let players_inside = player_worlds.values().any(|world| *world == WorldId::Runtime(id));
-                      let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, |descriptor| make_runtime_ctx(descriptor, &command_tree), settings.runtime_world_view.as_ref())
+                      let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, |descriptor| make_runtime_ctx(descriptor, &shared_tree), settings.runtime_world_view.as_ref())
                           .await
                           .map_err(|error| format!("{error:#}"));
                       let _ = complete.send(result);
@@ -1617,6 +1617,7 @@ async fn run(
                           Err(error) => tracing::warn!(%error, "plugin commands unavailable"),
                       }
                       command_tree = Arc::new(tree);
+                      shared_tree.publish(Arc::clone(&command_tree));
                       settings.plugins = Some(hooks);
                       let _ = complete.send(());
                   },
