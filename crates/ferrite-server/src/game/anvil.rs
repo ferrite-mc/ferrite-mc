@@ -592,6 +592,25 @@ impl AnvilChunkSource {
         })?;
         Some(f(&column.chunk))
     }
+    /// Whether the chunk is resident in this source right now (loaded and readable).
+    pub fn chunk_resident(&self, x: i32, z: i32) -> bool {
+        self.with_loaded_chunk(x, z, |_| ()).is_some()
+    }
+    /// Whether the chunk is stored in this source's region files. Never loads or creates it;
+    /// a memory-backed source stores nothing.
+    pub fn chunk_saved(&self, x: i32, z: i32) -> bool {
+        let Some(path) = &self.path else {
+            return false;
+        };
+        let (rx, rz) = (x.div_euclid(32), z.div_euclid(32));
+        let file = path
+            .join(self.dimension.region_dir())
+            .join(format!("r.{rx}.{rz}.mca"));
+        file.is_file()
+            && RegionFile::open(&file, rx, rz)
+                .and_then(|region| region.read_chunk(x, z))
+                .is_ok_and(|chunk| chunk.is_some())
+    }
     pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
         let cache = self.cache.lock().unwrap();
         let key = (x.div_euclid(16), z.div_euclid(16));

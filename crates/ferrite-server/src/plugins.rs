@@ -665,6 +665,19 @@ impl ferrite_plugin::WorldView for SourceWorldView {
     fn light_level(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<u8> {
         self.source_with_chunk(world, x, z)?.light_level(x, y, z)
     }
+    fn chunk_loaded(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<bool> {
+        Some(self.source(world)?.chunk_resident(x, z))
+    }
+    fn chunk_generated(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<bool> {
+        let source = self.source(world)?;
+        Some(source.chunk_resident(x, z) || source.chunk_saved(x, z))
+    }
+    fn load_chunk(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<bool> {
+        Some(
+            self.source(world)?
+                .ensure_chunk_loaded(x, z, CHUNK_LOAD_TIMEOUT),
+        )
+    }
     fn block_entities(
         &self,
         world: uuid::Uuid,
