@@ -27,7 +27,7 @@ CMI가 동작한다고 말할 수 없다.
 - **Server 경계 정리.** help map(명령 맵 기반 + `registerHelpTopicFactory`), recipes(바닐라
   데이터팩), maps(메모리 `MapView`), tags(block/item/fluid/entity_type/game_event)는 기존 경계로
   구현되어 있음을 확인하고 JUnit `serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest`로
-  고정했다. `EntityFactory#createEntitySnapshot`(비플레이어
+  고정했다. `createWorld`/`unloadWorld`는 이후 런타임 월드로 구현되었고(`plugin-api-stubs.md` 참고, 이 줄은 2026-11-09 시점의 기록이다), 당시 `EntityFactory#createEntitySnapshot`(비플레이어
   엔티티 NBT 경계 없음)은 구현하지 않았고 소유자/이유/선행 작업을 `docs/plugin-api-stubs.md`에 적었다.
 - **구조물 엔티티는 계속 미지원.** `Structure#getEntities`는 빈 목록, `EntityTransformer` 목록은
   명시적 거부다. 필요한 선행 작업 3가지(호스트 비플레이어 엔티티 조회 경계, 템플릿 `entities`

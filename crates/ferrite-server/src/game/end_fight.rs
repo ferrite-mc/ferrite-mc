@@ -644,6 +644,31 @@ pub fn gateway_block_entity(age: i64) -> Option<ferrite_world::BlockEntity> {
     Some(ferrite_world::BlockEntity { type_id, data })
 }
 
+/// Advances a stored gateway's `Age` by one tick while it is below [`GATEWAY_SPAWN_TICKS`], so a
+/// chunk packet built later (a new viewer, or the chunk after a reload) carries how far the
+/// creation beam already got instead of the `Age = 0` it was created with. Vanilla ticks the
+/// block entity on the server; the client advances its own copy, so nothing is sent. Returns
+/// whether the stored age changed.
+pub fn advance_gateway_age(source: &super::anvil::AnvilChunkSource, at: [i32; 3]) -> bool {
+    source
+        .update_block_entity(at[0], at[1], at[2], |slot| {
+            let Some(entity) = slot.as_mut() else {
+                return (false, false);
+            };
+            match entity.data.get("Age") {
+                Some(ferrite_nbt::Tag::Long(age)) if *age < GATEWAY_SPAWN_TICKS => {
+                    let next = *age + 1;
+                    entity
+                        .data
+                        .insert("Age".into(), ferrite_nbt::Tag::Long(next));
+                    (true, true)
+                }
+                _ => (false, false),
+            }
+        })
+        .unwrap_or(false)
+}
+
 /// The tag sent in `ClientboundBlockEntityDataPacket`: the stored data without the chunk-local
 /// coordinates the chunk save adds.
 pub fn gateway_update_tag(entity: &ferrite_world::BlockEntity) -> ferrite_nbt::Compound {

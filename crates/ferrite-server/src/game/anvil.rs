@@ -1414,7 +1414,9 @@ fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
         keep
     });
     cache.pending -= dropped_pending;
-    if cache.entries.len() < before {
+    // A modified chunk's own packet is replaced by the caller right after this; that drops a
+    // cached packet as well, so repeated edits of one chunk are counted too.
+    if cache.entries.len() < before || cache.dirty.contains_key(&(x, z)) {
         stats.invalidations.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(x, z, "chunk packet cache invalidated");
     }
@@ -1794,5 +1796,66 @@ mod tests {
             &*before, &*after,
             "a light change must re-encode the chunk packet"
         );
+    }
+
+    fn sign_entity(pos: [i32; 3], text: &str) -> ferrite_world::BlockEntity {
+        let type_id = ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:sign")
+            .and_then(|id| u32::try_from(id).ok())
+            .expect("sign block entity type");
+        let mut data = ferrite_nbt::Compound::new();
+        data.insert("id".into(), Tag::String("minecraft:sign".into()));
+        data.insert("x".into(), Tag::Int(pos[0]));
+        data.insert("y".into(), Tag::Int(pos[1]));
+        data.insert("z".into(), Tag::Int(pos[2]));
+        data.insert("marker".into(), Tag::String(text.into()));
+        ferrite_world::BlockEntity { type_id, data }
+    }
+
+    /// Regression: a viewer asking for a chunk after a cache hit must receive the changed
+    /// block entity, on the first edit and on later edits of an already modified chunk.
+    #[tokio::test]
+    async fn block_entity_change_reaches_a_viewer_after_a_cache_hit() {
+        let source = AnvilChunkSource::new_memory();
+        let pos = [3, 70, 4];
+        let original = ready(&source, 0, 0, 0).await;
+        // Cache hit: the packet is shared before any edit.
+        assert!(Arc::ptr_eq(&original, &ready(&source, 0, 0, 0).await));
+
+        source
+            .update_block_entity(pos[0], pos[1], pos[2], |slot| {
+                *slot = Some(sign_entity(pos, "first"));
+                (true, ())
+            })
+            .unwrap();
+        let first = ready(&source, 0, 0, 0).await;
+        assert_ne!(&*original, &*first, "viewer still got the pre-edit packet");
+        assert!(Arc::ptr_eq(&first, &ready(&source, 0, 0, 0).await));
+        assert_eq!(source.cache_stats().invalidations, 1);
+
+        // A second edit of the now-dirty chunk replaces the cached packet again.
+        source
+            .update_block_entity(pos[0], pos[1], pos[2], |slot| {
+                *slot = Some(sign_entity(pos, "second"));
+                (true, ())
+            })
+            .unwrap();
+        let second = ready(&source, 0, 0, 0).await;
+        assert_ne!(&*first, &*second, "second edit served from a stale packet");
+        assert_eq!(source.cache_stats().invalidations, 2);
+
+        // Removing the block entity is a change too.
+        source
+            .update_block_entity(pos[0], pos[1], pos[2], |slot| (slot.take().is_some(), ()))
+            .unwrap();
+        let removed = ready(&source, 0, 0, 0).await;
+        assert_ne!(&*second, &*removed);
+        assert_eq!(&*removed, &*original, "no block entity again");
+
+        // A no-op closure must not re-encode or invalidate.
+        let encodes = source.cache_stats().encodes;
+        source
+            .update_block_entity(pos[0], pos[1], pos[2], |_| (false, ()))
+            .unwrap();
+        assert_eq!(source.cache_stats().encodes, encodes);
     }
 }

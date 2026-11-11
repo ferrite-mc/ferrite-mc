@@ -57,6 +57,7 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | `Server#createMap`/`getMap` | `FerriteMapView` — 메모리 `MapView`, 렌더러 목록, `sendMap` 때 캔버스 렌더. | 맵 id/메타가 Rust 아이템으로 왕복하지 않는다(아이템은 material+amount). 숨김 커서와 스타일 캡션은 26.3 decoration 레코드에 없어 보내지 않는다. |
 | `Server#getTags`/`getTag` | `FerriteTags` — 데이터팩 `tags/block|item|fluid|entity_type|game_event`. | 위 5개 레지스트리 밖은 `UnsupportedOperationException`. |
 | `InventoryDragEvent` | `game/container.rs` + `ferrite-plugin` + `Bootstrap#fireInventoryDrag` | 드래그가 실제로 바꾼 슬롯만 담는다(시작 시점과 끝 시점의 메뉴 차이). 단일 슬롯 드래그는 `ferrite-inventory`가 일반 클릭으로 적용하지만, 결과가 바뀌면 그 슬롯을 담아 이벤트를 보낸다. |
+| `Server#createWorld(WorldCreator)`, `Server#unloadWorld` | `FerriteServer` + 호스트 `createRuntimeWorld(String,String,long)` / `unloadRuntimeWorld(String,boolean)` (`plugins.rs`) + `game::World::create_runtime_world`/`unload_runtime_world` | 이미 등록된 이름·키는 그 월드를 돌려준다. 새 월드는 영구 디스크립터와 별도 청크 소스·리전 스케줄러(`WorldId::Runtime`)를 만들고 `WorldLoadEvent`를 보낸다. 시드는 생성 때만 적용되고 기존 월드는 디스크의 시드를 돌려준다. `unloadWorld`는 취소 가능한 `WorldUnloadEvent` 뒤에 호스트가 (`save` 인자에 따라 저장하고) 내리며, 기본 월드(`world`)는 내릴 수 없다. | `generator`가 있거나 `generateStructures(false)`이거나 `WorldType`이 `NORMAL`이 아니면 `UnsupportedOperationException`. 환경은 `NORMAL`/`NETHER`/`THE_END`만. 검증: JUnit `ApiSurfaceTest`(시드, 재열기, 거부 경로), Rust `game/runtime_persist.rs` 테스트(언로드 저장·실패·`save=false`). 실제 클라이언트로 월드 간 이동을 확인한 것은 아니다. |
 
 ### 런타임 월드와 플레이어 동작 (2026-11-11, W5)
 

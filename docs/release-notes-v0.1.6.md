@@ -13,12 +13,14 @@ Ferrite 0.1.6 targets Minecraft Java 26.3 (protocol 777).
 
 ## Known limitations
 
-- Bukkit `Server#createWorld` and `Server#unloadWorld` remain unsupported. Runtime world creation,
-  chunk-source lifecycle, scheduler routing, and Java `FerriteWorld` registration are tracked in
-  `docs/BACKLOG.md` and `docs/plugin-api-stubs.md`.
+- Bukkit `Server#createWorld` and `Server#unloadWorld` are implemented for runtime worlds (see
+  `docs/BACKLOG.md` section 8). Custom generators, `generateStructures(false)`, non-`NORMAL` world
+  types and environments other than `NORMAL`/`NETHER`/`THE_END` are rejected with
+  `UnsupportedOperationException`. This corrects the earlier text that listed both calls as
+  unsupported.
 - `World#unloadChunk` does not force-unload chunks held by a player or `/forceload`.
 - `World#sendBlockUpdate` supports signs; other tile states are unsupported.
-- The 800-bot throughput measurement and real-client validation remain open.
+- The 800-bot baseline is recorded in `docs/perf/README.md` (no optimisation claimed); real-client validation remains open (`docs/manual-checklist.md`).
 
 ## Windows package
 

@@ -50,7 +50,13 @@ What works, how it is built, and what is still missing.
   `Age`, so that one packet renders the full 200-tick magenta creation beam. No block event or
   new protocol structure is involved. `Age = 200` is used when only the
   block survived an older save, so the creation beam is not replayed; a gateway whose block is
-  missing but whose chunk is now loaded is written with `Age = 0`.
+  missing but whose chunk is now loaded is written with `Age = 0`. While a gateway's chunk is held
+  its stored `Age` is advanced one per region tick up to 200 (`end_fight::advance_gateway_age`, no
+  packet: the client ticks its own copy), so a viewer who arrives later, or the chunk after a
+  restart, receives the age already reached instead of 0. A gateway saved at 50 resumes at 50;
+  a finished one is never rewritten. Covered by
+  `a_reloaded_end_gateway_keeps_its_age_and_never_replays_the_creation_beam`
+  (`persistence_tests.rs`). The 200 ticks of re-encoding the chunk packet are the only cost.
 
 - **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
   head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Breath clouds use
@@ -79,9 +85,8 @@ What works, how it is built, and what is still missing.
   Vanilla splits the perch into scanning, attacking and flaming subphases; those exact timings
   and the scanning target switch are still approximations. The dragon smashes every block in its
   body except `#minecraft:dragon_immune`.
-- **Gateway beam lifecycle.** The server sends the creation `Age` once and never advances it, so a
-  chunk reloaded from a save can replay the 200-tick creation beam. The purple teleport beam and
-  the automatic 2400-tick beam are not triggered.
+- **Gateway beam.** The purple teleport beam and the automatic 2400-tick beam are not triggered.
+  The creation beam itself does not replay (see "Gateway beam" above).
 - **Outer islands.** A gateway landing searches up to 16 blocks around the point 1024 blocks out
   for the nearest loaded column with ground and two air above; an all-void 3x3 chunk area cancels
   the trip instead of dropping the player into the void. The search radius is smaller than
@@ -90,6 +95,8 @@ What works, how it is built, and what is still missing.
   terrain without vanilla's spike podiums the choice can differ from the generated world's
   shuffled sizes.
 ## Client-only behaviour (not verified here)
+
+The step-by-step checks for these are in [`manual-checklist.md`](manual-checklist.md).
 
 The packets and state above are covered by protocol bots and unit tests. These effects still need
 a real 26.3 client:
