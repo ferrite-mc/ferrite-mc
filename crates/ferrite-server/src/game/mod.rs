@@ -229,6 +229,59 @@ mod tests {
     }
 
     #[test]
+    fn plugin_location_reports_the_players_current_world() {
+        let id = Uuid::from_u128(77);
+        let player = Uuid::from_u128(5);
+        let pos = [1.5, 64.0, -3.5];
+        // Joined or travelled into a runtime world: its UUID, with the position carried over.
+        let tracked = HashMap::from([(player, WorldId::Runtime(id))]);
+        let location = plugin_location(&tracked, player, Dimension::Overworld, pos, 90.0, -10.0);
+        assert_eq!(location.world, id);
+        assert_eq!((location.x, location.y, location.z), (1.5, 64.0, -3.5));
+        assert_eq!((location.yaw, location.pitch), (90.0, -10.0));
+        // Untracked or vanilla players report the default world.
+        let vanilla = HashMap::from([(player, WorldId::Vanilla(Dimension::Nether))]);
+        assert_eq!(
+            plugin_location(&vanilla, player, Dimension::Overworld, pos, 0.0, 0.0).world,
+            ferrite_plugin::default_world_id()
+        );
+        assert_eq!(
+            plugin_location(&HashMap::new(), player, Dimension::Overworld, pos, 0.0, 0.0).world,
+            ferrite_plugin::default_world_id()
+        );
+    }
+
+    #[test]
+    fn crystal_from_a_runtime_world_player_lands_in_that_world() {
+        let (worlds, runtime) = two_world_fixture();
+        let vanilla = WorldId::Vanilla(Dimension::Overworld);
+        let chunk = ChunkPos(0, 0);
+        let mut holds = HashMap::new();
+        add_holds(&worlds, &mut holds, None, vanilla, [chunk]);
+        add_holds(&worlds, &mut holds, None, runtime, [chunk]);
+        let player = Uuid::from_u128(5);
+        let player_worlds = HashMap::from([(player, runtime)]);
+        assert!(summon_crystal_for_player(
+            &worlds,
+            &player_worlds,
+            player,
+            Dimension::Overworld,
+            [8.5, 64.0, 8.5],
+        ));
+        assert_eq!(in_world(&worlds, runtime, chunk), 1);
+        assert_eq!(in_world(&worlds, vanilla, chunk), 0);
+        // A chunk the player's world does not own keeps the "not loaded" outcome.
+        assert!(!summon_crystal_for_player(
+            &worlds,
+            &player_worlds,
+            player,
+            Dimension::Overworld,
+            [1608.5, 64.0, 8.5],
+        ));
+        worlds.shutdown();
+    }
+
+    #[test]
     fn holds_and_entities_are_keyed_per_world_across_travel() {
         let (worlds, runtime) = two_world_fixture();
         let vanilla = WorldId::Vanilla(Dimension::Overworld);
@@ -824,6 +877,44 @@ fn summon_for_player(
         region.summon(kind, pos, no_ai);
     });
     true
+}
+
+/// `/summon end_crystal` from a player: lands in the world the player stands in. False when the chunk is not loaded.
+fn summon_crystal_for_player(
+    worlds: &Worlds,
+    player_worlds: &HashMap<Uuid, WorldId>,
+    uuid: Uuid,
+    fallback: Dimension,
+    pos: [f64; 3],
+) -> bool {
+    let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    let world = player_world(player_worlds, uuid, fallback);
+    if worlds.owner_world(world, chunk).is_none() {
+        return false;
+    }
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
+        region.summon_end_crystal(pos);
+    });
+    true
+}
+
+/// The location plugins see for a player: the world they are in now (by UUID for runtime worlds) plus position.
+fn plugin_location(
+    player_worlds: &HashMap<Uuid, WorldId>,
+    uuid: Uuid,
+    fallback: Dimension,
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+) -> ferrite_plugin::PlayerLocation {
+    ferrite_plugin::PlayerLocation {
+        world: plugin_world_id(player_world(player_worlds, uuid, fallback)),
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        yaw,
+        pitch,
+    }
 }
 #[derive(Debug, Clone)]
 pub struct Operator {
@@ -1752,14 +1843,7 @@ async fn run(
                                3 => ferrite_plugin::GameMode::Spectator,
                                _ => ferrite_plugin::GameMode::Survival,
                            },
-                           location: ferrite_plugin::PlayerLocation {
-                               world: ferrite_plugin::default_world_id(),
-                               x: start_pos[0],
-                               y: start_pos[1],
-                               z: start_pos[2],
-                               yaw: start_yaw,
-                               pitch: start_pitch,
-                           },
+                           location: plugin_location(&player_worlds, uuid, start_dimension, start_pos, start_yaw, start_pitch),
                            inventory: vec![None; 41],
                        };
                        if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
@@ -1867,10 +1951,7 @@ async fn run(
                           commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: Some(outbound.clone()) }); } } },
                           commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: Some(outbound.clone()) }); } } },
                           commands::Action::SummonCrystal { pos, dimension } => {
-                              let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                              if worlds.owner(dimension, chunk).is_some() {
-                                  worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon_end_crystal(pos); });
-                              } else {
+                              if !summon_crystal_for_player(&worlds, &player_worlds, uuid, dimension, pos) {
                                   chat(outbound, "That position is not loaded");
                               }
                           }
@@ -2083,7 +2164,7 @@ async fn run(
                     crate::plugins::facts::set_on_ground(uuid, ground);
                     command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
                     if let Some(plugins) = &settings.plugins {
-                      let location = ferrite_plugin::PlayerLocation { world: plugin_world_id(player_world(&player_worlds, uuid, Dimension::Overworld)), x: pos[0], y: pos[1], z: pos[2], yaw, pitch };
+                      let location = plugin_location(&player_worlds, uuid, Dimension::Overworld, pos, yaw, pitch);
                       if let Err(error) = plugins.update_player_location(uuid, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
                     }
                     worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
@@ -2097,10 +2178,15 @@ async fn run(
                   },
                   Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let world=player.world_id;let chunk=player.chunk;let id=player.uuid;
+                    let (arrived_pos, arrived_yaw, arrived_pitch) = (player.pos, player.yaw, player.pitch);
                     worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
                     if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
                     player_worlds.insert(id, world);
+                    if let Some(plugins) = &settings.plugins {
+                      let location = plugin_location(&player_worlds, id, dimension, arrived_pos, arrived_yaw, arrived_pitch);
+                      if let Err(error) = plugins.update_player_location(id, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
+                    }
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
