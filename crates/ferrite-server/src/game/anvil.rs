@@ -1350,10 +1350,25 @@ fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
 /// fields from a real vanilla `level.dat` are not modeled here; callers only use this for a
 /// freshly created Ferrite world.
 pub fn write_spawn(world: &Path, spawn: [i32; 3]) -> anyhow::Result<()> {
+    write_level(world, spawn, None)
+}
+
+/// Like [`write_spawn`], and also records the world seed under `Data.WorldGenSettings.seed`
+/// (the location vanilla used before world generation settings moved out of `level.dat`).
+pub fn write_spawn_and_seed(world: &Path, spawn: [i32; 3], seed: i64) -> anyhow::Result<()> {
+    write_level(world, spawn, Some(seed))
+}
+
+fn write_level(world: &Path, spawn: [i32; 3], seed: Option<i64>) -> anyhow::Result<()> {
     let mut data = ferrite_nbt::Compound::new();
     let mut pos = ferrite_nbt::Compound::new();
     pos.insert("pos".into(), Tag::IntArray(spawn.to_vec()));
     data.insert("spawn".into(), Tag::Compound(pos));
+    if let Some(seed) = seed {
+        let mut settings = ferrite_nbt::Compound::new();
+        settings.insert("seed".into(), Tag::Long(seed));
+        data.insert("WorldGenSettings".into(), Tag::Compound(settings));
+    }
     data.insert("DataVersion".into(), Tag::Int(5023));
     let mut root = ferrite_nbt::Compound::new();
     root.insert("Data".into(), Tag::Compound(data));
@@ -1361,6 +1376,27 @@ pub fn write_spawn(world: &Path, spawn: [i32; 3]) -> anyhow::Result<()> {
     std::fs::create_dir_all(world)?;
     std::fs::write(world.join("level.dat"), bytes)?;
     Ok(())
+}
+
+/// The seed recorded by [`write_spawn_and_seed`], or `None` for a `level.dat` that has none
+/// (worlds created before seeds were stored).
+pub fn read_seed(world: &Path) -> anyhow::Result<Option<i64>> {
+    let bytes = std::fs::read(world.join("level.dat"))?;
+    let (_, tag) = binary::read_compressed(&bytes, binary::Compression::Gzip)?;
+    let Tag::Compound(root) = tag else {
+        anyhow::bail!("level.dat root is not a compound")
+    };
+    let Some(Tag::Compound(data)) = root.get("Data") else {
+        anyhow::bail!("level.dat missing Data")
+    };
+    Ok(match data.get("WorldGenSettings") {
+        Some(Tag::Compound(settings)) => match settings.get("seed") {
+            Some(Tag::Long(seed)) => Some(*seed),
+            Some(_) => anyhow::bail!("level.dat seed is not a long"),
+            None => None,
+        },
+        _ => None,
+    })
 }
 
 pub fn read_spawn(world: &Path) -> anyhow::Result<[i32; 3]> {

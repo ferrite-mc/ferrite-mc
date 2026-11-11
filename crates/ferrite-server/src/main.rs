@@ -570,7 +570,7 @@ async fn run_server(
             console: Some(plugin_console_tx),
             runtime_world_handler: Some({
                 let sender = world.sender.clone();
-                std::sync::Arc::new(move |name: &str, environment: &str| {
+                std::sync::Arc::new(move |name: &str, environment: &str, seed: i64| {
                     let dimension = match environment {
                         "NORMAL" => game::Dimension::Overworld,
                         "NETHER" => game::Dimension::Nether,
@@ -591,6 +591,7 @@ async fn run_server(
                                     name,
                                     dimension: dimension.key().to_owned(),
                                     spawn: dimension.default_spawn(),
+                                    seed,
                                     complete,
                                 })
                                 .map_err(|_| "game loop stopped".to_owned())?;
@@ -598,7 +599,7 @@ async fn run_server(
                                 .map_err(|_| "runtime world response lost".to_owned())?
                         })
                     })?;
-                    Ok((created.0, created.2))
+                    Ok((created.0, created.2, created.3))
                 })
             }),
             runtime_world_unloader: Some({

@@ -200,10 +200,157 @@ class ApiSurfaceTest {
         assertSame(map, server.getMap(map.getId()));
         assertNull(server.getMap(-12345));
         assertSame(world, server.createWorld(new org.bukkit.WorldCreator(world.getName())));
-        var missing = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_missing_world").seed(0L)));
+        var missing = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_missing_world")));
         assertTrue(missing.getMessage().contains("createRuntimeWorld"), () -> "Unexpected runtime world failure: " + missing.getMessage());
         var snapshot = assertThrows(IllegalStateException.class, () -> server.getEntityFactory().createEntitySnapshot("{}"));
         assertTrue(snapshot.getMessage().contains("no host is available"));
+    }
+
+    /**
+     * A stand-in for the Rust host's runtime-world calls. Like the real host it keeps the seed a world was
+     * created with and answers a later creation of the same name with that stored seed, and it refuses an
+     * unload on request (players inside, failed flush), which the real host reports as {@code false}.
+     */
+    private static final class WorldHost implements HostBridge.Transport {
+        final java.util.List<String> creates = new java.util.ArrayList<>();
+        final java.util.List<String> unloads = new java.util.ArrayList<>();
+        final java.util.Map<String, String[]> stored = new java.util.HashMap<>();
+        volatile boolean refuseUnload;
+        @Override public String call(String owner, String subject, String method, String args) {
+            if (!owner.equals("Server")) return null;
+            var parts = args.split(String.valueOf(HostBridge.ARG), -1);
+            if (method.equals("createRuntimeWorld(String,String,long)")) {
+                creates.add(args);
+                var entry = stored.computeIfAbsent(parts[0], name -> new String[]{java.util.UUID.nameUUIDFromBytes(name.getBytes()).toString(), parts[2]});
+                return entry[0] + HostBridge.ITEM + "0" + HostBridge.ITEM + "65" + HostBridge.ITEM + "0" + HostBridge.ITEM + entry[1];
+            }
+            if (method.equals("unloadRuntimeWorld(String,boolean)")) {
+                unloads.add(args);
+                return refuseUnload ? "false" : "true";
+            }
+            return null;
+        }
+    }
+
+    private static void withWorldHost(java.util.function.Consumer<WorldHost> body) {
+        var host = new WorldHost();
+        var previous = HostBridge.transport;
+        HostBridge.transport = host;
+        try { body.accept(host); }
+        finally {
+            HostBridge.transport = previous;
+            for (var created : host.stored.values()) server.unregisterWorld(java.util.UUID.fromString(created[0]));
+        }
+    }
+
+    private static org.bukkit.plugin.Plugin probePlugin() {
+        return (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(ApiSurfaceTest.class.getClassLoader(), new Class<?>[]{org.bukkit.plugin.Plugin.class}, (proxy, method, args) -> switch (method.getName()) {
+            case "getName" -> "WorldLifecycleProbe";
+            case "isEnabled" -> true;
+            case "hashCode" -> 17;
+            case "equals" -> proxy == args[0];
+            case "toString" -> "WorldLifecycleProbe";
+            default -> null;
+        });
+    }
+
+    @Test void createWorldWithAnUnsetSeedSucceedsAndCarriesTheSeedToTheHost() {
+        withWorldHost(host -> {
+            var creator = new org.bukkit.WorldCreator("ferrite_random_seed");
+            var created = server.createWorld(creator);
+            assertNotNull(created);
+            assertSame(created, server.getWorld("ferrite_random_seed"));
+            assertEquals(1, host.creates.size());
+            var sent = host.creates.get(0).split(String.valueOf(HostBridge.ARG), -1);
+            assertEquals(Long.toString(creator.seed()), sent[2], "the creator's own (random) seed is what the host is asked to use");
+            assertEquals(creator.seed(), created.getSeed());
+        });
+    }
+
+    @Test void anExplicitSeedRoundTripsThroughUnloadAndReopen() {
+        withWorldHost(host -> {
+            var first = server.createWorld(new org.bukkit.WorldCreator("ferrite_seeded").seed(-42_424_242L));
+            assertEquals(-42_424_242L, first.getSeed());
+            assertTrue(server.unloadWorld(first, true));
+            assertNull(server.getWorld("ferrite_seeded"));
+            // Paper keeps an existing world's seed; the host answers with the stored one, not the requested one.
+            var reopened = server.createWorld(new org.bukkit.WorldCreator("ferrite_seeded").seed(7L));
+            assertEquals(-42_424_242L, reopened.getSeed());
+            assertEquals(first.getUID(), reopened.getUID());
+        });
+    }
+
+    @Test void unsupportedCreatorOptionsAreRejectedWithExplicitMessagesAndNoHostCall() {
+        withWorldHost(host -> {
+            var generator = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_gen").generator(new org.bukkit.generator.ChunkGenerator() {})));
+            assertTrue(generator.getMessage().contains("custom chunk generators"), generator.getMessage());
+            var structures = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_nostruct").generateStructures(false)));
+            assertTrue(structures.getMessage().contains("structure generation"), structures.getMessage());
+            var type = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_flat").type(org.bukkit.WorldType.FLAT)));
+            assertTrue(type.getMessage().contains("FLAT") && type.getMessage().contains("NORMAL"), type.getMessage());
+            var environment = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_custom").environment(org.bukkit.World.Environment.CUSTOM)));
+            assertTrue(environment.getMessage().contains("CUSTOM"), environment.getMessage());
+            assertTrue(host.creates.isEmpty(), "a rejected creator never reaches the host");
+            for (var name : java.util.List.of("ferrite_gen", "ferrite_nostruct", "ferrite_flat", "ferrite_custom")) assertNull(server.getWorld(name), name);
+        });
+    }
+
+    /**
+     * Installs a handler that cancels every {@link org.bukkit.event.world.WorldUnloadEvent} and returns the undo.
+     * The plugin manager only accepts handlers from plugins it loaded, and loading one here would collide with
+     * BootstrapTest in the same JVM, so the handler goes straight into the manager's list.
+     */
+    private static Runnable vetoWorldUnloads() throws ReflectiveOperationException {
+        var handlersField = FerritePluginManager.class.getDeclaredField("handlers");
+        handlersField.setAccessible(true);
+        var handlerType = java.util.Arrays.stream(FerritePluginManager.class.getDeclaredClasses()).filter(type -> type.getSimpleName().equals("Handler")).findFirst().orElseThrow();
+        var constructor = handlerType.getDeclaredConstructors()[0];
+        constructor.setAccessible(true);
+        java.util.function.Consumer<Object> veto = event -> ((org.bukkit.event.Cancellable) event).setCancelled(true);
+        var invoker = java.lang.invoke.MethodHandles.lookup().findVirtual(java.util.function.Consumer.class, "accept", java.lang.invoke.MethodType.methodType(void.class, Object.class)).bindTo(veto);
+        var handler = constructor.newInstance(org.bukkit.event.world.WorldUnloadEvent.class, org.bukkit.event.EventPriority.NORMAL, false, probePlugin(), invoker);
+        @SuppressWarnings("unchecked") var handlers = (java.util.List<Object>) handlersField.get(server.plugins);
+        synchronized (server.plugins) { handlers.add(handler); }
+        return () -> { synchronized (server.plugins) { handlers.remove(handler); } };
+    }
+
+    @Test void aCancelledWorldUnloadEventLeavesTheWorldIntact() throws Exception {
+        var undo = vetoWorldUnloads();
+        try {
+            withWorldHost(host -> {
+                var target = server.createWorld(new org.bukkit.WorldCreator("ferrite_cancelled").seed(5L));
+                assertFalse(server.unloadWorld(target, true));
+                assertTrue(host.unloads.isEmpty(), "a vetoed unload never asks the host to stop the world");
+                assertSame(target, server.getWorld(target.getUID()), "the world is still registered");
+                assertTrue(server.getWorlds().contains(target));
+                undo.run();
+                assertTrue(server.unloadWorld(target, true), "without the veto the same world unloads");
+                assertNull(server.getWorld(target.getUID()));
+            });
+        } finally { undo.run(); }
+    }
+
+    @Test void aHostRefusalSuchAsAPlayerInsideOrAFailedFlushKeepsTheWorldRegistered() {
+        withWorldHost(host -> {
+            var target = server.createWorld(new org.bukkit.WorldCreator("ferrite_refused").seed(5L));
+            host.refuseUnload = true;
+            assertFalse(server.unloadWorld(target, true), "Bukkit reports a refused unload as false, not as an exception");
+            assertEquals(1, host.unloads.size());
+            assertSame(target, server.getWorld(target.getUID()), "a refused unload does not unregister the world");
+            host.refuseUnload = false;
+            assertTrue(server.unloadWorld(target, true));
+            assertNull(server.getWorld(target.getUID()));
+        });
+    }
+
+    @Test void unloadingWithoutSavingTellsTheHostToSkipPersistence() {
+        withWorldHost(host -> {
+            var target = server.createWorld(new org.bukkit.WorldCreator("ferrite_nosave").seed(5L));
+            assertTrue(server.unloadWorld(target, false));
+            assertEquals(java.util.List.of(target.getUID() + String.valueOf(HostBridge.ARG) + "false"), host.unloads);
+            assertNull(server.getWorld(target.getUID()), "the world is fully unregistered afterwards");
+            assertNull(server.getWorld("ferrite_nosave"));
+        });
     }
 
     @Test void damageEventsExposeMutableDamage() {

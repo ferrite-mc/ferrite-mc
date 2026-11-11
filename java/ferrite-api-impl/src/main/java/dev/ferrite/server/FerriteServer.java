@@ -547,17 +547,27 @@ public class FerriteServer extends ServerStubs {
         var existing = getWorld(creator.name());
         if (existing == null) existing = getWorld(creator.key());
         if (existing != null) return existing;
-        if (creator.generator() != null || creator.seed() != 0L || !creator.generateStructures() || creator.type() != org.bukkit.WorldType.NORMAL) {
-            throw new UnsupportedOperationException("Ferrite: custom generators, seeds, structure flags, and world types are not supported");
+        if (creator.generator() != null) {
+            throw new UnsupportedOperationException("Ferrite: custom chunk generators are not supported (WorldCreator#generator must be null)");
         }
-        String reply;
-        try { reply = (String) HostBridge.call("Server", "server", "createRuntimeWorld(String,String)", String.class, creator.name(), creator.environment().name()); }
-        catch (RuntimeException error) { throw error; }
+        if (!creator.generateStructures()) {
+            throw new UnsupportedOperationException("Ferrite: disabling structure generation is not supported (WorldCreator#generateStructures must be true)");
+        }
+        if (creator.type() != org.bukkit.WorldType.NORMAL) {
+            throw new UnsupportedOperationException("Ferrite: world type " + creator.type() + " is not supported (only WorldType.NORMAL)");
+        }
+        if (creator.environment() != org.bukkit.World.Environment.NORMAL && creator.environment() != org.bukkit.World.Environment.NETHER && creator.environment() != org.bukkit.World.Environment.THE_END) {
+            throw new UnsupportedOperationException("Ferrite: world environment " + creator.environment() + " is not supported (NORMAL, NETHER or THE_END)");
+        }
+        // Paper's WorldCreator(String) already picked a random seed, so every creator carries one. The host
+        // applies it only when it creates the world; an existing world answers with the seed stored on disk.
+        String reply = (String) HostBridge.call("Server", "server", "createRuntimeWorld(String,String,long)", String.class, creator.name(), creator.environment().name(), creator.seed());
         if (reply == null || reply.isBlank()) throw new IllegalStateException("Ferrite: runtime world creation failed");
         var parts = reply.split(String.valueOf(HostBridge.ITEM), -1);
-        if (parts.length != 4) throw new IllegalStateException("Ferrite: invalid runtime world response");
+        if (parts.length != 5) throw new IllegalStateException("Ferrite: invalid runtime world response");
         var world = FerriteWorld.create(this, java.util.UUID.fromString(parts[0]), creator.name(), 0L,
                 Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+        FerriteWorld.setSeed(world, Long.parseLong(parts[4]));
         registerWorld(world);
         synchronized (Bootstrap.LEGACY_LOCK) { plugins.callEvent(new org.bukkit.event.world.WorldLoadEvent(world)); }
         return world;

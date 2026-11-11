@@ -8,6 +8,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.UUID id;
     private final String name;
     private final long time;
+    /** The world seed as the host reported it when the world was opened; the host's live answer wins. */
+    private volatile long seed;
     private final Pos spawn;
     private final java.util.Map<Pos, org.bukkit.Material> blocks = new java.util.concurrent.ConcurrentHashMap<>();
     /** Full state strings for blocks a plugin placed with {@code setBlockData}; {@link #blocks} holds their material. */
@@ -23,6 +25,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         world.proxy = (org.bukkit.World) java.lang.reflect.Proxy.newProxyInstance(FerriteWorld.class.getClassLoader(), new Class<?>[]{org.bukkit.World.class}, world);
         return world.proxy;
     }
+    static void setSeed(org.bukkit.World world, long seed) { ((FerriteWorld) java.lang.reflect.Proxy.getInvocationHandler(java.util.Objects.requireNonNull(world))).seed = seed; }
     static void setHeight(org.bukkit.World world, int x, int z, int y) { ((FerriteWorld) java.lang.reflect.Proxy.getInvocationHandler(java.util.Objects.requireNonNull(world))).heights.put(new Column(x, z), y); }
     static void setSnapshot(org.bukkit.World world, int x, int y, int z, String material) {
         var type = org.bukkit.Material.matchMaterial(material);
@@ -112,7 +115,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getMoonPhase" -> moonPhase(method);
             case "getWorldBorder" -> border();
             case "spigot" -> spigot();
-            case "getSeed" -> hostLong("getSeed()", 0L);
+            case "getSeed" -> hostLong("getSeed()", seed);
             case "isDayTime" -> { long t = hostLong("getTime()", time) % 24_000; yield t < 12_000 || t > 23_960; }
             case "isHardcore" -> hardcore;
             case "setHardcore" -> { hardcore = (boolean) args[0]; yield null; }

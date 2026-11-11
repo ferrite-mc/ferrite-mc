@@ -185,6 +185,7 @@ mod tests {
     use super::*;
     use crate::game::Dimension;
     use crate::game::anvil::AnvilChunkSource;
+    use crate::game::dimension::RuntimeWorldRequest;
     use ferrite_entity::{
         Rng,
         mob::{self, MobKind},
@@ -278,8 +279,11 @@ mod tests {
                 root,
                 Arc::clone(registry),
                 None,
-                Dimension::Overworld,
-                [0, 65, 0],
+                RuntimeWorldRequest {
+                    dimension: Dimension::Overworld,
+                    spawn: [0, 65, 0],
+                    seed: 0,
+                },
             )
             .unwrap();
         assert!(worlds.insert_runtime_scheduler(descriptor.id, ctx(&descriptor)));
@@ -294,6 +298,11 @@ mod tests {
             region.entities.insert(cow);
         });
         await_chunk(&descriptor.source, 0, 0).await;
+        assert_ne!(
+            descriptor.source.block(1, 64, 1),
+            Some(1),
+            "the edit below must differ from generated terrain"
+        );
         descriptor.source.set_block(1, 64, 1, 1).unwrap();
         (descriptor, cow_uuid)
     }
@@ -360,6 +369,159 @@ mod tests {
         worlds.shutdown();
     }
 
+    /// The world is catalogued, has a running scheduler, still holds chunk (0, 0) and still owns
+    /// exactly the given cow. The entities are put back, so the check does not change the world.
+    fn assert_world_intact(worlds: &Worlds, catalog: &RuntimeWorldCatalog, id: Uuid, cow: Uuid) {
+        assert!(catalog.get(id).is_some(), "world stays catalogued");
+        assert!(
+            worlds.schedulers.contains_key(&WorldId::Runtime(id)),
+            "scheduler stays present"
+        );
+        let held = run_in_chunk(worlds, id, |region| {
+            let records = region.drain_entities();
+            let uuids: Vec<_> = records.iter().map(|record| record.data.uuid).collect();
+            region.add_entities(records);
+            (region.has_chunk_hold(ChunkPos(0, 0)), uuids)
+        });
+        assert_eq!(held, (true, vec![cow]));
+    }
+
+    #[tokio::test]
+    async fn unload_with_a_player_inside_is_refused_and_changes_nothing() {
+        let Some(vanilla) = vanilla_root() else {
+            return;
+        };
+        let registry = Arc::new(RuntimeRegistry::load(vanilla).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let mut worlds = worlds();
+        let mut catalog = RuntimeWorldCatalog::default();
+        let (descriptor, cow) = setup(dir.path(), &registry, &mut worlds, &mut catalog).await;
+        let id = descriptor.id;
+
+        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, true, &ctx, None)
+            .await
+            .expect_err("a world with a player inside must not unload");
+        assert!(
+            format!("{error:#}").contains("players are inside"),
+            "{error:#}"
+        );
+        // Post-condition: the world is exactly as it was, and nothing was written for it.
+        assert_world_intact(&worlds, &catalog, id, cow);
+        assert!(
+            entity_save::load(&dir.path().join("extra"), (0, 0)).is_empty(),
+            "a refused unload writes no entity sidecar"
+        );
+
+        // Once the player has left, the same world unloads normally.
+        assert!(
+            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+                .await
+                .unwrap()
+        );
+        assert!(catalog.get(id).is_none());
+        assert_eq!(
+            entity_save::load(&dir.path().join("extra"), (0, 0)).len(),
+            1
+        );
+        worlds.shutdown();
+    }
+
+    #[tokio::test]
+    async fn unload_without_save_skips_persistence_and_leaves_no_half_removed_world() {
+        let Some(vanilla) = vanilla_root() else {
+            return;
+        };
+        let registry = Arc::new(RuntimeRegistry::load(vanilla).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let mut worlds = worlds();
+        let mut catalog = RuntimeWorldCatalog::default();
+        let (descriptor, _cow) = setup(dir.path(), &registry, &mut worlds, &mut catalog).await;
+        let id = descriptor.id;
+
+        // Even a broken entity directory cannot matter: nothing is written when save is false.
+        let blocker = dir.path().join("extra").join(entity_save::DIRECTORY);
+        std::fs::write(&blocker, b"not a directory").unwrap();
+
+        assert!(
+            unload_runtime_world(&mut worlds, &mut catalog, id, false, false, &ctx, None)
+                .await
+                .expect("save=false does not touch the disk, so it cannot fail on it")
+        );
+        // Removed completely: catalog and scheduler agree, and the name is free again.
+        assert!(catalog.get(id).is_none());
+        assert!(catalog.by_name("extra").is_none());
+        assert!(!worlds.schedulers.contains_key(&WorldId::Runtime(id)));
+        // Nothing was persisted: the blocker is still the untouched file and no region exists.
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"not a directory");
+        drop(descriptor);
+        std::fs::remove_file(&blocker).unwrap();
+        let reopened = catalog
+            .open_persistent(
+                "extra",
+                dir.path(),
+                Arc::clone(&registry),
+                None,
+                RuntimeWorldRequest {
+                    dimension: Dimension::Overworld,
+                    spawn: [0, 65, 0],
+                    seed: 0,
+                },
+            )
+            .expect("the unloaded name can be opened again");
+        assert_eq!(reopened.id, id, "the world identity is kept");
+        await_chunk(&reopened.source, 0, 0).await;
+        assert_ne!(
+            reopened.source.block(1, 64, 1),
+            Some(1),
+            "the unsaved block edit did not reach the disk"
+        );
+        assert!(
+            entity_save::load(&dir.path().join("extra"), (0, 0)).is_empty(),
+            "the unsaved cow did not reach the disk"
+        );
+        worlds.shutdown();
+    }
+
+    #[tokio::test]
+    async fn failed_chunk_flush_restores_the_scheduler_and_catalog_entry() {
+        let Some(vanilla) = vanilla_root() else {
+            return;
+        };
+        let registry = Arc::new(RuntimeRegistry::load(vanilla).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let mut worlds = worlds();
+        let mut catalog = RuntimeWorldCatalog::default();
+        let (descriptor, cow) = setup(dir.path(), &registry, &mut worlds, &mut catalog).await;
+        let id = descriptor.id;
+
+        // The entity sidecars write fine; only the region files cannot be created.
+        let blocker = dir.path().join("extra").join("dimensions");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+
+        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+            .await
+            .expect_err("the chunk flush must fail loudly");
+        assert!(format!("{error:#}").contains("restored"), "{error:#}");
+        assert_world_intact(&worlds, &catalog, id, cow);
+        // The unsaved edit is still in memory, ready for the retry.
+        assert_eq!(descriptor.source.block(1, 64, 1), Some(1));
+
+        std::fs::remove_file(&blocker).unwrap();
+        run_in_chunk(&worlds, id, move |region| {
+            let mut rng = Rng::default();
+            let mut again = mob::new_mob(MobKind::Cow, Vec3::new(8.5, 64.0, 8.5), &mut rng);
+            again.data.uuid = cow;
+            region.entities.insert(again);
+        });
+        assert!(
+            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+                .await
+                .unwrap()
+        );
+        assert!(catalog.get(id).is_none());
+        worlds.shutdown();
+    }
+
     #[tokio::test]
     async fn shutdown_then_reopen_preserves_runtime_chunks_and_entities() {
         let Some(vanilla) = vanilla_root() else {
@@ -388,8 +550,11 @@ mod tests {
                 dir.path(),
                 registry,
                 None,
-                Dimension::Overworld,
-                [9, 9, 9],
+                RuntimeWorldRequest {
+                    dimension: Dimension::Overworld,
+                    spawn: [9, 9, 9],
+                    seed: 0,
+                },
             )
             .unwrap();
         assert_eq!(reopened.id, id);

@@ -23,6 +23,9 @@ pub struct RuntimeWorldDescriptor {
     pub key: String,
     pub spawn: [i32; 3],
     pub dimension: Dimension,
+    /// The world seed. An existing world keeps the seed in its `level.dat`; the seed a caller
+    /// requests only applies when the world is first created.
+    pub seed: i64,
     pub source: Arc<AnvilChunkSource>,
 }
 
@@ -30,6 +33,16 @@ pub struct RuntimeWorldDescriptor {
 struct RuntimeWorldSettings {
     spawn: [i32; 3],
     dimension: Dimension,
+    seed: i64,
+}
+
+/// What a caller asks for when opening a runtime world. An existing world keeps the spawn and
+/// seed stored in its `level.dat`; these only apply when the world is first created.
+#[derive(Clone, Copy)]
+pub struct RuntimeWorldRequest {
+    pub dimension: Dimension,
+    pub spawn: [i32; 3],
+    pub seed: i64,
 }
 
 /// Owns runtime-world identity and disk-backed chunk sources. Names are unique ignoring case.
@@ -102,6 +115,7 @@ impl RuntimeWorldCatalog {
             RuntimeWorldSettings {
                 spawn,
                 dimension: Dimension::Overworld,
+                seed: 0,
             },
         )
     }
@@ -135,6 +149,7 @@ impl RuntimeWorldCatalog {
             key: key.clone(),
             spawn: settings.spawn,
             dimension: settings.dimension,
+            seed: settings.seed,
             source,
         };
         self.by_name.insert(folded, id);
@@ -165,10 +180,14 @@ impl RuntimeWorldCatalog {
         root: &Path,
         registry: Arc<RuntimeRegistry>,
         terrain: Option<Arc<dyn ChunkGenerator>>,
-        dimension: Dimension,
-        initial_spawn: [i32; 3],
+        request: RuntimeWorldRequest,
     ) -> anyhow::Result<RuntimeWorldDescriptor> {
         use std::io::Write;
+        let RuntimeWorldRequest {
+            dimension,
+            spawn: initial_spawn,
+            seed: requested_seed,
+        } = request;
         let name = name.trim();
         let (folded, key) = runtime_world_identity(name).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
@@ -196,11 +215,16 @@ impl RuntimeWorldCatalog {
             Err(error) => return Err(error.into()),
         };
         anyhow::ensure!(!self.by_id.contains_key(&id), "world id already loaded");
-        let spawn = if world_root.join("level.dat").exists() {
-            super::anvil::read_spawn(&world_root)?
+        // An existing world keeps the seed it was created with; a `level.dat` written before
+        // seeds were stored belongs to a world that could only have been created with seed 0.
+        let (spawn, seed) = if world_root.join("level.dat").exists() {
+            (
+                super::anvil::read_spawn(&world_root)?,
+                super::anvil::read_seed(&world_root)?.unwrap_or(0),
+            )
         } else {
-            super::anvil::write_spawn(&world_root, initial_spawn)?;
-            initial_spawn
+            super::anvil::write_spawn_and_seed(&world_root, initial_spawn, requested_seed)?;
+            (initial_spawn, requested_seed)
         };
         self.create_for_dimension(
             id,
@@ -208,7 +232,11 @@ impl RuntimeWorldCatalog {
             root,
             registry,
             terrain,
-            RuntimeWorldSettings { spawn, dimension },
+            RuntimeWorldSettings {
+                spawn,
+                dimension,
+                seed,
+            },
         )
         .map_err(anyhow::Error::msg)
     }
@@ -503,8 +531,11 @@ mod tests {
                 directory.path(),
                 registry.clone(),
                 None,
-                Dimension::Overworld,
-                [3, 70, -4],
+                RuntimeWorldRequest {
+                    dimension: Dimension::Overworld,
+                    spawn: [3, 70, -4],
+                    seed: 0,
+                },
             )
             .unwrap();
         let id = first.id;
@@ -519,12 +550,84 @@ mod tests {
                 directory.path(),
                 registry,
                 None,
-                Dimension::Overworld,
-                [0, 64, 0],
+                RuntimeWorldRequest {
+                    dimension: Dimension::Overworld,
+                    spawn: [0, 64, 0],
+                    seed: 0,
+                },
             )
             .unwrap();
         assert_eq!(reopened.id, id);
         assert_eq!(reopened.spawn, [3, 70, -4]);
+    }
+
+    #[tokio::test]
+    async fn runtime_world_seed_is_stored_in_level_dat_and_survives_reopen() {
+        let Some(root) = vanilla_root() else { return };
+        let registry = Arc::new(RuntimeRegistry::load(root).unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let mut catalog = RuntimeWorldCatalog::default();
+        let open = |catalog: &mut RuntimeWorldCatalog, name: &str, seed: i64| {
+            catalog
+                .open_persistent(
+                    name,
+                    directory.path(),
+                    registry.clone(),
+                    None,
+                    RuntimeWorldRequest {
+                        dimension: Dimension::Overworld,
+                        spawn: [0, 64, 0],
+                        seed,
+                    },
+                )
+                .unwrap()
+        };
+        // Any seed is accepted: zero, a large positive one and a negative one.
+        for (name, seed) in [("zero", 0), ("big", i64::MAX), ("negative", -8_912_345_678)] {
+            let created = open(&mut catalog, name, seed);
+            assert_eq!(created.seed, seed, "{name}: descriptor carries the seed");
+            assert_eq!(
+                super::super::anvil::read_seed(&directory.path().join(name)).unwrap(),
+                Some(seed),
+                "{name}: level.dat records the seed"
+            );
+            assert!(
+                catalog
+                    .unload_saved(created.id, true)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            // A different requested seed must not rewrite an existing world.
+            let reopened = open(&mut catalog, name, seed.wrapping_add(1));
+            assert_eq!(reopened.id, created.id);
+            assert_eq!(reopened.seed, seed, "{name}: reopen keeps the stored seed");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_level_dat_without_a_seed_reopens_with_seed_zero() {
+        let Some(root) = vanilla_root() else { return };
+        let registry = Arc::new(RuntimeRegistry::load(root).unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        // The shape written before seeds were stored: spawn only.
+        super::super::anvil::write_spawn(&directory.path().join("old"), [1, 2, 3]).unwrap();
+        let mut catalog = RuntimeWorldCatalog::default();
+        let world = catalog
+            .open_persistent(
+                "old",
+                directory.path(),
+                registry,
+                None,
+                RuntimeWorldRequest {
+                    dimension: Dimension::Overworld,
+                    spawn: [0, 64, 0],
+                    seed: 777,
+                },
+            )
+            .unwrap();
+        assert_eq!(world.spawn, [1, 2, 3]);
+        assert_eq!(world.seed, 0, "an existing world is never re-seeded");
     }
 
     #[test]

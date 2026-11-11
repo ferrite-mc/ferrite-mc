@@ -36,8 +36,21 @@ use ferrite_plugin::{
 };
 
 pub type RuntimeWorldCreateHandler =
-    Arc<dyn Fn(&str, &str) -> Result<(Uuid, [i32; 3]), String> + Send + Sync>;
+    Arc<dyn Fn(&str, &str, i64) -> Result<(Uuid, [i32; 3], i64), String> + Send + Sync>;
 pub type RuntimeWorldUnloadHandler = Arc<dyn Fn(Uuid, bool) -> Result<bool, String> + Send + Sync>;
+
+/// The reply to `Server#unloadWorld`. A refused or failed unload (players inside, a failed
+/// flush) is `false`, which is what Bukkit's contract says; answering with no reply instead
+/// would surface in the plugin as an `UnsupportedOperationException`.
+fn unload_reply(id: Uuid, result: Result<bool, String>) -> String {
+    match result {
+        Ok(unloaded) => unloaded.to_string(),
+        Err(error) => {
+            tracing::warn!(world = %id, %error, "runtime world unload refused");
+            "false".to_owned()
+        }
+    }
+}
 
 /// Everything the plugin bridge needs from the server's startup configuration.
 pub struct Settings {
@@ -144,26 +157,30 @@ impl PluginBridge {
                         let cooldowns = std::sync::Mutex::new(cooldown::Cooldowns::default());
                         let handler: ferrite_plugin::HostCallHandler = Arc::new(move |call| {
                             if call.owner == "Server"
-                                && call.method == "createRuntimeWorld(String,String)"
+                                && call.method == "createRuntimeWorld(String,String,long)"
                             {
                                 let name = call.args.first()?;
                                 let environment = call.args.get(1)?;
+                                let seed = call.args.get(2)?.parse::<i64>().ok()?;
                                 let create = runtime_world_handler.as_ref()?;
-                                return create(name, environment).ok().map(|(id, spawn)| {
-                                    format!(
-                                        "{}\u{1d}{}\u{1d}{}\u{1d}{}",
-                                        id, spawn[0], spawn[1], spawn[2]
-                                    )
-                                });
+                                return create(name, environment, seed).ok().map(
+                                    |(id, spawn, seed)| {
+                                        format!(
+                                            "{}\u{1d}{}\u{1d}{}\u{1d}{}\u{1d}{}",
+                                            id, spawn[0], spawn[1], spawn[2], seed
+                                        )
+                                    },
+                                );
                             }
                             if call.owner == "Server"
                                 && call.method == "unloadRuntimeWorld(String,boolean)"
                             {
                                 let id = Uuid::parse_str(call.args.first()?).ok()?;
                                 let save = call.args.get(1)?.parse::<bool>().ok()?;
-                                return (runtime_world_unloader.as_ref()?)(id, save)
-                                    .ok()
-                                    .map(|ok| ok.to_string());
+                                return Some(unload_reply(
+                                    id,
+                                    (runtime_world_unloader.as_ref()?)(id, save),
+                                ));
                             }
                             if let Some(reply) = items::item_type_answer(call) {
                                 return Some(reply);
@@ -1027,6 +1044,20 @@ fn has_plugin_jars(directory: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_unload_answers_false_instead_of_no_reply() {
+        let id = Uuid::from_u128(7);
+        assert_eq!(unload_reply(id, Ok(true)), "true");
+        assert_eq!(unload_reply(id, Ok(false)), "false");
+        assert_eq!(
+            unload_reply(
+                id,
+                Err("cannot unload a runtime world while players are inside it".into())
+            ),
+            "false"
+        );
+    }
 
     #[test]
     fn speeds_are_read_back_but_flight_flags_are_not_guessed() {

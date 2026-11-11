@@ -51,7 +51,9 @@ mod equine_chest;
 mod jukebox;
 mod portal;
 mod vault;
-pub use dimension::{Dimension, DimensionRegistry, RuntimeWorldCatalog, RuntimeWorldDescriptor};
+pub use dimension::{
+    Dimension, DimensionRegistry, RuntimeWorldCatalog, RuntimeWorldDescriptor, RuntimeWorldRequest,
+};
 mod commands_data;
 #[cfg(test)]
 pub(crate) use commands_data::{BlockData, apply_block};
@@ -768,13 +770,15 @@ impl World {
         name: impl Into<String>,
         dimension: Dimension,
         spawn: [i32; 3],
-    ) -> anyhow::Result<(Uuid, String, [i32; 3])> {
+        seed: i64,
+    ) -> anyhow::Result<(Uuid, String, [i32; 3], i64)> {
         let (complete, done) = oneshot::channel();
         self.sender
             .send(GameMessage::CreateRuntimeWorld {
                 name: name.into(),
                 dimension: dimension.key().to_owned(),
                 spawn,
+                seed,
                 complete,
             })
             .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
@@ -1576,13 +1580,13 @@ async fn run(
                   GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
                   GameMessage::Left{session,uuid}=>{ride::forget(uuid); if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
                     if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);}},
-                  GameMessage::CreateRuntimeWorld{name,dimension,spawn,complete}=>{
-                      let result = (|| -> Result<(Uuid, String, [i32; 3]), String> {
+                  GameMessage::CreateRuntimeWorld{name,dimension,spawn,seed,complete}=>{
+                      let result = (|| -> Result<(Uuid, String, [i32; 3], i64), String> {
                           let dimension = Dimension::from_key(&dimension).ok_or_else(|| format!("unknown world dimension {dimension}"))?;
                           let root = world_path.ok_or_else(|| "runtime worlds require a persistent world directory".to_owned())?;
                           let overworld = dimensions.source(Dimension::Overworld);
                           let descriptor = runtime_world_catalog
-                              .open_persistent(&name, root, overworld.registry(), overworld.terrain(), dimension, spawn)
+                              .open_persistent(&name, root, overworld.registry(), overworld.terrain(), RuntimeWorldRequest { dimension, spawn, seed })
                               .map_err(|error| error.to_string())?;
                           let id = descriptor.id;
                           let ctx = make_runtime_ctx(&descriptor, &shared_tree);
@@ -1597,7 +1601,7 @@ async fn run(
                               let _ = runtime_world_catalog.unload(id);
                               return Err("plugin world view already contains this UUID".to_owned());
                           }
-                          Ok((id, descriptor.name, descriptor.spawn))
+                          Ok((id, descriptor.name, descriptor.spawn, descriptor.seed))
                       })();
                       let _ = complete.send(result);
                   },
