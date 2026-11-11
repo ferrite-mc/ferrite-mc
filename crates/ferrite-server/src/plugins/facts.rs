@@ -209,6 +209,10 @@ pub struct EntityFact {
     /// The plugin world this entity belongs to; `None` for dimensions plugins cannot address.
     pub world: Option<Uuid>,
     pub item: Option<ItemFact>,
+    /// The entity's saved NBT as SNBT. Only runtime-world entities carry it: serializing every
+    /// entity of every tick is paid where a plugin can ask for the snapshot, not on the
+    /// overworld, whose entities answer the live-handle snapshot without NBT.
+    pub snbt: Option<String>,
 }
 
 fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
@@ -220,9 +224,16 @@ fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
 pub fn publish_entities(
     owned: &mut std::collections::HashSet<Uuid>,
     store: &ferrite_entity::EntityStore,
-    dimension: Dimension,
+    world_id: impl Into<crate::game::WorldId>,
 ) {
-    let world = (dimension == Dimension::Overworld).then(ferrite_plugin::default_world_id);
+    use crate::game::WorldId;
+    let world_id = world_id.into();
+    let world = match world_id {
+        WorldId::Vanilla(Dimension::Overworld) => Some(ferrite_plugin::default_world_id()),
+        WorldId::Vanilla(_) => None,
+        WorldId::Runtime(id) => Some(id),
+    };
+    let with_nbt = matches!(world_id, WorldId::Runtime(_));
     let mut registry = entity_registry().lock().unwrap();
     for uuid in owned.drain() {
         registry.remove(&uuid);
@@ -258,6 +269,17 @@ pub fn publish_entities(
                 health: item.health,
             }
         });
+        let snbt = with_nbt
+            .then(|| {
+                let record = ferrite_entity::EntityRecord {
+                    pos,
+                    vel,
+                    flags,
+                    data: data.clone(),
+                };
+                super::snapshot::entity_snbt(&record)
+            })
+            .flatten();
         registry.insert(
             data.uuid,
             EntityFact {
@@ -269,6 +291,7 @@ pub fn publish_entities(
                 health: data.mob.as_ref().map(|mob| mob.health),
                 world,
                 item,
+                snbt,
             },
         );
     }
@@ -301,6 +324,50 @@ pub fn entity_snapshot(subject: &str) -> Option<String> {
         fact.vel,
         None,
     ))
+}
+
+/// The records `World#ferriteEntities` answers for a runtime world: see `snapshot::world_entities`.
+pub(super) fn runtime_snapshots(world: Uuid, min: (i32, i32), max: (i32, i32)) -> String {
+    use base64::Engine as _;
+    let field = super::snapshot::FIELD;
+    let null = ferrite_plugin::HOST_NULL;
+    let registry = entity_registry().lock().unwrap();
+    let mut facts: Vec<_> = registry
+        .iter()
+        .filter(|(_, fact)| fact.world == Some(world))
+        .filter(|(_, fact)| {
+            let chunk = ferrite_entity::chunk_of(ferrite_math::Vec3::new(
+                fact.pos[0],
+                fact.pos[1],
+                fact.pos[2],
+            ));
+            (min.0..=max.0).contains(&chunk.0) && (min.1..=max.1).contains(&chunk.1)
+        })
+        .filter_map(|(uuid, fact)| Some((*uuid, fact, fact.snbt.as_ref()?)))
+        .collect();
+    facts.sort_by_key(|(uuid, _, _)| *uuid);
+    facts
+        .iter()
+        .map(|(uuid, fact, snbt)| {
+            let health = fact
+                .health
+                .map_or_else(|| null.to_owned(), |health| health.to_string());
+            let nbt = base64::engine::general_purpose::STANDARD.encode(snbt);
+            format!(
+                "{}{field}{}{field}{}{field}{}{field}{}{field}{}{field}{uuid}{field}{health}{field}{}{field}{}{field}{}{field}{null}{field}{nbt}",
+                fact.kind,
+                fact.pos[0],
+                fact.pos[1],
+                fact.pos[2],
+                fact.yaw,
+                fact.pitch,
+                fact.vel[0],
+                fact.vel[1],
+                fact.vel[2],
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(&ferrite_plugin::HOST_ITEM_SEPARATOR.to_string())
 }
 
 /// Where an entity was last published, for routing an operation to the region that owns it.

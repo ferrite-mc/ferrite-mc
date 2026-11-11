@@ -541,6 +541,15 @@ pub enum PlayerCommand {
         /// The id the plugin handle carries, so later calls find this entity again.
         uuid: uuid::Uuid,
     },
+    /// `World#ferriteSpawnSnapshot`: the entity an SNBT snapshot describes, placed in a runtime
+    /// world at `pos` facing `yaw` under `uuid`.
+    SpawnSnapshot {
+        world: uuid::Uuid,
+        snbt: String,
+        uuid: uuid::Uuid,
+        pos: [f64; 3],
+        yaw: f32,
+    },
     /// An operation on a spawned or known entity, run by the region that owns it.
     EntityOp {
         uuid: uuid::Uuid,

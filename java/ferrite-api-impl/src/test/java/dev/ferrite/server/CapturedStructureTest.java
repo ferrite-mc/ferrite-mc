@@ -13,7 +13,6 @@ import org.bukkit.block.structure.Mirror;
 import org.bukkit.block.structure.StructureRotation;
 import org.bukkit.util.BlockTransformer;
 import org.bukkit.util.BlockVector;
-import org.bukkit.util.EntityTransformer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -203,15 +202,6 @@ class CapturedStructureTest {
         };
         template.place(new Location(world, 810, 70, 810), false, StructureRotation.NONE, Mirror.NONE, 0, 1f, new Random(1), List.of(transformer), List.of());
         assertEquals(Material.DIRT, world.getBlockAt(810, 70, 810).getType());
-    }
-
-    @Test void entityTransformersAreRejectedExplicitly() {
-        build();
-        var structure = org.bukkit.Bukkit.getStructureManager().createStructure();
-        structure.fill(new Location(world, 100, 70, 100), new BlockVector(1, 1, 1), false);
-        List<EntityTransformer> transformers = List.of((region, x, y, z, entity, allowed) -> true);
-        var error = assertThrows(UnsupportedOperationException.class, () -> structure.place(new Location(world, 900, 70, 900), false, StructureRotation.NONE, Mirror.NONE, 0, 1f, new Random(1), List.of(), transformers));
-        assertTrue(error.getMessage().contains("EntityTransformer"), error.getMessage());
     }
 
     @Test void nullBlockTransformerResultsAreRejected() {

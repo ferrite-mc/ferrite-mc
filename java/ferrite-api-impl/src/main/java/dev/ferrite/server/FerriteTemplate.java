@@ -107,8 +107,8 @@ final class FerriteTemplate implements Structure {
 
     @Override public List<Palette> getPalettes() { return captured().getPalettes(); }
     @Override public int getPaletteCount() { return captured().getPaletteCount(); }
-    @Override public List<Entity> getEntities() { return List.of(); }
-    @Override public int getEntityCount() { return 0; }
+    @Override public List<Entity> getEntities() { return captured().getEntities(); }
+    @Override public int getEntityCount() { return captured().getEntityCount(); }
     @Override public PersistentDataContainer getPersistentDataContainer() { return data; }
 
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
@@ -118,8 +118,7 @@ final class FerriteTemplate implements Structure {
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
         java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
         java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
-        if (!entityTransformers.isEmpty()) throw CapturedStructure.entityTransformersNotSupported();
-        if (refilled || !blockTransformers.isEmpty()) {
+        if (refilled || !blockTransformers.isEmpty() || !entityTransformers.isEmpty()) {
             captured().place(location, includeEntities, rotation, mirror, palette, integrity, random, blockTransformers, entityTransformers);
             return;
         }
@@ -131,8 +130,7 @@ final class FerriteTemplate implements Structure {
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
         java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
         java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
-        if (!entityTransformers.isEmpty()) throw CapturedStructure.entityTransformersNotSupported();
-        if (refilled || !blockTransformers.isEmpty()) {
+        if (refilled || !blockTransformers.isEmpty() || !entityTransformers.isEmpty()) {
             captured().place(region, location, includeEntities, rotation, mirror, palette, integrity, random, blockTransformers, entityTransformers);
             return;
         }

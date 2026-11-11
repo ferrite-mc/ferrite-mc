@@ -38,6 +38,8 @@ final class CapturedStructure implements Structure {
 
     private BlockVector size;
     private List<List<Cell>> palettes;
+    /** The non-player entities captured by {@code fill(..., true)}, positioned relative to the corner. */
+    private List<CapturedEntity> entities = new ArrayList<>();
     private final PersistentDataContainer data = new FerriteDataContainer();
 
     CapturedStructure() { this(new BlockVector(0, 0, 0), List.of()); }
@@ -52,8 +54,13 @@ final class CapturedStructure implements Structure {
     CapturedStructure copy() {
         var copy = new ArrayList<List<Cell>>();
         for (var palette : palettes) copy.add(new ArrayList<>(palette));
-        return new CapturedStructure(new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()), copy);
+        var result = new CapturedStructure(new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()), copy);
+        result.entities = new ArrayList<>(entities);
+        return result;
     }
+
+    /** One captured entity: where it stood relative to the structure corner, and its snapshot. */
+    record CapturedEntity(double x, double y, double z, FerriteEntitySnapshot snapshot) { }
 
     @Override public BlockVector getSize() { return new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()); }
 
@@ -64,8 +71,15 @@ final class CapturedStructure implements Structure {
     }
 
     @Override public int getPaletteCount() { return palettes.size(); }
-    @Override public List<Entity> getEntities() { return List.of(); }
-    @Override public int getEntityCount() { return 0; }
+    @Override public List<Entity> getEntities() {
+        var result = new ArrayList<Entity>();
+        for (var captured : entities) {
+            var at = captured.snapshot().getLocation();
+            result.add(StructureEntity.of(captured.snapshot(), new Location(null, captured.x(), captured.y(), captured.z(), at.getYaw(), at.getPitch())));
+        }
+        return result;
+    }
+    @Override public int getEntityCount() { return entities.size(); }
     @Override public PersistentDataContainer getPersistentDataContainer() { return data; }
 
     @Override public void fill(Location corner1, Location corner2, boolean includeEntities) {
@@ -76,16 +90,16 @@ final class CapturedStructure implements Structure {
         int x1 = Math.max(corner1.getBlockX(), corner2.getBlockX());
         int y1 = Math.max(corner1.getBlockY(), corner2.getBlockY());
         int z1 = Math.max(corner1.getBlockZ(), corner2.getBlockZ());
-        capture(world, x0, y0, z0, x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1);
+        capture(world, x0, y0, z0, x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1, includeEntities);
     }
 
     @Override public void fill(Location corner, BlockVector size, boolean includeEntities) {
         var world = java.util.Objects.requireNonNull(corner.getWorld(), "corner world");
         if (size.getBlockX() < 1 || size.getBlockY() < 1 || size.getBlockZ() < 1) throw new IllegalArgumentException("Structure size must be positive: " + size);
-        capture(world, corner.getBlockX(), corner.getBlockY(), corner.getBlockZ(), size.getBlockX(), size.getBlockY(), size.getBlockZ());
+        capture(world, corner.getBlockX(), corner.getBlockY(), corner.getBlockZ(), size.getBlockX(), size.getBlockY(), size.getBlockZ(), includeEntities);
     }
 
-    private void capture(org.bukkit.World world, int x0, int y0, int z0, int sx, int sy, int sz) {
+    private void capture(org.bukkit.World world, int x0, int y0, int z0, int sx, int sy, int sz, boolean includeEntities) {
         var cells = new ArrayList<Cell>();
         for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
             var block = world.getBlockAt(x0 + x, y0 + y, z0 + z);
@@ -119,43 +133,61 @@ final class CapturedStructure implements Structure {
         }
         size = new BlockVector(sx, sy, sz);
         palettes = new ArrayList<>(List.of(cells));
+        this.entities = includeEntities ? captureEntities(world, x0, y0, z0, sx, sy, sz) : new ArrayList<>();
+    }
+
+    /**
+     * The non-player entities standing in the box, from one host call over the chunks it touches.
+     * A world the host cannot enumerate (today only runtime worlds can, the default world cannot)
+     * contributes no entities instead of failing the whole capture.
+     */
+    private static List<CapturedEntity> captureEntities(org.bukkit.World world, int x0, int y0, int z0, int sx, int sy, int sz) {
+        var result = new ArrayList<CapturedEntity>();
+        if (!HostBridge.available()) return result;
+        List<String> reply;
+        try {
+            @SuppressWarnings("unchecked") var records = (List<String>) HostBridge.call("World", world.getUID(), "ferriteEntities(int,int,int,int)", List.class,
+                Math.floorDiv(x0, 16), Math.floorDiv(z0, 16), Math.floorDiv(x0 + sx - 1, 16), Math.floorDiv(z0 + sz - 1, 16));
+            reply = records;
+        } catch (UnsupportedOperationException unavailable) {
+            return result;
+        }
+        if (reply == null) return result;
+        for (var record : reply) {
+            if (record.isEmpty()) continue;
+            var snapshot = FerriteEntitySnapshot.fromRecord(record);
+            var at = snapshot.getLocation();
+            double x = at.getX() - x0, y = at.getY() - y0, z = at.getZ() - z0;
+            if (Math.floor(x) < 0 || Math.floor(y) < 0 || Math.floor(z) < 0 || Math.floor(x) >= sx || Math.floor(y) >= sy || Math.floor(z) >= sz) continue;
+            result.add(new CapturedEntity(x, y, z, snapshot));
+        }
+        return result;
     }
 
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
-        write(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random);
+        write(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, List.of(), includeEntities, List.of());
     }
 
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
-        write(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, blockTransformers, entityTransformers);
+        write(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, blockTransformers, includeEntities, entityTransformers);
     }
 
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
         if (!(region instanceof org.bukkit.World world)) throw notImplemented("place into a non-world region");
-        write(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random);
+        write(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, List.of(), includeEntities, List.of());
     }
 
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
         java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
         java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
-        if (!entityTransformers.isEmpty()) throw entityTransformersNotSupported();
         if (!(region instanceof org.bukkit.World world)) throw notImplemented("place into a non-world region");
-        write(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, blockTransformers);
+        write(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, blockTransformers, includeEntities, entityTransformers);
     }
 
-    private void write(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
-        write(world, ox, oy, oz, rotation, mirror, palette, integrity, random, List.of());
-    }
-
-    private void write(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
-        java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
-        java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
-        if (!entityTransformers.isEmpty()) throw entityTransformersNotSupported();
-        write(world, ox, oy, oz, rotation, mirror, palette, integrity, random, blockTransformers);
-    }
-
-    private void write(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers) {
+    private void write(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, boolean includeEntities, Collection<EntityTransformer> entityTransformers) {
         java.util.Objects.requireNonNull(world, "location world");
         java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
+        java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
         if (integrity < 0f || integrity > 1f) throw new IllegalArgumentException("Integrity must be between 0 and 1: " + integrity);
         if (palettes.isEmpty()) return;
         if (palette < -1 || palette >= palettes.size()) throw new IllegalArgumentException("Palette index out of range: " + palette);
@@ -179,6 +211,44 @@ final class CapturedStructure implements Structure {
             if (region != null) state = transform(world, region, wx, wy, wz, cell.state(), state, blockTransformers);
             world.getBlockAt(wx, wy, wz).setBlockData(FerriteBlockData.create(state));
             if (cell.nbt() != null) HostBridge.callVoid("World", world.getUID(), "ferriteDataMerge(int,int,int,String)", wx, wy, wz, Snbt.of(cell.nbt()));
+        }
+        if (includeEntities) placeEntities(world, ox, oy, oz, rotation, mirror, entityTransformers);
+    }
+
+    /**
+     * Spawns the captured entities. Each one is first shown to the transformers as a detached
+     * handle at its final position; a transformer returning false drops it, otherwise the snapshot
+     * becomes a live entity through the host's snapshot spawn. Positions and yaw follow vanilla's
+     * {@code StructureTemplate}: mirror first, then rotation, entities offset by one block where
+     * blocks are, so a mirrored or turned entity stays inside the block it stood in.
+     */
+    private void placeEntities(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror, Collection<EntityTransformer> transformers) {
+        var region = transformers.isEmpty() || entities.isEmpty() ? null : region(world, ox, oz);
+        boolean turned = rotation != StructureRotation.NONE || mirror != Mirror.NONE;
+        for (var captured : entities) {
+            double x = captured.x(), z = captured.z();
+            var source = captured.snapshot().getLocation();
+            float yaw = source.getYaw();
+            if (mirror == Mirror.LEFT_RIGHT) { z = 1.0 - z; yaw = 180f - yaw; }
+            else if (mirror == Mirror.FRONT_BACK) { x = 1.0 - x; yaw = -yaw; }
+            double rx = x, rz = z;
+            switch (rotation) {
+                case CLOCKWISE_90 -> { rx = 1.0 - z; rz = x; yaw += 90f; }
+                case CLOCKWISE_180 -> { rx = 1.0 - x; rz = 1.0 - z; yaw += 180f; }
+                case COUNTERCLOCKWISE_90 -> { rx = z; rz = 1.0 - x; yaw += 270f; }
+                default -> { }
+            }
+            yaw = (yaw % 360f + 360f) % 360f;
+            if (yaw >= 180f) yaw -= 360f;
+            var at = new Location(world, ox + rx, oy + captured.y(), oz + rz, yaw, source.getPitch());
+            boolean keep = true;
+            if (region != null) {
+                var handle = StructureEntity.of(captured.snapshot(), at.clone());
+                for (var transformer : transformers) {
+                    if (!transformer.transform(region, at.getBlockX(), at.getBlockY(), at.getBlockZ(), handle, turned)) { keep = false; break; }
+                }
+            }
+            if (keep) captured.snapshot().createEntity(at);
         }
     }
 
@@ -474,10 +544,6 @@ final class CapturedStructure implements Structure {
     private static org.bukkit.block.Block blockAt(org.bukkit.World world, Object[] values) {
         if (values[0] instanceof Location location) return world.getBlockAt(location);
         return world.getBlockAt((int) values[0], (int) values[1], (int) values[2]);
-    }
-
-    static UnsupportedOperationException entityTransformersNotSupported() {
-        return new UnsupportedOperationException("Ferrite: not implemented: Structure#place with EntityTransformer; structures do not capture entities and there is no host enumeration of non-player entities for the callback");
     }
 
     private static UnsupportedOperationException notImplemented(String method) {

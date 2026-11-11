@@ -19,7 +19,7 @@ mod motion;
 mod network;
 mod riding;
 pub mod rules;
-mod snapshot;
+pub(crate) mod snapshot;
 mod survival;
 mod visual;
 pub mod worldgen;
@@ -329,6 +329,12 @@ impl PluginBridge {
                             }
                             if let (Some(players), Some(command)) =
                                 (&players, blasts::spawn_command(call))
+                            {
+                                players(command);
+                                return Some("true".to_owned());
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, snapshot::command(call))
                             {
                                 players(command);
                                 return Some("true".to_owned());
