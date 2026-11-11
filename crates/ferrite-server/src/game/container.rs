@@ -854,13 +854,13 @@ impl Player {
                     self.pitch,
                     self.gamemode,
                     self.dimension,
-                    match self.world_id {
-                        super::WorldId::Runtime(id) => Some(id),
-                        super::WorldId::Vanilla(_) => None,
-                    },
                     self.seen_credits,
                     &self.inventory,
-                ),
+                )
+                .in_world(match self.world_id {
+                    super::WorldId::Runtime(id) => Some(id),
+                    super::WorldId::Vanilla(_) => None,
+                }),
             )
         {
             tracing::error!(%error, "failed to save player data");
@@ -1291,6 +1291,28 @@ impl Player {
                     global: false,
                 },
             ),
+            PluginPacket::EntityHurt { entity_id, yaw } => send(
+                self,
+                &ferrite_protocol::packets::play::HurtAnimation {
+                    id: VarInt(entity_id),
+                    yaw,
+                },
+            ),
+            PluginPacket::PickupAnimation { item, amount } => {
+                let update =
+                    ferrite_net::game::packet(&ferrite_protocol::packets::play::TakeItemEntity {
+                        item: VarInt(item),
+                        collector: VarInt(self.entity),
+                        amount: VarInt(amount),
+                    });
+                let tracking = self.tracking.lock().unwrap();
+                super::region::broadcast_tracked_chunk(
+                    &tracking,
+                    self.world_id,
+                    (self.chunk.0, self.chunk.1),
+                    &update,
+                );
+            }
             PluginPacket::HurtAnimation { yaw } => {
                 let update =
                     ferrite_net::game::packet(&ferrite_protocol::packets::play::HurtAnimation {

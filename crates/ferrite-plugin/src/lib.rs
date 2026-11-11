@@ -494,6 +494,18 @@ pub enum PluginPacket {
     HurtAnimation {
         yaw: f32,
     },
+    /// The hurt tilt of the entity with this network id, shown only to this player
+    /// (`Player#broadcastHurtAnimation` sends one per viewer).
+    EntityHurt {
+        entity_id: i32,
+        yaw: f32,
+    },
+    /// An item entity flying into the player (`Player#playPickupItemAnimation`), shown to the
+    /// viewers of the player's chunk. `item` is the item entity's network id.
+    PickupAnimation {
+        item: i32,
+        amount: i32,
+    },
 }
 /// A survival number a plugin can set directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -572,6 +584,19 @@ pub enum PlayerCommand {
     DisplayName {
         player: uuid::Uuid,
         component_json: Option<String>,
+    },
+    /// `Player#chat` with a slash command: runs it as the player, with the permission the player
+    /// has, exactly like a command typed in the chat box.
+    Chat {
+        player: uuid::Uuid,
+        message: String,
+    },
+    /// `Player#breakBlock`: the owning region applies the player's own break rules and reports
+    /// the verdict to the waiting caller through `ticket`.
+    BreakBlock {
+        player: uuid::Uuid,
+        position: [i32; 3],
+        ticket: u64,
     },
     /// `Player#updateCommands`: sends the player the command tree again, filtered by their
     /// current permission.

@@ -27,7 +27,7 @@ CMI가 동작한다고 말할 수 없다.
 - **Server 경계 정리.** help map(명령 맵 기반 + `registerHelpTopicFactory`), recipes(바닐라
   데이터팩), maps(메모리 `MapView`), tags(block/item/fluid/entity_type/game_event)는 기존 경계로
   구현되어 있음을 확인하고 JUnit `serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest`로
-  고정했다. `createWorld`(런타임 월드 없음)와 `EntityFactory#createEntitySnapshot`(비플레이어
+  고정했다. `EntityFactory#createEntitySnapshot`(비플레이어
   엔티티 NBT 경계 없음)은 구현하지 않았고 소유자/이유/선행 작업을 `docs/plugin-api-stubs.md`에 적었다.
 - **구조물 엔티티는 계속 미지원.** `Structure#getEntities`는 빈 목록, `EntityTransformer` 목록은
   명시적 거부다. 필요한 선행 작업 3가지(호스트 비플레이어 엔티티 조회 경계, 템플릿 `entities`
@@ -144,6 +144,18 @@ CMI가 동작한다고 말할 수 없다.
 - 검증: Rust 단위 테스트(`drag_buttons_split_into_phase_and_even_spread`), `cargo check`,
   scoped clippy, `./gradlew compileJava`. `./gradlew test`와 실제 26.3 클라이언트 드래그 화면은
   아직 확인하지 않았다.
+
+## 2026-11-11 — W5: 런타임 월드 재접속과 플레이어 동작
+
+- **재접속 갭 닫힘.** 플레이어 파일(`Saved.world`)이 런타임 월드 UUID를 저장하고, 접속 시 그 월드가 로드돼
+  있으면 `player_worlds`/추적/리전/글로벌 플레이어/플러그인 스냅샷 모두 그 월드로 시작한다. 월드가 없으면
+  저장된 차원으로 대체한다. 회귀 테스트 `integration::player_rejoins_the_runtime_world_they_left_in`.
+- `70b4ba4`(접속 스냅샷, `ChangeDimension` 푸시, 런타임 월드 플레이어의 `/summon end_crystal`)를 가져왔다.
+- 새로 동작: `Player#breakBlock`, `Player#chat("/명령")`(플레이어 권한), 1-인자 `broadcastSlotBreak`,
+  `broadcastHurtAnimation(Collection)`, `playPickupItemAnimation(Item,int)`. 규칙과 한계는
+  `docs/plugin-api-stubs.md`의 "런타임 월드와 플레이어 동작" 표.
+- **여전히 미구현:** `Structure#getEntities`와 비어 있지 않은 `EntityTransformer`(템플릿 엔티티 저장과 변환 위치 스폰
+  op가 없음), `Player#performCommand`(호스트 명령 핸들러 없음). Paper 전체 호환이 아니다.
 
 ## 다음 단계 제안
 

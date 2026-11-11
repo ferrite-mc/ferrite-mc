@@ -63,7 +63,12 @@ public abstract class PlayerSight extends PlayerMisc {
     // ---- chat --------------------------------------------------------------------------------
     @Override public void chat(String message) {
         Objects.requireNonNull(message, "message");
-        if (message.startsWith("/")) { performCommand(message.substring(1)); return; }
+        if (message.startsWith("/")) {
+            // Run by the host as this player, with the permission this player has; never as the console.
+            if (HostBridge.available()) HostBridge.callVoid("Player", getUniqueId(), "chat(String)", message);
+            else performCommand(message.substring(1));
+            return;
+        }
         String result = Bootstrap.fireChat(getUniqueId().toString(), getName(), message);
         if (result != null) org.bukkit.Bukkit.broadcastMessage("<" + getName() + "> " + result);
     }

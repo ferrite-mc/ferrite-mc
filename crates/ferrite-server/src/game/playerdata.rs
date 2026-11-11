@@ -89,7 +89,6 @@ impl Saved {
         pitch: f32,
         gamemode: i32,
         dimension: super::Dimension,
-        world: Option<Uuid>,
         seen_credits: bool,
         inventory: &PlayerInventory,
     ) -> Self {
@@ -113,11 +112,18 @@ impl Saved {
             gamemode,
             seen_credits,
             dimension: dimension.key().to_owned(),
-            world,
+            world: None,
             items,
             selected: inventory.selected_slot() as u8,
             inventory: Vec::new(),
         }
+    }
+
+    /// Records the plugin runtime world the player is in, so a rejoin restores it.
+    #[must_use]
+    pub fn in_world(mut self, world: Option<Uuid>) -> Self {
+        self.world = world;
+        self
     }
 
     /// The saved dimension, or the overworld when an older save has none.
@@ -201,7 +207,6 @@ mod tests {
             0.0,
             0,
             crate::game::Dimension::Overworld,
-            None,
             false,
             &PlayerInventory::new(),
         );
@@ -236,10 +241,10 @@ mod tests {
             -15.0,
             1,
             crate::game::Dimension::Nether,
-            Some(Uuid::from_u128(99)),
             true,
             &inventory,
-        );
+        )
+        .in_world(Some(Uuid::from_u128(99)));
         save_to(&dir, &uuid, &saved).unwrap();
         let loaded = load_from(&dir, &uuid).unwrap();
         assert_eq!(loaded, saved);

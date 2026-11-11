@@ -17,6 +17,7 @@ mod loot;
 mod messaging;
 mod motion;
 mod network;
+pub mod playerops;
 mod riding;
 pub mod rules;
 pub(crate) mod snapshot;
@@ -371,6 +372,12 @@ impl PluginBridge {
                             {
                                 players(command);
                                 return Some("true".to_owned());
+                            }
+                            if let Some(players) = &players
+                                && let Some(reply) =
+                                    playerops::handle(call, |command| players(command))
+                            {
+                                return Some(reply);
                             }
                             if let Some(players) = &players {
                                 let commands = broadcast::broadcast_commands(call);

@@ -621,6 +621,19 @@ public abstract class PlayerMisc extends PlayerStubs {
         }
         return out;
     }
+    /** Shows the item-break effect to every client that sees this player, and to the player. */
+    @Override public void broadcastSlotBreak(org.bukkit.inventory.EquipmentSlot slot) {
+        Objects.requireNonNull(slot, "slot");
+        var viewers = new LinkedHashSet<org.bukkit.entity.Player>(getTrackedBy());
+        viewers.add(this);
+        broadcastSlotBreak(slot, viewers);
+    }
+    /** Breaks the block under this player's own rules; false when the player may not, or the block is air. */
+    @Override public boolean breakBlock(org.bukkit.block.Block block) {
+        Objects.requireNonNull(block, "block");
+        if (!Objects.equals(block.getWorld(), getWorld())) throw new IllegalArgumentException("Cannot break blocks across worlds");
+        return HostBridge.callBoolean("Player", getUniqueId(), "breakBlock(int,int,int)", block.getX(), block.getY(), block.getZ());
+    }
     @Override public Set<org.bukkit.entity.Player> getTrackedPlayers() { return getTrackedBy(); }
     @Override public boolean isTrackedBy(org.bukkit.entity.Player viewer) { return getTrackedBy().contains(Objects.requireNonNull(viewer, "player")); }
     @Override public com.destroystokyo.paper.profile.PlayerProfile getPlayerProfile() { return new FerriteProfile(getUniqueId(), getName()); }

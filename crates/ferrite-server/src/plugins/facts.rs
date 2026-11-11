@@ -200,6 +200,8 @@ pub struct ItemFact {
 /// What a plugin may read about an entity of the world.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityFact {
+    /// The network id clients know the entity by.
+    pub entity_id: i32,
     pub kind: &'static str,
     pub pos: [f64; 3],
     pub vel: [f64; 3],
@@ -283,6 +285,7 @@ pub fn publish_entities(
         registry.insert(
             data.uuid,
             EntityFact {
+                entity_id: data.id,
                 kind: ferrite_data::entity_props::get(data.kind).key,
                 pos: [pos.x, pos.y, pos.z],
                 vel: [vel.x, vel.y, vel.z],
@@ -304,6 +307,26 @@ pub fn forget_entities(uuids: impl IntoIterator<Item = Uuid>) {
     for uuid in uuids {
         registry.remove(&uuid);
     }
+}
+
+/// Publishes one hand-built entity, so a test can address it by UUID.
+#[cfg(test)]
+pub fn publish_for_test(uuid: Uuid, entity_id: i32) {
+    entity_registry().lock().unwrap().insert(
+        uuid,
+        EntityFact {
+            entity_id,
+            kind: "minecraft:item",
+            pos: [0.0; 3],
+            vel: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            health: None,
+            world: None,
+            item: None,
+            snbt: None,
+        },
+    );
 }
 
 /// What the host last published about one entity, or `None` once it left the world.

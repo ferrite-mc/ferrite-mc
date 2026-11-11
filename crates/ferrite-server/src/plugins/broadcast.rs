@@ -23,13 +23,29 @@ pub fn broadcast_commands(call: &HostCall) -> Vec<PlayerCommand> {
 }
 
 fn broadcast(call: &HostCall) -> Option<Vec<PlayerCommand>> {
-    if call.owner != "Player" || call.method != "broadcastSlotBreak(EquipmentSlot,Collection)" {
+    if call.owner != "Player" {
         return None;
     }
     let subject = Uuid::parse_str(&call.subject).ok()?;
-    let status = slot_break_status(call.args.first()?)?;
     let entity_id = super::facts::entity_id(subject)?;
-    let viewers = call.args.get(1)?;
+    let (packet, viewers): (PluginPacket, &String) = match call.method.as_str() {
+        "broadcastSlotBreak(EquipmentSlot,Collection)" => (
+            PluginPacket::EntityEvent {
+                entity_id,
+                status: slot_break_status(call.args.first()?)?,
+            },
+            call.args.get(1)?,
+        ),
+        // Paper plays the hurt tilt with no damage direction.
+        "broadcastHurtAnimation(Collection)" => (
+            PluginPacket::EntityHurt {
+                entity_id,
+                yaw: 0.0,
+            },
+            call.args.first()?,
+        ),
+        _ => return None,
+    };
     if viewers.is_empty() {
         return Some(Vec::new());
     }
@@ -45,7 +61,7 @@ fn broadcast(call: &HostCall) -> Option<Vec<PlayerCommand>> {
             .into_iter()
             .map(|player| PlayerCommand::Packet {
                 player,
-                packet: PluginPacket::EntityEvent { entity_id, status },
+                packet: packet.clone(),
             })
             .collect(),
     )
@@ -107,6 +123,46 @@ mod tests {
                 }]
             );
         }
+        forget(subject);
+    }
+
+    #[test]
+    fn hurt_animation_reaches_each_listed_viewer_with_the_subjects_entity() {
+        let subject = Uuid::from_u128(0xb12);
+        record(subject, facts(99));
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let viewers = format!("{a}{HOST_ITEM_SEPARATOR}{b}");
+        let hurt = |method: &str, args: Vec<String>| HostCall {
+            owner: "Player".into(),
+            subject: subject.to_string(),
+            method: method.into(),
+            args,
+        };
+        let commands =
+            broadcast_commands(&hurt("broadcastHurtAnimation(Collection)", vec![viewers]));
+        let packet = |player| PlayerCommand::Packet {
+            player,
+            packet: PluginPacket::EntityHurt {
+                entity_id: 99,
+                yaw: 0.0,
+            },
+        };
+        assert_eq!(commands, vec![packet(a), packet(b)]);
+        // No viewers, nobody to send to; a bad viewer list sends nothing at all.
+        assert!(
+            broadcast_commands(&hurt(
+                "broadcastHurtAnimation(Collection)",
+                vec![String::new()]
+            ))
+            .is_empty()
+        );
+        assert!(
+            broadcast_commands(&hurt(
+                "broadcastHurtAnimation(Collection)",
+                vec![format!("{a}{HOST_ITEM_SEPARATOR}nope")]
+            ))
+            .is_empty()
+        );
         forget(subject);
     }
 

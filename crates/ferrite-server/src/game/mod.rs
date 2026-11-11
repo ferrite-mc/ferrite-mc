@@ -1282,9 +1282,6 @@ impl Worlds {
     fn owner_world(&self, world: WorldId, chunk: ChunkPos) -> Option<ferrite_region::RegionId> {
         self.schedulers.get(&world)?.owner(chunk)
     }
-    fn add_chunk(&self, dimension: Dimension, chunk: ChunkPos) {
-        self.scheduler(dimension).add_chunk(chunk);
-    }
     fn add_chunk_world(&self, world: WorldId, chunk: ChunkPos) {
         self.scheduler_world(world).add_chunk(chunk);
     }
@@ -2208,6 +2205,13 @@ async fn run(
                              let name = component_json.as_deref().map(json_text);
                              worlds.schedule_global(move |g| g.set_display_name(player, name));
                          }
+                         // A plugin-made chat command is the player's own: it takes the same path as one
+                         // typed in the chat box, so it runs with the permission that player has.
+                         Some(ferrite_plugin::PlayerCommand::Chat { player, message }) => {
+                            if let Some((session, _, _)) = mailboxes.get(&player) {
+                                let _ = event_tx.send(GameMessage::Input { session: *session, uuid: player, packet: ServerboundPlay::ChatCommand(ServerboundChatCommand { command: message }) });
+                            }
+                        }
                          Some(ferrite_plugin::PlayerCommand::UpdateCommands { player }) => {
                             if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
                                 let (actions, _) = mpsc::unbounded_channel();
@@ -2664,6 +2668,18 @@ fn route_plugin_command(
                 mailbox.lock().unwrap().push_back(Command::Respawn);
             }
         }
+        PlayerCommand::BreakBlock {
+            player,
+            position,
+            ticket,
+        } => match mailboxes.get(&player) {
+            Some((_, mailbox, _)) => mailbox
+                .lock()
+                .unwrap()
+                .push_back(Command::PluginBreakBlock { position, ticket }),
+            // Nobody to break it: the waiting plugin call gets its answer now.
+            None => crate::plugins::playerops::complete(ticket, false),
+        },
         PlayerCommand::SetGameMode { player, mode } => {
             let mode = match mode {
                 ferrite_plugin::GameMode::Survival => 0,
@@ -3012,6 +3028,7 @@ fn route_plugin_command(
         | PlayerCommand::Lightning { .. }
         | PlayerCommand::RideChanged { .. }
         | PlayerCommand::UpdateCommands { .. }
+        | PlayerCommand::Chat { .. }
         | PlayerCommand::EntityOp { .. }
         | PlayerCommand::DropItem { .. }
         | PlayerCommand::SpawnEntity { .. }

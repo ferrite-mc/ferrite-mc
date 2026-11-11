@@ -58,15 +58,35 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | `Server#getTags`/`getTag` | `FerriteTags` — 데이터팩 `tags/block|item|fluid|entity_type|game_event`. | 위 5개 레지스트리 밖은 `UnsupportedOperationException`. |
 | `InventoryDragEvent` | `game/container.rs` + `ferrite-plugin` + `Bootstrap#fireInventoryDrag` | 드래그가 실제로 바꾼 슬롯만 담는다(시작 시점과 끝 시점의 메뉴 차이). 단일 슬롯 드래그는 `ferrite-inventory`가 일반 클릭으로 적용하지만, 결과가 바뀌면 그 슬롯을 담아 이벤트를 보낸다. |
 
+### 런타임 월드와 플레이어 동작 (2026-11-11, W5)
+
+| API | 소유자 | 동작 | 증명 테스트 |
+|---|---|---|---|
+| `Server#createWorld`/`unloadWorld`, 런타임 월드 생성·언로드·재오픈 | `game/runtime_persist.rs`, `game/dimension.rs` | 새 월드마다 청크 소스·Anvil 저장·스폰·리전 스케줄러를 만든다. 플레이어가 안에 있으면 언로드는 거부한다. | `plugin_lifecycle::runtime_world_gap7_create_edit_enter_leave_unload_reopen` |
+| 런타임 월드에서 접속 종료 후 재접속 | `game/playerdata.rs`, `game/mod.rs` | 플레이어 파일이 `world`(런타임 월드 UUID)를 저장하고, 접속 시 그 월드가 로드돼 있으면 거기로 복원한다. 월드가 없으면 저장된 차원으로 대체한다. 접속 스냅샷과 위치 갱신도 그 월드를 보고한다. | `integration::player_rejoins_the_runtime_world_they_left_in`, `playerdata` 왕복 테스트 |
+| `Player#breakBlock(Block)` | `game/interaction.rs::may_break`, `region.rs::plugin_break_block`, `plugins/playerops.rs` | 소유 리전이 플레이어 자신의 규칙으로 부순다: 공기는 `false`, 서바이벌의 베드락 등 파괴 불가(경도 < 0)는 `false`, 모험·관전은 `false`, 명령 블록 등은 OP 권한(2) 필요, `BlockBreakEvent`가 취소되면 `false`. 다른 월드의 블록은 `IllegalArgumentException`. 리전 답변을 2초까지 기다리고, 못 받으면 `false`. | `interaction::break_rules_follow_hardness_mode_and_permission`, `integration::plugin_break_block_follows_the_players_rules`, `playerops` 단위 테스트, `PlayerActionsTest` |
+| `Player#chat("/명령")` | `plugins/playerops.rs`, 게임 루프 `ChatCommand` 경로 | 슬래시 명령을 채팅창에 친 것과 같은 경로로 플레이어 권한으로 실행한다. 콘솔 권한을 주지 않는다. 일반 채팅 줄은 기존대로 Java가 채팅 이벤트를 부른다. | `integration::plugin_chat_commands_keep_the_players_permission`, `PlayerActionsTest` |
+| `Player#broadcastSlotBreak(EquipmentSlot)` | Java `PlayerMisc` | `getTrackedBy()` + 본인에게 2-인자 호출로 보낸다. | `PlayerActionsTest.oneArgumentSlotBreakIncludesThePlayerThemselves` |
+| `Player#broadcastHurtAnimation(Collection)` | `plugins/broadcast.rs`, `PluginPacket::EntityHurt` | 목록의 각 시청자에게 이 플레이어의 엔티티 id로 피격 흔들림(yaw 0)을 보낸다. 목록을 다 읽지 못하면 아무에게도 보내지 않는다. | `broadcast::hurt_animation_reaches_each_listed_viewer_with_the_subjects_entity` |
+| `Player#playPickupItemAnimation(Item,int)` | `plugins/network.rs`, `PluginPacket::PickupAnimation`, `facts::EntityFact::entity_id` | 호스트가 아는 아이템 엔티티의 네트워크 id로 `TakeItemEntity`를 플레이어 청크 시청자에게 보낸다. 모르는 아이템이나 0 이하 수량은 미구현 오류. | `network::pickup_animation_names_the_item_entity_and_a_positive_count` |
+
+한계: `breakBlock`은 크리에이티브에서 검을 든 경우의 제한과 도구 내구도 소모, 월드 보더 검사를 하지 않는다.
+`Player#performCommand`는 여전히 호스트 명령 핸들러가 없어 `false`다.
+
 ### 경계가 없어 구현하지 않은 것 (소유자와 이유)
 
 | API | 소유자 | 왜 지금 구현할 수 없는가 | 필요한 선행 작업 |
 |---|---|---|---|
-| `Server#createWorld(WorldCreator)` | `ferrite-server` 월드 수명주기 + 리전라이저 | 이미 등록된 이름은 그 월드를 그대로 돌려주지만, 새 런타임 월드는 거부한다. Ferrite는 로드된 차원 집합이 고정되어 있고, 새 월드는 청크 소스·Anvil 저장·스폰·리전라이저 등록을 새로 만들어야 한다. | (1) 월드 등록/언로드 수명주기와 `WorldLoadEvent` 순서, (2) 새 차원의 청크 소스·저장·스폰, (3) 리전라이저의 차원 추가/제거 프로토콜. |
 | `EntityFactory#createEntitySnapshot` | `ferrite-server` 엔티티 스냅샷 + `ferrite-entity` | 호스트에 접속 플레이어 외 엔티티의 타입·위치·NBT 스냅샷을 주는 경계가 없다. NMS 파싱을 가장하지 않는다. | (1) 리전 소유 엔티티의 읽기 전용 NBT/위치 스냅샷 op, (2) 스냅샷에서 엔티티를 다시 스폰하는 경로, (3) 두 경로의 리전 핸드오프/취소 규칙. |
 | `Structure#getEntities`, `Structure#place(..., EntityTransformer)` | `ferrite-server/src/plugins/worldgen.rs` + Java 구조물 | 구조물이 엔티티를 담지 않고, 템플릿 파일의 `entities` 목록도 읽지 않는다. 콜백을 부를 엔티티 자체가 없다. | 아래 "구조물 엔티티 선행 작업 3가지" 참고. |
 
 ### 구조물 엔티티 선행 작업 3가지
+
+> 2026-11-11 확인: 런타임 월드의 비플레이어 엔티티는 이제 `facts::EntityFact`(NBT 포함, `World#ferriteEntities`)로
+> 읽을 수 있지만, 기본 월드(오버월드)는 NBT 없이 라이브 핸들 스냅샷만 준다. 구조물 영역 조회·템플릿
+> `entities` 저장·변환 위치 스폰 경로는 여전히 없으므로 `Structure#getEntities`와 비어 있지 않은
+> `EntityTransformer`는 이 레인에서 구현하지 않았다. 막힌 지점은 아래 2번(`CapturedStructure`와
+> `StructureNbt`가 엔티티를 담지 않음)과 3번(변환 위치 스폰 op 없음)이다.
 
 1. **호스트 비플레이어 엔티티 조회 경계** — 구조물 영역(청크 범위)을 소유한 리전 스레드에서
    플레이어 외 엔티티의 UUID, 타입, 위치/회전, 전체 NBT를 읽는 `worldgen.rs` op가 필요하다.
