@@ -27,6 +27,10 @@ pub struct Saved {
     /// the overworld.
     #[serde(default = "default_dimension")]
     pub dimension: String,
+    /// The plugin runtime world the player logged out in, so a rejoin lands there again. Absent
+    /// for the vanilla dimensions and in older saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world: Option<Uuid>,
     /// `(inventory slot, network slot bytes as hex)` for non-empty slots, in vanilla `Inventory`
     /// numbering. The network form keeps every component, including ones the NBT save format
     /// cannot re-encode for the network.
@@ -85,6 +89,7 @@ impl Saved {
         pitch: f32,
         gamemode: i32,
         dimension: super::Dimension,
+        world: Option<Uuid>,
         seen_credits: bool,
         inventory: &PlayerInventory,
     ) -> Self {
@@ -108,6 +113,7 @@ impl Saved {
             gamemode,
             seen_credits,
             dimension: dimension.key().to_owned(),
+            world,
             items,
             selected: inventory.selected_slot() as u8,
             inventory: Vec::new(),
@@ -195,6 +201,7 @@ mod tests {
             0.0,
             0,
             crate::game::Dimension::Overworld,
+            None,
             false,
             &PlayerInventory::new(),
         );
@@ -229,6 +236,7 @@ mod tests {
             -15.0,
             1,
             crate::game::Dimension::Nether,
+            Some(Uuid::from_u128(99)),
             true,
             &inventory,
         );

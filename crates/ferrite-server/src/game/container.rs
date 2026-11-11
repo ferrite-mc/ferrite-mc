@@ -854,6 +854,10 @@ impl Player {
                     self.pitch,
                     self.gamemode,
                     self.dimension,
+                    match self.world_id {
+                        super::WorldId::Runtime(id) => Some(id),
+                        super::WorldId::Vanilla(_) => None,
+                    },
                     self.seen_credits,
                     &self.inventory,
                 ),
