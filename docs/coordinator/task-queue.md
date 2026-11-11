@@ -167,3 +167,24 @@ the real 26.3 client join, Dependabot #10, and retired-worktree/cache cleanup.
 Not assigned to a lane: the real-client 23:38 server join (needs a 26.3 client and is a manual
 verification, not a remote code task); math and English practice (outside this repository, tracked
 separately).
+
+## Dispatched 2026-11-11 (wave 5, fourth lane) — residual closeout
+
+After the user asked for one more worker for everything left, Orca created worktree
+`/home/ubuntu/orca/workspaces/ferrite-mc/w5-residual` on branch `w5-residual` from
+`origin/main` `6aca3fc`. Terminal `term_3ec5966a` runs `claude --model sonnet`. The lane owns
+`docs/coordinator/**`, dependency updates, CI diagnosis, and an independent audit of anything
+the three active lanes do not cover.
+
+| Deliverable | Detail |
+|---|---|
+| Remaining-work audit | `docs/coordinator/remaining-2026-11-11.md`: every open item with `path:line`, owner (`L1`/`L2`/`L3`/`L4`/`manual`/`closed`), next action |
+| Dependabot #10 | read the alert, update the vulnerable dependency with lockfile and focused tests, or record the exact blocker |
+| CI | record run `43040195519`; fix only unowned Windows failures on `w5-residual`, never `main` |
+| Cleanup plan | `docs/coordinator/cleanup-2026-11-11.md`; inventory only, no worktree/target deletion |
+| Orca runbook | `docs/coordinator/orca-4lane.md`; exact create/send/clear commands, four handles, `MSYS_NO_PATHCONV=1` |
+| Unowned gaps | only small isolated fixes with tests; no edits to active-lane files |
+
+L4 uses `CARGO_TARGET_DIR=$HOME/ferrite/target-rw4` and `CARGO_BUILD_JOBS=2` because the other
+three lanes are already compiling. It pushes `w5-residual`; the coordinator still owns the merge
+gate and destructive cleanup.
