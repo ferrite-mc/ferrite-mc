@@ -26,5 +26,8 @@ commands:
   gap7:
     description: Drives the runtime world end-to-end check
     usage: /gap7 <check|enter|leave|spawn|entities|unload|reopen>
+  worldcycle:
+    description: Creates then unloads a runtime world directly on the command thread
+    usage: /worldcycle
 depend: [FerriteAlias]
 folia-supported: true
