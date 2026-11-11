@@ -1786,6 +1786,7 @@ fn entities_follow_region_merges_splits_and_hand_offs() {
         trader_spawner: Default::default(),
         profiler: None,
         tree: None,
+        hooks: None,
     };
     let scheduler = Scheduler::new(
         Regionizer::<super::Region>::default(),

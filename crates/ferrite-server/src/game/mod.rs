@@ -1354,6 +1354,8 @@ async fn run(
     }
     let mut command_tree = Arc::new(tree);
     let shared_tree = Arc::new(region::SharedCommandTree::new(Arc::clone(&command_tree)));
+    let shared_hooks = Arc::new(region::SharedPluginHooks::default());
+    shared_hooks.publish(settings.plugins.clone(), settings.plugin_event_errors);
     let registry_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../vanilla/26.3/generated/reports");
     let parser_registry = ferrite_command::ParserRegistry::load(&registry_dir).ok();
@@ -1404,6 +1406,7 @@ async fn run(
             trader_spawner: Default::default(),
             profiler: Some(Arc::clone(&profiler)),
             tree: Some(Arc::clone(tree)),
+            hooks: Some(Arc::clone(&shared_hooks)),
         };
     crate::plugins::worldinfo::register({
         let state = Arc::clone(&command_state);
@@ -1473,6 +1476,7 @@ async fn run(
             trader_spawner: Default::default(),
             profiler: Some(profiler.clone()),
             tree: Some(Arc::clone(&shared_tree)),
+            hooks: Some(Arc::clone(&shared_hooks)),
         };
         let scheduler = (scheduler_factory)(ctx, dimension == Dimension::Overworld);
         schedulers.insert(WorldId::Vanilla(dimension), scheduler);
@@ -1838,6 +1842,7 @@ async fn run(
                       }
                       command_tree = Arc::new(tree);
                       shared_tree.publish(Arc::clone(&command_tree));
+                      shared_hooks.publish(Some(Arc::clone(&hooks)), settings.plugin_event_errors);
                       settings.plugins = Some(hooks);
                       let _ = complete.send(());
                   },
