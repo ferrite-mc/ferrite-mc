@@ -38,6 +38,8 @@ const WALK_ACCELERATION: f64 = 0.09;
 pub const CREEPER_TRIGGER_DISTANCE: f64 = 3.0;
 /// Vanilla creeper fuse length (30 swell ticks).
 pub const CREEPER_SWELL_TICKS: u16 = 30;
+/// A lit creeper keeps swelling until its target is farther than this (`SwellGoal`, 7 blocks).
+pub const CREEPER_ABORT_DISTANCE: f64 = 7.0;
 /// Vanilla creeper explosion power.
 pub const CREEPER_POWER: f32 = 3.0;
 /// Skeleton bow range (`RangedAttackGoal` follow range is 15-16 blocks).
@@ -419,14 +421,52 @@ pub fn look_at(pos: Vec3, eye_height: f64, players: &[Vec3]) -> Option<(f32, f32
 }
 
 /// The nearest player within `range` blocks horizontally and eight blocks vertically.
+fn in_target_range(target: &Target, pos: Vec3, range: f64) -> bool {
+    let dx = target.pos.x - pos.x;
+    let dz = target.pos.z - pos.z;
+    dx * dx + dz * dz <= range * range && (target.pos.y - pos.y).abs() <= 8.0
+}
+
+/// The player a hostile mob hunts: the current target while it stays in range (vanilla goals
+/// only re-select after the target is lost, so a mob that was hurt keeps chasing its attacker),
+/// otherwise the nearest player.
+fn select_target(
+    players: &[Target],
+    current: Option<Uuid>,
+    pos: Vec3,
+    range: f64,
+) -> Option<&Target> {
+    current
+        .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
+        .filter(|target| in_target_range(target, pos, range))
+        .or_else(|| nearest_target(players, pos, range))
+}
+
+/// The nearest adult of the same kind within eight blocks that a baby should trail
+/// (`FollowParentGoal`); `None` once the baby is within three blocks of it.
+fn follow_parent(store: &EntityStore, key: crate::EntityKey, start: Vec3) -> Option<Vec3> {
+    let me = mob::state(store, key)?;
+    if me.age >= 0 || !me.kind.is_animal() {
+        return None;
+    }
+    let kind = me.kind;
+    let nearest = store
+        .keys()
+        .iter()
+        .copied()
+        .filter(|&other| other != key)
+        .filter(|&other| mob::state(store, other).is_some_and(|m| m.kind == kind && m.age >= 0))
+        .filter_map(|other| store.pos(other))
+        .map(|pos| (pos, (pos.x - start.x).powi(2) + (pos.z - start.z).powi(2)))
+        .filter(|(_, d)| *d <= 64.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    (nearest.1 >= 9.0).then_some(nearest.0)
+}
+
 fn nearest_target(players: &[Target], pos: Vec3, range: f64) -> Option<&Target> {
     players
         .iter()
-        .filter(|target| {
-            let dx = target.pos.x - pos.x;
-            let dz = target.pos.z - pos.z;
-            dx * dx + dz * dz <= range * range && (target.pos.y - pos.y).abs() <= 8.0
-        })
+        .filter(|target| in_target_range(target, pos, range))
         .min_by(|a, b| {
             let da = (a.pos.x - pos.x).powi(2) + (a.pos.z - pos.z).powi(2);
             let db = (b.pos.x - pos.x).powi(2) + (b.pos.z - pos.z).powi(2);
@@ -534,7 +574,7 @@ pub fn tick_with_owner_attacks_and_holders(
             state.path_timer = state.path_timer.saturating_sub(1);
             if matches!(
                 state.kind,
-                MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama
+                MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama | MobKind::Enderman
             ) {
                 state.anger = state.anger.saturating_sub(1);
                 if state.anger == 0 {
@@ -544,7 +584,14 @@ pub fn tick_with_owner_attacks_and_holders(
         }
 
         if kind.is_hostile() {
-            let target = nearest_target(players, start, kind.follow_range()).copied();
+            let (current, calm) =
+                mob::state(store, key).map_or((None, false), |s| (s.target, s.anger == 0));
+            // An enderman stays neutral until something angers it.
+            let target = if kind == MobKind::Enderman && calm {
+                None
+            } else {
+                select_target(players, current, start, kind.follow_range()).copied()
+            };
             {
                 let Some(state) = mob::state_mut(store, key) else {
                     continue;
@@ -566,9 +613,14 @@ pub fn tick_with_owner_attacks_and_holders(
                     MobKind::Creeper => {
                         let mut explode = false;
                         if let Some(state) = mob::state_mut(store, key) {
-                            if horizontal <= CREEPER_TRIGGER_DISTANCE
-                                && (target.pos.y - start.y).abs() <= 2.0
-                            {
+                            // `SwellGoal`: ignite inside three blocks, then keep swelling until
+                            // the target is more than seven blocks away.
+                            let reach = if state.swell > 0 {
+                                CREEPER_ABORT_DISTANCE
+                            } else {
+                                CREEPER_TRIGGER_DISTANCE
+                            };
+                            if horizontal <= reach && (target.pos.y - start.y).abs() <= 2.0 {
                                 state.swell = state.swell.saturating_add(1);
                                 explode = state.swell >= CREEPER_SWELL_TICKS;
                             } else {
@@ -591,6 +643,16 @@ pub fn tick_with_owner_attacks_and_holders(
                                 walking = Some(yaw);
                             } else if horizontal < 4.0 {
                                 walking = Some(wrap_degrees(yaw + 180.0));
+                            } else {
+                                // `RangedBowAttackGoal` strafes while it shoots, flipping side
+                                // every second and a half.
+                                let ticks = store.data(key).map_or(0, |data| data.tick_count);
+                                let side = if (ticks / 30).is_multiple_of(2) {
+                                    90.0
+                                } else {
+                                    -90.0
+                                };
+                                walking = Some(wrap_degrees(yaw + side));
                             }
                             let ready =
                                 mob::state(store, key).is_some_and(|state| state.bow_timer == 0);
@@ -767,6 +829,9 @@ pub fn tick_with_owner_attacks_and_holders(
                 if let Some(bred) = crate::breed::approach(store, key, mate, mate_pos, rng) {
                     events.push(MobEvent::Bred(bred));
                 }
+            } else if let Some(parent) = follow_parent(store, key, start) {
+                directed = true;
+                walking = Some(yaw_towards(parent.x - start.x, parent.z - start.z));
             } else if kind == MobKind::Villager
                 && let Some((activity, destination)) = store.data(key).and_then(|data| {
                     let villager = data.villager.as_ref()?;
@@ -1896,5 +1961,167 @@ mod tests {
         assert_eq!(cat_hearts, 1, "one heart event per ten love ticks");
         assert_eq!(parrot_hearts, 0, "a parrot cannot fall in love");
         assert_eq!(mob::state(&store, parrot).unwrap().love, 0);
+    }
+
+    fn one_mob(kind: MobKind, x: f64) -> (EntityStore, crate::EntityKey) {
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(kind, Vec3::new(x, 64.0, 0.5), &mut Rng::new(5)));
+        (store, key)
+    }
+
+    #[test]
+    fn a_lit_creeper_keeps_swelling_until_the_target_is_seven_blocks_away() {
+        let world = TestWorld::flat(64);
+        let (mut store, creeper) = one_mob(MobKind::Creeper, 0.5);
+        mob::state_mut(&mut store, creeper).unwrap().no_ai = true;
+        let mut rng = Rng::new(6);
+        // Ignite inside three blocks...
+        tick_with(&mut store, &world, &[target(2.5, 0.5)], &mut rng);
+        assert_eq!(mob::state(&store, creeper).unwrap().swell, 1);
+        // ...then the target backs off to five blocks: the fuse keeps burning.
+        tick_with(&mut store, &world, &[target(5.5, 0.5)], &mut rng);
+        assert_eq!(mob::state(&store, creeper).unwrap().swell, 2);
+        // Beyond seven blocks it winds down instead.
+        tick_with(&mut store, &world, &[target(9.0, 0.5)], &mut rng);
+        assert_eq!(mob::state(&store, creeper).unwrap().swell, 1);
+    }
+
+    #[test]
+    fn an_unlit_creeper_does_not_ignite_at_five_blocks() {
+        let world = TestWorld::flat(64);
+        let (mut store, creeper) = one_mob(MobKind::Creeper, 0.5);
+        mob::state_mut(&mut store, creeper).unwrap().no_ai = true;
+        tick_with(&mut store, &world, &[target(5.5, 0.5)], &mut Rng::new(6));
+        assert_eq!(mob::state(&store, creeper).unwrap().swell, 0);
+    }
+
+    #[test]
+    fn an_enderman_ignores_players_until_provoked() {
+        let world = TestWorld::flat(64);
+        let (mut store, enderman) = one_mob(MobKind::Enderman, 0.5);
+        let player = target(1.5, 0.5);
+        let mut rng = Rng::new(9);
+        for _ in 0..30 {
+            let events = tick_with(&mut store, &world, &[player], &mut rng);
+            assert!(!events.iter().any(|e| matches!(e, MobEvent::Melee { .. })));
+        }
+        assert_eq!(mob::state(&store, enderman).unwrap().target, None);
+
+        assert!(mob::retaliate(&mut store, enderman, player.uuid));
+        assert_eq!(
+            mob::state(&store, enderman).unwrap().anger,
+            mob::ENDERMAN_ANGER_TICKS
+        );
+        let mut struck = false;
+        for _ in 0..30 {
+            struck |= tick_with(&mut store, &world, &[player], &mut rng)
+                .iter()
+                .any(|e| matches!(e, MobEvent::Melee { .. }));
+        }
+        assert!(struck, "a provoked enderman attacks");
+    }
+
+    #[test]
+    fn a_provoked_enderman_calms_down_when_its_anger_runs_out() {
+        let world = TestWorld::flat(64);
+        let (mut store, enderman) = one_mob(MobKind::Enderman, 0.5);
+        let player = target(30.5, 0.5);
+        mob::retaliate(&mut store, enderman, player.uuid);
+        mob::state_mut(&mut store, enderman).unwrap().anger = 2;
+        let mut rng = Rng::new(9);
+        for _ in 0..4 {
+            tick_with(&mut store, &world, &[player], &mut rng);
+        }
+        let state = mob::state(&store, enderman).unwrap();
+        assert_eq!((state.anger, state.target), (0, None));
+    }
+
+    #[test]
+    fn a_hurt_zombie_keeps_chasing_its_attacker_over_a_nearer_player() {
+        let world = TestWorld::flat(64);
+        let (mut store, zombie) = one_mob(MobKind::Zombie, 0.5);
+        mob::state_mut(&mut store, zombie).unwrap().no_ai = true;
+        let attacker = Target {
+            uuid: Uuid::from_u128(77),
+            pos: Vec3::new(20.5, 64.0, 0.5),
+        };
+        let bystander = target(4.5, 0.5);
+        mob::retaliate(&mut store, zombie, attacker.uuid);
+        tick_with(&mut store, &world, &[attacker, bystander], &mut Rng::new(3));
+        assert_eq!(
+            mob::state(&store, zombie).unwrap().target,
+            Some(attacker.uuid)
+        );
+        // Once the attacker is out of follow range the nearest player is chosen again.
+        let far = Target {
+            pos: Vec3::new(300.5, 64.0, 0.5),
+            ..attacker
+        };
+        tick_with(&mut store, &world, &[far, bystander], &mut Rng::new(3));
+        assert_eq!(
+            mob::state(&store, zombie).unwrap().target,
+            Some(bystander.uuid)
+        );
+    }
+
+    #[test]
+    fn a_skeleton_strafes_inside_its_firing_band_and_flips_sides() {
+        let world = TestWorld::flat(64);
+        let (mut store, skeleton) = one_mob(MobKind::Skeleton, 0.5);
+        let player = target(6.5, 0.5);
+        let mut rng = Rng::new(4);
+        let mut z_at = [0.5; 3];
+        for tick in 1..=55 {
+            tick_with(&mut store, &world, &[player], &mut rng);
+            match tick {
+                25 => z_at[1] = store.pos(skeleton).unwrap().z,
+                55 => z_at[2] = store.pos(skeleton).unwrap().z,
+                _ => {}
+            }
+        }
+        let (first, second) = (z_at[1] - z_at[0], z_at[2] - z_at[1]);
+        assert!(first.abs() > 0.2, "strafed sideways: {first}");
+        assert!(first * second < 0.0, "flipped sides: {first} then {second}");
+        let x = store.pos(skeleton).unwrap().x;
+        assert!(
+            (x - 0.5).abs() < 3.0,
+            "strafing does not close the distance"
+        );
+    }
+
+    #[test]
+    fn a_baby_animal_trails_an_adult_of_its_kind_but_not_when_close() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let adult = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(6.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let baby = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(2),
+        ));
+        mob::state_mut(&mut store, baby).unwrap().age = -6000;
+        for key in [adult, baby] {
+            mob::state_mut(&mut store, key).unwrap().moving = false;
+            mob::state_mut(&mut store, key).unwrap().wander_timer = 1_000;
+        }
+        let before = store.pos(baby).unwrap();
+        let mut rng = Rng::new(3);
+        for _ in 0..40 {
+            tick_with(&mut store, &world, &[], &mut rng);
+        }
+        let after = store.pos(baby).unwrap();
+        assert!(after.x > before.x + 1.0, "the calf walked toward the cow");
+        assert!(
+            follow_parent(&store, baby, Vec3::new(5.5, 64.0, 0.5)).is_none(),
+            "within three blocks it stops"
+        );
+        assert!(
+            follow_parent(&store, adult, Vec3::new(0.0, 64.0, 0.0)).is_none(),
+            "adults never trail"
+        );
     }
 }

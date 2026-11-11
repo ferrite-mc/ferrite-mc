@@ -22,6 +22,8 @@ pub const NO_DESPAWN_DISTANCE: f64 = 32.0;
 pub const NO_ACTION_TICKS: u32 = 600;
 /// How long a wild wolf stays angry (vanilla 20 to 39 seconds, the shorter value here).
 pub const WOLF_ANGER_TICKS: u16 = 400;
+/// How long a provoked enderman hunts its attacker (`NeutralMob` persistent anger, ~30 s).
+pub const ENDERMAN_ANGER_TICKS: u16 = 600;
 /// Ticks a passive mob flees after being hurt (vanilla panic goal duration is 100-200).
 pub const PANIC_TICKS: u16 = 100;
 
@@ -609,6 +611,9 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
         return false;
     }
     mob.target = Some(player);
+    if mob.kind == MobKind::Enderman {
+        mob.anger = ENDERMAN_ANGER_TICKS;
+    }
     true
 }
 

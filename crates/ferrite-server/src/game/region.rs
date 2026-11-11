@@ -198,6 +198,7 @@ pub enum Command {
         dimension: super::Dimension,
         damage: f32,
         from: [f64; 3],
+        attacker: Uuid,
     },
     /// Move to another dimension with the `Respawn` + position sequence.
     ChangeDimension {
@@ -603,6 +604,16 @@ pub enum Signal {
         player: Uuid,
         damage: f32,
         from: [f64; 3],
+        attacker: Uuid,
+    },
+    /// A shield in another region blocked a mob's melee hit: the mob's owner knocks it back.
+    MobKnockback {
+        world_id: super::WorldId,
+        attacker: Uuid,
+        /// Where the attacker stood when it swung, to find the region that owns it.
+        at: [f64; 3],
+        /// The blocking player's position, which the attacker is pushed away from.
+        source: [f64; 3],
     },
     FluidChange {
         dimension: super::Dimension,
@@ -1112,6 +1123,8 @@ pub struct Region {
     pub moving_pistons: super::piston::Animations,
     /// The stack of every trident in flight, by entity uuid, so it can drop as it was thrown.
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
+    /// The bottle each splash potion in flight was thrown from, keyed by projectile uuid.
+    pub thrown_potions: HashMap<Uuid, ferrite_item::ItemStack>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
@@ -1170,6 +1183,7 @@ impl RegionData for Region {
         self.moving_pistons.merge(other.moving_pistons);
         self.players.extend(other.players);
         self.entities.merge(other.entities);
+        self.thrown_potions.extend(other.thrown_potions);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
         self.generator.merge(other.generator);
@@ -1198,6 +1212,7 @@ impl RegionData for Region {
             delayed_updates,
             moving_pistons,
             thrown_tridents: HashMap::new(),
+            thrown_potions: HashMap::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
             dragon_bars: HashMap::new(),
@@ -1251,6 +1266,9 @@ impl RegionData for Region {
                 }
                 if self.published_entities.remove(&data.uuid) {
                     result.published_entities.insert(data.uuid);
+                }
+                if let Some(bottle) = self.thrown_potions.remove(&data.uuid) {
+                    result.thrown_potions.insert(data.uuid, bottle);
                 }
             }
         }
@@ -3084,7 +3102,9 @@ impl Player {
                     },
                 );
             }
-            self.menus.launched.push(kind);
+            // A potion keeps its contents so the burst can apply them where it lands.
+            let contents = (kind == arrow::Kind::SplashPotion).then(|| stack.copy_with_count(1));
+            self.menus.launched.push((kind, contents));
             return;
         }
         // Vanilla `LivingEntity.startUsingItem`: a shield raises, a bow starts drawing.
@@ -3959,10 +3979,18 @@ impl Player {
                     dimension,
                     damage,
                     from,
+                    attacker,
                 } => {
                     if dimension == self.dimension {
                         if self.blocks_damage_from(from) {
                             self.shield_disabled = 5;
+                            // The attacker belongs to another region: ask its owner to recoil it.
+                            let _ = self.signals.send(Signal::MobKnockback {
+                                world_id: self.world_id,
+                                attacker,
+                                at: from,
+                                source: self.pos,
+                            });
                         } else if self.hurt(DamageKind::Mob, damage) {
                             let dx = self.pos[0] - from[0];
                             let dz = self.pos[2] - from[2];
@@ -4848,6 +4876,17 @@ impl Region {
     pub fn has_chunk_hold(&self, chunk: ChunkPos) -> bool {
         self.held_chunks.contains_key(&chunk)
     }
+    /// Knocks the entity with `uuid` away from `source`, for a hit another region's shield
+    /// blocked. Does nothing when the entity has since left this region.
+    pub fn knock_back_by_uuid(&mut self, uuid: Uuid, source: ferrite_math::Vec3) -> bool {
+        match trader_key(&self.entities, uuid) {
+            Some(key) => {
+                mob::knockback(&mut self.entities, key, source);
+                true
+            }
+            None => false,
+        }
+    }
     /// Removes and returns every entity standing in `chunk`, so the world loop can persist the
     /// chunk's entities when it unloads. Entities in chunks that stay loaded are untouched.
     pub fn take_chunk_entities(&mut self, chunk: ChunkPos) -> Vec<EntityRecord> {
@@ -5337,11 +5376,16 @@ impl Region {
                     if self.players.contains_key(&player) {
                         self.damage_player(player, damage, DamageKind::Mob, from, Some(attacker));
                     } else {
+                        let attacker = self
+                            .entities
+                            .data(attacker)
+                            .map_or(Uuid::nil(), |data| data.uuid);
                         let _ = ctx.signals.send(Signal::MobMelee {
                             dimension: ctx.dimension,
                             player,
                             damage,
                             from: [from.x, from.y, from.z],
+                            attacker,
                         });
                     }
                 }
@@ -7831,6 +7875,11 @@ impl Region {
                     at.z.floor() as i32,
                 ]);
             }
+            if landing.kind == arrow::Kind::SplashPotion
+                && let Some(bottle) = self.thrown_potions.remove(&landing.uuid)
+            {
+                self.splash_potion([landing.pos.x, landing.pos.y, landing.pos.z], &bottle);
+            }
             if landing.kind == arrow::Kind::Egg {
                 ferrite_entity::breed::hatch_egg(&mut self.entities, landing.pos, &mut self.rng);
             }
@@ -8822,15 +8871,27 @@ impl Region {
                 self.entities.insert(record);
             }
         }
-        for kind in p.menus.launched.drain(..) {
+        for (kind, contents) in p.menus.launched.drain(..) {
             let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
             let eye = combat::eye_position(feet);
-            let direction = combat::look_vector(p.yaw, p.pitch);
-            // Vanilla `shootFromRotation(.., 1.5, 1.0)`.
-            let vel =
-                ferrite_math::Vec3::new(direction.x * 1.5, direction.y * 1.5, direction.z * 1.5);
-            self.entities
-                .insert(arrow::new_thrown(kind, eye, vel, Some(p.uuid)));
+            // Vanilla `shootFromRotation(.., 1.5, 1.0)`; a potion is lobbed: 20 degrees upward
+            // at half the speed (`ThrowablePotionItem`).
+            let (pitch, power) = if kind == arrow::Kind::SplashPotion {
+                (p.pitch - 20.0, 0.5)
+            } else {
+                (p.pitch, 1.5)
+            };
+            let direction = combat::look_vector(p.yaw, pitch);
+            let vel = ferrite_math::Vec3::new(
+                direction.x * power,
+                direction.y * power,
+                direction.z * power,
+            );
+            let record = arrow::new_thrown(kind, eye, vel, Some(p.uuid));
+            if let Some(contents) = contents {
+                self.thrown_potions.insert(record.data.uuid, contents);
+            }
+            self.entities.insert(record);
         }
         for stack in p.menus.thrown.drain(..) {
             let plain = ItemStack {
@@ -10103,6 +10164,149 @@ mod tests {
             super::super::WorldId::Vanilla(super::super::Dimension::Nether);
         region.tick_mobs(&ctx, &blocks);
         assert!(region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
+    }
+
+    /// A tick context whose signal receiver the test keeps.
+    fn listening_context() -> (
+        TickContext,
+        tokio::sync::mpsc::UnboundedReceiver<Signal>,
+        Uuid,
+    ) {
+        let mut ctx = tick_context();
+        let (signals, rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.signals = signals;
+        let player = Uuid::from_u128(0xabcd);
+        let (outbound, _receiver) = OutboundSender::channel(4096);
+        ctx.tracking.lock().unwrap().insert(
+            player,
+            (
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+                HashSet::new(),
+                outbound,
+            ),
+        );
+        (ctx, rx, player)
+    }
+
+    #[test]
+    fn a_zombie_hits_a_player_across_a_region_boundary_and_names_itself() {
+        let (ctx, mut signals, player) = listening_context();
+        // 8 blocks past a region section edge: the player is owned by another region.
+        ctx.positions
+            .lock()
+            .unwrap()
+            .insert(player, [128.5, 65.0, 0.5]);
+        let mut region = Region::default();
+        let zombie = region.entities.insert(mob::new_mob(
+            MobKind::Zombie,
+            ferrite_math::Vec3::new(127.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        let uuid = region.entities.data(zombie).unwrap().uuid;
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        let mut hit = None;
+        for _ in 0..40 {
+            region.tick_mobs(&ctx, &blocks);
+            while let Ok(signal) = signals.try_recv() {
+                if let Signal::MobMelee {
+                    attacker,
+                    player: target,
+                    ..
+                } = signal
+                {
+                    hit = Some((attacker, target));
+                }
+            }
+        }
+        assert_eq!(
+            hit,
+            Some((uuid, player)),
+            "the hit reaches the player's region and says which mob swung"
+        );
+        assert!(!region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
+    }
+
+    #[test]
+    fn a_mob_walking_toward_a_cross_region_player_is_not_despawned_when_the_snapshot_moves() {
+        let (ctx, _signals, player) = listening_context();
+        let mut region = Region::default();
+        let zombie = region.entities.insert(mob::new_mob(
+            MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        // The player crosses the boundary: the mob keeps seeing the fresh snapshot each tick.
+        for x in [100.5, 120.5, 126.5, 110.5] {
+            ctx.positions.lock().unwrap().insert(player, [x, 65.0, 0.5]);
+            region.tick_mobs(&ctx, &blocks);
+            assert!(!region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
+        }
+        // Only a player beyond 128 blocks lets it despawn.
+        ctx.positions
+            .lock()
+            .unwrap()
+            .insert(player, [400.5, 65.0, 0.5]);
+        region.tick_mobs(&ctx, &blocks);
+        assert!(region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
+    }
+
+    #[test]
+    fn knock_back_by_uuid_pushes_only_the_named_mob() {
+        let mut region = Region::default();
+        let pos = ferrite_math::Vec3::new(8.5, 64.0, 8.5);
+        let first = region
+            .entities
+            .insert(mob::new_mob(MobKind::Zombie, pos, &mut region.rng));
+        let second = region
+            .entities
+            .insert(mob::new_mob(MobKind::Zombie, pos, &mut region.rng));
+        let uuid = region.entities.data(first).unwrap().uuid;
+        assert!(region.knock_back_by_uuid(uuid, ferrite_math::Vec3::new(6.5, 64.0, 8.5)));
+        assert!(region.entities.vel(first).unwrap().x > 0.3);
+        assert_eq!(region.entities.vel(second).unwrap().x, 0.0);
+        assert!(
+            !region.knock_back_by_uuid(Uuid::from_u128(1), pos),
+            "gone mobs are ignored"
+        );
+    }
+
+    #[test]
+    fn a_potions_bottle_follows_it_through_a_region_split_and_merge() {
+        let bottle = ferrite_item::ItemStack::with_count(
+            ferrite_item::item_id("minecraft:splash_potion").unwrap(),
+            1,
+        );
+        let mut region = Region::default();
+        let potion = arrow::new_thrown(
+            arrow::Kind::SplashPotion,
+            ferrite_math::Vec3::new(8.5, 70.0, 8.5),
+            ferrite_math::Vec3::new(0.0, 0.0, 0.5),
+            None,
+        );
+        let uuid = potion.data.uuid;
+        region.entities.insert(potion);
+        region.thrown_potions.insert(uuid, bottle);
+
+        // A split that does not take the potion's section leaves the bottle where it is.
+        let elsewhere: HashSet<_> = [SectionPos(40, 40)].into();
+        let other = region.split(&elsewhere);
+        assert!(other.thrown_potions.is_empty());
+        assert!(region.thrown_potions.contains_key(&uuid));
+
+        // One that takes it moves the bottle along with the entity, and a merge brings it home.
+        let here: HashSet<_> = [SectionPos(0, 0)].into();
+        let mut taken = region.split(&here);
+        assert!(region.thrown_potions.is_empty());
+        assert!(taken.thrown_potions.contains_key(&uuid));
+        taken.merge(region);
+        assert!(taken.thrown_potions.contains_key(&uuid));
     }
 
     fn dropped_items(region: &Region) -> Vec<&'static str> {
