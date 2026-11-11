@@ -209,6 +209,8 @@ pub struct EntityFact {
     /// The plugin world this entity belongs to; `None` for dimensions plugins cannot address.
     pub world: Option<Uuid>,
     pub item: Option<ItemFact>,
+    /// Named binary NBT snapshot published by the owning region, encoded as base64.
+    pub nbt_base64: Option<String>,
 }
 
 fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
@@ -269,6 +271,18 @@ pub fn publish_entities(
                 health: data.mob.as_ref().map(|mob| mob.health),
                 world,
                 item,
+                nbt_base64: super::super::game::entity_save::record_to_nbt(
+                    &ferrite_entity::EntityRecord {
+                        pos,
+                        vel,
+                        flags,
+                        data: data.clone(),
+                    },
+                )
+                .and_then(|tag| ferrite_nbt::binary::write_named("entity", &tag).ok())
+                .map(|bytes| {
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+                }),
             },
         );
     }
@@ -310,6 +324,16 @@ pub fn entity_position(uuid: Uuid) -> Option<[f64; 3]> {
         .unwrap()
         .get(&uuid)
         .map(|fact| fact.pos)
+}
+
+/// The last entity NBT snapshot published by its owning region.
+pub fn entity_nbt_base64(uuid: Uuid) -> Option<String> {
+    entity_registry()
+        .lock()
+        .unwrap()
+        .get(&uuid)?
+        .nbt_base64
+        .clone()
 }
 
 /// The entities visible in `world`, as `uuid FIELD kind FIELD x FIELD y FIELD z FIELD yaw FIELD pitch`.

@@ -115,20 +115,20 @@ CMI가 동작한다고 말할 수 없다.
 - 월드 엔티티 조회는 JUnit/Rust 단위 테스트로만 확인했고 실제 마인크래프트 클라이언트에서는 확인하지 않았다.
 - 패킷 구조는 바닐라 jar와 대조했지만, 실제 클라이언트가 그려 주는 모습(색·위치·소리 크기)은 확인하지 못했다.
 
-## 오늘 못한 것 (구현 안 됨)
+## 남은 한계 및 미검증 동작
 
 서버 쪽 기능이나 데이터가 먼저 필요하다.
 
 - **연결됨(이번 라운드):** 아이템 사용 상태, 마모 동기화, 탑승·승객(`/ride` 탑승표), `openBook`(제목·저자·일반 텍스트 쪽), `sendMap`(렌더러를 캔버스에 그려 `map_item_data` 전송; 보이는 커서와 일반 텍스트 캡션 전송),
   `refreshChunk`/`getChunkGenerationState`/`unloadChunk`, 기온·습도(바이옴 데이터, 높이 보정은 노이즈 없이), 전투 추적기(호스트가 보고한 피해를 기록, 낙하 위치 종류는 GENERIC),
-  눈덩이·달걀·엔더 진주·작은 화염구(플레이어가 던질 수 있고 `launchProjectile`로도 발사; 진주는 같은 리전의 던진 사람만 순간이동 + 낙하 피해 5, 달걀은 닭을 낳지 않음; 작은 화염구는 직선 비행, 착탄 지점의 몹에 5 피해와 100틱 점화, 불 블록 생성).
+  눈덩이·달걀·엔더 진주·작은 화염구(플레이어가 던질 수 있고 `launchProjectile`로도 발사; 진주는 교차 리전 착탄을 소유 플레이어 리전으로 넘겨 순간이동과 낙하 피해 5를 적용, 다른 차원으로 이동한 소유자는 건너뜀; 달걀은 닭을 낳지 않음; 작은 화염구는 직선 비행, 착탄 지점의 몹에 5 피해와 100틱 점화, 불 블록 생성).
 - **장부만 있는 것:** 어깨 앵무새(`set/get/releaseShoulderEntity*`는 Java에서 기억만 하고 게임엔 앵무새도, 클라이언트 표시도 없다).
 - **마지막에 붙인 것:** 큰 화염구(직선 비행, 닿는 곳에서 불 붙는 위력 1 폭발), `findLightningRod/Target`(불러온 열의 맨 위 블록만 보고 128칸 안에서 가장 가까운 피뢰침을 찾는다), `sendBlockUpdate`는 표지판만(다른 타일 상태는 `UnsupportedOperationException`).
 - **아이템 메타:** `PlayerInventory.setItem` 등이 이름·로어·인챈트·불괴·커스텀 모델 데이터·수리 비용·내구도를 실제 슬롯 컴포넌트로 보낸다(`setItemMeta`). 아이템 PDC는 `BYTE`·`SHORT`·`INTEGER`·`LONG`·`FLOAT`·`DOUBLE`·`BOOLEAN`·`STRING`·`BYTE_ARRAY`·`INTEGER_ARRAY`·`LONG_ARRAY`를 키와 타입을 보존해 `minecraft:custom_data`로 보내고, `serializeToBytes`/`readFromBytes`도 지원한다. 아이템 플래그는 `minecraft:tooltip_display`로 보내며 `HIDE_ADDITIONAL_TOOLTIP`은 26.3에 개별 컴포넌트가 없어 전체 툴팁 숨김으로 근사한다. 컨테이너/리스트 PDC 타입과 책 같은 나머지 메타는 조용히 버리지 않고 `UnsupportedOperationException`. 실제 클라이언트 렌더링은 미검증.
 - **월드젠 쪽:** `World#getStructures(x,z[,Structure])` 구현됨(호스트 op 10 `structure starts` → `getStructureStarts(int,int)` → `GeneratedStructure`, 조각(`getPieces`)은 비어 있음). `createExplorerMap`(Server 3개)은 가장 가까운 구조물을 호스트로 찾아 그 중심의 `MapView`가 달린 FILLED_MAP을 돌려준다(못 찾으면 null). 지형 렌더링과 마커 커서는 없고, 맵 연결(`MapMeta`)은 Java 쪽 메타에만 있어 Rust 아이템(material+amount)로는 전달되지 않는다.
   (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
   호스트가 없으면 "not implemented"를 던진다. 호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능.)
-- **청크:** `unloadChunk`는 서버가 홀더 없는 청크를 스스로 내리므로 "이미 내려가 있으면 true, 플레이어·스폰이 잡고 있으면 false"로 답한다(강제 언로드는 없음).
+- **청크:** `unloadChunk`는 서버가 홀더 없는 청크를 스스로 내리므로 "이미 내려가 있으면 true, 플레이어나 `/forceload`가 잡고 있으면 false"로 답한다(강제 언로드는 없음).
   `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk`는 월드 뷰로 블록 하나를 읽어 생성을 유도한다.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.
 
@@ -154,7 +154,7 @@ CMI가 동작한다고 말할 수 없다.
 ## 아직 안 한 것 / 알려진 한계
 
 - 작은 화염구 밖의 나머지 투사체는 `UnsupportedOperationException`.
-- 엔더 진주는 같은 리전의 던진 사람만 순간이동시킨다(리전 간 이동 없음). 달걀은 맞은 자리에서 병아리가 나오지만(8분의 1 확률, 그중 32분의 1은 네 마리), 눈덩이는 피해를 주지 않는다.
+- 달걀은 맞은 자리에서 병아리가 나오지만(8분의 1 확률, 그중 32분의 1은 네 마리), 눈덩이는 피해를 주지 않는다. 엔더 진주 교차 리전 이동은 소유 리전으로 넘기며, 실제 클라이언트 동작은 미검증이다.
 - `sendMap`은 보이는 커서 장식을 보낸다. 숨김 커서는 26.3 decoration 레코드에 visibility 비트가 없어 보내지 않으며, 스타일·번역 캡션은 거부한다. 기후 높이 보정은 노이즈를 무시한다.
 - 어깨 앵무새는 장부만 있고 화면에는 안 나온다.
 - 아이템 메타: 책 메타처럼 이름·로어·인챈트·불괴·모델·수리비·내구도·PDC·아이템 플래그 밖의 메타를 `setItem`으로 쓰는 경로는 거부한다. PDC는 위 원시/배열 타입만 지원하며, `HIDE_ADDITIONAL_TOOLTIP`은 전체 툴팁 숨김으로 근사한다.

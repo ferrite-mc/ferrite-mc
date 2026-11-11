@@ -16,12 +16,28 @@ use std::{
 /// Stable metadata for a non-vanilla world. This catalog is the identity/storage seam for
 /// runtime worlds; region scheduling still uses `Dimension` and must be migrated before these
 /// descriptors can be exposed through Bukkit's `Server#createWorld`.
+/// Lifecycle of one catalog entry. Regions are registered only once a world is `Ready`, and a
+/// world in `Unloading` must not accept new players or tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeWorldState {
+    Creating,
+    Ready,
+    Unloading,
+}
+
 #[derive(Clone)]
 pub struct RuntimeWorldDescriptor {
     pub id: uuid::Uuid,
     pub name: String,
     pub key: String,
+    /// Dimension semantics (height, skylight, bed rules) this world runs with.
+    pub kind: Dimension,
+    /// Seed new chunks are generated with; stored so a reload reproduces the same terrain.
+    pub seed: i64,
     pub spawn: [i32; 3],
+    /// Directory holding this world's Anvil and entity data.
+    pub root: PathBuf,
+    pub state: RuntimeWorldState,
     pub source: Arc<AnvilChunkSource>,
 }
 
@@ -41,6 +57,8 @@ impl RuntimeWorldCatalog {
         root: &Path,
         registry: Arc<RuntimeRegistry>,
         terrain: Option<Arc<dyn ChunkGenerator>>,
+        kind: Dimension,
+        seed: i64,
         spawn: [i32; 3],
     ) -> Result<RuntimeWorldDescriptor, &'static str> {
         let name = name.trim();
@@ -51,17 +69,17 @@ impl RuntimeWorldCatalog {
         if self.by_id.contains_key(&id) || self.by_name.contains_key(&folded) {
             return Err("world id or name already loaded");
         }
-        let source = AnvilChunkSource::with_dimension(
-            root.join(name),
-            registry,
-            terrain,
-            Dimension::Overworld,
-        );
+        let world_root = root.join(name);
+        let source = AnvilChunkSource::with_dimension(world_root.clone(), registry, terrain, kind);
         let descriptor = RuntimeWorldDescriptor {
             id,
             name: name.to_owned(),
             key: format!("ferrite:{}", folded.replace(' ', "_")),
+            kind,
+            seed,
             spawn,
+            root: world_root,
+            state: RuntimeWorldState::Ready,
             source,
         };
         self.by_name.insert(folded, id);
@@ -76,6 +94,10 @@ impl RuntimeWorldCatalog {
         self.by_name
             .get(&name.trim().to_ascii_lowercase())
             .and_then(|id| self.by_id.get(id))
+    }
+    /// Iterates the currently registered descriptors for plugin/read-only world views.
+    pub fn iter(&self) -> impl Iterator<Item = &RuntimeWorldDescriptor> {
+        self.by_id.values()
     }
     pub fn unload(&mut self, id: uuid::Uuid) -> Option<RuntimeWorldDescriptor> {
         let descriptor = self.by_id.remove(&id)?;
@@ -362,6 +384,79 @@ mod tests {
             }
         }
         panic!("chunk ({x}, {z}) never loaded");
+    }
+
+    #[tokio::test]
+    async fn runtime_catalog_creates_and_unloads_a_world() {
+        let Some(root) = vanilla_root() else {
+            return;
+        };
+        let registry = Arc::new(RuntimeRegistry::load(&root).unwrap());
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-runtime-catalog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let mut catalog = RuntimeWorldCatalog::default();
+        let id = uuid::Uuid::new_v4();
+        let descriptor = catalog
+            .create(
+                id,
+                "Arena",
+                &dir,
+                Arc::clone(&registry),
+                None,
+                Dimension::Nether,
+                42,
+                [0, 70, 0],
+            )
+            .unwrap();
+        assert_eq!(descriptor.id, id);
+        assert_eq!(descriptor.name, "Arena");
+        assert_eq!(descriptor.key, "ferrite:arena");
+        assert_eq!(descriptor.kind, Dimension::Nether);
+        assert_eq!(descriptor.seed, 42);
+        assert_eq!(descriptor.state, RuntimeWorldState::Ready);
+        assert_eq!(descriptor.root, dir.join("Arena"));
+        assert!(catalog.get(id).is_some());
+        assert!(catalog.by_name("arena").is_some());
+        assert!(
+            catalog
+                .create(
+                    uuid::Uuid::new_v4(),
+                    "ARENA",
+                    &dir,
+                    Arc::clone(&registry),
+                    None,
+                    Dimension::Overworld,
+                    0,
+                    [0, 64, 0],
+                )
+                .is_err(),
+            "names are unique ignoring case"
+        );
+        assert!(
+            catalog
+                .create(
+                    uuid::Uuid::new_v4(),
+                    "../escape",
+                    &dir,
+                    Arc::clone(&registry),
+                    None,
+                    Dimension::Overworld,
+                    0,
+                    [0, 64, 0],
+                )
+                .is_err(),
+            "world names cannot escape the world root"
+        );
+        assert!(catalog.unload(id).is_some());
+        assert!(catalog.get(id).is_none());
+        assert!(catalog.by_name("Arena").is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

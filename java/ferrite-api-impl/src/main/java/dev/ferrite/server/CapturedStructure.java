@@ -25,12 +25,13 @@ import org.bukkit.util.EntityTransformer;
  * string for each. {@link #fill} copies a world region into it, {@link #place} writes it back
  * with rotation, mirroring and integrity, and {@link StructureNbt} saves and loads the file.
  *
- * <p>shortcut: entities are not captured (plugins cannot list non-player entities yet) and
- * block entity data goes through the host. Rotation and mirroring turn facing, axis, sign
+ * <p>Entity capture uses the world's published entity view; block entity data goes through the host. Rotation and mirroring turn facing, axis, sign
  * rotation, stair/rail shapes, door hinges and the four horizontal connection keys. Other
  * directional properties are preserved; block transformers can adjust the final state.
  */
 final class CapturedStructure implements Structure {
+    /** Vanilla template entity entry: relative floating position and its complete entity NBT. */
+    record StructureEntity(double x, double y, double z, Map<String, Object> nbt, Map<String, Object> extra) {}
     /** A block of the structure: its offset from the origin and its vanilla state string. */
     record Cell(int x, int y, int z, String state, Map<String, Object> nbt) {
         Cell(int x, int y, int z, String state) { this(x, y, z, state, null); }
@@ -38,6 +39,7 @@ final class CapturedStructure implements Structure {
 
     private BlockVector size;
     private List<List<Cell>> palettes;
+    private List<StructureEntity> entities = new ArrayList<>();
     private final PersistentDataContainer data = new FerriteDataContainer();
 
     CapturedStructure() { this(new BlockVector(0, 0, 0), List.of()); }
@@ -48,11 +50,14 @@ final class CapturedStructure implements Structure {
     }
 
     List<List<Cell>> cellsByPalette() { return palettes; }
+    List<StructureEntity> structureEntities() { return entities; }
 
     CapturedStructure copy() {
         var copy = new ArrayList<List<Cell>>();
         for (var palette : palettes) copy.add(new ArrayList<>(palette));
-        return new CapturedStructure(new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()), copy);
+        var result = new CapturedStructure(new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()), copy);
+        result.entities = new ArrayList<>(entities);
+        return result;
     }
 
     @Override public BlockVector getSize() { return new BlockVector(size.getBlockX(), size.getBlockY(), size.getBlockZ()); }
@@ -64,8 +69,8 @@ final class CapturedStructure implements Structure {
     }
 
     @Override public int getPaletteCount() { return palettes.size(); }
-    @Override public List<Entity> getEntities() { return List.of(); }
-    @Override public int getEntityCount() { return 0; }
+    @Override public List<Entity> getEntities() { return entities.stream().map(StructureEntityView::of).toList(); }
+    @Override public int getEntityCount() { return entities.size(); }
     @Override public PersistentDataContainer getPersistentDataContainer() { return data; }
 
     @Override public void fill(Location corner1, Location corner2, boolean includeEntities) {
@@ -76,16 +81,16 @@ final class CapturedStructure implements Structure {
         int x1 = Math.max(corner1.getBlockX(), corner2.getBlockX());
         int y1 = Math.max(corner1.getBlockY(), corner2.getBlockY());
         int z1 = Math.max(corner1.getBlockZ(), corner2.getBlockZ());
-        capture(world, x0, y0, z0, x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1);
+        capture(world, x0, y0, z0, x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1, includeEntities);
     }
 
     @Override public void fill(Location corner, BlockVector size, boolean includeEntities) {
         var world = java.util.Objects.requireNonNull(corner.getWorld(), "corner world");
         if (size.getBlockX() < 1 || size.getBlockY() < 1 || size.getBlockZ() < 1) throw new IllegalArgumentException("Structure size must be positive: " + size);
-        capture(world, corner.getBlockX(), corner.getBlockY(), corner.getBlockZ(), size.getBlockX(), size.getBlockY(), size.getBlockZ());
+        capture(world, corner.getBlockX(), corner.getBlockY(), corner.getBlockZ(), size.getBlockX(), size.getBlockY(), size.getBlockZ(), includeEntities);
     }
 
-    private void capture(org.bukkit.World world, int x0, int y0, int z0, int sx, int sy, int sz) {
+    private void capture(org.bukkit.World world, int x0, int y0, int z0, int sx, int sy, int sz, boolean includeEntities) {
         var cells = new ArrayList<Cell>();
         for (int y = 0; y < sy; y++) for (int z = 0; z < sz; z++) for (int x = 0; x < sx; x++) {
             var block = world.getBlockAt(x0 + x, y0 + y, z0 + z);
@@ -119,27 +124,117 @@ final class CapturedStructure implements Structure {
         }
         size = new BlockVector(sx, sy, sz);
         palettes = new ArrayList<>(List.of(cells));
+        this.entities = new ArrayList<>();
+        if (includeEntities) for (var entity : world.getEntities()) {
+            if (entity instanceof org.bukkit.entity.Player) continue;
+            var at = entity.getLocation();
+            if (at.getX() < x0 || at.getX() >= x0 + sx || at.getY() < y0 || at.getY() >= y0 + sz || at.getZ() < z0 || at.getZ() >= z0 + sz) continue;
+            var uuid = entity.getUniqueId();
+            Map<String, Object> nbt;
+            if (HostBridge.available()) {
+                try {
+                    var encoded = (String) HostBridge.call("Entity", uuid, "getEntityNbt()", String.class);
+                    nbt = StructureNbt.readEntityNbt(encoded);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException("Ferrite: could not capture entity NBT for " + uuid, error);
+                }
+            } else {
+                nbt = new java.util.LinkedHashMap<>();
+                nbt.put("id", entity.getType().getKey().toString());
+                nbt.put("UUID", new int[] {(int)(uuid.getMostSignificantBits() >>> 32), (int)uuid.getMostSignificantBits(), (int)(uuid.getLeastSignificantBits() >>> 32), (int)uuid.getLeastSignificantBits()});
+                nbt.put("Rotation", List.of(at.getYaw(), at.getPitch()));
+                var velocity = entity.getVelocity();
+                nbt.put("Motion", List.of(velocity.getX(), velocity.getY(), velocity.getZ()));
+            }
+            nbt.put("Pos", List.of(at.getX() - x0, at.getY() - y0, at.getZ() - z0));
+            this.entities.add(new StructureEntity(at.getX() - x0, at.getY() - y0, at.getZ() - z0, nbt, Map.of()));
+        }
     }
 
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
         write(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random);
+        if (includeEntities) placeEntities(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, integrity, random, List.of());
     }
 
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
+        if (!includeEntities && !entityTransformers.isEmpty()) throw entityTransformersNotSupported();
         write(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, blockTransformers, entityTransformers);
+        if (includeEntities) placeEntities(location.getWorld(), location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, integrity, random, entityTransformers);
     }
 
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
         if (!(region instanceof org.bukkit.World world)) throw notImplemented("place into a non-world region");
         write(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random);
+        if (includeEntities) placeEntities(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, integrity, random, List.of());
     }
 
     @Override public void place(RegionAccessor region, BlockVector location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
         java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
         java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
-        if (!entityTransformers.isEmpty()) throw entityTransformersNotSupported();
+        if (!includeEntities && !entityTransformers.isEmpty()) throw entityTransformersNotSupported();
         if (!(region instanceof org.bukkit.World world)) throw notImplemented("place into a non-world region");
         write(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, palette, integrity, random, blockTransformers);
+        if (includeEntities) placeEntities(world, location.getBlockX(), location.getBlockY(), location.getBlockZ(), rotation, mirror, integrity, random, entityTransformers);
+    }
+
+    private void placeEntities(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror,
+                               float integrity, Random random, Collection<EntityTransformer> transformers) {
+        if (entities.isEmpty()) return;
+        java.util.Objects.requireNonNull(world, "location world");
+        if (integrity < 0f || integrity > 1f) throw new IllegalArgumentException("Integrity must be between 0 and 1: " + integrity);
+        var limited = transformers.isEmpty() ? null : region(world, ox, oz);
+        var spawned = new ArrayList<Entity>();
+        try {
+        for (var data : entities) {
+            if (integrity < 1f && random.nextFloat() > integrity) continue;
+            double x = data.x(), z = data.z();
+            if (mirror == Mirror.LEFT_RIGHT) z = -z;
+            else if (mirror == Mirror.FRONT_BACK) x = -x;
+            double rx = x, rz = z;
+            switch (rotation) {
+                case CLOCKWISE_90 -> { rx = -z; rz = x; }
+                case CLOCKWISE_180 -> { rx = -x; rz = -z; }
+                case COUNTERCLOCKWISE_90 -> { rx = z; rz = -x; }
+                default -> { }
+            }
+            var at = new Location(world, ox + rx, oy + data.y(), oz + rz);
+            var typeKey = org.bukkit.NamespacedKey.fromString(String.valueOf(data.nbt().get("id")));
+            var type = typeKey == null ? null : org.bukkit.Registry.ENTITY_TYPE.get(typeKey);
+            if (type == null) throw new IllegalArgumentException("Unknown structure entity type: " + data.nbt().get("id"));
+            var entity = world.spawnEntity(at, type);
+            spawned.add(entity);
+            try {
+                var rot = data.nbt().get("Rotation");
+                if (rot instanceof List<?> values && values.size() == 2 && values.get(0) instanceof Number yaw && values.get(1) instanceof Number pitch) {
+                    float adjustedYaw = yaw.floatValue();
+                    if (mirror != Mirror.NONE) adjustedYaw = -adjustedYaw;
+                    adjustedYaw += switch (rotation) {
+                        case CLOCKWISE_90 -> 90f;
+                        case CLOCKWISE_180 -> 180f;
+                        case COUNTERCLOCKWISE_90 -> -90f;
+                        default -> 0f;
+                    };
+                    entity.setRotation(adjustedYaw, pitch.floatValue());
+                }
+                if (data.nbt().get("Motion") instanceof List<?> motion && motion.size() == 3 && motion.get(0) instanceof Number vx && motion.get(1) instanceof Number vy && motion.get(2) instanceof Number vz) {
+                    entity.setVelocity(new org.bukkit.util.Vector(vx.doubleValue(), vy.doubleValue(), vz.doubleValue()));
+                }
+                for (var transformer : transformers) {
+                    if (!transformer.transform(limited, at.getBlockX(), at.getBlockY(), at.getBlockZ(), entity, true)) {
+                        entity.remove();
+                        break;
+                    }
+                }
+            } catch (RuntimeException failure) {
+                throw failure;
+            }
+        }
+        } catch (RuntimeException failure) {
+            for (var entity : spawned) {
+                try { entity.remove(); } catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+            }
+            throw failure;
+        }
     }
 
     private void write(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {
@@ -149,7 +244,6 @@ final class CapturedStructure implements Structure {
     private void write(org.bukkit.World world, int ox, int oy, int oz, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random, Collection<BlockTransformer> blockTransformers, Collection<EntityTransformer> entityTransformers) {
         java.util.Objects.requireNonNull(blockTransformers, "blockTransformers");
         java.util.Objects.requireNonNull(entityTransformers, "entityTransformers");
-        if (!entityTransformers.isEmpty()) throw entityTransformersNotSupported();
         write(world, ox, oy, oz, rotation, mirror, palette, integrity, random, blockTransformers);
     }
 

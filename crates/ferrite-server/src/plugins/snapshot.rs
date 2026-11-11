@@ -21,6 +21,9 @@ pub fn answer(call: &HostCall) -> Option<String> {
             None => INVALID.to_owned(),
         }),
         ("Entity", "getEntitySnapshot()") => super::facts::entity_snapshot(&call.subject),
+        ("Entity", "getEntityNbt()") => Uuid::parse_str(&call.subject)
+            .ok()
+            .and_then(super::facts::entity_nbt_base64),
         _ => None,
     }
 }

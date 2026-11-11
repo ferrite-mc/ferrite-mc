@@ -52,10 +52,11 @@ mod stack;
 pub mod wire;
 
 pub use component::{
-    AttributeModifier, AttributeOperation, COMPONENT_COUNT, Component, ComponentPatch,
-    ComponentType, CustomModelData, Enchantments, EquipmentSlot, Food, LodestoneTracker,
-    PotionContents, PotionEffect, Rarity, Tool, ToolRule, TooltipDisplay, Trim, component_id,
-    component_name, component_type, component_types,
+    AttributeModifier, AttributeOperation, BannerPattern, BannerPatterns, COMPONENT_COUNT,
+    Component, ComponentPatch, ComponentType, CustomModelData, DYE_COLORS, Enchantments,
+    EquipmentSlot, FireworkExplosion, Fireworks, Food, LodestoneTracker, PotDecorations,
+    PotionContents, PotionEffect, Rarity, Tool, ToolRule, TooltipDisplay, Trim, WrittenBookContent,
+    component_id, component_name, component_type, component_types, dye_color_id, dye_color_name,
 };
 pub use defaults::{
     AIR, ItemDefaults, default_components, item_count, item_defaults, item_defaults_by_name,

@@ -40,8 +40,9 @@ use ferrite_nbt::Tag;
 use ferrite_text::Component as Text;
 
 use crate::component::{
-    AttributeModifier, AttributeOperation, Component, ComponentPatch, CustomModelData,
-    Enchantments, EquipmentSlot, Food, Rarity, Tool, ToolRule, TooltipDisplay,
+    AttributeModifier, AttributeOperation, BannerPattern, BannerPatterns, Component,
+    ComponentPatch, CustomModelData, Enchantments, EquipmentSlot, Food, Rarity, Tool, ToolRule,
+    TooltipDisplay, WrittenBookContent, dye_color_id, dye_color_name,
 };
 use crate::component_ids as ids;
 use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count};
@@ -394,6 +395,71 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
             })
         }
         ids::TOOL => Component::Tool(decode_tool(&mut reader)?),
+        ids::FIREWORK_EXPLOSION => {
+            Component::FireworkExplosion(decode_firework_explosion(&mut reader)?)
+        }
+        ids::FIREWORKS => {
+            let flight_duration = reader.varint().ok()?;
+            let count = reader.count_len(MAX_LIST).ok()?;
+            let mut explosions = Vec::new();
+            for _ in 0..count {
+                explosions.push(decode_firework_explosion(&mut reader)?);
+            }
+            Component::Fireworks(crate::component::Fireworks {
+                flight_duration,
+                explosions,
+            })
+        }
+        ids::POT_DECORATIONS => {
+            let count = reader.count_len(4).ok()?;
+            let mut items = [String::new(), String::new(), String::new(), String::new()];
+            for item in items.iter_mut().take(count) {
+                let id = u16::try_from(reader.varint().ok()?).ok()?;
+                *item = crate::defaults::item_name(id)?.to_owned();
+            }
+            Component::PotDecorations(crate::component::PotDecorations(items))
+        }
+        ids::BANNER_PATTERNS => {
+            let count = reader.count_len(MAX_LIST).ok()?;
+            let mut patterns = Vec::new();
+            for _ in 0..count {
+                if reader.varint().ok()? != 0 {
+                    return None; // registry-id patterns are re-encoded as raw
+                }
+                let asset_id = reader.string(32767).ok()?;
+                reader.string(32767).ok()?; // translation key
+                let pattern = banner_patterns::name(asset_id)?;
+                let color = dye_color_name(reader.varint().ok()?)?;
+                patterns.push(BannerPattern {
+                    pattern: format!("minecraft:{pattern}"),
+                    color: color.to_owned(),
+                });
+            }
+            Component::BannerPatterns(BannerPatterns(patterns))
+        }
+        ids::WRITTEN_BOOK_CONTENT => {
+            let title = reader.string(32).ok()?.to_owned();
+            let filtered_title = reader
+                .optional(|reader| reader.string(32).map(str::to_owned))
+                .ok()?;
+            let author = reader.string(32767).ok()?.to_owned();
+            let generation = reader.varint().ok()?;
+            let count = reader.count_len(100).ok()?;
+            let mut pages = Vec::new();
+            for _ in 0..count {
+                let raw = reader.nbt_tag().ok()?;
+                let filtered = reader.optional(Reader::nbt_tag).ok()?;
+                pages.push((raw, filtered));
+            }
+            Component::WrittenBookContent(WrittenBookContent {
+                title,
+                filtered_title,
+                author,
+                generation,
+                pages,
+                resolved: reader.bool().ok()?,
+            })
+        }
         ids::TOOLTIP_DISPLAY => Component::TooltipDisplay(TooltipDisplay {
             hide_tooltip: reader.bool().ok()?,
             hidden_components: reader
@@ -675,10 +741,98 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
             }
             out.push(u8::from(tracker.tracked));
         }
+        Component::FireworkExplosion(explosion) => {
+            write_firework_explosion(explosion, &mut out)?;
+        }
+        Component::Fireworks(fireworks) => {
+            write_varint(fireworks.flight_duration, &mut out);
+            write_count(fireworks.explosions.len(), &mut out)?;
+            for explosion in &fireworks.explosions {
+                write_firework_explosion(explosion, &mut out)?;
+            }
+        }
+        Component::PotDecorations(decorations) => {
+            write_count(decorations.0.len(), &mut out)?;
+            for item in &decorations.0 {
+                let id =
+                    crate::defaults::item_id(item).ok_or_else(|| WireError::UnknownRegistry {
+                        registry: "item",
+                        name: item.clone(),
+                    })?;
+                write_varint(i32::from(id), &mut out);
+            }
+        }
+        Component::BannerPatterns(patterns) => {
+            write_count(patterns.0.len(), &mut out)?;
+            for pattern in &patterns.0 {
+                let (asset_id, translation_key) = banner_patterns::lookup(&pattern.pattern)
+                    .ok_or_else(|| WireError::UnknownRegistry {
+                        registry: "banner_pattern",
+                        name: pattern.pattern.clone(),
+                    })?;
+                write_varint(0, &mut out); // inline asset id and translation key
+                write_string(asset_id, &mut out)?;
+                write_string(translation_key, &mut out)?;
+                let color =
+                    dye_color_id(&pattern.color).ok_or_else(|| WireError::UnknownRegistry {
+                        registry: "dye",
+                        name: pattern.color.clone(),
+                    })?;
+                write_varint(color, &mut out);
+            }
+        }
+        Component::WrittenBookContent(content) => {
+            write_string(&content.title, &mut out)?;
+            match &content.filtered_title {
+                Some(filtered) => {
+                    out.push(1);
+                    write_string(filtered, &mut out)?;
+                }
+                None => out.push(0),
+            }
+            write_string(&content.author, &mut out)?;
+            write_varint(content.generation, &mut out);
+            write_count(content.pages.len(), &mut out)?;
+            for (raw, filtered) in &content.pages {
+                out.extend_from_slice(&nbt_bytes(raw)?);
+                match filtered {
+                    Some(filtered) => {
+                        out.push(1);
+                        out.extend_from_slice(&nbt_bytes(filtered)?);
+                    }
+                    None => out.push(0),
+                }
+            }
+            out.push(u8::from(content.resolved));
+        }
         Component::Opaque(_) => return Err(WireError::NotRepresentable(component.kind())),
         Component::Raw(bytes) => out.extend_from_slice(bytes),
     }
     Ok(out)
+}
+
+fn write_firework_explosion(
+    explosion: &crate::component::FireworkExplosion,
+    out: &mut Vec<u8>,
+) -> Result<(), WireError> {
+    let shape = explosion
+        .shape_id()
+        .ok_or_else(|| WireError::UnknownRegistry {
+            registry: "firework_explosion_shape",
+            name: explosion.shape.clone(),
+        })?;
+    write_varint(shape, out);
+    write_count(explosion.colors.len(), out)?;
+    for color in &explosion.colors {
+        out.extend_from_slice(&color.to_be_bytes());
+    }
+    write_count(explosion.fade_colors.len(), out)?;
+    for color in &explosion.fade_colors {
+        out.extend_from_slice(&color.to_be_bytes());
+    }
+    out.push(u8::from(explosion.has_trail));
+    out.push(u8::from(explosion.has_twinkle));
+    Ok(())
 }
 
 fn operation_id(operation: AttributeOperation) -> i32 {
@@ -1148,6 +1302,19 @@ fn firework_explosion(reader: &mut Reader<'_>) -> Result<(), WireError> {
     Ok(())
 }
 
+fn decode_firework_explosion(
+    reader: &mut Reader<'_>,
+) -> Option<crate::component::FireworkExplosion> {
+    let shape = crate::component::FireworkExplosion::shape_name(reader.varint().ok()?)?.to_owned();
+    Some(crate::component::FireworkExplosion {
+        shape,
+        colors: reader.prefixed(MAX_LIST, Reader::i32).ok()?,
+        fade_colors: reader.prefixed(MAX_LIST, Reader::i32).ok()?,
+        has_trail: reader.bool().ok()?,
+        has_twinkle: reader.bool().ok()?,
+    })
+}
+
 fn item_stack_template(reader: &mut Reader<'_>, depth: u8) -> Result<(), WireError> {
     reader.item_id()?;
     reader.count()?;
@@ -1278,6 +1445,32 @@ fn sign_text(reader: &mut Reader<'_>) -> Result<(), WireError> {
 // ---------------------------------------------------------------------------------------------
 // Registry ids used by typed payloads
 // ---------------------------------------------------------------------------------------------
+
+/// Banner pattern metadata generated from the 26.3 data pack.
+mod banner_patterns {
+    include!(concat!(env!("OUT_DIR"), "/banner_patterns.rs"));
+
+    fn key(name: &str) -> &str {
+        name.strip_prefix("minecraft:").unwrap_or(name)
+    }
+
+    /// The inline asset id and translation key for a pattern id or short name.
+    pub(super) fn lookup(name: &str) -> Option<(&'static str, &'static str)> {
+        let name = key(name);
+        BANNER_PATTERNS
+            .iter()
+            .find(|(pattern, _, _)| *pattern == name)
+            .map(|(_, asset_id, translation_key)| (*asset_id, *translation_key))
+    }
+
+    /// The short pattern name for an inline asset id.
+    pub(super) fn name(asset_id: &str) -> Option<&'static str> {
+        BANNER_PATTERNS
+            .iter()
+            .find(|(_, asset, _)| *asset == asset_id)
+            .map(|(name, _, _)| *name)
+    }
+}
 
 /// Registry ids the typed network components need: attributes, blocks and enchantments.
 pub mod registry_ids {

@@ -803,6 +803,95 @@ fn potion_contents_round_trip() {
 }
 
 #[test]
+fn fireworks_and_pot_decorations_round_trip() {
+    use crate::{FireworkExplosion, Fireworks, PotDecorations};
+
+    let explosion = FireworkExplosion {
+        shape: "burst".to_owned(),
+        colors: vec![0x00FF_0000, 0x0000_FF00],
+        fade_colors: vec![0x0000_00FF],
+        has_trail: true,
+        has_twinkle: false,
+    };
+    let decorations = PotDecorations([
+        "minecraft:brick".to_owned(),
+        "minecraft:angler_pottery_sherd".to_owned(),
+        "minecraft:blade_pottery_sherd".to_owned(),
+        "minecraft:brick".to_owned(),
+    ]);
+    let mut stack = ItemStack::new(1);
+    stack.components.insert(
+        ids::FIREWORKS,
+        Component::Fireworks(Fireworks {
+            flight_duration: 2,
+            explosions: vec![explosion.clone()],
+        }),
+    );
+    stack.components.insert(
+        ids::POT_DECORATIONS,
+        Component::PotDecorations(decorations.clone()),
+    );
+
+    let bytes = stack.encode_network().unwrap();
+    let decoded = ItemStack::decode_network(&bytes).unwrap();
+    assert_eq!(
+        decoded.components.get(ids::FIREWORKS),
+        Some(&Component::Fireworks(Fireworks {
+            flight_duration: 2,
+            explosions: vec![explosion],
+        }))
+    );
+    assert_eq!(
+        decoded.components.get(ids::POT_DECORATIONS),
+        Some(&Component::PotDecorations(decorations))
+    );
+}
+
+#[test]
+fn banner_patterns_and_written_books_round_trip() {
+    use crate::{BannerPattern, BannerPatterns, WrittenBookContent};
+
+    let patterns = BannerPatterns(vec![BannerPattern {
+        pattern: "minecraft:creeper".to_owned(),
+        color: "red".to_owned(),
+    }]);
+    let content = WrittenBookContent {
+        title: "T".to_owned(),
+        filtered_title: Some("F".to_owned()),
+        author: "A".to_owned(),
+        generation: 1,
+        pages: vec![
+            (Tag::String("page".to_owned()), None),
+            (
+                Tag::String("filtered".to_owned()),
+                Some(Tag::String("filtered page".to_owned())),
+            ),
+        ],
+        resolved: true,
+    };
+    let mut stack = ItemStack::new(1);
+    stack.components.insert(
+        ids::BANNER_PATTERNS,
+        Component::BannerPatterns(patterns.clone()),
+    );
+    stack.components.insert(
+        ids::WRITTEN_BOOK_CONTENT,
+        Component::WrittenBookContent(content.clone()),
+    );
+
+    let bytes = stack.encode_network().unwrap();
+    let decoded = ItemStack::decode_network(&bytes).unwrap();
+    assert_eq!(
+        decoded.components.get(ids::BANNER_PATTERNS),
+        Some(&Component::BannerPatterns(patterns))
+    );
+    assert_eq!(
+        decoded.components.get(ids::WRITTEN_BOOK_CONTENT),
+        Some(&Component::WrittenBookContent(content))
+    );
+}
+
+#[test]
 fn opaque_components_cannot_be_encoded() {
     let mut stack = ItemStack::new(1);
     stack

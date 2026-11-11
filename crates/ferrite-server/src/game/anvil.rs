@@ -798,6 +798,12 @@ impl AnvilChunkSource {
         );
         Ok(result)
     }
+    /// Drops encoded chunk packets cached for `(x, z)` after a block entity changed outside
+    /// the normal set-block path. A dirty entry is the freshest packet and is kept.
+    pub fn invalidate_packet(&self, x: i32, z: i32) {
+        let mut cache = self.cache.lock().unwrap();
+        invalidate(&mut cache, &self.stats, x, z);
+    }
     pub fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> anyhow::Result<()> {
         self.compare_set_block(x, y, z, None, state)
     }
@@ -1609,6 +1615,18 @@ mod tests {
             .unwrap();
         assert_eq!(source.block(a[0], a[1], a[2]), Some(stone));
         assert_eq!(source.block(b[0], b[1], b[2]), Some(stone));
+    }
+
+    #[tokio::test]
+    async fn explicit_invalidation_reencodes_the_next_lookup() {
+        let source = AnvilChunkSource::new_memory();
+        let before = ready(&source, 2, 2, 0).await;
+        source.invalidate_packet(2, 2);
+        let stats = source.cache_stats();
+        assert_eq!(stats.invalidations, 1, "{stats:?}");
+        let after = ready(&source, 2, 2, 0).await;
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert_eq!(source.cache_stats().encodes, 2, "{stats:?}");
     }
 
     #[tokio::test]

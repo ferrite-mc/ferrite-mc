@@ -532,6 +532,29 @@ pub fn world_view(
     Arc::new(SourceWorldView { worlds })
 }
 
+/// Build a plugin world view that also includes currently loaded runtime-world sources.
+///
+/// This only adds the loaded worlds to read-only block queries. The game loop must still
+/// register/tick their regions before exposing them through Bukkit's mutable world API.
+pub fn world_view_with_runtime_worlds(
+    dimensions: Arc<crate::game::DimensionRegistry>,
+    runtime: &crate::game::RuntimeWorldCatalog,
+) -> Arc<dyn ferrite_plugin::WorldView> {
+    let mut worlds: HashMap<_, _> = crate::game::Dimension::ALL
+        .into_iter()
+        .map(|dimension| {
+            (
+                world_id(dimension),
+                Arc::clone(dimensions.source(dimension)),
+            )
+        })
+        .collect();
+    for descriptor in runtime.iter() {
+        worlds.insert(descriptor.id, Arc::clone(&descriptor.source));
+    }
+    Arc::new(SourceWorldView { worlds })
+}
+
 #[cfg(test)]
 pub(crate) fn world_view_for_sources(
     worlds: impl IntoIterator<Item = (Uuid, Arc<crate::game::AnvilChunkSource>)>,

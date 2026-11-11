@@ -105,6 +105,10 @@ pub enum Kind {
     Snowball,
     Egg,
     EnderPearl,
+    /// `minecraft:splash_potion`: arcs and applies its effects where it breaks.
+    SplashPotion,
+    /// `minecraft:lingering_potion`: arcs and leaves an area-effect cloud where it breaks.
+    LingeringPotion,
     /// `minecraft:fireball` (the large one): flies straight and explodes where it lands.
     Fireball,
     /// `minecraft:small_fireball` (blaze, fire charge): flies straight; the region burns what it hits.
@@ -128,6 +132,8 @@ impl Kind {
             Self::Snowball => "snowball",
             Self::Egg => "egg",
             Self::EnderPearl => "ender_pearl",
+            Self::SplashPotion => "splash_potion",
+            Self::LingeringPotion => "lingering_potion",
             Self::Fireball => "fireball",
             Self::SmallFireball => "small_fireball",
             Self::DragonFireball => "dragon_fireball",
@@ -144,6 +150,8 @@ impl Kind {
             "snowball" => Some(Self::Snowball),
             "egg" => Some(Self::Egg),
             "ender_pearl" => Some(Self::EnderPearl),
+            "splash_potion" => Some(Self::SplashPotion),
+            "lingering_potion" => Some(Self::LingeringPotion),
             "fireball" => Some(Self::Fireball),
             "small_fireball" => Some(Self::SmallFireball),
             "experience_bottle" => Some(Self::ExperienceBottle),
@@ -166,6 +174,8 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::Snowball,
         Kind::Egg,
         Kind::EnderPearl,
+        Kind::SplashPotion,
+        Kind::LingeringPotion,
         Kind::Fireball,
         Kind::SmallFireball,
         Kind::DragonFireball,
@@ -213,11 +223,13 @@ pub fn new_thrown(kind: Kind, pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> Enti
 }
 
 /// Where a thrown projectile ended.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Landing {
     pub kind: Kind,
     pub owner: Option<Uuid>,
     pub pos: Vec3,
+    /// The potion stack carried by a splash or lingering potion.
+    pub potion: Option<ferrite_item::ItemStack>,
 }
 
 /// Advances every snowball, egg and ender pearl one tick and reports where each one landed.
@@ -236,6 +248,7 @@ pub fn tick_thrown(
         let (Some(mut state), Some(kind)) = (data.arrow, kind_of(data)) else {
             continue;
         };
+        let potion = data.potion.clone();
         if matches!(kind, Kind::Arrow | Kind::Trident | Kind::LlamaSpit)
             || store
                 .flags(key)
@@ -282,6 +295,7 @@ pub fn tick_thrown(
                 kind,
                 owner: state.owner,
                 pos,
+                potion: potion.clone(),
             });
             remove(store, key);
         };

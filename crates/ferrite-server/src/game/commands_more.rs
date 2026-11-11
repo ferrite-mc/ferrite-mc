@@ -5,7 +5,7 @@
 //! jar. Feedback strings come from the translations extracted from that jar
 //! (`reports/lang_en_us.json`), so no Mojang text is kept here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
 use ferrite_command::{
@@ -70,6 +70,7 @@ pub struct TickControl {
     steps: std::sync::atomic::AtomicU32,
     stepping: std::sync::atomic::AtomicBool,
     mspt_micro: std::sync::atomic::AtomicU64,
+    samples: std::sync::Mutex<VecDeque<u32>>,
     sprint: std::sync::Mutex<Sprint>,
 }
 
@@ -93,6 +94,7 @@ impl Default for TickControl {
             steps: AtomicU32::new(0),
             stepping: AtomicBool::new(false),
             mspt_micro: AtomicU64::new(0),
+            samples: std::sync::Mutex::new(VecDeque::with_capacity(100)),
             sprint: std::sync::Mutex::new(Sprint::default()),
         }
     }
@@ -228,10 +230,37 @@ impl TickControl {
             old * 0.95 + ms * 0.05
         };
         self.mspt_micro.store((next * 1000.0) as u64, Self::RELAXED);
+        let micros = (ms * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32;
+        let mut samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() == 100 {
+            samples.pop_front();
+        }
+        samples.push_back(micros);
     }
 
     pub fn mspt(&self) -> f64 {
         self.mspt_micro.load(Self::RELAXED) as f64 / 1000.0
+    }
+
+    /// `(p50, p95, p99)` of the last 100 region tick durations in milliseconds.
+    pub fn percentiles(&self) -> Option<(f64, f64, f64)> {
+        let mut samples: Vec<u32> = self
+            .samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_unstable();
+        let percentile = |fraction: f64| {
+            let rank = (fraction * samples.len() as f64).ceil() as usize;
+            let index = rank.saturating_sub(1).min(samples.len() - 1);
+            f64::from(samples[index]) / 1000.0
+        };
+        Some((percentile(0.50), percentile(0.95), percentile(0.99)))
     }
 }
 
@@ -954,6 +983,17 @@ fn tick_tree() -> NodeBuilder<Source> {
                     format!("{:.1}", 1000.0 / f64::from(target)),
                 ],
             )?;
+            if let Some((p50, p95, p99)) = control.percentiles() {
+                feedback(
+                    ctx,
+                    "commands.tick.query.percentiles",
+                    vec![
+                        format!("{p50:.1}"),
+                        format!("{p95:.1}"),
+                        format!("{p99:.1}"),
+                    ],
+                )?;
+            }
             Ok(target as i32)
         }))
         .then(
@@ -3056,6 +3096,28 @@ mod tests {
                 "commands.tick.query.rate.running"
             ]
         );
+    }
+
+    #[test]
+    fn tick_query_reports_percentiles_once_samples_exist() {
+        let state = fresh();
+        let control = state.lock().unwrap().more.tick.clone();
+        for ms in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            control.record_mspt(ms);
+        }
+        let (_, actions) = run("tick query", 2, state, None);
+        assert_eq!(
+            keys(&actions),
+            [
+                "commands.tick.status.running",
+                "commands.tick.query.rate.running",
+                "commands.tick.query.percentiles"
+            ]
+        );
+        let Some(Action::Feedback(feedback)) = actions.last() else {
+            panic!("expected percentile feedback, got {actions:?}");
+        };
+        assert_eq!(feedback.args, ["3.0", "5.0", "5.0"]);
     }
 
     #[test]

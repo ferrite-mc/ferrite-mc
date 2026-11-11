@@ -367,6 +367,27 @@ pub trait Crafter {
     ) -> Option<String> {
         None
     }
+
+    /// The `max_level` of an enchantment from the data pack (vanilla `Enchantment.maxLevel`).
+    /// `None` means the caller has no data and must not raise a level above its inputs.
+    fn enchantment_max_level(&self, _enchantment: &str) -> Option<i32> {
+        None
+    }
+
+    /// The anvil cost of one level of an enchantment (vanilla `Enchantment.getAnvilCost`).
+    fn enchantment_anvil_cost(&self, _enchantment: &str) -> i32 {
+        1
+    }
+
+    /// Whether `enchantment` can be applied to `item` (vanilla `Enchantment.canEnchant`).
+    fn enchantment_supports(&self, _enchantment: &str, _item: &ItemStack) -> bool {
+        true
+    }
+
+    /// Whether two enchantments may coexist on one item (vanilla `Enchantment.areCompatible`).
+    fn enchantments_compatible(&self, _first: &str, _second: &str) -> bool {
+        true
+    }
 }
 
 /// A [`Crafter`] that never crafts anything.
@@ -1231,7 +1252,7 @@ impl Menu {
     /// by [`Menu::update_result`] instead.
     fn refresh_station_result(&mut self, crafter: &dyn Crafter) {
         match self.kind {
-            MenuKind::Anvil => self.update_anvil(),
+            MenuKind::Anvil => self.update_anvil(crafter),
             MenuKind::Grindstone => self.update_grindstone(),
             MenuKind::Stonecutter => {
                 self.stonecutting = if self.container[0].is_empty() {
@@ -1377,10 +1398,12 @@ impl Menu {
         Some(cost)
     }
 
-    /// Vanilla `AnvilMenu.createResult`: renames, combines two damaged copies of one item, or
-    /// repairs with the item's repair material, charging the two prior-work penalties and one
-    /// level per operation. Combining enchantments is not implemented.
-    fn update_anvil(&mut self) {
+    /// Vanilla `AnvilMenu.createResult`: renames, combines two damaged copies of one item,
+    /// repairs with the item's repair material, and merges the second item's enchantments,
+    /// charging the two prior-work penalties and one level per added enchantment level. The
+    /// item's enchantability and the enchantments' exclusive sets are not modelled, and the
+    /// exact per-enchantment `anvil_cost` is not loaded (one level per added level instead).
+    fn update_anvil(&mut self, crafter: &dyn Crafter) {
         let left = self.container[0].clone();
         let right = self.container[1].clone();
         self.result = ItemStack::empty();
@@ -1410,11 +1433,12 @@ impl Menu {
         if !right.is_empty() {
             if left.is_same_item(&right) && left.is_damageable() && right.is_damageable() {
                 let max = left.max_damage().unwrap_or(0);
-                let left_durability = max - left.damage();
-                let right_durability = max - right.damage();
-                // Vanilla gives a 5% bonus of the maximum durability for a combined repair.
+                let left_durability = (max - left.damage()).max(0);
+                let right_durability = (max - right.damage()).max(0);
+                // Vanilla gives a 5% bonus of the maximum durability for a combined repair and
+                // charges two levels only when the result gains durability.
                 let total = (left_durability + right_durability + max / 20).min(max);
-                if total > 0 {
+                if total > left_durability {
                     result
                         .components
                         .insert(ids::DAMAGE, Component::Damage(max - total));
@@ -1431,6 +1455,68 @@ impl Menu {
                         .components
                         .insert(ids::DAMAGE, Component::Damage(left.damage() - repaired));
                     cost += used;
+                    changed = true;
+                }
+            }
+        }
+
+        // Vanilla combines enchantments from the second item: the higher level wins, an equal
+        // pair upgrades by one, and the enchantment's `max_level` caps it. An enchanted book
+        // applies its stored enchantments to any item; a book merged with a book keeps them
+        // stored. Items are matched by their `minecraft:enchantments` or
+        // `minecraft:stored_enchantments` components, whichever the target uses.
+        if !right.is_empty() {
+            let book = left.name() == Some("minecraft:enchanted_book");
+            let target_kind = if book {
+                ids::STORED_ENCHANTMENTS
+            } else {
+                ids::ENCHANTMENTS
+            };
+            let source = if right.name() == Some("minecraft:enchanted_book") {
+                enchantments(&right, ids::STORED_ENCHANTMENTS)
+            } else if left.is_same_item(&right) {
+                enchantments(&right, target_kind)
+            } else {
+                None
+            };
+            if let Some(source) = source {
+                let mut merged = enchantments(&result, target_kind).unwrap_or_default();
+                let mut enchanted = false;
+                for (enchantment, level) in &source.levels {
+                    // A real item only accepts enchantments whose `supported_items` contains it.
+                    // Stored enchantments on a book are not restricted by an item type.
+                    if !book && !crafter.enchantment_supports(enchantment, &result) {
+                        continue;
+                    }
+                    // Vanilla refuses an enchantment whose exclusive set names one already on
+                    // the result (for example Sharpness and Smite).
+                    if merged.levels.keys().any(|other| {
+                        other != enchantment && !crafter.enchantments_compatible(enchantment, other)
+                    }) {
+                        continue;
+                    }
+                    let existing = merged.level(enchantment).unwrap_or(0);
+                    let base = existing.max(*level);
+                    let upgrade = existing > 0 && existing == *level;
+                    let target = match crafter.enchantment_max_level(enchantment) {
+                        Some(max) if upgrade => (base + 1).min(max),
+                        Some(max) => base.min(max),
+                        None => base,
+                    };
+                    if target > existing {
+                        merged.set(enchantment.clone(), target);
+                        let unit = crafter.enchantment_anvil_cost(enchantment);
+                        cost += (if book { (unit / 2).max(1) } else { unit }) * (target - existing);
+                        enchanted = true;
+                    }
+                }
+                if enchanted {
+                    let component = if target_kind == ids::STORED_ENCHANTMENTS {
+                        Component::StoredEnchantments(merged)
+                    } else {
+                        Component::Enchantments(merged)
+                    };
+                    result.components.insert(target_kind, component);
                     changed = true;
                 }
             }
@@ -2619,12 +2705,12 @@ impl Menu {
     }
 
     /// Vanilla `AnvilMenu.setItemName`: records the typed name and recomputes the result.
-    pub fn rename(&mut self, name: String) {
+    pub fn rename(&mut self, name: String, crafter: &dyn Crafter) {
         if self.kind != MenuKind::Anvil {
             return;
         }
         self.rename = name;
-        self.update_anvil();
+        self.update_anvil(crafter);
     }
 
     /// Vanilla `AbstractContainerMenu.clickMenuButton`: an enchant choice, stonecutter recipe or
@@ -2680,6 +2766,15 @@ impl Menu {
 }
 
 /// Vanilla `ItemStack.getOrDefault(DataComponents.REPAIR_COST, 0)`.
+/// The enchantments a stack carries in `component`, whichever typed variant holds them.
+fn enchantments(stack: &ItemStack, component: u16) -> Option<Enchantments> {
+    match stack.effective_component(component) {
+        Some(Component::Enchantments(enchantments))
+        | Some(Component::StoredEnchantments(enchantments)) => Some(enchantments),
+        _ => None,
+    }
+}
+
 fn repair_cost(stack: &ItemStack) -> i32 {
     match stack.effective_component(ids::REPAIR_COST) {
         Some(Component::RepairCost(value)) => value,

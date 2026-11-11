@@ -11,6 +11,11 @@
 2026-11-08 fb-32 후속에서 `Advancement#getDisplay`, `PotionBrewer#getEffects`,
 `Player#ban(..., Date/Instant/Duration, ...)`가 구현되어 이 표에서 제거됐다.
 
+계획에서 제외한 항목(구현하지 않기로 결정): 멀티버전 번역 계층. 런타임 월드 생성/언로드는
+아래 표대로 남은 작업이며, 해당 호출은 구현 전까지 계속 명시적으로 실패한다.
+`LootTable#populateLoot`/`fillInventory`와 구조물 엔티티 조회·스폰은 이미 구현되어 아래 표에서
+제외했다.
+
 생성 파일은 `java/ferrite-api-impl/build/catalog/`에 있고 커밋하지 않는다. 갱신:
 
 ```sh
@@ -63,26 +68,18 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | API | 소유자 | 왜 지금 구현할 수 없는가 | 필요한 선행 작업 |
 |---|---|---|---|
 | `Server#createWorld(WorldCreator)` | `ferrite-server` 월드 수명주기 + 리전라이저 | 이미 등록된 이름은 그 월드를 그대로 돌려주지만, 새 런타임 월드는 거부한다. Ferrite는 로드된 차원 집합이 고정되어 있고, 새 월드는 청크 소스·Anvil 저장·스폰·리전라이저 등록을 새로 만들어야 한다. | (1) 월드 등록/언로드 수명주기와 `WorldLoadEvent` 순서, (2) 새 차원의 청크 소스·저장·스폰, (3) 리전라이저의 차원 추가/제거 프로토콜. |
-| `EntityFactory#createEntitySnapshot` | `ferrite-server` 엔티티 스냅샷 + `ferrite-entity` | 호스트에 접속 플레이어 외 엔티티의 타입·위치·NBT 스냅샷을 주는 경계가 없다. NMS 파싱을 가장하지 않는다. | (1) 리전 소유 엔티티의 읽기 전용 NBT/위치 스냅샷 op, (2) 스냅샷에서 엔티티를 다시 스폰하는 경로, (3) 두 경로의 리전 핸드오프/취소 규칙. |
-| `Structure#getEntities`, `Structure#place(..., EntityTransformer)` | `ferrite-server/src/plugins/worldgen.rs` + Java 구조물 | 구조물이 엔티티를 담지 않고, 템플릿 파일의 `entities` 목록도 읽지 않는다. 콜백을 부를 엔티티 자체가 없다. | 아래 "구조물 엔티티 선행 작업 3가지" 참고. |
 
-### 구조물 엔티티 선행 작업 3가지
+### 구조물 엔티티 (작업 트리에서 구현됨)
 
-1. **호스트 비플레이어 엔티티 조회 경계** — 구조물 영역(청크 범위)을 소유한 리전 스레드에서
-   플레이어 외 엔티티의 UUID, 타입, 위치/회전, 전체 NBT를 읽는 `worldgen.rs` op가 필요하다.
-   현재 `World#getEntities*`는 접속 플레이어만 돌려준다. 구조물이 여러 리전에 걸치면 리전별
-   스냅샷을 모아야 하므로 `Signal::EntityTransfer`/`RegionData` 같은 명시적 핸드오프 규칙과
-   같은-리전/교차-리전 테스트가 함께 필요하다.
-2. **구조물/템플릿의 엔티티 저장** — `CapturedStructure`가 캡처한 엔티티 목록을 보관하고
-   `StructureNbt`가 템플릿 파일의 `entities`(pos/blockPos/nbt)를 읽고 써야 하며,
-   `Structure#getEntities`/`getEntityCount`가 그 스냅샷을 돌려줘야 한다. `fill(..., true)`도
-   엔티티를 수집해야 한다.
-3. **변환된 위치에 스폰하는 경로** — `EntityTransformer` 콜백을 소유 리전 스레드에서 호출한 뒤,
-   변환된 위치에 NBT로 엔티티를 스폰하는 호스트 op가 필요하다. 회전/반전/integrity가 위치와
-   엔티티 NBT에 함께 적용되어야 하고, 콜백이 엔티티를 거부/취소하는 규칙, 구조물이 여러 리전에
-   걸칠 때의 스폰 스케줄링도 정해야 한다.
+`CapturedStructure`가 발행 엔티티 레지스트리에서 비플레이어 엔티티를 캡처하고, `StructureNbt`가
+템플릿 `entities`(pos/blockPos/nbt)를 읽고 쓰며, `place(..., EntityTransformer)`가 회전·반전·
+integrity와 콜백 거부를 적용한다. `CapturedStructureTest`가 저장/로드, 회전·반전, 거부를
+검증한다. 실제 서버에서 리전 경계를 넘는 구조물 검증은 남아 있다.
 
 ## 그 밖에 남은 명시적 미지원 경로와 소유자
+
+`LootTable#populateLoot`/`fillInventory`는 `FerriteLoot`/`FerriteLootTable`로 구현되어
+`FerriteLootTableTest`가 검증하므로 이 표에서 제외한다.
 
 | 영역 | 예시 (정확한 이름) | 소유자 / 선행 작업 |
 |---|---|---|
@@ -94,12 +91,10 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | 청크 스냅샷/청크 데이터 | `ChunkSnapshot#contains(Biome)`; `ChunkData#getBiome` | 호스트 청크/바이옴 데이터 |
 | Paper 생명주기 | `InternalAPIBridge#createPluginLifecycleEventManager` | Paper lifecycle API |
 | 포션/인챈트/레지스트리 | `PotionEffectType` 속성(색·카테고리·지속시간 보정·attribute), `Enchantment` 속성, `RegistryAccess` 미지원 레지스트리 | `ferrite-data` 데이터/호스트 |
-| 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Java `FerriteLoot` — 생성 데이터팩의 `loot_table`/`predicate`/`tags`를 읽고 `FerriteItemStack`/`FerriteItemMeta`로 스택을 만든다. luck·bonus rolls·looting·killer/this_entity를 반영하고, `enchant_randomly`의 최대 레벨/호환성은 호스트의 `Enchantment` 응답을 쓴다(호스트가 없으면 1레벨/호환으로 폴백). 폭발 반경·블록 엔티티 데이터·미모델링 컴포넌트는 불투명 처리한다. |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
 | NMS/Unsafe | `UnsafeValues`의 NMS 의존 멤버, `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` | 의도적 미지원 (가짜 구현 금지); 계속 `NoSuchMethodError` |
 | 투사체/타일/장비/효과 | `Player#launchProjectile`(화살 외), `sendBlockUpdate`(표지판 외), `EntityEquipment`(미지원), `Player#playEffect`(데이터 있는 효과) | Rust 호스트/프로토콜 |
 | 아이템 메타 | `PlayerInventory#setItem`이 지원하지 않는 메타, 미지원 장비 슬롯 | `ferrite-item` 컴포넌트 |
-| 엔티티 조회 | `World#getEntities*`는 접속 플레이어만 반환, 구조물 엔티티 빈 목록 | Folia 리전 소유권 + 호스트 비플레이어 엔티티 조회 |
 | 월드젠 호스트 | `locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE` | vanilla 월드젠 호스트 (EULA 때문에 개발자 로컬만) |
 
 ## 생성된 전체 목록 (호스트 없는 폴백 프로브)

@@ -2845,6 +2845,24 @@ mod tests {
     }
 
     #[test]
+    fn item_commands_keep_component_patches() {
+        let (result, actions) = run(
+            "item replace entity @s hotbar.0 with minecraft:potion[potion_contents={potion:\"minecraft:swiftness\"}]",
+            2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let Some(Action::Slots {
+            source: SlotSource::Stacks(stacks),
+            ..
+        }) = actions.first()
+        else {
+            panic!("expected slot stacks, got {actions:?}");
+        };
+        let id = ferrite_item::component_id("potion_contents").unwrap();
+        assert!(stacks[0].components.contains(id), "{stacks:?}");
+    }
+
+    #[test]
     fn place_needs_the_worldgen_host_for_features() {
         denied("place feature minecraft:oak");
         let error = run("place feature minecraft:oak 0 64 0", 2)

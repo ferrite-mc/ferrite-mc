@@ -18,6 +18,7 @@
 use crate::arrow::ArrowState;
 use crate::effect::ActiveEffects;
 use crate::experience::OrbState;
+use crate::fishing::FishingState;
 use crate::id::EntityKey;
 use crate::index::{Cell, SectionIndex};
 use crate::item::ItemState;
@@ -84,8 +85,12 @@ pub struct EntityData {
     pub tracker: TrackerState,
     /// Item entity state, for `minecraft:item`.
     pub item: Option<ItemState>,
+    /// The potion stack of a thrown splash or lingering potion.
+    pub potion: Option<ferrite_item::ItemStack>,
     /// Arrow state, for `minecraft:arrow`.
     pub arrow: Option<ArrowState>,
+    /// Fishing-hook state, for `minecraft:fishing_bobber`.
+    pub fishing: Option<FishingState>,
     /// Living state, for the modelled mobs.
     pub mob: Option<MobState>,
     /// Experience-orb state, for `minecraft:experience_orb`.
@@ -122,7 +127,9 @@ impl EntityData {
             metadata: Metadata::default(),
             tracker: TrackerState::default(),
             item: None,
+            potion: None,
             arrow: None,
+            fishing: None,
             mob: None,
             orb: None,
             villager: None,

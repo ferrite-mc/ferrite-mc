@@ -31,6 +31,40 @@ fn key(name: &str) -> &str {
     name.strip_prefix("minecraft:").unwrap_or(name)
 }
 
+/// `minecraft:dye` colour names in protocol-id order.
+pub const DYE_COLORS: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+/// The protocol id of a dye colour name, with or without the `minecraft:` namespace.
+pub fn dye_color_id(name: &str) -> Option<i32> {
+    let name = key(name);
+    DYE_COLORS
+        .iter()
+        .position(|color| *color == name)
+        .and_then(|id| i32::try_from(id).ok())
+}
+
+/// The dye colour name for a protocol id.
+pub fn dye_color_name(id: i32) -> Option<&'static str> {
+    DYE_COLORS.get(usize::try_from(id).ok()?).copied()
+}
+
 /// The component type with the given name, with or without the `minecraft:` prefix.
 pub fn component_type(name: &str) -> Option<ComponentType> {
     let wanted = key(name);
@@ -502,6 +536,321 @@ impl PotionContents {
     }
 }
 
+/// The explosion of one `minecraft:firework_star`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FireworkExplosion {
+    /// Shape name without a namespace: `small_ball`, `large_ball`, `star`, `creeper` or `burst`.
+    pub shape: String,
+    /// Packed RGB colors, in the order the star was crafted.
+    pub colors: Vec<i32>,
+    /// Packed RGB colors of the fade effect.
+    pub fade_colors: Vec<i32>,
+    /// Whether the explosion leaves a trail.
+    pub has_trail: bool,
+    /// Whether the explosion twinkles.
+    pub has_twinkle: bool,
+}
+
+impl FireworkExplosion {
+    /// Vanilla `FireworkExplosion.Shape` names, in protocol-id order.
+    pub const SHAPES: [&'static str; 5] = ["small_ball", "large_ball", "star", "creeper", "burst"];
+
+    /// The `minecraft:firework_explosion_shape` protocol id of this explosion's shape.
+    pub fn shape_id(&self) -> Option<i32> {
+        let shape = key(&self.shape);
+        Self::SHAPES
+            .iter()
+            .position(|name| *name == shape)
+            .and_then(|id| i32::try_from(id).ok())
+    }
+
+    /// The shape name for a `minecraft:firework_explosion_shape` protocol id.
+    pub fn shape_name(id: i32) -> Option<&'static str> {
+        Self::SHAPES.get(usize::try_from(id).ok()?).copied()
+    }
+
+    fn to_compound(&self) -> Compound {
+        let mut compound = Compound::new();
+        compound.insert("shape".to_owned(), Tag::String(key(&self.shape).to_owned()));
+        compound.insert("colors".to_owned(), Tag::IntArray(self.colors.clone()));
+        compound.insert(
+            "fade_colors".to_owned(),
+            Tag::IntArray(self.fade_colors.clone()),
+        );
+        compound.insert("has_trail".to_owned(), Tag::Byte(i8::from(self.has_trail)));
+        compound.insert(
+            "has_twinkle".to_owned(),
+            Tag::Byte(i8::from(self.has_twinkle)),
+        );
+        compound
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        Self::from_compound(compound)
+    }
+
+    fn from_compound(compound: &Compound) -> Option<Self> {
+        let shape = match compound.get("shape")? {
+            Tag::String(shape) => key(shape).to_owned(),
+            _ => return None,
+        };
+        if !Self::SHAPES.contains(&shape.as_str()) {
+            return None;
+        }
+        let colors = match compound.get("colors") {
+            Some(Tag::IntArray(colors)) => colors.clone(),
+            Some(_) => return None,
+            None => Vec::new(),
+        };
+        let fade_colors = match compound.get("fade_colors") {
+            Some(Tag::IntArray(colors)) => colors.clone(),
+            Some(_) => return None,
+            None => Vec::new(),
+        };
+        Some(Self {
+            shape,
+            colors,
+            fade_colors,
+            has_trail: compound.get("has_trail").map_or(Some(false), as_bool)?,
+            has_twinkle: compound.get("has_twinkle").map_or(Some(false), as_bool)?,
+        })
+    }
+}
+
+/// The `minecraft:fireworks` value of a rocket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fireworks {
+    /// Flight duration in seconds, 1 to 3.
+    pub flight_duration: i32,
+    /// The explosions the rocket launches.
+    pub explosions: Vec<FireworkExplosion>,
+}
+
+impl Fireworks {
+    fn to_compound(&self) -> Compound {
+        let mut compound = Compound::new();
+        compound.insert("flight_duration".to_owned(), Tag::Int(self.flight_duration));
+        compound.insert(
+            "explosions".to_owned(),
+            Tag::List(List::Compound(
+                self.explosions
+                    .iter()
+                    .map(FireworkExplosion::to_compound)
+                    .collect(),
+            )),
+        );
+        compound
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        let flight_duration = match compound.get("flight_duration") {
+            Some(tag) => as_int(tag)?,
+            None => 1,
+        };
+        let explosions = match compound.get("explosions") {
+            Some(Tag::List(List::Compound(explosions))) => explosions
+                .iter()
+                .map(FireworkExplosion::from_compound)
+                .collect::<Option<Vec<_>>>()?,
+            Some(_) => return None,
+            None => Vec::new(),
+        };
+        Some(Self {
+            flight_duration,
+            explosions,
+        })
+    }
+}
+
+/// The `minecraft:pot_decorations` value: the items on a decorated pot's four sides, in back,
+/// left, right, front order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PotDecorations(pub [String; 4]);
+
+impl PotDecorations {
+    /// The side names in vanilla order, which is also the network order.
+    pub const SIDES: [&'static str; 4] = ["back", "left", "right", "front"];
+
+    fn to_compound(&self) -> Compound {
+        let mut compound = Compound::new();
+        for (side, item) in Self::SIDES.iter().zip(&self.0) {
+            let mut holder = Compound::new();
+            holder.insert("id".to_owned(), Tag::String(item.clone()));
+            compound.insert((*side).to_owned(), Tag::Compound(holder));
+        }
+        compound
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        let mut items = [String::new(), String::new(), String::new(), String::new()];
+        for (index, side) in Self::SIDES.iter().enumerate() {
+            let Tag::Compound(holder) = compound.get(*side)? else {
+                return None;
+            };
+            let Tag::String(item) = holder.get("id")? else {
+                return None;
+            };
+            items[index] = format!("minecraft:{}", key(item));
+        }
+        Some(Self(items))
+    }
+}
+
+/// One layer of a patterned banner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BannerPattern {
+    /// The full pattern id, e.g. `minecraft:creeper`.
+    pub pattern: String,
+    /// The dye colour without the namespace, e.g. `red`.
+    pub color: String,
+}
+
+/// The `minecraft:banner_patterns` component, in application order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BannerPatterns(pub Vec<BannerPattern>);
+
+impl BannerPatterns {
+    fn to_compound(&self) -> Tag {
+        Tag::List(List::Compound(
+            self.0
+                .iter()
+                .map(|pattern| {
+                    let mut compound = Compound::new();
+                    compound.insert("pattern".to_owned(), Tag::String(pattern.pattern.clone()));
+                    compound.insert("color".to_owned(), Tag::String(pattern.color.clone()));
+                    compound
+                })
+                .collect(),
+        ))
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::List(List::Compound(patterns)) = tag else {
+            return None;
+        };
+        let patterns = patterns
+            .iter()
+            .map(|pattern| {
+                let Tag::String(pattern_id) = pattern.get("pattern")? else {
+                    return None;
+                };
+                let Tag::String(color) = pattern.get("color")? else {
+                    return None;
+                };
+                Some(BannerPattern {
+                    pattern: format!("minecraft:{}", key(pattern_id)),
+                    color: key(color).to_owned(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self(patterns))
+    }
+}
+
+/// The `minecraft:written_book_content` component. Pages are kept as their component NBT so the
+/// original text is preserved exactly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WrittenBookContent {
+    /// The book's title.
+    pub title: String,
+    /// The filtered title shown by chat filters, if any.
+    pub filtered_title: Option<String>,
+    /// The author shown in the book.
+    pub author: String,
+    /// Copy generation: 0 original, 1 copy, 2 copy of a copy.
+    pub generation: i32,
+    /// Pages as `(raw text component, filtered text component)`.
+    pub pages: Vec<(Tag, Option<Tag>)>,
+    /// Whether the book's content has been resolved by the server.
+    pub resolved: bool,
+}
+
+impl WrittenBookContent {
+    fn to_compound(&self) -> Compound {
+        let mut compound = Compound::new();
+        let mut title = Compound::new();
+        title.insert("raw".to_owned(), Tag::String(self.title.clone()));
+        if let Some(filtered) = &self.filtered_title {
+            title.insert("filtered".to_owned(), Tag::String(filtered.clone()));
+        }
+        compound.insert("title".to_owned(), Tag::Compound(title));
+        compound.insert("author".to_owned(), Tag::String(self.author.clone()));
+        compound.insert("generation".to_owned(), Tag::Int(self.generation));
+        compound.insert("resolved".to_owned(), Tag::Byte(i8::from(self.resolved)));
+        compound.insert(
+            "pages".to_owned(),
+            Tag::List(List::Compound(
+                self.pages
+                    .iter()
+                    .map(|(raw, filtered)| {
+                        let mut page = Compound::new();
+                        page.insert("raw".to_owned(), raw.clone());
+                        if let Some(filtered) = filtered {
+                            page.insert("filtered".to_owned(), filtered.clone());
+                        }
+                        page
+                    })
+                    .collect(),
+            )),
+        );
+        compound
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        let (title, filtered_title) = match compound.get("title")? {
+            Tag::Compound(title) => {
+                let Tag::String(raw) = title.get("raw")? else {
+                    return None;
+                };
+                let filtered = match title.get("filtered") {
+                    Some(Tag::String(filtered)) => Some(filtered.clone()),
+                    Some(_) => return None,
+                    None => None,
+                };
+                (raw.clone(), filtered)
+            }
+            Tag::String(raw) => (raw.clone(), None),
+            _ => return None,
+        };
+        let Tag::String(author) = compound.get("author")? else {
+            return None;
+        };
+        let generation = compound.get("generation").map_or(Some(0), as_int)?;
+        let pages = match compound.get("pages") {
+            Some(Tag::List(List::Compound(pages))) => pages
+                .iter()
+                .map(|page| {
+                    let raw = page.get("raw")?.clone();
+                    let filtered = page.get("filtered").cloned();
+                    Some((raw, filtered))
+                })
+                .collect::<Option<Vec<_>>>()?,
+            Some(_) => return None,
+            None => Vec::new(),
+        };
+        Some(Self {
+            title,
+            filtered_title,
+            author: author.clone(),
+            generation,
+            pages,
+            resolved: compound.get("resolved").map_or(Some(true), as_bool)?,
+        })
+    }
+}
+
 impl PotionEffect {
     fn to_compound(&self) -> Compound {
         let mut compound = Compound::new();
@@ -873,6 +1222,16 @@ pub enum Component {
     LodestoneTracker(LodestoneTracker),
     /// `minecraft:tooltip_display`, which hides tooltip lines.
     TooltipDisplay(TooltipDisplay),
+    /// `minecraft:firework_explosion`, one firework star's explosion.
+    FireworkExplosion(FireworkExplosion),
+    /// `minecraft:fireworks`, a rocket's flight and explosions.
+    Fireworks(Fireworks),
+    /// `minecraft:pot_decorations`, the sherds on a decorated pot.
+    PotDecorations(PotDecorations),
+    /// `minecraft:banner_patterns`, the layers on a patterned banner or shield.
+    BannerPatterns(BannerPatterns),
+    /// `minecraft:written_book_content`, a written book's contents.
+    WrittenBookContent(WrittenBookContent),
     /// A component without a typed variant, or a value whose NBT shape did not match its typed
     /// variant. Kept verbatim.
     Opaque(Tag),
@@ -908,6 +1267,11 @@ impl Component {
             Self::Trim(_) => ids::TRIM,
             Self::LodestoneTracker(_) => ids::LODESTONE_TRACKER,
             Self::TooltipDisplay(_) => ids::TOOLTIP_DISPLAY,
+            Self::FireworkExplosion(_) => ids::FIREWORK_EXPLOSION,
+            Self::Fireworks(_) => ids::FIREWORKS,
+            Self::PotDecorations(_) => ids::POT_DECORATIONS,
+            Self::BannerPatterns(_) => ids::BANNER_PATTERNS,
+            Self::WrittenBookContent(_) => ids::WRITTEN_BOOK_CONTENT,
             Self::Opaque(_) | Self::Raw(_) => return None,
         })
     }
@@ -936,6 +1300,11 @@ impl Component {
             Self::Trim(_) => "trim",
             Self::LodestoneTracker(_) => "lodestone_tracker",
             Self::TooltipDisplay(_) => "tooltip_display",
+            Self::FireworkExplosion(_) => "firework_explosion",
+            Self::Fireworks(_) => "fireworks",
+            Self::PotDecorations(_) => "pot_decorations",
+            Self::BannerPatterns(_) => "banner_patterns",
+            Self::WrittenBookContent(_) => "written_book_content",
             Self::Opaque(_) => "opaque",
             Self::Raw(_) => "raw",
         }
@@ -978,6 +1347,11 @@ impl Component {
             Self::Trim(trim) => Tag::Compound(trim.to_compound()),
             Self::LodestoneTracker(tracker) => Tag::Compound(tracker.to_compound()),
             Self::TooltipDisplay(display) => display.to_tag()?,
+            Self::FireworkExplosion(explosion) => Tag::Compound(explosion.to_compound()),
+            Self::Fireworks(fireworks) => Tag::Compound(fireworks.to_compound()),
+            Self::PotDecorations(decorations) => Tag::Compound(decorations.to_compound()),
+            Self::BannerPatterns(patterns) => patterns.to_compound(),
+            Self::WrittenBookContent(content) => Tag::Compound(content.to_compound()),
             Self::Opaque(tag) => tag.clone(),
             Self::Raw(_) => return Err(Error::NoNbtForm("raw")),
         })
@@ -1024,6 +1398,15 @@ impl Component {
             ids::TRIM => Trim::from_tag(tag).map(Self::Trim),
             ids::LODESTONE_TRACKER => LodestoneTracker::from_tag(tag).map(Self::LodestoneTracker),
             ids::TOOLTIP_DISPLAY => TooltipDisplay::from_tag(tag).map(Self::TooltipDisplay),
+            ids::FIREWORK_EXPLOSION => {
+                FireworkExplosion::from_tag(tag).map(Self::FireworkExplosion)
+            }
+            ids::FIREWORKS => Fireworks::from_tag(tag).map(Self::Fireworks),
+            ids::POT_DECORATIONS => PotDecorations::from_tag(tag).map(Self::PotDecorations),
+            ids::BANNER_PATTERNS => BannerPatterns::from_tag(tag).map(Self::BannerPatterns),
+            ids::WRITTEN_BOOK_CONTENT => {
+                WrittenBookContent::from_tag(tag).map(Self::WrittenBookContent)
+            }
             _ => None,
         };
         typed.unwrap_or_else(|| Self::Opaque(tag.clone()))
@@ -1303,6 +1686,31 @@ mod tests {
         enchantments.set("minecraft:sharpness", 5);
         enchantments.set("minecraft:unbreaking", 3);
         enchantments
+    }
+
+    #[test]
+    fn firework_and_pot_components_round_trip_through_nbt() {
+        let fireworks = Component::Fireworks(Fireworks {
+            flight_duration: 3,
+            explosions: vec![FireworkExplosion {
+                shape: "creeper".to_owned(),
+                colors: vec![0x00FF_0000],
+                fade_colors: vec![0x0000_00FF],
+                has_trail: true,
+                has_twinkle: true,
+            }],
+        });
+        let tag = fireworks.to_nbt().unwrap();
+        assert_eq!(Component::from_nbt(ids::FIREWORKS, &tag), fireworks);
+
+        let pot = Component::PotDecorations(PotDecorations([
+            "minecraft:brick".to_owned(),
+            "minecraft:angler_pottery_sherd".to_owned(),
+            "minecraft:blade_pottery_sherd".to_owned(),
+            "minecraft:brick".to_owned(),
+        ]));
+        let tag = pot.to_nbt().unwrap();
+        assert_eq!(Component::from_nbt(ids::POT_DECORATIONS, &tag), pot);
     }
 
     #[test]

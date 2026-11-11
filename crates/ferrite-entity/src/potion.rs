@@ -2,8 +2,8 @@
 //!
 //! A potion item carries the `minecraft:potion_contents` component: an optional potion id from
 //! the `minecraft:potion` registry, optional custom effects, a custom color and a custom name.
-//! Drinking applies the potion's effects (`PotionContents.applyToLivingEntity`). Splash and
-//! lingering potions are not implemented yet.
+//! Drinking applies the potion's effects (`PotionContents.applyToLivingEntity`); the region
+//! throws splash and lingering potions and applies them at their landing point.
 //!
 //! Durations and amplifiers mirror the vanilla `Potions` registrations; the effect ids come from
 //! [`Effect`](crate::effect::Effect), and potion ids are checked against the 26.3 registry
@@ -481,5 +481,24 @@ mod tests {
                 .all_effects()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn splash_and_lingering_potions_are_thrown_projectiles() {
+        use crate::arrow::{Kind, kind_of, new_thrown};
+
+        for (name, kind) in [
+            ("minecraft:splash_potion", Kind::SplashPotion),
+            ("minecraft:lingering_potion", Kind::LingeringPotion),
+        ] {
+            assert_eq!(Kind::thrown_from_name(name), Some(kind));
+            let record = new_thrown(
+                kind,
+                ferrite_math::Vec3::ZERO,
+                ferrite_math::Vec3::ZERO,
+                None,
+            );
+            assert_eq!(kind_of(&record.data), Some(kind));
+        }
     }
 }

@@ -9,8 +9,8 @@ use ferrite_protocol::{
         handshake::{Intent, Intention},
         login::{LoginAcknowledged, LoginStart},
         play::{
-            ChunkBatchReceived, ClientboundPlayerChat, ConfirmTeleport, LastSeenUpdate,
-            MovePosition, PositionSync, ServerboundChat, SystemChat,
+            ChunkBatchReceived, ClientKeepAlive, ClientboundPlayerChat, ConfirmTeleport,
+            LastSeenUpdate, MovePosition, PlayKeepAlive, PositionSync, ServerboundChat, SystemChat,
         },
     },
 };
@@ -106,6 +106,10 @@ impl Bot {
                     chunks_per_tick: self.chunks_per_tick,
                 })
                 .await
+            }
+            id if id == PlayKeepAlive::ID => {
+                let keepalive = PlayKeepAlive::decode(&mut rest.as_slice()).unwrap();
+                self.send(&ClientKeepAlive { id: keepalive.id }).await
             }
             _ => {}
         }
@@ -1776,6 +1780,7 @@ fn entities_follow_region_merges_splits_and_hand_offs() {
         tracking: Default::default(),
         source: None,
         dimension: super::Dimension::Overworld,
+        world_id: super::region::RegionWorldId::from(super::Dimension::Overworld),
         raining: false,
         rules: Default::default(),
         spawn: [0.0, 65.0, 0.0],

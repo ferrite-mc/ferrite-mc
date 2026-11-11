@@ -10,7 +10,7 @@ use super::{
 use ferrite_entity::{
     BlockGetter, EntityRecord, EntityStore, Flags, Rng, ai, arrow, chunk_of, combat,
     effect::{ActiveEffects, Effect, EffectEvent, MobEffectInstance},
-    experience, item,
+    experience, fishing, item,
     mob::{self, MobKind},
     potion::PotionContents,
     shoulder::{ShoulderParrot, ShoulderSide},
@@ -28,6 +28,27 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
+
+/// Identity of the world that owns a region. Vanilla dimensions keep their stable protocol
+/// identity; plugin-created worlds use their persistent UUID instead of pretending to be one
+/// of the three built-in dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RegionWorldId {
+    Vanilla(super::Dimension),
+    Runtime(Uuid),
+}
+
+impl From<super::Dimension> for RegionWorldId {
+    fn from(value: super::Dimension) -> Self {
+        Self::Vanilla(value)
+    }
+}
+
+impl RegionWorldId {
+    pub fn runtime(id: Uuid) -> Self {
+        Self::Runtime(id)
+    }
+}
 
 #[cfg(test)]
 type DelayedBlockUpdate = (i64, (i32, i32), [i32; 3], u32);
@@ -187,6 +208,11 @@ pub enum Command {
         pos: [f64; 3],
         yaw: Option<f32>,
         pitch: Option<f32>,
+    },
+    /// An ender pearl landed in another region; teleport and apply fall damage on the owner.
+    EnderPearlTeleport {
+        dimension: super::Dimension,
+        pos: [f64; 3],
     },
     /// Move to another dimension with the `Respawn` + position sequence.
     ChangeDimension {
@@ -564,6 +590,12 @@ pub enum Signal {
         chunk: ChunkPos,
         add: bool,
     },
+    /// Several chunk-view holds changed together, so the scheduler can update topology once.
+    HoldBatch {
+        dimension: super::Dimension,
+        chunks: Vec<ChunkPos>,
+        add: bool,
+    },
     FluidChange {
         dimension: super::Dimension,
         x: i32,
@@ -618,6 +650,12 @@ pub enum Signal {
         to: ChunkPos,
         entity: Box<EntityRecord>,
     },
+    /// An ender pearl landed outside its thrower's region; the world loop routes it by UUID.
+    EnderPearlTeleport {
+        dimension: super::Dimension,
+        player: Uuid,
+        pos: [f64; 3],
+    },
     /// A player used a spawn egg; the target region owns creation of the new entity.
     Summon {
         dimension: super::Dimension,
@@ -639,6 +677,9 @@ pub struct TickContext {
     pub source: Option<Arc<super::anvil::AnvilChunkSource>>,
     /// The dimension this world runs, for bed and fire rules.
     pub dimension: super::Dimension,
+    /// Stable region scheduler identity. Vanilla worlds map to their protocol dimension;
+    /// runtime worlds use their persistent UUID.
+    pub world_id: RegionWorldId,
     /// Current weather, for fire and cauldron rules.
     #[allow(dead_code)] // the live weather is read from `state`; kept for the startup setting
     pub raining: bool,
@@ -940,6 +981,8 @@ pub struct Player {
     pub spin_ticks: u8,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
+    /// The fishing rod was used this tick; the region casts or reels the hook.
+    pub fishing_use: bool,
     /// The dimension registry, used to swap the chunk source on a dimension change.
     pub dimensions: Arc<super::DimensionRegistry>,
     /// Ticks spent standing in a nether portal.
@@ -964,6 +1007,13 @@ pub struct DelayedUpdate {
     pub expected_state: u32,
     pub packet: Outbound,
 }
+/// A lingering potion's area-effect cloud: its centre, its effects and its age in ticks.
+pub struct LingeringCloud {
+    pub center: ferrite_math::Vec3,
+    pub effects: Vec<MobEffectInstance>,
+    pub age: i32,
+}
+
 #[derive(Default)]
 pub struct Region {
     /// Explosions plugins asked for: center, power, whether fire is left behind and whether
@@ -971,6 +1021,8 @@ pub struct Region {
     pub plugin_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Dragon breath clouds: vanilla growth, wait and damage schedule.
     pub breath_clouds: Vec<ferrite_entity::dragon::BreathCloud>,
+    /// Lingering potion area-effect clouds.
+    pub lingering_clouds: Vec<LingeringCloud>,
     /// Final block updates held back until the client finished the push animation. Keyed by
     /// position through [`Region::queue_delayed_update`] so a reversal replaces stale updates.
     pub delayed_updates: Vec<DelayedUpdate>,
@@ -1061,6 +1113,7 @@ impl RegionData for Region {
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
+            lingering_clouds: Vec::new(),
             delayed_updates,
             moving_pistons,
             thrown_tridents: HashMap::new(),
@@ -1428,6 +1481,7 @@ impl Player {
             },
         );
         let (forget, new) = chunk_window((self.chunk.0, self.chunk.1), self.view, &self.loaded);
+        let mut forgotten = Vec::with_capacity(forget.len());
         for (x, z) in forget {
             send(self, &ForgetChunk { z, x });
             self.loaded.remove(&(x, z));
@@ -1438,9 +1492,12 @@ impl Player {
             if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
                 loaded.remove(&(x, z));
             }
-            let _ = self.signals.send(Signal::Hold {
+            forgotten.push(ChunkPos(x, z));
+        }
+        if !forgotten.is_empty() {
+            let _ = self.signals.send(Signal::HoldBatch {
                 dimension: self.dimension,
-                chunk: ChunkPos(x, z),
+                chunks: forgotten,
                 add: false,
             });
         }
@@ -1466,6 +1523,20 @@ impl Player {
                 flags: 0,
             },
         );
+    }
+    fn land_ender_pearl(&mut self, pos: [f64; 3]) -> bool {
+        if !pos
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+        {
+            return false;
+        }
+        self.pos = pos;
+        self.teleport();
+        if !matches!(self.gamemode, 1 | 3) {
+            self.hurt(DamageKind::Fall, 5.0);
+        }
+        true
     }
     fn chunks_tick(
         &mut self,
@@ -1541,12 +1612,12 @@ impl Player {
             if let Some(plugins) = self.plugins.clone() {
                 let _ = plugins.chunk_loaded(ferrite_plugin::default_world_id(), x, z, true);
             }
-            let _ = self.signals.send(Signal::Hold {
-                dimension: self.dimension,
-                chunk: ChunkPos(x, z),
-                add: true,
-            });
         }
+        let _ = self.signals.send(Signal::HoldBatch {
+            dimension: self.dimension,
+            chunks: sent.iter().map(|&(x, z)| ChunkPos(x, z)).collect(),
+            add: true,
+        });
         // Held only for this insert: loading and encoding above must not serialize the regions.
         if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
             loaded.extend(sent.iter().copied());
@@ -1683,6 +1754,9 @@ impl Player {
             return;
         };
         let chunk = (pos[0].div_euclid(16), pos[2].div_euclid(16));
+        // The encoded chunk packet embeds block entity NBT; a later viewer must not get the
+        // pre-edit copy. Dirty entries already carry the new packet and stay.
+        source.invalidate_packet(chunk.0, chunk.1);
         let ferrite_world::BlockEntity { type_id, mut data } = entity;
         data.shift_remove("x");
         data.shift_remove("y");
@@ -2835,6 +2909,15 @@ impl Player {
                 sequence: p.sequence,
             },
         );
+        if (0..=1).contains(&p.hand.0) {
+            let stack = self.inventory.get(self.hand_slot(p.hand.0));
+            if matches!(stack.name(), Some("minecraft:fishing_rod")) {
+                // The region owns the hook: it knows whether one is already out and where to
+                // drop the catch. Casting and reeling are the same click.
+                self.fishing_use = true;
+                return;
+            }
+        }
         self.start_use(p.hand.0);
     }
 
@@ -2929,7 +3012,12 @@ impl Player {
                     },
                 );
             }
-            self.menus.launched.push(kind);
+            let potion = matches!(
+                kind,
+                arrow::Kind::SplashPotion | arrow::Kind::LingeringPotion
+            )
+            .then(|| stack.clone());
+            self.menus.launched.push((kind, potion));
             return;
         }
         // Vanilla `LivingEntity.startUsingItem`: a shield raises, a bow starts drawing.
@@ -2970,6 +3058,12 @@ impl Player {
     /// start the same use duration and finish through [`Player::tick_eating`].
     fn use_potion(&mut self, slot: usize) -> bool {
         let stack = self.inventory.get(slot);
+        if matches!(
+            stack.name(),
+            Some("minecraft:splash_potion" | "minecraft:lingering_potion")
+        ) {
+            return false;
+        }
         if stack
             .effective_component(ferrite_item::component_ids::POTION_CONTENTS)
             .is_none()
@@ -3746,6 +3840,12 @@ impl Player {
                     }
                     continue;
                 }
+                Command::EnderPearlTeleport { dimension, pos } => {
+                    if dimension == self.dimension {
+                        changed |= self.land_ender_pearl(pos);
+                    }
+                    continue;
+                }
                 Command::ChangeDimension {
                     dimension,
                     pos,
@@ -3954,6 +4054,18 @@ impl Player {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(self.uuid, held);
+                    let mainhand = self.resolve_slot(-1).and_then(|slot| {
+                        super::commands_loot::HeldTool::from_stack(self.inventory.get(slot))
+                    });
+                    let offhand = self
+                        .resolve_slot(ferrite_inventory::OFFHAND as i16)
+                        .and_then(|slot| {
+                            super::commands_loot::HeldTool::from_stack(self.inventory.get(slot))
+                        });
+                    super::commands_loot::HELD_TOOLS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(self.uuid, [mainhand, offhand]);
                     if let Some(biome) = self.source.as_ref().and_then(|source| {
                         source.biome_name(
                             self.pos[0].floor() as i32,
@@ -3965,6 +4077,34 @@ impl Player {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .push((self.uuid, biome));
+                    }
+                    if let Some((name, props)) = self.source.as_ref().and_then(|source| {
+                        let (x, y, z) = (
+                            self.pos[0].floor() as i32,
+                            self.pos[1].floor() as i32,
+                            self.pos[2].floor() as i32,
+                        );
+                        source
+                            .block(x, y, z)
+                            .and_then(|state| u16::try_from(state).ok())
+                            .and_then(ferrite_data::blocks::state)
+                    }) {
+                        let changed = {
+                            let mut last = super::recipe_unlock::LAST_BLOCK
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            last.insert(self.uuid, (name, props)) != Some((name, props))
+                        };
+                        if changed {
+                            super::recipe_unlock::BLOCKS
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(super::recipe_unlock::BlockRecord {
+                                    player: self.uuid,
+                                    block: name,
+                                    props,
+                                });
+                        }
                     }
                     continue;
                 }
@@ -7423,6 +7563,87 @@ impl Region {
         }
     }
 
+    /// Ticks fishing hooks: water entry, the bite countdown, and removal when the owner left
+    /// the region or the hook hit land.
+    fn tick_fishing(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let owners: Vec<Uuid> = self.players.keys().copied().collect();
+        let blocks = TickBlocks {
+            source: Some(source),
+            seen: Default::default(),
+        };
+        let _ = fishing::tick_bobbers(&mut self.entities, &blocks, &owners, &mut self.rng);
+    }
+
+    /// Applies a fishing rod's click once the player's input has been handled: reel in the
+    /// hook this player already has out, or cast a new one.
+    fn tick_fishing_use(&mut self) {
+        let users: Vec<Uuid> = self
+            .players
+            .iter()
+            .filter(|(_, player)| player.fishing_use)
+            .map(|(uuid, _)| *uuid)
+            .collect();
+        for uuid in users {
+            if let Some(player) = self.players.get_mut(&uuid) {
+                player.fishing_use = false;
+            }
+            self.use_fishing_rod(uuid);
+        }
+    }
+
+    fn use_fishing_rod(&mut self, uuid: Uuid) {
+        let existing = self.entities.keys().to_vec().into_iter().find(|key| {
+            self.entities
+                .data(*key)
+                .and_then(|data| data.fishing)
+                .is_some_and(|state| state.owner == uuid)
+        });
+        if let Some(key) = existing {
+            let biting = self
+                .entities
+                .data(key)
+                .and_then(|data| data.fishing)
+                .is_some_and(|state| state.biting);
+            let pos = self.entities.pos(key).unwrap_or_default();
+            if let Some(flags) = self.entities.flags_mut(key) {
+                flags.set(Flags::REMOVED, true);
+            }
+            if biting
+                && let Some(stack) =
+                    ferrite_item::ItemStack::from_name(fishing::loot(&mut self.rng))
+            {
+                let plain = ItemStack {
+                    count: stack.count,
+                    item_id: i32::from(stack.item),
+                };
+                let record = item::new_item(
+                    pos,
+                    ferrite_math::Vec3::new(0.0, 0.2, 0.0),
+                    plain,
+                    &mut self.rng,
+                );
+                self.entities.insert(record);
+            }
+            return;
+        }
+        let Some(player) = self.players.get(&uuid) else {
+            return;
+        };
+        let feet = ferrite_math::Vec3::new(player.pos[0], player.pos[1], player.pos[2]);
+        let eye = combat::eye_position(feet);
+        let direction = combat::look_vector(player.yaw, player.pitch);
+        let vel = ferrite_math::Vec3::new(
+            direction.x * 1.2,
+            direction.y * 1.2 + 0.1,
+            direction.z * 1.2,
+        );
+        let record = fishing::new_bobber(eye, vel, uuid, &mut self.rng);
+        self.entities.insert(record);
+    }
+
     fn tick_arrows(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
             return;
@@ -7533,15 +7754,26 @@ impl Region {
             if landing.kind == arrow::Kind::WindCharge {
                 self.wind_charge_burst(landing.pos, landing.owner, &players);
             }
+            if let Some(stack) = &landing.potion {
+                match landing.kind {
+                    arrow::Kind::SplashPotion => {
+                        self.splash_potion([landing.pos.x, landing.pos.y, landing.pos.z], stack)
+                    }
+                    arrow::Kind::LingeringPotion => {
+                        self.lingering_potion(landing.pos, stack);
+                    }
+                    _ => {}
+                }
+            }
             if landing.kind == arrow::Kind::EnderPearl
                 && let Some(owner) = landing.owner
-                && let Some(p) = self.players.get_mut(&owner)
             {
-                p.pos = [landing.pos.x, landing.pos.y, landing.pos.z];
-                p.teleport();
-                if !matches!(p.gamemode, 1 | 3) {
-                    p.hurt(DamageKind::Fall, 5.0);
-                }
+                self.route_ender_pearl_landing(
+                    &ctx.signals,
+                    ctx.dimension,
+                    owner,
+                    [landing.pos.x, landing.pos.y, landing.pos.z],
+                );
             }
         }
         for pos in fires {
@@ -7559,6 +7791,24 @@ impl Region {
         }
         for pos in blasts {
             self.explode([pos.x, pos.y + 1.0, pos.z], 6.0, true, ctx);
+        }
+    }
+
+    fn route_ender_pearl_landing(
+        &mut self,
+        signals: &UnboundedSender<Signal>,
+        dimension: super::Dimension,
+        owner: Uuid,
+        pos: [f64; 3],
+    ) {
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.land_ender_pearl(pos);
+        } else {
+            let _ = signals.send(Signal::EnderPearlTeleport {
+                dimension,
+                player: owner,
+                pos,
+            });
         }
     }
 
@@ -8232,19 +8482,66 @@ impl Region {
         }
     }
 
-    /// Vanilla `ThrownPotion.applySplash`: every player within four blocks gains the potion's
-    /// effects, with the duration falling off with distance.
-    fn splash_potion(&mut self, center: [f64; 3], stack: &ferrite_item::ItemStack) {
-        let effects = match stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS)
-        {
+    /// The effects of a potion stack, from a typed component or its raw NBT.
+    fn potion_effects(stack: &ferrite_item::ItemStack) -> Vec<MobEffectInstance> {
+        match stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS) {
             Some(ferrite_item::Component::PotionContents(contents)) => {
                 ferrite_entity::potion::effects_from_component(&contents)
             }
             Some(ferrite_item::Component::Opaque(tag)) => PotionContents::from_tag(&tag)
                 .map(|contents| contents.all_effects())
                 .unwrap_or_default(),
-            _ => return,
-        };
+            _ => Vec::new(),
+        }
+    }
+
+    /// Leaves a lingering potion's area-effect cloud at `center`.
+    fn lingering_potion(&mut self, center: ferrite_math::Vec3, stack: &ferrite_item::ItemStack) {
+        let effects = Self::potion_effects(stack);
+        if effects.is_empty() {
+            return;
+        }
+        self.lingering_clouds.push(LingeringCloud {
+            center,
+            effects,
+            age: 0,
+        });
+    }
+
+    /// Vanilla `AreaEffectCloud.tick`: reapply the potion every 20 ticks for five seconds.
+    fn tick_lingering_clouds(&mut self) {
+        let mut clouds = std::mem::take(&mut self.lingering_clouds);
+        for cloud in &mut clouds {
+            cloud.age += 1;
+            if cloud.age % 20 != 0 {
+                continue;
+            }
+            for p in self.players.values_mut() {
+                let distance = ((p.pos[0] - cloud.center.x).powi(2)
+                    + (p.pos[1] - cloud.center.y).powi(2)
+                    + (p.pos[2] - cloud.center.z).powi(2))
+                .sqrt();
+                if distance > 3.0 {
+                    continue;
+                }
+                let scale = (1.0 - distance / 3.0).max(0.25);
+                for instance in &cloud.effects {
+                    let mut instance = *instance;
+                    if instance.duration > 0 {
+                        instance.duration = (f64::from(instance.duration) * scale) as i32;
+                    }
+                    p.apply_effect(instance);
+                }
+            }
+        }
+        clouds.retain(|cloud| cloud.age < 100);
+        self.lingering_clouds = clouds;
+    }
+
+    /// Vanilla `ThrownPotion.applySplash`: every player within four blocks gains the potion's
+    /// effects, with the duration falling off with distance.
+    fn splash_potion(&mut self, center: [f64; 3], stack: &ferrite_item::ItemStack) {
+        let effects = Self::potion_effects(stack);
         if effects.is_empty() {
             return;
         }
@@ -8473,15 +8770,16 @@ impl Region {
                 self.entities.insert(record);
             }
         }
-        for kind in p.menus.launched.drain(..) {
+        for (kind, potion) in p.menus.launched.drain(..) {
             let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
             let eye = combat::eye_position(feet);
             let direction = combat::look_vector(p.yaw, p.pitch);
             // Vanilla `shootFromRotation(.., 1.5, 1.0)`.
             let vel =
                 ferrite_math::Vec3::new(direction.x * 1.5, direction.y * 1.5, direction.z * 1.5);
-            self.entities
-                .insert(arrow::new_thrown(kind, eye, vel, Some(p.uuid)));
+            let mut record = arrow::new_thrown(kind, eye, vel, Some(p.uuid));
+            record.data.potion = potion;
+            self.entities.insert(record);
         }
         for stack in p.menus.thrown.drain(..) {
             let plain = ItemStack {
@@ -8961,6 +9259,9 @@ impl Region {
         self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
+            self.tick_fishing(ctx);
+            self.tick_fishing_use();
+            self.tick_lingering_clouds();
             self.tick_horses(ctx);
             self.sync_trades();
             self.land_tridents();
@@ -9294,6 +9595,37 @@ impl Region {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_ender_pearl_landing_is_handed_to_the_world_loop() {
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let owner = Uuid::from_u128(0xfeed);
+        let pos = [32.5, 70.0, -16.5];
+
+        Region::default().route_ender_pearl_landing(
+            &signals,
+            super::super::Dimension::Nether,
+            owner,
+            pos,
+        );
+
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Signal::EnderPearlTeleport {
+                dimension: super::super::Dimension::Nether,
+                player,
+                pos: landing,
+            }) if player == owner && landing == pos
+        ));
+    }
+
+    #[test]
+    fn runtime_world_identity_is_distinct_from_vanilla_dimensions() {
+        let overworld = super::RegionWorldId::from(super::super::Dimension::Overworld);
+        let runtime = super::RegionWorldId::runtime(Uuid::from_u128(7));
+        assert_ne!(overworld, runtime);
+        assert_eq!(runtime, super::RegionWorldId::Runtime(Uuid::from_u128(7)));
+    }
+
     use super::*;
 
     #[test]
@@ -9684,6 +10016,7 @@ mod tests {
             tracking: Default::default(),
             source: None,
             dimension: super::super::Dimension::Overworld,
+            world_id: super::RegionWorldId::from(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10298,6 +10631,7 @@ mod tests {
             tracking: Default::default(),
             source: Some(source.clone()),
             dimension: super::super::Dimension::Overworld,
+            world_id: super::RegionWorldId::from(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10353,6 +10687,7 @@ mod tests {
             tracking: Default::default(),
             source: Some(source),
             dimension: super::super::Dimension::Overworld,
+            world_id: super::RegionWorldId::from(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10549,6 +10884,7 @@ mod tests {
             tracking: Default::default(),
             source: None,
             dimension: crate::game::Dimension::Overworld,
+            world_id: crate::game::region::RegionWorldId::from(crate::game::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10575,6 +10911,7 @@ mod tests {
             tracking: Default::default(),
             source: None,
             dimension: crate::game::Dimension::Overworld,
+            world_id: crate::game::region::RegionWorldId::from(crate::game::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],
@@ -10652,6 +10989,7 @@ mod tests {
             tracking: Default::default(),
             source: None,
             dimension: super::super::Dimension::Overworld,
+            world_id: super::RegionWorldId::from(super::super::Dimension::Overworld),
             raining: false,
             rules: Default::default(),
             spawn: [0.0, 65.0, 0.0],

@@ -28,8 +28,9 @@ pub struct Containers {
     counter: i32,
     /// Stacks the player dropped, spawned as item entities by the region this tick.
     pub thrown: Vec<ItemStack>,
-    /// Snowballs, eggs and ender pearls the player threw, launched by the region this tick.
-    pub launched: Vec<ferrite_entity::arrow::Kind>,
+    /// Projectiles the player threw, launched by the region this tick; potions carry their
+    /// stack so the landing can apply its contents.
+    pub launched: Vec<(ferrite_entity::arrow::Kind, Option<ItemStack>)>,
     /// The block the open menu belongs to, for vanilla `stillValid` and shared contents.
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
@@ -488,7 +489,7 @@ impl Player {
         let Some(menu) = self.menus.open.as_mut() else {
             return;
         };
-        menu.rename(name.chars().take(50).collect());
+        menu.rename(name.chars().take(50).collect(), crafter());
         let out = self.menus.current().broadcast_changes(&self.inventory);
         emit(self, out);
     }

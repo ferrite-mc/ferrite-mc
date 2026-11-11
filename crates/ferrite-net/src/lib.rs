@@ -749,7 +749,7 @@ async fn play(
                         Err(error) => Err(anyhow::anyhow!("writer task failed: {error}")),
                     };
                 }
-                frame = read_packet(&mut reader, &mut decoder) => {
+                frame = read_packet_timeout(&mut reader, &mut decoder, config.read_timeout) => {
                     let frame = frame?;
                     if settings::is_keepalive_answer(&frame) {
                         probe.answered();

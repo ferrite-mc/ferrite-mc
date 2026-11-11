@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -235,6 +236,79 @@ class CapturedStructureTest {
         var plank = back.getPalettes().get(0).getBlocks().stream().filter(b -> b.getX() == 1 && b.getZ() == 2 && b.getY() == 0).findFirst().orElseThrow();
         assertEquals(Material.OAK_PLANKS, plank.getType());
         assertEquals(12, manager.copy(back).getPalettes().get(0).getBlockCount());
+    }
+
+    @Test void entityEntriesSurviveTemplateSaveAndLoad() throws Exception {
+        var structure = new CapturedStructure(new BlockVector(4, 3, 2), List.of());
+        structure.structureEntities().add(new CapturedStructure.StructureEntity(
+            1.25, 0.5, 1.75,
+            Map.of("id", "minecraft:cow", "Health", 12.0f, "CustomName", "cow"),
+            Map.of("blockPos", List.of(1, 0, 1), "custom", "preserved")));
+        var out = new ByteArrayOutputStream();
+        StructureNbt.write(out, structure);
+        var loaded = StructureNbt.read(new ByteArrayInputStream(out.toByteArray()));
+        assertEquals(1, loaded.structureEntities().size());
+        var entity = loaded.structureEntities().get(0);
+        assertEquals(1.25, entity.x());
+        assertEquals(0.5, entity.y());
+        assertEquals(1.75, entity.z());
+        assertEquals("minecraft:cow", entity.nbt().get("id"));
+        assertEquals(12.0f, entity.nbt().get("Health"));
+        assertEquals("preserved", entity.extra().get("custom"));
+        assertEquals(List.of(1, 0, 1), entity.extra().get("blockPos"));
+    }
+
+    @Test void namedBinaryEntityNbtDecodesWithoutChangingTagTypes() throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new java.io.DataOutputStream(bytes)) {
+            out.writeByte(10); out.writeUTF("entity");
+            out.writeByte(8); out.writeUTF("id"); out.writeUTF("minecraft:cow");
+            out.writeByte(3); out.writeUTF("Health"); out.writeInt(17);
+            out.writeByte(0);
+        }
+        var nbt = StructureNbt.readEntityNbt(java.util.Base64.getEncoder().encodeToString(bytes.toByteArray()));
+        assertEquals("minecraft:cow", nbt.get("id"));
+        assertEquals(17, nbt.get("Health"));
+    }
+
+    @Test void loadedTemplateExposesItsCapturedEntities() throws Exception {
+        var structure = new CapturedStructure(new BlockVector(2, 2, 2), List.of());
+        structure.structureEntities().add(new CapturedStructure.StructureEntity(
+            0.25, 0.5, 1.25, Map.of("id", "minecraft:cow", "UUID", new int[] {0, 1, 0, 2}), Map.of()));
+        structure.structureEntities().add(new CapturedStructure.StructureEntity(
+            1.25, 0.5, 0.25, Map.of("id", "minecraft:pig"), Map.of()));
+        var out = new ByteArrayOutputStream();
+        StructureNbt.write(out, structure);
+        var loaded = StructureNbt.read(new ByteArrayInputStream(out.toByteArray()));
+        assertEquals(2, loaded.getEntityCount());
+        assertEquals(2, loaded.getEntities().size());
+        var cow = loaded.getEntities().get(0);
+        assertEquals(org.bukkit.entity.EntityType.COW, cow.getType());
+        assertEquals(new java.util.UUID(1, 2), cow.getUniqueId());
+        assertEquals(0.25, cow.getLocation().getX());
+        assertEquals(0.5, cow.getLocation().getY());
+        assertEquals(1.25, cow.getLocation().getZ());
+        assertThrows(UnsupportedOperationException.class, cow::remove);
+        assertEquals(org.bukkit.entity.EntityType.PIG, loaded.getEntities().get(1).getType());
+    }
+
+    @Test void entityTransformerCanRejectPlacedEntity() {
+        build();
+        var structure = new CapturedStructure(new BlockVector(2, 2, 2), List.of());
+        structure.structureEntities().add(new CapturedStructure.StructureEntity(
+            0.5, 0.0, 0.5, Map.of("id", "minecraft:pig"), Map.of()));
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> {
+            calls.add(owner + ":" + method);
+            return owner.equals("World") && method.equals("spawnEntity(Location,EntityType,String)")
+                ? "00000000-0000-0000-0000-000000000099" : "";
+        };
+        try {
+            List<EntityTransformer> transformers = List.of((region, x, y, z, entity, allowed) -> false);
+            structure.place(new Location(world, 930, 70, 930), true, StructureRotation.NONE, Mirror.NONE, 0, 1f,
+                new Random(1), List.of(), transformers);
+            assertTrue(calls.contains("Entity:remove()"), calls.toString());
+        } finally { HostBridge.transport = null; }
     }
 
     @Test void filesLiveWhereVanillaLooksAndDeleteRemovesThem() throws Exception {

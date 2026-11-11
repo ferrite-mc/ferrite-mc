@@ -49,6 +49,8 @@ pub struct GlobalPlayer {
     pub chat: PlayerChatState,
     /// Bukkit `Player#setDisplayName`: the sender name chat is decorated with, if a plugin set one.
     pub display_name: Option<String>,
+    /// Permission level at least 2; operators are exempt from the vanilla spam throttle.
+    pub op: bool,
 }
 impl GlobalPlayer {
     #[allow(clippy::too_many_arguments)]
@@ -78,6 +80,7 @@ impl GlobalPlayer {
             chat_type,
             chat: PlayerChatState::new(secure_chat),
             display_name: None,
+            op: false,
         }
     }
     fn info(&self) -> PlayerInfo {
@@ -285,6 +288,10 @@ impl GlobalRegion {
         let Some(player) = self.players.get_mut(&id) else {
             return;
         };
+        if !super::ratelimit::charge_chat(id, player.op) {
+            kick(player, "disconnect.spam");
+            return;
+        }
         // Vanilla `tryHandleChat`: hidden chat is rejected before the signature is even checked.
         if player.chat_visibility == 2 {
             tell(player, "Chat is disabled in your client settings");
@@ -360,6 +367,7 @@ impl GlobalRegion {
         }
     }
     pub fn leave(&mut self, id: Uuid) {
+        super::ratelimit::forget(id);
         if let Some(p) = self.players.remove(&id) {
             for other in self.players.values() {
                 send(other, &PlayerInfoRemove { uuids: vec![id] });
@@ -493,6 +501,7 @@ impl GlobalRegion {
         }
     }
     pub fn tick(&mut self) {
+        super::ratelimit::tick();
         let timings = self.timings.clone();
         let _tick = timings.as_ref().map(|t| t.scope("global-tick"));
         let _tracking = timings.as_ref().map(|t| t.scope("entity-tracking"));

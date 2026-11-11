@@ -18,7 +18,7 @@ use super::structure_template::{Mirror, Rotation, Template};
 
 use super::commands::{
     Action, Feedback, SlotMode, SlotSource, SlotTarget, Source, entity, item_display, parse_item,
-    send,
+    parse_item_components, send,
 };
 
 /// The block position of a `<pos>` argument (relative coordinates resolved).
@@ -61,7 +61,11 @@ fn run_with(
         .string("item")
         .ok_or_else(|| CommandError::failed("Missing item"))?;
     let item = parse_item(raw)?;
-    let count = ctx.integer("count").unwrap_or(1);
+    let mut stack = ItemStack::with_count(item, ctx.integer("count").unwrap_or(1));
+    for (id, tag) in parse_item_components(raw)? {
+        stack.components.insert_opaque(id, tag);
+    }
+    let count = stack.count;
     let max = ferrite_item::item_defaults(item).map_or(64, |defaults| defaults.max_stack_size);
     if !(1..=max).contains(&count) {
         return Err(CommandError::failed(format!(
@@ -75,7 +79,7 @@ fn run_with(
             mode,
             target: target(ctx, block)?,
             slots: ctx.string("slots").unwrap_or_default().to_owned(),
-            source: SlotSource::Stacks(vec![ItemStack::with_count(item, count)]),
+            source: SlotSource::Stacks(vec![stack]),
         },
     )
 }

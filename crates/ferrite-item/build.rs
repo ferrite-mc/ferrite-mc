@@ -39,14 +39,18 @@ fn main() {
         .join("components")
         .join("item");
     let enchantments = generated.join("data").join("minecraft").join("enchantment");
-    for path in [&registries, &item_reports, &enchantments] {
+    let banner_patterns = generated
+        .join("data")
+        .join("minecraft")
+        .join("banner_pattern");
+    for path in [&registries, &item_reports, &enchantments, &banner_patterns] {
         if !path.exists() {
             missing(path);
         }
     }
 
     println!("cargo:rerun-if-changed=build.rs");
-    for path in [&registries, &item_reports, &enchantments] {
+    for path in [&registries, &item_reports, &enchantments, &banner_patterns] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
@@ -66,6 +70,10 @@ fn main() {
     write_file(
         &out_dir.join("wire_registries.rs"),
         &gen_wire_registries(&registry, &enchantments),
+    );
+    write_file(
+        &out_dir.join("banner_patterns.rs"),
+        &gen_banner_patterns(&banner_patterns),
     );
 }
 
@@ -167,6 +175,47 @@ fn gen_wire_registries(registry: &serde_json::Value, enchantment_dir: &Path) -> 
         }
         out.push_str("];\n");
     }
+    out
+}
+
+/// Banner pattern metadata from `data/minecraft/banner_pattern`: `(name, asset id, translation
+/// key)`, sorted by name. The network component stores an inline asset id and translation key.
+fn gen_banner_patterns(dir: &Path) -> String {
+    let mut patterns = Vec::new();
+    for entry in fs::read_dir(dir).expect("failed to read banner_pattern directory") {
+        let path = entry.expect("failed to read banner_pattern entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let value = read_json(&path);
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("banner pattern file has a name");
+        let asset_id = value
+            .get("asset_id")
+            .and_then(|value| value.as_str())
+            .expect("banner pattern has an asset_id");
+        let translation_key = value
+            .get("translation_key")
+            .and_then(|value| value.as_str())
+            .expect("banner pattern has a translation_key");
+        patterns.push((
+            name.to_owned(),
+            asset_id.to_owned(),
+            translation_key.to_owned(),
+        ));
+    }
+    patterns.sort();
+
+    let mut out = String::from(
+        "/// `(name, asset id, translation key)` from the 26.3 banner_pattern data.\n",
+    );
+    out.push_str("pub static BANNER_PATTERNS: &[(&str, &str, &str)] = &[\n");
+    for (name, asset_id, translation_key) in patterns {
+        writeln!(out, "    ({name:?}, {asset_id:?}, {translation_key:?}),").expect("write");
+    }
+    out.push_str("];\n");
     out
 }
 

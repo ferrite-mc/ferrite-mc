@@ -107,8 +107,8 @@ final class FerriteTemplate implements Structure {
 
     @Override public List<Palette> getPalettes() { return captured().getPalettes(); }
     @Override public int getPaletteCount() { return captured().getPaletteCount(); }
-    @Override public List<Entity> getEntities() { return List.of(); }
-    @Override public int getEntityCount() { return 0; }
+    @Override public List<Entity> getEntities() { return captured().getEntities(); }
+    @Override public int getEntityCount() { return captured().getEntityCount(); }
     @Override public PersistentDataContainer getPersistentDataContainer() { return data; }
 
     @Override public void place(Location location, boolean includeEntities, StructureRotation rotation, Mirror mirror, int palette, float integrity, Random random) {

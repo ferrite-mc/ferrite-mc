@@ -448,8 +448,19 @@ fn villager_from_nbt(
     Some(state)
 }
 
+/// Serialize one supported live entity using the same fields as chunk persistence.
+/// Unknown fields cannot be emitted because the runtime entity model does not retain them.
+pub fn record_to_nbt(record: &EntityRecord) -> Option<Tag> {
+    entity_to_nbt(record).map(Tag::Compound)
+}
+
 fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     let data = &record.data;
+    // A fishing bobber is a transient projectile and its per-hook state is not in the save
+    // shape; writing it would restore a stateless hook that never bites again.
+    if data.fishing.is_some() {
+        return None;
+    }
     let props = ferrite_data::entity_props::get(data.kind);
     let mut c = Compound::new();
     c.insert("id".into(), Tag::String(props.key.to_owned()));
@@ -509,6 +520,10 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if let Some(thrower) = item.thrower {
             c.insert("Thrower".into(), Tag::IntArray(uuid_words(thrower)));
         }
+    }
+
+    if let Some(potion) = &data.potion {
+        c.insert("Potion".into(), Tag::Compound(potion.to_nbt().ok()?));
     }
 
     if let Some(arrow) = &data.arrow {
@@ -634,6 +649,13 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
     data.tick_count = int(c, "TickCount").unwrap_or(0).max(0) as u32;
     if let Some(Tag::List(List::String(tags))) = c.get("Tags") {
         data.tags = tags.iter().cloned().collect();
+    }
+
+    if let Some(Tag::Compound(potion)) = c.get("Potion")
+        && let Ok(stack) = ferrite_item::ItemStack::from_nbt(potion)
+        && !stack.is_empty()
+    {
+        data.potion = Some(stack);
     }
 
     if let Some(Tag::Compound(item)) = c.get("Item")

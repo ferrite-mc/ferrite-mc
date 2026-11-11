@@ -3,8 +3,8 @@
 //! `/compute` evaluates the context int/float providers of the extracted vanilla data
 //! (`context_int_provider`, `context_float_provider`, `predicate`). `/waypoint` keeps color and
 //! style per entity in [`super::commands_more::MoreState`]; [`super::waypoints`] sends them.
-//! `/ride` validates its arguments and then reports that riding is unsupported: the simulation
-//! has no vehicle/passenger model.
+//! `/ride` mounts or dismounts through [`super::ride`]; the region path walks the passengers and
+//! broadcasts the change.
 
 use std::path::PathBuf;
 

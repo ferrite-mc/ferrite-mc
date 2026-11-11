@@ -24,6 +24,22 @@ final class StructureNbt {
 
     private StructureNbt() {}
 
+    /** Decodes a base64 named-compound NBT snapshot emitted by the region owning an entity. */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> readEntityNbt(String base64) throws IOException {
+        if (base64 == null || base64.length() > 8_000_000) throw new IOException("Missing or oversized entity NBT");
+        final byte[] bytes;
+        try { bytes = java.util.Base64.getDecoder().decode(base64); }
+        catch (IllegalArgumentException error) { throw new IOException("Malformed entity NBT base64", error); }
+        try (var data = new DataInputStream(new java.io.ByteArrayInputStream(bytes))) {
+            if (data.readUnsignedByte() != 10) throw new IOException("Entity NBT root is not a compound");
+            data.readUTF();
+            Object value = payload(data, 10);
+            if (data.read() != -1 || !(value instanceof Map<?, ?> map)) throw new IOException("Malformed entity NBT payload");
+            return (Map<String, Object>) map;
+        }
+    }
+
     static void write(OutputStream out, CapturedStructure structure) throws IOException {
         var gzip = new GZIPOutputStream(out);
         var data = new DataOutputStream(gzip);
@@ -61,8 +77,15 @@ final class StructureNbt {
             writeBlocks(data, first, cell -> counter[0]++);
         }
         named(data, 9, "entities");
-        data.writeByte(0);
-        data.writeInt(0);
+        data.writeByte(10);
+        data.writeInt(structure.structureEntities().size());
+        for (var entity : structure.structureEntities()) {
+            var entry = new LinkedHashMap<String, Object>(entity.extra());
+            entry.put("pos", List.of(entity.x(), entity.y(), entity.z()));
+            entry.putIfAbsent("blockPos", List.of((int) Math.floor(entity.x()), (int) Math.floor(entity.y()), (int) Math.floor(entity.z())));
+            entry.put("nbt", entity.nbt());
+            writePayload(data, entry);
+        }
         named(data, 3, "DataVersion");
         data.writeInt(DATA_VERSION);
         data.writeByte(0);
@@ -204,7 +227,21 @@ final class StructureNbt {
             }
             result.add(cells);
         }
-        return new CapturedStructure(size, result);
+        var structure = new CapturedStructure(size, result);
+        var entities = list(map.get("entities"));
+        if (entities != null) {
+            for (var value : entities) {
+                if (!(value instanceof Map<?, ?> raw)) throw new IOException("Bad entity entry");
+                @SuppressWarnings("unchecked") var entry = (Map<String, Object>) raw;
+                var pos = list(entry.get("pos"));
+                if (pos == null || pos.size() != 3 || !(pos.get(0) instanceof Number) || !(pos.get(1) instanceof Number) || !(pos.get(2) instanceof Number) || !(entry.get("nbt") instanceof Map<?, ?> rawNbt)) throw new IOException("Bad entity entry");
+                @SuppressWarnings("unchecked") var nbt = (Map<String, Object>) rawNbt;
+                structure.structureEntities().add(new CapturedStructure.StructureEntity(
+                    ((Number) pos.get(0)).doubleValue(), ((Number) pos.get(1)).doubleValue(),
+                    ((Number) pos.get(2)).doubleValue(), nbt, new LinkedHashMap<>(entry)));
+            }
+        }
+        return structure;
     }
 
     @SuppressWarnings("unchecked")

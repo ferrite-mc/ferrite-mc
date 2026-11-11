@@ -32,6 +32,24 @@ impl Crafter for TestCrafter {
     fn recipe_id(&self, grid: &[ItemStack], width: usize) -> Option<String> {
         (!self.craft(grid, width).is_empty()).then(|| "minecraft:test_recipe".to_owned())
     }
+
+    fn enchantment_max_level(&self, enchantment: &str) -> Option<i32> {
+        (enchantment == "minecraft:sharpness").then_some(5)
+    }
+
+    fn enchantment_anvil_cost(&self, enchantment: &str) -> i32 {
+        if enchantment.ends_with("smite") { 2 } else { 1 }
+    }
+
+    fn enchantment_supports(&self, _enchantment: &str, item: &ItemStack) -> bool {
+        item.name()
+            .is_some_and(|name| name.ends_with("_sword") || name == "minecraft:enchanted_book")
+    }
+
+    fn enchantments_compatible(&self, first: &str, second: &str) -> bool {
+        let damage = |name: &str| name.ends_with("sharpness") || name.ends_with("smite");
+        !(damage(first) && damage(second))
+    }
 }
 
 struct Fixture {
@@ -194,7 +212,7 @@ fn anvil_repairs_renames_and_charges_levels() {
 
     // A rename alone costs one level and writes the custom name component.
     f.menu.set_slot(&mut f.inv, &TestCrafter, 0, first);
-    f.menu.rename("Excalibur".into());
+    f.menu.rename("Excalibur".into(), &TestCrafter);
     assert_eq!(f.menu.anvil_cost(), 1);
     assert!(matches!(
         f.menu
@@ -207,12 +225,109 @@ fn anvil_repairs_renames_and_charges_levels() {
     damaged
         .components
         .insert(component_ids::DAMAGE, Component::Damage(200));
-    f.menu.rename(String::new());
+    f.menu.rename(String::new(), &TestCrafter);
     f.menu.set_slot(&mut f.inv, &TestCrafter, 0, damaged);
     f.menu
         .set_slot(&mut f.inv, &TestCrafter, 1, item("iron_ingot", 2));
     assert_eq!(f.slot(2).damage(), 200 - 2 * (250 / 4));
     assert_eq!(f.menu.anvil_cost(), 2);
+}
+
+#[test]
+fn anvil_combines_enchantments_up_to_their_max_level() {
+    let mut f = Fixture::new(Menu::anvil(9));
+    let mut levels = Enchantments::new();
+    levels.set("minecraft:sharpness", 2);
+    let mut first = item("iron_sword", 1);
+    first
+        .components
+        .insert(component_ids::ENCHANTMENTS, Component::Enchantments(levels));
+    let mut second = first.copy_with_count(1);
+    second.components.insert(
+        component_ids::ENCHANTMENTS,
+        Component::Enchantments(first_enchantments()),
+    );
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 0, first);
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 1, second);
+    // Equal levels upgrade by one, capped by the data max; the new level costs one level.
+    let Some(Component::Enchantments(result)) =
+        f.slot(2).effective_component(component_ids::ENCHANTMENTS)
+    else {
+        panic!("the combined sword keeps its enchantments");
+    };
+    assert_eq!(result.level("minecraft:sharpness"), Some(3));
+    assert_eq!(f.menu.anvil_cost(), 1);
+
+    // An enchanted book applies its stored enchantments to an item and is consumed on take.
+    let mut book = item("enchanted_book", 1);
+    book.components.insert(
+        component_ids::STORED_ENCHANTMENTS,
+        Component::StoredEnchantments(first_enchantments()),
+    );
+    let mut plain = item("diamond_sword", 1);
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 0, plain);
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 1, book);
+    let Some(Component::Enchantments(result)) =
+        f.slot(2).effective_component(component_ids::ENCHANTMENTS)
+    else {
+        panic!("the book's stored enchantments move to the sword");
+    };
+    assert_eq!(result.level("minecraft:sharpness"), Some(2));
+    plain = f.slot(2);
+    assert_eq!(plain.name(), Some("minecraft:diamond_sword"));
+}
+
+#[test]
+fn anvil_applies_only_supported_and_compatible_enchantments() {
+    let mut f = Fixture::new(Menu::anvil(9));
+    // Sharpness cannot go on leather boots.
+    let mut book = item("enchanted_book", 1);
+    let mut levels = Enchantments::new();
+    levels.set("minecraft:sharpness", 3);
+    book.components.insert(
+        component_ids::STORED_ENCHANTMENTS,
+        Component::StoredEnchantments(levels),
+    );
+    f.menu
+        .set_slot(&mut f.inv, &TestCrafter, 0, item("leather_boots", 1));
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 1, book.clone());
+    assert!(f.slot(2).is_empty());
+
+    // The same book applies to a sword.
+    f.menu
+        .set_slot(&mut f.inv, &TestCrafter, 0, item("iron_sword", 1));
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 1, book);
+    let Some(Component::Enchantments(result)) =
+        f.slot(2).effective_component(component_ids::ENCHANTMENTS)
+    else {
+        panic!("sharpness is applied to the sword");
+    };
+    assert_eq!(result.level("minecraft:sharpness"), Some(3));
+
+    // A Smite book cannot join a sword that already has Sharpness.
+    let mut sword = item("iron_sword", 1);
+    let mut existing = Enchantments::new();
+    existing.set("minecraft:sharpness", 1);
+    sword.components.insert(
+        component_ids::ENCHANTMENTS,
+        Component::Enchantments(existing),
+    );
+    let mut smite = item("enchanted_book", 1);
+    let mut smite_levels = Enchantments::new();
+    smite_levels.set("minecraft:smite", 1);
+    smite.components.insert(
+        component_ids::STORED_ENCHANTMENTS,
+        Component::StoredEnchantments(smite_levels),
+    );
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 0, sword);
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 1, smite);
+    assert!(f.slot(2).is_empty());
+}
+
+fn first_enchantments() -> Enchantments {
+    let mut levels = Enchantments::new();
+    levels.set("minecraft:sharpness", 2);
+    levels
 }
 
 /// Station recipes for the non-furnace crafting stations.
