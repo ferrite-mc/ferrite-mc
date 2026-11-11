@@ -121,8 +121,8 @@ Merge gate on the merged tree (`265c336`): `fmt --check` 0, `clippy --workspace 
 
 ### Still open after wave 3
 
-- **R2 `rw-chunk-api`** — resumed after the trait-scope question; the worker chose defaulted `WorldView` methods.
-  Not yet landed.
+- **R2 `rw-chunk-api`** landed as `0f8ca6c` (merge `abdb2b6`): defaulted `WorldView` methods, `chunk_resident` /
+  `chunk_saved` on `AnvilChunkSource`, and one test per method; `ferrite-server` lib 760 passed.
 - `Block#setType` drops block-state properties (runtime world path).
 - Entities reappear only after a player re-enters a reopened world.
 - Join-time `register_player` still reports the default world; a player rejoining inside a runtime world would be reported wrong.
