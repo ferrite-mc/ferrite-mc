@@ -7921,6 +7921,22 @@ impl Region {
         true
     }
 
+    /// `World#ferriteSpawnSnapshot`: the entity an SNBT snapshot describes, keeping its NBT.
+    /// Returns whether something was spawned.
+    pub fn plugin_spawn_snapshot(
+        &mut self,
+        snbt: &str,
+        uuid: Uuid,
+        pos: [f64; 3],
+        yaw: f32,
+    ) -> bool {
+        let Some(record) = crate::plugins::snapshot::record_from_snbt(snbt, uuid, pos, yaw) else {
+            return false;
+        };
+        self.entities.insert(record);
+        true
+    }
+
     /// `World#dropItem`: an item entity at `center`; the natural variant scatters it a little
     /// and pops it up like a block drop. An unknown item is ignored.
     pub fn plugin_drop_item(
@@ -9275,7 +9291,7 @@ impl Region {
             });
         }
         stage!("finish");
-        self.publish_command_entities(&ctx.command_entities, ctx.dimension);
+        self.publish_command_entities(&ctx.command_entities, ctx.dimension, ctx.world_id);
     }
 
     /// Vanilla `BeaconBlockEntity`'s 80-tick timer: recompute each beacon's pyramid, resend the
@@ -9343,6 +9359,7 @@ impl Region {
         &mut self,
         index: &Arc<Mutex<super::entity_index::EntityIndex>>,
         dimension: super::Dimension,
+        world_id: super::WorldId,
     ) {
         index
             .lock()
@@ -9351,7 +9368,7 @@ impl Region {
         crate::plugins::facts::publish_entities(
             &mut self.published_facts,
             &self.entities,
-            dimension,
+            world_id,
         );
     }
 
@@ -10085,6 +10102,27 @@ mod tests {
         assert!(mob::state(&region.entities, key).unwrap().loot_dropped);
         region.tick(&ctx);
         assert_eq!(dropped_gear(&region).len(), 2, "gear drops exactly once");
+    }
+
+    #[test]
+    fn a_snapshot_spawns_a_mob_with_its_nbt_at_the_requested_spot() {
+        let mut source = Region::default();
+        let original = mob::new_mob(
+            MobKind::Zombie,
+            ferrite_math::Vec3::new(1.5, 64.0, 1.5),
+            &mut source.rng,
+        );
+        let snbt = crate::plugins::snapshot::entity_snbt(&original).expect("serializes");
+        let mut region = Region::default();
+        let uuid = Uuid::from_u128(0x5a47);
+        assert!(!region.plugin_spawn_snapshot("{id:\"minecraft:nope\"}", uuid, [0.0; 3], 0.0));
+        assert!(region.plugin_spawn_snapshot(&snbt, uuid, [40.5, 70.0, -9.5], 180.0));
+        let key = *region.entities.keys().first().expect("spawned");
+        let data = region.entities.data(key).unwrap();
+        assert_eq!(data.uuid, uuid);
+        assert_eq!(data.yaw, 180.0);
+        assert_eq!(region.entities.pos(key).unwrap().x, 40.5);
+        assert_eq!(region.entities.keys().len(), 1);
     }
 
     #[test]

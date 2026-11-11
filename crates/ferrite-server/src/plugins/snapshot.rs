@@ -21,8 +21,116 @@ pub fn answer(call: &HostCall) -> Option<String> {
             None => INVALID.to_owned(),
         }),
         ("Entity", "getEntitySnapshot()") => super::facts::entity_snapshot(&call.subject),
+        ("World", "ferriteEntities(int,int,int,int)") => world_entities(call),
         _ => None,
     }
+}
+
+/// Separates the fields of one record in a [`world_entities`] reply; records are separated by
+/// [`HOST_ITEM_SEPARATOR`] like every list reply.
+pub(super) const FIELD: char = '\u{1e}';
+
+/// The most chunks one `ferriteEntities` request may cover. A structure is at most 48 blocks per
+/// side (4 x 4 chunks); this leaves room for padding without letting a plugin walk the world.
+const MAX_CHUNKS: i64 = 1024;
+
+/// `World#ferriteEntities(minChunkX, minChunkZ, maxChunkX, maxChunkZ)`: every non-player entity of
+/// a runtime world whose position lies in the inclusive chunk range, one record per entity as
+/// `type, x, y, z, yaw, pitch, uuid, health, vx, vy, vz, name, nbt` separated by [`FIELD`].
+///
+/// `health` and `name` use [`HOST_NULL`], `nbt` is the base64 SNBT of the entity's saved form.
+/// The default world and the other vanilla dimensions are not answered (`None`): their entities
+/// are published without NBT, and a snapshot that could not be turned back into the same entity
+/// is worse than an explicit "unsupported".
+fn world_entities(call: &HostCall) -> Option<String> {
+    let world = Uuid::parse_str(&call.subject).ok()?;
+    if world == ferrite_plugin::default_world_id() || call.args.len() != 4 {
+        return None;
+    }
+    let bounds: Vec<i32> = call
+        .args
+        .iter()
+        .map(|arg| arg.parse().ok())
+        .collect::<Option<_>>()?;
+    let (min_x, min_z, max_x, max_z) = (bounds[0], bounds[1], bounds[2], bounds[3]);
+    let width = i64::from(max_x) - i64::from(min_x) + 1;
+    let depth = i64::from(max_z) - i64::from(min_z) + 1;
+    if width < 1 || depth < 1 || width * depth > MAX_CHUNKS {
+        return None;
+    }
+    Some(super::facts::runtime_snapshots(
+        world,
+        (min_x, min_z),
+        (max_x, max_z),
+    ))
+}
+
+/// Encodes one entity's NBT as SNBT, for the snapshot a plugin can turn back into an entity.
+pub(crate) fn entity_snbt(record: &ferrite_entity::EntityRecord) -> Option<String> {
+    let Tag::Compound(root) = crate::game::entities_to_nbt(std::slice::from_ref(record)) else {
+        return None;
+    };
+    let Some(Tag::List(List::Compound(entities))) = root.get("Entities") else {
+        return None;
+    };
+    let entity = entities.first()?;
+    Some(ferrite_nbt::snbt::format(&Tag::Compound(entity.clone())))
+}
+
+/// A live entity record for `snbt`, placed at `pos` facing `yaw` and carrying `uuid`.
+///
+/// The UUID and position come from the caller so a snapshot placed twice never produces two
+/// entities with the same identity. `None` when the SNBT is not a known, loadable entity.
+pub(crate) fn record_from_snbt(
+    snbt: &str,
+    uuid: Uuid,
+    pos: [f64; 3],
+    yaw: f32,
+) -> Option<ferrite_entity::EntityRecord> {
+    let Ok(Tag::Compound(entity)) = ferrite_nbt::snbt::parse(snbt) else {
+        return None;
+    };
+    let mut root = ferrite_nbt::Compound::new();
+    root.insert("Entities".into(), Tag::List(List::Compound(vec![entity])));
+    let mut record = crate::game::entities_from_nbt(&Tag::Compound(root))
+        .into_iter()
+        .next()?;
+    record.pos = ferrite_math::Vec3::new(pos[0], pos[1], pos[2]);
+    record.data.uuid = uuid;
+    record.data.yaw = yaw;
+    Some(record)
+}
+
+/// `World#ferriteSpawnSnapshot(snbt, uuid, x, y, z, yaw)` on a runtime world: puts the entity the
+/// SNBT describes into the world at the given spot under the given UUID.
+pub fn command(call: &HostCall) -> Option<ferrite_plugin::PlayerCommand> {
+    if call.owner != "World"
+        || call.method != "ferriteSpawnSnapshot(String,String,double,double,double,double)"
+    {
+        return None;
+    }
+    let world = Uuid::parse_str(&call.subject).ok()?;
+    if call.args.len() != 6 {
+        return None;
+    }
+    let uuid = Uuid::parse_str(&call.args[1]).ok()?;
+    let mut numbers = [0.0f64; 4];
+    for (slot, arg) in numbers.iter_mut().zip(&call.args[2..]) {
+        *slot = arg.parse().ok().filter(|value: &f64| value.is_finite())?;
+    }
+    let pos = [numbers[0], numbers[1], numbers[2]];
+    if pos.iter().any(|value| value.abs() > 30_000_000.0) {
+        return None;
+    }
+    // Validate here so a bad snapshot is refused with an error reply instead of vanishing later.
+    record_from_snbt(&call.args[0], uuid, pos, numbers[3] as f32)?;
+    Some(ferrite_plugin::PlayerCommand::SpawnSnapshot {
+        world,
+        snbt: call.args[0].clone(),
+        uuid,
+        pos,
+        yaw: numbers[3] as f32,
+    })
 }
 
 /// Parses one entity's SNBT and encodes what Bukkit's snapshot can carry.
@@ -193,5 +301,142 @@ mod tests {
             args: vec![],
         };
         assert_eq!(answer(&gone), None);
+    }
+
+    use crate::game::{Dimension, WorldId};
+    use ferrite_entity::{EntityStore, Rng, mob::MobKind};
+    use ferrite_math::Vec3;
+
+    fn zombie(uuid: Uuid) -> ferrite_entity::EntityRecord {
+        let mut record = ferrite_entity::mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(12.5, 64.0, -3.5),
+            &mut Rng::default(),
+        );
+        record.data.uuid = uuid;
+        record.data.yaw = 45.0;
+        record
+    }
+
+    fn ask(world: Uuid, args: [&str; 4]) -> Option<String> {
+        answer(&HostCall {
+            owner: "World".into(),
+            subject: world.to_string(),
+            method: "ferriteEntities(int,int,int,int)".into(),
+            args: args.map(str::to_owned).to_vec(),
+        })
+    }
+
+    #[test]
+    fn a_runtime_world_lists_its_entities_with_nbt_inside_the_chunk_range() {
+        let world = Uuid::new_v4();
+        let uuid = Uuid::new_v4();
+        let mut store = EntityStore::new(3);
+        store.insert(zombie(uuid));
+        let mut owned = std::collections::HashSet::new();
+        super::super::facts::publish_entities(&mut owned, &store, WorldId::Runtime(world));
+
+        let reply = ask(world, ["0", "-1", "0", "-1"]).expect("runtime worlds answer");
+        let records: Vec<_> = reply.split(HOST_ITEM_SEPARATOR).collect();
+        assert_eq!(records.len(), 1, "{reply:?}");
+        let fields: Vec<_> = records[0].split(FIELD).collect();
+        assert_eq!(fields.len(), 13, "{fields:?}");
+        assert_eq!(fields[0], "minecraft:zombie");
+        assert_eq!(&fields[1..4], &["12.5", "64", "-3.5"]);
+        assert_eq!(fields[4], "45");
+        assert_eq!(fields[6], uuid.to_string());
+        assert_ne!(fields[7], HOST_NULL, "a zombie has health");
+        use base64::Engine as _;
+        let nbt = base64::engine::general_purpose::STANDARD
+            .decode(fields[12])
+            .unwrap();
+        let Ok(Tag::Compound(root)) = ferrite_nbt::snbt::parse(std::str::from_utf8(&nbt).unwrap())
+        else {
+            panic!("the record carries SNBT");
+        };
+        assert_eq!(
+            root.get("id"),
+            Some(&Tag::String("minecraft:zombie".to_owned()))
+        );
+
+        // Outside the range, in another world, or for an unsupported request: nothing.
+        assert_eq!(ask(world, ["5", "5", "6", "6"]).as_deref(), Some(""));
+        assert_eq!(
+            ask(Uuid::new_v4(), ["0", "-1", "0", "-1"]).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            ask(ferrite_plugin::default_world_id(), ["0", "-1", "0", "-1"]),
+            None
+        );
+        assert_eq!(ask(world, ["0", "0", "100", "100"]), None, "range cap");
+        assert_eq!(ask(world, ["1", "0", "0", "0"]), None, "inverted range");
+
+        let empty = EntityStore::new(3);
+        super::super::facts::publish_entities(&mut owned, &empty, WorldId::Runtime(world));
+        assert_eq!(ask(world, ["0", "-1", "0", "-1"]).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn overworld_entities_stay_out_of_runtime_world_listings() {
+        let world = Uuid::new_v4();
+        let mut store = EntityStore::new(3);
+        store.insert(zombie(Uuid::new_v4()));
+        let mut owned = std::collections::HashSet::new();
+        super::super::facts::publish_entities(
+            &mut owned,
+            &store,
+            WorldId::Vanilla(Dimension::Overworld),
+        );
+        assert_eq!(ask(world, ["0", "-1", "0", "-1"]).as_deref(), Some(""));
+        let empty = EntityStore::new(3);
+        super::super::facts::publish_entities(&mut owned, &empty, Dimension::Overworld);
+    }
+
+    #[test]
+    fn a_snapshot_becomes_an_entity_under_the_requested_identity() {
+        let original = zombie(Uuid::new_v4());
+        let snbt = entity_snbt(&original).expect("a zombie serializes");
+        let fresh = Uuid::new_v4();
+        let record = record_from_snbt(&snbt, fresh, [100.5, 70.0, -20.5], 90.0).expect("loads");
+        assert_eq!(record.data.uuid, fresh);
+        assert_ne!(record.data.uuid, original.data.uuid);
+        assert_eq!(record.pos, Vec3::new(100.5, 70.0, -20.5));
+        assert_eq!(record.data.yaw, 90.0);
+        assert_eq!(record.data.kind, original.data.kind);
+        assert!(record_from_snbt("{id:\"minecraft:not_a_mob\"}", fresh, [0.0; 3], 0.0).is_none());
+        assert!(record_from_snbt("garbage", fresh, [0.0; 3], 0.0).is_none());
+    }
+
+    #[test]
+    fn the_spawn_op_is_a_validated_command() {
+        let world = Uuid::new_v4();
+        let uuid = Uuid::new_v4();
+        let snbt = entity_snbt(&zombie(Uuid::new_v4())).unwrap();
+        let call = |snbt: &str, x: &str| HostCall {
+            owner: "World".into(),
+            subject: world.to_string(),
+            method: "ferriteSpawnSnapshot(String,String,double,double,double,double)".into(),
+            args: vec![
+                snbt.into(),
+                uuid.to_string(),
+                x.into(),
+                "70".into(),
+                "2".into(),
+                "90".into(),
+            ],
+        };
+        assert_eq!(
+            command(&call(&snbt, "1.5")),
+            Some(ferrite_plugin::PlayerCommand::SpawnSnapshot {
+                world,
+                snbt: snbt.clone(),
+                uuid,
+                pos: [1.5, 70.0, 2.0],
+                yaw: 90.0,
+            })
+        );
+        assert_eq!(command(&call(&snbt, "NaN")), None);
+        assert_eq!(command(&call("{id:\"minecraft:nope\"}", "1")), None);
     }
 }

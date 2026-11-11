@@ -74,6 +74,8 @@ mod dispenser;
 pub(crate) mod drops;
 mod entity_index;
 mod entity_save;
+// Only the record codec is shared with plugin snapshots; the rest of `entity_save` names `Region`.
+pub(crate) use entity_save::{from_nbt as entities_from_nbt, to_nbt as entities_to_nbt};
 mod runtime_persist;
 pub use explosion::{CHARGED_CREEPER_POWER, CREEPER_POWER, TNT_POWER};
 mod explosion;
@@ -2043,6 +2045,13 @@ async fn run(
                                 worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid, owner); });
                             }
                         }
+                         Some(ferrite_plugin::PlayerCommand::SpawnSnapshot { world, snbt, uuid, pos, yaw }) => {
+                            let target = if world == ferrite_plugin::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
+                            let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+                            if worlds.owner_world(target, chunk).is_some() {
+                                worlds.schedule_at_world_chunk(target, chunk, move |r| { r.plugin_spawn_snapshot(&snbt, uuid, pos, yaw); });
+                            }
+                        }
                          Some(ferrite_plugin::PlayerCommand::EntityOp { uuid, op }) => {
                             if let Some(at) = crate::plugins::facts::entity_position(uuid) {
                                 let chunk = ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
@@ -2806,7 +2815,8 @@ fn route_plugin_command(
         | PlayerCommand::UpdateCommands { .. }
         | PlayerCommand::EntityOp { .. }
         | PlayerCommand::DropItem { .. }
-        | PlayerCommand::SpawnEntity { .. } => {}
+        | PlayerCommand::SpawnEntity { .. }
+        | PlayerCommand::SpawnSnapshot { .. } => {}
         // The game loop sends display names to the global region before calling this.
         PlayerCommand::DisplayName { .. } => {
             tracing::debug!("plugin display name reached the player router")

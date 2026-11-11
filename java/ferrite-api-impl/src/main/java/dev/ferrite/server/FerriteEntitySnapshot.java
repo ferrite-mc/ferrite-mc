@@ -23,6 +23,8 @@ final class FerriteEntitySnapshot implements org.bukkit.entity.EntitySnapshot {
     private final String name;
     private volatile org.bukkit.World world;
     private volatile boolean valid = true;
+    /** True when {@link #snbt} is the host's full saved NBT, so the host can rebuild the same entity. */
+    private boolean hostNbt;
 
     private FerriteEntitySnapshot(org.bukkit.entity.EntityType type, String snbt, org.bukkit.Location location,
                                   UUID uniqueId, double health, org.bukkit.util.Vector velocity, String name) {
@@ -52,6 +54,23 @@ final class FerriteEntitySnapshot implements org.bukkit.entity.EntitySnapshot {
         String name = parts[11].equals(HostBridge.NULL) ? null
                 : new String(java.util.Base64.getDecoder().decode(parts[11]), java.nio.charset.StandardCharsets.UTF_8);
         return new FerriteEntitySnapshot(type, snbt, location, uuid, health, velocity, name);
+    }
+
+    /** Separates the fields of one {@code World#ferriteEntities} record. */
+    static final char FIELD = '\u001e';
+
+    /**
+     * Decodes one record of the host's entity listing: the twelve snapshot fields followed by the
+     * base64 SNBT of the entity's saved form, which {@link #createEntity} hands back to the host.
+     */
+    static FerriteEntitySnapshot fromRecord(String record) {
+        var parts = record.split(java.util.regex.Pattern.quote(String.valueOf(FIELD)), -1);
+        if (parts.length != 13) throw new IllegalArgumentException("Ferrite: malformed entity record from the host");
+        var wire = String.join(String.valueOf(HostBridge.ITEM), java.util.Arrays.copyOf(parts, 12));
+        var nbt = new String(java.util.Base64.getDecoder().decode(parts[12]), java.nio.charset.StandardCharsets.UTF_8);
+        var snapshot = fromWire(wire, nbt);
+        snapshot.hostNbt = true;
+        return snapshot;
     }
 
     /** Takes a snapshot of a live handle; values the host does not expose stay absent. */
@@ -102,7 +121,19 @@ final class FerriteEntitySnapshot implements org.bukkit.entity.EntitySnapshot {
         java.util.Objects.requireNonNull(at, "location");
         var target = at.clone();
         if (target.getWorld() == null) throw new IllegalArgumentException("Location has no world");
-        var entity = target.getWorld().spawnEntity(target, type);
+        org.bukkit.entity.Entity entity;
+        if (hostNbt) {
+            // The host rebuilds the entity from its saved NBT under a fresh identity, so the copy
+            // never collides with the entity the snapshot was taken from.
+            var id = UUID.randomUUID();
+            if (!HostBridge.callBoolean("World", target.getWorld().getUID(), "ferriteSpawnSnapshot(String,String,double,double,double,double)",
+                    snbt, id, target.getX(), target.getY(), target.getZ(), (double) target.getYaw())) {
+                throw new IllegalStateException("Ferrite: the host refused to spawn the entity snapshot");
+            }
+            entity = SpawnedEntity.of(type, target, target.getWorld(), id);
+        } else {
+            entity = target.getWorld().spawnEntity(target, type);
+        }
         world = target.getWorld();
         valid = true;
         return entity;
