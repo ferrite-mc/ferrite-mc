@@ -5909,8 +5909,8 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
     let cow = cow.unwrap();
 
     // Cross-region/cross-world travel: into a runtime world sharing the overworld's rules.
-    let (runtime, _, _) = world
-        .create_runtime_world("travel", super::Dimension::Overworld, [0, 65, 0])
+    let (runtime, _, _, _) = world
+        .create_runtime_world("travel", super::Dimension::Overworld, [0, 65, 0], 0)
         .await
         .unwrap();
     commands
