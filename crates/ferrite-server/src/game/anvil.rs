@@ -1616,6 +1616,40 @@ mod tests {
         assert!(open(Dimension::Nether).load_forced_chunks().is_empty());
     }
 
+    #[tokio::test]
+    async fn chunk_saved_sees_a_chunk_on_disk_that_is_not_resident() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(
+            RuntimeRegistry::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../vanilla/26.3/generated"),
+            )
+            .unwrap(),
+        );
+        let open = || {
+            AnvilChunkSource::with_dimension(
+                dir.path().to_path_buf(),
+                registry.clone(),
+                None,
+                Dimension::Overworld,
+            )
+        };
+        let first = open();
+        assert!(!first.chunk_saved(3, -2), "nothing is on disk yet");
+        assert!(first.ensure_chunk_loaded(3, -2, std::time::Duration::from_secs(10)));
+        assert!(first.chunk_resident(3, -2));
+        first.flush_chunk(3, -2).await.unwrap();
+        assert!(first.chunk_saved(3, -2), "flushed to the region file");
+        assert!(!first.chunk_saved(4, -2), "a neighbour was never written");
+        drop(first);
+
+        // A fresh source over the same directory stands in for an evicted chunk.
+        let second = open();
+        assert!(!second.chunk_resident(3, -2), "nothing is resident yet");
+        assert!(second.chunk_saved(3, -2), "the chunk is still on disk");
+        assert!(!second.chunk_resident(3, -2), "asking never loads it");
+    }
+
     use super::*;
 
     async fn ready(source: &Arc<AnvilChunkSource>, x: i32, z: i32, biome: i32) -> Arc<[u8]> {

@@ -425,15 +425,13 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 return !chunkLoaded(cx, cz);
             }
             case "loadChunk" -> {
-                // Chunk handles are views that need no loading step. `generate` (default true)
-                // forces generation by reading one block of the chunk through the world view.
+                // The host loads the chunk (generating it only when `generate` is set) and
+                // answers whether it is now loaded or generated.
                 int cx, cz; boolean generate = true;
                 if (args[0] instanceof org.bukkit.Chunk c) { cx = c.getX(); cz = c.getZ(); if (args.length > 1) generate = (boolean) args[1]; }
                 else { cx = (int) args[0]; cz = (int) args[1]; if (args.length > 2) generate = (boolean) args[2]; }
-                if ((boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, cx, cz)) return true;
-                if (!generate) return false;
-                typeAt(new Pos(cx << 4, 64, cz << 4));
-                return true;
+                if (!generate && !(boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, cx, cz)) return false;
+                return (boolean) HostBridge.call("World", id, "loadChunk(int,int)", Boolean.class, cx, cz);
             }
             case "findLightningRod" -> { return findRod((org.bukkit.Location) args[0]); }
             case "findLightningTarget" -> {
@@ -451,9 +449,9 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 return chunks.toArray(new org.bukkit.Chunk[0]);
             }
             case "getType" -> { if (args.length == 3) return typeAt(new Pos((int) args[0], (int) args[1], (int) args[2])); }
-            case "getBlockData" -> { if (args.length == 3) return FerriteBlockData.create(typeAt(new Pos((int) args[0], (int) args[1], (int) args[2]))); }
+            case "getBlockData" -> { if (args.length == 3) return FerriteBlockData.create(stateAt(new Pos((int) args[0], (int) args[1], (int) args[2]))); }
             case "setBlockData" -> {
-                if (args.length == 4) { setType(new Pos((int) args[0], (int) args[1], (int) args[2]), ((org.bukkit.block.data.BlockData) args[3]).getMaterial()); return null; }
+                if (args.length == 4) { setState(new Pos((int) args[0], (int) args[1], (int) args[2]), (org.bukkit.block.data.BlockData) args[3]); return null; }
             }
             case "getWorldType" -> { return org.bukkit.WorldType.NORMAL; }
             case "setSpawnFlags" -> { allowMonsters = (boolean) args[0]; allowAnimals = (boolean) args[1]; return null; }

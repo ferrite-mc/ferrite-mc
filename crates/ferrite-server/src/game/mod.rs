@@ -1909,6 +1909,13 @@ async fn run(
                               let _ = runtime_world_catalog.unload(id);
                               return Err("plugin world view already contains this UUID".to_owned());
                           }
+                          // Entities saved by an earlier session load with the world, not when a
+                          // player first walks into their chunk. The world keeps one hold per such
+                          // chunk (dropped again on unload); players' holds stack on top of it.
+                          if let Some(storage) = world_storage_root(entity_world.as_deref(), WorldId::Runtime(id), &runtime_world_catalog) {
+                              let saved = entity_save::saved_chunks(&storage).into_iter().map(|(x, z)| ChunkPos(x, z));
+                              add_holds(&worlds, &mut holds, Some(storage), WorldId::Runtime(id), saved);
+                          }
                           Ok((id, descriptor.name, descriptor.spawn, descriptor.seed))
                       })();
                       let _ = complete.send(result);
@@ -1918,6 +1925,9 @@ async fn run(
                       let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, |descriptor| make_runtime_ctx(descriptor, &shared_tree), settings.runtime_world_view.as_ref())
                           .await
                           .map_err(|error| format!("{error:#}"));
+                      if matches!(result, Ok(true)) {
+                          holds.retain(|(world, _), _| *world != WorldId::Runtime(id));
+                      }
                       let _ = complete.send(result);
                   },
                   GameMessage::SetPluginHooks{hooks,complete}=>{
