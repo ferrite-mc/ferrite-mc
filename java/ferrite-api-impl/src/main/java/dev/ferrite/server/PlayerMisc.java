@@ -646,6 +646,17 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Instant expires, String source) { return (E) applyBan(reason, expires == null ? null : java.util.Date.from(expires), source, true); }
     @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source, boolean kick) { return (E) applyBan(reason, duration == null ? null : java.util.Date.from(java.time.Instant.now().plus(duration)), source, kick); }
     @Override public <E extends org.bukkit.BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(String reason, java.time.Duration duration, String source) { return (E) applyBan(reason, duration == null ? null : java.util.Date.from(java.time.Instant.now().plus(duration)), source, true); }
+    /** Bans the address this player connected from (`Player#banIp`); the server list forwards it to `/ban-ip`. */
+    private org.bukkit.BanEntry<java.net.InetAddress> applyBanIp(String reason, java.util.Date expires, String source, boolean kick) {
+        var address = getAddress().getAddress();
+        var list = (org.bukkit.ban.IpBanList) getServer().getBanList(org.bukkit.BanList.Type.IP);
+        var entry = list.addBan(address, reason, expires, source);
+        if (kick) kickPlayer(reason);
+        return entry;
+    }
+    @Override public org.bukkit.BanEntry<java.net.InetAddress> banIp(String reason, java.util.Date expires, String source, boolean kick) { return applyBanIp(reason, expires, source, kick); }
+    @Override public org.bukkit.BanEntry<java.net.InetAddress> banIp(String reason, java.time.Instant expires, String source, boolean kick) { return applyBanIp(reason, expires == null ? null : java.util.Date.from(expires), source, kick); }
+    @Override public org.bukkit.BanEntry<java.net.InetAddress> banIp(String reason, java.time.Duration duration, String source, boolean kick) { return applyBanIp(reason, duration == null ? null : java.util.Date.from(java.time.Instant.now().plus(duration)), source, kick); }
     @Override public boolean isBanned() { return ((org.bukkit.ban.ProfileBanList) getServer().getBanList(org.bukkit.BanList.Type.PROFILE)).isBanned((org.bukkit.profile.PlayerProfile) getPlayerProfile()); }
 
     // ---- connection --------------------------------------------------------------------------------------------
