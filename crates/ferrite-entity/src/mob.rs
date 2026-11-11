@@ -522,6 +522,18 @@ pub fn hurt(
     amount: f32,
     source: Option<Vec3>,
 ) -> Option<Hurt> {
+    hurt_with(store, key, amount, source, false)
+}
+
+/// [`hurt`] with control over armour. Sources tagged as bypassing armour (explosions in this
+/// server's damage model) pass `bypass_armor` so the hit lands at full strength.
+pub fn hurt_with(
+    store: &mut EntityStore,
+    key: EntityKey,
+    amount: f32,
+    source: Option<Vec3>,
+    bypass_armor: bool,
+) -> Option<Hurt> {
     if !amount.is_finite() || amount <= 0.0 {
         return None;
     }
@@ -536,7 +548,7 @@ pub fn hurt(
         return Some(Hurt::Immune);
     }
     // `CombatRules.getDamageAfterAbsorb`: armour takes away up to 80% of a hit.
-    let amount = if state.armor_points > 0.0 {
+    let amount = if state.armor_points > 0.0 && !bypass_armor {
         let reduction = (state.armor_points / 5.0)
             .max(state.armor_points - amount / 2.0)
             .clamp(0.0, 20.0);
