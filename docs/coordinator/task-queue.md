@@ -92,3 +92,17 @@ P6 needs P5. L1 and L2 need nothing and are running. Push is unblocked: `origin/
 - fable hit the provider usage limit mid-survey; P5 was rerun on `sonnet` and landed. L1 and L2 workers also stopped at their limits; the coordinator closed both out.
 - L2's failing test was a test bug: the region never loaded chunk (0,0). Fixed by awaiting `source.get(0,0,0)` as the older blast test does.
 - P5 left open and documented in its report: `/summon` inside a runtime world still lands in the overworld; `createWorld`/`unloadWorld` called from a plugin command deadlock the game loop; `Player#getWorld` still reports the default world; `isChunkLoaded`/`isChunkGenerated`/`loadChunk` unimplemented on runtime worlds; entities reappear only after a player re-enters; block-state properties are dropped on the `setType` path.
+
+## Dispatched 2026-11-11 (wave 3) — runtime-world gaps, all on sonnet
+
+Base: `main` `7a0ae81`. Worktrees under `/home/ubuntu/orca/workspaces/ferrite-mc/<lane>`, each with `vanilla` symlinked.
+
+| Lane | Branch | Terminal | Target |
+|---|---|---|---|
+| R1 | `rw-player-world` | `term_a452282d` | `/summon` and `Player#getWorld` resolve the player's runtime world |
+| R2 | `rw-chunk-api` | `term_dffde10b` | `isChunkLoaded` / `isChunkGenerated` / `loadChunk` for runtime worlds |
+| R3 | `rw-plugin-cmd-thread` | `term_ec631ec3` | `createWorld` / `unloadWorld` from a plugin command no longer deadlock the loop |
+
+All three confirmed `input_accepted -> turn_started`. Each owner commits on its own branch, no push, no merge.
+
+**Next session:** collect the three reports, run `fmt --check`, `clippy --workspace --all-targets -- -D warnings` and the relevant tests per branch, merge into `main`, push, and delete the worktrees. Still open after that: block-state properties dropped on the `setType` path, and entities only reappearing after a player re-enters a reopened world.
