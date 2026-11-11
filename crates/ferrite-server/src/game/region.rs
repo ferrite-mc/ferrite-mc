@@ -5642,6 +5642,10 @@ impl Region {
                 // The block survived but an older save never wrote its block entity; do not
                 // replay the creation beam for a gateway that has been open for a while.
                 gateway_entities.push(at);
+            } else {
+                // Keep the stored `Age` moving so a viewer who arrives later, or the chunk
+                // after a reload, does not see the creation beam start again from zero.
+                super::end_fight::advance_gateway_age(source, at);
             }
         }
         if !blocks.is_empty() {

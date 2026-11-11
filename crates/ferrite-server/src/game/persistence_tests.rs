@@ -291,3 +291,167 @@ fn unloading_and_reloading_a_chunk_twice_keeps_one_entity() {
 
     let _ = std::fs::remove_dir_all(world);
 }
+
+/// `PistonWorld` over a chunk source, so the planner runs against a real (disk-backed) world.
+struct SourceWorld<'a>(&'a AnvilChunkSource);
+impl super::piston::PistonWorld for SourceWorld<'_> {
+    fn block(&self, [x, y, z]: [i32; 3]) -> Option<u16> {
+        u16::try_from(self.0.block(x, y, z)?).ok()
+    }
+    fn has_block_entity(&self, [x, y, z]: [i32; 3]) -> bool {
+        self.0.block_entity(x, y, z).is_some()
+    }
+}
+
+/// The move is committed atomically before the two-tick `moving_piston` overlay starts, and the
+/// overlay is never written to the chunk. A restart inside that window must therefore reload
+/// the final blocks, not a half-moved world or a leftover moving block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_during_the_piston_overlay_keeps_the_committed_final_state() {
+    let Some(root) = vanilla_root() else {
+        eprintln!("SKIP persistence test: vanilla/26.3/generated is absent");
+        return;
+    };
+    let world = temp_dir("piston-restart");
+    let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+    let source = AnvilChunkSource::new(world.clone(), registry);
+    await_chunk(&source, 0, 0).await;
+
+    let piston = |extended: &str| {
+        u32::from(
+            ferrite_data::blocks::state_id("piston", &[("facing", "east"), ("extended", extended)])
+                .expect("piston state"),
+        )
+    };
+    let base = [0, 64, 0];
+    source.set_block(0, 64, 0, piston("false")).unwrap();
+    source.set_block(1, 64, 0, state("stone")).unwrap();
+    source.set_block(2, 64, 0, state("air")).unwrap();
+
+    let operation = super::piston::operation(
+        &SourceWorld(&source),
+        base,
+        ferrite_math::Direction::East,
+        true,
+    )
+    .expect("a piston with one stone in front extends");
+    source.compare_set_blocks(&operation.edits).unwrap();
+    // The animation would now run for two ticks in the region; the server stops inside it.
+    let committed: Vec<_> = operation
+        .edits
+        .iter()
+        .map(|&([x, y, z], _, state)| ([x, y, z], state))
+        .collect();
+    assert_eq!(committed.len(), 3, "base, head cell and the pushed stone");
+    source.flush_chunk(0, 0).await.unwrap();
+    drop(source);
+
+    let registry = ferrite_world::RuntimeRegistry::load(&root).unwrap();
+    let source = AnvilChunkSource::new(world.clone(), registry);
+    await_chunk(&source, 0, 0).await;
+    for ([x, y, z], expected) in &committed {
+        assert_eq!(
+            source.block(*x, *y, *z),
+            Some(*expected),
+            "committed state at {:?} after the restart",
+            [x, y, z]
+        );
+    }
+    assert_eq!(source.block(0, 64, 0), Some(piston("true")));
+    assert_eq!(source.block(2, 64, 0), Some(state("stone")));
+    let moving = state("moving_piston");
+    for x in 0..=3 {
+        assert_ne!(
+            source.block(x, 64, 0),
+            Some(moving),
+            "the transient overlay block must not be persisted"
+        );
+        assert!(
+            source.block_entity(x, 64, 0).is_none(),
+            "the transient piston block entity must not be persisted"
+        );
+    }
+}
+
+/// A gateway opened by the dragon starts at `Age` 0, ages on the server and keeps the age it
+/// reached through a save, so the chunk packet a viewer gets after a reload does not start the
+/// 200-tick creation beam over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reloaded_end_gateway_keeps_its_age_and_never_replays_the_creation_beam() {
+    use super::end_fight::{GATEWAY_SPAWN_TICKS, advance_gateway_age, gateway_block_entity};
+    let Some(root) = vanilla_root() else {
+        eprintln!("SKIP persistence test: vanilla/26.3/generated is absent");
+        return;
+    };
+    let world = temp_dir("gateway-age");
+    let open = || {
+        let registry = std::sync::Arc::new(ferrite_world::RuntimeRegistry::load(&root).unwrap());
+        AnvilChunkSource::with_dimension(world.clone(), registry, None, super::Dimension::End)
+    };
+    let age = |source: &AnvilChunkSource, at: [i32; 3]| match source
+        .block_entity(at[0], at[1], at[2])
+        .and_then(|e| e.data.get("Age").cloned())
+    {
+        Some(Tag::Long(age)) => age,
+        other => panic!("gateway block entity without a long Age: {other:?}"),
+    };
+    let at = super::end_fight::gateway_position(0);
+    let (cx, cz) = (at[0].div_euclid(16), at[2].div_euclid(16));
+
+    let source = open();
+    // The 3x3 gateway cross straddles chunk borders (x 95..97, z -1..1).
+    for (x, z) in [(cx - 1, cz - 1), (cx - 1, cz), (cx, cz - 1), (cx, cz)] {
+        await_chunk(&source, x, z).await;
+    }
+    for (pos, block) in super::end_fight::gateway_blocks(at) {
+        source
+            .set_block(pos[0], pos[1], pos[2], u32::from(block))
+            .unwrap();
+    }
+    let entity = gateway_block_entity(0).unwrap();
+    source
+        .update_block_entity(at[0], at[1], at[2], |slot| {
+            *slot = Some(entity.clone());
+            (true, ())
+        })
+        .unwrap();
+    assert_eq!(age(&source, at), 0);
+    let fresh_packet = source.get(cx, cz, 0).unwrap().unwrap();
+    for _ in 0..50 {
+        assert!(advance_gateway_age(&source, at));
+    }
+    assert_eq!(age(&source, at), 50);
+    let aged_packet = source.get(cx, cz, 0).unwrap().unwrap();
+    assert_ne!(
+        &*fresh_packet, &*aged_packet,
+        "a viewer arriving later must receive the advanced age, not Age 0"
+    );
+    source.flush_all().await.unwrap();
+    drop(source);
+
+    // Restart mid-beam: the creation beam resumes from the stored age rather than from zero.
+    let source = open();
+    await_chunk(&source, cx, cz).await;
+    assert_eq!(age(&source, at), 50, "a reload must not reset the age to 0");
+    for _ in 50..GATEWAY_SPAWN_TICKS {
+        assert!(advance_gateway_age(&source, at));
+    }
+    assert_eq!(age(&source, at), GATEWAY_SPAWN_TICKS);
+    assert!(
+        !advance_gateway_age(&source, at),
+        "a finished gateway is not rewritten"
+    );
+    source.flush_all().await.unwrap();
+    drop(source);
+
+    let source = open();
+    await_chunk(&source, cx, cz).await;
+    assert_eq!(age(&source, at), GATEWAY_SPAWN_TICKS);
+    let invalidations = source.cache_stats().invalidations;
+    assert!(!advance_gateway_age(&source, at));
+    assert_eq!(
+        source.cache_stats().invalidations,
+        invalidations,
+        "a finished gateway does not touch the chunk packet cache"
+    );
+}

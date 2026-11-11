@@ -215,7 +215,27 @@ fn process_usage() -> (u64, u64) {
     let ticks = |t: FileTime| (u64::from(t.high) << 32) | u64::from(t.low);
     (mem.working_set as u64, ticks(kernel) + ticks(user))
 }
-#[cfg(not(windows))]
+/// Resident set size in bytes and CPU time in 100 ns units, read from `/proc/self`.
+#[cfg(target_os = "linux")]
+fn process_usage() -> (u64, u64) {
+    let rss_pages = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .unwrap_or(0);
+    // Fields 14 and 15 (utime, stime) in clock ticks; the command name may contain spaces, so
+    // count from the closing parenthesis.
+    let cpu_ticks = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|s| {
+            let rest = s.rsplit_once(')')?.1.to_owned();
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+        })
+        .unwrap_or(0);
+    // _SC_CLK_TCK is 100 on Linux, so one tick is 10 ms = 100_000 units of 100 ns.
+    (rss_pages * 4096, cpu_ticks * 100_000)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn process_usage() -> (u64, u64) {
     (0, 0)
 }
@@ -267,6 +287,13 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
     for i in 0..n {
         let barrier = barrier.clone();
         tasks.push(tokio::spawn(async move {
+            // `BOTS_STAGGER_MS` spreads the connects: 800 sockets opened in one instant overflow
+            // the accept backlog and are reset before the server ever sees them.
+            let stagger: u64 = std::env::var("BOTS_STAGGER_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            tokio::time::sleep(std::time::Duration::from_millis(i as u64 * stagger)).await;
             let mut bot = Bot::join(addr, &format!("Bot{i}")).await;
             barrier.wait().await;
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -297,6 +324,43 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             );
         }
         samples.clear();
+    }
+    // `BOTS_FORCELOAD=<cycles>` drives the batched holder path end to end while the bots walk:
+    // `/forceload add` of 256 chunks (the command maximum) and `remove all` through the
+    // console, timing each command from dispatch to its reply.
+    if let Some(cycles) = std::env::var("BOTS_FORCELOAD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        let mut add_ms = Vec::new();
+        let mut remove_ms = Vec::new();
+        for cycle in 0..cycles {
+            // A distinct 16x16-chunk square per cycle keeps every add a real change.
+            let base = (cycle as i32 % 8) * 256;
+            let t = std::time::Instant::now();
+            world
+                .console_command(format!("forceload add {base} 0 {} 255", base + 255))
+                .await
+                .unwrap();
+            add_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            let t = std::time::Instant::now();
+            world
+                .console_command("forceload remove all".into())
+                .await
+                .unwrap();
+            remove_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        for (name, mut v) in [("add 256 chunks", add_ms), ("remove all", remove_ms)] {
+            v.sort_by(f64::total_cmp);
+            println!(
+                "{label} forceload {name}: cycles={}, mean={:.3} ms, p99={:.3} ms, max={:.3} ms",
+                v.len(),
+                v.iter().sum::<f64>() / v.len() as f64,
+                v[((v.len() - 1) as f64 * 0.99) as usize],
+                v[v.len() - 1]
+            );
+        }
     }
     for task in tasks {
         task.await.unwrap();

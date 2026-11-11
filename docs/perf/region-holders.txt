@@ -1,0 +1,7 @@
+$ cargo run -p ferrite-region --release --example holders
+| chunks | one by one: add | one by one: remove | batched: add | batched: remove |
+|---:|---:|---:|---:|---:|
+| 16 | 29 us | 5 us | 18 us | 4 us |
+| 256 | 415 us | 77 us | 294 us | 54 us |
+| 1024 | 1753 us | 309 us | 1325 us | 221 us |
+| 4096 | 12869 us | 1288 us | 7266 us | 1186 us |

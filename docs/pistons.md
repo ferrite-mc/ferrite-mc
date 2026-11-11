@@ -51,7 +51,11 @@ merge. A player who starts tracking a chunk while the animation is still active 
 current moving block and piston block entity when the chunk batch is sent, then the scheduled
 final block update when it is due. The overlay itself is not written to chunk NBT, so a server
 restart during the two-tick window leaves the committed final state; persisting that transient
-entity would require staging the movement instead. Resolver parity for a real client and full
+entity would require staging the movement instead. This is pinned by
+`a_restart_during_the_piston_overlay_keeps_the_committed_final_state` (`persistence_tests.rs`): it
+commits a real extension to a disk-backed world, restarts inside the window and checks the base,
+head and pushed block, and that no `moving_piston` block or `minecraft:piston` block entity was
+saved. Resolver parity for a real client and full
 cross-region runtime load behaviour still need client/runtime coverage. The local vanilla
 extractor records push reactions and block-entity capability for every state in
 `vanilla/26.3/generated/ferrite/piston_states.json`; existing vanilla extractions need to be
@@ -63,4 +67,4 @@ targets, head removal, collision-shape entity clearance, animation progression a
 delayed-update coalescing, region split/merge (including a moving block crossing a section
 boundary and a late tracker receiving its overlay), unowned main lines and side branches, and
 cross-boundary retraction. The animation timing and packet sequence have not been checked with a
-real Minecraft client.
+real Minecraft client; the steps to check are in `manual-checklist.md` section 5.

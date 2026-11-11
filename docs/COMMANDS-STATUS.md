@@ -1,4 +1,30 @@
-# Vanilla command coverage (2026-11-04)
+# Vanilla command coverage
+
+> **Stale snapshot.** The sections below were written on 2026-11-04 and only partly updated
+> afterwards. This block lists what has changed since, checked against source; where the two
+> disagree, this block wins. The root count (94) and the "nothing missing from the command tree"
+> statement were not re-counted.
+
+## Deltas since 2026-11-04
+
+- Advancement criteria (`game/recipe_unlock.rs`, `Criterion`): plain `player_killed_entity`,
+  `consume_item`, `changed_dimension` (into one dimension), `placed_block` (one block),
+  `location` (one biome), `recipe_crafted`, `bred_animals`, `tame_animal` and
+  `item_used_on_block` are now evaluated. The "Not done" list in `/advancement` below (melee kills,
+  eating/drinking, entering a dimension, placing a plain block) is out of date. Experience and
+  recipe rewards and the chat announcement are given. Loot-table and function rewards are not.
+- `/waypoint`: spectators do not transmit on the locator bar.
+- `/attribute`: `max_health` feeds the player's survival state.
+- `/debug function` traces to `debug/commands-<time>.txt`; `/dialog show` accepts an inline
+  dialog compound; `/recipe` stores the recipe book open/filter settings per player.
+- `/place template` places block entity data (chests, signs); `/place feature|jigsaw|structure`
+  carry block entities from the host.
+- `/forceload` persists per dimension and holds chunks again at startup; adds and removes reach
+  the scheduler as one batch (`Signal::HoldBatch`).
+- `/summon` and plugin player location route by the player's world id, so they work in runtime
+  worlds created through `Server#createWorld` (`docs/BACKLOG.md` section 8).
+
+## Snapshot of 2026-11-04 (stale)
 
 Goal: every vanilla command works like vanilla. The list of root commands comes from the
 dispatcher compared with `vanilla/26.3/generated/reports/commands.json` (94 roots).
@@ -100,7 +126,3 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `generator = "vanilla"`); `poi` only finds points of interest of chunks that are stored.
 - Plugin `World#generateTree` runs the matching vanilla feature through the host and keeps block
   states; it reports `false` when nothing was placed and is unavailable without the host.
-
-## Merge state
-
-Nothing was pushed to the remote on 2026-11-04 after the worldgen/README push.

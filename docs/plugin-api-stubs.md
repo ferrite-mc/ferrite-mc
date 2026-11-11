@@ -57,12 +57,12 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | `Server#createMap`/`getMap` | `FerriteMapView` — 메모리 `MapView`, 렌더러 목록, `sendMap` 때 캔버스 렌더. | 맵 id/메타가 Rust 아이템으로 왕복하지 않는다(아이템은 material+amount). 숨김 커서와 스타일 캡션은 26.3 decoration 레코드에 없어 보내지 않는다. |
 | `Server#getTags`/`getTag` | `FerriteTags` — 데이터팩 `tags/block|item|fluid|entity_type|game_event`. | 위 5개 레지스트리 밖은 `UnsupportedOperationException`. |
 | `InventoryDragEvent` | `game/container.rs` + `ferrite-plugin` + `Bootstrap#fireInventoryDrag` | 드래그가 실제로 바꾼 슬롯만 담는다(시작 시점과 끝 시점의 메뉴 차이). 단일 슬롯 드래그는 `ferrite-inventory`가 일반 클릭으로 적용하지만, 결과가 바뀌면 그 슬롯을 담아 이벤트를 보낸다. |
+| `Server#createWorld(WorldCreator)`, `Server#unloadWorld` | `FerriteServer` + 호스트 `createRuntimeWorld(String,String,long)` / `unloadRuntimeWorld(String,boolean)` (`plugins.rs`) + `game::World::create_runtime_world`/`unload_runtime_world` | 이미 등록된 이름·키는 그 월드를 돌려준다. 새 월드는 영구 디스크립터와 별도 청크 소스·리전 스케줄러(`WorldId::Runtime`)를 만들고 `WorldLoadEvent`를 보낸다. 시드는 생성 때만 적용되고 기존 월드는 디스크의 시드를 돌려준다. `unloadWorld`는 취소 가능한 `WorldUnloadEvent` 뒤에 호스트가 (`save` 인자에 따라 저장하고) 내리며, 기본 월드(`world`)는 내릴 수 없다. | `generator`가 있거나 `generateStructures(false)`이거나 `WorldType`이 `NORMAL`이 아니면 `UnsupportedOperationException`. 환경은 `NORMAL`/`NETHER`/`THE_END`만. 검증: JUnit `ApiSurfaceTest`(시드, 재열기, 거부 경로), Rust `game/runtime_persist.rs` 테스트(언로드 저장·실패·`save=false`). 실제 클라이언트로 월드 간 이동을 확인한 것은 아니다. |
 
 ### 경계가 없어 구현하지 않은 것 (소유자와 이유)
 
 | API | 소유자 | 왜 지금 구현할 수 없는가 | 필요한 선행 작업 |
 |---|---|---|---|
-| `Server#createWorld(WorldCreator)` | `ferrite-server` 월드 수명주기 + 리전라이저 | 이미 등록된 이름은 그 월드를 그대로 돌려주지만, 새 런타임 월드는 거부한다. Ferrite는 로드된 차원 집합이 고정되어 있고, 새 월드는 청크 소스·Anvil 저장·스폰·리전라이저 등록을 새로 만들어야 한다. | (1) 월드 등록/언로드 수명주기와 `WorldLoadEvent` 순서, (2) 새 차원의 청크 소스·저장·스폰, (3) 리전라이저의 차원 추가/제거 프로토콜. |
 | `EntityFactory#createEntitySnapshot` | `ferrite-server` 엔티티 스냅샷 + `ferrite-entity` | 호스트에 접속 플레이어 외 엔티티의 타입·위치·NBT 스냅샷을 주는 경계가 없다. NMS 파싱을 가장하지 않는다. | (1) 리전 소유 엔티티의 읽기 전용 NBT/위치 스냅샷 op, (2) 스냅샷에서 엔티티를 다시 스폰하는 경로, (3) 두 경로의 리전 핸드오프/취소 규칙. |
 | `Structure#getEntities`, `Structure#place(..., EntityTransformer)` | `ferrite-server/src/plugins/worldgen.rs` + Java 구조물 | 구조물이 엔티티를 담지 않고, 템플릿 파일의 `entities` 목록도 읽지 않는다. 콜백을 부를 엔티티 자체가 없다. | 아래 "구조물 엔티티 선행 작업 3가지" 참고. |
 

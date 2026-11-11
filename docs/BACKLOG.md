@@ -58,7 +58,9 @@ server-side only.
   in-memory handoff for entity saves were changed; cross-region player snapshots and melee
   routing were wired. Final integration tests and real-client reproduction are still required.
   A remotely blocked melee hit does not yet knock back the attacking mob.
-- Dragon: vanilla strafe phases and the gateway beam (`docs/end-dimension.md`).
+- Dragon: the strafe phase and the gateway creation beam are implemented. What is left is the
+  perched scanning/attacking/flaming subphases, the purple teleport beam and the automatic
+  2400-tick gateway beam (`docs/end-dimension.md`).
 - Projectiles beyond arrow, snowball, egg, ender pearl and fireball: potion, experience bottle,
   thrown trident, wind charge, fishing bobber.
 - Shoulder parrot is bookkeeping only (`set/get/releaseShoulderEntity*`): no entity, no display.
@@ -68,8 +70,8 @@ server-side only.
 
 ## 3. Plugin API breadth
 
-- `Server#createWorld`/`unloadWorld` still refuse runtime worlds; see the explicit implementation
-  sequence in `docs/plugin-api-stubs.md`.
+- `Server#createWorld`/`unloadWorld` are implemented (runtime worlds, section 8). Creator options
+  Ferrite cannot honour still throw `UnsupportedOperationException`.
 - `World#sendBlockUpdate` supports signs only. `World#unloadChunk` does not force-unload a live
   chunk: it succeeds after unload and returns false while a player or `/forceload` holds it.
 - Ender pearls now route cross-region landings through the world loop to the owner's region. A
@@ -115,22 +117,24 @@ server-side only.
 - The portable Windows ZIP currently contains the executable and start notes; the NSIS
   bundle described by `tauri.conf.json` is not part of the ZIP.
 
-## 8. Runtime worlds (not included in v0.1.6)
+## 8. Runtime worlds
 
-The storage catalog can describe runtime worlds, but Bukkit cannot create one or route a player
-into one yet. Complete these steps together before enabling `Server#createWorld` or
-`Server#unloadWorld`:
+Implemented: `Server#createWorld` and `Server#unloadWorld` (`FerriteServer.java`, host calls
+`createRuntimeWorld(String,String,long)` and `unloadRuntimeWorld(String,boolean)`). A runtime world
+has a persistent descriptor, its own chunk source and its own scheduler keyed by `WorldId::Runtime`;
+player travel, entity transfers and summons route by world id. Unload is transactional: a player
+inside the world refuses it, a failed flush restores the scheduler and catalog entry, and
+`save=false` skips persistence (`game/runtime_persist.rs` tests). `WorldLoadEvent` and a
+cancellable `WorldUnloadEvent` are fired, and the default world cannot be unloaded.
 
-1. Add the host operation and `GameMessage` dispatch for create/unload.
-2. Connect each runtime world's `AnvilChunkSource` to spawn and save callbacks and its storage
-   lifecycle.
-3. Route `Signal`, `Player`, `Tracking`, and `GlobalPlayer` by a world identifier instead of the
-   fixed `Dimension` enum.
-4. Dynamically register Java `FerriteWorld` instances and connect `WorldLoadEvent`,
-   `WorldUnloadEvent`, and `WorldView`.
+Still unsupported (each throws `UnsupportedOperationException`): `WorldCreator#generator`,
+`generateStructures(false)`, a `WorldType` other than `NORMAL`, and environments other than
+`NORMAL`, `NETHER` and `THE_END`.
 
-Use vanilla terrain as the default for newly configured servers; superflat must remain an
-explicit choice. Verify host prerequisites, fresh-world spawn and existing-world preservation.
+Open: exercising create, reopen, unload, block access, travel and persistence with a real client
+and plugin (`docs/manual-checklist.md`). `docs/handoff-runtime-worlds-2026-11-11.md` is a
+point-in-time note from before travel, shutdown persistence and unload recovery landed; its
+"Known gaps" list is superseded by this section.
 
 ## 9. Orca FB integration review
 

@@ -1,0 +1,65 @@
+superflat join phase: region ticks=81, p99=42.763 ms, max=93.94 ms
+superflat forceload add 256 chunks: cycles=20, mean=49.346 ms, p99=107.747 ms, max=358.581 ms
+superflat forceload remove all: cycles=20, mean=15.428 ms, p99=62.423 ms, max=103.923 ms
+superflat: bots=800, avg_mspt=63.371, p99_mspt=146.130, rss_mb=1248.5, cpu_percent=797.6, samples=448, cache_hit_rate=99.8%, encodes=147, lookups=145684
+  coordinator events: runs=109768, total=656 ms (1.9% of the run), mean=0.0060 ms, p99=0.003 ms, max=12.76 ms
+  coordinator signals: runs=123759, total=3342 ms (9.6% of the run), mean=0.0270 ms, p99=0.197 ms, max=19.33 ms
+  coordinator clock: runs=591, total=1680 ms (4.8% of the run), mean=2.8434 ms, p99=29.302 ms, max=86.23 ms
+  coordinator   head (before game.tick): runs=591, total=2 ms (0.0% of the run), mean=0.0031 ms, p99=0.005 ms, max=0.01 ms
+  coordinator   locator: runs=591, total=310 ms (0.9% of the run), mean=0.5246 ms, p99=2.111 ms, max=7.79 ms
+  coordinator   advancements: runs=591, total=337 ms (1.0% of the run), mean=0.5699 ms, p99=2.907 ms, max=4.70 ms
+  coordinator   recipes: runs=591, total=201 ms (0.6% of the run), mean=0.3399 ms, p99=3.109 ms, max=6.08 ms
+  coordinator   scan: runs=591, total=398 ms (1.1% of the run), mean=0.6727 ms, p99=4.027 ms, max=84.89 ms
+  coordinator   ride: runs=591, total=1 ms (0.0% of the run), mean=0.0013 ms, p99=0.002 ms, max=0.08 ms
+  coordinator   rest: runs=591, total=0 ms (0.0% of the run), mean=0.0007 ms, p99=0.001 ms, max=0.00 ms
+Timings for all regions (tick 50.00 ms, 59825.714 ms scoped)
+global-tick                              30547.354 ms 61094.7% of tick      609 calls     0.480 ms self
+  global-tick/entity-tracking              30546.874 ms 61093.7% of tick      609 calls 30546.874 ms self
+region-tick                              29278.360 ms 58556.7% of tick      529 calls     5.471 ms self
+  region-tick/track-entities               21936.491 ms 43873.0% of tick      529 calls 21936.491 ms self
+  region-tick/entities                      4304.621 ms 8609.2% of tick      529 calls  4304.621 ms self
+  region-tick/players                       1610.643 ms 3221.3% of tick      529 calls   878.988 ms self
+    region-tick/players/chunk-stream           535.894 ms 1071.8% of tick   366714 calls   535.894 ms self
+    region-tick/players/player-update          195.761 ms 391.5% of tick   378033 calls   195.761 ms self
+  region-tick/containers                     908.709 ms 1817.4% of tick      529 calls   908.709 ms self
+  region-tick/fire                           289.294 ms 578.6% of tick      529 calls   289.294 ms self
+  region-tick/gravity-redstone               118.332 ms 236.7% of tick      529 calls   118.332 ms self
+  region-tick/finish                          84.863 ms 169.7% of tick      529 calls    84.863 ms self
+  region-tick/vaults                          10.679 ms  21.4% of tick      529 calls    10.679 ms self
+  region-tick/buttons-and-block-updates        8.942 ms  17.9% of tick      529 calls     8.942 ms self
+  region-tick/hoppers                          0.214 ms   0.4% of tick      529 calls     0.214 ms self
+  region-tick/explosions                       0.102 ms   0.2% of tick      529 calls     0.102 ms self
+
+fixture join phase: region ticks=81, p99=35.945 ms, max=54.11 ms
+fixture forceload add 256 chunks: cycles=20, mean=47.785 ms, p99=180.188 ms, max=249.053 ms
+fixture forceload remove all: cycles=20, mean=30.068 ms, p99=60.490 ms, max=265.996 ms
+fixture: bots=800, avg_mspt=8.953, p99_mspt=31.571, rss_mb=1750.1, cpu_percent=885.6, samples=624, cache_hit_rate=99.8%, encodes=82, lookups=145670
+  coordinator events: runs=109925, total=664 ms (1.9% of the run), mean=0.0060 ms, p99=0.003 ms, max=36.38 ms
+  coordinator signals: runs=130251, total=4228 ms (12.1% of the run), mean=0.0325 ms, p99=0.348 ms, max=20.17 ms
+  coordinator clock: runs=606, total=1665 ms (4.8% of the run), mean=2.7476 ms, p99=28.827 ms, max=61.49 ms
+  coordinator   head (before game.tick): runs=606, total=2 ms (0.0% of the run), mean=0.0034 ms, p99=0.006 ms, max=0.04 ms
+  coordinator   locator: runs=606, total=327 ms (0.9% of the run), mean=0.5400 ms, p99=2.955 ms, max=11.62 ms
+  coordinator   advancements: runs=606, total=347 ms (1.0% of the run), mean=0.5730 ms, p99=2.552 ms, max=17.23 ms
+  coordinator   recipes: runs=606, total=195 ms (0.6% of the run), mean=0.3222 ms, p99=3.115 ms, max=5.93 ms
+  coordinator   scan: runs=606, total=373 ms (1.1% of the run), mean=0.6156 ms, p99=3.829 ms, max=61.35 ms
+  coordinator   ride: runs=606, total=1 ms (0.0% of the run), mean=0.0012 ms, p99=0.002 ms, max=0.03 ms
+  coordinator   rest: runs=606, total=0 ms (0.0% of the run), mean=0.0008 ms, p99=0.001 ms, max=0.03 ms
+Timings for all regions (tick 50.00 ms, 33205.039 ms scoped)
+global-tick                              27322.552 ms 54645.1% of tick      654 calls     0.643 ms self
+  global-tick/entity-tracking              27321.908 ms 54643.8% of tick      654 calls 27321.908 ms self
+region-tick                               5882.488 ms 11765.0% of tick      705 calls    10.170 ms self
+  region-tick/players                       2771.348 ms 5542.7% of tick      705 calls  1243.772 ms self
+    region-tick/players/chunk-stream          1264.594 ms 2529.2% of tick   497795 calls  1264.594 ms self
+    region-tick/players/player-update          262.983 ms 526.0% of tick   509048 calls   262.983 ms self
+  region-tick/containers                    1590.913 ms 3181.8% of tick      705 calls  1590.913 ms self
+  region-tick/entities                       560.494 ms 1121.0% of tick      705 calls   560.494 ms self
+  region-tick/fire                           392.070 ms 784.1% of tick      705 calls   392.070 ms self
+  region-tick/gravity-redstone               272.775 ms 545.5% of tick      705 calls   272.775 ms self
+  region-tick/track-entities                 225.683 ms 451.4% of tick      705 calls   225.683 ms self
+  region-tick/vaults                          26.080 ms  52.2% of tick      705 calls    26.080 ms self
+  region-tick/finish                          16.555 ms  33.1% of tick      705 calls    16.555 ms self
+  region-tick/buttons-and-block-updates       15.992 ms  32.0% of tick      705 calls    15.992 ms self
+  region-tick/hoppers                          0.263 ms   0.5% of tick      705 calls     0.263 ms self
+  region-tick/explosions                       0.145 ms   0.3% of tick      705 calls     0.145 ms self
+
+exit 0
