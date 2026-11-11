@@ -106,3 +106,29 @@ Base: `main` `7a0ae81`. Worktrees under `/home/ubuntu/orca/workspaces/ferrite-mc
 All three confirmed `input_accepted -> turn_started`. Each owner commits on its own branch, no push, no merge.
 
 **Next session:** collect the three reports, run `fmt --check`, `clippy --workspace --all-targets -- -D warnings` and the relevant tests per branch, merge into `main`, push, and delete the worktrees. Still open after that: block-state properties dropped on the `setType` path, and entities only reappearing after a player re-enters a reopened world.
+
+## Landed 2026-11-11 (wave 3) — main `265c336`, pushed
+
+| Lane | Commit | Evidence |
+|---|---|---|
+| R1 `rw-player-world` | `ecd58c3` | `/summon` resolves through the player's `WorldId` (`summon_for_player`), plugin location uses `plugin_world_id(player_world(..))`. `cargo test -p ferrite-server --lib` 759 passed; new tests `summon_from_a_runtime_world_player_lands_in_that_world`, `plugin_world_id_follows_the_players_world` |
+| R3 `rw-plugin-cmd-thread` | `9322e48` | `Action::Plugin` arms dispatch through `spawn_blocking`; new `tests/plugin_command_world.rs` fails on old code after 97.6s, passes in 4.9s fixed. `plugin_lifecycle` 5/5, lib 757 passed |
+
+Merge gate on the merged tree (`265c336`): `fmt --check` 0, `clippy --workspace --all-targets -D warnings` 0,
+`cargo test --workspace` 0, **93 suites ok**, `plugin_command_world` 1 passed (8.65s),
+`plugin_lifecycle` 5 passed (15.76s), `runtime_world_gap7_...` ok. `origin/main` == local `main`; `rw-player-world`,
+`rw-chunk-api` and `rw-plugin-cmd-thread` are pushed as remote branches.
+
+### Still open after wave 3
+
+- **R2 `rw-chunk-api`** — resumed after the trait-scope question; the worker chose defaulted `WorldView` methods.
+  Not yet landed.
+- `Block#setType` drops block-state properties (runtime world path).
+- Entities reappear only after a player re-enters a reopened world.
+- Join-time `register_player` still reports the default world; a player rejoining inside a runtime world would be reported wrong.
+- The plugin still sees the old world between a world/dimension change and the next movement packet (no push from `Signal::ChangeDimension`).
+- `SummonCrystal` still routes by dimension.
+- Plugin commands are no longer serialized on the loop; overlap safety on the blocking pool is unchecked.
+- The gap 7 Java steps in `plugin_lifecycle.rs` still use the async scheduler.
+- Dependabot moderate 1 (`/security/dependabot/10`).
+- Retired lane worktrees (`p5-gap7`, `light-deadlock`, `mob-damage-events`, `rw-player-world`, `rw-plugin-cmd-thread`) and `$HOME/ferrite/target-*` caches still on disk.
