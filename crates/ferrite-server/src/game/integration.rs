@@ -5985,3 +5985,230 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
     // The runtime world has no player left, so it can unload.
     assert!(world.unload_runtime_world(runtime, true).await.unwrap());
 }
+
+/// A player who disconnects inside a runtime world is saved with that world and rejoins there:
+/// the world's own entities reach them, and the world cannot unload underneath them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn player_rejoins_the_runtime_world_they_left_in() {
+    use ferrite_protocol::packets::play::{AddEntity, Respawn};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3");
+    if !root.join("generated/reports/blocks.json").exists() {
+        eprintln!("SKIP: vanilla/26.3/generated is absent");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let players = tempfile::tempdir().unwrap();
+    let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
+    let source = super::anvil::AnvilChunkSource::new(temp.path().to_path_buf(), registry);
+    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let world = World::start_configured(
+        Some(source),
+        [0, 65, 0],
+        super::WorldSettings {
+            plugin_commands: Some(plugin_commands),
+            playerdata: Some(players.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Homebody").await;
+    let player = ferrite_net::offline_uuid("Homebody");
+    let (runtime, _, _, _) = world
+        .create_runtime_world("homebody", super::Dimension::Overworld, [0, 65, 0], 0)
+        .await
+        .unwrap();
+    commands
+        .send(ferrite_plugin::PlayerCommand::Teleport {
+            player,
+            location: ferrite_plugin::PlayerLocation {
+                world: runtime,
+                x: 8.5,
+                y: 65.0,
+                z: 8.5,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        })
+        .unwrap();
+    let mut responded = 0;
+    read_until(&mut bot, |id, _| {
+        responded += i32::from(id == Respawn::ID);
+        id == 73 && responded > 0
+    })
+    .await;
+    drop(bot);
+
+    // Leaving writes the player file, which now names the runtime world.
+    let saved = players.path().join(format!("{player}.json"));
+    let expected = format!("\"world\": \"{runtime}\"");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let text = std::fs::read_to_string(&saved).unwrap_or_default();
+        if text.contains(&expected) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "player file never named the runtime world: {text}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Rejoining lands in the runtime world: its entities are tracked, the default world's are not.
+    let mut bot = Bot::join(addr, "Homebody").await;
+    let visitor = item_record([8.5, 65.0, 8.5], 1);
+    let visitor_id = visitor.data.id;
+    world
+        .signals
+        .send(super::Signal::EntityTransfer {
+            world_id: super::WorldId::Runtime(runtime),
+            to: ferrite_region::ChunkPos(0, 0),
+            entity: Box::new(visitor),
+        })
+        .unwrap();
+    entity_packet(&mut bot, AddEntity::ID, visitor_id).await;
+    assert!(
+        world.unload_runtime_world(runtime, true).await.is_err(),
+        "a world with the rejoined player inside must not unload"
+    );
+}
+
+/// `Player#breakBlock` applies the player's own break rules: it breaks stone for a survival
+/// player, but never invents a break for air or bedrock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_break_block_follows_the_players_rules() {
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let world = World::start_configured(
+        Some(source.clone()),
+        [8, 65, 8],
+        super::WorldSettings {
+            gamemode: 0,
+            plugin_commands: Some(plugin_commands),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let _bot = Bot::join(addr, "Breaker").await;
+    let player = ferrite_net::offline_uuid("Breaker");
+    let state = |name| u32::from(ferrite_data::blocks::default_state(name).unwrap());
+    let (stone, bedrock, air) = (state("stone"), state("bedrock"), state("air"));
+    for (x, block) in [(8, stone), (9, bedrock), (10, air)] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while source.set_block(x, 64, 8, block).is_err() {
+            assert!(std::time::Instant::now() < deadline, "chunk never loaded");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    let break_at = |x: i32| {
+        let commands = commands.clone();
+        let call = ferrite_plugin::HostCall {
+            owner: "Player".into(),
+            subject: player.to_string(),
+            method: "breakBlock(int,int,int)".into(),
+            args: vec![x.to_string(), "64".into(), "8".into()],
+        };
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::plugins::playerops::handle(&call, |command| {
+                    let _ = commands.send(command);
+                })
+            })
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(break_at(8).await.as_deref(), Some("true"), "stone breaks");
+    assert_eq!(source.block(8, 64, 8), Some(air));
+    assert_eq!(break_at(8).await.as_deref(), Some("false"), "now it is air");
+    assert_eq!(break_at(10).await.as_deref(), Some("false"), "air");
+    assert_eq!(break_at(9).await.as_deref(), Some("false"), "bedrock");
+    assert_eq!(source.block(9, 64, 8), Some(bedrock), "bedrock stands");
+}
+
+/// `Player#chat("/command")` runs as the player: a player without operator rights cannot use it
+/// to reach console permissions (here, `/gamemode creative` is refused, so bedrock stays).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_chat_commands_keep_the_players_permission() {
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let world = World::start_configured(
+        Some(source.clone()),
+        [8, 65, 8],
+        super::WorldSettings {
+            gamemode: 0,
+            plugin_commands: Some(plugin_commands),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let _bot = Bot::join(addr, "Speaker").await;
+    let player = ferrite_net::offline_uuid("Speaker");
+    let bedrock = u32::from(ferrite_data::blocks::default_state("bedrock").unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while source.set_block(9, 64, 8, bedrock).is_err() {
+        assert!(std::time::Instant::now() < deadline, "chunk never loaded");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let call = |method: &str, args: Vec<String>| ferrite_plugin::HostCall {
+        owner: "Player".into(),
+        subject: player.to_string(),
+        method: method.into(),
+        args,
+    };
+    let run = |call: ferrite_plugin::HostCall| {
+        let commands = commands.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::plugins::playerops::handle(&call, |command| {
+                    let _ = commands.send(command);
+                })
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let chat = run(call("chat(String)", vec!["/gamemode creative".into()])).await;
+    assert_eq!(chat.as_deref(), Some(""));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let breaking = call(
+        "breakBlock(int,int,int)",
+        vec!["9".into(), "64".into(), "8".into()],
+    );
+    assert_eq!(
+        run(breaking).await.as_deref(),
+        Some("false"),
+        "still a survival player, so bedrock stands"
+    );
+    assert_eq!(source.block(9, 64, 8), Some(bedrock));
+}

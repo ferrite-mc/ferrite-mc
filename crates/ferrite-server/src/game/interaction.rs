@@ -14,6 +14,40 @@ pub fn break_ticks(state: u16) -> Option<u32> {
     Some((f64::from(props.hardness) * divisor).ceil().max(1.0) as u32)
 }
 
+/// Whether a player in `gamemode` (0 survival .. 3 spectator) with command `permission` may break
+/// the block `state`, before any plugin event: vanilla `ServerPlayerGameMode.destroyBlock`.
+/// Air never breaks, spectators and adventure players cannot, an unbreakable block (bedrock,
+/// barrier, ...) only breaks in creative, and game-master blocks need an operator.
+pub fn may_break(gamemode: i32, permission: u8, state: u32) -> bool {
+    let Ok(state) = u16::try_from(state) else {
+        return false;
+    };
+    if usize::from(state) >= ferrite_data::blocks::STATE_COUNT {
+        return false;
+    }
+    let props = ferrite_data::block_props::get(state);
+    if props.is_air {
+        return false;
+    }
+    match gamemode {
+        0 => {
+            if props.hardness < 0.0 {
+                return false;
+            }
+        }
+        1 => {}
+        _ => return false,
+    }
+    let game_master = ferrite_data::blocks::state(state).is_some_and(|(name, _)| {
+        super::command_block::Mode::of_block(name).is_some()
+            || matches!(
+                name,
+                "minecraft:structure_block" | "minecraft:jigsaw" | "minecraft:test_block"
+            )
+    });
+    !game_master || permission >= 2
+}
+
 /// Vanilla `WallTorchBlock` variant of a torch item, when a torch is placed on a horizontal
 /// face (`StandingAndWallBlockItem` picks the wall block for side placement).
 fn wall_torch_name(name: &str) -> Option<&'static str> {
@@ -125,6 +159,32 @@ pub fn placement_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn id(name: &str) -> u32 {
+        u32::from(ferrite_data::blocks::default_state(name).unwrap())
+    }
+    #[test]
+    fn break_rules_follow_hardness_mode_and_permission() {
+        let (air, stone, bedrock) = (id("air"), id("stone"), id("bedrock"));
+        // Air has nothing to break, in any mode.
+        for mode in 0..=3 {
+            assert!(!may_break(mode, 4, air), "air in mode {mode}");
+        }
+        assert!(may_break(0, 0, stone));
+        assert!(may_break(1, 0, stone));
+        assert!(!may_break(2, 4, stone), "adventure players cannot break");
+        assert!(!may_break(3, 4, stone), "spectators cannot break");
+        // Bedrock only gives way to creative.
+        assert!(!may_break(0, 4, bedrock));
+        assert!(may_break(1, 0, bedrock));
+        // Game-master blocks need an operator even in creative.
+        let command = id("command_block");
+        assert!(!may_break(1, 0, command));
+        assert!(may_break(1, 2, command));
+        assert!(!may_break(0, 4, id("barrier")));
+        // A state number outside the table is never a break.
+        assert!(!may_break(1, 4, u32::MAX));
+    }
+
     #[test]
     fn tool_less_stone_and_log_axis() {
         let stone = ferrite_data::blocks::default_state("stone").unwrap();

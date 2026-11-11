@@ -582,6 +582,13 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             let yaw: f32 = arg(0)?.parse().ok().filter(|yaw: &f32| yaw.is_finite())?;
             PluginPacket::HurtAnimation { yaw }
         }
+        "playPickupItemAnimation(Item,int)" => {
+            let item = Uuid::parse_str(arg(0)?).ok()?;
+            PluginPacket::PickupAnimation {
+                item: super::facts::fact(item)?.entity_id,
+                amount: arg(1)?.parse().ok().filter(|amount| *amount > 0)?,
+            }
+        }
         "setCompassTarget(Location)" => PluginPacket::CompassTarget {
             pos: block_pos(arg(0)?)?,
         },
@@ -1208,6 +1215,34 @@ mod tests {
             Some(PluginPacket::HurtAnimation { yaw: 90.0 })
         );
         assert_eq!(packet(call("playHurtAnimation(float)", &["NaN"])), None);
+    }
+
+    #[test]
+    fn pickup_animation_names_the_item_entity_and_a_positive_count() {
+        let item = Uuid::from_u128(0xfeed);
+        super::super::facts::publish_for_test(item, 5150);
+        let args = |count: &str| [item.to_string(), count.to_owned()];
+        let pickup = |count: &str| {
+            let args = args(count);
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            packet(call("playPickupItemAnimation(Item,int)", &refs))
+        };
+        assert_eq!(
+            pickup("3"),
+            Some(PluginPacket::PickupAnimation {
+                item: 5150,
+                amount: 3
+            })
+        );
+        assert_eq!(pickup("0"), None);
+        assert_eq!(pickup("-1"), None);
+        assert_eq!(pickup("many"), None);
+        // An item the host never published has no network id to name.
+        let unknown = Uuid::from_u128(0xdead).to_string();
+        assert_eq!(
+            packet(call("playPickupItemAnimation(Item,int)", &[&unknown, "1"])),
+            None
+        );
     }
 
     #[test]

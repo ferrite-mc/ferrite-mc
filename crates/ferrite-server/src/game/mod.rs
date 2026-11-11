@@ -229,6 +229,59 @@ mod tests {
     }
 
     #[test]
+    fn plugin_location_reports_the_players_current_world() {
+        let id = Uuid::from_u128(77);
+        let player = Uuid::from_u128(5);
+        let pos = [1.5, 64.0, -3.5];
+        // Joined or travelled into a runtime world: its UUID, with the position carried over.
+        let tracked = HashMap::from([(player, WorldId::Runtime(id))]);
+        let location = plugin_location(&tracked, player, Dimension::Overworld, pos, 90.0, -10.0);
+        assert_eq!(location.world, id);
+        assert_eq!((location.x, location.y, location.z), (1.5, 64.0, -3.5));
+        assert_eq!((location.yaw, location.pitch), (90.0, -10.0));
+        // Untracked or vanilla players report the default world.
+        let vanilla = HashMap::from([(player, WorldId::Vanilla(Dimension::Nether))]);
+        assert_eq!(
+            plugin_location(&vanilla, player, Dimension::Overworld, pos, 0.0, 0.0).world,
+            ferrite_plugin::default_world_id()
+        );
+        assert_eq!(
+            plugin_location(&HashMap::new(), player, Dimension::Overworld, pos, 0.0, 0.0).world,
+            ferrite_plugin::default_world_id()
+        );
+    }
+
+    #[test]
+    fn crystal_from_a_runtime_world_player_lands_in_that_world() {
+        let (worlds, runtime) = two_world_fixture();
+        let vanilla = WorldId::Vanilla(Dimension::Overworld);
+        let chunk = ChunkPos(0, 0);
+        let mut holds = HashMap::new();
+        add_holds(&worlds, &mut holds, None, vanilla, [chunk]);
+        add_holds(&worlds, &mut holds, None, runtime, [chunk]);
+        let player = Uuid::from_u128(5);
+        let player_worlds = HashMap::from([(player, runtime)]);
+        assert!(summon_crystal_for_player(
+            &worlds,
+            &player_worlds,
+            player,
+            Dimension::Overworld,
+            [8.5, 64.0, 8.5],
+        ));
+        assert_eq!(in_world(&worlds, runtime, chunk), 1);
+        assert_eq!(in_world(&worlds, vanilla, chunk), 0);
+        // A chunk the player's world does not own keeps the "not loaded" outcome.
+        assert!(!summon_crystal_for_player(
+            &worlds,
+            &player_worlds,
+            player,
+            Dimension::Overworld,
+            [1608.5, 64.0, 8.5],
+        ));
+        worlds.shutdown();
+    }
+
+    #[test]
     fn holds_and_entities_are_keyed_per_world_across_travel() {
         let (worlds, runtime) = two_world_fixture();
         let vanilla = WorldId::Vanilla(Dimension::Overworld);
@@ -1082,6 +1135,44 @@ fn summon_for_player(
     });
     true
 }
+
+/// `/summon end_crystal` from a player: lands in the world the player stands in. False when the chunk is not loaded.
+fn summon_crystal_for_player(
+    worlds: &Worlds,
+    player_worlds: &HashMap<Uuid, WorldId>,
+    uuid: Uuid,
+    fallback: Dimension,
+    pos: [f64; 3],
+) -> bool {
+    let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    let world = player_world(player_worlds, uuid, fallback);
+    if worlds.owner_world(world, chunk).is_none() {
+        return false;
+    }
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
+        region.summon_end_crystal(pos);
+    });
+    true
+}
+
+/// The location plugins see for a player: the world they are in now (by UUID for runtime worlds) plus position.
+fn plugin_location(
+    player_worlds: &HashMap<Uuid, WorldId>,
+    uuid: Uuid,
+    fallback: Dimension,
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+) -> ferrite_plugin::PlayerLocation {
+    ferrite_plugin::PlayerLocation {
+        world: plugin_world_id(player_world(player_worlds, uuid, fallback)),
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        yaw,
+        pitch,
+    }
+}
 #[derive(Debug, Clone)]
 pub struct Operator {
     pub uuid: Uuid,
@@ -1447,9 +1538,6 @@ impl Worlds {
     }
     fn owner_world(&self, world: WorldId, chunk: ChunkPos) -> Option<ferrite_region::RegionId> {
         self.schedulers.get(&world)?.owner(chunk)
-    }
-    fn add_chunk(&self, dimension: Dimension, chunk: ChunkPos) {
-        self.scheduler(dimension).add_chunk(chunk);
     }
     fn add_chunk_world(&self, world: WorldId, chunk: ChunkPos) {
         self.scheduler_world(world).add_chunk(chunk);
@@ -1955,8 +2043,12 @@ async fn run(
                    // spawn of the dimension the world is configured for.
                    let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
                    if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } let flags = recipe_packets::load_settings(dir, &uuid); command_state.lock().unwrap().more.recipe_settings.insert(uuid, flags); let recipes = recipe_packets::load(dir, &uuid); if !recipes.is_empty() { command_state.lock().unwrap().more.recipes.insert(uuid, recipes); } }
-                   let start_dimension = saved.as_ref().map_or(settings.dimension, |s| s.dimension());
-                   let dimension_spawn = dimensions.spawn(start_dimension);
+                   // A player who logged out inside a runtime world rejoins there while that world is
+                   // loaded; otherwise they fall back to the dimension they were saved in.
+                   let saved_runtime = saved.as_ref().and_then(|s| s.world).and_then(|id| runtime_world_catalog.get(id));
+                   let start_dimension = saved_runtime.map_or_else(|| saved.as_ref().map_or(settings.dimension, |s| s.dimension()), |d| d.dimension);
+                   let start_world = saved_runtime.map_or(WorldId::Vanilla(start_dimension), |d| WorldId::Runtime(d.id));
+                   let dimension_spawn = saved_runtime.map_or_else(|| dimensions.spawn(start_dimension), |d| d.spawn);
                    let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
                    let start_pos = saved.as_ref().map_or(default_pos, |s| s.pos);
                    let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
@@ -1968,7 +2060,7 @@ async fn run(
                    let seed = command_state.lock().unwrap().seed;
                    let start_chunk = ChunkPos((start_pos[0].floor() as i32).div_euclid(16), (start_pos[2].floor() as i32).div_euclid(16));
                    let start_inventory = container::restore(saved.as_ref());
-                   let start_source = dimensions.source(start_dimension).clone();
+                   let start_source = saved_runtime.map_or_else(|| dimensions.source(start_dimension).clone(), |d| Arc::clone(&d.source));
                    permissions.insert(uuid, permission);
                    let entity=ferrite_entity::allocate_id();
                    emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
@@ -1984,11 +2076,11 @@ async fn run(
                    emit(&outbound,&DefaultSpawn{dimension:start_dimension.key().into(),position:ferrite_protocol::types::BlockPos::new(dimension_spawn[0],dimension_spawn[1],dimension_spawn[2]).pack(),yaw:0.0,pitch:0.0});emit(&outbound,&GameEvent{event:13,value:0.0});
                    let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
                    online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: view_distance as i32 });
-                   player_worlds.insert(uuid, WorldId::Vanilla(start_dimension));
+                   player_worlds.insert(uuid, start_world);
                    positions.lock().unwrap().insert(uuid, start_pos);
-                   tracking.lock().unwrap().insert(uuid, (WorldId::Vanilla(start_dimension), HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:WorldId::Vanilla(start_dimension),sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
-                   worlds.add_chunk(start_dimension,player.chunk);worlds.schedule_at_chunk(start_dimension,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
+                   tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
+                   worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
                    {
                        let before = saved.is_some();
@@ -2009,20 +2101,13 @@ async fn run(
                                3 => ferrite_plugin::GameMode::Spectator,
                                _ => ferrite_plugin::GameMode::Survival,
                            },
-                           location: ferrite_plugin::PlayerLocation {
-                               world: ferrite_plugin::default_world_id(),
-                               x: start_pos[0],
-                               y: start_pos[1],
-                               z: start_pos[2],
-                               yaw: start_yaw,
-                               pitch: start_pitch,
-                           },
+                           location: plugin_location(&player_worlds, uuid, start_dimension, start_pos, start_yaw, start_pitch),
                            inventory: vec![None; 41],
                        };
                        if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
                    }
                    if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_joined(uuid, &name) { tracing::warn!(%error, "player join event failed"); }
-                   let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; player.world_id = WorldId::Vanilla(start_dimension); g.join(player)});tracing::info!(%uuid,"player joined");
+                   let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; player.world_id = start_world; g.join(player)});tracing::info!(%uuid,"player joined");
                   },
                   GameMessage::Input{session,uuid,packet:ServerboundPlay::Chat(chat)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) && chat.message.chars().count()<=256 {
                       let mut chat = chat;
@@ -2124,10 +2209,7 @@ async fn run(
                           commands::Action::Give { targets, item, count, item_name, components } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Give { target, target_name, item, count, item_name: item_name.clone(), components: components.clone(), feedback: Some(outbound.clone()) }); } } },
                           commands::Action::Experience { operation, targets, amount, unit } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Experience { target, target_name, operation, amount, unit, feedback: Some(outbound.clone()) }); } } },
                           commands::Action::SummonCrystal { pos, dimension } => {
-                              let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                              if worlds.owner(dimension, chunk).is_some() {
-                                  worlds.schedule_at_chunk(dimension, chunk, move |region| { region.summon_end_crystal(pos); });
-                              } else {
+                              if !summon_crystal_for_player(&worlds, &player_worlds, uuid, dimension, pos) {
                                   chat(outbound, "That position is not loaded");
                               }
                           }
@@ -2341,7 +2423,7 @@ async fn run(
                     crate::plugins::facts::set_on_ground(uuid, ground);
                     command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
                     if let Some(plugins) = &settings.plugins {
-                      let location = ferrite_plugin::PlayerLocation { world: plugin_world_id(player_world(&player_worlds, uuid, Dimension::Overworld)), x: pos[0], y: pos[1], z: pos[2], yaw, pitch };
+                      let location = plugin_location(&player_worlds, uuid, Dimension::Overworld, pos, yaw, pitch);
                       if let Err(error) = plugins.update_player_location(uuid, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
                     }
                     worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
@@ -2355,10 +2437,15 @@ async fn run(
                   },
                   Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let world=player.world_id;let chunk=player.chunk;let id=player.uuid;
+                    let (arrived_pos, arrived_yaw, arrived_pitch) = (player.pos, player.yaw, player.pitch);
                     worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
                     if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
                     player_worlds.insert(id, world);
+                    if let Some(plugins) = &settings.plugins {
+                      let location = plugin_location(&player_worlds, id, dimension, arrived_pos, arrived_yaw, arrived_pitch);
+                      if let Err(error) = plugins.update_player_location(id, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
+                    }
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
@@ -2376,6 +2463,13 @@ async fn run(
                              let name = component_json.as_deref().map(json_text);
                              worlds.schedule_global(move |g| g.set_display_name(player, name));
                          }
+                         // A plugin-made chat command is the player's own: it takes the same path as one
+                         // typed in the chat box, so it runs with the permission that player has.
+                         Some(ferrite_plugin::PlayerCommand::Chat { player, message }) => {
+                            if let Some((session, _, _)) = mailboxes.get(&player) {
+                                let _ = event_tx.send(GameMessage::Input { session: *session, uuid: player, packet: ServerboundPlay::ChatCommand(ServerboundChatCommand { command: message }) });
+                            }
+                        }
                          Some(ferrite_plugin::PlayerCommand::UpdateCommands { player }) => {
                             if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
                                 let (actions, _) = mpsc::unbounded_channel();
@@ -2832,6 +2926,18 @@ fn route_plugin_command(
                 mailbox.lock().unwrap().push_back(Command::Respawn);
             }
         }
+        PlayerCommand::BreakBlock {
+            player,
+            position,
+            ticket,
+        } => match mailboxes.get(&player) {
+            Some((_, mailbox, _)) => mailbox
+                .lock()
+                .unwrap()
+                .push_back(Command::PluginBreakBlock { position, ticket }),
+            // Nobody to break it: the waiting plugin call gets its answer now.
+            None => crate::plugins::playerops::complete(ticket, false),
+        },
         PlayerCommand::SetGameMode { player, mode } => {
             let mode = match mode {
                 ferrite_plugin::GameMode::Survival => 0,
@@ -3180,6 +3286,7 @@ fn route_plugin_command(
         | PlayerCommand::Lightning { .. }
         | PlayerCommand::RideChanged { .. }
         | PlayerCommand::UpdateCommands { .. }
+        | PlayerCommand::Chat { .. }
         | PlayerCommand::EntityOp { .. }
         | PlayerCommand::DropItem { .. }
         | PlayerCommand::SpawnEntity { .. }

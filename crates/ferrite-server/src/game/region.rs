@@ -122,6 +122,12 @@ pub enum SlotFill {
 }
 
 pub enum Command {
+    /// `Player#breakBlock`: break the block under the player's own rules and answer the
+    /// waiting plugin call.
+    PluginBreakBlock {
+        position: [i32; 3],
+        ticket: u64,
+    },
     Input(ServerboundPlay),
     Leave,
     SetMode(i32),
@@ -1954,6 +1960,40 @@ impl Player {
                     (entity.take().is_some(), ())
                 });
             }
+        }
+        true
+    }
+    /// `Player#breakBlock`: breaks the block as this player would, and says whether it broke.
+    /// A refusal (air, an unbreakable block for a non-creative player, a mode that cannot
+    /// break, a game-master block without permission, a cancelled event) leaves it standing.
+    fn plugin_break_block(&mut self, position: [i32; 3]) -> bool {
+        let Some(state) = self
+            .source
+            .as_ref()
+            .and_then(|s| s.block(position[0], position[1], position[2]))
+        else {
+            return false;
+        };
+        if !super::interaction::may_break(self.gamemode, self.permission, state) {
+            return false;
+        }
+        let clicked = ferrite_plugin::BlockPosition {
+            x: position[0],
+            y: position[1],
+            z: position[2],
+        };
+        if !self.plugin_allows(|plugins| {
+            plugins.block_broken(self.uuid, &self.name, clicked, material_name(state))
+        }) {
+            return false;
+        }
+        let at = ferrite_protocol::types::BlockPos::new(position[0], position[1], position[2]);
+        if !self.break_block(at.pack(), state) {
+            return false;
+        }
+        self.broken.push((at, state));
+        if self.gamemode == 0 {
+            self.survival.food.add_exhaustion(0.005);
         }
         true
     }
@@ -4100,6 +4140,11 @@ impl Player {
                             feedback.as_ref(),
                         );
                     }
+                    continue;
+                }
+                Command::PluginBreakBlock { position, ticket } => {
+                    let broke = self.plugin_break_block(position);
+                    crate::plugins::playerops::complete(ticket, broke);
                     continue;
                 }
                 Command::SetInventorySlot { slot, item } => {
