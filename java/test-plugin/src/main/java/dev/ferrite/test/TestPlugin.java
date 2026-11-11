@@ -165,7 +165,7 @@ public final class TestPlugin extends JavaPlugin implements Listener {
                     case "spawn" -> appendEvent("gap7 spawn " + w.spawnEntity(new org.bukkit.Location(w, 5.5, 201, 5.5), org.bukkit.entity.EntityType.COW).getUniqueId());
                     case "entities" -> appendEvent("gap7 entities cows=" + w.getEntities().stream().filter(e -> e.getType() == org.bukkit.entity.EntityType.COW).count());
                     // createWorld and unloadWorld run synchronously on the command thread: the bridge releases
-                    // its lock while they wait for the game loop, so command ordering is the real one.
+                    // its lock while they wait for the game loop, so these calls no longer deadlock the loop.
                     case "unload" -> appendEvent("gap7 unload " + getServer().unloadWorld(w, true) + " gone=" + (getServer().getWorld("gap7_world") == null));
                     case "reopen" -> { try {
                         var again = getServer().createWorld(new org.bukkit.WorldCreator("gap7_world").seed(1234L));

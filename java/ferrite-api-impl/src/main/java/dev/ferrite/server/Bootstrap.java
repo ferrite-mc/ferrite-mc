@@ -1,8 +1,6 @@
 package dev.ferrite.server;
 public final class Bootstrap {
     static final Object LEGACY_LOCK = new Object();
-    /** Plugin commands enter the bridge one at a time, even while a command has released {@link #LEGACY_LOCK}. */
-    private static final java.util.concurrent.locks.ReentrantLock COMMAND_LOCK = new java.util.concurrent.locks.ReentrantLock();
     /**
      * Runs a host call that waits on the game loop. The loop's tick takes {@link #LEGACY_LOCK}, so a thread
      * holding it (a plugin command) would deadlock the loop it waits on: release it for the duration.
@@ -434,12 +432,9 @@ public final class Bootstrap {
         if (resolved == null) return 0;
         var command = server.getPluginCommand(label);
         if (command == null) return 0;
-        COMMAND_LOCK.lock();
-        try {
-            synchronized (LEGACY_LOCK) {
-                if (!command.testPermission(resolved)) return 2;
-                return command.execute(resolved, label, args) ? 1 : 0;
-            }
-        } finally { COMMAND_LOCK.unlock(); }
+        synchronized (LEGACY_LOCK) {
+            if (!command.testPermission(resolved)) return 2;
+            return command.execute(resolved, label, args) ? 1 : 0;
+        }
     }
 }
