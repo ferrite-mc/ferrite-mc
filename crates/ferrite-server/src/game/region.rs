@@ -4684,6 +4684,10 @@ impl Region {
             }
         }
     }
+    /// Every held chunk with its hold count, so a stopped region's chunks can be re-held.
+    pub fn held_chunk_counts(&self) -> Vec<(ChunkPos, usize)> {
+        self.held_chunks.iter().map(|(&c, &n)| (c, n)).collect()
+    }
     pub fn has_chunk_hold(&self, chunk: ChunkPos) -> bool {
         self.held_chunks.contains_key(&chunk)
     }
