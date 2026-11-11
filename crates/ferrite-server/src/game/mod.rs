@@ -1762,14 +1762,16 @@ async fn run(
                           commands::Action::PlayerFeedback { uuid: target, feedback } => { if let Some((_, _, target_outbound)) = mailboxes.get(&target) { emit(target_outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }); } },
                           commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
                           commands::Action::Plugin { name, args } => {
-                              if let Some(plugins) = &settings.plugins {
+                              // Off the loop: a command may call `createWorld`/`unloadWorld`, which wait on this loop.
+                              if let Some(plugins) = settings.plugins.clone() {
                                   let line = plugin_command_line(&name, &args);
-                                  match plugins.run_plugin_command(ferrite_plugin::CommandSender::Player(uuid), &line) {
+                                  let reply = outbound.clone();
+                                  tokio::task::spawn_blocking(move || match plugins.run_plugin_command(ferrite_plugin::CommandSender::Player(uuid), &line) {
                                       Ok(result) => for message in result.messages {
-                                          if message.player == uuid { chat(outbound, &plugin_message_text(&message.content)); }
+                                          if message.player == uuid { chat(&reply, &plugin_message_text(&message.content)); }
                                       },
                                       Err(error) => tracing::warn!(%error, "plugin command failed"),
-                                  }
+                                  });
                               }
                           },
                           commands::Action::GameRule(name, value) => match apply_game_rule(&game_rules, source.as_ref(), &command_speed, &name, value.as_deref()) { Ok(message) => chat(outbound, &message), Err(error) => chat(outbound, &error) },
@@ -1893,12 +1895,13 @@ async fn run(
                               Err(error) => tracing::warn!(%error, "profile stop failed"),
                           },
                           commands::Action::Plugin { name, args } => {
-                              if let Some(plugins) = &settings.plugins {
+                              // Off the loop, as for players: the command may wait on this loop.
+                              if let Some(plugins) = settings.plugins.clone() {
                                   let line = plugin_command_line(&name, &args);
-                                  match plugins.run_plugin_command(ferrite_plugin::CommandSender::Console, &line) {
+                                  tokio::task::spawn_blocking(move || match plugins.run_plugin_command(ferrite_plugin::CommandSender::Console, &line) {
                                       Ok(result) => for message in result.messages { tracing::info!("{}", plugin_message_text(&message.content)); },
                                       Err(error) => tracing::warn!(%error, "plugin command failed"),
-                                  }
+                                  });
                               }
                           },
                           commands::Action::GameMode { .. } | commands::Action::PlayerFeedback { .. } => tracing::warn!("command requires a player"),
