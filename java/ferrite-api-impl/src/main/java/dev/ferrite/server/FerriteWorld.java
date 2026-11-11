@@ -83,6 +83,11 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getType" -> typeAt(pos);
             case "getTemperature" -> climate(true, pos.x(), pos.y(), pos.z());
             case "getHumidity" -> climate(false, pos.x(), pos.y(), pos.z());
+            case "getLightLevel" -> {
+                var reply = (String) HostBridge.call("World", id, "getLightLevel(int,int,int)", String.class, pos.x(), pos.y(), pos.z());
+                if (reply == null) throw new UnsupportedOperationException("Ferrite: no light data at " + pos);
+                yield (byte) Integer.parseInt(reply);
+            }
             case "getLightFromSky" -> { int level = Native.skyLight(id.toString(), pos.x(), pos.y(), pos.z()); if (level < 0) throw new UnsupportedOperationException("Ferrite: no light data at " + pos); yield (byte) level; }
             case "setType" -> { setType(pos, java.util.Objects.requireNonNull((org.bukkit.Material) args[0])); yield null; }
             case "getBlockData" -> FerriteBlockData.create(stateAt(pos));
@@ -124,7 +129,17 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "isAutoSave" -> autoSave;
             case "setAutoSave" -> { autoSave = (boolean) args[0]; try { HostBridge.callVoid("World", id, "setAutoSave(boolean)", autoSave); } catch (UnsupportedOperationException noHost) { /* remembered only */ } yield null; }
             case "getSpawnLocation" -> location(spawn);
-            case "getHighestBlockYAt" -> { if (args.length > 2 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) throw new UnsupportedOperationException("Ferrite: heightmap-specific queries are not implemented"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) { int value = Native.highestBlockY(id.toString(), x, z); if (value == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + x + "," + z); height = value; heights.put(new Column(x, z), height); } yield height; }
+            case "getHighestBlockYAt" -> {
+                if (args.length == 3 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) {
+                    // The host reads the chunk's stored heightmap, loading the chunk first when nobody holds it.
+                    var map = (org.bukkit.HeightMap) args[args.length - 1];
+                    int mx, mz;
+                    if (args[0] instanceof org.bukkit.Location l) { mx = l.getBlockX(); mz = l.getBlockZ(); } else { mx = (int) args[0]; mz = (int) args[1]; }
+                    var reply = (String) HostBridge.call("World", id, "getHighestBlockYAt(int,int,HeightMap)", String.class, mx, mz, map);
+                    if (reply == null) throw new UnsupportedOperationException("Ferrite: no " + map + " height data at " + mx + "," + mz);
+                    yield Integer.parseInt(reply);
+                }
+                if (args.length > 2) throw new UnsupportedOperationException("Ferrite: unsupported getHighestBlockYAt overload"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) { int value = Native.highestBlockY(id.toString(), x, z); if (value == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + x + "," + z); height = value; heights.put(new Column(x, z), height); } yield height; }
             case "getBiome", "getComputedBiome" -> { int x, y, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = (int) args[1]; z = (int) args[2]; } var key = Native.biomeAt(id.toString(), x, y, z); if (key == null) throw new UnsupportedOperationException("Ferrite: no biome data at " + x + "," + y + "," + z); var biome = org.bukkit.Registry.BIOME.get(org.bukkit.NamespacedKey.fromString(key)); if (biome == null) throw new IllegalStateException("Unknown biome " + key); yield biome; }
             case "getBlockAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield block(new Pos(l.getBlockX(), l.getBlockY(), l.getBlockZ())); yield block(new Pos((int) args[0], (int) args[1], (int) args[2])); }
             case "getEmptyChunkSnapshot" -> {

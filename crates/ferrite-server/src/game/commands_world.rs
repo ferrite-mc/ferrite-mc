@@ -135,8 +135,8 @@ pub trait WorldBlocks {
     }
     fn block(&self, x: i32, y: i32, z: i32) -> Option<u32>;
     fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool;
-    /// Creates the block entity a freshly placed block needs. Only command blocks are
-    /// supported; `nbt` is the `/setblock` tag, which wins over the defaults.
+    /// Creates the block entity a freshly placed block needs: command blocks, chests, furnaces
+    /// and signs. `nbt` is the `/setblock` tag, which wins over the defaults.
     fn place_block_entity(&self, _pos: [i32; 3], _state: u32, _nbt: Option<&Tag>) -> bool {
         false
     }
@@ -187,13 +187,69 @@ impl WorldBlocks for super::anvil::AnvilChunkSource {
             return false;
         };
         if super::command_block::Mode::of_block(name).is_none() {
-            return false;
+            return match plain_block_entity_id(name) {
+                Some(id) => place_plain_block_entity(self, pos, &id, nbt),
+                None => false,
+            };
         }
         match nbt {
             Some(Tag::Compound(data)) => super::command_block::place_with(self, pos, name, data),
             _ => super::command_block::ensure(self, pos, name).is_some(),
         }
     }
+}
+
+/// The block entity type of a block that keeps its data in plain NBT (containers, furnaces and
+/// signs), or `None` for a block without one. Command blocks have their own module.
+fn plain_block_entity_id(block: &str) -> Option<String> {
+    let name = block.strip_prefix("minecraft:")?;
+    let id = match name {
+        "chest" | "trapped_chest" | "furnace" | "blast_furnace" | "smoker" => name,
+        _ if name.ends_with("_hanging_sign") => "hanging_sign",
+        _ if name.ends_with("_sign") => "sign",
+        _ => return None,
+    };
+    Some(format!("minecraft:{id}"))
+}
+
+/// Whether placing `block` creates a block entity that `/setblock ... {nbt}` can fill.
+fn carries_block_entity(block: &str) -> bool {
+    super::command_block::Mode::of_block(block).is_some() || plain_block_entity_id(block).is_some()
+}
+
+/// Creates the block entity of a placed chest, furnace or sign. With a tag the entity is
+/// replaced by it (the tag wins, like `/setblock`); without one an existing entity is kept and
+/// a missing one is created empty, as vanilla does when the block is placed.
+fn place_plain_block_entity(
+    world: &super::anvil::AnvilChunkSource,
+    pos: [i32; 3],
+    id: &str,
+    nbt: Option<&Tag>,
+) -> bool {
+    let mut data = match nbt {
+        Some(Tag::Compound(tag)) => tag.clone(),
+        Some(_) => return false,
+        None => ferrite_nbt::Compound::new(),
+    };
+    let Some(type_id) = ferrite_data::registries::id("minecraft:block_entity_type", id)
+        .and_then(|id| u32::try_from(id).ok())
+    else {
+        return false;
+    };
+    data.insert("id".into(), Tag::String(id.to_owned()));
+    data.insert("x".into(), Tag::Int(pos[0]));
+    data.insert("y".into(), Tag::Int(pos[1]));
+    data.insert("z".into(), Tag::Int(pos[2]));
+    let replace = nbt.is_some();
+    world
+        .update_block_entity(pos[0], pos[1], pos[2], |slot| {
+            if slot.is_some() && !replace {
+                return (false, ());
+            }
+            *slot = Some(ferrite_world::BlockEntity { type_id, data });
+            (true, ())
+        })
+        .is_ok()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -671,8 +727,7 @@ fn set_block(
         ));
     }
     if nbt.is_some()
-        && !ferrite_data::blocks::state(block)
-            .is_some_and(|(name, _)| super::command_block::Mode::of_block(name).is_some())
+        && !ferrite_data::blocks::state(block).is_some_and(|(name, _)| carries_block_entity(name))
     {
         return Err("The target block is not a block entity".into());
     }
@@ -1334,5 +1389,155 @@ mod tests {
             [11, 64, 12],
             "entity positions follow the template origin"
         );
+    }
+
+    mod placed_block_entities {
+        use super::*;
+        use crate::game::anvil::AnvilChunkSource;
+
+        fn loaded_source() -> std::sync::Arc<AnvilChunkSource> {
+            let source = AnvilChunkSource::new_memory();
+            assert!(source.ensure_chunk_loaded(0, 0, std::time::Duration::from_secs(10)));
+            source
+        }
+
+        fn block_state(name: &str) -> u16 {
+            ferrite_data::blocks::default_state(name).expect(name)
+        }
+
+        fn set_block(
+            source: &AnvilChunkSource,
+            name: &str,
+            at: [i32; 3],
+            tag: Option<&str>,
+        ) -> Result<Outcome, String> {
+            execute(
+                &WorldCommand::SetBlock {
+                    pos: pos(f64::from(at[0]), f64::from(at[1]), f64::from(at[2])),
+                    block: block_state(name),
+                    mode: SetMode::Replace,
+                    nbt: tag.map(|text| ferrite_nbt::snbt::parse(text).unwrap()),
+                },
+                &origin(),
+                source,
+            )
+        }
+
+        #[tokio::test]
+        async fn setblock_with_a_tag_creates_a_chest_furnace_and_sign_entity() {
+            let source = loaded_source();
+            let cases = [
+                (
+                    "minecraft:chest",
+                    [2, 70, 2],
+                    "{Items:[{Slot:0b,id:\"minecraft:stone\",count:3}]}",
+                    "Items",
+                ),
+                (
+                    "minecraft:furnace",
+                    [4, 70, 2],
+                    "{BurnTime:200s}",
+                    "BurnTime",
+                ),
+                (
+                    "minecraft:oak_sign",
+                    [6, 70, 2],
+                    "{is_waxed:1b}",
+                    "is_waxed",
+                ),
+                (
+                    "minecraft:oak_wall_hanging_sign",
+                    [8, 70, 2],
+                    "{is_waxed:1b}",
+                    "is_waxed",
+                ),
+            ];
+            for (block, at, tag, key) in cases {
+                set_block(&source, block, at, Some(tag))
+                    .unwrap_or_else(|error| panic!("{block}: {error}"));
+                let entity = source
+                    .block_entity(at[0], at[1], at[2])
+                    .unwrap_or_else(|| panic!("{block}: no block entity"));
+                assert!(
+                    entity.data.contains_key(key),
+                    "{block} keeps its tag key {key}"
+                );
+                assert_eq!(entity.data.get("x"), Some(&Tag::Int(at[0])), "{block} x");
+                assert_eq!(entity.data.get("z"), Some(&Tag::Int(at[2])), "{block} z");
+            }
+            let chest = source.block_entity(2, 70, 2).unwrap();
+            assert_eq!(
+                chest.data.get("id"),
+                Some(&Tag::String("minecraft:chest".into()))
+            );
+            let sign = source.block_entity(6, 70, 2).unwrap();
+            assert_eq!(
+                sign.data.get("id"),
+                Some(&Tag::String("minecraft:sign".into()))
+            );
+            let hanging = source.block_entity(8, 70, 2).unwrap();
+            assert_eq!(
+                hanging.data.get("id"),
+                Some(&Tag::String("minecraft:hanging_sign".into()))
+            );
+        }
+
+        #[tokio::test]
+        async fn placing_without_a_tag_creates_an_empty_entity_and_keeps_an_existing_one() {
+            let source = loaded_source();
+            let tracking = Tracking::default();
+            let place = |name: &str| {
+                let command = WorldCommand::SetBlock {
+                    pos: pos(5.0, 71.0, 5.0),
+                    block: block_state(name),
+                    mode: SetMode::Replace,
+                    nbt: None,
+                };
+                apply_world_result(&command, &origin(), &*source, &tracking).unwrap();
+            };
+            place("minecraft:smoker");
+            let fresh = source
+                .block_entity(5, 71, 5)
+                .expect("a placed smoker gets its block entity");
+            assert_eq!(
+                fresh.data.get("id"),
+                Some(&Tag::String("minecraft:smoker".into()))
+            );
+            // Give it contents; placing the same block again must not wipe them.
+            source
+                .update_block_entity(5, 71, 5, |slot| {
+                    slot.as_mut()
+                        .unwrap()
+                        .data
+                        .insert("BurnTime".into(), Tag::Short(99));
+                    (true, ())
+                })
+                .unwrap();
+            place("minecraft:smoker");
+            assert_eq!(
+                source.block_entity(5, 71, 5).unwrap().data.get("BurnTime"),
+                Some(&Tag::Short(99))
+            );
+            // A block that carries no block entity gets none.
+            let command = WorldCommand::SetBlock {
+                pos: pos(7.0, 71.0, 5.0),
+                block: block_state("minecraft:stone"),
+                mode: SetMode::Replace,
+                nbt: None,
+            };
+            apply_world_result(&command, &origin(), &*source, &tracking).unwrap();
+            assert!(source.block_entity(7, 71, 5).is_none());
+        }
+
+        #[tokio::test]
+        async fn a_tag_on_a_block_without_an_entity_is_still_rejected_and_changes_nothing() {
+            let source = loaded_source();
+            let before = source.block(9, 70, 9);
+            let error =
+                set_block(&source, "minecraft:stone", [9, 70, 9], Some("{Items:[]}")).unwrap_err();
+            assert!(error.contains("not a block entity"), "{error}");
+            assert_eq!(source.block(9, 70, 9), before, "the block was not placed");
+            assert!(source.block_entity(9, 70, 9).is_none());
+        }
     }
 }

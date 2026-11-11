@@ -353,6 +353,47 @@ class ApiSurfaceTest {
         });
     }
 
+    /** Runs {@code body} with a fake host that answers world data queries through {@link HostBridge#transport}. */
+    private static void withWorldData(HostBridge.Transport host, Runnable body) {
+        var previous = HostBridge.transport;
+        HostBridge.transport = host;
+        try { body.run(); } finally { HostBridge.transport = previous; }
+    }
+
+    @Test void heightmapSpecificHighestBlockQueriesReachTheHost() {
+        var asked = new java.util.ArrayList<String>();
+        withWorldData((owner, subject, method, args) -> {
+            if (!owner.equals("World") || !method.equals("getHighestBlockYAt(int,int,HeightMap)")) return null;
+            asked.add(args);
+            var parts = args.split(String.valueOf(HostBridge.ARG), -1);
+            if (parts[0].equals("9")) return HostBridge.NULL;
+            return switch (parts[2]) {
+                case "WORLD_SURFACE" -> "68";
+                case "MOTION_BLOCKING" -> "67";
+                case "MOTION_BLOCKING_NO_LEAVES" -> "65";
+                case "OCEAN_FLOOR" -> "64";
+                default -> null;
+            };
+        }, () -> {
+            assertEquals(68, world.getHighestBlockYAt(1, 1, org.bukkit.HeightMap.WORLD_SURFACE));
+            assertEquals(67, world.getHighestBlockYAt(1, 1, org.bukkit.HeightMap.MOTION_BLOCKING));
+            assertEquals(65, world.getHighestBlockYAt(1, 1, org.bukkit.HeightMap.MOTION_BLOCKING_NO_LEAVES));
+            assertEquals(64, world.getHighestBlockYAt(new org.bukkit.Location(world, 1.5, 70, 1.5), org.bukkit.HeightMap.OCEAN_FLOOR));
+            assertTrue(asked.contains("1" + HostBridge.ARG + "1" + HostBridge.ARG + "OCEAN_FLOOR"), "the Location overload sends block coordinates: " + asked);
+            var missing = assertThrows(UnsupportedOperationException.class, () -> world.getHighestBlockYAt(9, 9, org.bukkit.HeightMap.MOTION_BLOCKING));
+            assertTrue(missing.getMessage().contains("MOTION_BLOCKING"), missing.getMessage());
+        });
+    }
+
+    @Test void blockLightLevelComesFromTheHost() {
+        withWorldData((owner, subject, method, args) -> owner.equals("World") && method.equals("getLightLevel(int,int,int)")
+                ? (args.startsWith("1" + HostBridge.ARG + "70") ? "13" : HostBridge.NULL) : null, () -> {
+            assertEquals((byte) 13, world.getBlockAt(1, 70, 2).getLightLevel());
+            var unknown = assertThrows(UnsupportedOperationException.class, () -> world.getBlockAt(5, 5, 5).getLightLevel());
+            assertTrue(unknown.getMessage().contains("light"), unknown.getMessage());
+        });
+    }
+
     @Test void damageEventsExposeMutableDamage() {
         var damage = new org.bukkit.event.entity.EntityDamageEvent(player, EntityDamageEvent.DamageCause.FALL, 5.0);
         assertSame(player, damage.getEntity());

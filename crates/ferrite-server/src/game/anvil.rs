@@ -711,6 +711,45 @@ impl AnvilChunkSource {
         }
         self.is_flat().then(|| "minecraft:plains".to_owned())
     }
+    /// Loads the chunk through this world's own loader when it is not resident, waiting up to
+    /// `timeout`. `true` once the chunk can be read. This is how plugin reads reach chunks no
+    /// player holds; it adds no scheduler hold, so the chunk may be evicted again later.
+    pub fn ensure_chunk_loaded(
+        self: &Arc<Self>,
+        x: i32,
+        z: i32,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.with_loaded_chunk(x, z, |_| ()).is_some() {
+                return true;
+            }
+            self.prefetch(x, z, 0);
+            if self.with_loaded_chunk(x, z, |_| ()).is_some() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    /// Y of the highest block a vanilla heightmap counts in a loaded column, from the chunk's
+    /// stored heightmap. An uncounted column answers `min_y - 1`, like Paper.
+    pub fn heightmap_y(&self, x: i32, z: i32, kind: ferrite_world::HeightmapKind) -> Option<i32> {
+        let stored = self
+            .with_loaded_chunk(x.div_euclid(16), z.div_euclid(16), |chunk| {
+                chunk.height(kind, x.rem_euclid(16) as u8, z.rem_euclid(16) as u8)
+            })
+            .flatten()?;
+        Some(i32::from(stored) + self.dimension.min_y() - 1)
+    }
+    /// The brighter of sky and block light at a position in a loaded chunk.
+    pub fn light_level(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        let sky = self.sky_light(x, y, z)?;
+        Some(sky.max(self.brightness(x, y, z).unwrap_or(0)))
+    }
     /// The highest non-air block in a loaded column.
     pub fn highest_block_y(&self, x: i32, z: i32) -> Option<i32> {
         self.block(x, 0, z)?;

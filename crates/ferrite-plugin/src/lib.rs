@@ -141,6 +141,32 @@ pub enum BlockEntityError {
     /// The box covers more chunks than one host call will inspect.
     TooLarge,
 }
+/// The vanilla heightmaps a plugin can ask for, named like Bukkit's `HeightMap`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heightmap {
+    MotionBlocking,
+    MotionBlockingNoLeaves,
+    OceanFloor,
+    OceanFloorWg,
+    WorldSurface,
+    WorldSurfaceWg,
+}
+
+impl Heightmap {
+    /// Parses the Bukkit enum constant name, for example `MOTION_BLOCKING_NO_LEAVES`.
+    pub fn from_bukkit(name: &str) -> Option<Self> {
+        Some(match name {
+            "MOTION_BLOCKING" => Self::MotionBlocking,
+            "MOTION_BLOCKING_NO_LEAVES" => Self::MotionBlockingNoLeaves,
+            "OCEAN_FLOOR" => Self::OceanFloor,
+            "OCEAN_FLOOR_WG" => Self::OceanFloorWg,
+            "WORLD_SURFACE" => Self::WorldSurface,
+            "WORLD_SURFACE_WG" => Self::WorldSurfaceWg,
+            _ => return None,
+        })
+    }
+}
+
 /// Read-only world access for `World#getBlockAt`, `Block#getLightFromSky`, `World#getBiome`
 /// and `World#getHighestBlockYAt`.
 ///
@@ -155,6 +181,16 @@ pub trait WorldView: Send + Sync {
     fn highest_block(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<i32>;
     /// The biome key at a position, for example `minecraft:plains`.
     fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String>;
+    /// The Y of the highest block counted by a vanilla heightmap in a column, read from the
+    /// chunk's stored heightmap (Bukkit `World#getHighestBlockYAt(x, z, HeightMap)`). A column
+    /// with no counted block answers one below the world's minimum height, like Paper.
+    fn heightmap(&self, _world: uuid::Uuid, _x: i32, _z: i32, _kind: Heightmap) -> Option<i32> {
+        None
+    }
+    /// The light level at a position, the brighter of sky and block light (`Block#getLightLevel`).
+    fn light_level(&self, _world: uuid::Uuid, _x: i32, _y: i32, _z: i32) -> Option<u8> {
+        None
+    }
     /// The block entities inside the box `min..=max` of the loaded chunks, each as its position
     /// and binary NBT (a named root compound). `Ok` with an empty vector means the world and
     /// every chunk in the box are loaded but the box has no block entities; an error means the

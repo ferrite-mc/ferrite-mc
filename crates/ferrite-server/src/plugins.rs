@@ -24,6 +24,7 @@ mod survival;
 mod visual;
 pub mod worldgen;
 pub mod worldinfo;
+mod worldquery;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -217,6 +218,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = blockdata::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = worldquery::answer(call) {
                                 return Some(reply);
                             }
                             if let Some(reply) = chunks::answer(call) {
@@ -588,11 +592,28 @@ impl SourceWorldView {
     fn source(&self, world: Uuid) -> Option<Arc<crate::game::AnvilChunkSource>> {
         self.worlds.read().unwrap().get(&world).cloned()
     }
+
+    /// The world's source with the chunk containing block `(x, z)` loaded. A chunk no player
+    /// holds is loaded through the world's own loader instead of answering "no data".
+    fn source_with_chunk(
+        &self,
+        world: Uuid,
+        x: i32,
+        z: i32,
+    ) -> Option<Arc<crate::game::AnvilChunkSource>> {
+        let source = self.source(world)?;
+        source
+            .ensure_chunk_loaded(x.div_euclid(16), z.div_euclid(16), CHUNK_LOAD_TIMEOUT)
+            .then_some(source)
+    }
 }
+
+/// How long a plugin read waits for a chunk that has to be loaded first.
+const CHUNK_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl ferrite_plugin::WorldView for SourceWorldView {
     fn block(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String> {
-        let source = self.source(world)?;
+        let source = self.source_with_chunk(world, x, z)?;
         let state = u16::try_from(source.block(x, y, z)?).ok()?;
         ferrite_data::blocks::state(state).map(|(name, props)| {
             if props.is_empty() {
@@ -603,13 +624,35 @@ impl ferrite_plugin::WorldView for SourceWorldView {
         })
     }
     fn sky_light(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<u8> {
-        self.source(world)?.sky_light(x, y, z)
+        self.source_with_chunk(world, x, z)?.sky_light(x, y, z)
     }
     fn highest_block(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<i32> {
-        self.source(world)?.highest_block_y(x, z)
+        self.source_with_chunk(world, x, z)?.highest_block_y(x, z)
     }
     fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String> {
-        self.source(world)?.biome_name(x, y, z)
+        self.source_with_chunk(world, x, z)?.biome_name(x, y, z)
+    }
+    fn heightmap(
+        &self,
+        world: uuid::Uuid,
+        x: i32,
+        z: i32,
+        kind: ferrite_plugin::Heightmap,
+    ) -> Option<i32> {
+        use ferrite_plugin::Heightmap;
+        use ferrite_world::HeightmapKind;
+        let kind = match kind {
+            Heightmap::MotionBlocking => HeightmapKind::MotionBlocking,
+            Heightmap::MotionBlockingNoLeaves => HeightmapKind::MotionBlockingNoLeaves,
+            Heightmap::OceanFloor => HeightmapKind::OceanFloor,
+            Heightmap::OceanFloorWg => HeightmapKind::OceanFloorWg,
+            Heightmap::WorldSurface => HeightmapKind::WorldSurface,
+            Heightmap::WorldSurfaceWg => HeightmapKind::WorldSurfaceWg,
+        };
+        self.source_with_chunk(world, x, z)?.heightmap_y(x, z, kind)
+    }
+    fn light_level(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<u8> {
+        self.source_with_chunk(world, x, z)?.light_level(x, y, z)
     }
     fn block_entities(
         &self,
