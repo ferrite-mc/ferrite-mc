@@ -147,3 +147,23 @@ Briefs live on the host at `~/ferrite/briefs/<lane>.md`.
 All three confirmed `input_accepted -> turn_started`. Each owner commits on its branch; no push,
 no merge. Not assigned to a lane (coordinator-side): Dependabot moderate 1 and the retired
 worktree/target-cache cleanup.
+
+## Dispatched 2026-11-11 (wave 5) — remaining work in three lanes, all on sonnet
+
+Base: `main` `6aca3fc` (`origin/main` current). The W2 `rw-world-content` work from wave 4 is
+still uncommitted on `rw-chunk-api`; lane L1 lands it first. Briefs live on the host at
+`~/ferrite/briefs/w5-*.md`.
+
+| Lane | Branch / worktree | Terminal | Target | Scope |
+|---|---|---|---|---|
+| L1 | `rw-world-content` -> `w5-world-plugin` / `rw-chunk-api` | `term_dffde10b` | `target-rw2` | land W2; cherry-pick W1 `70b4ba4`; persist and restore the runtime `WorldId` on rejoin; `Player#breakBlock`, `Player#chat`, 1-arg `broadcastSlotBreak`, hurt/pickup animations, structure/non-player snapshot where feasible; plugin docs |
+| L2 | `w5-ai-gameplay` / `rw-player-world` | `term_a452282d` | `target-rw1` | entity replacement across unload/reload with overlapping viewers; cross-region targeting/despawn/knockback; vanilla behaviour slice for 5 hostiles + 4 passives; potion/xp/trident/wind-charge/fishing projectiles; regression tests |
+| L3 | `w5-perf-docs` / `rw-plugin-cmd-thread` | `term_ec631ec3` | `target-rw3` | repeatable 800-bot/MSPT/RSS baseline (or largest harness); chunk packet cache invalidation on block-entity change; consolidate BACKLOG/release-notes/plugin docs/README/COMMANDS-STATUS; piston restart and gateway `Age` regression tests; headless join smoke + manual 26.3 checklist |
+
+All three confirmed `input_accepted -> turn_started`. Workers commit and push their own
+branches; no merge into `main`. Coordinator still owns the merge gate, CI, Orca visibility,
+the real 26.3 client join, Dependabot #10, and retired-worktree/cache cleanup.
+
+Not assigned to a lane: the real-client 23:38 server join (needs a 26.3 client and is a manual
+verification, not a remote code task); math and English practice (outside this repository, tracked
+separately).
