@@ -138,3 +138,41 @@ jobs:
             gh release create "$TAG" --repo "$REPO" --title "Ferrite ${TAG#v}" --generate-notes
           fi
           gh release upload "$TAG" --repo "$REPO" packages/Ferrite-* --clobber
+
+      - name: Update package notes and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$REPO" --json body --jq .body > release-notes.md
+          ubuntu_sha=$(sha256sum "packages/Ferrite-${TAG}-ubuntu-x86_64.tar.gz" | cut -d' ' -f1)
+          windows_sha=$(sha256sum "packages/Ferrite-${TAG}-windows-x86_64.zip" | cut -d' ' -f1)
+          export TAG ubuntu_sha windows_sha
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path("release-notes.md")
+          body = path.read_text()
+          marker = "## Windows package"
+          if marker in body:
+              body = body[:body.index(marker)]
+          tag = os.environ["TAG"]
+          body += f"""## Release packages
+
+          The portable packages contain the Ferrite server binary, `LICENSE`, `NOTICE.md`, and
+          `START-HERE.txt`. Vanilla-generated data is not bundled; follow `START-HERE.txt` to
+          prepare it locally.
+
+          - **Ubuntu x86_64:** `Ferrite-{tag}-ubuntu-x86_64.tar.gz`
+            SHA-256: `{os.environ["ubuntu_sha"]}`
+          - **Windows x86_64:** `Ferrite-{tag}-windows-x86_64.zip`
+            SHA-256: `{os.environ["windows_sha"]}`
+
+          The Windows desktop UI requires the WebView2 runtime. Ubuntu runs headless with
+          `./ferrite-server --headless`.
+          """
+          path.write_text(body)
+          PY
+          gh release edit "$TAG" --repo "$REPO" --notes-file release-notes.md
