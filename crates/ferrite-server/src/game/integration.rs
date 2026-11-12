@@ -112,12 +112,23 @@ impl Bot {
         (id, rest)
     }
     pub(super) async fn until(&mut self, id: i32) -> Vec<u8> {
-        loop {
-            let (got, body) = self.next_play().await;
-            if got == id {
-                return body;
+        self.until_within(id, std::time::Duration::from_secs(120))
+            .await
+    }
+    /// Waits for packet `id`, failing after `limit` instead of spinning forever while other
+    /// packets keep arriving. Without this a missing reply hangs the whole suite until the CI
+    /// job timeout (see the Windows run that sat for 32 minutes after the last test line).
+    async fn until_within(&mut self, id: i32, limit: std::time::Duration) -> Vec<u8> {
+        tokio::time::timeout(limit, async {
+            loop {
+                let (got, body) = self.next_play().await;
+                if got == id {
+                    return body;
+                }
             }
-        }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no packet {id} within {limit:?}"))
     }
     /// Waits for the next `SystemChat` whose text contains `needle`.
     async fn chat_containing(&mut self, needle: &str) -> String {
