@@ -87,6 +87,11 @@ pub fn ping(player: Uuid) -> Option<i32> {
     pings().lock().unwrap().get(&player).copied()
 }
 
+/// The smoothed keepalive round trip of every connected player that has one, for harnesses.
+pub fn ping_snapshot() -> Vec<i32> {
+    pings().lock().unwrap().values().copied().collect()
+}
+
 /// Measures the round trip of the play keepalive: the writer marks `sent`, the reader marks
 /// `answered`, and the result is smoothed like vanilla (`(old * 3 + new) / 4`).
 #[derive(Debug)]

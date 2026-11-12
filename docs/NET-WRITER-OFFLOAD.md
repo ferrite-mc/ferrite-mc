@@ -101,6 +101,32 @@ to read.
   8 or more concurrent chunk streams. No evidence here that it affects ticks, which run on their
   own threads.
 
+## Update 2026-11-12 (W7): measured on the 800-bot run
+
+The plan's step 1 is done: `examples/bots.rs` now records, on the server's own runtime during
+the join storm and the walk, how late four 1 ms timer tasks fire, the round trip of a `/list`
+command from a probe bot, the server-measured keepalive RTT, bot join times and received
+throughput (full tables and caveats in `docs/perf/README.md`, raw files in `docs/perf/w7/`).
+
+Four runs (two per variant, 800/800 bots joined and walked every time):
+
+- During the join storm, when chunk compression and encryption peak, the timer probes fire at
+  the timer floor (p50 1.14-1.18 ms) with p99 4.2-6.8 ms.
+- During the walk, with little chunk traffic, they are much later (p50 1.4-1.5 ms, p90 21-31 ms,
+  p99 94-115 ms), because the process runs at 900-1000% CPU of 1200% on region ticks and the
+  800 in-process bots.
+- The `/list` round trip stays at 3-4 ms through the join storm and rises to a 31-127 ms median
+  in the walk, following the tick time (superflat p50 MSPT 59-69 ms), not the writer.
+- Keepalive RTT p50 is 28-34 ms and join time p50 27-37 ms.
+
+So the socket-task delay that offload would remove is not the dominant latency in this
+workload: the inline writer work is a small part of what delays tasks during the storm, and the
+long delays occur when there is almost no writer work. The bots share the runtime and join
+staggered 5 ms apart over 4 s, a milder storm than 800 simultaneous joins; with a smaller,
+more bursty join (or fewer cores) the synthetic `writer_stage` numbers above may apply, and
+that was not measured. **Decision unchanged: deferred, with this evidence.** Nothing in
+`ferrite-net`'s writer or reader was changed.
+
 ## Decision
 
 Deferred. The bench shows a tail-latency isolation benefit for non-writer tasks under heavy

@@ -1486,7 +1486,10 @@ fn runtime_world_gap7_create_edit_enter_leave_unload_reopen() {
                 stdout.lock().unwrap(),
                 stderr.lock().unwrap()
             );
-            std::thread::sleep(Duration::from_millis(250));
+            // Each retry is a chat command, and the server's default command limit (a burst of
+            // ten, one more per second) kicks "for spamming" a bot that re-issues faster than
+            // that refill while a slow host is still applying the write.
+            std::thread::sleep(Duration::from_millis(1100));
         }
     };
 
