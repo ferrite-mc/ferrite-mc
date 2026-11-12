@@ -33,8 +33,12 @@ const HEIGHT: f64 = 0.25;
 /// The plugin-visible fields (`target`, `thrower`, `unlimited_lifetime`, the pickup flags and
 /// `will_age`) mirror Bukkit's `Item` surface; the game keeps its own pickup and ageing rules
 /// on top of them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ItemState {
+    /// The components of the carried stack. The synched `ITEM` value is the protocol stack,
+    /// which has no component patch, so the server-side truth lives here: pickup, merging,
+    /// hoppers and the entity save all read the stack through [`full_stack`].
+    pub components: ferrite_item::ComponentPatch,
     pub age: i32,
     pub pickup_delay: i32,
     pub health: i32,
@@ -55,6 +59,7 @@ pub struct ItemState {
 impl Default for ItemState {
     fn default() -> Self {
         Self {
+            components: ferrite_item::ComponentPatch::new(),
             age: 0,
             pickup_delay: 0,
             health: 5,
@@ -86,6 +91,36 @@ pub fn stack(data: &EntityData) -> ItemStack {
     }
 }
 
+/// The complete stack an item entity carries: the synched id and count plus the components in
+/// [`ItemState`]. An empty stack when the entity carries nothing.
+pub fn full_stack(data: &EntityData) -> ferrite_item::ItemStack {
+    let plain = stack(data);
+    let Ok(item) = u16::try_from(plain.item_id) else {
+        return ferrite_item::ItemStack::empty();
+    };
+    let mut full = ferrite_item::ItemStack::with_count(item, plain.count);
+    if let Some(state) = &data.item {
+        full.components = state.components.clone();
+    }
+    full
+}
+
+/// The protocol stack of an item: its id and count, without components.
+pub fn plain_stack(stack: &ferrite_item::ItemStack) -> ItemStack {
+    ItemStack {
+        count: stack.count,
+        item_id: i32::from(stack.item),
+    }
+}
+
+/// Gives a freshly built item entity the components of `stack`.
+fn carry(mut record: EntityRecord, stack: &ferrite_item::ItemStack) -> EntityRecord {
+    if let Some(state) = &mut record.data.item {
+        state.components = stack.components.clone();
+    }
+    record
+}
+
 /// Replaces the stack, marking it dirty for trackers when it changed.
 pub fn set_stack(data: &mut EntityData, stack: ItemStack) {
     let stack = if stack.count <= 0 {
@@ -110,6 +145,37 @@ pub fn new_item(pos: Vec3, vel: Vec3, stack: ItemStack, rng: &mut Rng) -> Entity
         flags: Flags::default(),
         data,
     }
+}
+
+/// [`new_item`] for a stack with components.
+pub fn new_item_stack(
+    pos: Vec3,
+    vel: Vec3,
+    stack: &ferrite_item::ItemStack,
+    rng: &mut Rng,
+) -> EntityRecord {
+    carry(new_item(pos, vel, plain_stack(stack), rng), stack)
+}
+
+/// [`pop_resource`] for a stack with components.
+pub fn pop_resource_stack(
+    block: [i32; 3],
+    stack: &ferrite_item::ItemStack,
+    rng: &mut Rng,
+) -> EntityRecord {
+    carry(pop_resource(block, plain_stack(stack), rng), stack)
+}
+
+/// [`drop_from_container`] for a stack with components: every part keeps them.
+pub fn drop_from_container_stack(
+    block: [i32; 3],
+    stack: &ferrite_item::ItemStack,
+    rng: &mut Rng,
+) -> Vec<EntityRecord> {
+    drop_from_container(block, plain_stack(stack), rng)
+        .into_iter()
+        .map(|record| carry(record, stack))
+        .collect()
 }
 
 /// An item dropped from a broken block (vanilla `Block.popResource`): a random spot inside the
@@ -196,6 +262,21 @@ pub fn thrown_by_player(
     record
 }
 
+/// [`thrown_by_player`] for a stack with components.
+pub fn thrown_by_player_stack(
+    feet: Vec3,
+    eye_height: f64,
+    yaw: f32,
+    pitch: f32,
+    stack: &ferrite_item::ItemStack,
+    rng: &mut Rng,
+) -> EntityRecord {
+    carry(
+        thrown_by_player(feet, eye_height, yaw, pitch, plain_stack(stack), rng),
+        stack,
+    )
+}
+
 fn is_mergeable(store: &EntityStore, key: EntityKey) -> bool {
     let (Some(data), Some(flags)) = (store.data(key), store.flags(key)) else {
         return false;
@@ -238,8 +319,11 @@ fn try_merge(store: &mut EntityStore, this: EntityKey, other: EntityKey) {
     };
     let (this_stack, other_stack) = (stack(a), stack(b));
     let same_target = a.item.as_ref().map(|i| i.target) == b.item.as_ref().map(|i| i.target);
-    // `areMergable`: the same item (stacks carry no components yet) and room in `other`.
+    // `areMergable`: the same item with the same components and room in `other`.
+    let same_components =
+        a.item.as_ref().map(|i| &i.components) == b.item.as_ref().map(|i| &i.components);
     if !same_target
+        || !same_components
         || this_stack.item_id != other_stack.item_id
         || other_stack.count + this_stack.count > max_stack_size(other_stack.item_id)
     {
@@ -421,10 +505,10 @@ pub fn pick_up(store: &mut EntityStore, picker: &mut Picker<'_>, sink: &mut Sink
         }
         let mut taken = stack(data);
         let original = taken.count;
-        let Ok(id) = u16::try_from(taken.item_id) else {
+        let mut full = full_stack(data);
+        if full.is_empty() {
             continue;
-        };
-        let mut full = ferrite_item::ItemStack::with_count(id, taken.count);
+        }
         if !picker.inventory.add(&mut full, picker.infinite) {
             continue;
         }
@@ -649,5 +733,122 @@ mod tests {
         // Yaw 90 looks toward -x.
         let record = thrown_by_player(Vec3::ZERO, 1.62, 90.0, 0.0, dirt(1), &mut rng);
         assert!(record.vel.x < -0.28);
+    }
+
+    /// A stack of `count` dirt blocks whose repair cost marks it as one of a kind.
+    fn marked(count: i32, mark: i32) -> ferrite_item::ItemStack {
+        let mut stack = ferrite_item::ItemStack::with_count(dirt(1).item_id as u16, count);
+        stack.components.insert(
+            ferrite_item::component_ids::REPAIR_COST,
+            ferrite_item::Component::RepairCost(mark),
+        );
+        stack
+    }
+
+    #[test]
+    fn pickup_keeps_the_components_of_the_item_entity() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(5);
+        let key = store.insert(new_item_stack(
+            Vec3::new(0.5, 64.0, 0.5),
+            Vec3::ZERO,
+            &marked(2, 7),
+            &mut rng,
+        ));
+        assert_eq!(full_stack(store.data(key).unwrap()), marked(2, 7));
+        let mut inventory = PlayerInventory::new();
+        let mut sink = |_: tracker::ViewerKey, _: &[u8]| {};
+        let mut picker = Picker {
+            uuid: Uuid::from_u128(1),
+            entity_id: 1,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+            inventory: &mut inventory,
+            infinite: false,
+        };
+        assert!(pick_up(&mut store, &mut picker, &mut sink));
+        assert_eq!(inventory.get(0), &marked(2, 7));
+    }
+
+    #[test]
+    fn a_partly_picked_up_item_keeps_its_components_on_the_ground() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(5);
+        let key = store.insert(new_item_stack(
+            Vec3::new(0.5, 64.0, 0.5),
+            Vec3::ZERO,
+            &marked(3, 7),
+            &mut rng,
+        ));
+        let mut inventory = PlayerInventory::new();
+        // Fill every slot with a different marked stack that is already full.
+        for slot in 0..ferrite_inventory::SIZE {
+            inventory.set(slot, marked(64, 99));
+        }
+        let mut sink = |_: tracker::ViewerKey, _: &[u8]| {};
+        let mut picker = Picker {
+            uuid: Uuid::from_u128(1),
+            entity_id: 1,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+            inventory: &mut inventory,
+            infinite: false,
+        };
+        assert!(!pick_up(&mut store, &mut picker, &mut sink));
+        assert_eq!(full_stack(store.data(key).unwrap()), marked(3, 7));
+    }
+
+    #[test]
+    fn item_entities_merge_only_when_their_components_match() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(11);
+        let mut store = EntityStore::default();
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        let a = store.insert(new_item_stack(at, Vec3::ZERO, &marked(1, 1), &mut rng));
+        let b = store.insert(new_item_stack(at, Vec3::ZERO, &marked(1, 2), &mut rng));
+        for _ in 0..80 {
+            tick_items(&mut store, &world, &mut rng);
+        }
+        assert!(!store.flags(a).unwrap().has(Flags::REMOVED));
+        assert!(!store.flags(b).unwrap().has(Flags::REMOVED));
+        assert_eq!(full_stack(store.data(a).unwrap()), marked(1, 1));
+        assert_eq!(full_stack(store.data(b).unwrap()), marked(1, 2));
+
+        let mut store = EntityStore::default();
+        let a = store.insert(new_item_stack(at, Vec3::ZERO, &marked(1, 3), &mut rng));
+        let b = store.insert(new_item_stack(at, Vec3::ZERO, &marked(1, 3), &mut rng));
+        for _ in 0..80 {
+            tick_items(&mut store, &world, &mut rng);
+        }
+        let survivors: Vec<_> = [a, b]
+            .into_iter()
+            .filter(|key| !store.flags(*key).unwrap().has(Flags::REMOVED))
+            .collect();
+        assert_eq!(survivors.len(), 1, "identical stacks merge into one entity");
+        assert_eq!(full_stack(store.data(survivors[0]).unwrap()), marked(2, 3));
+    }
+
+    #[test]
+    fn a_spilled_stack_keeps_its_components_on_every_part() {
+        let mut rng = Rng::new(3);
+        let records = drop_from_container_stack([0, 64, 0], &marked(40, 5), &mut rng);
+        assert!(
+            records.len() > 1,
+            "a stack of 40 splits into several entities"
+        );
+        let mut total = 0;
+        for record in &records {
+            let stack = full_stack(&record.data);
+            assert_eq!(stack.components, marked(1, 5).components);
+            total += stack.count;
+        }
+        assert_eq!(total, 40);
+    }
+
+    #[test]
+    fn thrown_and_popped_stacks_carry_their_components() {
+        let mut rng = Rng::new(3);
+        let thrown = thrown_by_player_stack(Vec3::ZERO, 1.62, 0.0, 0.0, &marked(1, 8), &mut rng);
+        assert_eq!(full_stack(&thrown.data), marked(1, 8));
+        let popped = pop_resource_stack([0, 64, 0], &marked(1, 9), &mut rng);
+        assert_eq!(full_stack(&popped.data), marked(1, 9));
     }
 }

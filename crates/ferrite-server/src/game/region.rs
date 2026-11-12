@@ -7871,25 +7871,16 @@ impl Region {
                     let Some(stack) = leftover else {
                         continue;
                     };
-                    let plain = ItemStack {
-                        count: stack.count,
-                        item_id: i32::from(stack.item),
-                    };
-                    self.entities.insert(item::new_item(
+                    self.entities.insert(item::new_item_stack(
                         pos,
                         ferrite_math::Vec3::ZERO,
-                        plain,
+                        &stack,
                         &mut self.rng,
                     ));
                     continue;
                 }
-                // Item entities hold plain stacks, like every other dropped item.
-                let plain = ItemStack {
-                    count: stack.count,
-                    item_id: i32::from(stack.item),
-                };
                 let mut record =
-                    item::new_item(pos, ferrite_math::Vec3::ZERO, plain, &mut self.rng);
+                    item::new_item_stack(pos, ferrite_math::Vec3::ZERO, &stack, &mut self.rng);
                 if let Some(state) = &mut record.data.item {
                     state.pickup_delay = 10;
                 }
@@ -9381,15 +9372,10 @@ impl Region {
         self.schedule_gravity(source, &destroyed);
     }
     /// Spawns what a player threw (Q, clicks outside a screen, overflowing crafts) as item
-    /// entities in front of it. Item entities hold plain stacks for now, so components are not
-    /// carried over.
+    /// entities in front of it. The entities carry the stacks' components.
     fn spawn_thrown(&mut self, p: &mut Player) {
         for (block, stack) in p.menus.spilled.drain(..) {
-            let plain = ItemStack {
-                count: stack.count,
-                item_id: i32::from(stack.item),
-            };
-            for record in item::drop_from_container(block, plain, &mut self.rng) {
+            for record in item::drop_from_container_stack(block, &stack, &mut self.rng) {
                 self.entities.insert(record);
             }
         }
@@ -9419,12 +9405,9 @@ impl Region {
             self.use_fishing_rod(p, slot);
         }
         for stack in p.menus.thrown.drain(..) {
-            let plain = ItemStack {
-                count: stack.count,
-                item_id: i32::from(stack.item),
-            };
             let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
-            let record = item::thrown_by_player(feet, 1.62, p.yaw, p.pitch, plain, &mut self.rng);
+            let record =
+                item::thrown_by_player_stack(feet, 1.62, p.yaw, p.pitch, &stack, &mut self.rng);
             self.entities.insert(record);
         }
     }
@@ -9561,6 +9544,8 @@ impl Region {
             0
         };
         let mut initial_drops = Vec::new();
+        // The stacks behind `initial_drops`, so drops a plugin leaves alone keep their components.
+        let mut dropped_stacks = Vec::new();
         if drop_allowed {
             for slot in 0..ferrite_inventory::SIZE {
                 let stack = p.inventory.get(slot);
@@ -9570,6 +9555,7 @@ impl Region {
                 let Some(material) = ferrite_item::item_name(stack.item) else {
                     continue;
                 };
+                dropped_stacks.push(stack.clone());
                 initial_drops.push(ferrite_plugin::ItemSnapshot {
                     material: material.to_owned(),
                     amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
@@ -9607,17 +9593,17 @@ impl Region {
             for slot in 0..ferrite_inventory::SIZE {
                 p.inventory.set(slot, ferrite_item::ItemStack::empty());
             }
-            for drop in &outcome.drops {
-                let Some(item) = ferrite_item::item_id(&drop.material) else {
-                    tracing::warn!(material = %drop.material, "death drop material is unknown");
-                    continue;
+            for stack in super::item_keep::drop_stacks(dropped_stacks, &outcome.drops) {
+                match stack {
+                    Ok(stack) => {
+                        self.entities
+                            .insert(item::pop_resource_stack(pos, &stack, &mut self.rng))
+                    }
+                    Err(material) => {
+                        tracing::warn!(%material, "death drop material is unknown");
+                        continue;
+                    }
                 };
-                let plain = ItemStack {
-                    count: i32::from(drop.amount),
-                    item_id: i32::from(item),
-                };
-                self.entities
-                    .insert(item::pop_resource(pos, plain, &mut self.rng));
             }
             // `ServerPlayer.dropExperience`: `min(level * 7, 100)` points, split by
             // `ExperienceOrb.award` and spawned where the player died.
