@@ -28,6 +28,8 @@ real client, Windows, or a local machine. Nothing below is claimed beyond what i
 - `FERRITE_JAVA_PREBUILT=1 cargo test --workspace --no-fail-fast` with the vanilla data, fixture
   world and Java jars in place: 1682 passed, 0 failed, including doc-tests. A first run without
   the fixture world had 11 failures (see above); the full suite was re-run after it existed.
+- GitHub CI on PR #3 at head `a1dcfe1` (run 43173823283): `test (ubuntu-latest)` success in 7 min
+  52 s, `test (windows-latest)` success in 17 min 42 s. No merge conflict, no review comments.
 
 ## Not verified, and why
 
@@ -35,7 +37,7 @@ real client, Windows, or a local machine. Nothing below is claimed beyond what i
 |---|---|---|
 | Real 26.3 client behaviour of anything here | No client in the container. `docs/manual-checklist.md` is still entirely unticked. | Run `python tools/wirecheck/run.py`, then the manual checklist; write the commit you ran at the top. |
 | Lingering potion cloud | Server-side only. No area-effect-cloud entity, particle or metadata is sent, so a player sees nothing and only the effects arrive. Mobs are not affected (same as splash potions). No test drives a real player through `tick_potion_clouds` end to end; the unit tests cover the cloud maths and the region bookkeeping. | Add the entity spawn and metadata (radius, colour, particle) once a client can be checked; add a player-level region test. |
-| Windows CI | Only Linux was run. The Windows-only stall in `four_crystals_respawn_the_dragon_through_the_full_sequence` was never reproduced; on Linux the whole `game::integration` group (80 tests) takes about 48 s. Commit `da059a0` raised CI's `timeout-minutes` (job 30 to 45, test step 25 to 40), which gives a stall more room rather than explaining it. | Run the suite on Windows; if it stalls, bound the test (it depends on `/tick rate 10000` and 5 ms sleeps) and find the Windows-only wait. |
+| Windows stall root cause | CI on Windows passed once on this branch (17 min 42 s), so the earlier stall in `four_crystals_respawn_the_dragon_through_the_full_sequence` did not recur, but one green run does not explain it. It was never reproduced here; on Linux the whole `game::integration` group (80 tests) takes about 48 s. Commit `da059a0` raised CI's `timeout-minutes` (job 30 to 45, test step 25 to 40), which gives a stall more room rather than explaining it. | Watch Windows run times over several runs; if it stalls again, bound the test (it depends on `/tick rate 10000` and 5 ms sleeps) and find the Windows-only wait. |
 | Everything outside `crates/ferrite-entity` and the new region tests | Covered only by the existing suite. | Review the diff. |
 | `docs/perf` numbers | Not re-measured; the 800-bot baseline is from `6aca3fc`. | `docs/perf/README.md` has the command. |
 | Windows ZIP, Tauri GUI, Dependabot #10 | Cannot be done here. | Unchanged from `docs/coordinator/remaining-2026-11-11.md` #1, #33. |
