@@ -3755,7 +3755,8 @@ impl CommandRuntime<'_> {
             );
             return;
         }
-        match ride::mount(rider.uuid, vehicle.uuid, vehicle.player) {
+        let vehicle_kind = ride::kind_of(&self.state.lock().unwrap(), vehicle.uuid);
+        match ride::mount_in(rider.uuid, vehicle.uuid, vehicle.player, vehicle_kind) {
             Ok(()) => {
                 self.broadcast_passengers(vehicle.uuid);
                 self.reply

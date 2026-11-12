@@ -46,7 +46,12 @@ pub fn handle(call: &HostCall) -> Option<(String, Option<PlayerCommand>)> {
                 (!riders.is_empty()).then(|| changed(subject)).flatten(),
             )
         }
-        "addPassenger(Entity)" => match ride::mount(arg()?, subject, false) {
+        "addPassenger(Entity)" => match ride::mount_in(
+            arg()?,
+            subject,
+            false,
+            super::facts::fact(subject).map(|f| f.kind),
+        ) {
             Ok(()) => ("true".to_owned(), changed(subject)),
             Err(_) => ("false".to_owned(), None),
         },
