@@ -22,6 +22,7 @@ mod riding;
 pub mod rules;
 pub(crate) mod snapshot;
 mod survival;
+pub mod tile_update;
 mod visual;
 pub mod worldgen;
 pub mod worldinfo;

@@ -1268,6 +1268,26 @@ impl Player {
                     },
                 );
             }
+            PluginPacket::TileUpdate {
+                pos,
+                entity,
+                items,
+                furnace,
+            } => {
+                let Some(type_id) =
+                    ferrite_data::registries::id("minecraft:block_entity_type", &entity)
+                else {
+                    return;
+                };
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::BlockEntityData {
+                        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                        block_type: VarInt(type_id),
+                        nbt: crate::plugins::tile_update::nbt(&items, furnace),
+                    },
+                );
+            }
             PluginPacket::ServerLinks(links) => send(
                 self,
                 &ferrite_protocol::packets::play::ServerLinks {

@@ -461,6 +461,15 @@ pub enum PluginPacket {
         color: String,
         glowing: bool,
     },
+    /// `Player#sendBlockUpdate`: a container or furnace snapshot shown to one player only
+    /// (`ClientboundBlockEntityDataPacket`). `items` are `(slot, material, count)`; `furnace` is
+    /// `[BurnTime, BurnTimeTotal, CookTime, CookTimeTotal]`.
+    TileUpdate {
+        pos: [i32; 3],
+        entity: String,
+        items: Vec<(u8, String, i32)>,
+        furnace: Option<[i16; 4]>,
+    },
     /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
     Equipment {
         entity_id: i32,

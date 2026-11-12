@@ -378,16 +378,48 @@ public abstract class PlayerMisc extends PlayerStubs {
     protected void tellHost(String method, Object... args) {
         try { HostBridge.callVoid("Player", getUniqueId(), method, args); } catch (UnsupportedOperationException offline) { /* no host */ }
     }
-    /** Signs are the one tile entity the client can be sent; any other state has no host form. */
+    /**
+     * A tile snapshot shown to this player only (never a world change). Signs and the block entity families the host
+     * models (chest, trapped chest, barrel, shulker boxes, furnace, blast furnace, smoker) are sent; any other
+     * {@code TileState} (banner, skull, ...) has no host model and is refused instead of being sent with invented NBT.
+     */
     @Override public void sendBlockUpdate(org.bukkit.Location loc, org.bukkit.block.TileState tileState) {
         Objects.requireNonNull(loc, "loc");
         Objects.requireNonNull(tileState, "tileState");
-        if (!(tileState instanceof org.bukkit.block.Sign sign)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#sendBlockUpdate(" + tileState.getType() + ")");
-        var side = sign.getSide(org.bukkit.block.sign.Side.FRONT);
-        var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
-        var lines = new String[4];
-        for (int i = 0; i < 4; i++) lines[i] = plain.serialize(side.line(i));
-        sendSignChange(loc, lines, side.getColor(), side.isGlowingText());
+        if (tileState instanceof org.bukkit.block.Sign sign) {
+            var side = sign.getSide(org.bukkit.block.sign.Side.FRONT);
+            var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
+            var lines = new String[4];
+            for (int i = 0; i < 4; i++) lines[i] = plain.serialize(side.line(i));
+            sendSignChange(loc, lines, side.getColor(), side.isGlowingText());
+            return;
+        }
+        var type = tileState.getType();
+        String entity = switch (type) {
+            case CHEST -> "minecraft:chest";
+            case TRAPPED_CHEST -> "minecraft:trapped_chest";
+            case BARREL -> "minecraft:barrel";
+            case FURNACE -> "minecraft:furnace";
+            case BLAST_FURNACE -> "minecraft:blast_furnace";
+            case SMOKER -> "minecraft:smoker";
+            default -> type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
+        };
+        if (entity == null || !(tileState instanceof org.bukkit.block.Container container))
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, chests, barrels, shulker boxes and furnaces as tile entities, and has no banner, skull or other block entity model to encode");
+        var snapshot = container.getSnapshotInventory();
+        var entries = new java.util.ArrayList<String>();
+        for (int slot = 0; slot < snapshot.getSize(); slot++) {
+            var item = snapshot.getItem(slot);
+            if (item == null || item.getType().isAir() || item.getAmount() <= 0) continue;
+            if (item.hasItemMeta())
+                throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate cannot carry item metadata (slot " + slot + " holds " + item.getType() + " with meta); the host snapshot encodes material and amount only");
+            entries.add("item," + slot + "," + item.getType().getKey() + "," + item.getAmount());
+        }
+        if (tileState instanceof org.bukkit.block.Furnace furnace) {
+            // Bukkit exposes the remaining burn time but not the fuel's total, so the total is sent as 0.
+            entries.add("furnace," + furnace.getBurnTime() + ",0," + furnace.getCookTime() + "," + furnace.getCookTimeTotal());
+        }
+        HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, entity, entries);
     }
     @Override public void sendSignChange(org.bukkit.Location loc, String[] lines, org.bukkit.DyeColor dyeColor, boolean hasGlowingText) {
         java.util.List<String> text = new java.util.ArrayList<>();
