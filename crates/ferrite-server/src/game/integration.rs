@@ -2137,6 +2137,31 @@ async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
         Some(&ferrite_nbt::Tag::Long(0)),
         "a newly opened gateway starts its magenta creation beam"
     );
+    // The gateway clock keeps counting after the creation beam: at age 2400 the purple beam
+    // starts by itself, announced with block event 1 on the gateway block.
+    world
+        .console_command("/tick rate 10000".into())
+        .await
+        .unwrap();
+    let gateway = ferrite_data::registries::id("minecraft:block", "minecraft:end_gateway").unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let body = bot
+                .until(ferrite_protocol::packets::play::BlockEvent::ID)
+                .await;
+            let event =
+                ferrite_protocol::packets::play::BlockEvent::decode(&mut body.as_slice()).unwrap();
+            if (event.pos.x, event.pos.y, event.pos.z) == (96, 75, 0) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("the automatic purple beam");
+    assert_eq!(
+        (event.block.0, event.param_a, event.param_b),
+        (gateway, 1, 0)
+    );
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();
@@ -6361,4 +6386,46 @@ async fn plugin_chat_commands_keep_the_players_permission() {
         "still a survival player, so bedrock stands"
     );
     assert_eq!(source.block(9, 64, 8), Some(bedrock));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fishing_rod_casts_a_bobber_and_a_second_use_reels_it_in_with_bot() {
+    use ferrite_protocol::packets::play::{AddEntity, RemoveEntities, ServerboundUseItem};
+    let (world, addr, server) = op_world(None, 0, &["Angler"]).await;
+    let mut bot = Bot::join(addr, "Angler").await;
+    bot.until(46).await;
+    world
+        .console_command("give Angler fishing_rod 1".into())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let bobber_type = ferrite_entity::bobber::bobber_type();
+    let use_rod = |sequence| ServerboundUseItem {
+        hand: VarInt(0),
+        sequence: VarInt(sequence),
+        yaw: 0.0,
+        pitch: 0.0,
+    };
+    bot.send(&use_rod(1)).await;
+    // The cast bobber is spawned for the angler.
+    let bobber = loop {
+        let body = bot.until(AddEntity::ID).await;
+        let add = AddEntity::decode(&mut body.as_slice()).unwrap();
+        if add.entity_type.0 == i32::from(bobber_type) {
+            break add;
+        }
+    };
+    assert!(bobber.data.0 > 0, "the spawn data names the owner's entity");
+    // Using the rod again reels it in, and the client is told to forget it.
+    bot.send(&use_rod(2)).await;
+    loop {
+        let body = bot.until(RemoveEntities::ID).await;
+        let gone = RemoveEntities::decode(&mut body.as_slice()).unwrap();
+        if gone.ids.iter().any(|id| id.0 == bobber.id.0) {
+            break;
+        }
+    }
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
 }

@@ -168,9 +168,43 @@ pub fn mob_drops(
         .collect()
 }
 
+/// Rolls the fishing table (`gameplay/fishing`) for a rod. Luck of the Sea is not applied: the
+/// loot context carries no luck. Empty when the loot data is missing.
+pub fn fishing_catch(
+    rod: &ferrite_item::ItemStack,
+    rng: &mut ferrite_entity::Rng,
+) -> Vec<ItemStack> {
+    let Some(table) = tables().and_then(|tables| tables.get("minecraft:gameplay/fishing")) else {
+        return Vec::new();
+    };
+    let context = LootContext {
+        tool: rod.name().map(str::to_owned),
+        ..LootContext::default()
+    };
+    table
+        .roll(&context, &mut LootRng(rng))
+        .into_iter()
+        .filter_map(|(item, count)| {
+            let item_id = ferrite_data::registries::id("minecraft:item", &item)?;
+            (count > 0).then_some(ItemStack { count, item_id })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fishing_table_yields_items_for_a_rod() {
+        let rod = ferrite_item::ItemStack::from_name("minecraft:fishing_rod").unwrap();
+        let mut rng = ferrite_entity::Rng::new(3);
+        for _ in 0..20 {
+            let catch = fishing_catch(&rod, &mut rng);
+            assert!(!catch.is_empty(), "every roll catches something");
+            assert!(catch.iter().all(|stack| stack.count > 0));
+        }
+    }
 
     fn tool(name: &str) -> ferrite_item::ItemStack {
         ferrite_item::ItemStack::from_name(name).unwrap()

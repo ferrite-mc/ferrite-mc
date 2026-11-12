@@ -282,7 +282,7 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             pitch: pack_degrees(data.pitch),
                             yaw: pack_degrees(data.yaw),
                             head_yaw: pack_degrees(data.head_yaw),
-                            data: VarInt(0),
+                            data: VarInt(data.spawn_data),
                         }),
                     );
                     let values = data.metadata.non_default();
@@ -703,6 +703,32 @@ mod tests {
         // A short view distance caps the range; walking out of it removes the entity.
         let viewers = [viewer(near, 8.0, 48.0, 2, &chunks)];
         assert_eq!(ids(&tick(&mut store, &viewers)), [RemoveEntities::ID]);
+    }
+
+    #[test]
+    fn a_bobber_spawn_packet_carries_its_owners_entity_id() {
+        let mut store = EntityStore::default();
+        let record = crate::bobber::cast(
+            Uuid::from_u128(9),
+            41,
+            Vec3::new(8.0, 64.0, 8.0),
+            0.0,
+            0.0,
+            0,
+            &mut crate::Rng::new(1),
+        );
+        let kind = record.data.kind;
+        store.insert(record);
+        let chunks = HashSet::from([(0, 0)]);
+        let viewers = [viewer((Uuid::from_u128(1), 0), 8.0, 8.0, 10, &chunks)];
+        let packets = tick(&mut store, &viewers);
+        let add = packets
+            .iter()
+            .find(|p| p.1 == AddEntity::ID)
+            .expect("the bobber is spawned for a nearby viewer");
+        let add = AddEntity::decode(&mut add.2.as_slice()).unwrap();
+        assert_eq!(add.entity_type.0, i32::from(kind));
+        assert_eq!(add.data.0, 41);
     }
 
     /// Past `GRID_MIN_VIEWERS` the grid picks the candidates; it must pair the near viewers, skip

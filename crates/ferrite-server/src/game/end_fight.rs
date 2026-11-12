@@ -669,6 +669,79 @@ pub fn advance_gateway_age(source: &super::anvil::AnvilChunkSource, at: [i32; 3]
         .unwrap_or(false)
 }
 
+/// Ticks between the automatic purple beams of a gateway (`TheEndGatewayBlockEntity`: the beam
+/// fires whenever `Age % 2400 == 0` and no beam is running).
+pub const GATEWAY_BEAM_INTERVAL: i64 = 2400;
+/// How long a purple beam lasts (`teleportCooldown`).
+pub const GATEWAY_BEAM_TICKS: i32 = 40;
+/// The block event id that starts the beam on the client (`blockEvent(pos, block, 1, 0)`).
+pub const GATEWAY_BEAM_EVENT: u8 = 1;
+
+/// The runtime clock of one gateway: its age and the cooldown of the purple beam.
+///
+/// The stored `Age` stops at [`GATEWAY_SPAWN_TICKS`] (rewriting it every tick would resave the
+/// chunk forever), so this clock keeps counting in memory from that value. It restarts from the
+/// stored age after a restart; vanilla saves the full age, so the 2400-tick phase can differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayBeam {
+    age: i64,
+    cooldown: i32,
+}
+
+impl GatewayBeam {
+    pub const fn new(age: i64) -> Self {
+        Self { age, cooldown: 0 }
+    }
+
+    #[cfg(test)]
+    pub const fn age(&self) -> i64 {
+        self.age
+    }
+
+    pub const fn is_cooling_down(&self) -> bool {
+        self.cooldown > 0
+    }
+
+    /// Vanilla `serverTick`: advances the age, runs the beam down, and starts a beam when the
+    /// age reaches a multiple of 2400 while none is running. `true` on the tick the beam starts.
+    pub fn tick(&mut self) -> bool {
+        let cooling = self.is_cooling_down();
+        self.age += 1;
+        if cooling {
+            self.cooldown -= 1;
+            false
+        } else if self.age % GATEWAY_BEAM_INTERVAL == 0 {
+            self.cooldown = GATEWAY_BEAM_TICKS;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A teleport through the gateway starts the beam too (`triggerCooldown`). `false` when a
+    /// beam is already running, so no second event is sent.
+    pub fn trigger(&mut self) -> bool {
+        if self.is_cooling_down() {
+            return false;
+        }
+        self.cooldown = GATEWAY_BEAM_TICKS;
+        true
+    }
+}
+
+/// The `Age` stored in a gateway block entity, 0 when it has none.
+pub fn gateway_stored_age(entity: &ferrite_world::BlockEntity) -> i64 {
+    match entity.data.get("Age") {
+        Some(ferrite_nbt::Tag::Long(age)) => *age,
+        _ => 0,
+    }
+}
+
+/// The registry id of the gateway block, for the beam's block event.
+pub fn gateway_block_id() -> Option<i32> {
+    ferrite_data::registries::id("minecraft:block", END_GATEWAY)
+}
+
 /// The tag sent in `ClientboundBlockEntityDataPacket`: the stored data without the chunk-local
 /// coordinates the chunk save adds.
 pub fn gateway_update_tag(entity: &ferrite_world::BlockEntity) -> ferrite_nbt::Compound {
@@ -1217,5 +1290,83 @@ mod respawn_tests {
         };
         let restored = Saved::from_nbt(&oversized.to_nbt()).unwrap();
         assert_eq!(restored.gateways, GATEWAY_COUNT);
+    }
+
+    #[test]
+    fn the_beam_starts_on_the_2400th_tick_and_lasts_forty_ticks() {
+        let mut beam = GatewayBeam::new(GATEWAY_SPAWN_TICKS);
+        let mut starts = Vec::new();
+        let mut cooling = Vec::new();
+        while beam.age() < 2 * GATEWAY_BEAM_INTERVAL + 100 {
+            let fired = beam.tick();
+            if fired {
+                starts.push(beam.age());
+            }
+            if beam.is_cooling_down() {
+                cooling.push(beam.age());
+            }
+        }
+        assert_eq!(starts, vec![2400, 4800], "one beam per 2400 ticks of age");
+        // After the start at age 2400 the cooldown reads 40 and runs out 40 ticks later.
+        assert_eq!(
+            cooling.iter().filter(|a| (2400..2440).contains(*a)).count(),
+            40
+        );
+        assert!(!cooling.contains(&2440), "the beam is over after 40 ticks");
+    }
+
+    #[test]
+    fn nothing_fires_during_the_creation_beam_or_between_intervals() {
+        let mut beam = GatewayBeam::new(0);
+        for _ in 0..2399 {
+            assert!(!beam.tick());
+            assert!(!beam.is_cooling_down());
+        }
+        assert_eq!(beam.age(), 2399);
+        assert!(beam.tick(), "age 2400");
+        assert!(beam.is_cooling_down());
+    }
+
+    #[test]
+    fn a_teleport_starts_the_beam_once_and_a_running_beam_ignores_it() {
+        let mut beam = GatewayBeam::new(GATEWAY_SPAWN_TICKS);
+        assert!(beam.trigger());
+        assert!(beam.is_cooling_down());
+        assert!(!beam.trigger(), "no second event while the beam runs");
+        for _ in 0..GATEWAY_BEAM_TICKS - 1 {
+            assert!(!beam.tick());
+        }
+        assert!(beam.is_cooling_down(), "39 ticks in");
+        beam.tick();
+        assert!(!beam.is_cooling_down(), "over after 40");
+        assert!(beam.trigger(), "a new teleport can start another");
+    }
+
+    #[test]
+    fn an_automatic_beam_is_not_restarted_while_a_teleport_beam_runs() {
+        // A teleport beam running across the 2400 mark swallows the automatic one, as vanilla.
+        let mut beam = GatewayBeam::new(2390);
+        assert!(beam.trigger());
+        for _ in 0..20 {
+            assert!(!beam.tick());
+        }
+        assert_eq!(beam.age(), 2410);
+    }
+
+    #[test]
+    fn the_stored_age_and_block_id_come_from_the_block_entity() {
+        let entity = gateway_block_entity(50).unwrap();
+        assert_eq!(gateway_stored_age(&entity), 50);
+        assert_eq!(
+            gateway_stored_age(&ferrite_world::BlockEntity {
+                type_id: entity.type_id,
+                data: ferrite_nbt::Compound::new(),
+            }),
+            0
+        );
+        assert_eq!(
+            gateway_block_id(),
+            ferrite_data::registries::id("minecraft:block", "minecraft:end_gateway")
+        );
     }
 }

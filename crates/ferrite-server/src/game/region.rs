@@ -8,7 +8,7 @@ use super::{
     valid_move,
 };
 use ferrite_entity::{
-    BlockGetter, EntityRecord, EntityStore, Flags, Rng, ai, arrow, chunk_of, combat,
+    BlockGetter, EntityRecord, EntityStore, Flags, Rng, ai, arrow, bobber, chunk_of, combat,
     effect::{ActiveEffects, Effect, EffectEvent, MobEffectInstance},
     experience, item,
     mob::{self, MobKind},
@@ -1100,6 +1100,9 @@ pub struct Player {
     pub portal_cooldown: u32,
     /// A portal trip waiting for its destination chunk to load.
     pub portal_pending: Option<(super::Dimension, [f64; 3])>,
+    /// The end gateway block this player just teleported through, for the region to start the
+    /// purple beam.
+    pub gateway_used: Option<[i32; 3]>,
     /// Left the End once already, so the credits are not shown again (vanilla `seenCredits`).
     /// shortcut: kept in memory only, not saved with the player data.
     pub seen_credits: bool,
@@ -1132,12 +1135,17 @@ pub struct Region {
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// The bottle each splash potion in flight was thrown from, keyed by projectile uuid.
     pub thrown_potions: HashMap<Uuid, ferrite_item::ItemStack>,
-    /// Clouds left by landed lingering potions. They are not sent to clients and not saved.
+    /// Clouds left by landed lingering potions. Each has an `area_effect_cloud` entity in
+    /// `entities` (same uuid) that clients see; the cloud state itself is not saved.
     pub potion_clouds: Vec<ferrite_entity::potion::PotionCloud>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
     pending_hurts: Vec<Uuid>,
+    /// Runtime clocks of the end gateways this region holds: age and purple-beam cooldown.
+    gateway_beams: HashMap<[i32; 3], super::end_fight::GatewayBeam>,
+    /// Effect changes on mobs this tick, waiting to be sent to the players tracking them.
+    pending_mob_effects: Vec<(Uuid, MobEffectNotice)>,
     /// The dragon boss bar each player was last shown: bar id and progress.
     dragon_bars: HashMap<Uuid, (Uuid, f32)>,
     pub players: HashMap<Uuid, Player>,
@@ -1194,6 +1202,7 @@ impl RegionData for Region {
         self.entities.merge(other.entities);
         self.thrown_potions.extend(other.thrown_potions);
         self.potion_clouds.extend(other.potion_clouds);
+        self.gateway_beams.extend(other.gateway_beams);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
         self.generator.merge(other.generator);
@@ -1226,16 +1235,28 @@ impl RegionData for Region {
                 ])
             });
         self.potion_clouds = staying_clouds;
+        let moving_beams: Vec<_> = self
+            .gateway_beams
+            .keys()
+            .copied()
+            .filter(|at| in_sections(*at))
+            .collect();
+        let gateway_beams = moving_beams
+            .into_iter()
+            .filter_map(|at| self.gateway_beams.remove_entry(&at))
+            .collect();
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
             potion_clouds,
+            gateway_beams,
             delayed_updates,
             moving_pistons,
             thrown_tridents: HashMap::new(),
             thrown_potions: HashMap::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
+            pending_mob_effects: Vec::new(),
             dragon_bars: HashMap::new(),
             players: HashMap::new(),
             rng: Rng::default(),
@@ -3162,6 +3183,11 @@ impl Player {
             self.menus.launched.push((kind, contents));
             return;
         }
+        // A fishing rod casts a bobber, or reels in the one already out; the region does it.
+        if matches!(stack.name(), Some("minecraft:fishing_rod")) {
+            self.menus.fishing.push(slot);
+            return;
+        }
         // Vanilla `LivingEntity.startUsingItem`: a shield raises, a bow starts drawing.
         match stack.name() {
             Some("minecraft:shield") if self.shield_disabled == 0 => {
@@ -3466,6 +3492,7 @@ impl Player {
         self.portal_pending = None;
         self.portal_ticks = 0;
         if gateway {
+            self.gateway_used = Some(feet);
             self.pos = destination;
             self.teleport();
         } else {
@@ -4766,6 +4793,13 @@ impl Player {
 }
 /// Sends a tracker packet to a player: through its connection while it is in this region,
 /// otherwise through the world-wide table (it left the region since it started tracking).
+/// A change to a mob's active effects that its trackers have not been told about yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MobEffectNotice {
+    Added(ferrite_entity::effect::MobEffectInstance),
+    Removed(i32),
+}
+
 fn deliver(
     players: &HashMap<Uuid, Player>,
     ctx: &TickContext,
@@ -5718,6 +5752,7 @@ impl Region {
         let mut blocks = Vec::new();
         let mut new_gateways = Vec::new();
         let mut gateway_entities = Vec::new();
+        let mut beams = Vec::new();
         if self.held_chunks.contains_key(&ChunkPos(0, 0)) {
             let portal = ferrite_data::blocks::default_state("minecraft:end_portal").map(u32::from);
             let present = portal.is_some_and(|portal| {
@@ -5755,6 +5790,16 @@ impl Region {
                 // Keep the stored `Age` moving so a viewer who arrives later, or the chunk
                 // after a reload, does not see the creation beam start again from zero.
                 super::end_fight::advance_gateway_age(source, at);
+                let stored = source
+                    .block_entity(at[0], at[1], at[2])
+                    .map_or(0, |entity| super::end_fight::gateway_stored_age(&entity));
+                let beam = self
+                    .gateway_beams
+                    .entry(at)
+                    .or_insert_with(|| super::end_fight::GatewayBeam::new(stored));
+                if beam.tick() {
+                    beams.push(at);
+                }
             }
         }
         if !blocks.is_empty() {
@@ -5765,6 +5810,50 @@ impl Region {
         }
         for at in gateway_entities {
             self.set_gateway_age(ctx, at, super::end_fight::GATEWAY_SPAWN_TICKS);
+        }
+        for at in beams {
+            self.send_gateway_beam(ctx, at);
+        }
+    }
+
+    /// Starts the purple teleport beam of the gateway at `at` for the chunk's viewers: vanilla
+    /// `TheEndGatewayBlockEntity.triggerCooldown` sends block event 1.
+    fn send_gateway_beam(&self, ctx: &TickContext, at: [i32; 3]) {
+        let Some(block) = super::end_fight::gateway_block_id() else {
+            return;
+        };
+        let event = BlockEvent {
+            pos: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]),
+            block: VarInt(block),
+            param_a: super::end_fight::GATEWAY_BEAM_EVENT,
+            param_b: 0,
+        };
+        broadcast_tracked_chunk(
+            &ctx.tracking.lock().unwrap(),
+            ctx.dimension,
+            (at[0].div_euclid(16), at[2].div_euclid(16)),
+            &packet(&event),
+        );
+    }
+
+    /// A player teleported through the gateway at `at`: start its purple beam unless one runs.
+    fn gateway_teleported(&mut self, ctx: &TickContext, at: [i32; 3]) {
+        let started = self
+            .gateway_beams
+            .entry(at)
+            .or_insert_with(|| {
+                let stored = ctx
+                    .source
+                    .as_deref()
+                    .and_then(|source| source.block_entity(at[0], at[1], at[2]))
+                    .map_or(super::end_fight::GATEWAY_SPAWN_TICKS, |entity| {
+                        super::end_fight::gateway_stored_age(&entity)
+                    });
+                super::end_fight::GatewayBeam::new(stored)
+            })
+            .trigger();
+        if started {
+            self.send_gateway_beam(ctx, at);
         }
     }
 
@@ -6779,6 +6868,111 @@ impl Region {
         self.save_shoulders_for(p);
         self.send_shoulder(p, side, Some(parrot.variant));
         true
+    }
+
+    /// `Player#setShoulderEntityLeft/Right` and the release methods: seats the parrot `parrot`
+    /// on `side` of `player` (`None` takes the parrot off and puts it in the world). A live
+    /// parrot entity is lifted out of the world; a uuid with no entity becomes a fresh shoulder
+    /// parrot. A parrot already on the other shoulder moves over, and one that was on `side` is
+    /// released into the world. The change is saved at once and announced to the player and
+    /// the viewers. `false` when nothing changed: unknown player, or an entity that is not a
+    /// parrot.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "called by the plugin host handler for Player#setShoulderEntity*, which lives outside game/ and is not wired yet"
+        )
+    )]
+    pub fn set_shoulder(&mut self, player: Uuid, side: ShoulderSide, parrot: Option<Uuid>) -> bool {
+        let Some(at) = self
+            .players
+            .get(&player)
+            .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.05, p.pos[2]))
+        else {
+            return false;
+        };
+        let changes = self.change_shoulder(player, at, side, parrot);
+        let Some(p) = self.players.get(&player) else {
+            return false;
+        };
+        for (side, variant) in &changes {
+            self.send_shoulder(p, *side, *variant);
+        }
+        if !changes.is_empty() {
+            self.save_shoulders_for(p);
+        }
+        !changes.is_empty()
+    }
+
+    /// The game-state half of [`Self::set_shoulder`]: moves parrots between the entity store and
+    /// the shoulders. Returns what to announce, as `(side, variant)` with `None` for an empty
+    /// shoulder.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "called by the plugin host handler for Player#setShoulderEntity*, which lives outside game/ and is not wired yet"
+        )
+    )]
+    fn change_shoulder(
+        &mut self,
+        player: Uuid,
+        at: ferrite_math::Vec3,
+        side: ShoulderSide,
+        parrot: Option<Uuid>,
+    ) -> Vec<(ShoulderSide, Option<i32>)> {
+        let mut changes = Vec::new();
+        let Some(uuid) = parrot else {
+            if let Some(old) = super::ride::shoulder_release(player, side) {
+                self.entities.insert(old.to_record(at, &mut self.rng));
+                changes.push((side, None));
+            }
+            return changes;
+        };
+        let live = self.entities.keys().iter().copied().find(|key| {
+            self.entities
+                .data(*key)
+                .is_some_and(|data| data.uuid == uuid)
+        });
+        let seated = match live {
+            Some(key) => {
+                let state = self.entities.data(key).and_then(|data| data.mob);
+                let Some(state) = state.filter(|s| s.kind == MobKind::Parrot && !s.is_dead())
+                else {
+                    return changes;
+                };
+                self.entities.remove(key);
+                ShoulderParrot {
+                    uuid,
+                    variant: 0,
+                    owner: state.owner,
+                }
+            }
+            None => ShoulderParrot {
+                uuid,
+                variant: 0,
+                owner: None,
+            },
+        };
+        let other = match side {
+            ShoulderSide::Left => ShoulderSide::Right,
+            ShoulderSide::Right => ShoulderSide::Left,
+        };
+        if super::ride::shoulders_of(player)
+            .get(other)
+            .is_some_and(|sitting| sitting.uuid == uuid)
+        {
+            super::ride::shoulder_release(player, other);
+            changes.push((other, None));
+        }
+        if let Some(old) = super::ride::shoulder_set(player, side, Some(seated))
+            && old.uuid != uuid
+        {
+            self.entities.insert(old.to_record(at, &mut self.rng));
+        }
+        changes.push((side, Some(seated.variant)));
+        changes
     }
 
     /// Writes the player's current shoulders next to their player data.
@@ -8708,6 +8902,119 @@ impl Region {
                 p.apply_effect(instance);
             }
         }
+        // Every living entity in the burst, as vanilla (`ThrownSplashPotion.applySplash` looks
+        // in the box inflated by 4 blocks sideways and 2 up and down), with the same falloff.
+        let reach = ferrite_math::AABB::new(
+            center[0] - 4.0,
+            center[1] - 2.0,
+            center[2] - 4.0,
+            center[0] + 4.0,
+            center[1] + 2.0,
+            center[2] + 4.0,
+        );
+        for key in self.entities.query_vec(reach) {
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            let distance = ((pos.x - center[0]).powi(2)
+                + (pos.y - center[1]).powi(2)
+                + (pos.z - center[2]).powi(2))
+            .sqrt();
+            if distance > 4.0 {
+                continue;
+            }
+            let scale = (1.0 - distance / 4.0).max(0.25);
+            for instance in &effects {
+                let mut instance = *instance;
+                if instance.duration > 0 {
+                    instance.duration = (f64::from(instance.duration) * scale) as i32;
+                }
+                self.give_mob_effect(key, instance);
+            }
+        }
+    }
+
+    /// Gives a mob an effect and queues the client update for whoever tracks it.
+    fn give_mob_effect(
+        &mut self,
+        key: ferrite_entity::EntityKey,
+        instance: ferrite_entity::effect::MobEffectInstance,
+    ) {
+        let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
+            return;
+        };
+        if let Some(stored) = mob::add_effect(&mut self.entities, key, instance) {
+            self.pending_mob_effects
+                .push((uuid, MobEffectNotice::Added(stored)));
+        }
+    }
+
+    /// Ticks the effects of every mob that has any (wandering traders do their own in
+    /// [`Self::tick_trader_drinks`]) and tells trackers about what was added or expired.
+    fn tick_mob_effects(&mut self, ctx: &TickContext) {
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|key| {
+                self.entities.data(*key).is_some_and(|data| {
+                    !data.effects.is_empty()
+                        && data
+                            .mob
+                            .as_ref()
+                            .is_some_and(|mob| mob.kind != MobKind::WanderingTrader)
+                })
+            })
+            .collect();
+        for key in keys {
+            let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
+                continue;
+            };
+            for expired in mob::tick_effects(&mut self.entities, key) {
+                self.pending_mob_effects
+                    .push((uuid, MobEffectNotice::Removed(expired.effect)));
+            }
+        }
+        for (uuid, notice) in std::mem::take(&mut self.pending_mob_effects) {
+            let Some(key) = self
+                .entities
+                .keys()
+                .iter()
+                .copied()
+                .find(|key| self.entities.data(*key).is_some_and(|d| d.uuid == uuid))
+            else {
+                continue;
+            };
+            let Some(id) = self.entities.data(key).map(|data| VarInt(data.id)) else {
+                continue;
+            };
+            let players = &self.players;
+            let mut send_to = |viewer, bytes: &[u8]| deliver(players, ctx, viewer, bytes);
+            match notice {
+                MobEffectNotice::Added(instance) => tracker::broadcast(
+                    &self.entities,
+                    key,
+                    &UpdateMobEffect {
+                        entity_id: id,
+                        effect: VarInt(instance.effect),
+                        amplifier: VarInt(instance.amplifier),
+                        duration: VarInt(instance.duration),
+                        flags: instance.flags(),
+                    },
+                    &mut send_to,
+                ),
+                MobEffectNotice::Removed(effect) => tracker::broadcast(
+                    &self.entities,
+                    key,
+                    &RemoveMobEffect {
+                        entity_id: id,
+                        effect: VarInt(effect),
+                    },
+                    &mut send_to,
+                ),
+            }
+        }
     }
 
     /// The effects a potion bottle carries, or none when it is not a potion.
@@ -8732,10 +9039,17 @@ impl Region {
         if effects.is_empty() {
             return;
         }
-        self.potion_clouds
-            .push(ferrite_entity::potion::PotionCloud::lingering(
-                center, &effects,
-            ));
+        let color = match stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS) {
+            Some(ferrite_item::Component::PotionContents(contents)) => contents.custom_color,
+            Some(ferrite_item::Component::Opaque(tag)) => {
+                PotionContents::from_tag(&tag).and_then(|contents| contents.custom_color)
+            }
+            _ => None,
+        };
+        let cloud =
+            ferrite_entity::potion::PotionCloud::lingering(center, &effects).with_color(color);
+        self.entities.insert(cloud.spawn_record());
+        self.potion_clouds.push(cloud);
     }
 
     /// Ticks every lingering cloud and applies what it reaches to the players of this region.
@@ -8743,25 +9057,48 @@ impl Region {
         if self.potion_clouds.is_empty() {
             return;
         }
-        let candidates: Vec<(Uuid, [f64; 3])> = self
+        let mut candidates: Vec<(Uuid, [f64; 3])> = self
             .players
             .values()
             .filter(|p| p.gamemode != 3 && !p.survival.dead)
             .map(|p| (p.uuid, p.pos))
             .collect();
+        candidates.extend(self.entities.keys().iter().filter_map(|&key| {
+            let data = self.entities.data(key)?;
+            let live = self
+                .entities
+                .flags(key)
+                .is_some_and(|f| !f.has(Flags::REMOVED))
+                && data.mob.as_ref().is_some_and(|mob| !mob.is_dead());
+            let pos = self.entities.pos(key)?;
+            live.then_some((data.uuid, [pos.x, pos.y, pos.z]))
+        }));
         let mut clouds = std::mem::take(&mut self.potion_clouds);
+        let entities = &mut self.entities;
+        let mut pending = Vec::new();
         clouds.retain_mut(|cloud| {
             let Some(applied) = cloud.tick(candidates.iter().copied()) else {
+                cloud.despawn(entities);
                 return false;
             };
+            cloud.sync(entities);
             for (uuid, effect) in applied {
                 if let Some(p) = self.players.get_mut(&uuid) {
                     p.apply_effect(effect);
+                } else if let Some(key) = entities
+                    .keys()
+                    .iter()
+                    .copied()
+                    .find(|key| entities.data(*key).is_some_and(|d| d.uuid == uuid))
+                    && let Some(stored) = mob::add_effect(entities, key, effect)
+                {
+                    pending.push((uuid, MobEffectNotice::Added(stored)));
                 }
             }
             true
         });
         self.potion_clouds = clouds;
+        self.pending_mob_effects.extend(pending);
     }
 
     /// A fire charge: light the facing block when fire may be placed there.
@@ -9012,6 +9349,9 @@ impl Region {
             }
             self.entities.insert(record);
         }
+        for slot in std::mem::take(&mut p.menus.fishing) {
+            self.use_fishing_rod(p, slot);
+        }
         for stack in p.menus.thrown.drain(..) {
             let plain = ItemStack {
                 count: stack.count,
@@ -9022,6 +9362,101 @@ impl Region {
             self.entities.insert(record);
         }
     }
+    /// A right click with a fishing rod: reels in the player's bobber, or casts a new one.
+    fn use_fishing_rod(&mut self, p: &mut Player, slot: usize) {
+        let rod = p.inventory.get(slot).clone();
+        if p.survival.dead || !matches!(rod.name(), Some("minecraft:fishing_rod")) {
+            return;
+        }
+        let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+        let eye = combat::eye_position(feet);
+        let Some(key) = bobber::find_for(&self.entities, p.uuid) else {
+            let lure = match rod.effective_component(ferrite_item::component_ids::ENCHANTMENTS) {
+                Some(ferrite_item::Component::Enchantments(e)) => {
+                    e.level("minecraft:lure").unwrap_or(0)
+                }
+                _ => 0,
+            };
+            let record = bobber::cast(p.uuid, p.entity, eye, p.yaw, p.pitch, lure, &mut self.rng);
+            self.entities.insert(record);
+            return;
+        };
+        let at = self.entities.pos(key).unwrap_or(eye);
+        let Some(outcome) = bobber::reel(&mut self.entities, key, feet) else {
+            return;
+        };
+        if let bobber::Reel::Caught { .. } = outcome {
+            for stack in super::drops::fishing_catch(&rod, &mut self.rng) {
+                let vel = bobber::catch_velocity(at, eye);
+                self.entities
+                    .insert(item::new_item(at, vel, stack, &mut self.rng));
+            }
+            let experience = 1 + self.rng.next_int(6);
+            for orb in experience::award(feet, experience) {
+                self.entities.insert(orb);
+            }
+        }
+        Self::wear_rod(p, slot, outcome.damage());
+    }
+
+    /// Wears the rod in `slot` by `damage` points outside creative mode; it breaks at its last.
+    fn wear_rod(p: &mut Player, slot: usize, damage: i32) {
+        if damage <= 0 || p.gamemode == 1 {
+            return;
+        }
+        let stack = p.inventory.get(slot).clone();
+        let Some(max) = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage) else {
+            return;
+        };
+        let worn = stack.damage() + damage;
+        if worn >= max {
+            p.inventory.remove(slot, 1);
+        } else if let Some(stack) = worn_stack(stack, worn) {
+            p.inventory.set(slot, stack);
+        }
+        send(
+            p,
+            &SetPlayerInventory {
+                slot: VarInt(slot as i32),
+                item: p.inventory.get(slot).clone(),
+            },
+        );
+    }
+
+    /// Ticks every fishing bobber. One whose owner left, died, is more than 32 blocks away or no
+    /// longer holds a rod is discarded (`FishingHook.shouldStopFishing`).
+    fn tick_bobbers(&mut self, blocks: &TickBlocks) {
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|key| self.entities.data(*key).is_some_and(|d| d.bobber.is_some()))
+            .collect();
+        for key in keys {
+            let Some(state) = self.entities.data(key).and_then(|d| d.bobber) else {
+                continue;
+            };
+            let at = self.entities.pos(key).unwrap_or_default();
+            let keeps_fishing = self.players.get(&state.owner).is_some_and(|p| {
+                let holds_rod = [p.hand_slot(0), p.hand_slot(1)].into_iter().any(|slot| {
+                    matches!(p.inventory.get(slot).name(), Some("minecraft:fishing_rod"))
+                });
+                let dx = p.pos[0] - at.x;
+                let dy = p.pos[1] - at.y;
+                let dz = p.pos[2] - at.z;
+                !p.survival.dead
+                    && holds_rod
+                    && dx * dx + dy * dy + dz * dz <= bobber::MAX_DISTANCE_SQ
+            });
+            if !keeps_fishing {
+                bobber::discard(&mut self.entities, key);
+                continue;
+            }
+            bobber::tick(&mut self.entities, key, blocks, &mut self.rng);
+        }
+    }
+
     /// Runs the entity tracker against this region's players.
     fn track_entities(&mut self, ctx: &TickContext) {
         let viewers: Vec<_> = self
@@ -9230,6 +9665,9 @@ impl Region {
                         p.respawn(ctx.spawn);
                     }
                 }
+            }
+            if let Some(at) = p.gateway_used.take() {
+                self.gateway_teleported(ctx, at);
             }
             self.spawn_thrown(&mut p);
             self.spawn_primed_tnt(&mut p);
@@ -9489,11 +9927,13 @@ impl Region {
         self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
+            self.tick_bobbers(&blocks);
             self.tick_horses(ctx);
             self.sync_trades();
             self.land_tridents();
             self.tick_dragon_effects(ctx);
             self.tick_potion_clouds();
+            self.tick_mob_effects(ctx);
             self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
         }
         let alive: Vec<ferrite_math::Vec3> = self
@@ -10491,6 +10931,498 @@ mod tests {
             region.tick_potion_clouds();
         }
         assert!(region.potion_clouds.is_empty());
+    }
+
+    fn cloud_entities(region: &Region) -> Vec<Uuid> {
+        let kind = ferrite_entity::potion::cloud_type();
+        region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| region.entities.data(key))
+            .filter(|data| data.kind == kind)
+            .map(|data| data.uuid)
+            .collect()
+    }
+
+    #[test]
+    fn a_lingering_potion_spawns_a_client_visible_cloud_entity_and_removes_it_on_expiry() {
+        let mut region = Region::default();
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:water"),
+        );
+        assert!(cloud_entities(&region).is_empty());
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        assert_eq!(
+            cloud_entities(&region),
+            vec![region.potion_clouds[0].uuid()]
+        );
+        let mut peak = 0;
+        for _ in 0..(ferrite_entity::potion::PotionCloud::WAIT
+            + ferrite_entity::potion::PotionCloud::DURATION)
+        {
+            region.tick_potion_clouds();
+            peak = peak.max(cloud_entities(&region).len());
+        }
+        assert_eq!(peak, 1);
+        assert!(region.potion_clouds.is_empty());
+        region.entities.sweep_removed();
+        assert!(cloud_entities(&region).is_empty());
+    }
+
+    #[test]
+    fn a_cloud_entity_travels_with_its_cloud_through_region_split_and_merge() {
+        let mut region = Region::default();
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        let uuid = region.potion_clouds[0].uuid();
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(cloud_entities(&region).is_empty() && region.potion_clouds.is_empty());
+        assert_eq!(cloud_entities(&taken), vec![uuid]);
+        taken.merge(region);
+        assert_eq!(cloud_entities(&taken), vec![uuid]);
+        // The merged region still ticks the cloud and still finds its entity to update.
+        for _ in 0..ferrite_entity::potion::PotionCloud::WAIT + 1 {
+            taken.tick_potion_clouds();
+        }
+        let key = taken.entities.keys()[0];
+        let data = taken.entities.data(key).unwrap();
+        assert_eq!(
+            data.metadata
+                .get(ferrite_entity::metadata::area_effect_cloud::WAITING),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(false))
+        );
+    }
+
+    fn potion_bottle(item: &str, potion: &str) -> ferrite_item::ItemStack {
+        let mut bottle = ferrite_item::ItemStack::from_name(item).expect("vanilla potion item");
+        bottle.components.insert(
+            ferrite_item::component_ids::POTION_CONTENTS,
+            ferrite_item::Component::PotionContents(ferrite_item::PotionContents {
+                potion: Some(potion.into()),
+                ..Default::default()
+            }),
+        );
+        bottle
+    }
+
+    fn cow_at(region: &mut Region, x: f64, z: f64) -> ferrite_entity::EntityKey {
+        region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(x, 64.0, z),
+            &mut ferrite_entity::Rng::new(3),
+        ))
+    }
+
+    fn effect_level(region: &Region, key: ferrite_entity::EntityKey, effect: Effect) -> i32 {
+        region.entities.data(key).unwrap().effects.level(effect)
+    }
+
+    #[test]
+    fn a_splash_potion_affects_mobs_in_range_with_falloff_and_not_those_outside() {
+        let mut region = Region::default();
+        let at_center = cow_at(&mut region, 8.0, 8.0);
+        let half_way = cow_at(&mut region, 10.0, 8.0);
+        let outside = cow_at(&mut region, 14.0, 8.0);
+        region.splash_potion(
+            [8.0, 64.0, 8.0],
+            &potion_bottle("minecraft:splash_potion", "minecraft:swiftness"),
+        );
+        let duration = |key| {
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .effects
+                .get(Effect::Speed)
+                .map(|e| e.duration)
+        };
+        assert_eq!(duration(at_center), Some(3600));
+        assert_eq!(duration(half_way), Some(1800));
+        assert_eq!(duration(outside), None);
+        // Each hit mob has an update waiting for its trackers.
+        assert_eq!(region.pending_mob_effects.len(), 2);
+    }
+
+    #[test]
+    fn a_harming_splash_hurts_a_mob_and_a_healing_one_heals_it() {
+        let mut region = Region::default();
+        let hurt = cow_at(&mut region, 8.0, 8.0);
+        region.splash_potion(
+            [8.0, 64.0, 8.0],
+            &potion_bottle("minecraft:splash_potion", "minecraft:harming"),
+        );
+        assert_eq!(mob::state(&region.entities, hurt).unwrap().health, 4.0);
+        // Instant effects are applied, not stored, and nothing is announced.
+        assert!(region.entities.data(hurt).unwrap().effects.is_empty());
+        assert!(region.pending_mob_effects.is_empty());
+        region.splash_potion(
+            [8.0, 64.0, 8.0],
+            &potion_bottle("minecraft:splash_potion", "minecraft:healing"),
+        );
+        assert_eq!(mob::state(&region.entities, hurt).unwrap().health, 8.0);
+    }
+
+    #[test]
+    fn a_lingering_cloud_affects_mobs_standing_in_it() {
+        let mut region = Region::default();
+        let inside = cow_at(&mut region, 8.5, 8.5);
+        let outside = cow_at(&mut region, 30.0, 30.0);
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        for _ in 0..ferrite_entity::potion::PotionCloud::CHECK_INTERVAL {
+            region.tick_potion_clouds();
+        }
+        assert_eq!(effect_level(&region, inside, Effect::Speed), 1);
+        assert_eq!(effect_level(&region, outside, Effect::Speed), 0);
+        // The cloud entity itself is never a candidate.
+        let cloud = cloud_entities(&region)[0];
+        assert!(
+            region
+                .pending_mob_effects
+                .iter()
+                .all(|(uuid, _)| *uuid != cloud)
+        );
+        assert_eq!(region.pending_mob_effects.len(), 1);
+    }
+
+    #[test]
+    fn effects_on_mobs_tick_down_and_expiry_is_announced_once() {
+        let mut region = Region::default();
+        let key = cow_at(&mut region, 8.0, 8.0);
+        region.give_mob_effect(
+            key,
+            ferrite_entity::effect::MobEffectInstance::new(Effect::Speed.id(), 2, 0),
+        );
+        let ctx = tick_context();
+        region.tick_mob_effects(&ctx);
+        assert!(region.pending_mob_effects.is_empty());
+        assert_eq!(effect_level(&region, key, Effect::Speed), 1);
+        region.tick_mob_effects(&ctx);
+        assert_eq!(effect_level(&region, key, Effect::Speed), 0);
+        // The expiry was queued and flushed in the same pass; a further tick has nothing left.
+        region.pending_mob_effects.clear();
+        region.tick_mob_effects(&ctx);
+        assert!(region.pending_mob_effects.is_empty());
+    }
+
+    fn bobber_of(owner: Uuid, at: ferrite_math::Vec3) -> ferrite_entity::EntityRecord {
+        let mut record = ferrite_entity::bobber::cast(
+            owner,
+            9,
+            at,
+            0.0,
+            0.0,
+            0,
+            &mut ferrite_entity::Rng::new(1),
+        );
+        record.pos = at;
+        record.vel = ferrite_math::Vec3::ZERO;
+        record
+    }
+
+    #[test]
+    fn a_bobber_whose_owner_is_not_here_is_discarded() {
+        let mut region = Region::default();
+        let key = region.entities.insert(bobber_of(
+            Uuid::from_u128(77),
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+        ));
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_bobbers(&blocks);
+        assert!(region.entities.flags(key).unwrap().has(Flags::REMOVED));
+        region.entities.sweep_removed();
+        assert!(ferrite_entity::bobber::find_for(&region.entities, Uuid::from_u128(77)).is_none());
+    }
+
+    #[test]
+    fn a_bobber_keeps_its_state_through_region_split_and_merge() {
+        let mut region = Region::default();
+        let owner = Uuid::from_u128(78);
+        region
+            .entities
+            .insert(bobber_of(owner, ferrite_math::Vec3::new(8.5, 64.0, 8.5)));
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(ferrite_entity::bobber::find_for(&region.entities, owner).is_none());
+        assert!(
+            ferrite_entity::bobber::find_for(&taken.entities, owner).is_some(),
+            "the bobber moved with its chunk"
+        );
+        taken.merge(region);
+        let key = ferrite_entity::bobber::find_for(&taken.entities, owner).expect("still here");
+        let state = taken.entities.data(key).unwrap().bobber.unwrap();
+        assert_eq!(state.owner, owner);
+        assert_eq!(state.phase, ferrite_entity::bobber::Phase::Flying);
+    }
+
+    #[test]
+    fn a_bobber_is_found_only_by_its_own_owner() {
+        let mut region = Region::default();
+        region.entities.insert(bobber_of(
+            Uuid::from_u128(1),
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+        ));
+        assert!(ferrite_entity::bobber::find_for(&region.entities, Uuid::from_u128(2)).is_none());
+        assert!(ferrite_entity::bobber::find_for(&region.entities, Uuid::from_u128(1)).is_some());
+    }
+
+    fn shoulder_side_parrot(player: Uuid, side: ShoulderSide) -> Option<ShoulderParrot> {
+        super::super::ride::shoulders_of(player).get(side)
+    }
+
+    fn tamed_parrot(region: &mut Region, owner: Option<Uuid>) -> (ferrite_entity::EntityKey, Uuid) {
+        let mut record = mob::new_mob(
+            MobKind::Parrot,
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &mut ferrite_entity::Rng::new(4),
+        );
+        record.data.mob.as_mut().unwrap().owner = owner;
+        let uuid = record.data.uuid;
+        (region.entities.insert(record), uuid)
+    }
+
+    fn parrots_in_world(region: &Region) -> Vec<Uuid> {
+        region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| region.entities.data(key))
+            .filter(|data| data.mob.is_some_and(|m| m.kind == MobKind::Parrot))
+            .map(|data| data.uuid)
+            .collect()
+    }
+
+    const FEET: ferrite_math::Vec3 = ferrite_math::Vec3::new(0.5, 64.05, 0.5);
+
+    #[test]
+    fn setting_a_shoulder_lifts_a_live_parrot_out_of_the_world_and_announces_the_side() {
+        let player = Uuid::from_u128(0x5101);
+        let mut region = Region::default();
+        let (_, parrot) = tamed_parrot(&mut region, Some(player));
+        let changes = region.change_shoulder(player, FEET, ShoulderSide::Right, Some(parrot));
+        assert_eq!(changes, vec![(ShoulderSide::Right, Some(0))]);
+        assert!(
+            parrots_in_world(&region).is_empty(),
+            "the parrot left the world"
+        );
+        let sitting = shoulder_side_parrot(player, ShoulderSide::Right).unwrap();
+        assert_eq!((sitting.uuid, sitting.owner), (parrot, Some(player)));
+        assert!(shoulder_side_parrot(player, ShoulderSide::Left).is_none());
+        super::super::ride::forget_shoulders(player);
+    }
+
+    #[test]
+    fn a_uuid_with_no_entity_becomes_a_shoulder_parrot_and_a_non_parrot_is_refused() {
+        let player = Uuid::from_u128(0x5102);
+        let mut region = Region::default();
+        let unknown = Uuid::from_u128(0x9999);
+        assert_eq!(
+            region.change_shoulder(player, FEET, ShoulderSide::Left, Some(unknown)),
+            vec![(ShoulderSide::Left, Some(0))]
+        );
+        assert_eq!(
+            shoulder_side_parrot(player, ShoulderSide::Left)
+                .unwrap()
+                .uuid,
+            unknown
+        );
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &mut ferrite_entity::Rng::new(4),
+        ));
+        let cow_uuid = region.entities.data(cow).unwrap().uuid;
+        assert!(
+            region
+                .change_shoulder(player, FEET, ShoulderSide::Right, Some(cow_uuid))
+                .is_empty()
+        );
+        assert!(shoulder_side_parrot(player, ShoulderSide::Right).is_none());
+        assert!(region.entities.contains(cow), "the cow stays where it is");
+        super::super::ride::forget_shoulders(player);
+    }
+
+    #[test]
+    fn replacing_a_shoulder_puts_the_old_parrot_in_the_world_and_moving_one_empties_its_old_side() {
+        let player = Uuid::from_u128(0x5103);
+        let mut region = Region::default();
+        let first = Uuid::from_u128(0xA1);
+        let second = Uuid::from_u128(0xA2);
+        region.change_shoulder(player, FEET, ShoulderSide::Left, Some(first));
+        let changes = region.change_shoulder(player, FEET, ShoulderSide::Left, Some(second));
+        assert_eq!(changes, vec![(ShoulderSide::Left, Some(0))]);
+        assert_eq!(
+            parrots_in_world(&region),
+            vec![first],
+            "the replaced parrot is released"
+        );
+        let key = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|k| region.entities.data(*k).unwrap().uuid == first)
+            .unwrap();
+        assert_eq!(region.entities.pos(key), Some(FEET));
+        // The parrot on the left moves to the right: the left side is announced empty.
+        let changes = region.change_shoulder(player, FEET, ShoulderSide::Right, Some(second));
+        assert_eq!(
+            changes,
+            vec![(ShoulderSide::Left, None), (ShoulderSide::Right, Some(0))]
+        );
+        assert!(shoulder_side_parrot(player, ShoulderSide::Left).is_none());
+        assert_eq!(
+            shoulder_side_parrot(player, ShoulderSide::Right)
+                .unwrap()
+                .uuid,
+            second
+        );
+        assert_eq!(
+            parrots_in_world(&region),
+            vec![first],
+            "a move releases nothing"
+        );
+        super::super::ride::forget_shoulders(player);
+    }
+
+    #[test]
+    fn releasing_a_shoulder_places_the_parrot_in_the_world_sitting_with_its_owner() {
+        let player = Uuid::from_u128(0x5104);
+        let mut region = Region::default();
+        let (_, parrot) = tamed_parrot(&mut region, Some(player));
+        region.change_shoulder(player, FEET, ShoulderSide::Left, Some(parrot));
+        assert!(parrots_in_world(&region).is_empty());
+        let changes = region.change_shoulder(player, FEET, ShoulderSide::Left, None);
+        assert_eq!(changes, vec![(ShoulderSide::Left, None)]);
+        assert!(shoulder_side_parrot(player, ShoulderSide::Left).is_none());
+        let key = region.entities.key_of(
+            region
+                .entities
+                .keys()
+                .iter()
+                .filter_map(|k| region.entities.data(*k))
+                .find(|d| d.uuid == parrot)
+                .expect("the parrot is back in the world")
+                .id,
+        );
+        let data = region.entities.data(key.unwrap()).unwrap();
+        let state = data.mob.unwrap();
+        assert_eq!((state.owner, state.sitting), (Some(player), true));
+        assert_eq!(region.entities.pos(key.unwrap()), Some(FEET));
+        // Releasing an empty shoulder does nothing.
+        assert!(
+            region
+                .change_shoulder(player, FEET, ShoulderSide::Left, None)
+                .is_empty()
+        );
+        super::super::ride::forget_shoulders(player);
+    }
+
+    #[test]
+    fn a_seated_shoulder_parrot_survives_a_save_and_reload_and_an_offline_player_is_refused() {
+        let player = Uuid::from_u128(0x5105);
+        let mut region = Region::default();
+        assert!(
+            !region.set_shoulder(player, ShoulderSide::Left, None),
+            "not online here"
+        );
+        let (_, parrot) = tamed_parrot(&mut region, Some(player));
+        region.change_shoulder(player, FEET, ShoulderSide::Right, Some(parrot));
+        let dir = std::env::temp_dir().join(format!("ferrite-shoulder-{}", std::process::id()));
+        let shoulders = super::super::ride::shoulders_of(player);
+        super::super::entity_save::save_shoulders(Some(&dir), player, &shoulders);
+        // A restart forgets the in-memory table; the login reads the file back.
+        super::super::ride::forget_shoulders(player);
+        assert!(super::super::ride::shoulders_of(player).is_empty());
+        let loaded = super::super::entity_save::load_shoulders(Some(&dir), player);
+        assert_eq!(loaded, shoulders);
+        assert_eq!(loaded.right.unwrap().uuid, parrot);
+        super::super::entity_save::save_shoulders(Some(&dir), player, &Default::default());
+        assert!(super::super::entity_save::load_shoulders(Some(&dir), player).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A viewer of chunk (0, 0) in the overworld, and the channel that receives its packets.
+    fn gateway_viewer(ctx: &TickContext) -> ferrite_net::game::OutboundReceiver {
+        let (outbound, receiver) = OutboundSender::channel(4096);
+        ctx.tracking.lock().unwrap().insert(
+            Uuid::from_u128(0xB0B),
+            (
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+                HashSet::from([(0, 0)]),
+                outbound,
+            ),
+        );
+        receiver
+    }
+
+    /// The `BlockEvent`s a receiver has queued.
+    fn block_events(receiver: &mut ferrite_net::game::OutboundReceiver) -> Vec<BlockEvent> {
+        let mut events = Vec::new();
+        while let Some(message) = receiver.try_recv() {
+            if let Outbound::Packet(bytes) = message {
+                let mut body = &bytes[..];
+                if <VarInt as ferrite_protocol::Decode>::decode(&mut body)
+                    .is_ok_and(|id| id.0 == BlockEvent::ID)
+                {
+                    events
+                        .push(<BlockEvent as ferrite_protocol::Decode>::decode(&mut body).unwrap());
+                }
+            }
+        }
+        events
+    }
+
+    #[test]
+    fn a_teleport_through_a_gateway_sends_one_purple_beam_event_to_the_chunks_viewers() {
+        let ctx = tick_context();
+        let mut viewer = gateway_viewer(&ctx);
+        let mut region = Region::default();
+        let at = [3, 75, 4];
+        region.gateway_teleported(&ctx, at);
+        let events = block_events(&mut viewer);
+        assert_eq!(events.len(), 1);
+        let gateway = crate::game::end_fight::gateway_block_id().unwrap();
+        assert_eq!(
+            (events[0].block.0, events[0].param_a, events[0].param_b),
+            (gateway, 1, 0)
+        );
+        assert_eq!(
+            events[0].pos,
+            ferrite_protocol::types::BlockPos::new(3, 75, 4)
+        );
+        // A second player stepping through while the beam runs does not start another.
+        region.gateway_teleported(&ctx, at);
+        assert!(block_events(&mut viewer).is_empty());
+    }
+
+    #[test]
+    fn a_gateway_clock_follows_its_section_through_a_region_split_and_merge() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        region.gateway_teleported(&ctx, [3, 75, 4]);
+        assert!(
+            region
+                .split(&[SectionPos(40, 40)].into())
+                .gateway_beams
+                .is_empty()
+        );
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(region.gateway_beams.is_empty());
+        assert!(taken.gateway_beams[&[3, 75, 4]].is_cooling_down());
+        taken.merge(region);
+        assert_eq!(taken.gateway_beams.len(), 1);
     }
 
     fn dropped_items(region: &Region) -> Vec<&'static str> {

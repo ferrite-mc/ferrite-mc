@@ -4,8 +4,8 @@
 //! the `minecraft:potion` registry, optional custom effects, a custom color and a custom name.
 //! Drinking applies the potion's effects (`PotionContents.applyToLivingEntity`). Splash potions
 //! are thrown projectiles (`arrow::Kind::SplashPotion`) that burst where they land; lingering
-//! potions (`arrow::Kind::LingeringPotion`) leave a [`PotionCloud`], which is simulated on the
-//! server only: no area-effect-cloud entity is sent to clients yet.
+//! potions (`arrow::Kind::LingeringPotion`) leave a [`PotionCloud`], which is also spawned as a
+//! `minecraft:area_effect_cloud` entity so clients see it (see [`PotionCloud::spawn_record`]).
 //!
 //! Durations and amplifiers mirror the vanilla `Potions` registrations; the effect ids come from
 //! [`Effect`](crate::effect::Effect), and potion ids are checked against the 26.3 registry
@@ -356,18 +356,35 @@ fn int(tag: &Tag) -> Option<i32> {
     }
 }
 
+/// `minecraft:entity_effect` in the 26.3 particle type registry.
+const ENTITY_EFFECT_PARTICLE: i32 = 28;
+
+/// Entity type id of `minecraft:area_effect_cloud`.
+pub fn cloud_type() -> u16 {
+    static KIND: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *KIND.get_or_init(|| {
+        ferrite_data::entity_props::by_name("area_effect_cloud")
+            .expect("vanilla has an area_effect_cloud entity type")
+            .id
+    })
+}
+
 /// Vanilla `AreaEffectCloud` left by a lingering potion (`ThrownPotion.makeAreaOfEffectCloud`).
 ///
 /// It starts with a 3 block radius, waits 10 ticks, then shrinks evenly over its 600 ticks. Every
 /// fifth tick it applies its effects to whoever stands inside and has not been hit during the last
 /// `REAPPLICATION_DELAY` ticks; each application costs half a block of radius. It ends when it
 /// has run its course or its radius falls under half a block. Effect durations are a quarter of
-/// the potion's, except for instant effects. Only the server side is modelled: no entity is sent
-/// to clients.
+/// the potion's, except for instant effects. [`PotionCloud::spawn_record`] builds the entity
+/// clients see and [`PotionCloud::sync`] keeps its synched radius and waiting flag current.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PotionCloud {
     pub center: ferrite_math::Vec3,
     pub effects: Vec<MobEffectInstance>,
+    /// Uuid of the client-visible entity.
+    uuid: uuid::Uuid,
+    /// ARGB-less RGB colour of the particle.
+    color: i32,
     age: u32,
     radius: f32,
     radius_per_tick: f32,
@@ -383,6 +400,9 @@ impl PotionCloud {
     pub const WAIT: u32 = 10;
     pub const REAPPLICATION_DELAY: u32 = 20;
     pub const CHECK_INTERVAL: u32 = 5;
+    /// Vanilla water colour, used when the bottle has no `custom_color`. Colours averaged from
+    /// the effects are not modelled (no local effect colour table), so those clouds look blue.
+    pub const DEFAULT_COLOR: i32 = 0x0038_5DC6;
 
     /// A cloud for the effects of a lingering potion bottle.
     pub fn lingering(center: ferrite_math::Vec3, potion_effects: &[MobEffectInstance]) -> Self {
@@ -399,11 +419,113 @@ impl PotionCloud {
         Self {
             center,
             effects,
+            uuid: crate::random_uuid(),
+            color: Self::DEFAULT_COLOR,
             age: 0,
             radius: Self::RADIUS,
             radius_per_tick: -Self::RADIUS / Self::DURATION as f32,
             victims: Vec::new(),
         }
+    }
+
+    /// A cloud tinted with the bottle's `custom_color`, if it has one.
+    pub fn with_color(mut self, color: Option<i32>) -> Self {
+        if let Some(color) = color {
+            self.color = color & 0x00FF_FFFF;
+        }
+        self
+    }
+
+    pub fn uuid(&self) -> uuid::Uuid {
+        self.uuid
+    }
+
+    pub fn color(&self) -> i32 {
+        self.color
+    }
+
+    /// Whether the cloud is still in its wait phase (the synched `WAITING` flag).
+    pub fn waiting(&self) -> bool {
+        self.age < Self::WAIT
+    }
+
+    /// The `minecraft:area_effect_cloud` entity for this cloud. The particle is the tinted
+    /// `entity_effect` particle.
+    pub fn spawn_record(&self) -> crate::store::EntityRecord {
+        use crate::metadata::area_effect_cloud as meta;
+        use crate::store::{EntityData, EntityRecord, Flags};
+        use ferrite_protocol::packets::play::MetaValue;
+        let kind = cloud_type();
+        let mut data = EntityData::new(
+            crate::allocate_id(),
+            self.uuid,
+            kind,
+            f64::from(Self::RADIUS) * 2.0,
+            0.5,
+        );
+        data.metadata.define(meta::RADIUS, MetaValue::Float(0.0));
+        data.metadata
+            .define(meta::WAITING, MetaValue::Boolean(false));
+        data.metadata.define(
+            meta::PARTICLE,
+            MetaValue::Particle {
+                id: ENTITY_EFFECT_PARTICLE,
+                argb: Some((0xFF00_0000_u32 | Self::DEFAULT_COLOR as u32) as i32),
+            },
+        );
+        data.metadata
+            .set(meta::RADIUS, MetaValue::Float(self.radius));
+        data.metadata
+            .set(meta::WAITING, MetaValue::Boolean(self.waiting()));
+        data.metadata.set(meta::PARTICLE, self.particle());
+        let mut flags = Flags::default();
+        flags.set(Flags::NO_GRAVITY, true);
+        flags.set(Flags::NO_PHYSICS, true);
+        EntityRecord {
+            pos: self.center,
+            vel: ferrite_math::Vec3::ZERO,
+            flags,
+            data,
+        }
+    }
+
+    fn particle(&self) -> ferrite_protocol::packets::play::MetaValue {
+        ferrite_protocol::packets::play::MetaValue::Particle {
+            id: ENTITY_EFFECT_PARTICLE,
+            argb: Some((0xFF00_0000_u32 | self.color as u32) as i32),
+        }
+    }
+
+    /// Pushes the current radius and waiting flag into the entity's synched data; trackers send
+    /// only what changed. Does nothing when the entity is not in `store`.
+    pub fn sync(&self, store: &mut crate::store::EntityStore) {
+        use crate::metadata::area_effect_cloud as meta;
+        use ferrite_protocol::packets::play::MetaValue;
+        if let Some(key) = self.entity_key(store)
+            && let Some(data) = store.data_mut(key)
+        {
+            data.metadata
+                .set(meta::RADIUS, MetaValue::Float(self.radius));
+            data.metadata
+                .set(meta::WAITING, MetaValue::Boolean(self.waiting()));
+        }
+    }
+
+    /// Flags the entity removed so trackers destroy it and the store sweeps it.
+    pub fn despawn(&self, store: &mut crate::store::EntityStore) {
+        if let Some(key) = self.entity_key(store)
+            && let Some(flags) = store.flags_mut(key)
+        {
+            flags.set(crate::store::Flags::REMOVED, true);
+        }
+    }
+
+    fn entity_key(&self, store: &crate::store::EntityStore) -> Option<crate::EntityKey> {
+        store
+            .keys()
+            .iter()
+            .copied()
+            .find(|key| store.data(*key).is_some_and(|d| d.uuid == self.uuid))
     }
 
     pub fn age(&self) -> u32 {
@@ -696,5 +818,68 @@ mod tests {
         let mut cloud = aged(cloud_at_origin(&[]), 4);
         let id = uuid::Uuid::from_u128(1);
         assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]), Some(Vec::new()));
+    }
+
+    #[test]
+    fn the_cloud_entity_is_an_area_effect_cloud_with_radius_waiting_and_a_tinted_particle() {
+        use crate::metadata::area_effect_cloud as meta;
+        use ferrite_protocol::packets::play::MetaValue;
+        let cloud = cloud_at_origin(&[speed(3600)]).with_color(Some(0x112233));
+        let record = cloud.spawn_record();
+        assert_eq!(record.data.kind, cloud_type());
+        assert_eq!(record.data.uuid, cloud.uuid());
+        assert_eq!(record.pos, cloud.center);
+        let sent = record.data.metadata.non_default();
+        let get = |index| {
+            sent.iter()
+                .find(|e| e.index == index)
+                .map(|e| e.value.clone())
+        };
+        assert_eq!(
+            get(meta::RADIUS),
+            Some(MetaValue::Float(PotionCloud::RADIUS))
+        );
+        assert_eq!(get(meta::WAITING), Some(MetaValue::Boolean(true)));
+        assert_eq!(
+            get(meta::PARTICLE),
+            Some(MetaValue::Particle {
+                id: ENTITY_EFFECT_PARTICLE,
+                argb: Some(0xFF11_2233_u32 as i32),
+            })
+        );
+    }
+
+    #[test]
+    fn syncing_updates_the_radius_and_ends_the_waiting_flag_and_despawn_flags_removal() {
+        use crate::metadata::area_effect_cloud as meta;
+        use crate::store::{EntityStore, Flags};
+        use ferrite_protocol::packets::play::MetaValue;
+        let mut cloud = cloud_at_origin(&[speed(3600)]);
+        let mut store = EntityStore::default();
+        let key = store.insert(cloud.spawn_record());
+        store.data_mut(key).unwrap().metadata.pack_dirty();
+        for _ in 0..PotionCloud::WAIT + 1 {
+            cloud.tick([]);
+        }
+        cloud.sync(&mut store);
+        let changed = store.data_mut(key).unwrap().metadata.pack_dirty().unwrap();
+        assert!(
+            changed
+                .iter()
+                .any(|e| e.index == meta::WAITING && e.value == MetaValue::Boolean(false))
+        );
+        assert!(
+            changed
+                .iter()
+                .any(|e| e.index == meta::RADIUS && e.value == MetaValue::Float(cloud.radius()))
+        );
+        assert!(cloud.radius() < PotionCloud::RADIUS);
+        assert!(!store.flags(key).unwrap().has(Flags::REMOVED));
+        cloud.despawn(&mut store);
+        assert!(store.flags(key).unwrap().has(Flags::REMOVED));
+        assert_eq!(store.sweep_removed().len(), 1);
+        // A cloud whose entity is gone syncs and despawns without effect.
+        cloud.sync(&mut store);
+        cloud.despawn(&mut store);
     }
 }

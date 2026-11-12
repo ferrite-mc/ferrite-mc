@@ -151,6 +151,26 @@ pub fn shoulder_put(player: Uuid, parrot: ShoulderParrot) -> Option<ShoulderSide
     shoulders_map().entry(player).or_default().put(parrot)
 }
 
+/// Puts `parrot` on `side` (or empties it), returning the parrot that was there.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called by the plugin host handler for Player#setShoulderEntity*, which lives outside game/ and is not wired yet"
+    )
+)]
+pub fn shoulder_set(
+    player: Uuid,
+    side: ShoulderSide,
+    parrot: Option<ShoulderParrot>,
+) -> Option<ShoulderParrot> {
+    let mut all = shoulders_map();
+    let shoulders = all.entry(player).or_default();
+    let old = shoulders.get(side);
+    shoulders.set(side, parrot);
+    old
+}
+
 /// Takes the parrot off one shoulder.
 pub fn shoulder_release(player: Uuid, side: ShoulderSide) -> Option<ShoulderParrot> {
     let mut all = shoulders_map();

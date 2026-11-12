@@ -203,6 +203,7 @@ pub fn to_nbt(records: &[EntityRecord]) -> Tag {
     root.insert("DataVersion".into(), Tag::Int(DATA_VERSION));
     let entities = records
         .iter()
+        .filter(|record| !is_runtime_only(record))
         .filter_map(|record| {
             entity_to_nbt(record).or_else(|| {
                 tracing::warn!(
@@ -215,6 +216,13 @@ pub fn to_nbt(records: &[EntityRecord]) -> Tag {
         .collect();
     root.insert("Entities".into(), Tag::List(List::Compound(entities)));
     Tag::Compound(root)
+}
+
+/// Entities that are never written. A fishing bobber is not serializable in vanilla and is
+/// discarded with its chunk. A lingering potion's cloud entity is driven by a region-side
+/// `PotionCloud` that is not saved, so reloading it would leave a cloud that never ends.
+fn is_runtime_only(record: &EntityRecord) -> bool {
+    record.data.bobber.is_some() || record.data.kind == ferrite_entity::potion::cloud_type()
 }
 
 /// Reads a sidecar root compound back into entity records.
@@ -941,6 +949,28 @@ mod tests {
     }
 
     #[test]
+    fn bobbers_and_lingering_clouds_are_never_saved_but_other_entities_are() {
+        let bobber = ferrite_entity::bobber::cast(
+            Uuid::from_u128(5),
+            9,
+            Vec3::new(1.5, 65.0, 1.5),
+            0.0,
+            0.0,
+            0,
+            &mut ferrite_entity::Rng::new(1),
+        );
+        let cloud = ferrite_entity::potion::PotionCloud::lingering(Vec3::new(2.5, 64.0, 2.5), &[])
+            .spawn_record();
+        let cow = mob_record();
+        let cow_uuid = cow.data.uuid;
+        let saved = from_nbt(&to_nbt(&[bobber, cloud, cow]));
+        // Vanilla does not serialize bobbers, and a cloud whose region state is not saved
+        // would come back as a bare cloud that never ends.
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].data.uuid, cow_uuid);
+    }
+
+    #[test]
     fn a_dragon_phase_survives_a_save() {
         let mut record = mob::new_mob(
             MobKind::EnderDragon,
@@ -956,6 +986,33 @@ mod tests {
         let state = loaded[0].data.mob.as_ref().unwrap();
         assert_eq!(state.dragon_phase, DragonPhase::LandingApproach);
         assert_eq!(state.dragon_phase_ticks, 137);
+    }
+
+    #[test]
+    fn every_perched_subphase_survives_a_save_with_its_timer() {
+        for phase in [
+            DragonPhase::Perched,
+            DragonPhase::PerchAttacking,
+            DragonPhase::PerchFlaming,
+        ] {
+            let mut record = mob::new_mob(
+                MobKind::EnderDragon,
+                Vec3::new(0.5, 68.0, 0.5),
+                &mut Rng::default(),
+            );
+            {
+                let state = record.data.mob.as_mut().unwrap();
+                state.dragon_phase = phase;
+                state.dragon_phase_ticks = 77;
+            }
+            let loaded = from_nbt(&to_nbt(&[record]));
+            let state = loaded[0].data.mob.as_ref().unwrap();
+            assert_eq!(
+                (state.dragon_phase, state.dragon_phase_ticks),
+                (phase, 77),
+                "{phase:?}"
+            );
+        }
     }
 
     #[test]
