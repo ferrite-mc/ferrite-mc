@@ -2,8 +2,53 @@
 
 > **Stale snapshot.** The sections below were written on 2026-11-04 and only partly updated
 > afterwards. This block lists what has changed since, checked against source; where the two
-> disagree, this block wins. The root count (94) and the "nothing missing from the command tree"
-> statement were not re-counted.
+> disagree, this block wins. The root count and tree statement were re-counted on 2026-11-12;
+> see "Recount 2026-11-12" below. The per-command "Partly done" prose has not been re-verified.
+
+## Recount 2026-11-12
+
+Method (no guessing): the live server tree, `dispatcher()` in
+`crates/ferrite-server/src/game/commands.rs`, was walked in a throwaway test (not committed;
+it used only the public `CommandDispatcher` API: `root_literals`, `node`, `children`,
+`is_executable`, `redirect`) and diffed path by path against
+`vanilla/26.3/generated/reports/commands.json`. Redirecting nodes were treated as leaves on both
+sides. Roots register through `dispatcher()` and the `register` functions of
+`crates/ferrite-server/src/game/commands_{world,extras,server,more,meta,data,exec}.rs` (`more`
+also calls `commands_{progress,late,loot,item}.rs`) plus `functions.rs`. The server builds its
+tree by hand; `crates/ferrite-command/src/vanilla.rs` (`load_vanilla_json`, whose stubs fail
+with `Command not implemented`) is not used by the server.
+
+| measure | count |
+|---|---:|
+| vanilla roots in `commands.json` | 94 |
+| vanilla roots registered in Ferrite's tree | 94 |
+| non-vanilla roots (`tps`, `mspt`, `profile`) | 3 |
+| roots whose tree matches vanilla exactly (same paths, same executable nodes) | 72 |
+| roots whose tree differs in shape | 22 |
+
+Roots with a different tree shape: clone, data, datapack, effect, execute, fill, function,
+gamerule, item, particle, place, playsound, return, scoreboard, setblock, stopsound, swing, team,
+teleport, test, time, trigger. **A shape difference is not counted as a gap.** The diff compares
+argument names and literal layout, so it also flags a different but possibly equivalent layout
+(for example `clone` takes mask/mode as flags, `time of <clock>` and `execute` are laid out
+differently, `trigger` adds `<value>`, `playsound` and `swing` have non-executable nodes vanilla
+makes executable). Which of these change behaviour has not been checked. That is also why this
+recount does not give a single "implemented" figure.
+
+Partial behaviour confirmed in source today:
+
+- `/jfr`: both forms always fail (`commands_more.rs`, `jfr_tree`, line 2082).
+- `/test`: every form answers `commands.test.no_tests` (`commands_more.rs`, `no_tests` line 2122,
+  `test_tree` line 2126).
+- `/item`: item components in `item[...]` are ignored, and the `modify` forms are not backed by
+  modifiers (`commands_item.rs`, header comment, line 5).
+- `/damage`: `from <cause>` only matters for death messages, which are not modelled
+  (`commands.rs`, line 665).
+
+Roots the sections below call partial but that were **not** re-verified today: advancement,
+recipe, compute, waypoint, loot, ride, place, fillbiome, attribute, dialog, spectate, swing, tick,
+forceload, debug, perf, fetchprofile, rotate, locate. So: 4 roots confirmed partial, 19 more
+documented as partial, the other 71 not known to be partial but not behaviour-tested here.
 
 ## Deltas since 2026-11-04
 

@@ -122,6 +122,39 @@ Defaults were checked against the PaperMC configuration reference (retrieved 202
   pathfinding updates)
 - `scoreboards.*`, `spawn.*`, `tick-rates.*`, `unsupported-settings.*`
 
+## `unsupported-settings`: what the server enforces
+
+Paper's descriptions are quoted from the Paper global configuration reference. All five keys
+below are parsed (`UnsupportedSettings` in `crates/ferrite-config/src/yaml/paper_global.rs`, tests in
+`crates/ferrite-config/tests/paper_config.rs`). The server reads `config/paper-global.yml` from its
+working directory at startup (`crates/ferrite-server/src/main.rs`).
+
+| key (default) | Paper's meaning | Ferrite |
+|---|---|---|
+| `perform-username-validation` (true) | "Whether the server should validate usernames." | **Enforced.** `ferrite-net` `ServerConfig::perform_username_validation`, checked at login by `username_allowed`. On: 1-16 ASCII letters, digits or `_`. Off: any 1-16 characters, except control characters, which are still refused (Ferrite's own floor; Paper has none). |
+| `allow-headless-pistons` (false) | "allow the creation of headless pistons. These are often used to break permanent blocks" | Parsed, **not enforced**. |
+| `allow-permanent-block-break-exploits` (false) | "Whether unbreakable blocks can be broken with Vanilla exploits" (bedrock, end portal frames, end portal blocks, and more) | Parsed, **not enforced**. |
+| `allow-piston-duplication` (false) | "duplication of TNT, carpets, and rails. This does not control sand duplication" | Parsed, **not enforced**. |
+| `allow-unsafe-end-portal-teleportation` (false) | "exploits related to end portal teleportation to be possible, for example sand duplication" | Parsed, **not enforced**. |
+
+Why the four are not enforced, exactly:
+
+- Each one gates a fix for a vanilla exploit, so enforcing it means a check inside the game
+  simulation: the flag has to reach the game through `WorldSettings`
+  (`crates/ferrite-server/src/game/mod.rs`) and be read in `game/piston.rs` (`operation`,
+  `changes`, `reaction`), the block-break path in `game/region.rs`, and `game/portal.rs` /
+  `game/gravity.rs`. That code was outside the files the task that added the username and
+  rate-limit settings was allowed to change, so it was left alone.
+- What was checked in the source: pistons are planned in `piston.rs::operation` and applied as one
+  atomic batch of expected-state changes (`changes`); retraction requires an existing head
+  (`changes` returns `None` when the head cell is not a matching `piston_head`); `reaction` treats
+  hardness below zero and block entities as immovable. `piston_head` is not referenced anywhere
+  outside `piston.rs`, so no other code path reacts to a head being removed.
+- What was **not** established: whether any of the four exploits is actually reachable in Ferrite.
+  None was reproduced, and the Paper patches themselves were not compared against Ferrite's
+  behaviour. So Ferrite behaves one fixed way regardless of these values; do not read `false`
+  as "the exploit is prevented" or `true` as "the exploit is enabled".
+
 ## UNVERIFIED keys
 
 Keys that were **not** confirmed against the current Paper reference are marked with an

@@ -63,3 +63,14 @@ forwarding-secret = ""
 # threads = 8
 # jvm-args = []
 # seed = "0"
+
+# 채팅·명령어 속도 제한 (연결마다 토큰 버킷 하나씩). 기본값은 바닐라의 스팸 기준입니다:
+# 한 번에 10개, 이후 초당 1개. burst를 0으로 두면 해당 제한이 꺼지고, enabled = false면 둘 다 꺼집니다.
+# action은 "kick"(바닐라처럼 "Kicked for spamming"으로 접속 종료) 또는 "drop"(초과 메시지만 버림)입니다.
+[rate-limits]
+enabled = true
+chat-burst = 10
+chat-per-second = 1.0
+command-burst = 10
+command-per-second = 1.0
+action = "kick"

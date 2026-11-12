@@ -91,8 +91,11 @@ server-side only.
 ## 5. Protocol and networking
 
 - Multi-version translation layer (the WIP branch `wip/day2-2026-10-28` has the start).
-- Compression and encryption off the reader and writer threads.
-- Chat and command rate limits. The 30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).
+- Compression and encryption off the reader and writer threads: measured and deferred; numbers,
+  caveats and the plan are in `docs/NET-WRITER-OFFLOAD.md` (bench: `ferrite-net/benches/writer_stage.rs`).
+- Chat and command rate limits are in (`ferrite-net/src/rate_limit.rs`, `ServerConfig::rate_limits`,
+  vanilla spam-threshold defaults), configured by the `[rate-limits]` table of `ferrite.toml`.
+  The 30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).
 
 ## 6. Performance and operations
 

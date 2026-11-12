@@ -94,6 +94,9 @@ impl Encode for ChunkData {
         self.block_arrays.encode(out);
     }
 }
+/// Decode refuses non-empty block-entity lists. `ChunkData` is clientbound only, so no vanilla
+/// client ever sends it; Ferrite writes it with an empty list (block entities travel in their own
+/// packets) and the decoder exists for round-trip tests and the wire-dump examples.
 impl Decode for ChunkData {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let x = i32::decode(buf)?;
@@ -101,7 +104,9 @@ impl Decode for ChunkData {
         let heightmaps = Vec::<Heightmap>::decode(buf)?;
         let data = Vec::<u8>::decode(buf)?;
         if VarInt::decode(buf)?.0 != 0 {
-            return Err(DecodeError::Invalid("block entities unsupported"));
+            return Err(DecodeError::Invalid(
+                "chunk block entities are never written by Ferrite",
+            ));
         }
         Ok(Self {
             x,
@@ -1135,6 +1140,11 @@ impl Encode for ItemStack {
         }
     }
 }
+/// Decode refuses component patches. This minimal stack is only the default type parameter of
+/// the item-carrying packets; the server decodes everything a vanilla client sends (creative
+/// slots, container clicks) with the full `ferrite_item::ItemStack` / `HashedSlot`, which own the
+/// component codecs. Component data cannot be skipped without those codecs, so refusing is the
+/// only correct behaviour here.
 impl Decode for ItemStack {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let count = VarInt::decode(buf)?.0;
@@ -1149,7 +1159,9 @@ impl Decode for ItemStack {
             return Err(DecodeError::Invalid("invalid item id"));
         }
         if VarInt::decode(buf)?.0 != 0 || VarInt::decode(buf)?.0 != 0 {
-            return Err(DecodeError::Invalid("item components unsupported"));
+            return Err(DecodeError::Invalid(
+                "component patches need ferrite_item::ItemStack",
+            ));
         }
         Ok(Self { count, item_id })
     }
@@ -1480,11 +1492,16 @@ impl Encode for ChatTypeBound {
         self.target_name.encode(out);
     }
 }
+/// Decode refuses inline chat-type definitions (holder id 0). The packets carrying this type
+/// (`player_chat`, `disguised_chat`) are clientbound only, and Ferrite always references the
+/// registry entry by id.
 impl Decode for ChatTypeBound {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let id = VarInt::decode(buf)?.0;
         if id == 0 {
-            return Err(DecodeError::Invalid("inline chat types unsupported"));
+            return Err(DecodeError::Invalid(
+                "inline chat types are never written by Ferrite",
+            ));
         }
         Ok(Self {
             chat_type: VarInt(id - 1),
@@ -1516,6 +1533,9 @@ impl Encode for SignedMessageBody {
         }
     }
 }
+/// Decode refuses cached (`id != 0`) last-seen entries. `SignedMessageBody` only appears in the
+/// clientbound `player_chat` packet; the serverbound `chat` packet carries its own acknowledgement
+/// bitset instead, so a client never sends this layout. Ferrite always writes full signatures.
 impl Decode for SignedMessageBody {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let content = crate::codec::decode_string(buf, 256)?;
@@ -1530,7 +1550,9 @@ impl Decode for SignedMessageBody {
         let mut last_seen = Vec::with_capacity(len);
         for _ in 0..len {
             if VarInt::decode(buf)?.0 != 0 {
-                return Err(DecodeError::Invalid("packed signature cache unsupported"));
+                return Err(DecodeError::Invalid(
+                    "signature cache ids are never written by Ferrite",
+                ));
             }
             last_seen.push(MessageSignature::decode(buf)?);
         }
@@ -2517,6 +2539,8 @@ impl Encode for SetObjective {
     }
 }
 
+/// Decode refuses an objective number format. `set_objective` is clientbound only and Ferrite
+/// never writes a number format, so the flag is always false on the wire it produces.
 impl Decode for SetObjective {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let name = String::decode(buf)?;
@@ -2532,7 +2556,9 @@ impl Decode for SetObjective {
         let display_name = Some(PlainText::decode(buf)?);
         let render_type = Some(VarInt::decode(buf)?);
         if bool::decode(buf)? {
-            return Err(DecodeError::Invalid("objective number format unsupported"));
+            return Err(DecodeError::Invalid(
+                "objective number format is never written by Ferrite",
+            ));
         }
         Ok(Self {
             name,
@@ -2569,6 +2595,8 @@ impl Encode for SetScore {
     }
 }
 
+/// Decode refuses a score number format. `set_score` is clientbound only and Ferrite never
+/// writes a number format.
 impl Decode for SetScore {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let entity = String::decode(buf)?;
@@ -2576,7 +2604,9 @@ impl Decode for SetScore {
         let value = VarInt::decode(buf)?;
         let display_name = Option::<PlainText>::decode(buf)?;
         if bool::decode(buf)? {
-            return Err(DecodeError::Invalid("score number format unsupported"));
+            return Err(DecodeError::Invalid(
+                "score number format is never written by Ferrite",
+            ));
         }
         Ok(Self {
             entity,
@@ -3144,5 +3174,98 @@ mod command_feedback_tests {
             conditional: false,
             automatic: true,
         });
+    }
+}
+
+/// Pins the decoder refusals for packets or fields a vanilla client never sends. Each is a
+/// documented reason, not a missing feature; see the `Decode` impl docs.
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    fn refusal<T: Decode + std::fmt::Debug>(bytes: &[u8]) -> &'static str {
+        match T::decode(&mut &bytes[..]) {
+            Err(DecodeError::Invalid(reason)) => reason,
+            other => panic!("expected an Invalid refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunk_data_refuses_block_entities() {
+        let mut b = Vec::new();
+        1i32.encode(&mut b);
+        2i32.encode(&mut b);
+        Vec::<Heightmap>::new().encode(&mut b);
+        Vec::<u8>::new().encode(&mut b);
+        VarInt(1).encode(&mut b);
+        assert_eq!(
+            refusal::<ChunkData>(&b),
+            "chunk block entities are never written by Ferrite"
+        );
+    }
+
+    #[test]
+    fn item_stack_refuses_component_patches() {
+        for (added, removed) in [(1, 0), (0, 1)] {
+            let mut b = Vec::new();
+            VarInt(1).encode(&mut b);
+            VarInt(5).encode(&mut b);
+            VarInt(added).encode(&mut b);
+            VarInt(removed).encode(&mut b);
+            assert_eq!(
+                refusal::<ItemStack>(&b),
+                "component patches need ferrite_item::ItemStack"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_type_refuses_inline_definitions() {
+        assert_eq!(
+            refusal::<ChatTypeBound>(&[0]),
+            "inline chat types are never written by Ferrite"
+        );
+    }
+
+    #[test]
+    fn signed_message_body_refuses_cached_signatures() {
+        let mut b = Vec::new();
+        String::from("hi").encode(&mut b);
+        0i64.encode(&mut b);
+        0i64.encode(&mut b);
+        VarInt(1).encode(&mut b);
+        VarInt(3).encode(&mut b);
+        assert_eq!(
+            refusal::<SignedMessageBody>(&b),
+            "signature cache ids are never written by Ferrite"
+        );
+    }
+
+    #[test]
+    fn objective_refuses_number_format() {
+        let mut b = Vec::new();
+        String::from("o").encode(&mut b);
+        0u8.encode(&mut b);
+        PlainText(String::new()).encode(&mut b);
+        VarInt(0).encode(&mut b);
+        true.encode(&mut b);
+        assert_eq!(
+            refusal::<SetObjective>(&b),
+            "objective number format is never written by Ferrite"
+        );
+    }
+
+    #[test]
+    fn score_refuses_number_format() {
+        let mut b = Vec::new();
+        String::from("e").encode(&mut b);
+        String::from("o").encode(&mut b);
+        VarInt(1).encode(&mut b);
+        Option::<PlainText>::None.encode(&mut b);
+        true.encode(&mut b);
+        assert_eq!(
+            refusal::<SetScore>(&b),
+            "score number format is never written by Ferrite"
+        );
     }
 }

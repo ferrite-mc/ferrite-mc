@@ -37,6 +37,77 @@ struct Config {
     whitelist: bool,
     /// Settings for the vanilla world generation host (`generator = 'vanilla'`).
     worldgen: WorldgenSettings,
+    /// Chat and command rate limits from the `[rate-limits]` table.
+    rate_limits: RateLimitSettings,
+}
+
+/// What happens to a player who exceeds a rate limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RateLimitAction {
+    /// Disconnect with "Kicked for spamming", like vanilla.
+    #[default]
+    Kick,
+    /// Silently discard the message and keep the connection.
+    Drop,
+}
+
+/// The `[rate-limits]` table: a token bucket per connection for chat and another for commands.
+/// A bucket holds `*-burst` messages and refills `*-per-second` of them each second. The
+/// defaults are vanilla's spam threshold (10 messages, one more per second). A burst of 0
+/// switches that bucket off, and `enabled = false` switches both off.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+struct RateLimitSettings {
+    enabled: bool,
+    chat_burst: u32,
+    chat_per_second: f64,
+    command_burst: u32,
+    command_per_second: f64,
+    action: RateLimitAction,
+}
+impl Default for RateLimitSettings {
+    fn default() -> Self {
+        let vanilla = ferrite_net::rate_limit::BucketConfig::VANILLA;
+        Self {
+            enabled: true,
+            chat_burst: vanilla.burst,
+            chat_per_second: vanilla.per_second,
+            command_burst: vanilla.burst,
+            command_per_second: vanilla.per_second,
+            action: RateLimitAction::Kick,
+        }
+    }
+}
+impl RateLimitSettings {
+    /// The `ferrite-net` limits. A refill rate that is negative, infinite or NaN is a config
+    /// error (the server refuses to start) instead of a bucket that silently never refills.
+    fn to_net(&self) -> anyhow::Result<ferrite_net::rate_limit::RateLimits> {
+        use ferrite_net::rate_limit::{BucketConfig, LimitAction, RateLimits};
+        let bucket =
+            |key: &str, burst: u32, per_second: f64| -> anyhow::Result<Option<BucketConfig>> {
+                anyhow::ensure!(
+                    per_second.is_finite() && per_second >= 0.0,
+                    "rate-limits.{key} must be a finite number of at least 0, got {per_second}"
+                );
+                Ok((burst > 0).then_some(BucketConfig { burst, per_second }))
+            };
+        if !self.enabled {
+            return Ok(RateLimits::disabled());
+        }
+        Ok(RateLimits {
+            chat: bucket("chat-per-second", self.chat_burst, self.chat_per_second)?,
+            command: bucket(
+                "command-per-second",
+                self.command_burst,
+                self.command_per_second,
+            )?,
+            action: match self.action {
+                RateLimitAction::Kick => LimitAction::Kick,
+                RateLimitAction::Drop => LimitAction::Drop,
+            },
+        })
+    }
 }
 
 /// The `[worldgen]` table: how the vanilla world generation host is run. It uses the user's own
@@ -185,6 +256,7 @@ impl Default for Config {
             plugins: PluginSettings::default(),
             whitelist: false,
             worldgen: WorldgenSettings::default(),
+            rate_limits: RateLimitSettings::default(),
         }
     }
 }
@@ -220,6 +292,16 @@ whitelist = false
 
 [plugins]
 on-event-error = "allow"
+
+# Chat and command rate limits (a token bucket per connection). The defaults are vanilla's spam
+# threshold. A burst of 0 switches that bucket off; action is "kick" or "drop".
+[rate-limits]
+enabled = true
+chat-burst = 10
+chat-per-second = 1.0
+command-burst = 10
+command-per-second = 1.0
+action = "kick"
 "#;
 
 /// Reads `ferrite.toml`, creating it with [`DEFAULT_CONFIG`] on the first run. A failed write is
@@ -504,13 +586,21 @@ async fn run_server(
         tracing::info!("server startup cancelled");
         return Ok(());
     }
-    let disable_end_credits = match ferrite_config::FerriteConfig::load("config") {
-        Ok(config) => config.world_settings("world").misc.disable_end_credits,
-        Err(error) => {
-            tracing::warn!(%error, "reading Paper world config failed; End credits stay enabled");
-            false
-        }
-    };
+    let (disable_end_credits, perform_username_validation) =
+        match ferrite_config::FerriteConfig::load("config") {
+            Ok(config) => (
+                config.world_settings("world").misc.disable_end_credits,
+                config
+                    .paper_global()
+                    .unsupported_settings
+                    .perform_username_validation,
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "reading Paper config failed; End credits stay enabled and usernames stay validated");
+                (false, true)
+            }
+        };
+    let rate_limits = config.rate_limits.to_net()?;
     let settings = game::WorldSettings {
         disable_end_credits,
         dimension: game::Dimension::Overworld,
@@ -658,6 +748,8 @@ async fn run_server(
             favicon,
             status: Default::default(),
             read_timeout: ferrite_net::DEFAULT_READ_TIMEOUT,
+            rate_limits,
+            perform_username_validation,
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -758,6 +850,83 @@ fn favicon_data_uri(png: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(toml_text: &str) -> Config {
+        toml::from_str(toml_text).expect("config parses")
+    }
+
+    #[test]
+    fn rate_limits_default_to_vanillas_spam_threshold() {
+        let net = Config::default().rate_limits.to_net().unwrap();
+        assert_eq!(net, ferrite_net::rate_limit::RateLimits::default());
+        // A config file without the table behaves the same.
+        assert_eq!(parse("").rate_limits, RateLimitSettings::default());
+    }
+
+    #[test]
+    fn the_built_in_config_file_parses_to_the_defaults() {
+        let config = parse(DEFAULT_CONFIG);
+        assert_eq!(config.rate_limits, RateLimitSettings::default());
+        assert_eq!(
+            config.rate_limits.to_net().unwrap(),
+            ferrite_net::rate_limit::RateLimits::default()
+        );
+    }
+
+    #[test]
+    fn rate_limits_table_is_read_and_converted() {
+        use ferrite_net::rate_limit::{BucketConfig, LimitAction};
+        let config = parse(
+            "[rate-limits]\nchat-burst = 4\nchat-per-second = 0.5\ncommand-burst = 20\n\
+             command-per-second = 5\naction = \"drop\"\n",
+        );
+        let net = config.rate_limits.to_net().unwrap();
+        assert_eq!(
+            net.chat,
+            Some(BucketConfig {
+                burst: 4,
+                per_second: 0.5
+            })
+        );
+        assert_eq!(
+            net.command,
+            Some(BucketConfig {
+                burst: 20,
+                per_second: 5.0
+            })
+        );
+        assert_eq!(net.action, LimitAction::Drop);
+    }
+
+    #[test]
+    fn a_zero_burst_or_enabled_false_switches_limits_off() {
+        let net = parse("[rate-limits]\nchat-burst = 0\n")
+            .rate_limits
+            .to_net()
+            .unwrap();
+        assert!(net.chat.is_none());
+        assert!(net.command.is_some());
+        let off = parse("[rate-limits]\nenabled = false\n")
+            .rate_limits
+            .to_net()
+            .unwrap();
+        assert_eq!(off, ferrite_net::rate_limit::RateLimits::disabled());
+    }
+
+    #[test]
+    fn bad_rate_limit_values_are_rejected() {
+        for bad in [
+            "[rate-limits]\nchat-per-second = -1.0\n",
+            "[rate-limits]\ncommand-per-second = nan\n",
+            "[rate-limits]\nchat-per-second = inf\n",
+        ] {
+            let error = parse(bad).rate_limits.to_net().unwrap_err().to_string();
+            assert!(error.contains("rate-limits."), "{bad}: {error}");
+        }
+        // Unknown keys and unknown actions fail to parse instead of being ignored.
+        assert!(toml::from_str::<Config>("[rate-limits]\nchat-burts = 3\n").is_err());
+        assert!(toml::from_str::<Config>("[rate-limits]\naction = \"ban\"\n").is_err());
+    }
 
     #[test]
     fn a_missing_plugins_directory_is_created_and_an_existing_one_is_kept() {
