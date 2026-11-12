@@ -43,6 +43,43 @@ fixture world is about 7x cheaper per tick; why was not investigated (the bots u
 and spawn in both). Entity tracking is the first place to look for the 50 ms budget at 800
 players; it is not changed here.
 
+## Re-run on branch `w6-protocol` (2026-11-12, head `3652b74`)
+
+Same command and machine as the baseline above, built with
+`cargo build --release -p ferrite-server --example bots`. This branch adds the chat/command rate
+limits (on by default in `ServerConfig`; the bots send no chat), the username-validation switch,
+and the `[rate-limits]` config. Raw: `bots-800-w6-run1.txt`, `bots-800-w6-run2.txt`.
+
+**The machine was not quiet.** Other agents were building and testing on the same 12 CPUs. The
+load average (1/5/15 min) was 14.8 / 15.5 / 9.8 at the start of run 1 and 39.6 / 24.4 / 13.5 at its
+end; run 2 started at 37.4 / 24.2 / 13.5 and ended at 30.4 / 25.2 / 14.7. Run 1 reached only 380%
+CPU on the superflat world (baseline: 798-880%), so it was starved. Treat both runs as
+contended, and run 1 as unusable for comparison.
+
+| World | Run | avg MSPT | p99 MSPT | RSS | CPU | cache hit rate |
+|---|---|---:|---:|---:|---:|---:|
+| superflat | 1 | 94.4 ms | 250.7 ms | 1580 MiB | 381% | 99.8% |
+| superflat | 2 | 69.0 ms | 177.9 ms | 1356 MiB | 690% | 99.9% |
+| fixture | 1 | 9.1 ms | 74.9 ms | 2272 MiB | 681% | 99.8% |
+| fixture | 2 | 9.2 ms | 40.8 ms | 1998 MiB | 878% | 99.7% |
+
+Baseline for reference (`6aca3fc`, quieter machine): superflat 63.4 / 75.8 ms avg and 146.1 /
+192.3 ms p99, RSS 1248 / 1252 MiB; fixture 9.0 / 9.1 ms avg and 31.6 / 41.9 ms p99, RSS 1750 /
+1932 MiB.
+
+What can and cannot be said:
+
+- Average MSPT is within the baseline's own run-to-run spread (about 20% on superflat) for
+  superflat run 2 (69.0 vs 63.4-75.8 ms) and for both fixture runs (9.1-9.2 vs 9.0-9.1 ms). Nothing
+  here shows a change from this branch.
+- Superflat run 1 (94.4 ms) and the higher p99 and forceload latencies (for example `/forceload add`
+  mean 147 ms in run 1 and 75 ms in run 2, against 49-50 ms at baseline) coincide with the heavy
+  load, and no run was made on a quiet machine, so they are not attributed to the code.
+- RSS is 5-30% above baseline in these runs (superflat 1356-1580 vs 1248-1252 MiB, fixture
+  1998-2272 vs 1750-1932 MiB). The baseline's own fixture RSS varied by 10% between its two runs,
+  and no run isolated the cause, so no claim is made about whether this branch changed memory use.
+- A quiet-machine re-run is still needed before reading anything into the p99 and RSS differences.
+
 ## `/forceload` through the console, end to end
 
 Measured inside the same runs: time from `World::console_command("forceload add x 0 x+255 255")`
