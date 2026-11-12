@@ -85,7 +85,7 @@ server-side only.
 - Waterlogged edge cases, fluid/redstone interaction, flow into unloaded chunks.
 - Neighbour-update ordering and placement rules; audit crop growth and gravity-block chains against
   vanilla before implementing.
-- Enchanting/anvil edge cases, shulker boxes, cartography table.
+- Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is refused: locking and zooming out need a map data model (saved map store, map id allocator, typed `map_id`) that does not exist yet.
 - Maps: only the visible cursor decoration is sent; hidden cursors and styled captions are refused.
 
 ## 5. Protocol and networking

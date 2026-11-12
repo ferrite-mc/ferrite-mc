@@ -40,7 +40,25 @@ final class FerriteInventoryView implements org.bukkit.inventory.InventoryView {
     @Override public String getTitle() { return title; }
     @Override public String getOriginalTitle() { return title; }
     @Override public void setTitle(String value) { title = java.util.Objects.requireNonNull(value, "title"); }
-    @Override public org.bukkit.inventory.MenuType getMenuType() { return null; }
+    /** The vanilla menu type the client shows for the top inventory (the `minecraft:menu` registry). */
+    @Override public org.bukkit.inventory.MenuType getMenuType() {
+        return switch (top.getType()) {
+            case CHEST -> switch (top.getSize() / 9) {
+                case 1 -> org.bukkit.inventory.MenuType.GENERIC_9X1;
+                case 2 -> org.bukkit.inventory.MenuType.GENERIC_9X2;
+                case 3 -> org.bukkit.inventory.MenuType.GENERIC_9X3;
+                case 4 -> org.bukkit.inventory.MenuType.GENERIC_9X4;
+                case 5 -> org.bukkit.inventory.MenuType.GENERIC_9X5;
+                case 6 -> org.bukkit.inventory.MenuType.GENERIC_9X6;
+                default -> throw new UnsupportedOperationException("Ferrite: a chest inventory of " + top.getSize() + " slots has no menu type");
+            };
+            case ENDER_CHEST, BARREL -> org.bukkit.inventory.MenuType.GENERIC_9X3;
+            case SHULKER_BOX -> org.bukkit.inventory.MenuType.SHULKER_BOX;
+            case ANVIL -> org.bukkit.inventory.MenuType.ANVIL;
+            case CARTOGRAPHY -> org.bukkit.inventory.MenuType.CARTOGRAPHY_TABLE;
+            default -> throw new UnsupportedOperationException("Ferrite: no menu type is mapped for inventory type " + top.getType());
+        };
+    }
     private org.bukkit.inventory.Inventory inventory(int rawSlot) { return rawSlot < top.getSize() ? top : bottom; }
     private int relative(int rawSlot) { return rawSlot < top.getSize() ? rawSlot : rawSlot - top.getSize(); }
 }

@@ -15,7 +15,8 @@ const MAX_ROWS: usize = 6;
 const MAX_MAP_CAPTION_UTF16: usize = 21_844;
 
 /// The command behind an inventory call, or `None` when it is not one this module handles
-/// (a hopper or dispenser inventory, say, which the menu code cannot show yet).
+/// (a hopper or dispenser inventory, say, which the menu code cannot show yet). The cartography
+/// table is deliberately not handled; see the test `stations_open_for_the_calling_player`.
 pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "Player" {
         return None;
@@ -379,7 +380,11 @@ mod tests {
                 "{method}"
             );
         }
-        // Cartography tables have no menu yet and stay unimplemented.
+        // Cartography tables stay refused. Cloning a map would only need the menu, but locking
+        // and zooming out create a new map id with a copy of the saved map data (scale, locked,
+        // centre, colours, decorations), and the server has no map data model: no
+        // `data/map_<id>.dat` store, no `idcounts` id allocator, and `minecraft:map_id` is an
+        // opaque component. A menu that could only clone would be a fake cartography table.
         assert_eq!(
             inventory_command(&call("openCartographyTable(Location,boolean)", "null")),
             None

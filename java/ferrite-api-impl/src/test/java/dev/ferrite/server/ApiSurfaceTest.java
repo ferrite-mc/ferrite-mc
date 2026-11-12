@@ -2,6 +2,7 @@ package dev.ferrite.server;
 import java.util.*;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryAction;
@@ -147,6 +148,23 @@ class ApiSurfaceTest {
         var close = new org.bukkit.event.inventory.InventoryCloseEvent(view, org.bukkit.event.inventory.InventoryCloseEvent.Reason.PLUGIN);
         assertSame(player, close.getPlayer());
         assertSame(player.getInventory(), close.getInventory());
+    }
+
+    @Test void inventoryViewsReportTheVanillaMenuType() {
+        var chest = FerriteInventoryView.create(player, server.createInventory(null, 54));
+        assertEquals(NamespacedKey.minecraft("generic_9x6"), chest.getMenuType().getKey());
+        assertEquals(NamespacedKey.minecraft("generic_9x3"),
+            FerriteInventoryView.create(player, server.createInventory(null, 27)).getMenuType().getKey());
+        var shulker = server.createInventory(null, InventoryType.SHULKER_BOX);
+        assertEquals(27, shulker.getSize());
+        var view = FerriteInventoryView.create(player, shulker);
+        assertEquals(NamespacedKey.minecraft("shulker_box"), view.getMenuType().getKey());
+        assertEquals(InventoryType.SHULKER_BOX, view.getType());
+        assertEquals(NamespacedKey.minecraft("cartography_table"),
+            FerriteInventoryView.create(player, server.createInventory(null, InventoryType.CARTOGRAPHY)).getMenuType().getKey());
+        var unmapped = FerriteInventoryView.create(player, server.createInventory(null, InventoryType.HOPPER));
+        var error = assertThrows(UnsupportedOperationException.class, unmapped::getMenuType);
+        assertTrue(error.getMessage().contains("HOPPER"), error.getMessage());
     }
 
     @Test void inventoryDragEventCarriesSlotsAndCursors() {
