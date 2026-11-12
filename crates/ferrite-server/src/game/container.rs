@@ -1471,9 +1471,14 @@ impl Player {
         };
         let items = block_container::load(&source, &opened);
         let (rows, title) = (opened.rows, opened.title);
+        let shulker = block_container::is_shulker_box(opened.block);
         self.open_menu(
             |id| {
-                let mut menu = Menu::generic(id, rows);
+                let mut menu = if shulker {
+                    Menu::shulker_box(id)
+                } else {
+                    Menu::generic(id, rows)
+                };
                 menu.container_mut().clone_from_slice(&items);
                 menu
             },

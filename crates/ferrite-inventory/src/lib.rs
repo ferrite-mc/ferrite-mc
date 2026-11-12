@@ -24,7 +24,8 @@ pub use menu::{
     BREWING_BREW_TIME, BREWING_DATA_SLOTS, BREWING_FUEL, BeaconState, BrewingState, ClickInput,
     Clicker, CookingOutput, Crafter, FUEL_PER_BLAZE_POWDER, FURNACE_BURN_LEFT, FURNACE_BURN_TOTAL,
     FURNACE_COOK_PROGRESS, FURNACE_COOK_TOTAL, FURNACE_DATA_SLOTS, FURNACE_LIT, FurnaceKind,
-    FurnaceState, Menu, MenuKind, NoCrafting, SLOT_OUTSIDE, Sync, Trade, craft_remainder,
+    FurnaceState, Menu, MenuKind, NoCrafting, SHULKER_BOX_SLOTS, SLOT_OUTSIDE, Sync, Trade,
+    craft_remainder, is_shulker_box,
 };
 
 #[cfg(test)]

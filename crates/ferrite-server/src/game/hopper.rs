@@ -302,7 +302,9 @@ pub fn push(source: &AnvilChunkSource, [x, y, z]: [i32; 3], items: &mut [ItemSta
         let mut target_items = block_container::load_slots(source, target, size);
         let mut one = items[index].clone();
         one.count = 1;
-        if insert_into_slots(&mut target_items, &allowed, one).is_none() {
+        if block_container::accepts(name, &one)
+            && insert_into_slots(&mut target_items, &allowed, one).is_none()
+        {
             items[index].count -= 1;
             if items[index].count <= 0 {
                 items[index] = ItemStack::empty();

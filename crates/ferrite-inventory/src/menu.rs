@@ -11,6 +11,18 @@ use crate::inventory::{
 /// The slot number of a click outside the window, which drops the carried stack.
 pub const SLOT_OUTSIDE: i16 = -999;
 
+/// Slots of a shulker box (vanilla `ShulkerBoxBlockEntity.CONTAINER_SIZE`).
+pub const SHULKER_BOX_SLOTS: usize = 27;
+
+/// Whether a stack is a shulker box of any colour, which cannot go inside another one.
+pub fn is_shulker_box(stack: &ItemStack) -> bool {
+    stack.name().is_some_and(|name| {
+        name.strip_prefix("minecraft:")
+            .unwrap_or(name)
+            .ends_with("shulker_box")
+    })
+}
+
 /// Vanilla `ContainerInput` (formerly `ClickType`), the `container_click` mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickInput {
@@ -167,6 +179,9 @@ pub enum MenuKind {
     Crafting,
     /// A chest-like grid of `rows` rows of nine slots (vanilla `ChestMenu`).
     Generic { rows: u8 },
+    /// A shulker box (vanilla `ShulkerBoxMenu`): three rows of nine slots that refuse shulker
+    /// boxes, so boxes never nest.
+    ShulkerBox,
     /// A furnace, blast furnace or smoker (vanilla `AbstractFurnaceMenu`).
     Furnace(FurnaceKind),
     /// An anvil (vanilla `AnvilMenu`).
@@ -200,6 +215,7 @@ impl MenuKind {
             Self::Inventory => None,
             Self::Crafting => Some("minecraft:crafting".into()),
             Self::Generic { rows } => Some(format!("minecraft:generic_9x{rows}")),
+            Self::ShulkerBox => Some("minecraft:shulker_box".into()),
             Self::Furnace(kind) => Some(kind.menu_type().into()),
             Self::Anvil => Some("minecraft:anvil".into()),
             Self::Enchanting => Some("minecraft:enchantment".into()),
@@ -472,6 +488,8 @@ enum Store {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rule {
     Plain,
+    /// A shulker box slot: anything but a shulker box (vanilla `ShulkerBoxSlot`).
+    NoShulkerBox,
     /// A mount's saddle slot.
     MountSaddle {
         llama: bool,
@@ -622,7 +640,10 @@ impl Menu {
         let grid_width = match kind {
             MenuKind::Inventory => 2,
             MenuKind::Crafting => 3,
-            MenuKind::Generic { .. } | MenuKind::Furnace(_) | MenuKind::Anvil => 0,
+            MenuKind::Generic { .. }
+            | MenuKind::ShulkerBox
+            | MenuKind::Furnace(_)
+            | MenuKind::Anvil => 0,
             MenuKind::Enchanting
             | MenuKind::Grindstone
             | MenuKind::Stonecutter
@@ -635,6 +656,7 @@ impl Menu {
         };
         let container = match kind {
             MenuKind::Generic { rows } => vec![ItemStack::empty(); usize::from(rows) * 9],
+            MenuKind::ShulkerBox => vec![ItemStack::empty(); SHULKER_BOX_SLOTS],
             MenuKind::Furnace(_) => vec![ItemStack::empty(); 3],
             MenuKind::Anvil => vec![ItemStack::empty(); 2],
             MenuKind::Enchanting => vec![ItemStack::empty(); 2],
@@ -749,6 +771,19 @@ impl Menu {
             .collect();
         standard_inventory_slots(&mut slots);
         Self::with_slots(container_id, MenuKind::Generic { rows }, slots)
+    }
+
+    /// A shulker box menu (vanilla `ShulkerBoxMenu`): 27 container slots, each refusing shulker
+    /// boxes (vanilla `ShulkerBoxSlot.mayPlace`), followed by the player's inventory.
+    pub fn shulker_box(container_id: i32) -> Self {
+        let mut slots: Vec<SlotDef> = (0..SHULKER_BOX_SLOTS)
+            .map(|i| SlotDef {
+                store: Store::Container(i),
+                rule: Rule::NoShulkerBox,
+            })
+            .collect();
+        standard_inventory_slots(&mut slots);
+        Self::with_slots(container_id, MenuKind::ShulkerBox, slots)
     }
 
     /// A mount inventory (vanilla `HorseInventoryMenu`): 0 saddle, 1 body armour, then three rows
@@ -1724,6 +1759,7 @@ impl Menu {
     fn may_place(&self, slot: usize, stack: &ItemStack) -> bool {
         match self.slots[slot].rule {
             Rule::Plain => true,
+            Rule::NoShulkerBox => !is_shulker_box(stack),
             Rule::Armor(name) => equipment_slot(stack) == name,
             Rule::Result | Rule::Output => false,
             Rule::MountSaddle { llama } => !llama && stack.name() == Some("minecraft:saddle"),
@@ -2350,6 +2386,14 @@ impl Menu {
                         }
                 } else {
                     self.move_item_stack_to(p, &mut stack, 10, 46, false)
+                }
+            }
+            MenuKind::ShulkerBox => {
+                let len = self.slots.len();
+                if i < SHULKER_BOX_SLOTS {
+                    self.move_item_stack_to(p, &mut stack, SHULKER_BOX_SLOTS, len, true)
+                } else {
+                    self.move_item_stack_to(p, &mut stack, 0, SHULKER_BOX_SLOTS, false)
                 }
             }
             MenuKind::Generic { rows } => {

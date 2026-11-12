@@ -3,7 +3,7 @@ use ferrite_item::{Component, Enchantments, HashedSlot, ItemStack, component_ids
 use crate::{
     ClickInput::{self, *},
     Clicker, CookingOutput, Crafter, FurnaceKind, Menu, NoCrafting, PlayerInventory, SLOT_OUTSIDE,
-    Sync,
+    Sync, is_shulker_box,
 };
 
 fn item(name: &str, count: i32) -> ItemStack {
@@ -1334,4 +1334,29 @@ fn beacon_payment_slot_holds_one_item_and_rejects_other_items() {
     assert!(f.menu.confirm_beacon(Some(1), None));
     assert!(f.slot(0).is_empty());
     assert_eq!(f.menu.beacon_state().unwrap().primary, Some(1));
+}
+
+#[test]
+fn shulker_box_menu_has_27_slots_and_refuses_nested_boxes() {
+    let mut f = Fixture::new(Menu::shulker_box(6));
+    assert_eq!(f.menu.len(), 27 + 36);
+    assert_eq!(
+        f.menu.kind().menu_type().as_deref(),
+        Some("minecraft:shulker_box")
+    );
+    f.inv.set(0, item("red_shulker_box", 1));
+    f.inv.set(1, item("stone", 5));
+    // Shift-click: stone moves into the box, the box itself stays in the inventory.
+    f.click(27 + 27, 0, QuickMove); // hotbar slot 0
+    f.click(27 + 27 + 1, 0, QuickMove);
+    assert_eq!(f.slot(0), item("stone", 5));
+    assert_eq!(f.inv.get(0), &item("red_shulker_box", 1));
+    // Placing a box with the cursor into a box slot is refused too.
+    f.click(27 + 27, 0, Pickup);
+    assert_eq!(f.carried(), item("red_shulker_box", 1));
+    f.click(3, 0, Pickup);
+    assert_eq!(f.slot(3), empty());
+    assert_eq!(f.carried(), item("red_shulker_box", 1));
+    assert!(is_shulker_box(&item("shulker_box", 1)));
+    assert!(!is_shulker_box(&item("shield", 1)));
 }

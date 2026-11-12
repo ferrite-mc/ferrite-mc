@@ -162,7 +162,9 @@ pub fn dispense(source: &AnvilChunkSource, pos: [i32; 3], kind: Kind) -> Action 
             let mut target_items = block_container::load_slots(source, target, size);
             let mut one = data.items[slot].clone();
             one.count = 1;
-            if super::hopper::insert(&mut target_items, one).is_none() {
+            if block_container::accepts(target_name, &one)
+                && super::hopper::insert(&mut target_items, one).is_none()
+            {
                 data.items[slot].count -= 1;
                 if data.items[slot].count <= 0 {
                     data.items[slot] = ItemStack::empty();
