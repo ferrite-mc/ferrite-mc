@@ -924,6 +924,7 @@ impl Player {
         &mut self,
         title: &str,
         rows: u8,
+        shulker: bool,
         items: &[Option<ferrite_plugin::ItemSnapshot>],
     ) {
         let stacks: Vec<ItemStack> = items
@@ -939,7 +940,11 @@ impl Player {
             .collect();
         self.open_menu(
             |id| {
-                let mut menu = Menu::generic(id, rows);
+                let mut menu = if shulker {
+                    Menu::shulker_box(id)
+                } else {
+                    Menu::generic(id, rows)
+                };
                 let slots = menu.container_mut();
                 let count = slots.len().min(stacks.len());
                 slots[..count].clone_from_slice(&stacks[..count]);

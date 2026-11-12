@@ -46,6 +46,20 @@ class NmsInventoryPacketsTest {
     }
 
     @Test
+    void aPluginShulkerBoxInventoryIsSentToTheHostAsAShulkerBox() {
+        var inventory = server.createInventory(null, org.bukkit.event.inventory.InventoryType.SHULKER_BOX, "Loot");
+        inventory.setItem(26, bukkit(org.bukkit.Material.EMERALD, 5));
+        player.openInventory(inventory);
+        var call = calls.stream().filter(c -> c.contains("|openInventory(Inventory)|")).findFirst().orElseThrow(() -> new AssertionError(calls.toString()));
+        var wire = call.substring(call.indexOf("|openInventory(Inventory)|") + "|openInventory(Inventory)|".length()).split("\u001e", -1);
+        assertEquals("Loot", wire[0]);
+        assertEquals("27", wire[1]);
+        assertEquals("SHULKER_BOX", wire[2]);
+        assertEquals("EMERALD\u001d5", wire[2 + 26 + 1]);
+        assertEquals(3 + 27, wire.length);
+    }
+
+    @Test
     void opensSynchronizesAndClosesOneChestScreen() {
         var connection = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().connection;
         connection.send(new ClientboundOpenScreenPacket(7, MenuType.GENERIC_9x3, Component.literal("Shop")));

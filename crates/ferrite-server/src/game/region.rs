@@ -147,6 +147,7 @@ pub enum Command {
     PluginOpenInventory {
         title: String,
         rows: u8,
+        shulker: bool,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
     /// A packet a plugin sends to this player.
@@ -3829,8 +3830,13 @@ impl Player {
                     send(self, &GameEvent { event, value });
                     continue;
                 }
-                Command::PluginOpenInventory { title, rows, items } => {
-                    self.open_plugin_inventory(&title, rows, &items);
+                Command::PluginOpenInventory {
+                    title,
+                    rows,
+                    shulker,
+                    items,
+                } => {
+                    self.open_plugin_inventory(&title, rows, shulker, &items);
                     continue;
                 }
                 Command::PluginPacket(packet) => {
