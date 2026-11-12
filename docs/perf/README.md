@@ -78,7 +78,7 @@ What can and cannot be said:
 - RSS is 5-30% above baseline in these runs (superflat 1356-1580 vs 1248-1252 MiB, fixture
   1998-2272 vs 1750-1932 MiB). The baseline's own fixture RSS varied by 10% between its two runs,
   and no run isolated the cause, so no claim is made about whether this branch changed memory use.
-- A quiet-machine re-run is still needed before reading anything into the p99 and RSS differences.
+- A quiet-machine re-run was still needed here; it is recorded in the next section.
 
 
 ## Re-run on branch `w6-protocol`, quiet machine (2026-11-12, head `9d1fd2d` + `c0357b2`)
