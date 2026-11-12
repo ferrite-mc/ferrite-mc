@@ -325,6 +325,17 @@ pub trait Crafter {
     /// The result of a row-major grid with `width` columns, or an empty stack.
     fn craft(&self, grid: &[ItemStack], width: usize) -> ItemStack;
 
+    /// The anvil rules of `enchantment` (`minecraft:` name) for `item`, or `None` when the
+    /// enchantment is unknown and the anvil must leave it out.
+    fn enchantment_rules(&self, _enchantment: &str, _item: &ItemStack) -> Option<EnchantRules> {
+        None
+    }
+
+    /// Whether two enchantments exclude each other (vanilla `Enchantment.areCompatible` false).
+    fn enchantments_exclusive(&self, _a: &str, _b: &str) -> bool {
+        false
+    }
+
     /// The id of the recipe `craft` matches for this grid, for the `recipe_crafted` trigger.
     fn recipe_id(&self, _grid: &[ItemStack], _width: usize) -> Option<String> {
         None
@@ -383,6 +394,17 @@ pub trait Crafter {
     ) -> Option<String> {
         None
     }
+}
+
+/// What the anvil needs to know about one enchantment on one item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnchantRules {
+    /// `Enchantment.getMaxLevel`.
+    pub max_level: i32,
+    /// The enchantment's `anvil_cost` (its rarity weight).
+    pub anvil_cost: i32,
+    /// Whether the item is in the enchantment's `supported_items`.
+    pub supported: bool,
 }
 
 /// A [`Crafter`] that never crafts anything.
@@ -1266,7 +1288,7 @@ impl Menu {
     /// by [`Menu::update_result`] instead.
     fn refresh_station_result(&mut self, crafter: &dyn Crafter) {
         match self.kind {
-            MenuKind::Anvil => self.update_anvil(),
+            MenuKind::Anvil => self.update_anvil(crafter),
             MenuKind::Grindstone => self.update_grindstone(),
             MenuKind::Stonecutter => {
                 self.stonecutting = if self.container[0].is_empty() {
@@ -1414,8 +1436,11 @@ impl Menu {
 
     /// Vanilla `AnvilMenu.createResult`: renames, combines two damaged copies of one item, or
     /// repairs with the item's repair material, charging the two prior-work penalties and one
-    /// level per operation. Combining enchantments is not implemented.
-    fn update_anvil(&mut self) {
+    /// level per operation. Enchantments of the second slot (an enchanted book, or an item of the
+    /// same kind) merge into the first: equal levels combine to one more, the cap is the
+    /// enchantment's maximum, and an enchantment the item does not support or that excludes one
+    /// already present is left out (and makes the result empty when nothing else applied).
+    fn update_anvil(&mut self, crafter: &dyn Crafter) {
         let left = self.container[0].clone();
         let right = self.container[1].clone();
         self.result = ItemStack::empty();
@@ -1443,20 +1468,13 @@ impl Menu {
         }
 
         if !right.is_empty() {
-            if left.is_same_item(&right) && left.is_damageable() && right.is_damageable() {
-                let max = left.max_damage().unwrap_or(0);
-                let left_durability = max - left.damage();
-                let right_durability = max - right.damage();
-                // Vanilla gives a 5% bonus of the maximum durability for a combined repair.
-                let total = (left_durability + right_durability + max / 20).min(max);
-                if total > 0 {
-                    result
-                        .components
-                        .insert(ids::DAMAGE, Component::Damage(max - total));
-                    cost += 2;
-                    changed = true;
-                }
-            } else if repairs_with(&left, &right) {
+            let right_is_book = matches!(
+                right.effective_component(ids::STORED_ENCHANTMENTS),
+                Some(Component::StoredEnchantments(_))
+            );
+            let same_damageable =
+                left.is_same_item(&right) && left.is_damageable() && right.is_damageable();
+            if !right_is_book && !same_damageable && repairs_with(&left, &right) {
                 let max = left.max_damage().unwrap_or(0);
                 let per_item = (max / 4).max(1);
                 let used = right.count.min(4);
@@ -1468,6 +1486,49 @@ impl Menu {
                     cost += used;
                     changed = true;
                 }
+            } else if right_is_book || same_damageable {
+                if same_damageable && !right_is_book {
+                    let max = left.max_damage().unwrap_or(0);
+                    let left_durability = max - left.damage();
+                    let right_durability = max - right.damage();
+                    // Vanilla gives a 5% bonus of the maximum durability for a combined repair.
+                    let total = (left_durability + right_durability + max / 20).min(max);
+                    // Vanilla only charges when the combination actually repairs something.
+                    if total > 0 && max - total < left.damage() {
+                        result
+                            .components
+                            .insert(ids::DAMAGE, Component::Damage(max - total));
+                        cost += 2;
+                        changed = true;
+                    }
+                }
+                let (merged, enchant_cost, applied, refused) =
+                    merge_enchantments(&left, &right, right_is_book, crafter);
+                if applied {
+                    cost += enchant_cost;
+                    changed = true;
+                    if left.name() == Some("minecraft:enchanted_book") {
+                        result.components.insert(
+                            ids::STORED_ENCHANTMENTS,
+                            Component::StoredEnchantments(merged),
+                        );
+                    } else {
+                        result
+                            .components
+                            .insert(ids::ENCHANTMENTS, Component::Enchantments(merged));
+                    }
+                    if left.count > 1 {
+                        cost = 40;
+                    }
+                } else if refused {
+                    // Every enchantment of the second slot was refused: no result at all.
+                    self.sync_data();
+                    return;
+                }
+            } else {
+                // Vanilla: a second item that neither repairs nor enchants gives no result.
+                self.sync_data();
+                return;
             }
         }
 
@@ -2663,12 +2724,12 @@ impl Menu {
     }
 
     /// Vanilla `AnvilMenu.setItemName`: records the typed name and recomputes the result.
-    pub fn rename(&mut self, name: String) {
+    pub fn rename(&mut self, name: String, crafter: &dyn Crafter) {
         if self.kind != MenuKind::Anvil {
             return;
         }
         self.rename = name;
-        self.update_anvil();
+        self.update_anvil(crafter);
     }
 
     /// Vanilla `AbstractContainerMenu.clickMenuButton`: an enchant choice, stonecutter recipe or
@@ -2724,6 +2785,69 @@ impl Menu {
 }
 
 /// Vanilla `ItemStack.getOrDefault(DataComponents.REPAIR_COST, 0)`.
+/// The enchantments the anvil reads from a stack: the stored ones of an enchanted book,
+/// otherwise the applied ones (vanilla `EnchantmentHelper.getEnchantmentsForCrafting`).
+fn crafting_enchantments(stack: &ItemStack) -> Enchantments {
+    if stack.name() == Some("minecraft:enchanted_book") {
+        if let Some(Component::StoredEnchantments(stored)) =
+            stack.effective_component(ids::STORED_ENCHANTMENTS)
+        {
+            return stored.clone();
+        }
+        return Enchantments::new();
+    }
+    match stack.effective_component(ids::ENCHANTMENTS) {
+        Some(Component::Enchantments(applied)) => applied.clone(),
+        _ => Enchantments::new(),
+    }
+}
+
+/// Vanilla `AnvilMenu.createResult` enchantment loop. Returns the merged enchantments, the level
+/// cost they add, whether any applied, and whether some enchantment was refused.
+fn merge_enchantments(
+    left: &ItemStack,
+    right: &ItemStack,
+    right_is_book: bool,
+    crafter: &dyn Crafter,
+) -> (Enchantments, i32, bool, bool) {
+    let left_is_book = left.name() == Some("minecraft:enchanted_book");
+    let mut merged = crafting_enchantments(left);
+    let mut cost = 0;
+    let (mut applied, mut refused) = (false, false);
+    for (name, &level) in &crafting_enchantments(right).levels {
+        let Some(rules) = crafter.enchantment_rules(name, left) else {
+            continue;
+        };
+        let current = merged.level(name).unwrap_or(0);
+        let mut new_level = if current == level {
+            level + 1
+        } else {
+            level.max(current)
+        };
+        let mut allowed = rules.supported || left_is_book;
+        for other in merged.levels.keys() {
+            if other != name && crafter.enchantments_exclusive(name, other) {
+                allowed = false;
+                cost += 1;
+            }
+        }
+        if !allowed {
+            refused = true;
+            continue;
+        }
+        new_level = new_level.min(rules.max_level);
+        merged.set(name.clone(), new_level);
+        applied = true;
+        let weight = if right_is_book {
+            (rules.anvil_cost / 2).max(1)
+        } else {
+            rules.anvil_cost
+        };
+        cost += weight * new_level;
+    }
+    (merged, cost, applied, refused)
+}
+
 fn repair_cost(stack: &ItemStack) -> i32 {
     match stack.effective_component(ids::REPAIR_COST) {
         Some(Component::RepairCost(value)) => value,

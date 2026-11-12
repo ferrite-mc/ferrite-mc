@@ -2,8 +2,8 @@ use ferrite_item::{Component, Enchantments, HashedSlot, ItemStack, component_ids
 
 use crate::{
     ClickInput::{self, *},
-    Clicker, CookingOutput, Crafter, FurnaceKind, Menu, NoCrafting, PlayerInventory, SLOT_OUTSIDE,
-    Sync, is_shulker_box,
+    Clicker, CookingOutput, Crafter, EnchantRules, FurnaceKind, Menu, NoCrafting, PlayerInventory,
+    SLOT_OUTSIDE, Sync, is_shulker_box,
 };
 
 fn item(name: &str, count: i32) -> ItemStack {
@@ -194,7 +194,7 @@ fn anvil_repairs_renames_and_charges_levels() {
 
     // A rename alone costs one level and writes the custom name component.
     f.menu.set_slot(&mut f.inv, &TestCrafter, 0, first);
-    f.menu.rename("Excalibur".into());
+    f.menu.rename("Excalibur".into(), &TestCrafter);
     assert_eq!(f.menu.anvil_cost(), 1);
     assert!(matches!(
         f.menu
@@ -207,7 +207,7 @@ fn anvil_repairs_renames_and_charges_levels() {
     damaged
         .components
         .insert(component_ids::DAMAGE, Component::Damage(200));
-    f.menu.rename(String::new());
+    f.menu.rename(String::new(), &TestCrafter);
     f.menu.set_slot(&mut f.inv, &TestCrafter, 0, damaged);
     f.menu
         .set_slot(&mut f.inv, &TestCrafter, 1, item("iron_ingot", 2));
@@ -1334,6 +1334,174 @@ fn beacon_payment_slot_holds_one_item_and_rejects_other_items() {
     assert!(f.menu.confirm_beacon(Some(1), None));
     assert!(f.slot(0).is_empty());
     assert_eq!(f.menu.beacon_state().unwrap().primary, Some(1));
+}
+
+/// A crafter that knows a handful of enchantments, with vanilla's weights and maximum levels.
+struct EnchantCrafter;
+
+impl Crafter for EnchantCrafter {
+    fn craft(&self, _: &[ItemStack], _: usize) -> ItemStack {
+        ItemStack::empty()
+    }
+
+    fn enchantment_rules(&self, enchantment: &str, item: &ItemStack) -> Option<EnchantRules> {
+        let name = item.name()?;
+        let (max_level, anvil_cost, sword_only) = match enchantment {
+            "minecraft:sharpness" => (5, 1, true),
+            "minecraft:smite" => (5, 2, true),
+            "minecraft:unbreaking" => (3, 2, false),
+            "minecraft:protection" => (4, 1, false),
+            _ => return None,
+        };
+        let supported = match enchantment {
+            "minecraft:protection" => name.ends_with("_chestplate"),
+            _ => !sword_only || name.ends_with("_sword"),
+        };
+        Some(EnchantRules {
+            max_level,
+            anvil_cost,
+            supported,
+        })
+    }
+
+    fn enchantments_exclusive(&self, a: &str, b: &str) -> bool {
+        let damage = ["minecraft:sharpness", "minecraft:smite"];
+        damage.contains(&a) && damage.contains(&b)
+    }
+}
+
+fn enchanted(name: &str, levels: &[(&str, i32)]) -> ItemStack {
+    let mut stack = item(name, 1);
+    let mut map = Enchantments::new();
+    for (enchantment, level) in levels {
+        map.set(*enchantment, *level);
+    }
+    if name == "enchanted_book" {
+        stack.components.insert(
+            component_ids::STORED_ENCHANTMENTS,
+            Component::StoredEnchantments(map),
+        );
+    } else {
+        stack
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(map));
+    }
+    stack
+}
+
+fn applied(stack: &ItemStack, enchantment: &str) -> Option<i32> {
+    match stack.effective_component(component_ids::ENCHANTMENTS) {
+        Some(Component::Enchantments(map)) => map.level(enchantment),
+        _ => None,
+    }
+}
+
+#[test]
+fn anvil_combines_enchantments_from_a_book_and_from_a_second_item() {
+    let mut f = Fixture::new(Menu::anvil(5));
+    let crafter = EnchantCrafter;
+    // Sharpness II + sharpness II -> III; a book halves the weight: cost = 1/2 -> max(1) * 3.
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        0,
+        enchanted("iron_sword", &[("minecraft:sharpness", 2)]),
+    );
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        1,
+        enchanted("enchanted_book", &[("minecraft:sharpness", 2)]),
+    );
+    assert_eq!(applied(&f.slot(2), "minecraft:sharpness"), Some(3));
+    assert_eq!(f.menu.anvil_cost(), 3);
+
+    // A different level keeps the higher one; a new enchantment is added at its weight.
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        1,
+        enchanted(
+            "enchanted_book",
+            &[("minecraft:sharpness", 1), ("minecraft:unbreaking", 3)],
+        ),
+    );
+    assert_eq!(applied(&f.slot(2), "minecraft:sharpness"), Some(2));
+    assert_eq!(applied(&f.slot(2), "minecraft:unbreaking"), Some(3));
+    // Vanilla charges the weight times the resulting level: sharpness 2 * max(1/2, 1)
+    // + unbreaking 3 * (2/2) = 5.
+    assert_eq!(f.menu.anvil_cost(), 5);
+
+    // Two enchanted swords: full weights, and the result caps at the maximum level.
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        0,
+        enchanted("iron_sword", &[("minecraft:sharpness", 5)]),
+    );
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        1,
+        enchanted("iron_sword", &[("minecraft:sharpness", 5)]),
+    );
+    assert_eq!(applied(&f.slot(2), "minecraft:sharpness"), Some(5));
+    assert_eq!(f.menu.anvil_cost(), 5);
+}
+
+#[test]
+fn anvil_refuses_unsupported_and_exclusive_enchantments() {
+    let mut f = Fixture::new(Menu::anvil(5));
+    let crafter = EnchantCrafter;
+    let sword = enchanted("iron_sword", &[("minecraft:sharpness", 3)]);
+    // Smite excludes sharpness: nothing else applies, so there is no result at all.
+    f.menu.set_slot(&mut f.inv, &crafter, 0, sword.clone());
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        1,
+        enchanted("enchanted_book", &[("minecraft:smite", 2)]),
+    );
+    assert_eq!(f.slot(2), empty());
+    // Protection does not fit a sword either.
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        1,
+        enchanted("enchanted_book", &[("minecraft:protection", 2)]),
+    );
+    assert_eq!(f.slot(2), empty());
+    // With a supported enchantment alongside, the refused one is dropped from the result.
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        1,
+        enchanted(
+            "enchanted_book",
+            &[("minecraft:smite", 2), ("minecraft:unbreaking", 1)],
+        ),
+    );
+    assert_eq!(applied(&f.slot(2), "minecraft:unbreaking"), Some(1));
+    assert_eq!(applied(&f.slot(2), "minecraft:smite"), None);
+    assert_eq!(applied(&f.slot(2), "minecraft:sharpness"), Some(3));
+    // A book on the left takes anything, and stores the result as stored enchantments.
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        0,
+        enchanted("enchanted_book", &[("minecraft:sharpness", 1)]),
+    );
+    f.menu.set_slot(
+        &mut f.inv,
+        &crafter,
+        1,
+        enchanted("enchanted_book", &[("minecraft:protection", 1)]),
+    );
+    assert!(matches!(
+        f.slot(2).effective_component(component_ids::STORED_ENCHANTMENTS),
+        Some(Component::StoredEnchantments(map))
+            if map.level("minecraft:sharpness") == Some(1) && map.level("minecraft:protection") == Some(1)
+    ));
 }
 
 #[test]

@@ -488,7 +488,7 @@ impl Player {
         let Some(menu) = self.menus.open.as_mut() else {
             return;
         };
-        menu.rename(name.chars().take(50).collect());
+        menu.rename(name.chars().take(50).collect(), crafter());
         let out = self.menus.current().broadcast_changes(&self.inventory);
         emit(self, out);
     }
