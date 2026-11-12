@@ -864,6 +864,7 @@ async fn write_loop<W: wire::BatchWriter>(
             close = Some("Timed out".to_string());
         }
         if let Some(reason) = close {
+            tracing::info!(%reason, "disconnecting player");
             let mut body = Vec::new();
             encode_packet(
                 &PlayDisconnect {
