@@ -416,7 +416,16 @@ pub enum MetaValue {
     OptionalUuid(Option<uuid::Uuid>),
     /// Vanilla `OPTIONAL_BLOCK_POS`: an End crystal's beam target.
     OptionalBlockPos(Option<i64>),
+    /// Vanilla `PARTICLE`: a particle type registry id, plus the ARGB colour that tinted
+    /// particles (`entity_effect`, protocol id 28) carry as their only option. Particles with
+    /// other options (dust, block, item ...) are not modelled.
+    Particle {
+        id: i32,
+        argb: Option<i32>,
+    },
 }
+/// `minecraft:entity_effect` in the particle type registry (26.3): its option is one ARGB int.
+const PARTICLE_ENTITY_EFFECT: i32 = 28;
 impl MetaValue {
     /// Serializer id in `EntityDataSerializers` registration order (26.3).
     pub fn serializer(&self) -> i32 {
@@ -430,6 +439,7 @@ impl MetaValue {
             Self::Boolean(_) => 8,
             Self::OptionalBlockPos(_) => 11,
             Self::OptionalUuid(_) => 13,
+            Self::Particle { .. } => 16,
             Self::VillagerData { .. } => 18,
             Self::Pose(_) => 20,
         }
@@ -474,6 +484,12 @@ impl Encode for MetaEntry {
                     pos.encode(out);
                 }
             }
+            MetaValue::Particle { id, argb } => {
+                VarInt(*id).encode(out);
+                if let Some(argb) = argb {
+                    argb.encode(out);
+                }
+            }
         }
     }
 }
@@ -497,6 +513,15 @@ impl MetaEntry {
             } else {
                 None
             }),
+            16 => {
+                let id = VarInt::decode(buf)?.0;
+                let argb = if id == PARTICLE_ENTITY_EFFECT {
+                    Some(i32::decode(buf)?)
+                } else {
+                    None
+                };
+                MetaValue::Particle { id, argb }
+            }
             18 => MetaValue::VillagerData {
                 kind: VarInt::decode(buf)?.0,
                 profession: VarInt::decode(buf)?.0,
@@ -2304,6 +2329,21 @@ mod interaction_tests {
             assert_eq!(
                 MetaEntry::decode_at(8, &mut &bytes[1..]).unwrap().value,
                 MetaValue::OptionalBlockPos(target)
+            );
+        }
+        // A cloud's particle: serializer 16, the type id, and an ARGB int for entity_effect.
+        for (id, argb) in [(28, Some(0x80FF_0000_u32 as i32)), (15, None)] {
+            let mut bytes = Vec::new();
+            MetaEntry {
+                index: 10,
+                value: MetaValue::Particle { id, argb },
+            }
+            .encode(&mut bytes);
+            assert_eq!(bytes[..3], [10, 16, id as u8]);
+            assert_eq!(bytes.len(), 3 + if argb.is_some() { 4 } else { 0 });
+            assert_eq!(
+                MetaEntry::decode_at(10, &mut &bytes[1..]).unwrap().value,
+                MetaValue::Particle { id, argb }
             );
         }
         // A non-zero velocity survives within LpVec3 precision.
