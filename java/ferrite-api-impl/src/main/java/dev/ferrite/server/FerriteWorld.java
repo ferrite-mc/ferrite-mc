@@ -655,6 +655,38 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 HostBridge.callVoid("World", id, "spawnFallingBlock(Location,Material,String)", at, material, uuid.toString());
                 yield handle;
             }
+            case "spawnArrow" -> {
+                // (Location, Vector, float speed, float spread, Class): vanilla Projectile#shoot with the arrow type.
+                if (args.length != 5) yield NONE;
+                var at = ((org.bukkit.Location) args[0]).clone();
+                var direction = ((org.bukkit.util.Vector) args[1]).clone();
+                float speed = (Float) args[2], spread = (Float) args[3];
+                var kind = (Class<?>) args[4];
+                if (!kind.isAssignableFrom(org.bukkit.entity.Arrow.class))
+                    throw new UnsupportedOperationException("Ferrite: World#spawnArrow(" + kind.getSimpleName() + ") is not available: the host only spawns plain arrows");
+                if (direction.lengthSquared() == 0) throw new IllegalArgumentException("direction must not be zero");
+                direction.normalize();
+                var random = java.util.concurrent.ThreadLocalRandom.current();
+                var velocity = new org.bukkit.util.Vector(
+                    direction.getX() + random.nextGaussian() * 0.0075 * spread,
+                    direction.getY() + random.nextGaussian() * 0.0075 * spread,
+                    direction.getZ() + random.nextGaussian() * 0.0075 * spread).multiply(speed);
+                var uuid = java.util.UUID.randomUUID();
+                var handle = SpawnedEntity.of(org.bukkit.entity.EntityType.ARROW, at, proxy, uuid);
+                HostBridge.callVoid("World", id, "spawnArrow(Location,double,double,double,String)", at, velocity.getX(), velocity.getY(), velocity.getZ(), uuid.toString());
+                yield handle;
+            }
+            case "getInfiniburn" -> {
+                // The dimension type's `infiniburn` block tag: overworld, nether and end each name their own.
+                var tag = switch (env) {
+                    case NETHER -> "infiniburn_nether";
+                    case THE_END -> "infiniburn_end";
+                    default -> "infiniburn_overworld";
+                };
+                for (var candidate : FerriteTags.tags("blocks", org.bukkit.Material.class))
+                    if (candidate.getKey().getKey().equals(tag)) yield java.util.Set.copyOf(candidate.getValues());
+                throw new UnsupportedOperationException("Ferrite: block tag minecraft:" + tag + " is not in the generated data");
+            }
             case "canGenerateStructures" -> true;
             case "generateTree" -> {
                 // (Location, TreeType) | (Location, Random, TreeType); a BlockChangeDelegate cannot be honoured.

@@ -54,6 +54,29 @@ class FerriteWorldHostTest {
 
     private String lastCall() { return calls.get(calls.size() - 1); }
 
+    @Test void spawnArrowShootsAlongTheNormalisedDirectionAtTheGivenSpeed() {
+        replies.put("spawnArrow(Location,double,double,double,String)", "");
+        var at = new Location(world, 1.5, 70, 2.5);
+        var arrow = world.spawnArrow(at, new org.bukkit.util.Vector(0, 0, 4), 2.0f, 0.0f, org.bukkit.entity.Arrow.class);
+        assertEquals(org.bukkit.entity.EntityType.ARROW, arrow.getType());
+        assertSame(world, arrow.getWorld());
+        var call = calls.stream().filter(c -> c.startsWith("spawnArrow(Location,double,double,double,String)|")).findFirst().orElseThrow();
+        var args = call.substring(call.indexOf('|') + 1);
+        var fields = args.split("[\\x00-\\x1f?]");
+        var tail = java.util.Arrays.copyOfRange(fields, fields.length - 4, fields.length);
+        assertArrayEquals(new String[] {"0.0", "0.0", "2.0", arrow.getUniqueId().toString()}, tail, args);
+        assertThrows(IllegalArgumentException.class, () -> world.spawnArrow(at, new org.bukkit.util.Vector(), 1f, 0f, org.bukkit.entity.Arrow.class));
+        var refused = assertThrows(UnsupportedOperationException.class, () -> world.spawnArrow(at, new org.bukkit.util.Vector(0, 1, 0), 1f, 0f, org.bukkit.entity.SpectralArrow.class));
+        assertTrue(refused.getMessage().contains("plain arrows"), refused.getMessage());
+    }
+
+    @Test void infiniburnIsTheDimensionTypesBlockTag() {
+        var burn = world.getInfiniburn();
+        assertTrue(burn.contains(org.bukkit.Material.NETHERRACK), burn.toString());
+        assertTrue(burn.contains(org.bukkit.Material.MAGMA_BLOCK), burn.toString());
+        assertFalse(burn.contains(org.bukkit.Material.STONE));
+    }
+
     // ---- time, weather, difficulty ------------------------------------------------------------------------------
 
     @Test void timeComesFromTheHostAndDecidesDayTime() {
