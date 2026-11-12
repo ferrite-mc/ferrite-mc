@@ -68,11 +68,15 @@ final class FerriteEnchantmentData {
         if (cached != null) return cached;
         var json = read(key);
         var supportedReference = firstReference(json.get("supported_items"));
+        // Legacy targets were the enchantment's primary set (thorns: chest armor although it is supported on all armor).
+        var primaryReference = json.has("primary_items") ? firstReference(json.get("primary_items")) : null;
+        var target = itemTarget(primaryReference);
+        if (target == null) target = itemTarget(supportedReference);
         var definition = new Definition(
                 integer(json, "max_level", key),
                 json.has("min_level") ? integer(json, "min_level", key) : 1,
                 integer(json, "weight", key),
-                itemTarget(supportedReference),
+                target,
                 slots(json, key),
                 keySet(RegistryKey.ITEM, references(json.get("supported_items"), "item", key, "supported_items")),
                 json.has("primary_items")

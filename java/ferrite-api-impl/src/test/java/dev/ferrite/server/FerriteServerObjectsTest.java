@@ -271,6 +271,23 @@ class FerriteServerObjectsTest {
         assertEquals(io.papermc.paper.enchantments.EnchantmentRarity.VERY_RARE, org.bukkit.enchantments.Enchantment.SOUL_SPEED.getRarity());
     }
 
+    @Test void everyVanillaEnchantmentHasALegacyItemTarget() {
+        var counts = new java.util.TreeMap<org.bukkit.enchantments.EnchantmentTarget, Integer>();
+        int total = 0;
+        for (var enchantment : org.bukkit.Registry.ENCHANTMENT) {
+            counts.merge(enchantment.getItemTarget(), 1, Integer::sum); // would throw if one had none
+            total++;
+        }
+        assertEquals(43, total);
+        assertEquals(1, counts.get(org.bukkit.enchantments.EnchantmentTarget.ARMOR_TORSO));
+        assertEquals(4, counts.get(org.bukkit.enchantments.EnchantmentTarget.ARMOR));
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.ARMOR_TORSO, org.bukkit.enchantments.Enchantment.THORNS.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.BOW, org.bukkit.enchantments.Enchantment.POWER.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.TRIDENT, org.bukkit.enchantments.Enchantment.LOYALTY.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.ARMOR_FEET, org.bukkit.enchantments.Enchantment.DEPTH_STRIDER.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.VANISHABLE, org.bukkit.enchantments.Enchantment.VANISHING_CURSE.getItemTarget());
+    }
+
     @Test void potionEffectTypesExposeTheirVanillaData() {
         var speed = PotionEffectType.SPEED;
         assertEquals(org.bukkit.potion.PotionEffectTypeCategory.BENEFICIAL, speed.getCategory());
