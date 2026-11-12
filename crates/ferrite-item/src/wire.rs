@@ -358,6 +358,7 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
             Component::Rarity(*Rarity::ALL.get(usize::try_from(reader.varint().ok()?).ok()?)?)
         }
         ids::REPAIR_COST => Component::RepairCost(reader.varint().ok()?),
+        ids::MAP_ID => Component::MapId(reader.varint().ok()?),
         ids::CUSTOM_DATA => match reader.nbt_tag().ok()? {
             Tag::Compound(compound) => Component::CustomData(compound),
             _ => return None,
@@ -509,7 +510,8 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
         Component::Damage(value)
         | Component::MaxDamage(value)
         | Component::MaxStackSize(value)
-        | Component::RepairCost(value) => write_varint(*value, &mut out),
+        | Component::RepairCost(value)
+        | Component::MapId(value) => write_varint(*value, &mut out),
         Component::Unbreakable => {}
         Component::Enchantments(enchantments) | Component::StoredEnchantments(enchantments) => {
             write_count(enchantments.levels.len(), &mut out)?;

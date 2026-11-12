@@ -857,6 +857,8 @@ pub enum Component {
     Rarity(Rarity),
     /// `minecraft:repair_cost`.
     RepairCost(i32),
+    /// `minecraft:map_id`, the id of the saved map a filled map shows (`data/map_<id>.dat`).
+    MapId(i32),
     /// `minecraft:custom_data`, opaque to the server.
     CustomData(Compound),
     /// `minecraft:attribute_modifiers`.
@@ -900,6 +902,7 @@ impl Component {
             Self::DyedColor(_) => ids::DYED_COLOR,
             Self::Rarity(_) => ids::RARITY,
             Self::RepairCost(_) => ids::REPAIR_COST,
+            Self::MapId(_) => ids::MAP_ID,
             Self::CustomData(_) => ids::CUSTOM_DATA,
             Self::AttributeModifiers(_) => ids::ATTRIBUTE_MODIFIERS,
             Self::Food(_) => ids::FOOD,
@@ -928,6 +931,7 @@ impl Component {
             Self::DyedColor(_) => "dyed_color",
             Self::Rarity(_) => "rarity",
             Self::RepairCost(_) => "repair_cost",
+            Self::MapId(_) => "map_id",
             Self::CustomData(_) => "custom_data",
             Self::AttributeModifiers(_) => "attribute_modifiers",
             Self::Food(_) => "food",
@@ -954,6 +958,7 @@ impl Component {
             | Self::MaxDamage(value)
             | Self::MaxStackSize(value)
             | Self::RepairCost(value)
+            | Self::MapId(value)
             | Self::DyedColor(value) => Tag::Int(*value),
             Self::Unbreakable => Tag::Compound(Compound::new()),
             Self::Enchantments(enchantments) | Self::StoredEnchantments(enchantments) => {
@@ -1005,6 +1010,7 @@ impl Component {
             ids::DYED_COLOR => as_int(tag).map(Self::DyedColor),
             ids::RARITY => as_str(tag).and_then(Rarity::from_name).map(Self::Rarity),
             ids::REPAIR_COST => as_int(tag).map(Self::RepairCost),
+            ids::MAP_ID => as_int(tag).map(Self::MapId),
             ids::CUSTOM_DATA => match tag {
                 Tag::Compound(compound) => Some(Self::CustomData(compound.clone())),
                 _ => None,
@@ -1400,6 +1406,7 @@ mod tests {
             (ids::DYED_COLOR, Component::DyedColor(0x0012_3456)),
             (ids::RARITY, Component::Rarity(Rarity::Epic)),
             (ids::REPAIR_COST, Component::RepairCost(4)),
+            (ids::MAP_ID, Component::MapId(12)),
             (ids::CUSTOM_DATA, Component::CustomData(custom_data)),
             (
                 ids::ATTRIBUTE_MODIFIERS,
