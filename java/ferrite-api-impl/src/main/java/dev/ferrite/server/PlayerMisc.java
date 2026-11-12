@@ -210,9 +210,6 @@ public abstract class PlayerMisc extends PlayerStubs {
         Objects.requireNonNull(slot, "slot");
         return slot != org.bukkit.inventory.EquipmentSlot.BODY && slot != org.bukkit.inventory.EquipmentSlot.SADDLE;
     }
-    /** Shoulder entities cannot be placed yet, so a shoulder is always empty and there is nothing to release. */
-    @Override public org.bukkit.entity.Entity releaseLeftShoulderEntity() { var entity = getShoulderEntityLeft(); setShoulderEntityLeft(null); return entity; }
-    @Override public org.bukkit.entity.Entity releaseRightShoulderEntity() { var entity = getShoulderEntityRight(); setShoulderEntityRight(null); return entity; }
     @Override public Map<String, Object> serialize() {
         var result = new LinkedHashMap<String, Object>();
         result.put("UUID", getUniqueId().toString());

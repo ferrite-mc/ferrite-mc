@@ -20,6 +20,7 @@ mod network;
 pub mod playerops;
 mod riding;
 pub mod rules;
+mod shoulders;
 pub(crate) mod snapshot;
 mod survival;
 pub mod tile_update;
@@ -214,6 +215,15 @@ impl PluginBridge {
                             }
                             if let Some(reply) = climate::answer(call) {
                                 return Some(reply);
+                            }
+                            if let Some(reply) = shoulders::answer(call) {
+                                return Some(reply);
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, shoulders::command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
                             }
                             if let Some(reply) = facts::answer(call) {
                                 return Some(reply);

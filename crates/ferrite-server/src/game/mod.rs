@@ -3018,6 +3018,14 @@ fn route_plugin_command(
                     });
             }
         }
+        PlayerCommand::Shoulder { player, left, op } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginShoulder { left, op });
+            }
+        }
         PlayerCommand::Packet { player, packet } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox

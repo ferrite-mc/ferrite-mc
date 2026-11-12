@@ -150,6 +150,11 @@ pub enum Command {
         shulker: bool,
         items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
     },
+    /// A plugin's change to one of this player's shoulders.
+    PluginShoulder {
+        left: bool,
+        op: ferrite_plugin::ShoulderOp,
+    },
     /// A packet a plugin sends to this player.
     PluginPacket(ferrite_plugin::PluginPacket),
     /// A plugin's direct change to a survival number.
@@ -3906,6 +3911,15 @@ impl Player {
                     self.open_plugin_inventory(&title, rows, shulker, &items);
                     continue;
                 }
+                Command::PluginShoulder { left, op } => {
+                    let side = if left {
+                        ShoulderSide::Left
+                    } else {
+                        ShoulderSide::Right
+                    };
+                    self.menus.shoulders.push((side, op));
+                    continue;
+                }
                 Command::PluginPacket(packet) => {
                     self.send_plugin_packet(packet);
                     continue;
@@ -6916,31 +6930,27 @@ impl Region {
         true
     }
 
-    /// `Player#setShoulderEntityLeft/Right` and the release methods: seats the parrot `parrot`
-    /// on `side` of `player` (`None` takes the parrot off and puts it in the world). A live
-    /// parrot entity is lifted out of the world; a uuid with no entity becomes a fresh shoulder
-    /// parrot. A parrot already on the other shoulder moves over, and one that was on `side` is
-    /// released into the world. The change is saved at once and announced to the player and
-    /// the viewers. `false` when nothing changed: unknown player, or an entity that is not a
-    /// parrot.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called by the plugin host handler for Player#setShoulderEntity*, which lives outside game/ and is not wired yet"
-        )
-    )]
-    pub fn set_shoulder(&mut self, player: Uuid, side: ShoulderSide, parrot: Option<Uuid>) -> bool {
-        let Some(at) = self
-            .players
-            .get(&player)
-            .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.05, p.pos[2]))
-        else {
-            return false;
-        };
-        let changes = self.change_shoulder(player, at, side, parrot);
-        let Some(p) = self.players.get(&player) else {
-            return false;
+    /// `Player#setShoulderEntityLeft/Right` and the release methods, applied to the (detached) player the
+    /// region is ticking. See [`ShoulderOp`]: seating lifts a live parrot out of the world (a uuid with no
+    /// entity becomes a fresh shoulder parrot), a parrot already on the other shoulder moves over, one that was
+    /// on `side` is released into the world; `Clear` empties the shoulder without a parrot; `Release` puts the
+    /// parrot into the world. The change is saved at once and announced to the player and the viewers. `false`
+    /// when nothing changed (an empty shoulder, or an entity that is not a parrot).
+    fn apply_shoulder(
+        &mut self,
+        p: &Player,
+        side: ShoulderSide,
+        op: ferrite_plugin::ShoulderOp,
+    ) -> bool {
+        use ferrite_plugin::ShoulderOp;
+        let at = ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.05, p.pos[2]);
+        let changes = match op {
+            ShoulderOp::Seat(parrot) => self.change_shoulder(p.uuid, at, side, Some(parrot)),
+            ShoulderOp::Release => self.change_shoulder(p.uuid, at, side, None),
+            ShoulderOp::Clear => match super::ride::shoulder_release(p.uuid, side) {
+                Some(_) => vec![(side, None)],
+                None => Vec::new(),
+            },
         };
         for (side, variant) in &changes {
             self.send_shoulder(p, *side, *variant);
@@ -6951,16 +6961,24 @@ impl Region {
         !changes.is_empty()
     }
 
-    /// The game-state half of [`Self::set_shoulder`]: moves parrots between the entity store and
+    /// [`Self::apply_shoulder`] for a player still in the region's table (tests).
+    #[cfg(test)]
+    pub fn set_shoulder(&mut self, player: Uuid, side: ShoulderSide, parrot: Option<Uuid>) -> bool {
+        let Some(p) = self.players.remove(&player) else {
+            return false;
+        };
+        let op = parrot.map_or(
+            ferrite_plugin::ShoulderOp::Release,
+            ferrite_plugin::ShoulderOp::Seat,
+        );
+        let changed = self.apply_shoulder(&p, side, op);
+        self.players.insert(player, p);
+        changed
+    }
+
+    /// The game-state half of [`Self::apply_shoulder`]: moves parrots between the entity store and
     /// the shoulders. Returns what to announce, as `(side, variant)` with `None` for an empty
     /// shoulder.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called by the plugin host handler for Player#setShoulderEntity*, which lives outside game/ and is not wired yet"
-        )
-    )]
     fn change_shoulder(
         &mut self,
         player: Uuid,
@@ -6981,7 +6999,15 @@ impl Region {
                 .data(*key)
                 .is_some_and(|data| data.uuid == uuid)
         });
-        let seated = match live {
+        let other = match side {
+            ShoulderSide::Left => ShoulderSide::Right,
+            ShoulderSide::Right => ShoulderSide::Left,
+        };
+        // A parrot already on the other shoulder keeps its variant and owner when it moves over.
+        let moving = super::ride::shoulders_of(player)
+            .get(other)
+            .filter(|sitting| sitting.uuid == uuid);
+        let seated = match live.filter(|_| moving.is_none()) {
             Some(key) => {
                 let state = self.entities.data(key).and_then(|data| data.mob);
                 let Some(state) = state.filter(|s| s.kind == MobKind::Parrot && !s.is_dead())
@@ -6995,20 +7021,13 @@ impl Region {
                     owner: state.owner,
                 }
             }
-            None => ShoulderParrot {
+            None => moving.unwrap_or(ShoulderParrot {
                 uuid,
                 variant: 0,
                 owner: None,
-            },
+            }),
         };
-        let other = match side {
-            ShoulderSide::Left => ShoulderSide::Right,
-            ShoulderSide::Right => ShoulderSide::Left,
-        };
-        if super::ride::shoulders_of(player)
-            .get(other)
-            .is_some_and(|sitting| sitting.uuid == uuid)
-        {
+        if moving.is_some() {
             super::ride::shoulder_release(player, other);
             changes.push((other, None));
         }
@@ -9432,6 +9451,9 @@ impl Region {
             }
             self.entities.insert(record);
         }
+        for (side, op) in std::mem::take(&mut p.menus.shoulders) {
+            self.apply_shoulder(p, side, op);
+        }
         for slot in std::mem::take(&mut p.menus.fishing) {
             self.use_fishing_rod(p, slot);
         }
@@ -11411,6 +11433,56 @@ mod tests {
                 .change_shoulder(player, FEET, ShoulderSide::Left, None)
                 .is_empty()
         );
+        super::super::ride::forget_shoulders(player);
+    }
+
+    #[test]
+    fn moving_a_shoulder_parrot_to_the_other_side_keeps_its_owner_and_variant() {
+        let player = Uuid::from_u128(0x5106);
+        let mut region = Region::default();
+        let parrot = ShoulderParrot {
+            uuid: Uuid::from_u128(0xB1),
+            variant: 3,
+            owner: Some(player),
+        };
+        super::super::ride::shoulder_set(player, ShoulderSide::Left, Some(parrot));
+        let changes = region.change_shoulder(player, FEET, ShoulderSide::Right, Some(parrot.uuid));
+        assert_eq!(
+            changes,
+            vec![(ShoulderSide::Left, None), (ShoulderSide::Right, Some(3))]
+        );
+        assert_eq!(
+            shoulder_side_parrot(player, ShoulderSide::Right),
+            Some(parrot)
+        );
+        assert_eq!(shoulder_side_parrot(player, ShoulderSide::Left), None);
+        assert!(
+            parrots_in_world(&region).is_empty(),
+            "moving puts nothing in the world"
+        );
+        super::super::ride::forget_shoulders(player);
+    }
+
+    #[test]
+    fn clearing_a_shoulder_leaves_no_parrot_while_releasing_one_does() {
+        let player = Uuid::from_u128(0x5107);
+        let mut region = Region::default();
+        let parrot = Uuid::from_u128(0xB2);
+        region.change_shoulder(player, FEET, ShoulderSide::Left, Some(parrot));
+        region.change_shoulder(
+            player,
+            FEET,
+            ShoulderSide::Right,
+            Some(Uuid::from_u128(0xB3)),
+        );
+        // Clear is the bare removal `apply_shoulder` does; Release is `change_shoulder(None)`.
+        assert!(super::super::ride::shoulder_release(player, ShoulderSide::Left).is_some());
+        assert!(parrots_in_world(&region).is_empty());
+        assert_eq!(
+            region.change_shoulder(player, FEET, ShoulderSide::Right, None),
+            vec![(ShoulderSide::Right, None)]
+        );
+        assert_eq!(parrots_in_world(&region), vec![Uuid::from_u128(0xB3)]);
         super::super::ride::forget_shoulders(player);
     }
 
