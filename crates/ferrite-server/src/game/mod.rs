@@ -8,6 +8,7 @@ mod recipe_unlock;
 pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
+mod targeting;
 mod waypoints;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn, write_spawn};
 #[cfg(test)]
@@ -3755,7 +3756,8 @@ impl CommandRuntime<'_> {
             );
             return;
         }
-        match ride::mount(rider.uuid, vehicle.uuid, vehicle.player) {
+        let vehicle_kind = ride::kind_of(&self.state.lock().unwrap(), vehicle.uuid);
+        match ride::mount_in(rider.uuid, vehicle.uuid, vehicle.player, vehicle_kind) {
             Ok(()) => {
                 self.broadcast_passengers(vehicle.uuid);
                 self.reply

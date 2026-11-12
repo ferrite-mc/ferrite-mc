@@ -531,7 +531,41 @@ pub fn tick_with_owner_attacks_and_holders(
     holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
+    tick_full(
+        store,
+        blocks,
+        players,
+        &std::collections::HashSet::new(),
+        owner_attacks,
+        holders,
+        rng,
+    )
+}
+
+/// [`tick_with_owner_attacks_and_holders`] where `untargetable` players (creative and
+/// spectator) are still seen by every other goal (look at, follow, tempt, owner, despawn
+/// range) but are never picked as a hostile mob's target.
+pub fn tick_full(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[Target],
+    untargetable: &std::collections::HashSet<Uuid>,
+    owner_attacks: &[(Uuid, crate::EntityKey)],
+    holders: &[(Uuid, Vec3)],
+    rng: &mut Rng,
+) -> Vec<MobEvent> {
     let mut events = Vec::new();
+    let hostile_targets: std::borrow::Cow<'_, [Target]> = if untargetable.is_empty() {
+        std::borrow::Cow::Borrowed(players)
+    } else {
+        std::borrow::Cow::Owned(
+            players
+                .iter()
+                .filter(|target| !untargetable.contains(&target.uuid))
+                .copied()
+                .collect(),
+        )
+    };
     let player_positions: Vec<Vec3> = players.iter().map(|target| target.pos).collect();
     let owners: Vec<(Uuid, Vec3)> = players
         .iter()
@@ -590,7 +624,7 @@ pub fn tick_with_owner_attacks_and_holders(
             let target = if kind == MobKind::Enderman && calm {
                 None
             } else {
-                select_target(players, current, start, kind.follow_range()).copied()
+                select_target(&hostile_targets, current, start, kind.follow_range()).copied()
             };
             {
                 let Some(state) = mob::state_mut(store, key) else {
@@ -1318,6 +1352,38 @@ mod tests {
         let pos = store.pos(key).unwrap();
         assert!(pos.x > 1.0, "fled away from the attacker: {pos:?}");
         assert!(mob::state(&store, key).unwrap().panic > 0);
+    }
+
+    #[test]
+    fn hostile_mobs_never_target_untargetable_players() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let zombie = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(6.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let creative = target(0.5, 0.5);
+        let hidden: std::collections::HashSet<Uuid> = [creative.uuid].into();
+        let mut rng = Rng::new(2);
+        let mut hits = 0;
+        for _ in 0..200 {
+            for event in tick_full(&mut store, &world, &[creative], &hidden, &[], &[], &mut rng) {
+                if matches!(event, MobEvent::Melee { .. }) {
+                    hits += 1;
+                }
+            }
+        }
+        assert_eq!(hits, 0, "a creative player is never attacked");
+        assert_eq!(mob::state(&store, zombie).unwrap().target, None);
+        // Control: the same setup without the exclusion does attack.
+        let none = std::collections::HashSet::new();
+        let attacked = (0..200).any(|_| {
+            tick_full(&mut store, &world, &[creative], &none, &[], &[], &mut rng)
+                .iter()
+                .any(|event| matches!(event, MobEvent::Melee { .. }))
+        });
+        assert!(attacked, "without the exclusion the zombie attacks");
     }
 
     #[test]

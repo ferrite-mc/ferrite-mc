@@ -2516,7 +2516,18 @@ async fn a_skeleton_arrow_damages_a_bot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_creeper_blast_damages_blocks_for_a_bot() {
     use ferrite_protocol::{packets::play::BlockUpdate, types::BlockPos};
-    let world = World::start();
+    // `/gamemode` needs operator rights.
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            ops: vec![super::Operator {
+                uuid: ferrite_net::offline_uuid("Boom"),
+                level: 4,
+            }],
+            ..Default::default()
+        },
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(serve(
@@ -2530,6 +2541,9 @@ async fn a_creeper_blast_damages_blocks_for_a_bot() {
     ));
     let mut bot = Bot::join(addr, "Boom").await;
     bot.until(46).await;
+    // Creepers (like every hostile mob) ignore creative players, and a new player joins in
+    // creative by default, so the bot has to be a survival target for the fuse to start.
+    set_mode(&mut bot, "survival", 0).await;
     world
         .console_command("/summon minecraft:creeper 2.5 65 0.5".into())
         .await

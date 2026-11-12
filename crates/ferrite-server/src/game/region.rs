@@ -5501,6 +5501,9 @@ impl Region {
             .iter()
             .filter_map(|(&uuid, (world, _, _))| (*world == ctx.world_id).then_some(uuid))
             .collect();
+        for p in self.players.values() {
+            super::targeting::publish(p.uuid, p.gamemode);
+        }
         let mut players: HashMap<Uuid, ferrite_math::Vec3> = ctx
             .positions
             .lock()
@@ -5520,6 +5523,7 @@ impl Region {
                 ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             );
         }
+        let untargetable = super::targeting::untargetable();
         let targets: Vec<_> = players
             .iter()
             .map(|(&uuid, &pos)| ai::Target { uuid, pos })
@@ -5538,10 +5542,11 @@ impl Region {
             .iter()
             .map(|(holder, (pos, _))| (*holder, *pos))
             .collect();
-        for event in ai::tick_with_owner_attacks_and_holders(
+        for event in ai::tick_full(
             &mut self.entities,
             blocks,
             &targets,
+            &untargetable,
             owner_attacks,
             &holder_positions,
             &mut self.rng,
