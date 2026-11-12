@@ -334,8 +334,13 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     let at = std::time::Instant::now();
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                    let late = at.elapsed().saturating_sub(std::time::Duration::from_millis(1));
-                    lateness.lock().unwrap().push((at, late.as_secs_f64() * 1000.0));
+                    let late = at
+                        .elapsed()
+                        .saturating_sub(std::time::Duration::from_millis(1));
+                    lateness
+                        .lock()
+                        .unwrap()
+                        .push((at, late.as_secs_f64() * 1000.0));
                 }
             });
         }
@@ -500,7 +505,10 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
         std::env::var("BOTS_STAGGER_MS").unwrap_or_else(|_| "0".into()),
         std::env::var("BOTS_VIEW").unwrap_or_else(|_| "8".into()),
     );
-    print_dist(&format!("{label} bot join time"), join_ms.lock().unwrap().clone());
+    print_dist(
+        &format!("{label} bot join time"),
+        join_ms.lock().unwrap().clone(),
+    );
     {
         let (mspt50, mspt90, _, mspt_max) = dist(&samples);
         println!(
@@ -533,9 +541,18 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
         };
         let long_ago = storm_start - std::time::Duration::from_secs(3600);
         let end = std::time::Instant::now();
-        for (name, v) in [("runtime timer lateness", &lateness), ("/list round trip", &command_rtt)] {
-            print_dist(&format!("{label} {name}, idle"), phase(v, long_ago, storm_start));
-            print_dist(&format!("{label} {name}, join storm"), phase(v, storm_start, walk_start));
+        for (name, v) in [
+            ("runtime timer lateness", &lateness),
+            ("/list round trip", &command_rtt),
+        ] {
+            print_dist(
+                &format!("{label} {name}, idle"),
+                phase(v, long_ago, storm_start),
+            );
+            print_dist(
+                &format!("{label} {name}, join storm"),
+                phase(v, storm_start, walk_start),
+            );
             print_dist(&format!("{label} {name}, walk"), phase(v, walk_start, end));
         }
     }

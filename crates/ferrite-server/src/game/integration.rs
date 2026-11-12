@@ -26,6 +26,7 @@ struct Stages {
     start: std::time::Instant,
     ticks: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
     marks: Vec<(&'static str, f64, usize)>,
+    profiler: std::sync::Arc<super::profile::Profiler>,
 }
 impl Stages {
     fn new(name: &'static str, world: &World) -> Self {
@@ -34,6 +35,7 @@ impl Stages {
             start: std::time::Instant::now(),
             ticks: world.tick_samples.clone(),
             marks: Vec::new(),
+            profiler: world.profiler(),
         }
     }
     fn mark(&mut self, stage: &'static str) {
@@ -57,6 +59,7 @@ impl Drop for Stages {
         for (stage, at, ticks) in &self.marks {
             eprintln!("  {at:8.1}s {ticks:7} ticks  {stage}");
         }
+        eprintln!("{}", self.profiler.timings().report_all(50.0));
     }
 }
 
@@ -714,15 +717,12 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
             .unwrap();
     }
     stages.mark("crystals summoned");
-    world
-        .console_command("/tick rate 10000".into())
-        .await
-        .unwrap();
-    // The respawn advances one stage tick per region tick (100 + 400 + 100 ticks). `/tick sprint`
-    // would not help here: its budget counts game-loop ticks, which run far faster than the region
-    // can tick, so the sprint ends long before the sequence is done. Raising the rate instead keeps
-    // the region at 10k TPS until the sequence finishes. Loaded CI runners still tick the region
-    // slowly sometimes, so allow five minutes before calling it a failure.
+    // The respawn advances one stage tick per region tick (100 + 400 + 100 ticks), about 30 s at
+    // the default 20 TPS. The rate is deliberately left alone: `/tick rate 10000` makes every
+    // region in every dimension tick flat out, they share the CPU with the one region that owns
+    // the sequence, and under load that took between 66 s and 300+ s (see
+    // docs/handoff/w7-net-validation.md), where the default rate takes 35 s with 25x headroom
+    // per tick. The wait below stays bounded at five minutes.
     let mut respawn_began = false;
     let mut watch = tokio::time::interval(std::time::Duration::from_millis(100));
     tokio::time::timeout(std::time::Duration::from_secs(300), async {
@@ -753,9 +753,6 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     .await
     .expect("the respawned dragon gets a boss bar");
     stages.mark("respawned dragon bar");
-    if std::env::var_os("FERRITE_TEST_STAGES").is_some() {
-        eprintln!("{}", world.profiler().timings().report_all(50.0));
-    }
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();
