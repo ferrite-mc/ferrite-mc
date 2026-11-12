@@ -80,6 +80,45 @@ What can and cannot be said:
   and no run isolated the cause, so no claim is made about whether this branch changed memory use.
 - A quiet-machine re-run is still needed before reading anything into the p99 and RSS differences.
 
+
+## Re-run on branch `w6-protocol`, quiet machine (2026-11-12, head `9d1fd2d` + `c0357b2`)
+
+Command (both runs; release build of `examples/bots` at the head named above, which adds the
+coordinator `biased;` select and the headless-piston cascade):
+
+```sh
+ulimit -n 65535
+BOTS_STAGGER_MS=5 BOTS_FORCELOAD=20 BOTS_VIEW=2 target/release/examples/bots 800
+```
+
+Raw: `bots-800-w6-idle-run1.txt`, `bots-800-w6-idle-run2.txt`, each with the load average before and
+after. Run 1 started at load 1.56 / 4.91 / 6.21, i.e. with the box otherwise idle (the earlier
+re-run above was at 15-39). Run 2 started at 15.1 / 8.3 / 7.3: that figure is mostly the decaying
+average of run 1, which itself drives ~10 CPUs, so it is not evidence that other agents were
+active, but it was not checked per process either.
+
+| World | Run | avg MSPT | p99 MSPT | RSS | CPU | cache hit rate |
+|---|---|---:|---:|---:|---:|---:|
+| superflat | 1 | 46.2 ms | 102.7 ms | 1261 MiB | 1025% | 99.8% |
+| superflat | 2 | 51.9 ms | 141.0 ms | 1221 MiB | 1023% | 99.7% |
+| fixture | 1 | 8.6 ms | 33.7 ms | 1900 MiB | 982% | 99.8% |
+| fixture | 2 | 7.5 ms | 30.1 ms | 1710 MiB | 989% | 99.7% |
+
+Baseline (`6aca3fc`): superflat 63.4 / 75.8 ms avg, 146.1 / 192.3 ms p99, RSS 1248 / 1252 MiB;
+fixture 9.0 / 9.1 ms avg, 31.6 / 41.9 ms p99, RSS 1750 / 1932 MiB.
+
+What can and cannot be said:
+
+- With the machine quiet, the rate-limit work did not show a cost: RSS is 1221-1261 MiB on
+  superflat (baseline 1248-1252) and 1710-1900 MiB on fixture (baseline 1750-1932), inside the
+  baseline's own spread.
+- Average and p99 MSPT are *lower* than the baseline on superflat (46-52 vs 63-76 ms avg). The
+  baseline machine state is not known to be comparable, and the two runs here differ by 12% from
+  each other, so this is not claimed as a speedup from the branch; it only shows there is no
+  regression at 800 bots.
+- Fixture p99 (30-34 ms) matches the baseline's 32-42 ms. The bots send no chat, so these runs
+  do not exercise the rate limiter itself; its cost is covered by the unit tests only.
+
 ## `/forceload` through the console, end to end
 
 Measured inside the same runs: time from `World::console_command("forceload add x 0 x+255 255")`
