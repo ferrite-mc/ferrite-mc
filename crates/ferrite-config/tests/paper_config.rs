@@ -445,3 +445,37 @@ fn world_render_includes_comments() {
     assert!(settings.anticheat.anti_xray.enabled);
     assert!(!settings.hopper.cooldown_when_full);
 }
+
+#[test]
+fn unsupported_settings_default_to_papers_values() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = FerriteConfig::load(dir.path()).expect("load config");
+    let unsupported = &config.paper_global().unsupported_settings;
+    assert!(!unsupported.allow_headless_pistons);
+    assert!(!unsupported.allow_permanent_block_break_exploits);
+    assert!(!unsupported.allow_piston_duplication);
+    assert!(!unsupported.allow_unsafe_end_portal_teleportation);
+    assert!(unsupported.perform_username_validation);
+}
+
+#[test]
+fn unsupported_settings_are_read_from_paper_global_yml() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
+    std::fs::write(
+        dir.path().join("config/paper-global.yml"),
+        "unsupported-settings:\n  allow-headless-pistons: true\n  \
+         allow-permanent-block-break-exploits: true\n  allow-piston-duplication: true\n  \
+         allow-unsafe-end-portal-teleportation: true\n  perform-username-validation: false\n",
+    )
+    .expect("global");
+    let config = FerriteConfig::load(dir.path()).expect("load config");
+    let unsupported = &config.paper_global().unsupported_settings;
+    assert!(unsupported.allow_headless_pistons);
+    assert!(unsupported.allow_permanent_block_break_exploits);
+    assert!(unsupported.allow_piston_duplication);
+    assert!(unsupported.allow_unsafe_end_portal_teleportation);
+    assert!(!unsupported.perform_username_validation);
+    // Settings that were not written keep Paper's defaults.
+    assert!(unsupported.update_equipment_on_player_actions);
+}

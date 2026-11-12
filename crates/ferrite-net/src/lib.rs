@@ -140,6 +140,11 @@ pub struct ServerConfig {
     pub read_timeout: Duration,
     /// Per-connection chat and command token buckets (vanilla's spam threshold by default).
     pub rate_limits: rate_limit::RateLimits,
+    /// Paper `unsupported-settings.perform-username-validation`. When true (the default) a login
+    /// name must be 1-16 ASCII letters, digits or underscores. When false only the protocol's
+    /// own limit (1-16 characters) applies, plus a floor that rejects control characters, which
+    /// would otherwise reach logs, chat and commands unescaped.
+    pub perform_username_validation: bool,
     pub game: Option<tokio::sync::mpsc::UnboundedSender<game::GameMessage>>,
 }
 impl Default for ServerConfig {
@@ -160,6 +165,7 @@ impl Default for ServerConfig {
             status: Arc::new(StatusState::default()),
             read_timeout: DEFAULT_READ_TIMEOUT,
             rate_limits: rate_limit::RateLimits::default(),
+            perform_username_validation: true,
             game: None,
         }
     }
@@ -356,7 +362,7 @@ async fn offline_login(
         bail!("expected login start");
     }
     let start = LoginStart::decode(&mut body)?;
-    if !valid_username(&start.name) {
+    if !username_allowed(&start.name, config.perform_username_validation) {
         bail!("invalid player name");
     }
     let profile = match &config.forwarding {
@@ -1001,6 +1007,13 @@ async fn authenticate(
         }
     }
     Ok((uuid, authenticated.into(), properties))
+}
+/// The login-name check: strict by default, protocol-limit-only when validation is turned off.
+fn username_allowed(name: &str, perform_validation: bool) -> bool {
+    if perform_validation {
+        return valid_username(name);
+    }
+    !name.is_empty() && name.chars().count() <= 16 && !name.chars().any(char::is_control)
 }
 fn valid_username(name: &str) -> bool {
     !name.is_empty()
@@ -1784,6 +1797,100 @@ mod configuration_test {
     }
 }
 
+#[cfg(test)]
+mod username_tests {
+    use super::*;
+    use ferrite_protocol::packets::{
+        handshake::{Intent, Intention},
+        login::{LoginStart, SetCompression},
+    };
+    use tokio::net::TcpStream;
+
+    #[test]
+    fn strict_validation_is_the_default() {
+        assert!(ServerConfig::default().perform_username_validation);
+        for ok in ["Steve", "a", "Name_16_chars_ok", "x1"] {
+            assert!(username_allowed(ok, true), "{ok}");
+        }
+        for bad in [
+            "",
+            "Bad Name",
+            "né",
+            "a.b",
+            "-x",
+            "seventeen_chars_xx",
+            "tab\t",
+        ] {
+            assert!(!username_allowed(bad, true), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn disabling_validation_allows_special_characters_but_keeps_the_floor() {
+        for ok in ["Bad Name", "né", "a.b", "-x", "名前", "sixteen_chars_xx"] {
+            assert!(username_allowed(ok, false), "{ok}");
+        }
+        // The protocol limit and the control-character floor still apply.
+        for bad in ["", "seventeen_chars_xxx", "tab\t", "new\nline", "nul\0"] {
+            assert!(!username_allowed(bad, false), "{bad:?}");
+        }
+    }
+
+    /// Whether the server answered a login for `name` (it sends `SetCompression`) or hung up.
+    async fn login_answered(name: &str, validate: bool) -> bool {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve(
+            listener,
+            ServerConfig {
+                online_mode: false,
+                perform_username_validation: validate,
+                ..Default::default()
+            },
+        ));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut decoder = FrameDecoder::default();
+        send_packet(
+            &mut stream,
+            &Intention {
+                protocol_version: 777,
+                server_address: "localhost".into(),
+                server_port: addr.port(),
+                intent: Intent::Login,
+            },
+        )
+        .await
+        .unwrap();
+        send_packet(
+            &mut stream,
+            &LoginStart {
+                name: name.into(),
+                uuid: uuid::Uuid::nil(),
+            },
+        )
+        .await
+        .unwrap();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_packet(&mut stream, &mut decoder),
+        )
+        .await
+        .expect("server neither answered nor closed")
+        {
+            Ok(packet) => VarInt::decode(&mut packet.as_slice()).unwrap().0 == SetCompression::ID,
+            Err(_) => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn login_with_a_special_name_is_refused_unless_validation_is_off() {
+        assert!(!login_answered("Bad Name", true).await);
+        assert!(login_answered("Bad Name", false).await);
+        // A normal name logs in either way.
+        assert!(login_answered("Steve", true).await);
+        assert!(login_answered("Steve", false).await);
+    }
+}
 #[cfg(test)]
 mod rate_limit_tests {
     use super::game::{GameMessage, ServerboundPlay};
