@@ -14,6 +14,7 @@ mod inventory;
 mod item_entity;
 mod items;
 mod loot;
+mod maps;
 mod messaging;
 mod motion;
 mod network;
@@ -247,6 +248,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = worldinfo::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = maps::answer(call) {
                                 return Some(reply);
                             }
                             if call.owner == "Player"

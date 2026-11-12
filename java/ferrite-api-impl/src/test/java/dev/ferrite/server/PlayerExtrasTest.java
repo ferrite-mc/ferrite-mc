@@ -810,7 +810,7 @@ class PlayerExtrasTest {
 
     @Test void mapsArePaintedByTheirRenderersAndSentAsColours() {
         var calls = new java.util.ArrayList<Object[]>();
-        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{subject, method, args}); return ""; };
+        HostBridge.transport = (owner, subject, method, args) -> { if (!method.startsWith("allocateMap(")) calls.add(new Object[]{subject, method, args}); return ""; };
         try {
             var view = new FerriteMapView(player.getWorld());
             view.addRenderer(new org.bukkit.map.MapRenderer() {
@@ -838,7 +838,7 @@ class PlayerExtrasTest {
 
     @Test void mapCursorsCarryTypeBoundsDirectionAndPlainCaptions() {
         var calls = new java.util.ArrayList<Object[]>();
-        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{subject, method, args}); return ""; };
+        HostBridge.transport = (owner, subject, method, args) -> { if (!method.startsWith("allocateMap(")) calls.add(new Object[]{subject, method, args}); return ""; };
         try {
             assertEquals(0, org.bukkit.map.MapCursor.Type.PLAYER.getValue());
             assertEquals(26, org.bukkit.map.MapCursor.Type.RED_X.getValue());
@@ -893,7 +893,7 @@ class PlayerExtrasTest {
             other = (org.bukkit.entity.Player) ensure.invoke(null, "00000000-0000-0000-0000-0000000000bb", "Other");
         } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
         var calls = new java.util.ArrayList<Object[]>();
-        HostBridge.transport = (owner, subject, method, args) -> { calls.add(new Object[]{subject, method, args}); return ""; };
+        HostBridge.transport = (owner, subject, method, args) -> { if (!method.startsWith("allocateMap(")) calls.add(new Object[]{subject, method, args}); return ""; };
         try {
             var view = new FerriteMapView(player.getWorld());
             view.addRenderer(new org.bukkit.map.MapRenderer() {

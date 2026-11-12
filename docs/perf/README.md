@@ -119,6 +119,66 @@ What can and cannot be said:
 - Fixture p99 (30-34 ms) matches the baseline's 32-42 ms. The bots send no chat, so these runs
   do not exercise the rate limiter itself; its cost is covered by the unit tests only.
 
+
+## W7: 800 bots on `0c2ef7f` (main + harness) vs `0f9737c` (with the chunk-lookup fix)
+
+Date 2026-11-12. Host: 12 vCPU Xeon Platinum 8358, 62 GiB RAM, Linux, **shared with the other
+W7 workers**: the 1-minute load average before the four runs was 3.7, 14.6, 16.7 and 20.8, so
+this is not a quiet machine and the runs are interleaved (base, head, base, head) to spread
+the drift. Two runs per variant is a small sample.
+
+```sh
+ulimit -n 65535
+BOTS_STAGGER_MS=5 BOTS_FORCELOAD=20 BOTS_VIEW=2 target/release/examples/bots 800
+```
+
+Both binaries use the same harness (`examples/bots.rs` as of `0c2ef7f`, which adds the figures
+below); `base` is main (`236f0e2`) plus only that harness, `head` adds the
+`AnvilChunkSource` lookup fix. Raw output with load before/after: `docs/perf/w7/bots-800-*-run*.txt`.
+Workload: 800 bots join 5 ms apart, walk randomly for 30 s (view distance 2, one 4 Hz
+position update each), while 20 `/forceload` cycles run; superflat world, then the fixture
+world. All four runs: 800/800 joined, 800/800 walked to the deadline, 77-85 process threads,
+about 35 s elapsed, 43.7-47.6 MiB/s received in total (about 56-61 KiB/s per bot).
+
+| | superflat avg / p50 / p99 MSPT | RSS | fixture avg / p50 / p99 MSPT | RSS |
+|---|---|---:|---|---:|
+| base run 1 | 73.4 / 68.5 / 152.1 ms | 1208 MiB | 8.5 / 5.9 / 41.1 ms | 1846 MiB |
+| head run 1 | 66.8 / 64.3 / 136.6 ms | 1238 MiB | 9.2 / 7.3 / 32.8 ms | 1801 MiB |
+| base run 2 | 63.7 / 59.5 / 153.1 ms | 1239 MiB | 8.8 / 6.0 / 34.5 ms | 1791 MiB |
+| head run 2 | 60.1 / 59.2 / 122.6 ms | 1260 MiB | 8.0 / 5.9 / 29.1 ms | 1854 MiB |
+
+Reading: head is lower on superflat in both pairs (average -9% and -6%, p99 -10% and -20%) and
+mixed on fixture (+8% and -9% average). The spread between the two base runs is itself 13%, the
+load differed, and there are two runs, so **this shows no regression and a possible small
+improvement on superflat, not a measured speedup**. The fix's effect is clear where block
+reads dominate (below), not in this walk, where the 800 bots stay in a few chunks.
+
+Network-side figures from the same runs (all four, same harness; the probes run on the
+server's own tokio runtime together with the 800 in-process bot tasks, so they include the
+bots' CPU use and are for comparing runs, not absolute client-visible latency):
+
+| figure | idle | join storm (about 4 s) | walk (30 s) |
+|---|---|---|---|
+| 1 ms timer lateness p50 / p99 (4 probe tasks) | | 1.14-1.18 / 4.2-6.8 ms | 1.40-1.53 / 94-115 ms (p90 21-31 ms) |
+| `/list` round trip, probe bot, p50 | 3.2-4.0 ms | 3.0-3.9 ms (n=4) | 31-127 ms (n=24-26) |
+| keepalive RTT, server-measured, smoothed per player | | | p50 28-34 ms, p99 103-182 ms, max 231-632 ms (n=801 each) |
+| bot join time (connect to first position) | | p50 27-37 ms, p99 74-101 ms, max 103-136 ms | |
+
+The join storm is where compression and encryption of chunk data peaks, and timer lateness
+there is near the timer floor (p99 under 7 ms). The walk phase has little chunk traffic but far
+higher lateness, so the delay follows total CPU saturation (the process used 900-1000% of 1200%)
+from region ticks and the bots, not the inline writer work. This does not support the writer
+offload in `docs/NET-WRITER-OFFLOAD.md`; see the update there.
+
+### Block reads were O(cached chunks)
+
+`AnvilChunkSource::block` (and `sky_light`, `with_loaded_chunk`, the block-entity edit paths)
+found a chunk by iterating every cache entry under the cache lock. Regression test
+`game::anvil::tests::block_reads_do_not_scan_the_whole_cache` (debug build, 20000 reads, best of
+7): 1 cached chunk 3.5 ms, 1500 cached chunks **621 ms** before the fix; 17 ms for both after.
+Effect on the End fight tests (4 CPUs plus 2 busy-loop processes): the dragon respawn went from
+46-312 s (2 of 8 runs over the 300 s bound) to 35 s, details in `docs/handoff/w7-net-validation.md`.
+
 ## `/forceload` through the console, end to end
 
 Measured inside the same runs: time from `World::console_command("forceload add x 0 x+255 255")`

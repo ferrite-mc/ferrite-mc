@@ -15,6 +15,7 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
     private org.bukkit.inventory.ItemStack read(int slot) { var item = items[slot]; return item == null ? null : item.clone(); }
     private void write(int slot, org.bukkit.inventory.ItemStack item) {
         int damage = 0;
+        Integer mapId = null;
         String meta = null;
         if (item != null && item.hasItemMeta()) {
             // The host carries wear, name, lore, enchantments, unbreakable, model, repair cost,
@@ -23,6 +24,12 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
             var worn = item.getItemMeta();
             var fresh = org.bukkit.Bukkit.getItemFactory().getItemMeta(item.getType());
             if (worn instanceof org.bukkit.inventory.meta.Damageable w && fresh instanceof org.bukkit.inventory.meta.Damageable f) { damage = w.getDamage(); f.setDamage(damage); }
+            // A filled map's identity travels as its own host call; the view's settings are
+            // already saved in the host's map store (see FerriteMapView).
+            if (worn instanceof org.bukkit.inventory.meta.MapMeta wm && wm.hasMapView() && fresh instanceof org.bukkit.inventory.meta.MapMeta fm) {
+                mapId = wm.getMapView().getId();
+                fm.setMapView(wm.getMapView());
+            }
             var gson = net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson();
             String name = worn.hasDisplayName() ? gson.serialize(worn.displayName()) : "";
             if (worn.hasDisplayName()) fresh.displayName(worn.displayName());
@@ -41,7 +48,7 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
             var data = new FerriteDataContainer();
             worn.getPersistentDataContainer().copyTo(data, true);
             data.copyTo(fresh.getPersistentDataContainer(), true);
-            if (!fresh.equals(worn)) throw new UnsupportedOperationException("Ferrite: inventory metadata beyond name, lore, enchantments, unbreakable, model data, repair cost, item flags and persistent data is not implemented");
+            if (!fresh.equals(worn)) throw new UnsupportedOperationException("Ferrite: inventory metadata beyond name, lore, enchantments, unbreakable, model data, repair cost, item flags, persistent data and a map view is not implemented");
             meta = String.join("\u001e", name,
                 lore == null ? "" : String.join("\u001d", lore.stream().map(gson::serialize).toList()),
                 String.join("\u001d", enchants), worn.isUnbreakable() ? "1" : "0", model == null ? "" : model.toString(), Integer.toString(repair),
@@ -53,6 +60,7 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
         if (!Native.playerInventory(player.getUniqueId().toString(), slot, material, amount)) throw new IllegalStateException("No player command handler");
         if (damage > 0) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemDamage(int,int)", slot, damage);
         if (meta != null) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemMeta(int,String)", slot, meta);
+        if (mapId != null) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemMapId(int,int)", slot, mapId);
         items[slot] = item == null ? null : item.clone();
     }
     /** An inventory index, or the index an equipment slot lives at (0 main hand, 36 boots .. 39 helmet, 40 off hand). */

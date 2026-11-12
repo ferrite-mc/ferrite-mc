@@ -1,0 +1,31 @@
+git: 0f9737c (server built from this tree); openjdk version "25.0.5.0.3" 2026-10-24
+cmd: python tools/wirecheck/run.py --port 25598 --seconds 4  (server: ferrite-server --headless, online-mode=false, superflat, view-distance=4)
+     89 OK   play minecraft:move_entity_pos
+     81 OK   play minecraft:level_chunk_with_light
+     56 OK   play minecraft:entity_position_sync
+     56 OK   play minecraft:add_entity
+     32 OK   configuration minecraft:registry_data
+      5 OK   play minecraft:chunk_batch_start
+      5 OK   play minecraft:chunk_batch_finished
+      4 OK   play minecraft:rotate_head
+      4 OK   play minecraft:game_event
+      2 OK   play minecraft:update_advancements
+      1 OK   play minecraft:update_recipes
+      1 OK   play minecraft:set_held_slot
+      1 OK   play minecraft:set_health
+      1 OK   play minecraft:set_experience
+      1 OK   play minecraft:set_default_spawn_position
+      1 OK   play minecraft:set_chunk_cache_center
+      1 OK   play minecraft:recipe_book_settings
+      1 OK   play minecraft:recipe_book_add
+      1 OK   play minecraft:player_position
+      1 OK   play minecraft:player_info_update
+      1 OK   play minecraft:player_chat
+      1 OK   play minecraft:login
+      1 OK   play minecraft:container_set_content
+      1 OK   play minecraft:commands
+      1 OK   configuration minecraft:update_tags
+      1 OK   configuration minecraft:select_known_packs
+      1 OK   configuration minecraft:finish_configuration
+      1 OK   configuration minecraft:custom_payload
+SUMMARY ok=352 bad=0

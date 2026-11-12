@@ -15,7 +15,16 @@ use super::commands::{GameState, OnlinePlayer};
 /// How far above the vehicle's position a rider is placed.
 const SEAT_LIFT: f64 = 0.6;
 
-static RIDES: Mutex<BTreeMap<Uuid, Uuid>> = Mutex::new(BTreeMap::new());
+/// One seated rider: the vehicle and the order the rider got on in (vanilla keeps passengers in
+/// the order they were added, and the first one steers).
+#[derive(Clone, Copy)]
+struct Seat {
+    vehicle: Uuid,
+    order: u64,
+}
+
+static RIDES: Mutex<BTreeMap<Uuid, Seat>> = Mutex::new(BTreeMap::new());
+static NEXT_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Shoulder parrots by player UUID. A shoulder is a passenger of the player, but it has no world
 /// entity while it sits there, so this small per-player table is the region-owned representation.
 /// It is bounded by the online player count, only touched on pickup/release and player ticks,
@@ -46,7 +55,7 @@ fn is_controlled(vehicle: Uuid) -> bool {
 
 static DISMOUNTS: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
 
-fn rides() -> MutexGuard<'static, BTreeMap<Uuid, Uuid>> {
+fn rides() -> MutexGuard<'static, BTreeMap<Uuid, Seat>> {
     RIDES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -57,10 +66,41 @@ pub enum MountError {
     CannotRidePlayer,
     Loop,
     SameEntity,
+    /// Every seat of the vehicle is taken.
+    Full,
+}
+
+/// How many riders a vehicle of `kind` takes, read from the 26.3 `canAddPassenger` overrides:
+/// the default needs an empty vehicle, `AbstractBoat` allows `getMaxPassengers()` = 2 (chest
+/// boats 1), `Camel` allows `size() <= 2` (so three) and `HappyGhast` `size() < 4`.
+pub fn capacity_of(kind: &str) -> usize {
+    let name = kind.strip_prefix("minecraft:").unwrap_or(kind);
+    if name.ends_with("_chest_boat") || name.ends_with("_chest_raft") {
+        1
+    } else if name.ends_with("_boat") || name.ends_with("_raft") {
+        2
+    } else if name == "camel" {
+        3
+    } else if name == "happy_ghast" {
+        4
+    } else {
+        1
+    }
 }
 
 /// Seats `rider` on `vehicle`.
 pub fn mount(rider: Uuid, vehicle: Uuid, vehicle_is_player: bool) -> Result<(), MountError> {
+    mount_in(rider, vehicle, vehicle_is_player, None)
+}
+
+/// [`mount`] for a vehicle whose entity type is known, so its seat count applies. An unknown
+/// type gets the default single seat.
+pub fn mount_in(
+    rider: Uuid,
+    vehicle: Uuid,
+    vehicle_is_player: bool,
+    vehicle_kind: Option<&str>,
+) -> Result<(), MountError> {
     if rider == vehicle {
         return Err(MountError::SameEntity);
     }
@@ -74,30 +114,38 @@ pub fn mount(rider: Uuid, vehicle: Uuid, vehicle_is_player: bool) -> Result<(), 
     // The vehicle may not (indirectly) ride the rider.
     let mut cursor = vehicle;
     while let Some(next) = rides.get(&cursor) {
-        if *next == rider {
+        if next.vehicle == rider {
             return Err(MountError::Loop);
         }
-        cursor = *next;
+        cursor = next.vehicle;
     }
-    rides.insert(rider, vehicle);
+    let seated = rides.values().filter(|s| s.vehicle == vehicle).count();
+    if seated >= vehicle_kind.map_or(1, capacity_of) {
+        return Err(MountError::Full);
+    }
+    let order = NEXT_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    rides.insert(rider, Seat { vehicle, order });
     Ok(())
 }
 
 /// Takes `rider` off whatever it rides; the vehicle it left.
 pub fn dismount(rider: Uuid) -> Option<Uuid> {
-    rides().remove(&rider)
+    rides().remove(&rider).map(|s| s.vehicle)
 }
 
 pub fn vehicle_of(rider: Uuid) -> Option<Uuid> {
-    rides().get(&rider).copied()
+    rides().get(&rider).map(|s| s.vehicle)
 }
 
 pub fn passengers_of(vehicle: Uuid) -> Vec<Uuid> {
-    rides()
+    let rides = rides();
+    let mut seated: Vec<(u64, Uuid)> = rides
         .iter()
-        .filter(|(_, v)| **v == vehicle)
-        .map(|(r, _)| *r)
-        .collect()
+        .filter(|(_, s)| s.vehicle == vehicle)
+        .map(|(r, s)| (s.order, *r))
+        .collect();
+    seated.sort_unstable();
+    seated.into_iter().map(|(_, r)| r).collect()
 }
 
 /// A player pressed sneak: dismount them on the next tick.
@@ -112,9 +160,10 @@ pub fn request_dismount(rider: Uuid) {
 
 /// Forgets a player who left.
 pub fn forget(uuid: Uuid) {
-    rides().retain(|rider, vehicle| *rider != uuid && *vehicle != uuid);
+    rides().retain(|rider, seat| *rider != uuid && seat.vehicle != uuid);
     follows().retain(|viewer, target| *viewer != uuid && *target != uuid);
     forget_shoulders(uuid);
+    super::targeting::forget(uuid);
 }
 
 fn shoulders_map() -> MutexGuard<'static, BTreeMap<Uuid, Shoulders>> {
@@ -210,6 +259,12 @@ pub enum Step {
     Detach { vehicle: Uuid },
 }
 
+/// The entity type of `uuid` (`minecraft:oak_boat`), for seat counts; `None` for a player or an
+/// entity the command index does not know.
+pub fn kind_of(state: &GameState, uuid: Uuid) -> Option<&'static str> {
+    state.entities.lock().ok()?.get(uuid).map(|e| e.type_name())
+}
+
 /// Network entity id of a player or region entity.
 pub fn network_id(
     state: &GameState,
@@ -274,14 +329,35 @@ pub fn plan(state: &GameState) -> Vec<Step> {
             });
         }
     }
-    let snapshot: Vec<(Uuid, Uuid)> = rides().iter().map(|(r, v)| (*r, *v)).collect();
+    let mut snapshot: Vec<(Uuid, Uuid)> = rides().iter().map(|(r, s)| (*r, s.vehicle)).collect();
+    // Riders of riders must be placed after the rider under them, on that rider's new seat, so
+    // process shallow chains first and remember where each rider ends up this tick.
+    let depth_of = |start: Uuid| {
+        let by_rider: HashMap<Uuid, Uuid> = snapshot.iter().copied().collect();
+        let (mut depth, mut cursor) = (0usize, start);
+        while let Some(next) = by_rider.get(&cursor) {
+            depth += 1;
+            cursor = *next;
+            if depth > snapshot.len() {
+                break;
+            }
+        }
+        depth
+    };
+    let mut order: Vec<(usize, Uuid, Uuid)> = snapshot
+        .iter()
+        .map(|(r, v)| (depth_of(*v), *r, *v))
+        .collect();
+    order.sort_unstable();
+    snapshot = order.into_iter().map(|(_, r, v)| (r, v)).collect();
+    let mut placed: HashMap<Uuid, [f64; 3]> = HashMap::new();
     for (rider, vehicle) in snapshot {
         let Some((rider_pos, rider_is_player, rider_rot)) = position(state, rider) else {
             rides().remove(&rider);
             steps.push(Step::Detach { vehicle });
             continue;
         };
-        let Some((vehicle_pos, _, _)) = position(state, vehicle) else {
+        let Some((live_vehicle_pos, _, _)) = position(state, vehicle) else {
             rides().remove(&rider);
             steps.push(Step::Detach { vehicle });
             continue;
@@ -289,7 +365,9 @@ pub fn plan(state: &GameState) -> Vec<Step> {
         if is_controlled(vehicle) {
             continue;
         }
+        let vehicle_pos = placed.get(&vehicle).copied().unwrap_or(live_vehicle_pos);
         let to = [vehicle_pos[0], vehicle_pos[1] + SEAT_LIFT, vehicle_pos[2]];
+        placed.insert(rider, to);
         let moved = (0..3).any(|i| (rider_pos[i] - to[i]).abs() > 0.01);
         if moved {
             steps.push(Step::Move {
@@ -360,6 +438,132 @@ mod tests {
         assert_eq!(passengers_of(b), vec![a]);
         assert_eq!(dismount(a), Some(b));
         assert_eq!(dismount(a), None);
+    }
+
+    #[test]
+    fn passengers_keep_the_order_they_mounted_in() {
+        let _turn = test_turn();
+        // UUID order is the reverse of mount order, so a UUID-sorted list would fail this.
+        let (first, second, third) = (
+            Uuid::from_u128(953),
+            Uuid::from_u128(952),
+            Uuid::from_u128(951),
+        );
+        let boat = Uuid::from_u128(950);
+        mount_in(first, boat, false, Some("minecraft:oak_boat")).unwrap();
+        mount_in(second, boat, false, Some("minecraft:oak_boat")).unwrap();
+        assert_eq!(passengers_of(boat), vec![first, second]);
+        dismount(first);
+        mount_in(third, boat, false, Some("minecraft:oak_boat")).unwrap();
+        assert_eq!(
+            passengers_of(boat),
+            vec![second, third],
+            "a new rider sits last"
+        );
+        dismount(second);
+        dismount(third);
+    }
+
+    #[test]
+    fn a_vehicle_takes_only_as_many_riders_as_vanilla_allows() {
+        let _turn = test_turn();
+        // Read from 26.3: `Entity.canAddPassenger` needs an empty vehicle, `AbstractBoat` allows
+        // `getMaxPassengers()` = 2 (1 for chest boats), `Camel` allows `size() <= 2` and
+        // `HappyGhast` `size() < 4`.
+        for (kind, seats) in [
+            ("minecraft:horse", 1),
+            ("minecraft:pig", 1),
+            ("minecraft:oak_boat", 2),
+            ("minecraft:bamboo_raft", 2),
+            ("minecraft:oak_chest_boat", 1),
+            ("minecraft:camel", 3),
+            ("minecraft:happy_ghast", 4),
+        ] {
+            assert_eq!(capacity_of(kind), seats, "{kind}");
+            let vehicle = Uuid::from_u128(960);
+            let riders: Vec<Uuid> = (0..6).map(|i| Uuid::from_u128(961 + i)).collect();
+            let mut seated = 0;
+            for rider in &riders {
+                match mount_in(*rider, vehicle, false, Some(kind)) {
+                    Ok(()) => seated += 1,
+                    Err(error) => assert_eq!(error, MountError::Full, "{kind}"),
+                }
+            }
+            assert_eq!(seated, seats, "{kind}");
+            for rider in &riders {
+                dismount(*rider);
+            }
+        }
+    }
+
+    #[test]
+    fn mounting_without_a_known_type_uses_the_default_single_seat() {
+        let _turn = test_turn();
+        let (a, b, vehicle) = (
+            Uuid::from_u128(971),
+            Uuid::from_u128(972),
+            Uuid::from_u128(970),
+        );
+        assert_eq!(mount(a, vehicle, false), Ok(()));
+        assert_eq!(mount(b, vehicle, false), Err(MountError::Full));
+        dismount(a);
+    }
+
+    #[test]
+    fn a_rider_of_a_rider_follows_the_final_position_in_the_same_plan() {
+        let _turn = test_turn();
+        let (top, middle, base) = (
+            Uuid::from_u128(981),
+            Uuid::from_u128(982),
+            Uuid::from_u128(983),
+        );
+        mount(middle, base, false).unwrap();
+        mount(top, middle, false).unwrap();
+        // The base moved; both riders are still where the base used to be.
+        let state = state_with(&[
+            (top, 1, [0.5, 64.0 + SEAT_LIFT * 2.0, 0.5]),
+            (middle, 2, [0.5, 64.0 + SEAT_LIFT, 0.5]),
+            (base, 3, [10.5, 64.0, 0.5]),
+        ]);
+        let steps = plan(&state);
+        let target = |who: Uuid| {
+            steps.iter().find_map(|step| match step {
+                Step::Move { rider, to, .. } if *rider == who => Some(*to),
+                _ => None,
+            })
+        };
+        assert_eq!(target(middle), Some([10.5, 64.0 + SEAT_LIFT, 0.5]));
+        assert_eq!(
+            target(top),
+            Some([10.5, 64.0 + SEAT_LIFT + SEAT_LIFT, 0.5]),
+            "the top rider sits on the middle rider's new seat, not its old one"
+        );
+        dismount(top);
+        dismount(middle);
+    }
+
+    #[test]
+    fn a_leaving_player_frees_the_seat_and_detaches_their_passengers() {
+        let _turn = test_turn();
+        let (driver, passenger, vehicle) = (
+            Uuid::from_u128(991),
+            Uuid::from_u128(992),
+            Uuid::from_u128(990),
+        );
+        mount(driver, vehicle, false).unwrap();
+        forget(driver);
+        assert_eq!(vehicle_of(driver), None);
+        assert_eq!(
+            mount(passenger, vehicle, false),
+            Ok(()),
+            "the seat is free again"
+        );
+        forget(vehicle);
+        assert_eq!(
+            vehicle_of(passenger),
+            None,
+            "a vanished vehicle keeps no riders"
+        );
     }
 
     #[test]
