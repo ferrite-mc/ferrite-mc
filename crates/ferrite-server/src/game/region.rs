@@ -8,7 +8,7 @@ use super::{
     valid_move,
 };
 use ferrite_entity::{
-    BlockGetter, EntityRecord, EntityStore, Flags, Rng, ai, arrow, chunk_of, combat,
+    BlockGetter, EntityRecord, EntityStore, Flags, Rng, ai, arrow, bobber, chunk_of, combat,
     effect::{ActiveEffects, Effect, EffectEvent, MobEffectInstance},
     experience, item,
     mob::{self, MobKind},
@@ -3163,6 +3163,11 @@ impl Player {
             // A potion keeps its contents so the burst can apply them where it lands.
             let contents = kind.is_potion().then(|| stack.copy_with_count(1));
             self.menus.launched.push((kind, contents));
+            return;
+        }
+        // A fishing rod casts a bobber, or reels in the one already out; the region does it.
+        if matches!(stack.name(), Some("minecraft:fishing_rod")) {
+            self.menus.fishing.push(slot);
             return;
         }
         // Vanilla `LivingEntity.startUsingItem`: a shield raises, a bow starts drawing.
@@ -9160,6 +9165,9 @@ impl Region {
             }
             self.entities.insert(record);
         }
+        for slot in std::mem::take(&mut p.menus.fishing) {
+            self.use_fishing_rod(p, slot);
+        }
         for stack in p.menus.thrown.drain(..) {
             let plain = ItemStack {
                 count: stack.count,
@@ -9170,6 +9178,101 @@ impl Region {
             self.entities.insert(record);
         }
     }
+    /// A right click with a fishing rod: reels in the player's bobber, or casts a new one.
+    fn use_fishing_rod(&mut self, p: &mut Player, slot: usize) {
+        let rod = p.inventory.get(slot).clone();
+        if p.survival.dead || !matches!(rod.name(), Some("minecraft:fishing_rod")) {
+            return;
+        }
+        let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+        let eye = combat::eye_position(feet);
+        let Some(key) = bobber::find_for(&self.entities, p.uuid) else {
+            let lure = match rod.effective_component(ferrite_item::component_ids::ENCHANTMENTS) {
+                Some(ferrite_item::Component::Enchantments(e)) => {
+                    e.level("minecraft:lure").unwrap_or(0)
+                }
+                _ => 0,
+            };
+            let record = bobber::cast(p.uuid, p.entity, eye, p.yaw, p.pitch, lure, &mut self.rng);
+            self.entities.insert(record);
+            return;
+        };
+        let at = self.entities.pos(key).unwrap_or(eye);
+        let Some(outcome) = bobber::reel(&mut self.entities, key, feet) else {
+            return;
+        };
+        if let bobber::Reel::Caught { .. } = outcome {
+            for stack in super::drops::fishing_catch(&rod, &mut self.rng) {
+                let vel = bobber::catch_velocity(at, eye);
+                self.entities
+                    .insert(item::new_item(at, vel, stack, &mut self.rng));
+            }
+            let experience = 1 + self.rng.next_int(6);
+            for orb in experience::award(feet, experience) {
+                self.entities.insert(orb);
+            }
+        }
+        Self::wear_rod(p, slot, outcome.damage());
+    }
+
+    /// Wears the rod in `slot` by `damage` points outside creative mode; it breaks at its last.
+    fn wear_rod(p: &mut Player, slot: usize, damage: i32) {
+        if damage <= 0 || p.gamemode == 1 {
+            return;
+        }
+        let stack = p.inventory.get(slot).clone();
+        let Some(max) = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage) else {
+            return;
+        };
+        let worn = stack.damage() + damage;
+        if worn >= max {
+            p.inventory.remove(slot, 1);
+        } else if let Some(stack) = worn_stack(stack, worn) {
+            p.inventory.set(slot, stack);
+        }
+        send(
+            p,
+            &SetPlayerInventory {
+                slot: VarInt(slot as i32),
+                item: p.inventory.get(slot).clone(),
+            },
+        );
+    }
+
+    /// Ticks every fishing bobber. One whose owner left, died, is more than 32 blocks away or no
+    /// longer holds a rod is discarded (`FishingHook.shouldStopFishing`).
+    fn tick_bobbers(&mut self, blocks: &TickBlocks) {
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|key| self.entities.data(*key).is_some_and(|d| d.bobber.is_some()))
+            .collect();
+        for key in keys {
+            let Some(state) = self.entities.data(key).and_then(|d| d.bobber) else {
+                continue;
+            };
+            let at = self.entities.pos(key).unwrap_or_default();
+            let keeps_fishing = self.players.get(&state.owner).is_some_and(|p| {
+                let holds_rod = [p.hand_slot(0), p.hand_slot(1)].into_iter().any(|slot| {
+                    matches!(p.inventory.get(slot).name(), Some("minecraft:fishing_rod"))
+                });
+                let dx = p.pos[0] - at.x;
+                let dy = p.pos[1] - at.y;
+                let dz = p.pos[2] - at.z;
+                !p.survival.dead
+                    && holds_rod
+                    && dx * dx + dy * dy + dz * dz <= bobber::MAX_DISTANCE_SQ
+            });
+            if !keeps_fishing {
+                bobber::discard(&mut self.entities, key);
+                continue;
+            }
+            bobber::tick(&mut self.entities, key, blocks, &mut self.rng);
+        }
+    }
+
     /// Runs the entity tracker against this region's players.
     fn track_entities(&mut self, ctx: &TickContext) {
         let viewers: Vec<_> = self
@@ -9637,6 +9740,7 @@ impl Region {
         self.resolve_uses(ctx);
         if entities_run {
             self.tick_arrows(ctx);
+            self.tick_bobbers(&blocks);
             self.tick_horses(ctx);
             self.sync_trades();
             self.land_tridents();
@@ -10821,6 +10925,69 @@ mod tests {
         region.pending_mob_effects.clear();
         region.tick_mob_effects(&ctx);
         assert!(region.pending_mob_effects.is_empty());
+    }
+
+    fn bobber_of(owner: Uuid, at: ferrite_math::Vec3) -> ferrite_entity::EntityRecord {
+        let mut record = ferrite_entity::bobber::cast(
+            owner,
+            9,
+            at,
+            0.0,
+            0.0,
+            0,
+            &mut ferrite_entity::Rng::new(1),
+        );
+        record.pos = at;
+        record.vel = ferrite_math::Vec3::ZERO;
+        record
+    }
+
+    #[test]
+    fn a_bobber_whose_owner_is_not_here_is_discarded() {
+        let mut region = Region::default();
+        let key = region.entities.insert(bobber_of(
+            Uuid::from_u128(77),
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+        ));
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_bobbers(&blocks);
+        assert!(region.entities.flags(key).unwrap().has(Flags::REMOVED));
+        region.entities.sweep_removed();
+        assert!(ferrite_entity::bobber::find_for(&region.entities, Uuid::from_u128(77)).is_none());
+    }
+
+    #[test]
+    fn a_bobber_keeps_its_state_through_region_split_and_merge() {
+        let mut region = Region::default();
+        let owner = Uuid::from_u128(78);
+        region
+            .entities
+            .insert(bobber_of(owner, ferrite_math::Vec3::new(8.5, 64.0, 8.5)));
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(ferrite_entity::bobber::find_for(&region.entities, owner).is_none());
+        assert!(
+            ferrite_entity::bobber::find_for(&taken.entities, owner).is_some(),
+            "the bobber moved with its chunk"
+        );
+        taken.merge(region);
+        let key = ferrite_entity::bobber::find_for(&taken.entities, owner).expect("still here");
+        let state = taken.entities.data(key).unwrap().bobber.unwrap();
+        assert_eq!(state.owner, owner);
+        assert_eq!(state.phase, ferrite_entity::bobber::Phase::Flying);
+    }
+
+    #[test]
+    fn a_bobber_is_found_only_by_its_own_owner() {
+        let mut region = Region::default();
+        region.entities.insert(bobber_of(
+            Uuid::from_u128(1),
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+        ));
+        assert!(ferrite_entity::bobber::find_for(&region.entities, Uuid::from_u128(2)).is_none());
+        assert!(ferrite_entity::bobber::find_for(&region.entities, Uuid::from_u128(1)).is_some());
     }
 
     fn dropped_items(region: &Region) -> Vec<&'static str> {

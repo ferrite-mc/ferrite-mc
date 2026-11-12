@@ -30,6 +30,8 @@ pub struct Containers {
     pub thrown: Vec<ItemStack>,
     /// Snowballs, eggs and ender pearls the player threw, launched by the region this tick.
     pub launched: Vec<(ferrite_entity::arrow::Kind, Option<ItemStack>)>,
+    /// Inventory slots of fishing rods the player used this tick: the region casts or reels.
+    pub fishing: Vec<usize>,
     /// The block the open menu belongs to, for vanilla `stillValid` and shared contents.
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
@@ -117,6 +119,7 @@ impl Default for Containers {
             counter: 0,
             thrown: Vec::new(),
             launched: Vec::new(),
+            fishing: Vec::new(),
             open_at: None,
             spilled: Vec::new(),
             drag: None,

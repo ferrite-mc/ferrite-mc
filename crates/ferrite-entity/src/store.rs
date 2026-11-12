@@ -92,6 +92,10 @@ pub struct EntityData {
     pub orb: Option<OrbState>,
     /// Trade and profession state, for `minecraft:villager`.
     pub villager: Option<VillagerState>,
+    /// Fishing bobber state, for `minecraft:fishing_bobber`. Vanilla never saves bobbers.
+    pub bobber: Option<crate::bobber::BobberState>,
+    /// The `data` field of the spawn packet; a bobber sends its owner's network id.
+    pub spawn_data: i32,
     /// Active mob effects (`LivingEntity.activeEffects`), one per effect id.
     pub effects: ActiveEffects,
     /// Block state carried by a falling block (vanilla `FallingBlockEntity.blockState`).
@@ -126,6 +130,8 @@ impl EntityData {
             mob: None,
             orb: None,
             villager: None,
+            bobber: None,
+            spawn_data: 0,
             effects: ActiveEffects::default(),
             block_state: None,
             fuse: None,

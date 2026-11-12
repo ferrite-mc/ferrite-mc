@@ -24,6 +24,13 @@ pub mod experience {
     pub const VALUE: u8 = 8;
 }
 
+/// Accessor indices of fishing bobbers (vanilla `FishingHook`): the hooked entity's network id
+/// plus one (0 for none) and whether a fish is biting.
+pub mod fishing_hook {
+    pub const HOOKED_ENTITY: u8 = 8;
+    pub const BITING: u8 = 9;
+}
+
 /// Accessor indices of area effect clouds (vanilla `AreaEffectCloud`): radius, whether the cloud
 /// is still in its wait phase, and the particle it emits. Vanilla does not synch the colour,
 /// `radius_on_use`, duration or wait time separately.
