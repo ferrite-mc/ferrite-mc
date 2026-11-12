@@ -15,7 +15,8 @@ const MAX_ROWS: usize = 6;
 const MAX_MAP_CAPTION_UTF16: usize = 21_844;
 
 /// The command behind an inventory call, or `None` when it is not one this module handles
-/// (a hopper or dispenser inventory, say, which the menu code cannot show yet).
+/// (a hopper or dispenser inventory, say, which the menu code cannot show yet). The cartography
+/// table is deliberately not handled; see the test `stations_open_for_the_calling_player`.
 pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "Player" {
         return None;
@@ -224,7 +225,14 @@ fn open(player: Uuid, text: &str) -> Option<PlayerCommand> {
     let mut fields = text.split(FIELD);
     let title = fields.next()?.to_owned();
     let size: usize = fields.next()?.parse().ok()?;
-    if fields.next()? != "CHEST" || size == 0 || !size.is_multiple_of(9) || size > MAX_ROWS * 9 {
+    let kind = fields.next()?;
+    let shulker = kind == "SHULKER_BOX";
+    let allowed = match kind {
+        "CHEST" => size != 0 && size.is_multiple_of(9) && size <= MAX_ROWS * 9,
+        "SHULKER_BOX" => size == ferrite_inventory::SHULKER_BOX_SLOTS,
+        _ => false,
+    };
+    if !allowed {
         return None;
     }
     let items: Vec<Option<ItemSnapshot>> = fields.map(item).collect::<Option<_>>()?;
@@ -235,6 +243,7 @@ fn open(player: Uuid, text: &str) -> Option<PlayerCommand> {
         player,
         title,
         rows: (size / 9) as u8,
+        shulker,
         items,
     })
 }
@@ -379,7 +388,11 @@ mod tests {
                 "{method}"
             );
         }
-        // Cartography tables have no menu yet and stay unimplemented.
+        // Cartography tables stay refused. Cloning a map would only need the menu, but locking
+        // and zooming out create a new map id with a copy of the saved map data (scale, locked,
+        // centre, colours, decorations), and the server has no map data model: no
+        // `data/map_<id>.dat` store, no `idcounts` id allocator, and `minecraft:map_id` is an
+        // opaque component. A menu that could only clone would be a fake cartography table.
         assert_eq!(
             inventory_command(&call("openCartographyTable(Location,boolean)", "null")),
             None
@@ -393,6 +406,45 @@ mod tests {
             command,
             Some(PlayerCommand::CloseInventory { .. })
         ));
+    }
+
+    #[test]
+    fn opens_a_plugin_shulker_box_inventory_as_a_shulker_menu() {
+        let mut items = vec![""; 27];
+        items[26] = "EMERALD\u{1d}5";
+        let text = inventory("Loot", 27, "SHULKER_BOX", &items);
+        let Some(PlayerCommand::OpenInventory {
+            title,
+            rows,
+            shulker,
+            items,
+            ..
+        }) = inventory_command(&call("openInventory(Inventory)", &text))
+        else {
+            panic!("expected OpenInventory");
+        };
+        assert_eq!((title.as_str(), rows, shulker), ("Loot", 3, true));
+        assert_eq!(items.len(), 27);
+        assert_eq!(
+            items[26],
+            Some(ItemSnapshot {
+                material: "EMERALD".into(),
+                amount: 5
+            })
+        );
+        // A chest of the same size stays a chest, and a shulker box of another size is refused.
+        let chest = inventory("Loot", 27, "CHEST", &[""; 27]);
+        assert!(matches!(
+            inventory_command(&call("openInventory(Inventory)", &chest)),
+            Some(PlayerCommand::OpenInventory { shulker: false, .. })
+        ));
+        assert_eq!(
+            inventory_command(&call(
+                "openInventory(Inventory)",
+                &inventory("Loot", 9, "SHULKER_BOX", &[""; 9])
+            )),
+            None
+        );
     }
 
     #[test]

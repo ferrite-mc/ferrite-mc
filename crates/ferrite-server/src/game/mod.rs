@@ -2993,13 +2993,19 @@ fn route_plugin_command(
             player,
             title,
             rows,
+            shulker,
             items,
         } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox
                     .lock()
                     .unwrap()
-                    .push_back(Command::PluginOpenInventory { title, rows, items });
+                    .push_back(Command::PluginOpenInventory {
+                        title,
+                        rows,
+                        shulker,
+                        items,
+                    });
             }
         }
         PlayerCommand::Packet { player, packet } => {

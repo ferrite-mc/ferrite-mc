@@ -754,6 +754,9 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         title: String,
         rows: u8,
+        /// A shulker box inventory (`InventoryType.SHULKER_BOX`, always three rows), which uses
+        /// the `shulker_box` menu and refuses shulker boxes.
+        shulker: bool,
         items: Vec<Option<ItemSnapshot>>,
     },
     /// Sends one packet to the player (`sendBlockChange`, `sendPluginMessage`, `transfer`, ...).

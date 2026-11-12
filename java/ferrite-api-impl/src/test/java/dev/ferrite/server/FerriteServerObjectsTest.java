@@ -271,6 +271,23 @@ class FerriteServerObjectsTest {
         assertEquals(io.papermc.paper.enchantments.EnchantmentRarity.VERY_RARE, org.bukkit.enchantments.Enchantment.SOUL_SPEED.getRarity());
     }
 
+    @Test void everyVanillaEnchantmentHasALegacyItemTarget() {
+        var counts = new java.util.TreeMap<org.bukkit.enchantments.EnchantmentTarget, Integer>();
+        int total = 0;
+        for (var enchantment : org.bukkit.Registry.ENCHANTMENT) {
+            counts.merge(enchantment.getItemTarget(), 1, Integer::sum); // would throw if one had none
+            total++;
+        }
+        assertEquals(43, total);
+        assertEquals(1, counts.get(org.bukkit.enchantments.EnchantmentTarget.ARMOR_TORSO));
+        assertEquals(4, counts.get(org.bukkit.enchantments.EnchantmentTarget.ARMOR));
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.ARMOR_TORSO, org.bukkit.enchantments.Enchantment.THORNS.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.BOW, org.bukkit.enchantments.Enchantment.POWER.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.TRIDENT, org.bukkit.enchantments.Enchantment.LOYALTY.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.ARMOR_FEET, org.bukkit.enchantments.Enchantment.DEPTH_STRIDER.getItemTarget());
+        assertEquals(org.bukkit.enchantments.EnchantmentTarget.VANISHABLE, org.bukkit.enchantments.Enchantment.VANISHING_CURSE.getItemTarget());
+    }
+
     @Test void potionEffectTypesExposeTheirVanillaData() {
         var speed = PotionEffectType.SPEED;
         assertEquals(org.bukkit.potion.PotionEffectTypeCategory.BENEFICIAL, speed.getCategory());
@@ -293,6 +310,49 @@ class FerriteServerObjectsTest {
         assertTrue(PotionEffectType.POISON.getEffectAttributes().isEmpty());
         assertEquals(org.bukkit.potion.PotionEffectTypeCategory.NEUTRAL, PotionEffectType.GLOWING.getCategory());
         assertEquals(org.bukkit.Color.fromRGB(0x94A061), PotionEffectType.GLOWING.getColor());
+    }
+
+    @Test void potionEffectIdsComeFromTheGeneratedRegistryReport() {
+        // protocol ids from vanilla/26.3/generated/reports/registries.json (minecraft:mob_effect)
+        assertEquals(0, PotionEffectType.SPEED.getId());
+        assertEquals(1, PotionEffectType.SLOWNESS.getId());
+        assertEquals(21, PotionEffectType.ABSORPTION.getId());
+        assertEquals(30, PotionEffectType.BAD_OMEN.getId());
+        var ids = org.bukkit.Registry.MOB_EFFECT.stream().map(PotionEffectType::getId).sorted().toList();
+        assertEquals(40, ids.size());
+        assertEquals(java.util.stream.IntStream.range(0, 40).boxed().toList(), ids, "ids are unique and dense");
+    }
+
+    @Test void potionEffectAttributeAmountsScaleWithTheAmplifier() {
+        var movementSpeed = org.bukkit.Registry.ATTRIBUTE.get(NamespacedKey.minecraft("movement_speed"));
+        var attackDamage = org.bukkit.Registry.ATTRIBUTE.get(NamespacedKey.minecraft("attack_damage"));
+        assertEquals(0.2, PotionEffectType.SPEED.getAttributeModifierAmount(movementSpeed, 0), 1e-9);
+        assertEquals(0.4, PotionEffectType.SPEED.getAttributeModifierAmount(movementSpeed, 1), 1e-9);
+        assertEquals(-0.45, PotionEffectType.SLOWNESS.getAttributeModifierAmount(movementSpeed, 2), 1e-9);
+        assertEquals(3.0, PotionEffectType.STRENGTH.getAttributeModifierAmount(attackDamage, 0), 1e-9);
+        assertEquals(-12.0, PotionEffectType.WEAKNESS.getAttributeModifierAmount(attackDamage, 2), 1e-9);
+        var noAttribute = assertThrows(IllegalArgumentException.class,
+                () -> PotionEffectType.POISON.getAttributeModifierAmount(attackDamage, 0));
+        assertTrue(noAttribute.getMessage().contains("poison"), noAttribute.getMessage());
+        assertThrows(IllegalArgumentException.class,
+                () -> PotionEffectType.SPEED.getAttributeModifierAmount(movementSpeed, -1));
+    }
+
+    @Test void potionEffectDurationModifierAndFeatureGatingAreDefinedForEveryEffect() {
+        var world = (org.bukkit.World) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{org.bukkit.World.class}, (proxy, method, args) -> {
+                    throw new AssertionError("feature gating must not call the world: " + method);
+                });
+        for (var effect : org.bukkit.Registry.MOB_EFFECT) {
+            assertEquals(1.0, effect.getDurationModifier(), 0.0, effect.toString());
+            assertTrue(((FerritePotionEffectType) effect).isEnabledByFeature(world), effect.toString());
+        }
+        var unknown = new FerritePotionEffectType(NamespacedKey.minecraft("no_such_effect"));
+        for (java.util.function.Supplier<Object> read : java.util.List.<java.util.function.Supplier<Object>>of(
+                unknown::getId, unknown::getDurationModifier, () -> unknown.isEnabledByFeature(world))) {
+            var error = assertThrows(UnsupportedOperationException.class, read::get);
+            assertTrue(error.getMessage().contains("no_such_effect"), error.getMessage());
+        }
     }
 
     @Test void registriesIterateTheirGeneratedKeysWithCachedObjects() {

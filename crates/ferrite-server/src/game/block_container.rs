@@ -42,9 +42,35 @@ fn prop<'a>(props: &'a [(&'static str, &'static str)], name: &str) -> Option<&'a
         .map(|(_, value)| *value)
 }
 
+/// Whether a block name is a shulker box of any colour (vanilla `ShulkerBoxBlock`).
+pub fn is_shulker_box(name: &str) -> bool {
+    name.strip_prefix("minecraft:")
+        .unwrap_or(name)
+        .ends_with("shulker_box")
+}
+
+/// The block entity type of an inventory block: every colour of shulker box shares
+/// `minecraft:shulker_box` (vanilla `BlockEntityType.SHULKER_BOX`), the rest use their block name.
+fn entity_type(block: &str) -> &str {
+    if is_shulker_box(block) {
+        "minecraft:shulker_box"
+    } else {
+        block
+    }
+}
+
+/// Whether `stack` may be put into the inventory block `target` by a hopper or dropper: shulker
+/// boxes never nest (vanilla `ShulkerBoxBlockEntity.canPlaceItemThroughFace`).
+pub fn accepts(target: &str, stack: &ItemStack) -> bool {
+    !(is_shulker_box(target) && ferrite_inventory::is_shulker_box(stack))
+}
+
 /// The slot count of every block entity inventory a hopper can move items between (vanilla
 /// `WorldlyContainer` implementations), or `None` for other blocks.
 pub fn inventory_slots(name: &str) -> Option<usize> {
+    if is_shulker_box(name) {
+        return Some(ferrite_inventory::SHULKER_BOX_SLOTS);
+    }
     Some(match name.strip_prefix("minecraft:").unwrap_or(name) {
         "chest" | "trapped_chest" | "barrel" => SIZE,
         "hopper" => super::hopper::SIZE,
@@ -69,6 +95,7 @@ pub fn store_slots(
     block: &str,
     items: &[ItemStack],
 ) {
+    let block = entity_type(block);
     let Some(type_id) = ferrite_data::registries::id("minecraft:block_entity_type", block)
         .and_then(|id| u32::try_from(id).ok())
     else {
@@ -141,6 +168,12 @@ fn connected_direction(facing: &str, kind: &str) -> Option<&'static str> {
 pub fn at(source: &AnvilChunkSource, pos: [i32; 3]) -> Option<Opened> {
     let (name, props) = block_at(source, pos)?;
     match name {
+        _ if is_shulker_box(name) => Some(Opened {
+            parts: vec![pos],
+            block: name,
+            rows: 3,
+            title: "container.shulkerBox",
+        }),
         "minecraft:barrel" => Some(Opened {
             parts: vec![pos],
             block: name,
@@ -270,7 +303,8 @@ pub fn load(source: &AnvilChunkSource, opened: &Opened) -> Vec<ItemStack> {
 /// Writes items back, creating the block entities when needed. Only changed parts mark their
 /// chunk modified.
 pub fn store(source: &AnvilChunkSource, opened: &Opened, items: &[ItemStack]) {
-    let Some(type_id) = ferrite_data::registries::id("minecraft:block_entity_type", opened.block)
+    let entity_name = entity_type(opened.block);
+    let Some(type_id) = ferrite_data::registries::id("minecraft:block_entity_type", entity_name)
         .and_then(|id| u32::try_from(id).ok())
     else {
         return;
@@ -283,7 +317,7 @@ pub fn store(source: &AnvilChunkSource, opened: &Opened, items: &[ItemStack]) {
             }
             let entity = entity.get_or_insert_with(|| {
                 let mut data = Compound::new();
-                data.insert("id".into(), Tag::String(opened.block.into()));
+                data.insert("id".into(), Tag::String(entity_name.into()));
                 data.insert("x".into(), Tag::Int(x));
                 data.insert("y".into(), Tag::Int(y));
                 data.insert("z".into(), Tag::Int(z));
@@ -384,5 +418,50 @@ mod tests {
         assert!(source.block_entity(5, 70, 5).is_none());
         // Breaking any other block leaves block entities alone.
         assert!(take_contents(&source, [5, 70, 5], state("stone", &[])).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shulker_boxes_open_as_one_27_slot_inventory_that_spills_on_break() {
+        let source = loaded().await;
+        assert!(is_shulker_box("minecraft:shulker_box"));
+        assert!(is_shulker_box("minecraft:lime_shulker_box"));
+        assert!(!is_shulker_box("minecraft:chest"));
+        for (index, name) in ["shulker_box", "lime_shulker_box"].into_iter().enumerate() {
+            let pos = [6 + index as i32, 70, 6];
+            let block = state(name, &[]);
+            source.set_block(pos[0], pos[1], pos[2], block).unwrap();
+            let opened = at(&source, pos).unwrap();
+            assert_eq!(
+                (opened.parts.clone(), opened.rows, opened.title),
+                (vec![pos], 3, "container.shulkerBox")
+            );
+            assert_eq!(inventory_slots(name), Some(27));
+            let mut items = vec![ItemStack::empty(); 27];
+            items[3] = ItemStack::from_name("diamond").unwrap().copy_with_count(7);
+            items[26] = ItemStack::from_name("stone").unwrap().copy_with_count(64);
+            store(&source, &opened, &items);
+            assert_eq!(load(&source, &opened), items);
+            let entity = source.block_entity(pos[0], pos[1], pos[2]).unwrap();
+            assert_eq!(
+                entity.data.get("id"),
+                Some(&Tag::String("minecraft:shulker_box".into()))
+            );
+            assert!(still_there(&source, &opened));
+            assert_eq!(
+                take_contents(&source, pos, block),
+                vec![items[3].clone(), items[26].clone()]
+            );
+            assert!(source.block_entity(pos[0], pos[1], pos[2]).is_none());
+        }
+    }
+
+    #[test]
+    fn hoppers_and_droppers_may_not_nest_shulker_boxes() {
+        let boxed = ItemStack::from_name("red_shulker_box").unwrap();
+        let stone = ItemStack::from_name("stone").unwrap();
+        assert!(!accepts("minecraft:shulker_box", &boxed));
+        assert!(!accepts("minecraft:cyan_shulker_box", &boxed));
+        assert!(accepts("minecraft:shulker_box", &stone));
+        assert!(accepts("minecraft:chest", &boxed));
     }
 }

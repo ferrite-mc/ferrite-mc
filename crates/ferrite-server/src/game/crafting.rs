@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use ferrite_inventory::{CookingOutput, Crafter, FurnaceKind, NoCrafting};
+use std::collections::{HashMap, HashSet};
+
+use ferrite_inventory::{CookingOutput, Crafter, EnchantRules, FurnaceKind, NoCrafting};
 use ferrite_item::{Component, ItemStack, PotionContents, Trim, component_ids};
 use ferrite_recipe::{CookingKind, RecipeBook, RecipeKind};
 
@@ -37,7 +39,112 @@ impl RecipeCrafter {
     }
 }
 
+/// One enchantment's anvil data from `data/minecraft/enchantment/*.json`.
+struct EnchantEntry {
+    max_level: i32,
+    anvil_cost: i32,
+    /// The `supported_items` reference: an item tag (`#...`) or one item id.
+    supported: String,
+    /// Enchantments in the `exclusive_set` tag, resolved.
+    exclusive: HashSet<String>,
+}
+
+static ENCHANTMENTS: OnceLock<HashMap<String, EnchantEntry>> = OnceLock::new();
+
+/// Loads every enchantment's maximum level, anvil weight, supported items and exclusive set.
+fn enchantments() -> &'static HashMap<String, EnchantEntry> {
+    ENCHANTMENTS.get_or_init(|| {
+        let Some(dir) = data_dir() else {
+            return HashMap::new();
+        };
+        let mut map = HashMap::new();
+        let Ok(files) = std::fs::read_dir(dir.join("enchantment")) else {
+            return map;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let int = |key: &str| json.get(key).and_then(serde_json::Value::as_i64);
+            let (Some(max_level), Some(anvil_cost), Some(supported)) = (
+                int("max_level"),
+                int("anvil_cost"),
+                json.get("supported_items")
+                    .and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            let exclusive = json
+                .get("exclusive_set")
+                .and_then(serde_json::Value::as_str)
+                .map(|reference| enchantment_tag(&dir, reference))
+                .unwrap_or_default();
+            map.insert(
+                format!("minecraft:{stem}"),
+                EnchantEntry {
+                    max_level: i32::try_from(max_level).unwrap_or(1),
+                    anvil_cost: i32::try_from(anvil_cost).unwrap_or(1),
+                    supported: supported.to_owned(),
+                    exclusive,
+                },
+            );
+        }
+        map
+    })
+}
+
+/// The enchantments in an enchantment tag reference such as `#minecraft:exclusive_set/damage`.
+fn enchantment_tag(dir: &Path, reference: &str) -> HashSet<String> {
+    let Some(tag) = reference.strip_prefix('#') else {
+        return HashSet::from([reference.to_owned()]);
+    };
+    let path = dir.join("tags/enchantment").join(format!(
+        "{}.json",
+        tag.strip_prefix("minecraft:").unwrap_or(tag)
+    ));
+    let Some(json) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    else {
+        return HashSet::new();
+    };
+    json.get("values")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .flat_map(|value| enchantment_tag(dir, value))
+        .collect()
+}
+
 impl Crafter for RecipeCrafter {
+    fn enchantment_rules(&self, enchantment: &str, item: &ItemStack) -> Option<EnchantRules> {
+        let entry = enchantments().get(enchantment)?;
+        let name = item.name()?;
+        let supported = match entry.supported.strip_prefix('#') {
+            Some(tag) => self.0.tags().contains(tag, name),
+            None => entry.supported == name,
+        };
+        Some(EnchantRules {
+            max_level: entry.max_level,
+            anvil_cost: entry.anvil_cost,
+            supported,
+        })
+    }
+
+    fn enchantments_exclusive(&self, a: &str, b: &str) -> bool {
+        enchantments()
+            .get(a)
+            .is_some_and(|entry| entry.exclusive.contains(b))
+    }
+
     fn craft(&self, grid: &[ItemStack], width: usize) -> ItemStack {
         if width == 0 || !grid.len().is_multiple_of(width) {
             return ItemStack::empty();
@@ -371,6 +478,75 @@ mod tests {
 
     fn stack(name: &str, count: i32) -> ItemStack {
         ItemStack::from_name(name).unwrap().copy_with_count(count)
+    }
+
+    #[test]
+    fn vanilla_enchantment_rules_drive_the_anvil() {
+        let crafter = crafter();
+        let sword = stack("diamond_sword", 1);
+        let sharpness = crafter
+            .enchantment_rules("minecraft:sharpness", &sword)
+            .expect("sharpness is a vanilla enchantment");
+        assert_eq!(
+            (
+                sharpness.max_level,
+                sharpness.anvil_cost,
+                sharpness.supported
+            ),
+            (5, 1, true)
+        );
+        let protection = crafter
+            .enchantment_rules("minecraft:protection", &sword)
+            .unwrap();
+        assert_eq!((protection.max_level, protection.supported), (4, false));
+        assert!(
+            crafter
+                .enchantment_rules("minecraft:mending", &stack("bow", 1))
+                .unwrap()
+                .supported
+        );
+        assert!(
+            crafter
+                .enchantment_rules("minecraft:nonsense", &sword)
+                .is_none()
+        );
+        assert!(crafter.enchantments_exclusive("minecraft:sharpness", "minecraft:smite"));
+        assert!(!crafter.enchantments_exclusive("minecraft:sharpness", "minecraft:unbreaking"));
+
+        // A sharpness V book on a sharpness IV sword in a real anvil menu.
+        let mut inventory = ferrite_inventory::PlayerInventory::new();
+        let mut menu = ferrite_inventory::Menu::anvil(1);
+        let mut applied = ferrite_item::Enchantments::new();
+        applied.set("minecraft:sharpness", 4);
+        let mut sword = sword;
+        sword.components.insert(
+            component_ids::ENCHANTMENTS,
+            Component::Enchantments(applied),
+        );
+        let mut stored = ferrite_item::Enchantments::new();
+        stored.set("minecraft:sharpness", 4);
+        stored.set("minecraft:smite", 2);
+        let mut book = stack("enchanted_book", 1);
+        book.components.insert(
+            component_ids::STORED_ENCHANTMENTS,
+            Component::StoredEnchantments(stored),
+        );
+        menu.set_slot(&mut inventory, crafter, 0, sword);
+        menu.set_slot(&mut inventory, crafter, 1, book);
+        let Some(Component::Enchantments(result)) = menu
+            .result()
+            .effective_component(component_ids::ENCHANTMENTS)
+        else {
+            panic!("the anvil produced no enchanted result");
+        };
+        assert_eq!(result.level("minecraft:sharpness"), Some(5));
+        assert_eq!(
+            result.level("minecraft:smite"),
+            None,
+            "smite excludes sharpness"
+        );
+        // sharpness V at weight 1 halved to max(1, 0) = 1 per level, plus smite's exclusion level.
+        assert_eq!(menu.anvil_cost(), 5 + 1);
     }
 
     #[test]

@@ -3816,6 +3816,141 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
     server.abort();
 }
 
+/// A shulker box opens as the 27-slot `shulker_box` menu, refuses another shulker box, keeps its
+/// contents in the block entity and spills them when it is broken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shulker_box_opens_refuses_nesting_saves_contents_and_spills_when_broken() {
+    use ferrite_inventory::ClickInput::*;
+    use ferrite_protocol::{
+        packets::play::{
+            ContainerContent, CreativeSlot, ItemStack, MoveRotation, OpenScreen, PlayerAction,
+            ServerboundContainerClose, UseItemOn,
+        },
+        types::BlockPos,
+    };
+    let source = super::anvil::AnvilChunkSource::new_memory();
+    let (world, addr, server) = op_world_at(Some(source.clone()), 1, &[], [8, 64, 8]).await;
+    let mut keeper = join_with_inventory(addr, "Boxer").await;
+    keeper.until(46).await;
+    let floor = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+    for x in 4..=12 {
+        for z in 4..=12 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while source.set_block(x, 63, z, floor).is_err() {
+                assert!(std::time::Instant::now() < deadline, "chunk never loaded");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+    let shulker = u32::from(ferrite_data::blocks::default_state("purple_shulker_box").unwrap());
+    source.set_block(8, 64, 8, shulker).unwrap();
+    keeper
+        .send(&CreativeSlot {
+            slot: 36,
+            item: plain("stone", 40),
+        })
+        .await;
+    keeper
+        .send(&CreativeSlot {
+            slot: 37,
+            item: plain("blue_shulker_box", 1),
+        })
+        .await;
+    keeper
+        .send(&MoveRotation {
+            yaw: 0.0,
+            pitch: 90.0,
+            flags: 1,
+        })
+        .await;
+    keeper
+        .send(&UseItemOn {
+            hand: VarInt(0),
+            location: BlockPos::new(8, 64, 8).pack(),
+            face: VarInt(1),
+            cursor_x: 0.5,
+            cursor_y: 0.875,
+            cursor_z: 0.5,
+            inside: false,
+            world_border_hit: false,
+            sequence: VarInt(1),
+        })
+        .await;
+    let body = keeper.until(OpenScreen::ID).await;
+    let screen = OpenScreen::decode(&mut body.as_slice()).unwrap();
+    let body = keeper.until(18).await;
+    let content = ContainerContent::<ItemStack>::decode(&mut body.as_slice()).unwrap();
+    let menu = ferrite_data::registries::id("minecraft:menu", "minecraft:shulker_box").unwrap();
+    assert_eq!(
+        (screen.menu.0, screen.title.0.as_str()),
+        (menu, "container.shulkerBox")
+    );
+    assert_eq!(content.slots.len(), 27 + 36);
+    let window = screen.window.0;
+    // Hotbar slots 0 and 1 are menu slots 54 and 55. The box stays where it is...
+    let slots = click_in(&mut keeper, window, 55, 0, QuickMove).await;
+    assert_eq!(slots[55], plain("blue_shulker_box", 1));
+    assert!(slots[..27].iter().all(|slot| *slot == ItemStack::default()));
+    // ...and a box on the cursor cannot be placed in a box slot either.
+    click_in(&mut keeper, window, 55, 0, Pickup).await;
+    let slots = click_in(&mut keeper, window, 4, 0, Pickup).await;
+    assert_eq!(slots[4], ItemStack::default());
+    click_in(&mut keeper, window, 55, 0, Pickup).await;
+    // Stone goes in.
+    let slots = click_in(&mut keeper, window, 54, 0, QuickMove).await;
+    assert_eq!(
+        (slots[0], slots[54]),
+        (plain("stone", 40), ItemStack::default())
+    );
+    keeper
+        .send(&ServerboundContainerClose {
+            window: VarInt(window),
+        })
+        .await;
+    let entity = source.block_entity(8, 64, 8).expect("shulker block entity");
+    assert_eq!(
+        entity.data.get("id"),
+        Some(&ferrite_nbt::Tag::String("minecraft:shulker_box".into()))
+    );
+    assert!(matches!(
+        entity.data.get("Items"),
+        Some(ferrite_nbt::Tag::List(ferrite_nbt::List::Compound(items))) if items.len() == 1
+    ));
+    // Breaking the box spills the stone, which the player standing on it picks up again.
+    keeper
+        .send(&PlayerAction {
+            status: VarInt(0),
+            location: BlockPos::new(8, 64, 8).pack(),
+            face: 1,
+            sequence: VarInt(2),
+        })
+        .await;
+    keeper.until(4).await;
+    assert_eq!(source.block(8, 64, 8), Some(0));
+    assert!(source.block_entity(8, 64, 8).is_none());
+    let stone = plain("stone", 1).item_id;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        let total = inventory_of(&mut keeper)
+            .await
+            .iter()
+            .filter(|s| s.item_id == stone)
+            .map(|s| s.count)
+            .sum::<i32>();
+        if total == 40 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "picked up {total} stone"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    drop(keeper);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gamerule_zero_stops_grass_spread_for_bot() {
     let Some(root) = super::fixture_version_root() else {

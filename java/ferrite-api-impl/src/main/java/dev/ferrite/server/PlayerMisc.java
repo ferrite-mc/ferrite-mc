@@ -219,18 +219,32 @@ public abstract class PlayerMisc extends PlayerStubs {
         return result;
     }
     // ---- projectiles ----------------------------------------------------------------------------
-    /** Shoots an arrow, snowball, egg, ender pearl, small fireball or fireball from the eyes. */
+    /**
+     * Shoots an arrow, snowball, egg, ender pearl, experience bottle, splash or lingering potion, wind charge, small
+     * fireball or fireball from the eyes, at the power vanilla gives the item that throws it. A trident is refused: the
+     * host's {@code launchThrown} does not accept it. A potion launches as a bare bottle because the call cannot carry
+     * its contents, so a callback that tries to set them fails instead of being dropped.
+     */
     @Override public <T extends org.bukkit.entity.Projectile> T launchProjectile(Class<? extends T> projectile, org.bukkit.util.Vector velocity, java.util.function.Consumer<? super T> callback) {
         Objects.requireNonNull(projectile, "projectile");
         org.bukkit.entity.EntityType thrown = null;
+        double power = 1.5;
         if (org.bukkit.entity.Snowball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SNOWBALL;
         else if (org.bukkit.entity.Egg.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.EGG;
         else if (org.bukkit.entity.EnderPearl.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.ENDER_PEARL;
         else if (org.bukkit.entity.SmallFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SMALL_FIREBALL;
         else if (projectile == org.bukkit.entity.Fireball.class || org.bukkit.entity.LargeFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.FIREBALL;
+        else if (org.bukkit.entity.ThrownExpBottle.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.EXPERIENCE_BOTTLE; power = 0.7; }
+        else if (org.bukkit.entity.ThrownPotion.class.isAssignableFrom(projectile)) {
+            thrown = org.bukkit.entity.LingeringPotion.class.isAssignableFrom(projectile) ? org.bukkit.entity.EntityType.LINGERING_POTION : org.bukkit.entity.EntityType.SPLASH_POTION;
+            power = 0.5;
+        }
+        else if (org.bukkit.entity.WindCharge.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.WIND_CHARGE;
+        else if (org.bukkit.entity.Trident.class.isAssignableFrom(projectile))
+            throw new UnsupportedOperationException("Ferrite: Player#launchProjectile(" + projectile.getSimpleName() + ") is not available: the host's launchThrown only accepts snowball, egg, ender pearl, fireballs, experience bottle, wind charge and potions, and has no trident launch");
         else if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
         var eye = getEyeLocation();
-        var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(thrown != null ? 1.5 : 3.0);
+        var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(thrown != null ? power : 3.0);
         var uuid = UUID.randomUUID();
         var type = thrown != null ? thrown : org.bukkit.entity.EntityType.ARROW;
         @SuppressWarnings("unchecked") var handle = (T) SpawnedEntity.of(type, eye, getWorld(), uuid);
@@ -594,9 +608,7 @@ public abstract class PlayerMisc extends PlayerStubs {
     }
     @Override public <T> void playEffect(org.bukkit.Location location, org.bukkit.Effect effect, T data) {
         Objects.requireNonNull(effect, "effect");
-        if (data == null) { playEffect(location, effect, 0); return; }
-        if (data instanceof Number number) { playEffect(location, effect, number.intValue()); return; }
-        throw new UnsupportedOperationException("Ferrite: not implemented: Player#playEffect with " + data.getClass().getSimpleName() + " data");
+        playEffect(location, effect, FerriteEffectData.levelEventData(effect, data));
     }
 
     // ---- looking, tracking and profile ----------------------------------------------------------------

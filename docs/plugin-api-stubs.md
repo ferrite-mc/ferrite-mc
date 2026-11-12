@@ -103,6 +103,43 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
    엔티티 NBT에 함께 적용되어야 하고, 콜백이 엔티티를 거부/취소하는 규칙, 구조물이 여러 리전에
    걸칠 때의 스폰 스케줄링도 정해야 한다.
 
+## `FerriteWorld`의 `UnsupportedOperationException` 16곳 (2026-11-12, W6, 기준 `b50f8d9`)
+
+`FerriteWorld.java`에서 이 이름이 나오는 줄은 16곳이다. 던지는 곳(`throw`) 8줄(예외 9개)과 받아서 처리하는 곳(`catch`) 8줄이다.
+`World`는 동적 프록시라 `setTime`/`setStorm`/`setDifficulty`/날씨 지속시간 같은 메서드는 `FerriteWorld`에 코드가 없고
+`HostBridge.dispatch("World", …)`로 호스트(`plugins.rs`, `worldinfo.rs`)에 간다. 호스트가 없는 JUnit에서만 "not implemented"로 보인다.
+
+던지는 곳 — 모두 "호스트가 그 위치의 데이터를 주지 않음"이라 데이터가 실제로 없을 때의 명시적 거부로 유지한다.
+
+| 메서드 | 예외 | 판단 |
+|---|---|---|
+| `typeAt` (`Block#getType`, `getBlockAt` 등) | `no block data at …` | 호스트가 블록을 돌려주지 않는 위치(미로드 청크·호스트 없음). 공기를 지어내지 않는다. 유지. |
+| `Block#getLightLevel` | `no light data at …` | 같은 이유. 유지. |
+| `Block#getLightFromSky` | `no light data at …` | 같은 이유. 유지. |
+| `getHighestBlockYAt(…, HeightMap)` | `no <HEIGHTMAP> height data` | 호스트가 저장된 높이 지도를 읽지 못한 열. 유지. |
+| `getHighestBlockYAt` 그 밖의 인자 수 | `unsupported … overload` | 도달 불가: Bukkit에는 이 네 가지 오버로드(`(int,int)`, `(Location)`, `(int,int,HeightMap)`, `(Location,HeightMap)`) 말고 없다. |
+| `getHighestBlockYAt(int,int)` | `no height data at …` | 호스트가 높이를 모르는 열. 유지. |
+| `getBiome`/`getComputedBiome` | `no biome data at …` | 호스트가 바이옴을 모르는 위치. 유지. |
+| `climate` (`getTemperature`/`getHumidity`) | `no biome data at …` | 같은 이유. 유지. |
+| `findLightningTarget` | `no height data at …` | 높이를 모르면 대상 위치를 계산할 수 없다. 유지. |
+
+받는 곳 — 호스트가 없거나 읽을 수 없을 때의 동작:
+
+| 위치 | 동작 | 판단 |
+|---|---|---|
+| `setAutoSave` | 호스트가 없으면 값만 기억 | 유지(`isAutoSave`가 되돌려 준다). |
+| `hostLong` (`getTime`, `getFullTime`, `getSeed`, `getMoonPhase`) | 호스트가 없으면 월드 등록 때의 스냅샷 | 유지. **`getMoonPhase`의 폴백은 `0`(항상 보름달)에서 "스냅샷 시간의 일수 mod 8"로 고쳤다.** |
+| `hostValue` (`getGameTime`, `hasStorm`, `isThundering`, `isClearWeather`, 날씨 지속시간, `getDifficulty`) | **고침**: 예전에는 호스트가 없으면 `null`을 돌려줘 `boolean`/`int` 질의는 `NullPointerException`, `Difficulty`는 조용한 `null`이었다. 이제 `Ferrite: not implemented: World#hasStorm()`처럼 명시적으로 거부한다(`set*`로 넣은 값은 `HostBridge`가 기억해 되돌려 준다). |
+| `setRule` (`setGameRule`, `setGameRuleValue`) | 호스트가 거부하거나 없으면 `false` | 유지. |
+| `playersHere`, `hostEntities`, `findRod`, `playEffect`(시청자 순회) | 읽을 수 없는 항목은 건너뜀 | 유지. |
+
+**이번에 고친 것:** `setSpawnLocation(int,int,int[,float])`과 `setSpawnLocation(Location)`을 호스트의 `setworldspawn`에 연결하고,
+성공하면 `getSpawnLocation()`이 새 위치와 각도를 돌려준다(호스트에 스폰 getter가 없어 Java가 기억한다). 예전에는 `Location` 오버로드가 호스트가
+모르는 서명으로 가서 거부됐고, 이동 뒤에도 `getSpawnLocation()`은 등록 때 위치였다.
+
+**이미 호스트가 답하던 것(코드 변경 없이 테스트로 고정):** 월드 보더(`FerriteHostBorder` ↔ `border*()`/`borderSet`/`borderCenter` 등), 시간, 날씨, 난이도, 달 위상.
+`FerriteWorldHostTest`가 호스트 서명 문자열과 되돌려 받는 값을 확인한다.
+
 ## 그 밖에 남은 명시적 미지원 경로와 소유자
 
 | 영역 | 예시 (정확한 이름) | 소유자 / 선행 작업 |
@@ -114,11 +151,11 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | BlockData | `BlockData#<미지원 메서드>` (재질별) | Java `FerriteBlockData` |
 | 청크 스냅샷/청크 데이터 | `ChunkSnapshot#contains(Biome)`; `ChunkData#getBiome` | 호스트 청크/바이옴 데이터 |
 | Paper 생명주기 | `InternalAPIBridge#createPluginLifecycleEventManager` | Paper lifecycle API |
-| 포션/인챈트/레지스트리 | `PotionEffectType` 속성(색·카테고리·지속시간 보정·attribute), `Enchantment` 속성, `RegistryAccess` 미지원 레지스트리 | `ferrite-data` 데이터/호스트 |
+| 포션/인챈트/레지스트리 | `Enchantment` 속성, `RegistryAccess` 중 `GameRule`(`game_rule`)과 `MemoryKey`(`memory_module_type`)만 미지원 — 생성된 보고서에 값 타입·기본값이 없고 `MemoryKey` 생성자가 private이라 `UnsupportedOperationException("Ferrite: registry minecraft:... is not available: ...")`로 거부한다. 그 밖의 `RegistryKey` 레지스트리 41개는 생성 데이터로 `size`/`keyStream`/`stream`/`iterator`/`get`이 동작한다(내장 레지스트리는 `registries.json`, 데이터 기반 레지스트리 21개는 `data/minecraft/<이름>/*.json`, `Particle`/`PotionType`은 enum 상수를 키로 색인, `MusicInstrument`는 `instrument/*.json`의 `use_duration`·`range`·`sound_event`·`description`을 읽는다). 레지스트리 태그(`hasTag`/`getTag`/`getTags`)는 그대로이며 `Server#getTags`(`FerriteTags`)만 실제 데이터를 쓴다. Rust 호스트에는 레지스트리 호출이 없다. (`PotionEffectType`은 구현됨: 색·카테고리·attribute는 `FerritePotionEffectData` 표, `getId`는 생성된 `registries.json`의 protocol id, `getAttributeModifierAmount`는 바닐라 `amount*(amplifier+1)`, `isEnabledByFeature`는 26.3에서 required feature를 쓰는 효과가 없어 항상 true, `getDurationModifier`는 26.3 `MobEffect`에 해당 필드가 없어 1.0) | `ferrite-data` 데이터/호스트 |
 | 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Java `FerriteLoot` — 생성 데이터팩의 `loot_table`/`predicate`/`tags`를 읽고 `FerriteItemStack`/`FerriteItemMeta`로 스택을 만든다. luck·bonus rolls·looting·killer/this_entity를 반영하고, `enchant_randomly`의 최대 레벨/호환성은 호스트의 `Enchantment` 응답을 쓴다(호스트가 없으면 1레벨/호환으로 폴백). 폭발 반경·블록 엔티티 데이터·미모델링 컴포넌트는 불투명 처리한다. |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
 | NMS/Unsafe | `UnsafeValues`의 NMS 의존 멤버, `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` | 의도적 미지원 (가짜 구현 금지); 계속 `NoSuchMethodError` |
-| 투사체/타일/장비/효과 | `Player#launchProjectile`(화살 외), `sendBlockUpdate`(표지판 외), `EntityEquipment`(미지원), `Player#playEffect`(데이터 있는 효과) | Rust 호스트/프로토콜 |
+| 투사체/타일/장비/효과 | `Player#launchProjectile(Trident)` — 호스트 `launchThrown`이 삼지창을 받지 않아 `UnsupportedOperationException`(눈덩이·달걀·진주·경험치 병·투척/잔류 물약·바람 구슬·화염구는 구현됨, 물약 내용물은 호출에 실을 수 없어 콜백의 `setItem`은 거부). `sendBlockUpdate`(표지판 외). `Player#playEffect`는 데이터 종류별로 구현: Boolean(`COMPOSTER_FILL_ATTEMPT`·`VAULT_*` 1/0, `ENDER_DRAGON_BREATH` 1/-1), Integer·Number(그대로), `Color`(불투명 ARGB), `Axis`(ordinal), `BlockFace`(`WHITE_SMOKE_SHOOT`만, `Direction#get3DDataValue`), `BlockData`(전역 블록 상태 id, `block-states.tsv`). 거부: `RECORD_PLAY`의 `JukeboxSong`(데이터 기반 레지스트리 id가 생성 보고서에 없음), `SMOKE_SHOOT`·`DESTROY_PROGRESS*`(바닐라 서버 호출 지점을 못 찾음), `EXTINGUISH`·`TRIAL_SPAWNER_*`의 Boolean(고정값/인코딩 입자만 보여 매핑 미확인) — 원시 int 오버로드는 항상 가능. 장비: 플레이어의 슬롯 6개(HAND·OFF_HAND·FEET·LEGS·CHEST·HEAD)는 모두 연결, `BODY`·`SADDLE`은 바닐라 `Player#canUseSlot`이 false라 `UnsupportedOperationException`. | Rust 호스트/프로토콜 |
 | 아이템 메타 | `PlayerInventory#setItem`이 지원하지 않는 메타, 미지원 장비 슬롯 | `ferrite-item` 컴포넌트 |
 | 엔티티 조회 | `World#getEntities*`는 접속 플레이어만 반환, 구조물 엔티티 빈 목록 | Folia 리전 소유권 + 호스트 비플레이어 엔티티 조회 |
 | 월드젠 호스트 | `locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE` | vanilla 월드젠 호스트 (EULA 때문에 개발자 로컬만) |
