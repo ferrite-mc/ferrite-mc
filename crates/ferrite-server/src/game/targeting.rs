@@ -76,7 +76,8 @@ mod tests {
         publish(creative, 0);
         publish(spectator, 3);
         forget(spectator);
-        let mut again: HashMap<Uuid, u8> = [creative, spectator].into_iter().map(|u| (u, 0)).collect();
+        let mut again: HashMap<Uuid, u8> =
+            [creative, spectator].into_iter().map(|u| (u, 0)).collect();
         retain_targetable(&mut again);
         assert_eq!(again.len(), 2);
         for u in [survival, creative, adventure] {
