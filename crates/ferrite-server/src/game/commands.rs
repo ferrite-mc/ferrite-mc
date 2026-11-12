@@ -1928,13 +1928,16 @@ pub(crate) fn parse_item_components(
     Ok(components)
 }
 
-/// Rewrites a `/give` component list (`a=1,b={c:"x"}`) as an SNBT compound.
+/// Rewrites a `/give` component list (`a=1,minecraft:b={c:"x"}`) as an SNBT compound. A top-level
+/// key is quoted, so a namespaced component id (`minecraft:damage`) survives SNBT's `:` separator.
 fn brigadier_to_snbt(inner: &str) -> String {
     let mut out = String::with_capacity(inner.len() + 2);
     out.push('{');
     let mut depth = 0usize;
     let mut quoted = false;
     let mut escaped = false;
+    let mut key = String::new();
+    let mut in_key = true;
     for c in inner.chars() {
         if quoted {
             out.push(c);
@@ -1944,6 +1947,25 @@ fn brigadier_to_snbt(inner: &str) -> String {
                 escaped = true;
             } else if c == '"' {
                 quoted = false;
+            }
+            continue;
+        }
+        if in_key && depth == 0 {
+            match c {
+                '=' => {
+                    let name = key.trim();
+                    if name.starts_with('"') {
+                        out.push_str(name);
+                    } else {
+                        out.push('"');
+                        out.push_str(name);
+                        out.push('"');
+                    }
+                    out.push(':');
+                    key.clear();
+                    in_key = false;
+                }
+                _ => key.push(c),
             }
             continue;
         }
@@ -1960,10 +1982,15 @@ fn brigadier_to_snbt(inner: &str) -> String {
                 depth = depth.saturating_sub(1);
                 out.push(c);
             }
-            '=' if depth == 0 => out.push(':'),
+            ',' if depth == 0 => {
+                in_key = true;
+                out.push(c);
+            }
             _ => out.push(c),
         }
     }
+    // A key with no `=` (vanilla's `!component` removal is one) is left for the SNBT parser to reject.
+    out.push_str(key.trim());
     out.push('}');
     out
 }
@@ -2682,6 +2709,23 @@ mod tests {
         std::fs::create_dir_all(&functions).unwrap();
         std::fs::write(functions.join("foo.mcfunction"), "say scheduled\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn item_component_lists_accept_namespaced_and_bare_ids_and_commas_inside_values() {
+        let parsed = parse_item_components(
+            "minecraft:diamond_pickaxe[minecraft:damage=5,custom_name=\"a,b=c\",minecraft:unbreakable={}]",
+        )
+        .unwrap();
+        let ids: Vec<u16> = parsed.iter().map(|(id, _)| *id).collect();
+        let expected: Vec<u16> = ["minecraft:damage", "minecraft:custom_name", "minecraft:unbreakable"]
+            .iter()
+            .map(|name| ferrite_item::component_id(name).unwrap())
+            .collect();
+        assert_eq!(ids, expected);
+        assert_eq!(parsed[1].1, ferrite_nbt::Tag::String("a,b=c".into()));
+        assert!(parse_item_components("minecraft:stone[]").unwrap().is_empty());
+        assert!(parse_item_components("minecraft:stone[!minecraft:damage]").is_err());
     }
 
     #[test]

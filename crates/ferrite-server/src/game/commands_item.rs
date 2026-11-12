@@ -1,9 +1,10 @@
 //! `/item replace|fill|override|modify` on block containers and entities.
 //!
 //! Writes go through [`Action::Slots`]. Players are the only entities with inventories the
-//! command layer can address, so `entity` targets act on players. Item components in the
-//! `item[...]` argument are ignored, and no item modifiers ship with vanilla data, so
-//! `modify` and every `<modifier>` report `argument.item_modifier.unknown`.
+//! command layer can address, so `entity` targets act on players. Components in the
+//! `item[...]` argument of `with` are parsed like `/give` does and set on the stack. No item
+//! modifiers ship with vanilla data, so `modify` and every `<modifier>` report
+//! `argument.item_modifier.unknown` until a data pack provides them.
 
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
@@ -18,7 +19,7 @@ use super::structure_template::{Mirror, Rotation, Template};
 
 use super::commands::{
     Action, Feedback, SlotMode, SlotSource, SlotTarget, Source, entity, item_display, parse_item,
-    send,
+    parse_item_components, send,
 };
 
 /// The block position of a `<pos>` argument (relative coordinates resolved).
@@ -60,8 +61,23 @@ fn run_with(
     let raw = ctx
         .string("item")
         .ok_or_else(|| CommandError::failed("Missing item"))?;
+    let stack = stack_for(raw, ctx.integer("count").unwrap_or(1))?;
+    send(
+        ctx.source(),
+        Action::Slots {
+            mode,
+            target: target(ctx, block)?,
+            slots: ctx.string("slots").unwrap_or_default().to_owned(),
+            source: SlotSource::Stacks(vec![stack]),
+        },
+    )
+}
+
+/// The stack `with <item>[components] <count>` describes: the count is checked against the item's
+/// stack size and each component is parsed exactly as `/give` parses it.
+fn stack_for(raw: &str, count: i32) -> Result<ItemStack, CommandError> {
     let item = parse_item(raw)?;
-    let count = ctx.integer("count").unwrap_or(1);
+    let components = parse_item_components(raw)?;
     let max = ferrite_item::item_defaults(item).map_or(64, |defaults| defaults.max_stack_size);
     if !(1..=max).contains(&count) {
         return Err(CommandError::failed(format!(
@@ -69,15 +85,13 @@ fn run_with(
             item_display(item)
         )));
     }
-    send(
-        ctx.source(),
-        Action::Slots {
-            mode,
-            target: target(ctx, block)?,
-            slots: ctx.string("slots").unwrap_or_default().to_owned(),
-            source: SlotSource::Stacks(vec![ItemStack::with_count(item, count)]),
-        },
-    )
+    let mut stack = ItemStack::with_count(item, count);
+    for (id, tag) in &components {
+        stack
+            .components
+            .insert(*id, ferrite_item::Component::from_nbt(*id, tag));
+    }
+    Ok(stack)
 }
 
 fn run_from(
@@ -395,6 +409,24 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_applies_the_components_in_the_item_argument() {
+        let stack = stack_for("minecraft:diamond_pickaxe[minecraft:damage=5]", 1).unwrap();
+        assert_eq!(stack.damage(), 5);
+        assert_eq!(stack.count, 1);
+        assert_eq!(stack_for("minecraft:stone", 3).unwrap().count, 3);
+    }
+
+    #[test]
+    fn with_rejects_unknown_components_bad_syntax_and_bad_counts() {
+        assert!(stack_for("minecraft:stone[minecraft:not_a_component=1]", 1).is_err());
+        assert!(stack_for("minecraft:stone[minecraft:damage=1", 1).is_err());
+        assert!(stack_for("minecraft:not_an_item", 1).is_err());
+        assert!(stack_for("minecraft:stone", 0).is_err());
+        assert!(stack_for("minecraft:stone", 65).is_err());
+        assert!(stack_for("minecraft:diamond_pickaxe", 2).is_err(), "unstackable");
+    }
 
     #[test]
     fn unknown_modifier_text() {
