@@ -1138,6 +1138,8 @@ pub struct Region {
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
     pending_hurts: Vec<Uuid>,
+    /// Effect changes on mobs this tick, waiting to be sent to the players tracking them.
+    pending_mob_effects: Vec<(Uuid, MobEffectNotice)>,
     /// The dragon boss bar each player was last shown: bar id and progress.
     dragon_bars: HashMap<Uuid, (Uuid, f32)>,
     pub players: HashMap<Uuid, Player>,
@@ -1236,6 +1238,7 @@ impl RegionData for Region {
             thrown_potions: HashMap::new(),
             pending_swings: Vec::new(),
             pending_hurts: Vec::new(),
+            pending_mob_effects: Vec::new(),
             dragon_bars: HashMap::new(),
             players: HashMap::new(),
             rng: Rng::default(),
@@ -4761,6 +4764,13 @@ impl Player {
 }
 /// Sends a tracker packet to a player: through its connection while it is in this region,
 /// otherwise through the world-wide table (it left the region since it started tracking).
+/// A change to a mob's active effects that its trackers have not been told about yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MobEffectNotice {
+    Added(ferrite_entity::effect::MobEffectInstance),
+    Removed(i32),
+}
+
 fn deliver(
     players: &HashMap<Uuid, Player>,
     ctx: &TickContext,
@@ -8703,6 +8713,119 @@ impl Region {
                 p.apply_effect(instance);
             }
         }
+        // Every living entity in the burst, as vanilla (`ThrownSplashPotion.applySplash` looks
+        // in the box inflated by 4 blocks sideways and 2 up and down), with the same falloff.
+        let reach = ferrite_math::AABB::new(
+            center[0] - 4.0,
+            center[1] - 2.0,
+            center[2] - 4.0,
+            center[0] + 4.0,
+            center[1] + 2.0,
+            center[2] + 4.0,
+        );
+        for key in self.entities.query_vec(reach) {
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            let distance = ((pos.x - center[0]).powi(2)
+                + (pos.y - center[1]).powi(2)
+                + (pos.z - center[2]).powi(2))
+            .sqrt();
+            if distance > 4.0 {
+                continue;
+            }
+            let scale = (1.0 - distance / 4.0).max(0.25);
+            for instance in &effects {
+                let mut instance = *instance;
+                if instance.duration > 0 {
+                    instance.duration = (f64::from(instance.duration) * scale) as i32;
+                }
+                self.give_mob_effect(key, instance);
+            }
+        }
+    }
+
+    /// Gives a mob an effect and queues the client update for whoever tracks it.
+    fn give_mob_effect(
+        &mut self,
+        key: ferrite_entity::EntityKey,
+        instance: ferrite_entity::effect::MobEffectInstance,
+    ) {
+        let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
+            return;
+        };
+        if let Some(stored) = mob::add_effect(&mut self.entities, key, instance) {
+            self.pending_mob_effects
+                .push((uuid, MobEffectNotice::Added(stored)));
+        }
+    }
+
+    /// Ticks the effects of every mob that has any (wandering traders do their own in
+    /// [`Self::tick_trader_drinks`]) and tells trackers about what was added or expired.
+    fn tick_mob_effects(&mut self, ctx: &TickContext) {
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|key| {
+                self.entities.data(*key).is_some_and(|data| {
+                    !data.effects.is_empty()
+                        && data
+                            .mob
+                            .as_ref()
+                            .is_some_and(|mob| mob.kind != MobKind::WanderingTrader)
+                })
+            })
+            .collect();
+        for key in keys {
+            let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
+                continue;
+            };
+            for expired in mob::tick_effects(&mut self.entities, key) {
+                self.pending_mob_effects
+                    .push((uuid, MobEffectNotice::Removed(expired.effect)));
+            }
+        }
+        for (uuid, notice) in std::mem::take(&mut self.pending_mob_effects) {
+            let Some(key) = self
+                .entities
+                .keys()
+                .iter()
+                .copied()
+                .find(|key| self.entities.data(*key).is_some_and(|d| d.uuid == uuid))
+            else {
+                continue;
+            };
+            let Some(id) = self.entities.data(key).map(|data| VarInt(data.id)) else {
+                continue;
+            };
+            let players = &self.players;
+            let mut send_to = |viewer, bytes: &[u8]| deliver(players, ctx, viewer, bytes);
+            match notice {
+                MobEffectNotice::Added(instance) => tracker::broadcast(
+                    &self.entities,
+                    key,
+                    &UpdateMobEffect {
+                        entity_id: id,
+                        effect: VarInt(instance.effect),
+                        amplifier: VarInt(instance.amplifier),
+                        duration: VarInt(instance.duration),
+                        flags: instance.flags(),
+                    },
+                    &mut send_to,
+                ),
+                MobEffectNotice::Removed(effect) => tracker::broadcast(
+                    &self.entities,
+                    key,
+                    &RemoveMobEffect {
+                        entity_id: id,
+                        effect: VarInt(effect),
+                    },
+                    &mut send_to,
+                ),
+            }
+        }
     }
 
     /// The effects a potion bottle carries, or none when it is not a potion.
@@ -8745,14 +8868,25 @@ impl Region {
         if self.potion_clouds.is_empty() {
             return;
         }
-        let candidates: Vec<(Uuid, [f64; 3])> = self
+        let mut candidates: Vec<(Uuid, [f64; 3])> = self
             .players
             .values()
             .filter(|p| p.gamemode != 3 && !p.survival.dead)
             .map(|p| (p.uuid, p.pos))
             .collect();
+        candidates.extend(self.entities.keys().iter().filter_map(|&key| {
+            let data = self.entities.data(key)?;
+            let live = self
+                .entities
+                .flags(key)
+                .is_some_and(|f| !f.has(Flags::REMOVED))
+                && data.mob.as_ref().is_some_and(|mob| !mob.is_dead());
+            let pos = self.entities.pos(key)?;
+            live.then_some((data.uuid, [pos.x, pos.y, pos.z]))
+        }));
         let mut clouds = std::mem::take(&mut self.potion_clouds);
         let entities = &mut self.entities;
+        let mut pending = Vec::new();
         clouds.retain_mut(|cloud| {
             let Some(applied) = cloud.tick(candidates.iter().copied()) else {
                 cloud.despawn(entities);
@@ -8762,11 +8896,20 @@ impl Region {
             for (uuid, effect) in applied {
                 if let Some(p) = self.players.get_mut(&uuid) {
                     p.apply_effect(effect);
+                } else if let Some(key) = entities
+                    .keys()
+                    .iter()
+                    .copied()
+                    .find(|key| entities.data(*key).is_some_and(|d| d.uuid == uuid))
+                    && let Some(stored) = mob::add_effect(entities, key, effect)
+                {
+                    pending.push((uuid, MobEffectNotice::Added(stored)));
                 }
             }
             true
         });
         self.potion_clouds = clouds;
+        self.pending_mob_effects.extend(pending);
     }
 
     /// A fire charge: light the facing block when fire may be placed there.
@@ -9499,6 +9642,7 @@ impl Region {
             self.land_tridents();
             self.tick_dragon_effects(ctx);
             self.tick_potion_clouds();
+            self.tick_mob_effects(ctx);
             self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
         }
         let alive: Vec<ferrite_math::Vec3> = self
@@ -10563,6 +10707,120 @@ mod tests {
                 .get(ferrite_entity::metadata::area_effect_cloud::WAITING),
             Some(&ferrite_protocol::packets::play::MetaValue::Boolean(false))
         );
+    }
+
+    fn potion_bottle(item: &str, potion: &str) -> ferrite_item::ItemStack {
+        let mut bottle = ferrite_item::ItemStack::from_name(item).expect("vanilla potion item");
+        bottle.components.insert(
+            ferrite_item::component_ids::POTION_CONTENTS,
+            ferrite_item::Component::PotionContents(ferrite_item::PotionContents {
+                potion: Some(potion.into()),
+                ..Default::default()
+            }),
+        );
+        bottle
+    }
+
+    fn cow_at(region: &mut Region, x: f64, z: f64) -> ferrite_entity::EntityKey {
+        region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(x, 64.0, z),
+            &mut ferrite_entity::Rng::new(3),
+        ))
+    }
+
+    fn effect_level(region: &Region, key: ferrite_entity::EntityKey, effect: Effect) -> i32 {
+        region.entities.data(key).unwrap().effects.level(effect)
+    }
+
+    #[test]
+    fn a_splash_potion_affects_mobs_in_range_with_falloff_and_not_those_outside() {
+        let mut region = Region::default();
+        let at_center = cow_at(&mut region, 8.0, 8.0);
+        let half_way = cow_at(&mut region, 10.0, 8.0);
+        let outside = cow_at(&mut region, 14.0, 8.0);
+        region.splash_potion(
+            [8.0, 64.0, 8.0],
+            &potion_bottle("minecraft:splash_potion", "minecraft:swiftness"),
+        );
+        let duration = |key| {
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .effects
+                .get(Effect::Speed)
+                .map(|e| e.duration)
+        };
+        assert_eq!(duration(at_center), Some(3600));
+        assert_eq!(duration(half_way), Some(1800));
+        assert_eq!(duration(outside), None);
+        // Each hit mob has an update waiting for its trackers.
+        assert_eq!(region.pending_mob_effects.len(), 2);
+    }
+
+    #[test]
+    fn a_harming_splash_hurts_a_mob_and_a_healing_one_heals_it() {
+        let mut region = Region::default();
+        let hurt = cow_at(&mut region, 8.0, 8.0);
+        region.splash_potion(
+            [8.0, 64.0, 8.0],
+            &potion_bottle("minecraft:splash_potion", "minecraft:harming"),
+        );
+        assert_eq!(mob::state(&region.entities, hurt).unwrap().health, 4.0);
+        // Instant effects are applied, not stored, and nothing is announced.
+        assert!(region.entities.data(hurt).unwrap().effects.is_empty());
+        assert!(region.pending_mob_effects.is_empty());
+        region.splash_potion(
+            [8.0, 64.0, 8.0],
+            &potion_bottle("minecraft:splash_potion", "minecraft:healing"),
+        );
+        assert_eq!(mob::state(&region.entities, hurt).unwrap().health, 8.0);
+    }
+
+    #[test]
+    fn a_lingering_cloud_affects_mobs_standing_in_it() {
+        let mut region = Region::default();
+        let inside = cow_at(&mut region, 8.5, 8.5);
+        let outside = cow_at(&mut region, 30.0, 30.0);
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        for _ in 0..ferrite_entity::potion::PotionCloud::CHECK_INTERVAL {
+            region.tick_potion_clouds();
+        }
+        assert_eq!(effect_level(&region, inside, Effect::Speed), 1);
+        assert_eq!(effect_level(&region, outside, Effect::Speed), 0);
+        // The cloud entity itself is never a candidate.
+        let cloud = cloud_entities(&region)[0];
+        assert!(
+            region
+                .pending_mob_effects
+                .iter()
+                .all(|(uuid, _)| *uuid != cloud)
+        );
+        assert_eq!(region.pending_mob_effects.len(), 1);
+    }
+
+    #[test]
+    fn effects_on_mobs_tick_down_and_expiry_is_announced_once() {
+        let mut region = Region::default();
+        let key = cow_at(&mut region, 8.0, 8.0);
+        region.give_mob_effect(
+            key,
+            ferrite_entity::effect::MobEffectInstance::new(Effect::Speed.id(), 2, 0),
+        );
+        let ctx = tick_context();
+        region.tick_mob_effects(&ctx);
+        assert!(region.pending_mob_effects.is_empty());
+        assert_eq!(effect_level(&region, key, Effect::Speed), 1);
+        region.tick_mob_effects(&ctx);
+        assert_eq!(effect_level(&region, key, Effect::Speed), 0);
+        // The expiry was queued and flushed in the same pass; a further tick has nothing left.
+        region.pending_mob_effects.clear();
+        region.tick_mob_effects(&ctx);
+        assert!(region.pending_mob_effects.is_empty());
     }
 
     fn dropped_items(region: &Region) -> Vec<&'static str> {

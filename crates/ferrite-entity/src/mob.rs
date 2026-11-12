@@ -585,6 +585,84 @@ pub fn hurt_with(
     }
 }
 
+/// Applies the health side of effect events to a mob (`LivingEntity` instant health/damage,
+/// regeneration, poison and wither). Absorption, hunger and saturation do not apply to mobs
+/// here. Poison never kills: it stops at half a heart.
+fn apply_effect_events(
+    store: &mut EntityStore,
+    key: EntityKey,
+    events: Vec<crate::effect::EffectEvent>,
+) {
+    use crate::effect::EffectEvent;
+    for event in events {
+        match event {
+            EffectEvent::Heal(amount) => {
+                if let Some(mob) = state_mut(store, key)
+                    && !mob.is_dead()
+                {
+                    mob.health = (mob.health + amount).min(mob.kind.max_health());
+                }
+            }
+            EffectEvent::Damage {
+                amount, can_kill, ..
+            } => {
+                let Some(health) = state(store, key).map(|mob| mob.health) else {
+                    continue;
+                };
+                let amount = if can_kill {
+                    amount
+                } else {
+                    amount.min(health - 1.0)
+                };
+                hurt_with(store, key, amount, None, true);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `LivingEntity.addEffect` on a mob: stores the effect (a weaker instance never replaces a
+/// stronger one) and applies instant health or damage at once. Returns the instance now
+/// stored when the client must be told about it, `None` for instant effects, a kept stronger
+/// instance or anything that is not a live mob.
+pub fn add_effect(
+    store: &mut EntityStore,
+    key: EntityKey,
+    instance: crate::effect::MobEffectInstance,
+) -> Option<crate::effect::MobEffectInstance> {
+    if !is_mob(store, key) {
+        return None;
+    }
+    let kind = instance.kind();
+    let events = store.data_mut(key)?.effects.add(instance);
+    apply_effect_events(store, key, events);
+    if kind.is_instant() {
+        return None;
+    }
+    let current = *store.data(key)?.effects.get(kind)?;
+    (current == instance).then_some(current)
+}
+
+/// One tick of a mob's effects: applies regeneration, poison and wither and returns the
+/// effects that expired, whose removal the client must be told about.
+pub fn tick_effects(
+    store: &mut EntityStore,
+    key: EntityKey,
+) -> Vec<crate::effect::MobEffectInstance> {
+    if !is_mob(store, key) {
+        return Vec::new();
+    }
+    let Some(data) = store.data_mut(key) else {
+        return Vec::new();
+    };
+    if data.effects.is_empty() {
+        return Vec::new();
+    }
+    let ticks = data.effects.tick();
+    apply_effect_events(store, key, ticks.events);
+    ticks.expired
+}
+
 /// Makes a hostile mob hunt `player` after being attacked (vanilla `Mob.setTarget` in
 /// `LivingEntity.hurt`'s retaliation hook).
 pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) -> bool {
@@ -952,5 +1030,84 @@ mod tests {
         assert_eq!(mob.health, 1.0);
         assert_eq!(mob.kind, MobKind::Chicken);
         assert!(other.check_invariants().is_ok());
+    }
+
+    #[test]
+    fn effects_on_a_mob_apply_instants_store_timed_ones_and_expire() {
+        use crate::effect::{Effect, MobEffectInstance};
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut Rng::new(1),
+        ));
+        state_mut(&mut store, key).unwrap().health = 2.0;
+        // Instant health heals at once and is not stored or announced.
+        let heal = MobEffectInstance::new(Effect::InstantHealth.id(), 1, 0);
+        assert_eq!(add_effect(&mut store, key, heal), None);
+        assert_eq!(state(&store, key).unwrap().health, 6.0);
+        assert!(store.data(key).unwrap().effects.is_empty());
+        // Instant damage hurts through armour-free magic damage.
+        let harm = MobEffectInstance::new(Effect::InstantDamage.id(), 1, 0);
+        assert_eq!(add_effect(&mut store, key, harm), None);
+        assert_eq!(state(&store, key).unwrap().health, 0.0);
+        assert!(!is_mob(&store, key));
+    }
+
+    #[test]
+    fn a_timed_effect_is_stored_a_weaker_one_is_kept_out_and_it_expires() {
+        use crate::effect::{Effect, MobEffectInstance};
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut Rng::new(1),
+        ));
+        let strong = MobEffectInstance::new(Effect::Speed.id(), 3, 1);
+        assert_eq!(add_effect(&mut store, key, strong), Some(strong));
+        let weak = MobEffectInstance::new(Effect::Speed.id(), 100, 0);
+        assert_eq!(add_effect(&mut store, key, weak), None);
+        assert_eq!(store.data(key).unwrap().effects.level(Effect::Speed), 2);
+        assert!(tick_effects(&mut store, key).is_empty());
+        assert!(tick_effects(&mut store, key).is_empty());
+        let expired = tick_effects(&mut store, key);
+        assert_eq!(
+            expired,
+            vec![MobEffectInstance {
+                duration: 0,
+                ..strong
+            }]
+        );
+        assert!(store.data(key).unwrap().effects.is_empty());
+    }
+
+    #[test]
+    fn poison_stops_at_half_a_heart_and_regeneration_stops_at_full_health() {
+        use crate::effect::{Effect, MobEffectInstance};
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut Rng::new(1),
+        ));
+        state_mut(&mut store, key).unwrap().health = 1.0;
+        add_effect(
+            &mut store,
+            key,
+            MobEffectInstance::new(Effect::Poison.id(), 25, 0),
+        );
+        for _ in 0..25 {
+            tick_effects(&mut store, key);
+        }
+        assert_eq!(state(&store, key).unwrap().health, 1.0);
+        add_effect(
+            &mut store,
+            key,
+            MobEffectInstance::new(Effect::Regeneration.id(), 50, 0),
+        );
+        for _ in 0..50 {
+            tick_effects(&mut store, key);
+        }
+        assert_eq!(state(&store, key).unwrap().health, 2.0);
     }
 }
