@@ -5,7 +5,7 @@
 A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading and aims to run Bukkit/Spigot/Paper/Folia plugins on an embedded JVM.
 
 - **Target**: Minecraft Java **26.3**, protocol **777**
-- **Status (2026-11-08)**: Survival and game systems have been verified with protocol bots and Rust/Java tests. The default world is now saved as Anvil files under `world/` and persists across restarts. The full Rust test suite, clippy, fmt, Java Gradle tests, and Linux/Windows CI pass. **A real 26.3 client connection is still unverified.**
+- **Status (2026-11-12)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
 - **License**: GPL-3.0-or-later
 
 > **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩과 Bukkit/Paper 플러그인을 위한 내장 JVM을 갖추고 있습니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
@@ -21,7 +21,43 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 
 **The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, and the exit portal and gateways are implemented. Simplified dragon strafing/dashing/breath/fireball behavior, four-crystal staged resummoning, and combat/phase save and restore are also in. Credits and full vanilla combat behavior are missing, and real-client visuals have not been checked.
 
-The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls surface as `UnsupportedOperationException("Ferrite: not implemented: …")`. Large plugins such as EssentialsX and plugins that depend on NMS do not work across all paths yet.
+The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls surface as `UnsupportedOperationException("Ferrite: not implemented: …")` or an explicit `NoSuchMethodError`. Large plugins such as EssentialsX and plugins that depend on NMS do not work across all paths yet.
+
+### Plugin API status (code cross-check: 2026-11-12)
+
+This status compares the Java implementations, Rust host dispatchers, and regression tests on
+`main`. Hostless JUnit probe failures are not equivalent to server-side missing implementations:
+the report distinguishes real host paths from deliberate rejection paths.
+
+**Implemented and covered by tests**
+
+- Runtime `Server#createWorld`/`unloadWorld`, persistence, unload/reopen, and player rejoin.
+- `Player#breakBlock`, player-permission `Player#chat("/command")`, `Player#performCommand`,
+  slot-break/hurt/pickup animations.
+- 41 registry views, `PotionEffectType`, `playEffect`, and all six player equipment slots.
+  Only `GameRule` and `MemoryKey` registries are rejected because generated data lacks the
+  required value-type/default metadata.
+- Shulker-box menus (27 slots, no nesting, contents spill on break), anvil enchantment merging,
+  `World#spawnArrow`, and `World#getInfiniburn`.
+- Structure block/block-entity capture and placement, transforms, and runtime-world non-player
+  entity snapshots with `EntityTransformer`; `EntityFactory#createEntitySnapshot` has an SNBT
+  host path.
+
+**Explicitly unsupported or constrained in code**
+
+- `Player#launchProjectile(Trident)` and projectile types unknown to the host. Potion callback
+  content mutation is also unsupported.
+- `Player#openCartographyTable`: there is no map store, `idcounts` allocator, or typed map-data
+  component, so the table is refused rather than faked.
+- Some `MapCanvas` methods, styled/translated map cursor captions, and hidden cursor transfer.
+- Entity snapshots for structure capture provide NBT only for runtime worlds; default Overworld,
+  Nether, and End non-player entities are excluded from NBT-based capture/recreation.
+- Unsupported item metadata/PDC container types, non-sign block-entity updates, some `BlockData`
+  and chunk-snapshot methods, and NMS/Unsafe APIs.
+
+See [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md), [`docs/plugin-stubs-status.md`](docs/plugin-stubs-status.md),
+and [`docs/plugin-api-audit.md`](docs/plugin-api-audit.md) for method-level ownership, evidence,
+and tests. Real client visuals and booting large third-party plugins remain unverified.
 
 ## Build and run
 
@@ -47,7 +83,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-Server behavior is verified by protocol bot sessions in `crates/ferrite-server/tests`. As of 2026-11-08, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `./gradlew test` in `java/ferrite-api-impl` pass. [main CI run 42398148054](https://github.com/yxshadxw/ferrite-mc/actions/runs/42398148054) also passed fmt, clippy, and the full Rust test suite on Linux and Windows. Bot tests passing does not mean real Minecraft client visuals were verified.
+Server behavior is verified by protocol bot sessions in `crates/ferrite-server/tests`. The existing
+CI run [42398148054](https://github.com/yxshadxw/ferrite-mc/actions/runs/42398148054) passed fmt,
+clippy, and the full Rust test suite on Linux and Windows. Bot tests passing does not mean real
+Minecraft client visuals were verified.
 
 ## Roadmap
 
@@ -84,7 +123,8 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 
 ## To do
 
-- Remaining game/plugin work: vanilla dragon strafe phases and gateway beams, plugin block-entity access across multiple worlds, and broader Paper/Bukkit and NMS compatibility.
+- Remaining game/plugin work: vanilla dragon phase timing and gateway beams, non-player entity NBT
+  boundaries for the default/Nether/End worlds, cartography/tridents, and broader Paper/Bukkit/NMS compatibility.
 - Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, vault/trade UI, and plugin behavior on an integrated server.
 - Optimization references: [server optimization mods](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [optimization modpack](https://modrinth.com/modpack/server-optimizationn),

@@ -25,8 +25,9 @@ import org.bukkit.util.EntityTransformer;
  * string for each. {@link #fill} copies a world region into it, {@link #place} writes it back
  * with rotation, mirroring and integrity, and {@link StructureNbt} saves and loads the file.
  *
- * <p>shortcut: entities are not captured (plugins cannot list non-player entities yet) and
- * block entity data goes through the host. Rotation and mirroring turn facing, axis, sign
+ * <p>Non-player entities are captured when the runtime-world host can provide saved NBT; the
+ * default world and vanilla secondary dimensions do not provide that snapshot boundary. Block
+ * entity data goes through the host. Rotation and mirroring turn facing, axis, sign
  * rotation, stair/rail shapes, door hinges and the four horizontal connection keys. Other
  * directional properties are preserved; block transformers can adjust the final state.
  */
