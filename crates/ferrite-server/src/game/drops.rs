@@ -82,13 +82,15 @@ fn tool_is_correct(item_id: u16, block: &str) -> bool {
         .is_some_and(|(_, correct)| correct)
 }
 
-/// What breaking `state` with `tool` drops (vanilla `Block.getDrops`, only when the player
-/// `hasCorrectToolForDrops`).
-pub fn block_drops(
+/// Rolls the loot table of `state` broken with `tool`; `None` when the block has no table or
+/// the tool is not correct for it. `block_entity` is what the broken block entity writes onto
+/// its item, for `copy_components`.
+fn roll_block(
     state: u16,
     tool: &ferrite_item::ItemStack,
     rng: &mut ferrite_entity::Rng,
-) -> Vec<ItemStack> {
+    block_entity: &std::collections::BTreeMap<String, ferrite_nbt::Tag>,
+) -> Vec<ferrite_loot::LootStack> {
     if usize::from(state) >= ferrite_data::blocks::STATE_COUNT {
         return Vec::new();
     }
@@ -133,14 +135,55 @@ pub fn block_drops(
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
+        block_entity_components: block_entity.clone(),
         ..LootContext::default()
     };
-    table
-        .roll(&context, &mut LootRng(rng))
+    table.roll_stacks(&context, &mut LootRng(rng))
+}
+
+/// What breaking `state` with `tool` drops (vanilla `Block.getDrops`, only when the player
+/// `hasCorrectToolForDrops`), as plain id and count stacks.
+pub fn block_drops(
+    state: u16,
+    tool: &ferrite_item::ItemStack,
+    rng: &mut ferrite_entity::Rng,
+) -> Vec<ItemStack> {
+    roll_block(state, tool, rng, &Default::default())
         .into_iter()
-        .filter_map(|(item, count)| {
-            let item_id = ferrite_data::registries::id("minecraft:item", &item)?;
-            (count > 0).then_some(ItemStack { count, item_id })
+        .filter_map(|stack| {
+            let item_id = ferrite_data::registries::id("minecraft:item", &stack.item)?;
+            (stack.count > 0).then_some(ItemStack {
+                count: stack.count,
+                item_id,
+            })
+        })
+        .collect()
+}
+
+/// [`block_drops`] with the components a loot table copied from the broken block entity, such
+/// as a shulker box's contents, name and lock.
+pub fn block_drop_stacks(
+    state: u16,
+    tool: &ferrite_item::ItemStack,
+    rng: &mut ferrite_entity::Rng,
+    block_entity: &std::collections::BTreeMap<String, ferrite_nbt::Tag>,
+) -> Vec<ferrite_item::ItemStack> {
+    roll_block(state, tool, rng, block_entity)
+        .into_iter()
+        .filter_map(|rolled| {
+            let item = ferrite_item::item_id(&rolled.item)?;
+            if rolled.count <= 0 {
+                return None;
+            }
+            let mut stack = ferrite_item::ItemStack::with_count(item, rolled.count);
+            for (name, tag) in &rolled.components {
+                if let Some(id) = ferrite_item::component_id(name) {
+                    stack
+                        .components
+                        .insert(id, ferrite_item::Component::from_nbt(id, tag));
+                }
+            }
+            Some(stack)
         })
         .collect()
 }

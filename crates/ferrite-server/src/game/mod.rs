@@ -75,6 +75,7 @@ pub(crate) mod drops;
 mod entity_index;
 mod entity_save;
 mod item_keep;
+mod shulker;
 // Only the record codec is shared with plugin snapshots; the rest of `entity_save` names `Region`.
 pub(crate) use entity_save::{from_nbt as entities_from_nbt, to_nbt as entities_to_nbt};
 mod runtime_persist;

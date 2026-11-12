@@ -36,6 +36,10 @@ pub struct Containers {
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
     pub spilled: Vec<([i32; 3], ItemStack)>,
+    /// What the shulker boxes this player just broke wrote onto their items, by position, until
+    /// the drop is rolled (or, in creative mode, dropped) this tick.
+    pub broken_entities:
+        std::collections::HashMap<[i32; 3], std::collections::BTreeMap<String, ferrite_nbt::Tag>>,
     /// State from the start of a drag, kept only long enough to give a listener the chance to
     /// cancel the finished drag.
     drag: Option<DragStart>,
@@ -122,6 +126,7 @@ impl Default for Containers {
             fishing: Vec::new(),
             open_at: None,
             spilled: Vec::new(),
+            broken_entities: Default::default(),
             drag: None,
         }
     }

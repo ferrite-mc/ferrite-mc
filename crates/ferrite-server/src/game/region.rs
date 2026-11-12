@@ -2009,13 +2009,20 @@ impl Player {
         let pos = [pos.x, pos.y, pos.z];
         self.changed_blocks.push(pos);
         if let Some(source) = &self.source {
-            for stack in super::block_container::take_contents(source, pos, state) {
-                self.menus.spilled.push((pos, stack));
-            }
             let name = u16::try_from(state)
                 .ok()
                 .and_then(ferrite_data::blocks::state)
                 .map(|(name, _)| name);
+            if name.is_some_and(super::block_container::is_shulker_box) {
+                // A shulker box keeps its contents in the item it drops (vanilla
+                // `ShulkerBoxBlock`), so they are not spilled here.
+                let components = super::shulker::take_components(source, pos);
+                self.menus.broken_entities.insert(pos, components);
+            } else {
+                for stack in super::block_container::take_contents(source, pos, state) {
+                    self.menus.spilled.push((pos, stack));
+                }
+            }
             if name.and_then(super::furnace::kind).is_some() {
                 for stack in super::furnace::take_contents(source, pos) {
                     self.menus.spilled.push((pos, stack));
@@ -2038,6 +2045,25 @@ impl Player {
             }
         }
         true
+    }
+    /// Vanilla `ShulkerBoxBlock.playerWillDestroy`: a creative player who breaks a shulker box
+    /// with contents still drops the box, carrying them (other blocks drop nothing in creative).
+    fn drop_creative_shulker(&mut self, location: i64, state: u32) {
+        let at = ferrite_protocol::types::BlockPos::unpack(location);
+        let at = [at.x, at.y, at.z];
+        let Some(components) = self.menus.broken_entities.remove(&at) else {
+            return;
+        };
+        if !super::shulker::has_contents(&components) {
+            return;
+        }
+        let item = u16::try_from(state)
+            .ok()
+            .and_then(ferrite_data::blocks::state)
+            .and_then(|(name, _)| super::shulker::item_with(name, &components));
+        if let Some(item) = item {
+            self.menus.spilled.push((at, item));
+        }
     }
     /// `Player#breakBlock`: breaks the block as this player would, and says whether it broke.
     /// A refusal (air, an unbreakable block for a non-creative player, a mode that cannot
@@ -2380,6 +2406,16 @@ impl Player {
                 Some("minecraft:beacon") => {
                     if let Some(source) = self.source.clone() {
                         super::beacon::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                Some(block) if super::block_container::is_shulker_box(block) => {
+                    // The item's contents, name and lock go into the new block entity; a
+                    // nested shulker box in it is handed back instead of being placed.
+                    if let Some(source) = self.source.clone() {
+                        let at = [target.x, target.y, target.z];
+                        for stack in super::shulker::apply_item(source.as_ref(), at, &item) {
+                            self.menus.spilled.push((at, stack));
+                        }
                     }
                 }
                 _ => {}
@@ -4536,8 +4572,9 @@ impl Player {
                                             clicked,
                                             material_name(state),
                                         )
-                                    }) {
-                                        self.break_block(p.location, state);
+                                    }) && self.break_block(p.location, state)
+                                    {
+                                        self.drop_creative_shulker(p.location, state);
                                     }
                                 } else if self.gamemode == 0 {
                                     // Zero hardness breaks on the first hit (vanilla: destroy
@@ -8489,8 +8526,10 @@ impl Region {
             let Ok(state) = u16::try_from(state) else {
                 continue;
             };
-            for stack in super::drops::block_drops(state, held, &mut self.rng) {
-                let record = item::pop_resource([pos.x, pos.y, pos.z], stack, &mut self.rng);
+            let at = [pos.x, pos.y, pos.z];
+            let entity = p.menus.broken_entities.remove(&at).unwrap_or_default();
+            for stack in super::drops::block_drop_stacks(state, held, &mut self.rng, &entity) {
+                let record = item::pop_resource_stack(at, &stack, &mut self.rng);
                 self.entities.insert(record);
             }
         }
