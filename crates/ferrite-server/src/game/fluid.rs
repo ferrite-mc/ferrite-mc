@@ -241,4 +241,85 @@ mod tests {
             _ => panic!("unexpected hand-off signal"),
         }
     }
+
+    async fn two_loaded_chunks() -> Arc<AnvilChunkSource> {
+        let source = AnvilChunkSource::new_memory();
+        for chunk in [0, 1] {
+            loop {
+                if let Some(result) = source.get(chunk, 0, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        let water = u32::from(ferrite_data::blocks::default_state("water").unwrap());
+        let stone = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+        let air = u32::from(ferrite_data::blocks::default_state("air").unwrap());
+        for x in 12..=20 {
+            source.set_block(x, 64, 0, stone).unwrap();
+            source.set_block(x, 65, 0, air).unwrap();
+        }
+        source.set_block(15, 65, 0, water).unwrap();
+        source
+    }
+
+    /// Same region: one region holds both chunks, so water crosses the chunk border directly.
+    #[tokio::test]
+    async fn water_crosses_a_chunk_border_inside_one_region() {
+        let source = two_loaded_chunks().await;
+        let held = HashMap::from([(ChunkPos(0, 0), 1), (ChunkPos(1, 0), 1)]);
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut world = RegionFluidWorld::new(&source, &held, &tracking);
+        let mut ticks = ferrite_fluid::FluidTicks::default();
+        ticks.schedule((15, 65, 0), 0);
+        ticks.run_until(&mut world, 30);
+        let flowed = ferrite_fluid::fluid_state(source.block(16, 65, 0).unwrap());
+        assert_eq!(flowed.kind, ferrite_fluid::FluidKind::Water);
+        assert!(!flowed.source);
+    }
+
+    /// Cross region: the east chunk is loaded but owned by another region. The west region may
+    /// only hand the placement over; the east region applies it and keeps the water flowing.
+    #[tokio::test]
+    async fn water_crosses_a_region_border_through_the_hand_off() {
+        let source = two_loaded_chunks().await;
+        let air = source.block(16, 65, 0).unwrap();
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut west = super::super::region::Region::default();
+        west.hold_chunk(ChunkPos(0, 0));
+        west.schedule_fluid((15, 65, 0));
+        west.tick_fluids(&source, &tracking, signals, true, false);
+        assert_eq!(
+            source.block(16, 65, 0),
+            Some(air),
+            "west must not write east"
+        );
+        let mut placed = None;
+        while let Ok(signal) = received.try_recv() {
+            if let Signal::FluidPlace { x, y, z, state, .. } = signal
+                && (x, y, z) == (16, 65, 0)
+            {
+                placed = Some(state);
+            }
+        }
+        let state = placed.expect("a hand-off for the east cell");
+
+        let mut east = super::super::region::Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        east.apply_fluid_place(&source, &tracking, (16, 65, 0), state);
+        assert_eq!(source.block(16, 65, 0), Some(state));
+        let (signals, _unused) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..30 {
+            east.tick_fluids(&source, &tracking, signals.clone(), true, false);
+        }
+        let further = ferrite_fluid::fluid_state(source.block(17, 65, 0).unwrap());
+        assert_eq!(
+            further.kind,
+            ferrite_fluid::FluidKind::Water,
+            "east keeps flowing"
+        );
+    }
 }

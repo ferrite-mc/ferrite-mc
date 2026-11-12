@@ -2410,6 +2410,10 @@ async fn run(
                       if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.schedule_fluid((x,y,z)));}
                     }
                   },
+                  Signal::NeighborUpdate{dimension,origin,target}=>{
+                    let chunk=ChunkPos(target[0].div_euclid(16),target[2].div_euclid(16));
+                    if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.remote_block_changed(origin));}
+                  },
                   Signal::FluidPlace{dimension,x,y,z,state}=>{
                     let chunk=ChunkPos(x.div_euclid(16),z.div_euclid(16));
                     if worlds.owner(dimension,chunk).is_some(){

@@ -636,6 +636,14 @@ pub enum Signal {
         z: i32,
         state: u32,
     },
+    /// A block changed next to a region boundary: the owner of `target` re-validates its own
+    /// neighbours of `origin` (support rules, gravity), because the region that changed
+    /// `origin` may not write them.
+    NeighborUpdate {
+        dimension: super::Dimension,
+        origin: [i32; 3],
+        target: [i32; 3],
+    },
     /// Redstone blocks on the other side of a region boundary need a re-evaluation.
     RedstoneChange {
         dimension: super::Dimension,
@@ -1152,6 +1160,9 @@ pub struct Region {
     pub entities: EntityStore,
     generator: FlatGenerator,
     fluid_ticks: ferrite_fluid::FluidTicks,
+    /// Origins of block changes made by neighbouring regions since the last tick; they feed the
+    /// gravity scheduler (the neighbour update itself is queued in `updates`).
+    remote_changes: Vec<[i32; 3]>,
     random_ticks: super::random_tick::RandomTicks,
     updates: super::neighbors::Updates,
     gravity: super::gravity::Gravity,
@@ -1266,6 +1277,7 @@ impl RegionData for Region {
                 .split(|(x, z)| sections.contains(&SectionPos(x >> 4, z >> 4))),
             generator: self.generator.split(sections),
             fluid_ticks: ferrite_fluid::FluidTicks::default(),
+            remote_changes: Vec::new(),
             random_ticks: super::random_tick::RandomTicks::default(),
             updates: super::neighbors::Updates::default(),
             gravity: self.gravity.split(|x, z| {
@@ -5047,6 +5059,12 @@ impl Region {
         crate::plugins::facts::forget_entities(self.published_facts.drain());
         records
     }
+    /// A block next to this region changed in another region (`Signal::NeighborUpdate`). Only
+    /// this region's own neighbours of `origin` are re-validated on the next tick.
+    pub fn remote_block_changed(&mut self, origin: [i32; 3]) {
+        self.updates.remote_changed(origin);
+        self.remote_changes.push(origin);
+    }
     pub fn schedule_fluid(&mut self, pos: (i32, i32, i32)) {
         let chunk = ChunkPos(pos.0.div_euclid(16), pos.2.div_euclid(16));
         if self.held_chunks.contains_key(&chunk) {
@@ -8210,9 +8228,24 @@ impl Region {
         self.apply_neighbor_updates(source, ctx, &mut removed);
         for (pos, state) in removed {
             self.spawn_block_drops(pos, state);
+            self.wake_fluid(ctx, pos);
             changed.push(pos);
         }
         changed
+    }
+
+    /// A block vanished at `pos` outside the player path: wake the fluids around it, in this
+    /// region or the one that owns them (vanilla `Level.setBlock` -> `neighborChanged`).
+    fn wake_fluid(&self, ctx: &TickContext, pos: [i32; 3]) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let _ = ctx.signals.send(Signal::FluidChange {
+            dimension: source.dimension(),
+            x: pos[0],
+            y: pos[1],
+            z: pos[2],
+        });
     }
 
     /// Runs the queued shape updates against the region's blocks.
@@ -8401,11 +8434,16 @@ impl Region {
         }
         for pos in &removed {
             self.updates.block_changed(*pos);
+            self.wake_fluid(ctx, *pos);
         }
+        // Vanilla `FallingBlock.updateShape` schedules the block above a vacated cell, so a
+        // stack falls one block per two ticks instead of leaving the upper blocks hanging.
+        self.schedule_gravity(source, &removed);
         let mut broken = Vec::new();
         self.apply_neighbor_updates(source, ctx, &mut broken);
         for (pos, state) in broken {
             self.spawn_block_drops(pos, state);
+            self.wake_fluid(ctx, pos);
         }
     }
 
@@ -9904,6 +9942,8 @@ impl Region {
         }
         if let Some(source) = ctx.source.as_deref() {
             self.schedule_gravity(source, &changed);
+            let remote = std::mem::take(&mut self.remote_changes);
+            self.schedule_gravity(source, &remote);
         }
         stage!("gravity-redstone");
         self.tick_gravity(ctx);
@@ -13097,6 +13137,189 @@ mod fluid_ownership_tests {
         right.fluid_ticks.run_until(&mut grid, 9);
         assert_eq!(fluid_state(grid.block(0, 0, 1)).kind, FluidKind::Water);
         assert_eq!(fluid_state(grid.block(512, 0, 1)).kind, FluidKind::Water);
+    }
+}
+
+#[cfg(test)]
+mod neighbor_ownership_tests {
+    use super::*;
+    use crate::game::{anvil::AnvilChunkSource, fluid::RegionFluidWorld};
+    use std::sync::Mutex;
+
+    async fn loaded(chunks: &[(i32, i32)]) -> Arc<AnvilChunkSource> {
+        let source = AnvilChunkSource::new_memory();
+        for &(x, z) in chunks {
+            loop {
+                if let Some(result) = source.get(x, z, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        source
+    }
+    fn id(name: &str) -> u32 {
+        u32::from(ferrite_data::blocks::default_state(name).unwrap())
+    }
+    fn wall_torch() -> u32 {
+        u32::from(ferrite_data::blocks::state_id("wall_torch", &[("facing", "east")]).unwrap())
+    }
+
+    fn gravity_context(
+        source: &Arc<AnvilChunkSource>,
+    ) -> (TickContext, tokio::sync::mpsc::UnboundedReceiver<Signal>) {
+        let (signals, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = TickContext {
+            signals,
+            tracking: Default::default(),
+            positions: Default::default(),
+            source: Some(source.clone()),
+            dimension: super::super::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(super::super::Dimension::Overworld),
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state: Default::default(),
+            trader_spawner: Default::default(),
+            profiler: None,
+            tree: None,
+            hooks: None,
+        };
+        (ctx, receiver)
+    }
+
+    /// A stack of gravity blocks falls one block per two ticks: the block above a vacated cell
+    /// must be scheduled when the one below turns into an entity. Runs for a region holding the
+    /// column and, with the column on the far side of a chunk border, for a second region.
+    #[tokio::test]
+    async fn a_gravity_stack_keeps_falling_and_wakes_the_fluid_around_each_vacated_cell() {
+        for chunk_x in [0, 1] {
+            let source = loaded(&[(0, 0), (1, 0)]).await;
+            let x = chunk_x * 16;
+            for y in 70..=72 {
+                source.set_block(x, y, 0, id("sand")).unwrap();
+            }
+            source.set_block(x, 69, 0, id("air")).unwrap();
+            let mut region = Region::default();
+            region.hold_chunk(ChunkPos(chunk_x, 0));
+            let (ctx, mut signals) = gravity_context(&source);
+            region.schedule_gravity(&source, &[[x, 69, 0]]);
+            for _ in 0..8 {
+                region.tick_gravity(&ctx);
+            }
+            for y in 70..=72 {
+                assert_eq!(source.block(x, y, 0), Some(id("air")), "x {x} y {y}");
+            }
+            assert_eq!(region.entities.len(), 3, "x {x}");
+            let mut woken = Vec::new();
+            while let Ok(signal) = signals.try_recv() {
+                if let Signal::FluidChange { x, y, z, .. } = signal {
+                    woken.push([x, y, z]);
+                }
+            }
+            for y in 70..=72 {
+                assert!(woken.contains(&[x, y, 0]), "fluid not woken at y {y}");
+            }
+        }
+    }
+
+    /// Cross-region: the west region breaks the support of a wall torch that lives in the east
+    /// region. It must hand the update over through the scheduler and leave the torch alone; the
+    /// east region then removes the torch and announces the removal back.
+    #[tokio::test]
+    async fn a_support_broken_across_a_region_boundary_removes_the_torch_in_the_owner() {
+        let source = loaded(&[(0, 0), (1, 0)]).await;
+        source.set_block(15, 64, 0, id("air")).unwrap();
+        source.set_block(16, 64, 0, wall_torch()).unwrap();
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+
+        let mut west = Region::default();
+        west.hold_chunk(ChunkPos(0, 0));
+        let mut world = RegionFluidWorld::new(&source, &west.held_chunks, &tracking)
+            .with_signals(signals.clone());
+        west.updates.block_changed([15, 64, 0]);
+        let mut removed = Vec::new();
+        west.updates.apply(&mut world, &mut removed);
+        assert!(removed.is_empty());
+        assert_eq!(
+            source.block(16, 64, 0),
+            Some(wall_torch()),
+            "west never writes east"
+        );
+        let Ok(Signal::NeighborUpdate { origin, target, .. }) = received.try_recv() else {
+            panic!("the west region must hand the update to the east region");
+        };
+        assert_eq!((origin, target), ([15, 64, 0], [16, 64, 0]));
+
+        let mut east = Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        east.remote_block_changed(origin);
+        assert_eq!(east.remote_changes, vec![[15, 64, 0]]);
+        let mut world =
+            RegionFluidWorld::new(&source, &east.held_chunks, &tracking).with_signals(signals);
+        east.updates.apply(&mut world, &mut removed);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, [16, 64, 0]);
+        assert_eq!(source.block(16, 64, 0), Some(id("air")));
+    }
+
+    /// Same-region baseline for the test above: one region holds both chunks and the torch
+    /// breaks directly, without any signal.
+    #[tokio::test]
+    async fn a_support_broken_inside_one_region_removes_the_torch_without_a_signal() {
+        let source = loaded(&[(0, 0), (1, 0)]).await;
+        source.set_block(15, 64, 0, id("air")).unwrap();
+        source.set_block(16, 64, 0, wall_torch()).unwrap();
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        region.hold_chunk(ChunkPos(1, 0));
+        let mut world =
+            RegionFluidWorld::new(&source, &region.held_chunks, &tracking).with_signals(signals);
+        region.updates.block_changed([15, 64, 0]);
+        let mut removed = Vec::new();
+        region.updates.apply(&mut world, &mut removed);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(source.block(16, 64, 0), Some(id("air")));
+        assert!(received.try_recv().is_err());
+    }
+
+    /// An unloaded neighbour chunk has no owner to notify, so nothing is sent.
+    #[tokio::test]
+    async fn a_border_change_next_to_an_unloaded_chunk_sends_nothing() {
+        let source = loaded(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let mut world =
+            RegionFluidWorld::new(&source, &region.held_chunks, &tracking).with_signals(signals);
+        region.updates.block_changed([15, 64, 0]);
+        region.updates.apply(&mut world, &mut Vec::new());
+        assert!(received.try_recv().is_err());
+    }
+
+    /// Gravity across a boundary: sand in the east region becomes unsupported next to a change
+    /// made by the west region. The east region schedules it from the remote origin.
+    #[tokio::test]
+    async fn a_remote_change_schedules_gravity_for_an_unsupported_block() {
+        let source = loaded(&[(0, 0), (1, 0)]).await;
+        source.set_block(16, 70, 0, id("sand")).unwrap();
+        source.set_block(16, 69, 0, id("air")).unwrap();
+        let mut east = Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        east.schedule_gravity(&source, &[[15, 70, 0]]);
+        assert!(east.gravity.scheduled.contains(&[16, 70, 0]));
+
+        // A west region that does not hold the chunk never schedules the east block.
+        let mut west = Region::default();
+        west.hold_chunk(ChunkPos(0, 0));
+        west.schedule_gravity(&source, &[[15, 70, 0]]);
+        assert!(west.gravity.scheduled.is_empty());
     }
 }
 

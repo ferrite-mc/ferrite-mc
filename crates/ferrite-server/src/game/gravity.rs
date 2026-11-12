@@ -37,7 +37,11 @@ pub fn is_gravity(state: u16) -> bool {
     ) || name.ends_with("_concrete_powder")
 }
 
-/// Vanilla `FallingBlock.isFree`: air, a liquid or fire.
+/// Vanilla `FallingBlock.isFree`: `isAir() || is(FIRE) || liquid() || canBeReplaced()`.
+///
+/// `liquid()` is true for the standalone water and lava blocks only: a waterlogged slab or
+/// stairs carries water but is a solid block, so a gravity block resting on it stays put.
+/// Replaceable blocks (grass, snow layers, vines, ...) are free, so sand falls through them.
 pub fn is_free(state: Option<u16>) -> bool {
     let Some(state) = state else {
         return false;
@@ -49,7 +53,10 @@ pub fn is_free(state: Option<u16>) -> bool {
         return false;
     };
     let props = ferrite_data::block_props::get(state);
-    props.is_air || props.fluid.is_some() || ferrite_data::tags::contains("block", "fire", name)
+    props.is_air
+        || ferrite_fluid::is_liquid_block(u32::from(state))
+        || props.replaceable
+        || ferrite_data::tags::contains("block", "fire", name)
 }
 
 /// Scheduled gravity checks for one region.
@@ -57,7 +64,7 @@ pub fn is_free(state: Option<u16>) -> bool {
 pub(super) struct Gravity {
     clock: u32,
     due: Vec<([i32; 3], u32)>,
-    scheduled: HashSet<[i32; 3]>,
+    pub(super) scheduled: HashSet<[i32; 3]>,
 }
 
 impl Gravity {
@@ -193,6 +200,25 @@ mod tests {
         assert!(is_free(Some(state("fire"))));
         assert!(!is_free(Some(state("stone"))));
         assert!(!is_free(None));
+    }
+
+    /// Vanilla `isFree` includes `canBeReplaced()`: sand falls through grass and snow layers.
+    #[test]
+    fn replaceable_blocks_are_free_to_fall_into() {
+        assert!(is_free(Some(state("short_grass"))));
+        assert!(is_free(Some(state("vine"))));
+    }
+
+    /// A waterlogged slab holds water but is not a liquid block, so it supports a falling block.
+    #[test]
+    fn waterlogged_blocks_are_not_free() {
+        let wet = ferrite_data::blocks::state_id(
+            "oak_slab",
+            &[("type", "bottom"), ("waterlogged", "true")],
+        )
+        .unwrap();
+        assert!(ferrite_fluid::fluid_state(u32::from(wet)).kind != ferrite_fluid::FluidKind::Empty);
+        assert!(!is_free(Some(wet)));
     }
 
     /// Every region counts its own ticks, so an entry merged from a region that has ticked a

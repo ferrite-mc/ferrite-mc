@@ -4,8 +4,11 @@
 //! Vanilla applies a block change in `Level.setBlock` -> `markAndNotifyBlock`: every neighbour
 //! gets `BlockState.updateShape` in `Block.UPDATE_SHAPE_ORDER` (west, east, down, up, north,
 //! south), and a shape update that fails replaces the block with air. Ferrite only updates
-//! blocks whose chunk this region holds; a change on a region border therefore leaves the other
-//! region's blocks alone (Folia: only the owning region may touch a chunk).
+//! blocks whose chunk this region holds (Folia: only the owning region may touch a chunk). A
+//! change on a region border is handed to the neighbouring region as a `Signal::NeighborUpdate`
+//! through [`NeighborWorld::notify_foreign`]; the owner queues it with [`Updates::remote_changed`]
+//! and re-validates only its own blocks, so nothing is ever written across the boundary and the
+//! two regions cannot bounce the same update back and forth.
 //!
 //! Support rules follow the vanilla block classes named on each branch. They are checked both
 //! by shape updates and by `BlockItem.place` (`BlockPlaceContext.canPlace` -> `canSurvive`).
@@ -38,6 +41,9 @@ pub trait NeighborWorld: BlockWorld {
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u16);
     /// Whether this region owns the chunk containing `(x, z)`.
     fn owns(&self, x: i32, z: i32) -> bool;
+    /// A block at `origin` changed and `target`, one of its neighbours, belongs to another
+    /// region. The implementation hands the update to the owner; the default drops it.
+    fn notify_foreign(&mut self, _origin: [i32; 3], _target: [i32; 3]) {}
 }
 
 /// Face index in `ferrite_data::block_props::face_occlusion`: west, east, down, up, north, south.
@@ -209,33 +215,42 @@ pub fn can_survive(state: u16, pos: [i32; 3], world: &impl BlockWorld) -> bool {
 /// origin, so one break cascades until nothing is left unsupported.
 #[derive(Debug, Default)]
 pub struct Updates {
-    queue: VecDeque<[i32; 3]>,
+    /// `(origin, remote)`: a remote origin was changed by another region, so its unowned
+    /// neighbours are not forwarded again.
+    queue: VecDeque<([i32; 3], bool)>,
 }
 
 impl Updates {
     /// Queues the block at `pos` as changed (vanilla `Level.markAndNotifyBlock`).
     pub fn block_changed(&mut self, pos: [i32; 3]) {
-        self.queue.push_back(pos);
+        self.queue.push_back((pos, false));
+    }
+
+    /// Queues a change another region made at `pos`: only this region's neighbours of it are
+    /// re-validated, and nothing is forwarded back.
+    pub fn remote_changed(&mut self, pos: [i32; 3]) {
+        self.queue.push_back((pos, true));
     }
 
     /// Flushes the queue. Returns the blocks that no longer survive, with their old states;
-    /// the caller drops their loot. Blocks in chunks this region does not own are skipped.
+    /// the caller drops their loot. Neighbours in chunks this region does not own are never
+    /// written: a local change is handed to their owner through [`NeighborWorld::notify_foreign`].
     pub fn apply(&mut self, world: &mut impl NeighborWorld, removed: &mut Vec<([i32; 3], u16)>) {
         let air = ferrite_data::blocks::default_state("air").expect("vanilla has an air state");
         let mut budget = UPDATE_LIMIT;
-        while let Some(pos) = self.queue.pop_front() {
+        while let Some((pos, remote)) = self.queue.pop_front() {
             if budget == 0 {
                 self.queue.clear();
                 break;
             }
             budget -= 1;
-            if !world.owns(pos[0], pos[2]) {
-                continue;
-            }
             for direction in SHAPE_ORDER {
                 let (dx, dy, dz) = direction.step();
                 let target = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
                 if !world.owns(target[0], target[2]) {
+                    if !remote && world.owns(pos[0], pos[2]) {
+                        world.notify_foreign(pos, target);
+                    }
                     continue;
                 }
                 let Some(state) = world.block(target[0], target[1], target[2]) else {
@@ -248,7 +263,7 @@ impl Updates {
                 // drop players observe comes from `Block.dropResources` for that state.
                 world.set_block(target[0], target[1], target[2], air);
                 removed.push((target, state));
-                self.queue.push_back(target);
+                self.queue.push_back((target, false));
             }
         }
     }
@@ -274,6 +289,19 @@ impl NeighborWorld for super::fluid::RegionFluidWorld<'_> {
 
     fn owns(&self, x: i32, z: i32) -> bool {
         super::fluid::RegionFluidWorld::owns(self, x, z)
+    }
+
+    fn notify_foreign(&mut self, origin: [i32; 3], target: [i32; 3]) {
+        // Only a loaded chunk has an owner that can act; an unloaded one re-validates on load.
+        if let Some(signals) = &self.signals
+            && self.source.block(target[0], target[1], target[2]).is_some()
+        {
+            let _ = signals.send(super::region::Signal::NeighborUpdate {
+                dimension: self.source.dimension(),
+                origin,
+                target,
+            });
+        }
     }
 }
 
@@ -397,31 +425,117 @@ mod tests {
         assert_eq!(grid.get([0, 64, 0]), state("air"));
     }
 
+    /// Two regions over one block map: `west` owns x < 16, the other owns x >= 16.
+    struct Border {
+        grid: Grid,
+        west: bool,
+        sent: Vec<([i32; 3], [i32; 3])>,
+    }
+    impl BlockWorld for Border {
+        fn block(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+            self.grid.block(x, y, z)
+        }
+    }
+    impl NeighborWorld for Border {
+        fn set_block(&mut self, x: i32, y: i32, z: i32, state: u16) {
+            assert!(self.owns(x, z), "a region wrote a block it does not own");
+            self.grid.set_block(x, y, z, state);
+        }
+        fn owns(&self, x: i32, _: i32) -> bool {
+            (x.div_euclid(16) < 1) == self.west
+        }
+        fn notify_foreign(&mut self, origin: [i32; 3], target: [i32; 3]) {
+            self.sent.push((origin, target));
+        }
+    }
+
+    /// A wall torch on the east side of the border hangs on the stone block west of it.
+    fn border_with_wall_torch(west: bool) -> (Border, u16) {
+        let mut grid = Grid::new();
+        grid.set([15, 64, 0], "stone");
+        let wall = state_with("wall_torch", &[("facing", "east")]);
+        grid.set_state([16, 64, 0], wall);
+        (
+            Border {
+                grid,
+                west,
+                sent: Vec::new(),
+            },
+            wall,
+        )
+    }
+
+    /// Same-region baseline: both blocks are owned, so the torch breaks at once.
     #[test]
-    fn region_border_changes_are_ignored() {
-        struct Border(Grid);
-        impl BlockWorld for Border {
-            fn block(&self, x: i32, y: i32, z: i32) -> Option<u16> {
-                self.0.block(x, y, z)
-            }
-        }
-        impl NeighborWorld for Border {
-            fn set_block(&mut self, x: i32, y: i32, z: i32, state: u16) {
-                self.0.set_block(x, y, z, state);
-            }
-            fn owns(&self, x: i32, _: i32) -> bool {
-                x.div_euclid(16) == 0
-            }
-        }
-        let mut grid = Border(Grid::new());
-        grid.0.set([0, 63, 0], "stone");
-        let torch = grid.0.set([0, 64, 0], "torch");
-        // The change happens in the neighbouring region: this region never touches it.
+    fn a_wall_torch_breaks_when_its_support_goes_in_the_same_region() {
+        let mut grid = Grid::new();
+        grid.set([15, 64, 0], "stone");
+        let wall = state_with("wall_torch", &[("facing", "east")]);
+        grid.set_state([16, 64, 0], wall);
+        grid.set([15, 64, 0], "air");
         let mut updates = Updates::default();
-        updates.block_changed([16, 63, 0]);
+        updates.block_changed([15, 64, 0]);
         let mut removed = Vec::new();
         updates.apply(&mut grid, &mut removed);
+        assert_eq!(removed, vec![([16, 64, 0], wall)]);
+    }
+
+    /// Cross-region: the support breaks in the west region. It must not write the east block,
+    /// and it must hand the change to the east region, which then removes the torch.
+    #[test]
+    fn a_change_on_a_region_border_is_handed_to_the_owner_not_ignored() {
+        let (mut west, wall) = border_with_wall_torch(true);
+        west.grid.blocks.insert([15, 64, 0], state("air"));
+        let mut updates = Updates::default();
+        updates.block_changed([15, 64, 0]);
+        let mut removed = Vec::new();
+        updates.apply(&mut west, &mut removed);
+        assert!(
+            removed.is_empty(),
+            "the west region must not break an east block"
+        );
+        assert_eq!(west.grid.get([16, 64, 0]), wall);
+        assert_eq!(west.sent, vec![([15, 64, 0], [16, 64, 0])]);
+
+        // The east region receives the origin as a remote change.
+        let mut east = Border {
+            grid: west.grid,
+            west: false,
+            sent: Vec::new(),
+        };
+        let mut updates = Updates::default();
+        updates.remote_changed([15, 64, 0]);
+        updates.apply(&mut east, &mut removed);
+        assert_eq!(removed, vec![([16, 64, 0], wall)]);
+        assert_eq!(east.grid.get([16, 64, 0]), state("air"));
+        // The remote origin itself is not forwarded again; only the torch removal, a new local
+        // change, is announced to the west region.
+        assert_eq!(east.sent, vec![([16, 64, 0], [15, 64, 0])]);
+    }
+
+    /// A removal that cascades out of a remote change is a local change: it is forwarded on.
+    #[test]
+    fn a_cascade_after_a_remote_change_is_forwarded_to_the_next_owner() {
+        let (mut east, wall) = border_with_wall_torch(false);
+        east.grid.blocks.insert([15, 64, 0], state("air"));
+        let mut updates = Updates::default();
+        updates.remote_changed([15, 64, 0]);
+        let mut removed = Vec::new();
+        updates.apply(&mut east, &mut removed);
+        assert_eq!(removed, vec![([16, 64, 0], wall)]);
+        // The removed torch is a local change whose west neighbour belongs to the other region.
+        assert_eq!(east.sent, vec![([16, 64, 0], [15, 64, 0])]);
+    }
+
+    #[test]
+    fn a_remote_change_never_touches_blocks_beyond_the_owned_side() {
+        let (mut west, wall) = border_with_wall_torch(true);
+        let mut updates = Updates::default();
+        updates.remote_changed([16, 63, 0]);
+        let mut removed = Vec::new();
+        updates.apply(&mut west, &mut removed);
         assert!(removed.is_empty());
-        assert_eq!(grid.0.get([0, 64, 0]), torch);
+        assert_eq!(west.grid.get([16, 64, 0]), wall);
+        assert!(west.sent.is_empty());
     }
 }
