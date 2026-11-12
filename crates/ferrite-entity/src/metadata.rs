@@ -24,6 +24,15 @@ pub mod experience {
     pub const VALUE: u8 = 8;
 }
 
+/// Accessor indices of area effect clouds (vanilla `AreaEffectCloud`): radius, whether the cloud
+/// is still in its wait phase, and the particle it emits. Vanilla does not synch the colour,
+/// `radius_on_use`, duration or wait time separately.
+pub mod area_effect_cloud {
+    pub const RADIUS: u8 = 8;
+    pub const WAITING: u8 = 9;
+    pub const PARTICLE: u8 = 10;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Item {
     index: u8,

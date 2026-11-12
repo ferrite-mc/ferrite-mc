@@ -1131,7 +1131,8 @@ pub struct Region {
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// The bottle each splash potion in flight was thrown from, keyed by projectile uuid.
     pub thrown_potions: HashMap<Uuid, ferrite_item::ItemStack>,
-    /// Clouds left by landed lingering potions. They are not sent to clients and not saved.
+    /// Clouds left by landed lingering potions. Each has an `area_effect_cloud` entity in
+    /// `entities` (same uuid) that clients see; the cloud state itself is not saved.
     pub potion_clouds: Vec<ferrite_entity::potion::PotionCloud>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
@@ -8726,10 +8727,17 @@ impl Region {
         if effects.is_empty() {
             return;
         }
-        self.potion_clouds
-            .push(ferrite_entity::potion::PotionCloud::lingering(
-                center, &effects,
-            ));
+        let color = match stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS) {
+            Some(ferrite_item::Component::PotionContents(contents)) => contents.custom_color,
+            Some(ferrite_item::Component::Opaque(tag)) => {
+                PotionContents::from_tag(&tag).and_then(|contents| contents.custom_color)
+            }
+            _ => None,
+        };
+        let cloud =
+            ferrite_entity::potion::PotionCloud::lingering(center, &effects).with_color(color);
+        self.entities.insert(cloud.spawn_record());
+        self.potion_clouds.push(cloud);
     }
 
     /// Ticks every lingering cloud and applies what it reaches to the players of this region.
@@ -8744,10 +8752,13 @@ impl Region {
             .map(|p| (p.uuid, p.pos))
             .collect();
         let mut clouds = std::mem::take(&mut self.potion_clouds);
+        let entities = &mut self.entities;
         clouds.retain_mut(|cloud| {
             let Some(applied) = cloud.tick(candidates.iter().copied()) else {
+                cloud.despawn(entities);
                 return false;
             };
+            cloud.sync(entities);
             for (uuid, effect) in applied {
                 if let Some(p) = self.players.get_mut(&uuid) {
                     p.apply_effect(effect);
@@ -10485,6 +10496,73 @@ mod tests {
             region.tick_potion_clouds();
         }
         assert!(region.potion_clouds.is_empty());
+    }
+
+    fn cloud_entities(region: &Region) -> Vec<Uuid> {
+        let kind = ferrite_entity::potion::cloud_type();
+        region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| region.entities.data(key))
+            .filter(|data| data.kind == kind)
+            .map(|data| data.uuid)
+            .collect()
+    }
+
+    #[test]
+    fn a_lingering_potion_spawns_a_client_visible_cloud_entity_and_removes_it_on_expiry() {
+        let mut region = Region::default();
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:water"),
+        );
+        assert!(cloud_entities(&region).is_empty());
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        assert_eq!(
+            cloud_entities(&region),
+            vec![region.potion_clouds[0].uuid()]
+        );
+        let mut peak = 0;
+        for _ in 0..(ferrite_entity::potion::PotionCloud::WAIT
+            + ferrite_entity::potion::PotionCloud::DURATION)
+        {
+            region.tick_potion_clouds();
+            peak = peak.max(cloud_entities(&region).len());
+        }
+        assert_eq!(peak, 1);
+        assert!(region.potion_clouds.is_empty());
+        region.entities.sweep_removed();
+        assert!(cloud_entities(&region).is_empty());
+    }
+
+    #[test]
+    fn a_cloud_entity_travels_with_its_cloud_through_region_split_and_merge() {
+        let mut region = Region::default();
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        let uuid = region.potion_clouds[0].uuid();
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(cloud_entities(&region).is_empty() && region.potion_clouds.is_empty());
+        assert_eq!(cloud_entities(&taken), vec![uuid]);
+        taken.merge(region);
+        assert_eq!(cloud_entities(&taken), vec![uuid]);
+        // The merged region still ticks the cloud and still finds its entity to update.
+        for _ in 0..ferrite_entity::potion::PotionCloud::WAIT + 1 {
+            taken.tick_potion_clouds();
+        }
+        let key = taken.entities.keys()[0];
+        let data = taken.entities.data(key).unwrap();
+        assert_eq!(
+            data.metadata
+                .get(ferrite_entity::metadata::area_effect_cloud::WAITING),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(false))
+        );
     }
 
     fn dropped_items(region: &Region) -> Vec<&'static str> {
