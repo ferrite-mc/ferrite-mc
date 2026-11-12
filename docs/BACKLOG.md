@@ -94,8 +94,8 @@ server-side only.
 - Compression and encryption off the reader and writer threads: measured and deferred; numbers,
   caveats and the plan are in `docs/NET-WRITER-OFFLOAD.md` (bench: `ferrite-net/benches/writer_stage.rs`).
 - Chat and command rate limits are in (`ferrite-net/src/rate_limit.rs`, `ServerConfig::rate_limits`,
-  vanilla spam-threshold defaults). The server does not expose them in its config file yet. The
-  30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).
+  vanilla spam-threshold defaults), configured by the `[rate-limits]` table of `ferrite.toml`.
+  The 30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).
 
 ## 6. Performance and operations
 
