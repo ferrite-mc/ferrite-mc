@@ -49,6 +49,7 @@ mod end_fight;
 mod end_frame;
 mod equine_chest;
 mod jukebox;
+mod map;
 mod portal;
 mod vault;
 pub use dimension::{
