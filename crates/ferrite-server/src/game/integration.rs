@@ -112,12 +112,23 @@ impl Bot {
         (id, rest)
     }
     pub(super) async fn until(&mut self, id: i32) -> Vec<u8> {
-        loop {
-            let (got, body) = self.next_play().await;
-            if got == id {
-                return body;
+        self.until_within(id, std::time::Duration::from_secs(120))
+            .await
+    }
+    /// Waits for packet `id`, failing after `limit` instead of spinning forever while other
+    /// packets keep arriving. Without this a missing reply hangs the whole suite until the CI
+    /// job timeout (see the Windows run that sat for 32 minutes after the last test line).
+    async fn until_within(&mut self, id: i32, limit: std::time::Duration) -> Vec<u8> {
+        tokio::time::timeout(limit, async {
+            loop {
+                let (got, body) = self.next_play().await;
+                if got == id {
+                    return body;
+                }
             }
-        }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no packet {id} within {limit:?}"))
     }
     /// Waits for the next `SystemChat` whose text contains `needle`.
     async fn chat_containing(&mut self, needle: &str) -> String {
@@ -662,7 +673,11 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     // slowly sometimes, so allow five minutes before calling it a failure.
     tokio::time::timeout(std::time::Duration::from_secs(300), async {
         loop {
-            let body = bot.until(BossBar::ID).await;
+            // The respawn stage ticks with the region, so a loaded runner can take most of
+            // this window; keep the packet wait as long as the enclosing timeout.
+            let body = bot
+                .until_within(BossBar::ID, std::time::Duration::from_secs(300))
+                .await;
             if matches!(
                 BossBar::decode(&mut body.as_slice()).unwrap().action,
                 BossBarAction::Add { .. }
