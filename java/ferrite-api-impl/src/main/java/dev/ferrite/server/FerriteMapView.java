@@ -10,7 +10,12 @@ import org.bukkit.map.MapCursor;
 import org.bukkit.map.MapCursorCollection;
 import org.bukkit.map.MapRenderer;
 
-/** An in-memory map view from Server#createMap: ids increase, renderers are listed only. */
+/**
+ * A map view from Server#createMap. With a host the id comes from the server's persistent map
+ * store (`data/minecraft/maps`) and every setting change is written back, so the id in a filled
+ * map's {@code minecraft:map_id} names real saved data. Without a host (unit tests) ids are
+ * in-memory counters. Renderers are listed only; pixels come from {@link #render}.
+ */
 final class FerriteMapView implements org.bukkit.map.MapView {
     private static final AtomicInteger NEXT_ID = new AtomicInteger(1);
     private final int id;
@@ -20,27 +25,43 @@ final class FerriteMapView implements org.bukkit.map.MapView {
     private volatile int centerX, centerZ;
     private volatile boolean locked, trackingPosition = true, unlimitedTracking;
 
-    FerriteMapView(World world) { this.id = NEXT_ID.getAndIncrement(); this.world = java.util.Objects.requireNonNull(world, "world"); }
+    private final boolean hosted;
+
+    FerriteMapView(World world) {
+        this.world = java.util.Objects.requireNonNull(world, "world");
+        this.hosted = HostBridge.available();
+        this.id = hosted
+            ? HostBridge.callInt("Server", "server", "allocateMap(String,int,int,int,boolean,boolean)", dimensionKey(world), scale.ordinal(), 0, 0, true, false)
+            : NEXT_ID.getAndIncrement();
+    }
+
+    private static String dimensionKey(World world) { return world.getKey().toString(); }
+
+    /** Writes the current settings to the saved map; a no-op without a host. */
+    private void sync() {
+        if (!hosted) return;
+        HostBridge.callVoid("Server", "server", "updateMap(int,String,int,int,int,boolean,boolean,boolean)", id, dimensionKey(world), scale.ordinal(), centerX, centerZ, trackingPosition, unlimitedTracking, locked);
+    }
 
     @Override public int getId() { return id; }
     @Override public boolean isVirtual() { return false; }
     @Override public Scale getScale() { return scale; }
-    @Override public void setScale(Scale value) { scale = java.util.Objects.requireNonNull(value, "scale"); }
+    @Override public void setScale(Scale value) { scale = java.util.Objects.requireNonNull(value, "scale"); sync(); }
     @Override public int getCenterX() { return centerX; }
     @Override public int getCenterZ() { return centerZ; }
-    @Override public void setCenterX(int value) { centerX = value; }
-    @Override public void setCenterZ(int value) { centerZ = value; }
+    @Override public void setCenterX(int value) { centerX = value; sync(); }
+    @Override public void setCenterZ(int value) { centerZ = value; sync(); }
     @Override public World getWorld() { return world; }
-    @Override public void setWorld(World value) { world = java.util.Objects.requireNonNull(value, "world"); }
+    @Override public void setWorld(World value) { world = java.util.Objects.requireNonNull(value, "world"); sync(); }
     @Override public List<MapRenderer> getRenderers() { return List.copyOf(renderers); }
     @Override public void addRenderer(MapRenderer renderer) { renderers.add(java.util.Objects.requireNonNull(renderer, "renderer")); }
     @Override public boolean removeRenderer(MapRenderer renderer) { return renderers.remove(renderer); }
     @Override public boolean isTrackingPosition() { return trackingPosition; }
-    @Override public void setTrackingPosition(boolean value) { trackingPosition = value; }
+    @Override public void setTrackingPosition(boolean value) { trackingPosition = value; sync(); }
     @Override public boolean isUnlimitedTracking() { return unlimitedTracking; }
-    @Override public void setUnlimitedTracking(boolean value) { unlimitedTracking = value; }
+    @Override public void setUnlimitedTracking(boolean value) { unlimitedTracking = value; sync(); }
     @Override public boolean isLocked() { return locked; }
-    @Override public void setLocked(boolean value) { locked = value; }
+    @Override public void setLocked(boolean value) { locked = value; sync(); }
     @Override public String toString() { return "MapView[" + id + "]"; }
 
     /** Pixels and encoded visible cursors for one viewer; nothing is kept between renders. */
