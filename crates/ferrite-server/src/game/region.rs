@@ -8325,9 +8325,10 @@ impl Region {
             // `Player#launchProjectile(Trident)`: vanilla gives the thrown trident a plain trident
             // item, which `land_tridents` drops (or returns, with Loyalty) when the flight ends.
             "minecraft:trident" => {
-                let (Some(owner), Some(stack)) =
-                    (owner, ferrite_item::ItemStack::from_name("minecraft:trident"))
-                else {
+                let (Some(owner), Some(stack)) = (
+                    owner,
+                    ferrite_item::ItemStack::from_name("minecraft:trident"),
+                ) else {
                     return false;
                 };
                 let record = arrow::new_trident(
