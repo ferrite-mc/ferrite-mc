@@ -1766,10 +1766,9 @@ impl Menu {
     /// ingredient is used up.
     fn do_brew(&mut self, crafter: &dyn Crafter) {
         let ingredient = self.container[3].clone();
-        for slot in 0..3 {
-            let bottle = self.container[slot].clone();
-            if let Some(result) = crafter.brew(&ingredient, &bottle) {
-                self.container[slot] = normalize(result);
+        for slot in self.container.iter_mut().take(3) {
+            if let Some(result) = crafter.brew(&ingredient, slot) {
+                *slot = normalize(result);
             }
         }
         let mut left = ingredient;
@@ -2122,10 +2121,10 @@ impl Menu {
                     self.anvil_cost = 0;
                 }
                 MenuKind::Grindstone => {
-                    for cell in 0..2 {
-                        let mut left = self.container[cell].clone();
+                    for cell in self.container.iter_mut().take(2) {
+                        let mut left = cell.clone();
                         left.count -= 1;
-                        self.container[cell] = normalize(left);
+                        *cell = normalize(left);
                     }
                     self.result = ItemStack::empty();
                     p.xp += self.station_xp;
@@ -2147,18 +2146,18 @@ impl Menu {
                     {
                         p.crafted.push(id);
                     }
-                    for cell in 0..3 {
-                        let mut left = self.container[cell].clone();
+                    for cell in self.container.iter_mut().take(3) {
+                        let mut left = cell.clone();
                         left.count -= 1;
-                        self.container[cell] = normalize(left);
+                        *cell = normalize(left);
                     }
                     self.result = ItemStack::empty();
                 }
                 MenuKind::Cartography => {
-                    for cell in 0..2 {
-                        let mut left = self.container[cell].clone();
+                    for cell in self.container.iter_mut().take(2) {
+                        let mut left = cell.clone();
                         left.count -= 1;
-                        self.container[cell] = normalize(left);
+                        *cell = normalize(left);
                     }
                     self.result = ItemStack::empty();
                     self.update_cartography(p.maps);
@@ -2797,8 +2796,8 @@ impl Menu {
         // Vanilla `CartographyTableMenu.removed` returns both inputs and drops the result.
         if self.kind == MenuKind::Cartography {
             self.result = ItemStack::empty();
-            for cell in 0..2 {
-                let stack = std::mem::take(&mut self.container[cell]);
+            for cell in self.container.iter_mut().take(2) {
+                let stack = std::mem::take(cell);
                 if let Some(rest) = p.inventory.place_back(stack) {
                     p.drop(rest);
                 }
@@ -2807,8 +2806,8 @@ impl Menu {
         // Vanilla `MerchantMenu.removed` returns both input stacks to the player.
         if self.kind == MenuKind::Merchant {
             self.result = ItemStack::empty();
-            for cell in 0..2 {
-                let stack = std::mem::take(&mut self.container[cell]);
+            for cell in self.container.iter_mut().take(2) {
+                let stack = std::mem::take(cell);
                 if let Some(rest) = p.inventory.place_back(stack) {
                     p.drop(rest);
                 }
