@@ -1948,12 +1948,40 @@ impl Player {
     pub(crate) fn change_block(&self, location: i64, expected: Option<u32>, state: u32) -> bool {
         let pos = ferrite_protocol::types::BlockPos::unpack(location);
         let tracking = self.tracking.lock().unwrap();
+        let before = self
+            .source
+            .as_ref()
+            .and_then(|source| source.block(pos.x, pos.y, pos.z))
+            .and_then(|old| u16::try_from(old).ok());
         if self.source.as_ref().is_some_and(|source| {
             source
                 .compare_set_block(pos.x, pos.y, pos.z, expected, state)
                 .is_ok()
         }) {
             let chunk = (pos.x.div_euclid(16), pos.z.div_euclid(16));
+            // A removed piston head takes its extended base with it unless the operator allows
+            // headless pistons (vanilla PistonHeadBlock; Paper allow-headless-pistons).
+            if let (Some(source), Some(before), Ok(after)) =
+                (&self.source, before, u16::try_from(state))
+                && let Some(base) = super::piston::remove_orphaned_base(
+                    source,
+                    [pos.x, pos.y, pos.z],
+                    before,
+                    after,
+                    super::piston::allow_headless_pistons(),
+                )
+            {
+                let base_pos = ferrite_protocol::types::BlockPos {
+                    x: base[0],
+                    y: base[1],
+                    z: base[2],
+                };
+                let cleared = packet(&BlockUpdate {
+                    location: base_pos.pack(),
+                    block_state: VarInt(0),
+                });
+                broadcast_tracked_chunk(&tracking, self.world_id, chunk, &cleared);
+            }
             // One encoding, shared by every observer.
             let update = packet(&BlockUpdate {
                 location,

@@ -588,13 +588,17 @@ async fn run_server(
     }
     let (disable_end_credits, perform_username_validation) =
         match ferrite_config::FerriteConfig::load("config") {
-            Ok(config) => (
-                config.world_settings("world").misc.disable_end_credits,
-                config
-                    .paper_global()
-                    .unsupported_settings
-                    .perform_username_validation,
-            ),
+            Ok(config) => {
+                let unsupported = &config.paper_global().unsupported_settings;
+                game::piston::ALLOW_HEADLESS_PISTONS.store(
+                    unsupported.allow_headless_pistons,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                (
+                    config.world_settings("world").misc.disable_end_credits,
+                    unsupported.perform_username_validation,
+                )
+            }
             Err(error) => {
                 tracing::warn!(%error, "reading Paper config failed; End credits stay enabled and usernames stay validated");
                 (false, true)

@@ -6161,6 +6161,92 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
     assert!(world.unload_runtime_world(runtime, true).await.unwrap());
 }
 
+/// The client is told about a departure (`Respawn`) before the coordinator has handled the
+/// `ChangeDimension` signal that moves the player out of the runtime world's bookkeeping. An
+/// `unloadWorld` issued the moment the client sees the first `Respawn` must therefore not be
+/// refused because the player still looks "inside". (CI flake: `gap7 unload false`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unload_right_after_the_client_sees_the_departure_is_not_refused() {
+    use ferrite_protocol::packets::play::Respawn;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3");
+    if !root.join("generated/reports/blocks.json").exists() {
+        eprintln!("SKIP: vanilla/26.3/generated is absent");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
+    let source = super::anvil::AnvilChunkSource::new(temp.path().to_path_buf(), registry);
+    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let world = World::start_configured(
+        Some(source),
+        [0, 65, 0],
+        super::WorldSettings {
+            plugin_commands: Some(plugin_commands),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Leaver").await;
+    let player = ferrite_net::offline_uuid("Leaver");
+    let location = |world| ferrite_plugin::PlayerLocation {
+        world,
+        x: 8.5,
+        y: 65.0,
+        z: 8.5,
+        yaw: 0.0,
+        pitch: 0.0,
+    };
+    for round in 0..12 {
+        let (runtime, _, _, _) = world
+            .create_runtime_world(
+                &format!("leave{round}"),
+                super::Dimension::Overworld,
+                [0, 65, 0],
+                0,
+            )
+            .await
+            .unwrap();
+        commands
+            .send(ferrite_plugin::PlayerCommand::Teleport {
+                player,
+                location: location(runtime),
+            })
+            .unwrap();
+        let (mut responded, mut positioned) = (0, false);
+        read_until(&mut bot, |id, _| {
+            responded += i32::from(id == Respawn::ID);
+            positioned |= id == 73 && responded > 0;
+            responded >= 2 && positioned
+        })
+        .await;
+        commands
+            .send(ferrite_plugin::PlayerCommand::Teleport {
+                player,
+                location: location(ferrite_plugin::default_world_id()),
+            })
+            .unwrap();
+        // Unload the instant the client has been told it left, not when it has settled.
+        read_until(&mut bot, |id, _| id == Respawn::ID).await;
+        let unloaded = world.unload_runtime_world(runtime, false).await;
+        assert!(
+            matches!(unloaded, Ok(true)),
+            "round {round}: unload right after the departure Respawn was refused: {unloaded:?}"
+        );
+        // Let the return finish before the next round.
+        read_until(&mut bot, |id, _| id == 73).await;
+    }
+}
+
 /// A player who disconnects inside a runtime world is saved with that world and rejoins there:
 /// the world's own entities reach them, and the world cannot unload underneath them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

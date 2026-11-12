@@ -5,6 +5,77 @@ use ferrite_math::Direction;
 use ferrite_nbt::{Compound, Tag};
 use std::collections::HashSet;
 
+/// Paper `unsupported-settings.allow-headless-pistons`, set once at startup. While false (the
+/// default) removing a piston head also removes the extended base it belonged to, so no headless
+/// piston is left standing; true keeps the base, which is what Paper's "allow" does.
+pub static ALLOW_HEADLESS_PISTONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn allow_headless_pistons() -> bool {
+    ALLOW_HEADLESS_PISTONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn direction_of(props: &[(&str, &str)]) -> Option<Direction> {
+    let facing = props.iter().find(|(key, _)| *key == "facing")?.1;
+    Direction::ALL
+        .into_iter()
+        .find(|direction| facing_name(*direction) == facing)
+}
+
+/// The extended piston base a removed head leaves behind, if any (vanilla
+/// `PistonHeadBlock` removes the base it was attached to). `old` is the state that stood at
+/// `head_pos`, `new` the state that replaced it.
+pub fn orphaned_base(
+    block: impl Fn([i32; 3]) -> Option<u16>,
+    head_pos: [i32; 3],
+    old: u16,
+    new: u16,
+) -> Option<[i32; 3]> {
+    let (old_name, old_props) = blocks::state(old)?;
+    if old_name.strip_prefix("minecraft:").unwrap_or(old_name) != "piston_head" {
+        return None;
+    }
+    let facing = direction_of(old_props)?;
+    if let Some((new_name, new_props)) = blocks::state(new)
+        && new_name.strip_prefix("minecraft:").unwrap_or(new_name) == "piston_head"
+        && direction_of(new_props) == Some(facing)
+    {
+        return None;
+    }
+    let base = offset(head_pos, facing.opposite());
+    let (name, props) = blocks::state(block(base)?)?;
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    (matches!(name, "piston" | "sticky_piston")
+        && props.contains(&("extended", "true"))
+        && direction_of(props) == Some(facing))
+    .then_some(base)
+}
+
+/// Applies [`orphaned_base`] to a chunk source: clears the base (no drop, like vanilla's
+/// `removeBlock`) unless headless pistons are allowed. Returns the cleared position.
+pub fn remove_orphaned_base(
+    source: &super::anvil::AnvilChunkSource,
+    head_pos: [i32; 3],
+    old: u16,
+    new: u16,
+    allow_headless: bool,
+) -> Option<[i32; 3]> {
+    if allow_headless {
+        return None;
+    }
+    let read = |pos: [i32; 3]| {
+        source
+            .block(pos[0], pos[1], pos[2])
+            .and_then(|state| u16::try_from(state).ok())
+    };
+    let base = orphaned_base(read, head_pos, old, new)?;
+    let base_state = read(base)?;
+    source
+        .compare_set_block(base[0], base[1], base[2], Some(u32::from(base_state)), 0)
+        .ok()?;
+    Some(base)
+}
+
 /// Read-only view of blocks owned by the current region. None means unavailable.
 pub trait PistonWorld {
     fn block(&self, pos: [i32; 3]) -> Option<u16>;
@@ -1394,5 +1465,148 @@ mod tests {
                 .collect::<HashSet<_>>(),
             HashSet::from([[14, 70, 0], [15, 70, 0]])
         );
+    }
+}
+
+/// Pins the behaviour behind Paper's `unsupported-settings` piston keys.
+#[cfg(test)]
+mod unsupported_settings_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Grid(HashMap<[i32; 3], u16>);
+    impl PistonWorld for Grid {
+        fn block(&self, pos: [i32; 3]) -> Option<u16> {
+            Some(*self.0.get(&pos).unwrap_or(&0))
+        }
+        fn has_block_entity(&self, _: [i32; 3]) -> bool {
+            false
+        }
+    }
+    fn state(name: &str) -> u16 {
+        blocks::default_state(name).unwrap_or_else(|| panic!("no block {name}"))
+    }
+    fn base(facing: &str, extended: &str) -> u16 {
+        blocks::state_id("piston", &[("facing", facing), ("extended", extended)]).unwrap()
+    }
+    fn head(facing: &str) -> u16 {
+        blocks::state_id("piston_head", &[("facing", facing), ("type", "normal")]).unwrap()
+    }
+
+    #[test]
+    fn removing_a_head_orphans_exactly_its_extended_base() {
+        let mut grid = Grid::default();
+        grid.0.insert([0, 64, 0], base("east", "true"));
+        grid.0.insert([1, 64, 0], head("east"));
+        let read = |pos| grid.block(pos);
+        let air = state("air");
+        assert_eq!(
+            orphaned_base(read, [1, 64, 0], head("east"), air),
+            Some([0, 64, 0])
+        );
+        // The same head replaced by a head of the same facing is not a removal.
+        assert_eq!(
+            orphaned_base(read, [1, 64, 0], head("east"), head("east")),
+            None
+        );
+        // Other blocks are not heads.
+        assert_eq!(orphaned_base(read, [1, 64, 0], state("stone"), air), None);
+        // A retracted base, a base facing another way, or no base at all leaves nothing.
+        grid.0.insert([0, 64, 0], base("east", "false"));
+        assert_eq!(
+            orphaned_base(|p| grid.block(p), [1, 64, 0], head("east"), air),
+            None
+        );
+        grid.0.insert([0, 64, 0], base("north", "true"));
+        assert_eq!(
+            orphaned_base(|p| grid.block(p), [1, 64, 0], head("east"), air),
+            None
+        );
+        grid.0.insert([0, 64, 0], state("stone"));
+        assert_eq!(
+            orphaned_base(|p| grid.block(p), [1, 64, 0], head("east"), air),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_head_removes_the_base_unless_headless_pistons_are_allowed() {
+        for allow in [false, true] {
+            let source = crate::game::anvil::AnvilChunkSource::new_memory();
+            source.prefetch(0, 0, 0);
+            for _ in 0..2000 {
+                if source.block(1, 64, 1).is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert!(source.block(1, 64, 1).is_some(), "chunk never loaded");
+            let (base_state, head_state) = (base("east", "true"), head("east"));
+            source.set_block(1, 64, 1, u32::from(base_state)).unwrap();
+            source.set_block(2, 64, 1, u32::from(head_state)).unwrap();
+            // The caller has already replaced the head with air.
+            source.set_block(2, 64, 1, 0).unwrap();
+            let removed =
+                remove_orphaned_base(&source, [2, 64, 1], head_state, state("air"), allow);
+            let left = source.block(1, 64, 1).unwrap();
+            if allow {
+                assert_eq!(removed, None);
+                assert_eq!(left, u32::from(base_state), "headless piston is kept");
+            } else {
+                assert_eq!(removed, Some([1, 64, 1]));
+                assert_eq!(left, 0, "no headless piston is left standing");
+            }
+        }
+    }
+
+    #[test]
+    fn permanent_blocks_cannot_be_pushed_or_destroyed_by_a_piston() {
+        for name in [
+            "bedrock",
+            "end_portal_frame",
+            "end_portal",
+            "end_gateway",
+            "barrier",
+            "command_block",
+            "reinforced_deepslate",
+        ] {
+            let mut grid = Grid::default();
+            // Directly in front of the piston.
+            grid.0.insert([1, 64, 0], state(name));
+            assert!(
+                resolve(&grid, [0, 64, 0], Direction::East, true).is_none(),
+                "{name} in front must stop the piston"
+            );
+            // Behind a pushed block: the push is refused, nothing is destroyed.
+            grid.0.insert([1, 64, 0], state("stone"));
+            grid.0.insert([2, 64, 0], state(name));
+            assert!(
+                resolve(&grid, [0, 64, 0], Direction::East, true).is_none(),
+                "{name} behind a pushed block must stop the push"
+            );
+        }
+    }
+
+    #[test]
+    fn tnt_carpets_and_rails_move_without_leaving_a_copy() {
+        for name in ["tnt", "white_carpet", "rail"] {
+            let mut grid = Grid::default();
+            let moved = state(name);
+            grid.0.insert([0, 64, 0], base("east", "false"));
+            grid.0.insert([1, 64, 0], moved);
+            let operation = operation(&grid, [0, 64, 0], Direction::East, true)
+                .unwrap_or_else(|| panic!("{name} can be pushed"));
+            for (pos, _, next) in operation.edits {
+                grid.0.insert(pos, u16::try_from(next).unwrap());
+            }
+            let copies = grid.0.values().filter(|&&s| s == moved).count();
+            assert_eq!(copies, 1, "{name}: pushing must not duplicate the block");
+            assert_eq!(
+                grid.block([2, 64, 0]),
+                Some(moved),
+                "{name} advanced one cell"
+            );
+        }
     }
 }
