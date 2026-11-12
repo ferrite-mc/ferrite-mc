@@ -18,6 +18,48 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpSocket, TcpStream},
 };
+/// Wall time and region ticks reached at each stage of a long end-to-end test. Printed when the
+/// test panics (or always with `FERRITE_TEST_STAGES=1`), so a CI failure shows whether the time
+/// went into waiting for a packet or into region ticks, instead of only "no packet N within Ts".
+struct Stages {
+    name: &'static str,
+    start: std::time::Instant,
+    ticks: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
+    marks: Vec<(&'static str, f64, usize)>,
+}
+impl Stages {
+    fn new(name: &'static str, world: &World) -> Self {
+        Self {
+            name,
+            start: std::time::Instant::now(),
+            ticks: world.tick_samples.clone(),
+            marks: Vec::new(),
+        }
+    }
+    fn mark(&mut self, stage: &'static str) {
+        let ticks = self.ticks.lock().unwrap().len();
+        self.marks
+            .push((stage, self.start.elapsed().as_secs_f64(), ticks));
+    }
+}
+impl Drop for Stages {
+    fn drop(&mut self) {
+        if !std::thread::panicking() && std::env::var_os("FERRITE_TEST_STAGES").is_none() {
+            return;
+        }
+        let ticks = self.ticks.lock().unwrap().len();
+        eprintln!(
+            "{}: stage timeline (seconds since start, region ticks so far); ended at {:.1}s, {ticks} ticks, panicking={}",
+            self.name,
+            self.start.elapsed().as_secs_f64(),
+            std::thread::panicking()
+        );
+        for (stage, at, ticks) in &self.marks {
+            eprintln!("  {at:8.1}s {ticks:7} ticks  {stage}");
+        }
+    }
+}
+
 pub(super) struct Bot {
     stream: TcpStream,
     encoder: FrameEncoder,
@@ -597,7 +639,9 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
             ..Default::default()
         },
     ));
+    let mut stages = Stages::new("four_crystals_respawn", &world);
     let mut bot = Bot::join(addr, "Respawner").await;
+    stages.mark("joined");
     source
         .set_block(
             0,
@@ -611,7 +655,9 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
         .expect("end portal travel");
     let respawn = Respawn::decode(&mut packet.as_slice()).unwrap();
     assert_eq!(respawn.dimension, "minecraft:the_end");
+    stages.mark("end respawn packet");
     bot.until(PositionSync::ID).await;
+    stages.mark("end position sync");
     // The fight is owned by the region holding the origin; stand there so it ticks.
     world
         .console_command("/execute in minecraft:the_end run tp Respawner 0.5 65 0.5".into())
@@ -622,6 +668,7 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     let body = tokio::time::timeout(std::time::Duration::from_secs(30), bot.until(BossBar::ID))
         .await
         .expect("the initial dragon bar");
+    stages.mark("initial dragon bar");
     assert!(matches!(
         BossBar::decode(&mut body.as_slice()).unwrap().action,
         BossBarAction::Add { .. }
@@ -655,6 +702,7 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     })
     .await
     .expect("the exit portal appears");
+    stages.mark("dragon dead, exit portal");
     let level = level.unwrap();
     for [x, y, z] in super::end_fight::respawn_crystal_cells(level) {
         world
@@ -665,6 +713,7 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
             .await
             .unwrap();
     }
+    stages.mark("crystals summoned");
     world
         .console_command("/tick rate 10000".into())
         .await
@@ -674,13 +723,25 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     // can tick, so the sprint ends long before the sequence is done. Raising the rate instead keeps
     // the region at 10k TPS until the sequence finishes. Loaded CI runners still tick the region
     // slowly sometimes, so allow five minutes before calling it a failure.
+    let mut respawn_began = false;
+    let mut watch = tokio::time::interval(std::time::Duration::from_millis(100));
     tokio::time::timeout(std::time::Duration::from_secs(300), async {
         loop {
             // The respawn stage ticks with the region, so a loaded runner can take most of
             // this window; keep the packet wait as long as the enclosing timeout.
-            let body = bot
-                .until_within(BossBar::ID, std::time::Duration::from_secs(300))
-                .await;
+            // The exit portal comes down the tick the sequence begins; note when, so a failure
+            // shows whether the sequence never started or started and never finished.
+            let body = loop {
+                tokio::select! {
+                    body = bot.until_within(BossBar::ID, std::time::Duration::from_secs(300)) => break body,
+                    _ = watch.tick(), if !respawn_began => {
+                        if end.block(1, level, 0) != Some(portal) {
+                            respawn_began = true;
+                            stages.mark("exit portal removed: respawn sequence began");
+                        }
+                    }
+                }
+            };
             if matches!(
                 BossBar::decode(&mut body.as_slice()).unwrap().action,
                 BossBarAction::Add { .. }
@@ -691,6 +752,10 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     })
     .await
     .expect("the respawned dragon gets a boss bar");
+    stages.mark("respawned dragon bar");
+    if std::env::var_os("FERRITE_TEST_STAGES").is_some() {
+        eprintln!("{}", world.profiler().timings().report_all(50.0));
+    }
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();
@@ -2070,7 +2135,9 @@ async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
             ..Default::default()
         },
     ));
+    let mut stages = Stages::new("end_gateway_beam", &world);
     let mut bot = Bot::join(addr, "Gateway").await;
+    stages.mark("joined");
     source
         .set_block(
             0,
@@ -2096,6 +2163,7 @@ async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
     let body = tokio::time::timeout(std::time::Duration::from_secs(30), bot.until(BossBar::ID))
         .await
         .expect("the initial dragon bar");
+    stages.mark("initial dragon bar");
     assert!(matches!(
         BossBar::decode(&mut body.as_slice()).unwrap().action,
         BossBarAction::Add { .. }
@@ -2116,6 +2184,7 @@ async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
     })
     .await
     .expect("the exit portal appears");
+    stages.mark("dragon dead, exit portal");
     // The first gateway is at x 96, z 0. Its chunk had no player when the dragon died, so this
     // also exercises the repair path that writes a missing gateway when its chunk loads.
     world
@@ -2135,6 +2204,7 @@ async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
     })
     .await
     .expect("the gateway block entity packet");
+    stages.mark("gateway block entity packet");
     assert_eq!(
         packet.nbt.get("Age"),
         Some(&ferrite_nbt::Tag::Long(0)),
@@ -2161,6 +2231,7 @@ async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
     })
     .await
     .expect("the automatic purple beam");
+    stages.mark("purple beam event");
     assert_eq!(
         (event.block.0, event.param_a, event.param_b),
         (gateway, 1, 0)
