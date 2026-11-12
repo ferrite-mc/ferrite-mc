@@ -1099,6 +1099,9 @@ pub struct Player {
     pub portal_cooldown: u32,
     /// A portal trip waiting for its destination chunk to load.
     pub portal_pending: Option<(super::Dimension, [f64; 3])>,
+    /// The end gateway block this player just teleported through, for the region to start the
+    /// purple beam.
+    pub gateway_used: Option<[i32; 3]>,
     /// Left the End once already, so the credits are not shown again (vanilla `seenCredits`).
     /// shortcut: kept in memory only, not saved with the player data.
     pub seen_credits: bool,
@@ -1138,6 +1141,8 @@ pub struct Region {
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
     pending_hurts: Vec<Uuid>,
+    /// Runtime clocks of the end gateways this region holds: age and purple-beam cooldown.
+    gateway_beams: HashMap<[i32; 3], super::end_fight::GatewayBeam>,
     /// Effect changes on mobs this tick, waiting to be sent to the players tracking them.
     pending_mob_effects: Vec<(Uuid, MobEffectNotice)>,
     /// The dragon boss bar each player was last shown: bar id and progress.
@@ -1196,6 +1201,7 @@ impl RegionData for Region {
         self.entities.merge(other.entities);
         self.thrown_potions.extend(other.thrown_potions);
         self.potion_clouds.extend(other.potion_clouds);
+        self.gateway_beams.extend(other.gateway_beams);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
         self.generator.merge(other.generator);
@@ -1228,10 +1234,21 @@ impl RegionData for Region {
                 ])
             });
         self.potion_clouds = staying_clouds;
+        let moving_beams: Vec<_> = self
+            .gateway_beams
+            .keys()
+            .copied()
+            .filter(|at| in_sections(*at))
+            .collect();
+        let gateway_beams = moving_beams
+            .into_iter()
+            .filter_map(|at| self.gateway_beams.remove_entry(&at))
+            .collect();
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
             potion_clouds,
+            gateway_beams,
             delayed_updates,
             moving_pistons,
             thrown_tridents: HashMap::new(),
@@ -3474,6 +3491,7 @@ impl Player {
         self.portal_pending = None;
         self.portal_ticks = 0;
         if gateway {
+            self.gateway_used = Some(feet);
             self.pos = destination;
             self.teleport();
         } else {
@@ -5728,6 +5746,7 @@ impl Region {
         let mut blocks = Vec::new();
         let mut new_gateways = Vec::new();
         let mut gateway_entities = Vec::new();
+        let mut beams = Vec::new();
         if self.held_chunks.contains_key(&ChunkPos(0, 0)) {
             let portal = ferrite_data::blocks::default_state("minecraft:end_portal").map(u32::from);
             let present = portal.is_some_and(|portal| {
@@ -5765,6 +5784,16 @@ impl Region {
                 // Keep the stored `Age` moving so a viewer who arrives later, or the chunk
                 // after a reload, does not see the creation beam start again from zero.
                 super::end_fight::advance_gateway_age(source, at);
+                let stored = source
+                    .block_entity(at[0], at[1], at[2])
+                    .map_or(0, |entity| super::end_fight::gateway_stored_age(&entity));
+                let beam = self
+                    .gateway_beams
+                    .entry(at)
+                    .or_insert_with(|| super::end_fight::GatewayBeam::new(stored));
+                if beam.tick() {
+                    beams.push(at);
+                }
             }
         }
         if !blocks.is_empty() {
@@ -5775,6 +5804,50 @@ impl Region {
         }
         for at in gateway_entities {
             self.set_gateway_age(ctx, at, super::end_fight::GATEWAY_SPAWN_TICKS);
+        }
+        for at in beams {
+            self.send_gateway_beam(ctx, at);
+        }
+    }
+
+    /// Starts the purple teleport beam of the gateway at `at` for the chunk's viewers: vanilla
+    /// `TheEndGatewayBlockEntity.triggerCooldown` sends block event 1.
+    fn send_gateway_beam(&self, ctx: &TickContext, at: [i32; 3]) {
+        let Some(block) = super::end_fight::gateway_block_id() else {
+            return;
+        };
+        let event = BlockEvent {
+            pos: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]),
+            block: VarInt(block),
+            param_a: super::end_fight::GATEWAY_BEAM_EVENT,
+            param_b: 0,
+        };
+        broadcast_tracked_chunk(
+            &ctx.tracking.lock().unwrap(),
+            ctx.dimension,
+            (at[0].div_euclid(16), at[2].div_euclid(16)),
+            &packet(&event),
+        );
+    }
+
+    /// A player teleported through the gateway at `at`: start its purple beam unless one runs.
+    fn gateway_teleported(&mut self, ctx: &TickContext, at: [i32; 3]) {
+        let started = self
+            .gateway_beams
+            .entry(at)
+            .or_insert_with(|| {
+                let stored = ctx
+                    .source
+                    .as_deref()
+                    .and_then(|source| source.block_entity(at[0], at[1], at[2]))
+                    .map_or(super::end_fight::GATEWAY_SPAWN_TICKS, |entity| {
+                        super::end_fight::gateway_stored_age(&entity)
+                    });
+                super::end_fight::GatewayBeam::new(stored)
+            })
+            .trigger();
+        if started {
+            self.send_gateway_beam(ctx, at);
         }
     }
 
@@ -9587,6 +9660,9 @@ impl Region {
                     }
                 }
             }
+            if let Some(at) = p.gateway_used.take() {
+                self.gateway_teleported(ctx, at);
+            }
             self.spawn_thrown(&mut p);
             self.spawn_primed_tnt(&mut p);
             self.spawn_crystals(&mut p);
@@ -11269,6 +11345,78 @@ mod tests {
         super::super::entity_save::save_shoulders(Some(&dir), player, &Default::default());
         assert!(super::super::entity_save::load_shoulders(Some(&dir), player).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A viewer of chunk (0, 0) in the overworld, and the channel that receives its packets.
+    fn gateway_viewer(ctx: &TickContext) -> ferrite_net::game::OutboundReceiver {
+        let (outbound, receiver) = OutboundSender::channel(4096);
+        ctx.tracking.lock().unwrap().insert(
+            Uuid::from_u128(0xB0B),
+            (
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+                HashSet::from([(0, 0)]),
+                outbound,
+            ),
+        );
+        receiver
+    }
+
+    /// The `BlockEvent`s a receiver has queued.
+    fn block_events(receiver: &mut ferrite_net::game::OutboundReceiver) -> Vec<BlockEvent> {
+        let mut events = Vec::new();
+        while let Some(message) = receiver.try_recv() {
+            if let Outbound::Packet(bytes) = message {
+                let mut body = &bytes[..];
+                if <VarInt as ferrite_protocol::Decode>::decode(&mut body)
+                    .is_ok_and(|id| id.0 == BlockEvent::ID)
+                {
+                    events
+                        .push(<BlockEvent as ferrite_protocol::Decode>::decode(&mut body).unwrap());
+                }
+            }
+        }
+        events
+    }
+
+    #[test]
+    fn a_teleport_through_a_gateway_sends_one_purple_beam_event_to_the_chunks_viewers() {
+        let ctx = tick_context();
+        let mut viewer = gateway_viewer(&ctx);
+        let mut region = Region::default();
+        let at = [3, 75, 4];
+        region.gateway_teleported(&ctx, at);
+        let events = block_events(&mut viewer);
+        assert_eq!(events.len(), 1);
+        let gateway = crate::game::end_fight::gateway_block_id().unwrap();
+        assert_eq!(
+            (events[0].block.0, events[0].param_a, events[0].param_b),
+            (gateway, 1, 0)
+        );
+        assert_eq!(
+            events[0].pos,
+            ferrite_protocol::types::BlockPos::new(3, 75, 4)
+        );
+        // A second player stepping through while the beam runs does not start another.
+        region.gateway_teleported(&ctx, at);
+        assert!(block_events(&mut viewer).is_empty());
+    }
+
+    #[test]
+    fn a_gateway_clock_follows_its_section_through_a_region_split_and_merge() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        region.gateway_teleported(&ctx, [3, 75, 4]);
+        assert!(
+            region
+                .split(&[SectionPos(40, 40)].into())
+                .gateway_beams
+                .is_empty()
+        );
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(region.gateway_beams.is_empty());
+        assert!(taken.gateway_beams[&[3, 75, 4]].is_cooling_down());
+        taken.merge(region);
+        assert_eq!(taken.gateway_beams.len(), 1);
     }
 
     fn dropped_items(region: &Region) -> Vec<&'static str> {

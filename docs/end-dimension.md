@@ -29,8 +29,13 @@ What works, how it is built, and what is still missing.
     fires one fireball and returns to the holding pattern; losing the target ends it. `DragonPhase`
     names `Holding`, `Strafe`, `LandingApproach`, `Perched` and `Takeoff`, and each transition has
     a unit test.
-  - The landing cycle is `Holding` -> `LandingApproach` -> `Perched` (200 ticks, breath every 20)
-    -> `Takeoff` -> `Holding`; the transition ticks are pinned by tests.
+  - The landing cycle is `Holding` -> `LandingApproach` -> perched -> `Takeoff` -> `Holding`.
+    The perch has three subphases (`DragonPhase::Perched` is the scanning one, so older saves
+    still load): **scanning** takes off after 100 ticks when no player is within 20 blocks, and
+    starts the attack once a player has been in range for more than 25 ticks; **attacking** roars
+    for 40 ticks; **flaming** lasts 200 ticks with four breath clouds, on ticks 50, 100, 150 and
+    200, then goes back to scanning. Every transition tick is pinned by a unit test in
+    `dragon.rs`, and each subphase and its timer survive a save.
   - On death the podium turns into the exit portal, a dragon egg appears on the pillar on the
     first kill only, and 12000 experience drops.
 - **Respawning the dragon.** Four end crystals in the cells three blocks from the centre start
@@ -58,6 +63,20 @@ What works, how it is built, and what is still missing.
   `a_reloaded_end_gateway_keeps_its_age_and_never_replays_the_creation_beam`
   (`persistence_tests.rs`). The 200 ticks of re-encoding the chunk packet are the only cost.
 
+- **Purple beam.** Each gateway the region holds has a runtime clock
+  (`end_fight::GatewayBeam`) that follows vanilla's `serverTick`: the age counts on past the
+  200-tick creation beam, and whenever it reaches a multiple of 2400 with no beam running the
+  region sends block event 1 (`BlockEvent`, param A 1) for the gateway block to the chunk's
+  viewers; the client draws the purple beam for the next 40 ticks. A player teleporting through a
+  gateway starts the same beam (the player sets `gateway_used`, the region triggers the clock),
+  and a beam that is already running is not restarted. The clock lives in memory because the
+  stored `Age` stays capped at 200 (rewriting it every tick would resave the chunk forever), so a
+  restart resumes counting from the stored age, and it only ticks while a player is in the End.
+  Covered by the timer unit tests in `end_fight.rs`, two region tests (the event reaches the
+  viewers once; the clock follows region split and merge) and the integration test
+  `a_new_end_gateway_sends_the_block_entity_age_for_its_beam`, which waits for the automatic
+  event at `/tick rate 10000`.
+
 - **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
   head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Breath clouds use
   vanilla's shape: radius 3 growing to 5 over 600 ticks, a 20-tick fireball wait, and 3 damage
@@ -81,12 +100,17 @@ What works, how it is built, and what is still missing.
 
 ## Remaining gaps
 
-- **Perched subphases.** The 200-tick `Perched` window is one phase that breathes every 20 ticks.
-  Vanilla splits the perch into scanning, attacking and flaming subphases; those exact timings
-  and the scanning target switch are still approximations. The dragon smashes every block in its
-  body except `#minecraft:dragon_immune`.
-- **Gateway beam.** The purple teleport beam and the automatic 2400-tick beam are not triggered.
-  The creation beam itself does not replay (see "Gateway beam" above).
+- **Perched subphase timings are from memory.** Scanning 100/25 ticks, attacking 40, flaming
+  200 with four clouds, and the 20 block scan range were written from recollection of vanilla's
+  sitting phases and are not checked against the 26.3 jar. Vanilla's scanning dragon may also
+  charge a player when it gives up instead of always taking off, and its attack turns toward the
+  player; neither is modelled. The dragon smashes every block in its body except
+  `#minecraft:dragon_immune`.
+- **Gateway beam.** The purple beam is not gated like vanilla: vanilla refuses to teleport an
+  entity while the beam cooldown runs, here a second player can still step through. The beam
+  clock restarts from the stored age after a restart and is idle when nobody is in the End. The
+  event id and the 2400 and 40 tick values are from memory of `TheEndGatewayBlockEntity`; the
+  client rendering of the purple beam is unverified (see below).
 - **Outer islands.** A gateway landing searches up to 16 blocks around the point 1024 blocks out
   for the nearest loaded column with ground and two air above; an all-void 3x3 chunk area cancels
   the trip instead of dropping the player into the void. The search radius is smaller than
@@ -101,9 +125,9 @@ The step-by-step checks for these are in [`manual-checklist.md`](manual-checklis
 The packets and state above are covered by protocol bots and unit tests. These effects still need
 a real 26.3 client:
 
-- The gateway beam renderer. The tests decode the `Age` packet; they do not prove how the client
-  draws the creation beam.
-- The dragon's circle, strafe orbit, landing/perch/takeoff motion, breath radius, boss bar and the
+- The gateway beam renderer. The tests decode the `Age` packet and the beam block event; they do
+  not prove how the client draws the creation beam or the purple beam.
+- The dragon's circle, strafe orbit, landing/perch/takeoff motion, the perched scan/attack/flame sequence, breath radius, boss bar and the
   obsidian arrival platform.
 - The credits screen and the advancement toast after the first exit-portal trip.
 
