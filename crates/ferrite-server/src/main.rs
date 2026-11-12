@@ -555,6 +555,7 @@ async fn run_server(
         }
     }
     ferrite_server::plugins::chunks::set_world_dir(config.world.clone());
+    game::set_map_server_root(config.world.clone());
     // The plugin bridge and the game loop share these sources, so a plugin write lands in the
     // same chunk data the server ticks.
     let dimensions = game::DimensionRegistry::with_source(

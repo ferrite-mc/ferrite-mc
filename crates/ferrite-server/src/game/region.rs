@@ -290,6 +290,11 @@ pub enum Command {
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
     },
+    /// A plugin pointed the filled map in a slot at a saved map.
+    ItemMapId {
+        slot: u8,
+        id: i32,
+    },
     /// A plugin wore the stack in an inventory slot down to `damage`.
     ItemDamage {
         slot: u8,
@@ -455,6 +460,15 @@ pub(super) fn written_book(
 
 /// The stack worn down to `damage` (never past its last point of durability); `None` for an
 /// empty stack or an item that cannot wear.
+/// The filled map `stack` pointing at saved map `id`; `None` for any other item.
+fn with_map_id(mut stack: ferrite_item::ItemStack, id: i32) -> Option<ferrite_item::ItemStack> {
+    if stack.name() != Some("minecraft:filled_map") {
+        return None;
+    }
+    ferrite_item::set_map_id(&mut stack, id);
+    Some(stack)
+}
+
 /// The metadata a plugin writes onto a stack (name and lore are text JSON).
 pub(super) struct ItemMetaFields {
     pub name: Option<String>,
@@ -1111,6 +1125,8 @@ pub struct Player {
     /// The end gateway block this player just teleported through, for the region to start the
     /// purple beam.
     pub gateway_used: Option<[i32; 3]>,
+    /// Saved maps already sent to this player: id and the identity of the data sent.
+    pub maps_sent: HashMap<i32, usize>,
     /// Left the End once already, so the credits are not shown again (vanilla `seenCredits`).
     /// shortcut: kept in memory only, not saved with the player data.
     pub seen_credits: bool,
@@ -2570,6 +2586,25 @@ impl Player {
         self.sync_containers();
     }
     /// Sets the wear of the stack in a slot; an empty slot or an item that cannot wear is ignored.
+    /// Points the filled map in `slot` at saved map `id`; any other stack is left alone.
+    fn set_item_map_id(&mut self, slot: u8, id: i32) {
+        let slot = usize::from(slot);
+        if slot >= ferrite_inventory::SIZE {
+            return;
+        }
+        let Some(stack) = with_map_id(self.inventory.get(slot).clone(), id) else {
+            return;
+        };
+        self.inventory.set(slot, stack.clone());
+        send(
+            self,
+            &SetPlayerInventory {
+                slot: VarInt(slot as i32),
+                item: stack,
+            },
+        );
+        self.sync_containers();
+    }
     fn set_item_damage(&mut self, slot: u8, damage: i32) {
         let slot = usize::from(slot);
         if slot >= ferrite_inventory::SIZE {
@@ -4333,6 +4368,10 @@ impl Player {
                             custom_data,
                         },
                     );
+                    continue;
+                }
+                Command::ItemMapId { slot, id } => {
+                    self.set_item_map_id(slot, id);
                     continue;
                 }
                 Command::ItemDamage { slot, damage } => {
@@ -10001,6 +10040,9 @@ impl Region {
             self.land_tridents();
             self.tick_dragon_effects(ctx);
             self.tick_potion_clouds();
+            for player in self.players.values_mut() {
+                player.send_held_maps();
+            }
             self.tick_mob_effects(ctx);
             self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
         }
@@ -10333,6 +10375,19 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plugin_can_point_only_a_filled_map_at_a_saved_map() {
+        let filled = ferrite_item::ItemStack::from_name("minecraft:filled_map").unwrap();
+        let pointed = with_map_id(filled, 12).unwrap();
+        assert_eq!(ferrite_item::map_id(&pointed), Some(12));
+        let again = with_map_id(pointed, 13).unwrap();
+        assert_eq!(ferrite_item::map_id(&again), Some(13));
+        let dirt = ferrite_item::ItemStack::from_name("minecraft:dirt").unwrap();
+        assert!(with_map_id(dirt, 1).is_none());
+        let empty_map = ferrite_item::ItemStack::from_name("minecraft:map").unwrap();
+        assert!(with_map_id(empty_map, 1).is_none());
+    }
 
     #[test]
     fn remote_ender_pearl_landing_is_handed_to_the_world_loop() {

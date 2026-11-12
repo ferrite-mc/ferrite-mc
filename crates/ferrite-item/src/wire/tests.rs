@@ -413,6 +413,7 @@ fn typed_components_decode_from_their_network_payloads() {
         ),
         (ids::RARITY, vi(3), Component::Rarity(Rarity::Epic)),
         (ids::REPAIR_COST, vi(3), Component::RepairCost(3)),
+        (ids::MAP_ID, vi(300), Component::MapId(300)),
         (
             ids::CUSTOM_DATA,
             nbt(&Tag::Compound({
@@ -471,7 +472,8 @@ fn hand_written_component_vectors() {
         (ids::MAX_DAMAGE, vec![0x99, 0x0c]), // 1561
         (ids::UNBREAKABLE, vec![]),
         (ids::REPAIR_COST, vec![0x03]),
-        (ids::RARITY, vec![0x03]), // epic
+        (ids::MAP_ID, vec![0xac, 0x02]), // 300
+        (ids::RARITY, vec![0x03]),       // epic
         (ids::ENCHANTMENT_GLINT_OVERRIDE, vec![0x01]),
         (ids::DYED_COLOR, vec![0x00, 0xff, 0x00, 0xff]),
         (ids::CUSTOM_NAME, vec![0x08, 0x00, 0x02, b'H', b'i']),
