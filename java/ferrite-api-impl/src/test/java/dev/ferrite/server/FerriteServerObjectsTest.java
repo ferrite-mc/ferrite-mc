@@ -295,6 +295,49 @@ class FerriteServerObjectsTest {
         assertEquals(org.bukkit.Color.fromRGB(0x94A061), PotionEffectType.GLOWING.getColor());
     }
 
+    @Test void potionEffectIdsComeFromTheGeneratedRegistryReport() {
+        // protocol ids from vanilla/26.3/generated/reports/registries.json (minecraft:mob_effect)
+        assertEquals(0, PotionEffectType.SPEED.getId());
+        assertEquals(1, PotionEffectType.SLOWNESS.getId());
+        assertEquals(21, PotionEffectType.ABSORPTION.getId());
+        assertEquals(30, PotionEffectType.BAD_OMEN.getId());
+        var ids = org.bukkit.Registry.MOB_EFFECT.stream().map(PotionEffectType::getId).sorted().toList();
+        assertEquals(40, ids.size());
+        assertEquals(java.util.stream.IntStream.range(0, 40).boxed().toList(), ids, "ids are unique and dense");
+    }
+
+    @Test void potionEffectAttributeAmountsScaleWithTheAmplifier() {
+        var movementSpeed = org.bukkit.Registry.ATTRIBUTE.get(NamespacedKey.minecraft("movement_speed"));
+        var attackDamage = org.bukkit.Registry.ATTRIBUTE.get(NamespacedKey.minecraft("attack_damage"));
+        assertEquals(0.2, PotionEffectType.SPEED.getAttributeModifierAmount(movementSpeed, 0), 1e-9);
+        assertEquals(0.4, PotionEffectType.SPEED.getAttributeModifierAmount(movementSpeed, 1), 1e-9);
+        assertEquals(-0.45, PotionEffectType.SLOWNESS.getAttributeModifierAmount(movementSpeed, 2), 1e-9);
+        assertEquals(3.0, PotionEffectType.STRENGTH.getAttributeModifierAmount(attackDamage, 0), 1e-9);
+        assertEquals(-12.0, PotionEffectType.WEAKNESS.getAttributeModifierAmount(attackDamage, 2), 1e-9);
+        var noAttribute = assertThrows(IllegalArgumentException.class,
+                () -> PotionEffectType.POISON.getAttributeModifierAmount(attackDamage, 0));
+        assertTrue(noAttribute.getMessage().contains("poison"), noAttribute.getMessage());
+        assertThrows(IllegalArgumentException.class,
+                () -> PotionEffectType.SPEED.getAttributeModifierAmount(movementSpeed, -1));
+    }
+
+    @Test void potionEffectDurationModifierAndFeatureGatingAreDefinedForEveryEffect() {
+        var world = (org.bukkit.World) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[]{org.bukkit.World.class}, (proxy, method, args) -> {
+                    throw new AssertionError("feature gating must not call the world: " + method);
+                });
+        for (var effect : org.bukkit.Registry.MOB_EFFECT) {
+            assertEquals(1.0, effect.getDurationModifier(), 0.0, effect.toString());
+            assertTrue(((FerritePotionEffectType) effect).isEnabledByFeature(world), effect.toString());
+        }
+        var unknown = new FerritePotionEffectType(NamespacedKey.minecraft("no_such_effect"));
+        for (java.util.function.Supplier<Object> read : java.util.List.<java.util.function.Supplier<Object>>of(
+                unknown::getId, unknown::getDurationModifier, () -> unknown.isEnabledByFeature(world))) {
+            var error = assertThrows(UnsupportedOperationException.class, read::get);
+            assertTrue(error.getMessage().contains("no_such_effect"), error.getMessage());
+        }
+    }
+
     @Test void registriesIterateTheirGeneratedKeysWithCachedObjects() {
         var enchantments = org.bukkit.Registry.ENCHANTMENT;
         var listedEnchantments = enchantments.stream().toList();

@@ -13,6 +13,17 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         var prior = (org.bukkit.Registry<T>) REGISTRIES.putIfAbsent(name, created);
         return prior == null ? created : prior;
     }
+    /** Protocol ids from the generated {@code reports/registries.json}, keyed by registry then full key. */
+    private static final java.util.Map<String, java.util.Map<String, Integer>> IDS = loadIds();
+    private static java.util.Map<String, java.util.Map<String, Integer>> loadIds() {
+        var result = new java.util.HashMap<String, java.util.Map<String, Integer>>();
+        try (var stream = java.util.Objects.requireNonNull(FerriteRegistryAccess.class.getResourceAsStream("/ferrite/registry-ids.tsv"), "Missing generated registry ids"); var reader = new java.io.BufferedReader(new java.io.InputStreamReader(stream, java.nio.charset.StandardCharsets.UTF_8))) {
+            for (String line; (line = reader.readLine()) != null;) { String[] parts = line.split("\\t", 3); result.computeIfAbsent(parts[0], ignored -> new java.util.HashMap<>()).put(parts[1], Integer.parseInt(parts[2])); }
+        } catch (java.io.IOException e) { throw new IllegalStateException("Cannot read registry ids", e); }
+        return result;
+    }
+    /** The vanilla protocol (raw) id of a generated registry entry, or -1 when the entry is not in that registry. */
+    static int protocolId(String registry, org.bukkit.NamespacedKey key) { return IDS.getOrDefault(registry, java.util.Map.of()).getOrDefault(key.toString(), -1); }
     private static java.util.Map<String, java.util.Set<String>> loadKeys() {
         var result = new java.util.HashMap<String, java.util.Set<String>>();
         try (var stream = java.util.Objects.requireNonNull(FerriteRegistryAccess.class.getResourceAsStream("/ferrite/registry-keys.tsv"), "Missing generated registry keys"); var reader = new java.io.BufferedReader(new java.io.InputStreamReader(stream, java.nio.charset.StandardCharsets.UTF_8))) {
