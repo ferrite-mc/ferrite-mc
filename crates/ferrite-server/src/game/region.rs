@@ -5501,6 +5501,9 @@ impl Region {
             .iter()
             .filter_map(|(&uuid, (world, _, _))| (*world == ctx.world_id).then_some(uuid))
             .collect();
+        for p in self.players.values() {
+            super::targeting::publish(p.uuid, p.gamemode);
+        }
         let mut players: HashMap<Uuid, ferrite_math::Vec3> = ctx
             .positions
             .lock()
@@ -5520,11 +5523,14 @@ impl Region {
                 ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             );
         }
+        // Every player still counts for spawning and despawning; only targeting skips creative
+        // and spectator players (published by their owner).
+        let positions: Vec<_> = players.values().copied().collect();
+        super::targeting::retain_targetable(&mut players);
         let targets: Vec<_> = players
             .iter()
             .map(|(&uuid, &pos)| ai::Target { uuid, pos })
             .collect();
-        let positions: Vec<_> = players.into_values().collect();
         let trading = self.trading_traders();
         self.tick_trader_lifetimes(&trading, ctx);
         let holders = {

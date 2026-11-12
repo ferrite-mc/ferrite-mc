@@ -8,6 +8,7 @@ mod recipe_unlock;
 pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
+mod targeting;
 mod waypoints;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn, write_spawn};
 #[cfg(test)]

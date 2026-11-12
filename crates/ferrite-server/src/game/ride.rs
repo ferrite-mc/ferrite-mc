@@ -163,6 +163,7 @@ pub fn forget(uuid: Uuid) {
     rides().retain(|rider, seat| *rider != uuid && seat.vehicle != uuid);
     follows().retain(|viewer, target| *viewer != uuid && *target != uuid);
     forget_shoulders(uuid);
+    super::targeting::forget(uuid);
 }
 
 fn shoulders_map() -> MutexGuard<'static, BTreeMap<Uuid, Shoulders>> {
