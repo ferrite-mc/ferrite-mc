@@ -4778,6 +4778,7 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
     // 64-chunk batch (~391 KiB) deterministically overflows the 128 KiB queue once the bot
     // stops reading. The OS defaults are not portable: Linux autotunes loopback buffers into
     // the megabytes, which absorbed the whole batch and let the queue drain instead.
+    let joined_at = std::time::Instant::now();
     let mut slow = Bot::join_with_rate_and_receive_buffer(addr, "Slow", 1.0, Some(8 * 1024)).await;
     let mut fast = Bot::join_with_rate(addr, "Fast", 1.0).await;
     let before = world.tick_samples.lock().unwrap().len();
@@ -4827,6 +4828,11 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
     // Let the slow bot read again; it must receive the timed-out disconnect.
     let mut reason = None;
     let mut reset = None;
+    // Kept for the failure message: a close without a disconnect frame is only explainable
+    // with how long the bot was away and what it read last.
+    let resumed_after = joined_at.elapsed();
+    let mut frames_read = 0usize;
+    let mut last_ids = std::collections::VecDeque::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
         let frame =
@@ -4839,7 +4845,13 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
                 }
             };
         let mut body = frame.as_slice();
-        if VarInt::decode(&mut body).unwrap().0 == PlayDisconnect::ID {
+        frames_read += 1;
+        let id = VarInt::decode(&mut body).unwrap().0;
+        if last_ids.len() == 8 {
+            last_ids.pop_front();
+        }
+        last_ids.push_back(id);
+        if id == PlayDisconnect::ID {
             reason = Some(PlayDisconnect::decode(&mut body).unwrap().reason.0);
             break;
         }
@@ -4867,7 +4879,11 @@ async fn slow_reader_is_disconnected_without_stalling_ticks() {
                 .expect("the server must drop the slow reader");
             }
         }
-        (None, error) => panic!("slow reader got no timed-out disconnect: {error:?}"),
+        (None, error) => panic!(
+            "slow reader got no timed-out disconnect: {error:?}; the bot resumed reading \
+             {resumed_after:?} after joining (server write timeout 30 s), read {frames_read} \
+             frames since, last packet ids {last_ids:?}"
+        ),
     }
     let samples = world.tick_samples.lock().unwrap().clone();
     assert!(
