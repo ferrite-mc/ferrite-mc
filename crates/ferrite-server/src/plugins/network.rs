@@ -373,6 +373,10 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
                 glowing: arg(3)? == "true",
             }
         }
+        // Entries: `item,<slot>,<material>,<count>` and `furnace,<burn>,<burn total>,<cook>,<cook total>`.
+        "sendTileSnapshot(Location,String,List)" => {
+            super::tile_update::packet(block_pos(arg(0)?)?, arg(1)?, arg(2)?, PART)?
+        }
         "sendLinks(ServerLinks)" => {
             let mut links = Vec::new();
             for entry in arg(0)?.split(PART).filter(|e| !e.is_empty()).take(100) {
@@ -716,6 +720,36 @@ mod tests {
             })
         );
         assert_eq!(sign("plaid"), None);
+    }
+
+    #[test]
+    fn a_tile_snapshot_becomes_a_packet_for_that_player_only() {
+        let entries = ["item,2,minecraft:stone,5"].join(&PART.to_string());
+        let command = network_command(&call(
+            "sendTileSnapshot(Location,String,List)",
+            &[&location("4", "65", "-3"), "minecraft:barrel", &entries],
+        ));
+        let Some(PlayerCommand::Packet { player, packet }) = command else {
+            panic!("a packet command");
+        };
+        assert_eq!(player, Uuid::parse_str(PLAYER).unwrap());
+        assert_eq!(
+            packet,
+            PluginPacket::TileUpdate {
+                pos: [4, 65, -3],
+                entity: "minecraft:barrel".into(),
+                items: vec![(2, "minecraft:stone".into(), 5)],
+                furnace: None,
+            }
+        );
+        let refused = |entity: &str| {
+            network_command(&call(
+                "sendTileSnapshot(Location,String,List)",
+                &[&location("4", "65", "-3"), entity, ""],
+            ))
+        };
+        assert_eq!(refused("minecraft:skull"), None);
+        assert_eq!(refused("minecraft:banner"), None);
     }
 
     #[test]

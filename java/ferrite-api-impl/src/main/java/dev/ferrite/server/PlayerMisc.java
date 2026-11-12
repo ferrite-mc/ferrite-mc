@@ -210,9 +210,6 @@ public abstract class PlayerMisc extends PlayerStubs {
         Objects.requireNonNull(slot, "slot");
         return slot != org.bukkit.inventory.EquipmentSlot.BODY && slot != org.bukkit.inventory.EquipmentSlot.SADDLE;
     }
-    /** Shoulder entities cannot be placed yet, so a shoulder is always empty and there is nothing to release. */
-    @Override public org.bukkit.entity.Entity releaseLeftShoulderEntity() { var entity = getShoulderEntityLeft(); setShoulderEntityLeft(null); return entity; }
-    @Override public org.bukkit.entity.Entity releaseRightShoulderEntity() { var entity = getShoulderEntityRight(); setShoulderEntityRight(null); return entity; }
     @Override public Map<String, Object> serialize() {
         var result = new LinkedHashMap<String, Object>();
         result.put("UUID", getUniqueId().toString());
@@ -221,8 +218,8 @@ public abstract class PlayerMisc extends PlayerStubs {
     // ---- projectiles ----------------------------------------------------------------------------
     /**
      * Shoots an arrow, snowball, egg, ender pearl, experience bottle, splash or lingering potion, wind charge, small
-     * fireball or fireball from the eyes, at the power vanilla gives the item that throws it. A trident is refused: the
-     * host's {@code launchThrown} does not accept it. A potion launches as a bare bottle because the call cannot carry
+     * fireball or fireball from the eyes, at the power vanilla gives the item that throws it. A trident flies at
+     * vanilla's 2.5 and is owned by the player. A potion launches as a bare bottle because the call cannot carry
      * its contents, so a callback that tries to set them fails instead of being dropped.
      */
     @Override public <T extends org.bukkit.entity.Projectile> T launchProjectile(Class<? extends T> projectile, org.bukkit.util.Vector velocity, java.util.function.Consumer<? super T> callback) {
@@ -240,8 +237,8 @@ public abstract class PlayerMisc extends PlayerStubs {
             power = 0.5;
         }
         else if (org.bukkit.entity.WindCharge.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.WIND_CHARGE;
-        else if (org.bukkit.entity.Trident.class.isAssignableFrom(projectile))
-            throw new UnsupportedOperationException("Ferrite: Player#launchProjectile(" + projectile.getSimpleName() + ") is not available: the host's launchThrown only accepts snowball, egg, ender pearl, fireballs, experience bottle, wind charge and potions, and has no trident launch");
+        // Vanilla Trident.PROJECTILE_SHOOT_POWER; the host gives it the default trident item, the thrown-trident damage and the player as owner.
+        else if (org.bukkit.entity.Trident.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.TRIDENT; power = 2.5; }
         else if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
         var eye = getEyeLocation();
         var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(thrown != null ? power : 3.0);
@@ -378,16 +375,48 @@ public abstract class PlayerMisc extends PlayerStubs {
     protected void tellHost(String method, Object... args) {
         try { HostBridge.callVoid("Player", getUniqueId(), method, args); } catch (UnsupportedOperationException offline) { /* no host */ }
     }
-    /** Signs are the one tile entity the client can be sent; any other state has no host form. */
+    /**
+     * A tile snapshot shown to this player only (never a world change). Signs and the block entity families the host
+     * models (chest, trapped chest, barrel, shulker boxes, furnace, blast furnace, smoker) are sent; any other
+     * {@code TileState} (banner, skull, ...) has no host model and is refused instead of being sent with invented NBT.
+     */
     @Override public void sendBlockUpdate(org.bukkit.Location loc, org.bukkit.block.TileState tileState) {
         Objects.requireNonNull(loc, "loc");
         Objects.requireNonNull(tileState, "tileState");
-        if (!(tileState instanceof org.bukkit.block.Sign sign)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#sendBlockUpdate(" + tileState.getType() + ")");
-        var side = sign.getSide(org.bukkit.block.sign.Side.FRONT);
-        var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
-        var lines = new String[4];
-        for (int i = 0; i < 4; i++) lines[i] = plain.serialize(side.line(i));
-        sendSignChange(loc, lines, side.getColor(), side.isGlowingText());
+        if (tileState instanceof org.bukkit.block.Sign sign) {
+            var side = sign.getSide(org.bukkit.block.sign.Side.FRONT);
+            var plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText();
+            var lines = new String[4];
+            for (int i = 0; i < 4; i++) lines[i] = plain.serialize(side.line(i));
+            sendSignChange(loc, lines, side.getColor(), side.isGlowingText());
+            return;
+        }
+        var type = tileState.getType();
+        String entity = switch (type) {
+            case CHEST -> "minecraft:chest";
+            case TRAPPED_CHEST -> "minecraft:trapped_chest";
+            case BARREL -> "minecraft:barrel";
+            case FURNACE -> "minecraft:furnace";
+            case BLAST_FURNACE -> "minecraft:blast_furnace";
+            case SMOKER -> "minecraft:smoker";
+            default -> type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
+        };
+        if (entity == null || !(tileState instanceof org.bukkit.block.Container container))
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, chests, barrels, shulker boxes and furnaces as tile entities, and has no banner, skull or other block entity model to encode");
+        var snapshot = container.getSnapshotInventory();
+        var entries = new java.util.ArrayList<String>();
+        for (int slot = 0; slot < snapshot.getSize(); slot++) {
+            var item = snapshot.getItem(slot);
+            if (item == null || item.getType().isAir() || item.getAmount() <= 0) continue;
+            if (item.hasItemMeta())
+                throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate cannot carry item metadata (slot " + slot + " holds " + item.getType() + " with meta); the host snapshot encodes material and amount only");
+            entries.add("item," + slot + "," + item.getType().getKey() + "," + item.getAmount());
+        }
+        if (tileState instanceof org.bukkit.block.Furnace furnace) {
+            // Bukkit exposes the remaining burn time but not the fuel's total, so the total is sent as 0.
+            entries.add("furnace," + furnace.getBurnTime() + ",0," + furnace.getCookTime() + "," + furnace.getCookTimeTotal());
+        }
+        HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, entity, entries);
     }
     @Override public void sendSignChange(org.bukkit.Location loc, String[] lines, org.bukkit.DyeColor dyeColor, boolean hasGlowingText) {
         java.util.List<String> text = new java.util.ArrayList<>();

@@ -32,6 +32,11 @@ pub struct Containers {
     pub launched: Vec<(ferrite_entity::arrow::Kind, Option<ItemStack>)>,
     /// Inventory slots of fishing rods the player used this tick: the region casts or reels.
     pub fishing: Vec<usize>,
+    /// Plugin shoulder changes (`Player#setShoulderEntity*`, `release*ShoulderEntity`) the region applies this tick.
+    pub shoulders: Vec<(
+        ferrite_entity::shoulder::ShoulderSide,
+        ferrite_plugin::ShoulderOp,
+    )>,
     /// The block the open menu belongs to, for vanilla `stillValid` and shared contents.
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
@@ -119,6 +124,7 @@ impl Default for Containers {
             counter: 0,
             thrown: Vec::new(),
             launched: Vec::new(),
+            shoulders: Vec::new(),
             fishing: Vec::new(),
             open_at: None,
             spilled: Vec::new(),
@@ -1274,6 +1280,26 @@ impl Player {
                         location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
                         block_type: VarInt(type_id),
                         nbt: data,
+                    },
+                );
+            }
+            PluginPacket::TileUpdate {
+                pos,
+                entity,
+                items,
+                furnace,
+            } => {
+                let Some(type_id) =
+                    ferrite_data::registries::id("minecraft:block_entity_type", &entity)
+                else {
+                    return;
+                };
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::BlockEntityData {
+                        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                        block_type: VarInt(type_id),
+                        nbt: crate::plugins::tile_update::nbt(&items, furnace),
                     },
                 );
             }

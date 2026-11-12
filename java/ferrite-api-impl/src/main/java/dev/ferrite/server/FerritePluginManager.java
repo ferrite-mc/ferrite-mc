@@ -101,6 +101,7 @@ final class FerritePluginManager extends PluginManagerStubs {
         if (!(plugin instanceof JavaPlugin javaPlugin) || !plugins.contains(javaPlugin)) throw new IllegalArgumentException("Plugin is not loaded: " + plugin.getName());
         if (!plugin.isEnabled()) return;
         javaPlugin.setEnabled(false);
+        FerriteLifecycleManager.dispose(plugin);
         server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);
     }
     @Override public void clearPlugins() { disablePlugins(); }
@@ -166,6 +167,7 @@ final class FerritePluginManager extends PluginManagerStubs {
                 declaredPermissions.put(plugin, declared);
             }
             for (JavaPlugin plugin : plugins) plugin.setEnabled(true);
+            FerriteLifecycleManager.fireCommands(io.papermc.paper.plugin.lifecycle.event.registrar.ReloadableRegistrarEvent.Cause.INITIAL);
         } catch (Throwable e) { disablePlugins(); throw new IllegalStateException("Failed to load plugin", e); }
     }
     public Plugin getPlugin(String name) { Plugin direct = plugins.stream().filter(p -> p.getName().equalsIgnoreCase(name)).findFirst().orElse(null); return direct != null ? direct : plugins.stream().filter(p -> p.getDescription().getProvidedPlugins().stream().anyMatch(alias -> alias.equalsIgnoreCase(name))).findFirst().orElse(null); }
@@ -188,6 +190,7 @@ final class FerritePluginManager extends PluginManagerStubs {
         for (FerriteClassLoader loader : new HashSet<>(loaders.values())) {
             try { loader.close(); } catch (IOException e) { server.getLogger().warning("Could not close plugin classloader: " + e); }
         }
+        FerriteLifecycleManager.disposeAll();
         for (JavaPlugin plugin : plugins) server.unregisterCommands(plugin);
         plugins.clear(); regionAware.clear(); loaders.clear(); declaredPermissions.clear();
     }

@@ -194,6 +194,40 @@ public class FerriteServer extends ServerStubs {
             }
         }
     }
+    /**
+     * Registers a lifecycle-made plugin command: {@code plugin:label} always, and each free name (label, aliases) as
+     * well. Returns the plain names that were free; every map key added goes to {@code keysOut} for later removal.
+     */
+    java.util.Set<String> registerPluginCommand(org.bukkit.plugin.Plugin plugin, String label, String description, java.util.List<String> aliases,
+            org.bukkit.command.CommandExecutor executor, org.bukkit.command.TabCompleter completer, String permission, java.util.List<String> keysOut) {
+        try {
+            var constructor = org.bukkit.command.PluginCommand.class.getDeclaredConstructor(String.class, org.bukkit.plugin.Plugin.class);
+            constructor.setAccessible(true);
+            var command = constructor.newInstance(label, plugin);
+            command.setExecutor(executor);
+            command.setTabCompleter(completer);
+            if (permission != null && !permission.isEmpty()) command.setPermission(permission);
+            if (description != null) command.setDescription(description);
+            command.setAliases(aliases);
+            var accepted = new java.util.LinkedHashSet<String>();
+            var prefix = plugin.getName().toLowerCase(java.util.Locale.ROOT) + ":";
+            var names = new java.util.ArrayList<String>();
+            names.add(label);
+            names.addAll(aliases);
+            synchronized (commands) {
+                for (var name : names) {
+                    var key = name.toLowerCase(java.util.Locale.ROOT);
+                    if (commands.putIfAbsent(key, command) == null) { accepted.add(key); keysOut.add(key); }
+                    commands.put(prefix + key, command);
+                    keysOut.add(prefix + key);
+                }
+            }
+            return accepted;
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("Cannot create a plugin command", error);
+        }
+    }
+    void removeCommandKeys(java.util.List<String> keys) { synchronized (commands) { for (var key : keys) commands.remove(key); } }
     void unregisterCommands(org.bukkit.plugin.Plugin plugin) { commands.values().removeIf(command -> command instanceof org.bukkit.command.PluginCommand pc && pc.getPlugin() == plugin); }
     @Override public org.bukkit.command.PluginCommand getPluginCommand(String name) { var command = commands.get(name.toLowerCase(java.util.Locale.ROOT)); return command instanceof org.bukkit.command.PluginCommand pc ? pc : null; }
     @Override public boolean dispatchCommand(org.bukkit.command.CommandSender sender, String line) {
@@ -423,6 +457,11 @@ public class FerriteServer extends ServerStubs {
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) { return registries.getRegistry(type); }
     private final org.bukkit.inventory.ItemFactory itemFactory = new FerriteItemFactory();
     @Override public org.bukkit.inventory.ItemFactory getItemFactory() { return itemFactory; }
+    /** The host reloads asynchronously; plugins' {@code COMMANDS} handlers run again with cause RELOAD once the request is sent. */
+    @Override public void reloadData() {
+        super.reloadData();
+        FerriteLifecycleManager.fireCommands(io.papermc.paper.plugin.lifecycle.event.registrar.ReloadableRegistrarEvent.Cause.RELOAD);
+    }
     @Override public void reloadPermissions() { facade.permissions.values().forEach(plugins::recalculatePermissionDefaults); }
     // ---- plugin-facing runtime surface kept from the fb4 bridge -----------------------------
     private final FerriteUnsafe unsafe = new FerriteUnsafe();

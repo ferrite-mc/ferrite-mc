@@ -201,13 +201,6 @@ pub fn shoulder_put(player: Uuid, parrot: ShoulderParrot) -> Option<ShoulderSide
 }
 
 /// Puts `parrot` on `side` (or empties it), returning the parrot that was there.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the plugin host handler for Player#setShoulderEntity*, which lives outside game/ and is not wired yet"
-    )
-)]
 pub fn shoulder_set(
     player: Uuid,
     side: ShoulderSide,

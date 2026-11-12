@@ -92,6 +92,8 @@ public final class TestPlugin extends JavaPlugin implements Listener {
         getLogger().info("initial ip ban " + getServer().getIPBans().contains("192.0.2.7"));
         getLogger().info("FerriteTest settings " + getServer().getMotd() + " " + getServer().getMaxPlayers() + " " + getServer().getPort() + " " + getServer().getViewDistance() + " " + getServer().hasWhitelist());
         if (!getName().equals("FerriteLegacyTest")) getLogger().info(dev.ferrite.dependency.Helper.greeting());
+        if (!getName().equals("FerriteLegacyTest")) getLifecycleManager().registerEventHandler(io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents.COMMANDS, event ->
+            event.registrar().register("testlife", "lifecycle command", java.util.List.of("tlife"), (stack, args) -> stack.getSender().sendMessage("life:" + String.join(",", args))));
         getCommand("testping").setExecutor((sender, command, label, args) -> { sender.sendMessage("pong"); return true; });
         var inventoryCommand = getCommand("test-inventory");
         if (inventoryCommand != null) inventoryCommand.setExecutor((sender, command, label, args) -> {

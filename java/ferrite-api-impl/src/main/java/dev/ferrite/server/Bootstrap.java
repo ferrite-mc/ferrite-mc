@@ -414,6 +414,8 @@ public final class Bootstrap {
         StringBuilder out = new StringBuilder();
         for (org.bukkit.plugin.Plugin plugin : server.plugins.getPlugins()) {
             if (!plugin.isEnabled()) continue;
+            for (var made : FerriteLifecycleManager.registeredCommands(plugin))
+                out.append(made.label()).append('\t').append(String.join(",", made.aliases())).append('\t').append(made.permission()).append('\t').append('\n');
             var commands = plugin.getDescription().getCommands();
             if (commands == null) continue;
             for (var entry : commands.entrySet()) {
