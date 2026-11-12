@@ -389,6 +389,7 @@ impl Player {
             }
             return;
         }
+        let maps = self.map_access();
         let menu = self
             .menus
             .open
@@ -407,6 +408,9 @@ impl Player {
             chest[2..].clone_from_slice(&super::equine_chest::load(*animal, len - 2));
         }
         let mut clicker = Clicker::new(&mut self.inventory, infinite, crafter());
+        if let Some(maps) = &maps {
+            clicker = clicker.with_maps(maps);
+        }
         let out = menu.handle_click(
             &mut clicker,
             p.state.0,
@@ -877,7 +881,11 @@ impl Player {
         }
         self.save_station();
         let infinite = self.infinite_materials();
+        let maps = self.map_access();
         let mut clicker = Clicker::new(&mut self.inventory, infinite, crafter());
+        if let Some(maps) = &maps {
+            clicker = clicker.with_maps(maps);
+        }
         self.menus.open_at = None;
         match self.menus.open.take() {
             Some(mut open) => {
@@ -969,6 +977,7 @@ impl Player {
             "stonecutter" => (Menu::stonecutter, "container.stonecutter"),
             "smithing" => (Menu::smithing, "container.upgrade"),
             "loom" => (Menu::loom, "container.loom"),
+            "cartography" => (Menu::cartography, "container.cartography_table"),
             _ => return,
         };
         self.open_menu(make, title, None);
@@ -1402,6 +1411,11 @@ impl Player {
                 Menu::loom as fn(i32) -> Menu,
                 "container.loom",
                 "minecraft:loom",
+            )),
+            Some("minecraft:cartography_table") => Some((
+                Menu::cartography as fn(i32) -> Menu,
+                "container.cartography_table",
+                "minecraft:cartography_table",
             )),
             _ => None,
         };

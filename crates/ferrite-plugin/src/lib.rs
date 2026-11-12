@@ -572,6 +572,12 @@ pub enum PlayerCommand {
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
     },
+    /// Points the filled map in a slot at saved map `id` (Bukkit `MapMeta#setMapView`).
+    ItemMapId {
+        player: uuid::Uuid,
+        slot: u8,
+        id: i32,
+    },
     ItemDamage {
         player: uuid::Uuid,
         slot: u8,

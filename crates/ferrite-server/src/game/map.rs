@@ -380,6 +380,7 @@ impl MapStore {
     }
 
     /// The highest id handed out so far, or -1.
+    #[cfg(test)]
     pub fn last_id(&self) -> i32 {
         self.lock().last_id
     }
@@ -425,6 +426,30 @@ impl MapStore {
         let map = Arc::new(SavedMap::from_nbt(&tag)?);
         inner.cache.insert(id, map.clone());
         Ok(Some(map))
+    }
+
+    /// Gives back the most recently allocated map when nothing else was allocated since: its
+    /// file is removed and the counter steps back. Any other id is left alone (it stays a
+    /// harmless unused map), so a concurrent allocation can never lose its file.
+    pub fn release(&self, id: i32) {
+        let mut inner = self.lock();
+        if id < 0 || id != inner.last_id {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(self.path(id)) {
+            tracing::warn!("could not release map {id}: {error}");
+            return;
+        }
+        inner.cache.remove(&id);
+        inner.last_id = id - 1;
+        match counter_bytes(inner.last_id, self.data_version) {
+            Ok(bytes) => {
+                if let Err(error) = write_atomic(&self.dir.join(COUNTER), &bytes) {
+                    tracing::warn!("could not rewrite the map counter: {error}");
+                }
+            }
+            Err(error) => tracing::warn!("could not encode the map counter: {error}"),
+        }
     }
 
     /// Replaces the saved data of an existing map.
@@ -502,6 +527,15 @@ pub fn set_server_root(root: Option<PathBuf>) {
     *server_root()
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = root;
+}
+
+/// The store of the registered server root, if one is set.
+pub fn primary_store() -> Option<Arc<MapStore>> {
+    let root = server_root()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()?;
+    store_for(&root, ferrite_command::gamerule::DATA_VERSION).ok()
 }
 
 /// The shared store for the world rooted at `own_root`, opened once per directory. A registered
@@ -738,6 +772,22 @@ mod tests {
         let reopened = MapStore::open(dir.path(), 4000).unwrap();
         assert_eq!(*reopened.get(id).unwrap().unwrap(), changed);
         assert!(store.save(id + 5, changed).is_err());
+    }
+
+    #[test]
+    fn release_only_takes_back_the_newest_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MapStore::open(dir.path(), 4000).unwrap();
+        let a = store.allocate(sample()).unwrap();
+        let b = store.allocate(sample()).unwrap();
+        store.release(a);
+        assert!(store.get(a).unwrap().is_some(), "an older map is kept");
+        store.release(b);
+        assert!(store.get(b).unwrap().is_none());
+        assert_eq!(store.last_id(), a);
+        assert_eq!(store.allocate(sample()).unwrap(), b, "the id is reused");
+        let reopened = MapStore::open(dir.path(), 4000).unwrap();
+        assert_eq!(reopened.last_id(), b);
     }
 
     #[test]
