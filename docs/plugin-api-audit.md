@@ -17,8 +17,8 @@
 |---|---|---|
 | `InventoryType.SHULKER_BOX` 플러그인 인벤토리 열기 (`OpenInventory.shulker`) | `7c642e6` | Rust `opens_a_plugin_shulker_box_inventory_as_a_shulker_menu`, Java `aPluginShulkerBoxInventoryIsSentToTheHostAsAShulkerBox` |
 | 서버 lib 테스트 11개 실패 | (코드 변경 없음) | 원인: 워크트리에 gitignore된 `vanilla/26.3/fixture-world`가 없었음. 심볼릭 링크 후 11개 모두 통과 |
-| `World#spawnArrow(Location,Vector,float,float,Class)` | 이 레인 | `spawnArrowShootsAlongTheNormalisedDirectionAtTheGivenSpeed` |
-| `World#getInfiniburn` (차원 타입의 `infiniburn` 블록 태그) | 이 레인 | `infiniburnIsTheDimensionTypesBlockTag` |
+| `World#spawnArrow(Location,Vector,float,float,Class)` | `0a147eb` | `spawnArrowShootsAlongTheNormalisedDirectionAtTheGivenSpeed` |
+| `World#getInfiniburn` (차원 타입의 `infiniburn` 블록 태그) | `0a147eb` | `infiniburnIsTheDimensionTypesBlockTag` |
 
 ## 남은 Player 후보 (호스트 처리기 문자열 없음)
 
