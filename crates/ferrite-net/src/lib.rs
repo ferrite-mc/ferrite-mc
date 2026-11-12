@@ -1,5 +1,6 @@
 pub mod cfb8;
 pub mod forwarding;
+pub mod rate_limit;
 mod raw;
 pub mod settings;
 mod wire;
@@ -137,6 +138,8 @@ pub struct ServerConfig {
     /// Handshake/status/login clients that send nothing for this long are dropped, like vanilla's
     /// Netty `ReadTimeoutHandler`.
     pub read_timeout: Duration,
+    /// Per-connection chat and command token buckets (vanilla's spam threshold by default).
+    pub rate_limits: rate_limit::RateLimits,
     pub game: Option<tokio::sync::mpsc::UnboundedSender<game::GameMessage>>,
 }
 impl Default for ServerConfig {
@@ -156,6 +159,7 @@ impl Default for ServerConfig {
             favicon: None,
             status: Arc::new(StatusState::default()),
             read_timeout: DEFAULT_READ_TIMEOUT,
+            rate_limits: rate_limit::RateLimits::default(),
             game: None,
         }
     }
@@ -740,6 +744,11 @@ async fn play(
         queue,
         config.write_timeout,
     ));
+    let mut limiter =
+        rate_limit::PlayerLimiter::new(&config.rate_limits, std::time::Instant::now());
+    // Set once the spam kick is queued: the writer delivers it and ends the connection, so stop
+    // forwarding input meanwhile.
+    let mut kicked = false;
     let result = async {
         loop {
             tokio::select! {
@@ -755,6 +764,20 @@ async fn play(
                         probe.answered();
                     }
                     if let Some(packet) = game::decode_play(&frame)? {
+                        if kicked {
+                            continue;
+                        }
+                        match limiter.check(&packet, std::time::Instant::now()) {
+                            rate_limit::Verdict::Allow => {}
+                            rate_limit::Verdict::Drop => continue,
+                            rate_limit::Verdict::Kick => {
+                                kicked = true;
+                                let _ = outbound.send(game::Outbound::Disconnect(
+                                    rate_limit::SPAM_KICK_REASON.to_string(),
+                                ));
+                                continue;
+                            }
+                        }
                         game.send(GameMessage::Input { session, uuid, packet })
                             .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
                     }
@@ -1761,6 +1784,211 @@ mod configuration_test {
     }
 }
 
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::game::{GameMessage, ServerboundPlay};
+    use super::rate_limit::{BucketConfig, LimitAction, RateLimits};
+    use super::*;
+    use ferrite_protocol::packets::{
+        configuration::{AcknowledgeFinishConfiguration, FinishConfiguration},
+        login::{LoginAcknowledged, LoginStart},
+        play::{LastSeenUpdate, PlayDisconnect, ServerboundChat, ServerboundChatCommand},
+    };
+    use tokio::net::TcpStream;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    struct Client {
+        stream: TcpStream,
+        encoder: FrameEncoder,
+        decoder: FrameDecoder,
+    }
+    /// A server whose game loop only reports the chat and command packets it is handed.
+    async fn start(limits: RateLimits) -> (Client, UnboundedReceiver<ServerboundPlay>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (game_tx, mut game_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (seen_tx, seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // Hold the outbound sender so the writer stays open for the whole test.
+            let mut _outbound = None;
+            while let Some(message) = game_rx.recv().await {
+                match message {
+                    GameMessage::Joined { outbound, .. } => _outbound = Some(outbound),
+                    GameMessage::Input { packet, .. } => {
+                        let _ = seen_tx.send(packet);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        tokio::spawn(serve(
+            listener,
+            ServerConfig {
+                online_mode: false,
+                game: Some(game_tx),
+                rate_limits: limits,
+                ..Default::default()
+            },
+        ));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut encoder = FrameEncoder::default();
+        let mut decoder = FrameDecoder::default();
+        send_packet(
+            &mut stream,
+            &ferrite_protocol::packets::handshake::Intention {
+                protocol_version: 777,
+                server_address: "localhost".into(),
+                server_port: addr.port(),
+                intent: ferrite_protocol::packets::handshake::Intent::Login,
+            },
+        )
+        .await
+        .unwrap();
+        send_packet(
+            &mut stream,
+            &LoginStart {
+                name: "Steve".into(),
+                uuid: uuid::Uuid::nil(),
+            },
+        )
+        .await
+        .unwrap();
+        read_packet(&mut stream, &mut decoder).await.unwrap();
+        encoder.set_compression(Some(256), 6);
+        decoder.set_compression(Some(256));
+        read_packet(&mut stream, &mut decoder).await.unwrap();
+        send_compressed(&mut stream, &encoder, &LoginAcknowledged)
+            .await
+            .unwrap();
+        loop {
+            let bytes = read_packet(&mut stream, &mut decoder).await.unwrap();
+            if VarInt::decode(&mut bytes.as_slice()).unwrap().0
+                == ferrite_protocol::packets::configuration::ClientboundKnownPacks::ID
+            {
+                break;
+            }
+        }
+        send_compressed(
+            &mut stream,
+            &encoder,
+            &ferrite_protocol::packets::configuration::ServerboundKnownPacks {
+                packs: vec![ferrite_protocol::packets::configuration::KnownPack {
+                    namespace: "minecraft".into(),
+                    id: "core".into(),
+                    version: "26.3".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        loop {
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                read_packet(&mut stream, &mut decoder),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if VarInt::decode(&mut bytes.as_slice()).unwrap().0 == FinishConfiguration::ID {
+                break;
+            }
+        }
+        send_compressed(&mut stream, &encoder, &AcknowledgeFinishConfiguration)
+            .await
+            .unwrap();
+        (
+            Client {
+                stream,
+                encoder,
+                decoder,
+            },
+            seen_rx,
+        )
+    }
+    async fn chat(client: &mut Client) {
+        let packet = ServerboundChat {
+            message: "hi".into(),
+            timestamp: 0,
+            salt: 0,
+            signature: None,
+            last_seen: LastSeenUpdate::new(0, &[], 0),
+        };
+        send_compressed(&mut client.stream, &client.encoder, &packet)
+            .await
+            .unwrap();
+    }
+    async fn command(client: &mut Client) {
+        let packet = ServerboundChatCommand {
+            command: "list".into(),
+        };
+        send_compressed(&mut client.stream, &client.encoder, &packet)
+            .await
+            .unwrap();
+    }
+    /// Collects what the game loop saw until it has been quiet for a moment.
+    async fn drain(seen: &mut UnboundedReceiver<ServerboundPlay>) -> (usize, usize) {
+        let (mut chats, mut commands) = (0, 0);
+        while let Ok(Some(packet)) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), seen.recv()).await
+        {
+            match packet {
+                ServerboundPlay::Chat(_) => chats += 1,
+                ServerboundPlay::ChatCommand(_) => commands += 1,
+                _ => {}
+            }
+        }
+        (chats, commands)
+    }
+    fn limits(chat: u32, command: u32, action: LimitAction) -> RateLimits {
+        let bucket = |burst| {
+            Some(BucketConfig {
+                burst,
+                per_second: 0.0,
+            })
+        };
+        RateLimits {
+            chat: bucket(chat),
+            command: bucket(command),
+            action,
+        }
+    }
+
+    #[tokio::test]
+    async fn spamming_chat_is_kicked_and_the_excess_never_reaches_the_game() {
+        let (mut client, mut seen) = start(limits(2, 100, LimitAction::Kick)).await;
+        for _ in 0..4 {
+            chat(&mut client).await;
+        }
+        let mut reason = None;
+        while reason.is_none() {
+            let bytes = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                read_packet(&mut client.stream, &mut client.decoder),
+            )
+            .await
+            .expect("no disconnect arrived")
+            .expect("connection closed before the disconnect");
+            let mut body = bytes.as_slice();
+            if VarInt::decode(&mut body).unwrap().0 == PlayDisconnect::ID {
+                reason = Some(PlayDisconnect::decode(&mut body).unwrap().reason.0);
+            }
+        }
+        assert_eq!(reason.as_deref(), Some(rate_limit::SPAM_KICK_REASON));
+        assert_eq!(drain(&mut seen).await, (2, 0));
+    }
+
+    #[tokio::test]
+    async fn drop_action_discards_the_excess_and_keeps_the_connection() {
+        let (mut client, mut seen) = start(limits(1, 100, LimitAction::Drop)).await;
+        for _ in 0..3 {
+            chat(&mut client).await;
+        }
+        // Commands have their own bucket and still pass after chat was throttled.
+        command(&mut client).await;
+        command(&mut client).await;
+        assert_eq!(drain(&mut seen).await, (1, 2));
+    }
+}
 #[cfg(test)]
 mod encryption_tests {
     use super::*;
