@@ -88,7 +88,13 @@ pub enum DragonPhase {
     Holding,
     Strafe,
     LandingApproach,
+    /// Perched and scanning for a player (vanilla `DragonSittingScanningPhase`). The name and
+    /// variant predate the subphases, so older saves of a perched dragon load as scanning.
     Perched,
+    /// Perched and roaring at a player before it flames (`DragonSittingAttackingPhase`).
+    PerchAttacking,
+    /// Perched and breathing flame clouds (`DragonSittingFlamingPhase`).
+    PerchFlaming,
     Takeoff,
 }
 
@@ -99,6 +105,8 @@ impl DragonPhase {
             Self::Strafe => "strafe",
             Self::LandingApproach => "landing_approach",
             Self::Perched => "perched",
+            Self::PerchAttacking => "perch_attacking",
+            Self::PerchFlaming => "perch_flaming",
             Self::Takeoff => "takeoff",
         }
     }
@@ -109,6 +117,8 @@ impl DragonPhase {
             "strafe" => Some(Self::Strafe),
             "landing_approach" => Some(Self::LandingApproach),
             "perched" => Some(Self::Perched),
+            "perch_attacking" => Some(Self::PerchAttacking),
+            "perch_flaming" => Some(Self::PerchFlaming),
             "takeoff" => Some(Self::Takeoff),
             _ => None,
         }
@@ -145,10 +155,20 @@ pub fn holding_decision(alive_crystals: u32, roll: u32, has_target: bool) -> Hol
 }
 /// The distance to the perch spot at which the approach becomes a perch.
 pub const PERCH_REACH: f64 = 4.0;
-/// How long the dragon stays perched before taking off again.
-pub const PERCH_TICKS: u32 = 200;
 pub const PERCH_SPOT: Vec3 = Vec3::new(0.0, 68.0, 0.0);
-pub const BREATH_INTERVAL: u32 = 20;
+/// Perched subphase timings, from vanilla's sitting phases as remembered (not checked against
+/// the 26.3 jar): a scanning dragon with no player near takes off after 100 ticks; with a player
+/// within `SCAN_RANGE` it starts attacking once it has scanned for more than 25 ticks; the
+/// attack roars for 40 ticks, then the dragon flames for 200 ticks, spreading four breath
+/// clouds, and goes back to scanning.
+pub const SCAN_IDLE_TICKS: u32 = 100;
+pub const SCAN_ATTACK_DELAY: u32 = 25;
+pub const SCAN_RANGE: f64 = 20.0;
+pub const ATTACK_TICKS: u32 = 40;
+pub const FLAME_TICKS: u32 = 200;
+pub const FLAME_ATTACKS: u32 = 4;
+/// Ticks between the breath clouds of one flaming phase.
+pub const FLAME_INTERVAL: u32 = FLAME_TICKS / FLAME_ATTACKS;
 /// The distance to the circling path at which takeoff ends.
 pub const TAKEOFF_REACH: f64 = 4.0;
 /// Vanilla `DragonStrafePlayerPhase`: the dragon flies around the selected player and fires a
@@ -514,7 +534,10 @@ pub fn fly(
         DragonPhase::Strafe => {
             strafe_target.map_or(previous, |target| strafe_point(target.pos, phase_ticks))
         }
-        DragonPhase::LandingApproach | DragonPhase::Perched => PERCH_SPOT,
+        DragonPhase::LandingApproach
+        | DragonPhase::Perched
+        | DragonPhase::PerchAttacking
+        | DragonPhase::PerchFlaming => PERCH_SPOT,
         DragonPhase::Takeoff => circle,
         DragonPhase::Holding => match combat_phase {
             Phase::Circling => circle,
@@ -561,9 +584,34 @@ pub fn fly(
             phase = DragonPhase::Perched;
             phase_ticks = 0;
         }
-        DragonPhase::Perched if phase_ticks >= PERCH_TICKS => {
-            phase = DragonPhase::Takeoff;
+        // Scanning: a player in range for more than `SCAN_ATTACK_DELAY` ticks starts the attack;
+        // with nobody near, the dragon gives up after `SCAN_IDLE_TICKS`.
+        DragonPhase::Perched => {
+            let near = players
+                .iter()
+                .any(|target| target.pos.distance_to_sqr(pos) <= SCAN_RANGE * SCAN_RANGE);
+            if near && phase_ticks > SCAN_ATTACK_DELAY {
+                phase = DragonPhase::PerchAttacking;
+                phase_ticks = 0;
+            } else if !near && phase_ticks >= SCAN_IDLE_TICKS {
+                phase = DragonPhase::Takeoff;
+                phase_ticks = 0;
+            }
+        }
+        DragonPhase::PerchAttacking if phase_ticks >= ATTACK_TICKS => {
+            phase = DragonPhase::PerchFlaming;
             phase_ticks = 0;
+        }
+        DragonPhase::PerchFlaming => {
+            if phase_ticks.is_multiple_of(FLAME_INTERVAL) {
+                events.push(MobEvent::Breath {
+                    pos: Vec3::new(pos.x, PERCH_SPOT.y - 3.0, pos.z),
+                });
+            }
+            if phase_ticks >= FLAME_TICKS {
+                phase = DragonPhase::Perched;
+                phase_ticks = 0;
+            }
         }
         DragonPhase::Takeoff if pos.distance_to_sqr(circle) <= TAKEOFF_REACH * TAKEOFF_REACH => {
             phase = DragonPhase::Holding;
@@ -602,16 +650,6 @@ pub fn fly(
             events.push(MobEvent::DragonFireball { from, direction });
             bow_timer = FIREBALL_COOLDOWN;
         }
-    }
-    // Perched on the portal it breathes a cloud at its feet.
-    if phase == DragonPhase::Perched
-        && bow_timer == 0
-        && phase_ticks.is_multiple_of(BREATH_INTERVAL)
-    {
-        events.push(MobEvent::Breath {
-            pos: Vec3::new(pos.x, PERCH_SPOT.y - 3.0, pos.z),
-        });
-        bow_timer = BREATH_INTERVAL as u16;
     }
     if let Some(data) = store.data_mut(key) {
         data.yaw = yaw;
@@ -887,49 +925,23 @@ mod tests {
     }
 
     #[test]
-    fn it_lands_perches_breathes_and_takes_off() {
-        let mut rng = Rng::new(1);
-        let mut store = EntityStore::new(4);
-        let (spot, _) = position_at(0);
-        let key = store.insert(mob::new_mob(mob::MobKind::EnderDragon, spot, &mut rng));
-        mob::state_mut(&mut store, key).unwrap().dragon_phase = DragonPhase::LandingApproach;
-        let mut events = Vec::new();
-        let mut saw_perched = false;
-        let mut saw_takeoff = false;
-        for _ in 0..(PERCH_TICKS + 120) {
-            fly(&mut store, key, &[], &mut rng, &mut events);
-            match mob::state(&store, key).unwrap().dragon_phase {
-                DragonPhase::Perched => saw_perched = true,
-                DragonPhase::Takeoff => saw_takeoff = true,
-                _ => {}
-            }
-        }
-        assert!(saw_perched, "the approach ends in a perch");
-        assert!(saw_takeoff, "the perch ends in takeoff");
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, MobEvent::Breath { .. })),
-            "the perched dragon breathes"
-        );
-        assert_eq!(
-            mob::state(&store, key).unwrap().dragon_phase,
-            DragonPhase::Holding,
-            "it returns to the holding pattern after takeoff"
-        );
-    }
-
-    #[test]
     fn every_dragon_phase_round_trips_through_its_saved_name() {
         for phase in [
             DragonPhase::Holding,
             DragonPhase::Strafe,
             DragonPhase::LandingApproach,
             DragonPhase::Perched,
+            DragonPhase::PerchAttacking,
+            DragonPhase::PerchFlaming,
             DragonPhase::Takeoff,
         ] {
             assert_eq!(DragonPhase::from_name(phase.name()), Some(phase));
         }
+        // A dragon saved while perched, before the subphases existed, loads as scanning.
+        assert_eq!(
+            DragonPhase::from_name("perched"),
+            Some(DragonPhase::Perched)
+        );
         assert_eq!(DragonPhase::from_name("unknown"), None);
         assert_eq!(DragonPhase::default(), DragonPhase::Holding);
     }
@@ -978,8 +990,7 @@ mod tests {
         assert_eq!(state.dragon_phase_ticks, 0);
     }
 
-    #[test]
-    fn perch_takeoff_and_holding_happen_on_vanilla_ticks() {
+    fn perched(phase: DragonPhase) -> (EntityStore, EntityKey, Rng) {
         let mut rng = Rng::new(1);
         let mut store = EntityStore::new(4);
         let key = store.insert(mob::new_mob(
@@ -987,33 +998,169 @@ mod tests {
             PERCH_SPOT,
             &mut rng,
         ));
-        mob::state_mut(&mut store, key).unwrap().dragon_phase = DragonPhase::LandingApproach;
-        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
-        assert_eq!(
-            mob::state(&store, key).unwrap().dragon_phase,
-            DragonPhase::Perched
-        );
-        for _ in 0..(PERCH_TICKS - 1) {
-            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        let state = mob::state_mut(&mut store, key).unwrap();
+        state.dragon_phase = phase;
+        state.dragon_phase_ticks = 0;
+        (store, key, rng)
+    }
+
+    fn near_player() -> [Target; 1] {
+        [Target {
+            uuid: uuid::Uuid::from_u128(31),
+            pos: PERCH_SPOT + Vec3::new(10.0, 0.0, 0.0),
+        }]
+    }
+
+    /// Runs `n` ticks and returns the tick numbers (1-based) on which the dragon breathed.
+    fn run(
+        store: &mut EntityStore,
+        key: EntityKey,
+        rng: &mut Rng,
+        players: &[Target],
+        n: u32,
+    ) -> Vec<u32> {
+        let mut breaths = Vec::new();
+        for tick in 1..=n {
+            let mut events = Vec::new();
+            fly(store, key, players, rng, &mut events);
+            if events
+                .iter()
+                .any(|event| matches!(event, MobEvent::Breath { .. }))
+            {
+                breaths.push(tick);
+            }
         }
+        breaths
+    }
+
+    fn phase_of(store: &EntityStore, key: EntityKey) -> DragonPhase {
+        mob::state(store, key).unwrap().dragon_phase
+    }
+
+    #[test]
+    fn landing_ends_in_the_scanning_perch() {
+        let (mut store, key, mut rng) = perched(DragonPhase::LandingApproach);
+        run(&mut store, key, &mut rng, &[], 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::Perched);
+    }
+
+    #[test]
+    fn scanning_with_nobody_near_takes_off_on_tick_100_without_breathing() {
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        let breaths = run(&mut store, key, &mut rng, &[], SCAN_IDLE_TICKS - 1);
         assert_eq!(
-            mob::state(&store, key).unwrap().dragon_phase,
+            phase_of(&store, key),
             DragonPhase::Perched,
-            "the perch lasts {PERCH_TICKS} ticks"
+            "still scanning at 99"
         );
-        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        run(&mut store, key, &mut rng, &[], 1);
         assert_eq!(
-            mob::state(&store, key).unwrap().dragon_phase,
-            DragonPhase::Takeoff
+            phase_of(&store, key),
+            DragonPhase::Takeoff,
+            "gives up at 100"
         );
+        assert!(breaths.is_empty());
+        // Takeoff ends in the holding pattern once the dragon reaches the circle.
         let age = mob::state(&store, key).unwrap().wander_timer;
         let (circle, _) = position_at(age + 1);
         store.set_pos(key, circle);
-        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        run(&mut store, key, &mut rng, &[], 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::Holding);
+    }
+
+    #[test]
+    fn a_player_in_range_starts_the_attack_after_more_than_25_ticks_of_scanning() {
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        run(&mut store, key, &mut rng, &near_player(), SCAN_ATTACK_DELAY);
         assert_eq!(
-            mob::state(&store, key).unwrap().dragon_phase,
-            DragonPhase::Holding,
-            "takeoff ends when the dragon reaches the circle"
+            phase_of(&store, key),
+            DragonPhase::Perched,
+            "tick 25 still scans"
+        );
+        run(&mut store, key, &mut rng, &near_player(), 1);
+        assert_eq!(
+            phase_of(&store, key),
+            DragonPhase::PerchAttacking,
+            "tick 26 attacks"
+        );
+        assert_eq!(mob::state(&store, key).unwrap().dragon_phase_ticks, 0);
+    }
+
+    #[test]
+    fn a_player_out_of_scan_range_does_not_start_an_attack() {
+        let far = [Target {
+            uuid: uuid::Uuid::from_u128(32),
+            pos: PERCH_SPOT + Vec3::new(SCAN_RANGE + 5.0, 0.0, 0.0),
+        }];
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        run(&mut store, key, &mut rng, &far, SCAN_IDLE_TICKS - 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::Perched);
+        run(&mut store, key, &mut rng, &far, 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::Takeoff);
+    }
+
+    #[test]
+    fn a_player_who_leaves_before_the_delay_does_not_start_an_attack() {
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        run(&mut store, key, &mut rng, &near_player(), 20);
+        run(&mut store, key, &mut rng, &[], SCAN_IDLE_TICKS - 20);
+        assert_eq!(phase_of(&store, key), DragonPhase::Takeoff);
+    }
+
+    #[test]
+    fn the_attack_roars_for_40_ticks_then_flames() {
+        let (mut store, key, mut rng) = perched(DragonPhase::PerchAttacking);
+        let breaths = run(&mut store, key, &mut rng, &near_player(), ATTACK_TICKS - 1);
+        assert_eq!(
+            phase_of(&store, key),
+            DragonPhase::PerchAttacking,
+            "tick 39"
+        );
+        assert!(breaths.is_empty(), "no breath while roaring");
+        run(&mut store, key, &mut rng, &near_player(), 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::PerchFlaming, "tick 40");
+    }
+
+    #[test]
+    fn flaming_breathes_four_clouds_on_every_50th_tick_then_scans_again() {
+        let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
+        let breaths = run(&mut store, key, &mut rng, &near_player(), FLAME_TICKS - 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::PerchFlaming, "tick 199");
+        let last = run(&mut store, key, &mut rng, &near_player(), 1);
+        assert_eq!(
+            phase_of(&store, key),
+            DragonPhase::Perched,
+            "tick 200 scans again"
+        );
+        assert_eq!(mob::state(&store, key).unwrap().dragon_phase_ticks, 0);
+        let all: Vec<u32> = breaths
+            .into_iter()
+            .chain(last.into_iter().map(|_| 200))
+            .collect();
+        assert_eq!(all, vec![50, 100, 150, 200]);
+        assert_eq!(all.len() as u32, FLAME_ATTACKS);
+    }
+
+    #[test]
+    fn a_player_who_stays_keeps_the_dragon_cycling_scan_attack_flame() {
+        let (mut store, key, mut rng) = perched(DragonPhase::LandingApproach);
+        let mut seen = Vec::new();
+        for _ in 0..700 {
+            run(&mut store, key, &mut rng, &near_player(), 1);
+            let phase = phase_of(&store, key);
+            if seen.last() != Some(&phase) {
+                seen.push(phase);
+            }
+        }
+        assert_eq!(
+            seen[..5],
+            [
+                DragonPhase::Perched,
+                DragonPhase::PerchAttacking,
+                DragonPhase::PerchFlaming,
+                DragonPhase::Perched,
+                DragonPhase::PerchAttacking,
+            ]
         );
     }
 

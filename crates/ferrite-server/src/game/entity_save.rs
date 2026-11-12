@@ -989,6 +989,33 @@ mod tests {
     }
 
     #[test]
+    fn every_perched_subphase_survives_a_save_with_its_timer() {
+        for phase in [
+            DragonPhase::Perched,
+            DragonPhase::PerchAttacking,
+            DragonPhase::PerchFlaming,
+        ] {
+            let mut record = mob::new_mob(
+                MobKind::EnderDragon,
+                Vec3::new(0.5, 68.0, 0.5),
+                &mut Rng::default(),
+            );
+            {
+                let state = record.data.mob.as_mut().unwrap();
+                state.dragon_phase = phase;
+                state.dragon_phase_ticks = 77;
+            }
+            let loaded = from_nbt(&to_nbt(&[record]));
+            let state = loaded[0].data.mob.as_ref().unwrap();
+            assert_eq!(
+                (state.dragon_phase, state.dragon_phase_ticks),
+                (phase, 77),
+                "{phase:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_lead_and_a_saddle_survive_a_save() {
         let mut record = ferrite_entity::mob::new_mob(
             ferrite_entity::mob::MobKind::Llama,
