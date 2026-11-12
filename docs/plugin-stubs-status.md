@@ -145,6 +145,17 @@ CMI가 동작한다고 말할 수 없다.
   scoped clippy, `./gradlew compileJava`. `./gradlew test`와 실제 26.3 클라이언트 드래그 화면은
   아직 확인하지 않았다.
 
+## 2026-11-12 — W6: Bukkit API 폭 넓히기 (`java/` 전용, Rust 변경 없음)
+
+- **`PotionEffectType`** (`0f64f79`): `getId`는 생성된 `registries.json`의 protocol id(`registry-ids.tsv`), `getAttributeModifierAmount`는
+  바닐라 `amount * (amplifier + 1)`, `isEnabledByFeature`는 26.3 `MobEffects`에 required feature가 없어 항상 true,
+  `getDurationModifier`는 26.3 `MobEffect`에 필드가 없어 1.0. 색·카테고리는 보고서에 없어 기존 `FerritePotionEffectData` 표를 유지한다.
+- **`RegistryAccess`**: `block`/`item`/`menu`/`entity_type`의 `size`·`stream`·`iterator`가 호스트로 가서 실패하던 것을 생성 키 목록으로 고쳤고,
+  `villager_profession`·`point_of_interest_type`·`villager_type`·`data_component_type`·`particle_type`·`potion`과 데이터 기반 21개(`trim_*`, `*_variant`,
+  `jukebox_song`, `banner_pattern`, `decorated_pot_pattern`, `painting_variant`, `instrument`, `sulfur_cube_archetype`, `dialog`)를 새로 연결했다.
+  `game_rule`·`memory_module_type`만 명시적 `UnsupportedOperationException`이다. 검증: `FerriteRegistryBackingTest`(생성기와 별개로 센 개수 대조).
+  이 줄의 값 객체(예: `Wolf.Variant`) 속성은 여전히 키 신원뿐이다. 속성을 읽으면 호스트 브리지로 간다.
+
 ## 2026-11-11 — W5: 런타임 월드 재접속과 플레이어 동작
 
 - **재접속 갭 닫힘.** 플레이어 파일(`Saved.world`)이 런타임 월드 UUID를 저장하고, 접속 시 그 월드가 로드돼

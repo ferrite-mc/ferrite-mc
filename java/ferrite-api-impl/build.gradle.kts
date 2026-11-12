@@ -31,6 +31,11 @@ val generateRegistryKeys by tasks.registering(Exec::class) {
     inputs.dir(vanilla.resolve("data/minecraft/enchantment"))
     inputs.dir(vanilla.resolve("data/minecraft/worldgen/biome"))
     inputs.dir(vanilla.resolve("data/minecraft/damage_type"))
+    for (name in listOf("trim_material", "trim_pattern", "wolf_variant", "wolf_sound_variant", "jukebox_song",
+            "banner_pattern", "decorated_pot_pattern", "painting_variant", "instrument", "cat_variant",
+            "cat_sound_variant", "frog_variant", "chicken_variant", "chicken_sound_variant", "cow_variant",
+            "cow_sound_variant", "pig_variant", "pig_sound_variant", "zombie_nautilus_variant",
+            "sulfur_cube_archetype", "dialog")) inputs.dir(vanilla.resolve("data/minecraft/$name"))
     outputs.dir(registryOutput)
     commandLine("python", projectDir.resolve("tools/generate_registry_keys.py"), vanilla, registryOutput.get().file("ferrite/registry-keys.tsv").asFile)
 }

@@ -48,6 +48,8 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type == org.bukkit.generator.structure.StructureType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.STRUCTURE_TYPE);
         if (type == org.bukkit.damage.DamageType.class) return (org.bukkit.Registry<T>) cached("damage_type", FerriteRegistryAccess::damageTypeRegistry);
         if (type == org.bukkit.map.MapCursor.Type.class) return (org.bukkit.Registry<T>) cached("map_decoration_type", FerriteRegistryAccess::mapDecorationRegistry);
+        var kind = KIND_BY_CLASS.get(type);
+        if (kind != null) return cast(byKind(kind));
         return unavailable(type.getName());
     }
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(io.papermc.paper.registry.RegistryKey<T> type) {
@@ -66,7 +68,91 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         if (type.equals(io.papermc.paper.registry.RegistryKey.STRUCTURE_TYPE)) return cast(cached("worldgen/structure_type", FerriteRegistryAccess::structureTypeRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.DAMAGE_TYPE)) return cast(cached("damage_type", FerriteRegistryAccess::damageTypeRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.MAP_DECORATION_TYPE)) return cast(cached("map_decoration_type", FerriteRegistryAccess::mapDecorationRegistry));
-        return unavailable(type.key().toString());
+        var name = type.key().toString();
+        if (name.startsWith("minecraft:") && KINDS.contains(name.substring("minecraft:".length())))
+            return cast(byKind(name.substring("minecraft:".length())));
+        return unavailable(name);
+    }
+
+    private record Identity(String kind, Class<? extends org.bukkit.Keyed> type) {}
+    /** Interface-typed registries whose members are plain identities backed by the generated key list. */
+    private static final java.util.List<Identity> IDENTITIES = java.util.List.of(
+        new Identity("villager_profession", org.bukkit.entity.Villager.Profession.class),
+        new Identity("point_of_interest_type", io.papermc.paper.entity.poi.PoiType.class),
+        new Identity("villager_type", org.bukkit.entity.Villager.Type.class),
+        new Identity("data_component_type", io.papermc.paper.datacomponent.DataComponentType.class),
+        new Identity("trim_material", org.bukkit.inventory.meta.trim.TrimMaterial.class),
+        new Identity("trim_pattern", org.bukkit.inventory.meta.trim.TrimPattern.class),
+        new Identity("wolf_variant", org.bukkit.entity.Wolf.Variant.class),
+        new Identity("wolf_sound_variant", org.bukkit.entity.Wolf.SoundVariant.class),
+        new Identity("jukebox_song", org.bukkit.JukeboxSong.class),
+        new Identity("banner_pattern", org.bukkit.block.banner.PatternType.class),
+        new Identity("decorated_pot_pattern", io.papermc.paper.block.pot.PotPatternType.class),
+        new Identity("painting_variant", org.bukkit.Art.class),
+        new Identity("cat_variant", org.bukkit.entity.Cat.Type.class),
+        new Identity("cat_sound_variant", org.bukkit.entity.Cat.SoundVariant.class),
+        new Identity("frog_variant", org.bukkit.entity.Frog.Variant.class),
+        new Identity("chicken_variant", org.bukkit.entity.Chicken.Variant.class),
+        new Identity("chicken_sound_variant", org.bukkit.entity.Chicken.SoundVariant.class),
+        new Identity("cow_variant", org.bukkit.entity.Cow.Variant.class),
+        new Identity("cow_sound_variant", org.bukkit.entity.Cow.SoundVariant.class),
+        new Identity("pig_variant", org.bukkit.entity.Pig.Variant.class),
+        new Identity("pig_sound_variant", org.bukkit.entity.Pig.SoundVariant.class),
+        new Identity("zombie_nautilus_variant", org.bukkit.entity.ZombieNautilus.Variant.class),
+        new Identity("sulfur_cube_archetype", org.bukkit.entity.SulfurCube.Archetype.class),
+        new Identity("dialog", io.papermc.paper.dialog.Dialog.class));
+    private static final java.util.Map<Class<?>, String> KIND_BY_CLASS = kindsByClass();
+    private static final java.util.Set<String> KINDS = kinds();
+    private static java.util.Map<Class<?>, String> kindsByClass() {
+        var result = new java.util.HashMap<Class<?>, String>();
+        for (var identity : IDENTITIES) result.put(identity.type(), identity.kind());
+        result.put(org.bukkit.Particle.class, "particle_type");
+        result.put(org.bukkit.potion.PotionType.class, "potion");
+        result.put(org.bukkit.MusicInstrument.class, "instrument");
+        return java.util.Map.copyOf(result);
+    }
+    private static java.util.Set<String> kinds() { return new java.util.HashSet<>(KIND_BY_CLASS.values()); }
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static org.bukkit.Registry<?> byKind(String kind) {
+        return switch (kind) {
+            case "particle_type" -> cached(kind, () -> enumRegistry(kind, org.bukkit.Particle.class));
+            case "potion" -> cached(kind, () -> enumRegistry(kind, org.bukkit.potion.PotionType.class));
+            case "instrument" -> cached(kind, FerriteRegistryAccess::instrumentRegistry);
+            default -> {
+                var identity = IDENTITIES.stream().filter(i -> i.kind().equals(kind)).findFirst().orElseThrow();
+                yield cached(kind, () -> identityRegistry(kind, (Class) identity.type()));
+            }
+        };
+    }
+    /**
+     * Enum-backed registries index the constants by their own key. The index is built on first use because
+     * {@link org.bukkit.Registry}'s static initializer calls back into this class while the enums may still be loading.
+     */
+    private static <E extends Enum<E> & org.bukkit.Keyed> org.bukkit.Registry<E> enumRegistry(String kind, Class<E> type) {
+        return new KeyedRegistry<E>(kind) {
+            private java.util.Map<org.bukkit.NamespacedKey, E> byKey;
+            private synchronized java.util.Map<org.bukkit.NamespacedKey, E> index() {
+                if (byKey == null) {
+                    var map = new java.util.HashMap<org.bukkit.NamespacedKey, E>();
+                    for (var constant : type.getEnumConstants()) map.put(constant.getKey(), constant);
+                    byKey = map;
+                }
+                return byKey;
+            }
+            @Override public E get(org.bukkit.NamespacedKey key) { return contains(kind, key) ? index().get(key) : null; }
+        };
+    }
+    private static org.bukkit.Registry<org.bukkit.MusicInstrument> instrumentRegistry() {
+        return new KeyedRegistry<org.bukkit.MusicInstrument>("instrument") {
+            private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.MusicInstrument> entries = new java.util.concurrent.ConcurrentHashMap<>();
+            @Override public org.bukkit.MusicInstrument get(org.bukkit.NamespacedKey key) {
+                if (!contains("instrument", key)) return null;
+                // MusicInstrument's static constants re-enter get(), so computeIfAbsent would be a recursive update.
+                var existing = entries.get(key); if (existing != null) return existing;
+                var created = new FerriteMusicInstrument(key);
+                var prior = entries.putIfAbsent(key, created); return prior == null ? created : prior;
+            }
+        };
     }
     /** 26.3 map decoration type keys in protocol-id order. */
     private static final String[] MAP_DECORATION_KEYS = {
@@ -135,7 +221,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         };
     }
     @SuppressWarnings("unchecked") private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> menuRegistry() {
-        return (org.bukkit.Registry<T>) new BaseRegistry<org.bukkit.inventory.MenuType>("menu") {
+        return (org.bukkit.Registry<T>) new KeyedRegistry<org.bukkit.inventory.MenuType>("menu") {
             private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.inventory.MenuType> entries = new java.util.concurrent.ConcurrentHashMap<>();
             @Override public org.bukkit.inventory.MenuType get(org.bukkit.NamespacedKey key) {
                 if (!contains("menu", key)) return null;
@@ -152,7 +238,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         };
     }
     @SuppressWarnings("unchecked") private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> itemRegistry() {
-        return (org.bukkit.Registry<T>) new BaseRegistry<org.bukkit.inventory.ItemType>("item") {
+        return (org.bukkit.Registry<T>) new KeyedRegistry<org.bukkit.inventory.ItemType>("item") {
             private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.inventory.ItemType> entries = new java.util.concurrent.ConcurrentHashMap<>();
             @Override public org.bukkit.inventory.ItemType get(org.bukkit.NamespacedKey key) {
                 if (!contains("item", key)) return null;
@@ -177,7 +263,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         };
     }
     private static org.bukkit.Registry<org.bukkit.block.BlockType> blockRegistry() {
-        return new BaseRegistry<>("block") {
+        return new KeyedRegistry<>("block") {
             private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.block.BlockType> entries = new java.util.concurrent.ConcurrentHashMap<>();
             @Override public org.bukkit.block.BlockType get(org.bukkit.NamespacedKey key) {
                 if (!contains("block", key)) return null;
@@ -202,7 +288,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         };
     }
     private static org.bukkit.Registry<org.bukkit.entity.EntityType> entityRegistry() {
-        return new BaseRegistry<>("entity_type") {
+        return new KeyedRegistry<>("entity_type") {
             @Override public org.bukkit.entity.EntityType get(org.bukkit.NamespacedKey key) {
                 if (!contains("entity_type", key)) return null;
                 try { return org.bukkit.entity.EntityType.valueOf(key.getKey().toUpperCase(java.util.Locale.ROOT)); }
@@ -346,11 +432,46 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             default -> 0;
         };
     }
-    private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> unavailable(String name) { return new BaseRegistry<T>(name) {}; }
+    private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> unavailable(String name) { return new UnavailableRegistry<>(name); }
+    /**
+     * A registry the generated vanilla reports cannot back. The Rust host has no registry call, so every read fails
+     * with the reason instead of reaching the bridge.
+     */
+    private static final class UnavailableRegistry<T extends org.bukkit.Keyed> extends BaseRegistry<T> {
+        private final String reason;
+        UnavailableRegistry(String name) {
+            super(name);
+            this.reason = name.contains("game_rule") || name.endsWith("GameRule")
+                ? "GameRule needs a value type and default that the generated reports do not contain"
+                : name.contains("memory_module_type") || name.endsWith("MemoryKey")
+                ? "MemoryKey has a private constructor and value types that the generated reports do not contain"
+                : "no generated vanilla data is mapped to it";
+        }
+        private UnsupportedOperationException no() { return new UnsupportedOperationException("Ferrite: registry " + name() + " is not available: " + reason); }
+        @Override public T get(org.bukkit.NamespacedKey key) { throw no(); }
+        @Override public boolean hasTag(io.papermc.paper.registry.tag.TagKey<T> key) { throw no(); }
+        @Override public io.papermc.paper.registry.tag.Tag<T> getTag(io.papermc.paper.registry.tag.TagKey<T> key) { throw no(); }
+        @Override public java.util.Collection<io.papermc.paper.registry.tag.Tag<T>> getTags() { throw no(); }
+        @Override public java.util.stream.Stream<T> stream() { throw no(); }
+        @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { throw no(); }
+        @Override public int size() { throw no(); }
+        @Override public java.util.Iterator<T> iterator() { throw no(); }
+    }
+    /** A registry whose members are exactly the generated key list; subclasses only resolve one key. */
+    private abstract static class KeyedRegistry<T extends org.bukkit.Keyed> extends BaseRegistry<T> {
+        private final String kind;
+        KeyedRegistry(String kind) { super(kind); this.kind = kind; }
+        @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() {
+            return KEYS.getOrDefault(kind, java.util.Set.of()).stream().sorted().map(org.bukkit.NamespacedKey::fromString).filter(key -> get(key) != null);
+        }
+        @Override public java.util.stream.Stream<T> stream() { return keyStream().map(this::get); }
+        @Override public int size() { return (int) keyStream().count(); }
+        @Override public java.util.Iterator<T> iterator() { return stream().iterator(); }
+    }
     private abstract static class BaseRegistry<T extends org.bukkit.Keyed> implements org.bukkit.Registry<T> {
         private final String name;
         BaseRegistry(String name) { this.name = name; }
-        private UnsupportedOperationException unavailable() { return new UnsupportedOperationException("Ferrite: registry data not implemented: " + name); }
+        final String name() { return name; }
         public T get(org.bukkit.NamespacedKey key) { return (T) HostBridge.call("Registry", name, "get(NamespacedKey)", Object.class, key); }
         public org.bukkit.NamespacedKey getKey(T value) { return value.getKey(); }
         public boolean hasTag(io.papermc.paper.registry.tag.TagKey<T> key) { return HostBridge.callBoolean("Registry", name, "hasTag(TagKey)", key); }
