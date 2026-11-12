@@ -132,28 +132,18 @@ working directory at startup (`crates/ferrite-server/src/main.rs`).
 | key (default) | Paper's meaning | Ferrite |
 |---|---|---|
 | `perform-username-validation` (true) | "Whether the server should validate usernames." | **Enforced.** `ferrite-net` `ServerConfig::perform_username_validation`, checked at login by `username_allowed`. On: 1-16 ASCII letters, digits or `_`. Off: any 1-16 characters, except control characters, which are still refused (Ferrite's own floor; Paper has none). |
-| `allow-headless-pistons` (false) | "allow the creation of headless pistons. These are often used to break permanent blocks" | Parsed, **not enforced**. |
-| `allow-permanent-block-break-exploits` (false) | "Whether unbreakable blocks can be broken with Vanilla exploits" (bedrock, end portal frames, end portal blocks, and more) | Parsed, **not enforced**. |
-| `allow-piston-duplication` (false) | "duplication of TNT, carpets, and rails. This does not control sand duplication" | Parsed, **not enforced**. |
-| `allow-unsafe-end-portal-teleportation` (false) | "exploits related to end portal teleportation to be possible, for example sand duplication" | Parsed, **not enforced**. |
+| `allow-headless-pistons` (false) | "allow the creation of headless pistons. These are often used to break permanent blocks" | **Enforced.** `game::piston::ALLOW_HEADLESS_PISTONS`, set once from the Paper config in `main.rs`. Off: when a `piston_head` is removed by any block change (`Region::change_block`: player break, `/setblock`, `/fill`, plugin edits), the extended `piston`/`sticky_piston` base with the same facing behind it is cleared too (`piston::remove_orphaned_base`), so no headless piston is left standing. On: the base is kept. Piston extension and retraction apply as atomic batches (`compare_set_blocks`) and never go through this path. |
+| `allow-permanent-block-break-exploits` (false) | "Whether unbreakable blocks can be broken with Vanilla exploits" (bedrock, end portal frames, end portal blocks, and more) | **Always enforced; the key is not read.** `piston::reaction` treats hardness below zero and every block entity as immovable, so a piston can neither push nor destroy bedrock, end portal frames, end portals, barriers or command blocks. Setting the key to `true` does not enable the exploit. Pinned by `unsupported_settings_tests::permanent_blocks_cannot_be_pushed_or_destroyed_by_a_piston`. |
+| `allow-piston-duplication` (false) | "duplication of TNT, carpets, and rails. This does not control sand duplication" | **Always enforced; the key is not read.** Ferrite has no support/attachment updates, which that dupe depends on, and a push moves each block exactly once. Pinned by `unsupported_settings_tests::tnt_carpets_and_rails_move_without_leaving_a_copy`. Setting the key to `true` does not enable the exploit. |
+| `allow-unsafe-end-portal-teleportation` (false) | "exploits related to end portal teleportation to be possible, for example sand duplication" | **Nothing to enforce; the key is not read.** Portal travel is player-only (`game/region.rs` portal handling), so non-player entities such as falling sand never traverse an end portal and the dupe has no path. |
 
-Why the four are not enforced, exactly:
+Notes on the piston keys:
 
-- Each one gates a fix for a vanilla exploit, so enforcing it means a check inside the game
-  simulation: the flag has to reach the game through `WorldSettings`
-  (`crates/ferrite-server/src/game/mod.rs`) and be read in `game/piston.rs` (`operation`,
-  `changes`, `reaction`), the block-break path in `game/region.rs`, and `game/portal.rs` /
-  `game/gravity.rs`. That code was outside the files the task that added the username and
-  rate-limit settings was allowed to change, so it was left alone.
-- What was checked in the source: pistons are planned in `piston.rs::operation` and applied as one
-  atomic batch of expected-state changes (`changes`); retraction requires an existing head
-  (`changes` returns `None` when the head cell is not a matching `piston_head`); `reaction` treats
-  hardness below zero and block entities as immovable. `piston_head` is not referenced anywhere
-  outside `piston.rs`, so no other code path reacts to a head being removed.
-- What was **not** established: whether any of the four exploits is actually reachable in Ferrite.
-  None was reproduced, and the Paper patches themselves were not compared against Ferrite's
-  behaviour. So Ferrite behaves one fixed way regardless of these values; do not read `false`
-  as "the exploit is prevented" or `true` as "the exploit is enabled".
+- Only `allow-headless-pistons` changes behaviour. The other three describe exploits Ferrite
+  does not have; their tests pin that, so a later change that introduces the exploit fails a test.
+- The headless cascade follows the vanilla rule that a piston head cannot exist without its base
+  (and not vice versa). It is not a port of Paper's patch; it was verified only by the unit tests
+  above, not against a Paper server.
 
 ## UNVERIFIED keys
 
