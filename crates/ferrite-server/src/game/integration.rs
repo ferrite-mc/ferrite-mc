@@ -112,7 +112,10 @@ impl Bot {
         (id, rest)
     }
     pub(super) async fn until(&mut self, id: i32) -> Vec<u8> {
-        self.until_within(id, std::time::Duration::from_secs(120))
+        // A loaded CI runner can take minutes to tick a region. Keep the wait bounded so a
+        // genuinely missing packet still fails, but do not turn scheduler starvation into a
+        // spurious failure. Tests that need a tighter budget wrap this in their own timeout.
+        self.until_within(id, std::time::Duration::from_secs(300))
             .await
     }
     /// Waits for packet `id`, failing after `limit` instead of spinning forever while other

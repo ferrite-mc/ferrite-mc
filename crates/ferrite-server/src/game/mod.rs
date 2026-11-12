@@ -2030,6 +2030,10 @@ async fn run(
                       if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.schedule_fluid((x,y,z)));}
                     }
                   },
+                  Signal::NeighborUpdate{dimension,origin,target}=>{
+                    let chunk=ChunkPos(target[0].div_euclid(16),target[2].div_euclid(16));
+                    if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.remote_block_changed(origin));}
+                  },
                   Signal::FluidPlace{dimension,x,y,z,state}=>{
                     let chunk=ChunkPos(x.div_euclid(16),z.div_euclid(16));
                     if worlds.owner(dimension,chunk).is_some(){
@@ -2375,7 +2379,7 @@ async fn run(
                    player_worlds.insert(uuid, start_world);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:view_distance as i32,pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,bow_released:false};player.init_inventory_menu();player.refresh_chunks();
                    worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
                    {
@@ -2999,13 +3003,19 @@ fn route_plugin_command(
             player,
             title,
             rows,
+            shulker,
             items,
         } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox
                     .lock()
                     .unwrap()
-                    .push_back(Command::PluginOpenInventory { title, rows, items });
+                    .push_back(Command::PluginOpenInventory {
+                        title,
+                        rows,
+                        shulker,
+                        items,
+                    });
             }
         }
         PlayerCommand::Packet { player, packet } => {
