@@ -80,7 +80,7 @@ CMI가 동작한다고 말할 수 없다.
 - 보스바: `showBossBar`/`hideBossBar`, 실시간 갱신, `activeBossBars`. 이름은 일반 텍스트만(색·서식 없음).
 - 스코어보드 표시: `setScoreboard`로 list/sidebar/below-name을 클라이언트에 보낸다(변경분만 전송).
 - 아이템 드롭/스폰: `World#dropItem`, `dropItemNaturally`, `Player#dropItem` 변형, `give(dropIfFull)`,
-  `spawnEntity`(TNT와 게임이 아는 몹), `spawnFallingBlock`, `launchProjectile`(화살만).
+  `spawnEntity`(TNT와 게임이 아는 몹), `spawnFallingBlock`, `launchProjectile`(화살·눈덩이·달걀·진주·경험치 병·물약·바람 구슬·화염구; 삼지창 제외).
   CraftBukkit 호환 캐스트 경로의 `CraftWorld#dropItem`/`dropItemNaturally`(콜백 포함)도 같은
   라이브 월드 드롭 경로로 위임한다 — Java 테스트로 호스트 호출까지 확인했다.
 - 엔티티 핸들: 스폰·드롭이 돌려주는 핸들은 실제 엔티티의 id를 가지며 위치·유효성·속도·체력 읽기와
@@ -156,6 +156,14 @@ CMI가 동작한다고 말할 수 없다.
   `game_rule`·`memory_module_type`만 명시적 `UnsupportedOperationException`이다. 검증: `FerriteRegistryBackingTest`(생성기와 별개로 센 개수 대조).
   이 줄의 값 객체(예: `Wolf.Variant`) 속성은 여전히 키 신원뿐이다. 속성을 읽으면 호스트 브리지로 간다.
 
+- **`Player#playEffect` 데이터**: `FerriteEffectData`가 바닐라 26.3 서버의 `levelEvent` 호출 지점(`javap`로 확인)에 맞춰 인코딩한다.
+  블록 효과는 전역 블록 상태 id가 필요해 생성기가 `blocks.json`에서 `block-states.tsv`를 만들고(속성은 알파벳 순, 마지막 속성이 가장 빨리 변함 —
+  보고서의 선언 순서가 아님을 `chest`로 확인), 생성기가 35,723개 상태 전부를 검증한다. 확인하지 못한 인코딩은 이유와 함께 거부한다.
+- **`Player#launchProjectile`**: 경험치 병(0.7), 투척/잔류 물약(0.5), 바람 구슬(1.5)을 바닐라 아이템 사용 속도로 추가했다. -20° 던지기 보정은 넣지 않았다.
+  삼지창은 호스트가 받지 않아 거부한다(Rust 변경 없음).
+- **장비 슬롯**: 플레이어가 쓰는 6개 슬롯은 이미 모두 연결돼 있었고, `BODY`·`SADDLE` 거부 사유를 바닐라 `canUseSlot` 근거로 정확히 적었다.
+  검증: `PlayerBreadthTest`, `FerriteBlockStatesTest`.
+
 ## 2026-11-11 — W5: 런타임 월드 재접속과 플레이어 동작
 
 - **재접속 갭 닫힘.** 플레이어 파일(`Saved.world`)이 런타임 월드 UUID를 저장하고, 접속 시 그 월드가 로드돼
@@ -176,7 +184,7 @@ CMI가 동작한다고 말할 수 없다.
 
 ## 아직 안 한 것 / 알려진 한계
 
-- 작은 화염구 밖의 나머지 투사체는 `UnsupportedOperationException`.
+- 삼지창과 위 목록 밖의 투사체는 `UnsupportedOperationException`.
 - 엔더 진주는 같은 리전의 던진 사람만 순간이동시킨다(리전 간 이동 없음). 달걀은 맞은 자리에서 병아리가 나오지만(8분의 1 확률, 그중 32분의 1은 네 마리), 눈덩이는 피해를 주지 않는다.
 - `sendMap`은 보이는 커서 장식을 보낸다. 숨김 커서는 26.3 decoration 레코드에 visibility 비트가 없어 보내지 않으며, 스타일·번역 캡션은 거부한다. 기후 높이 보정은 노이즈를 무시한다.
 - 어깨 앵무새는 장부만 있고 화면에는 안 나온다.

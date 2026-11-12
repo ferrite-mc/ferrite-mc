@@ -28,6 +28,7 @@ val generateRegistryKeys by tasks.registering(Exec::class) {
     val vanilla = rootProject.projectDir.resolve("../../vanilla/26.3/generated")
     inputs.file(projectDir.resolve("tools/generate_registry_keys.py"))
     inputs.file(vanilla.resolve("reports/registries.json"))
+    inputs.file(vanilla.resolve("reports/blocks.json"))
     inputs.dir(vanilla.resolve("data/minecraft/enchantment"))
     inputs.dir(vanilla.resolve("data/minecraft/worldgen/biome"))
     inputs.dir(vanilla.resolve("data/minecraft/damage_type"))

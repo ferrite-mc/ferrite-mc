@@ -33,3 +33,31 @@ out.write_text("".join(f"{kind}\t{key}\n" for kind, values in keys.items() for k
 out.with_name("registry-ids.tsv").write_text(
     "".join(f"{kind}\t{key}\t{value}\n" for kind, values in ids.items() for key, value in sorted(values.items(), key=lambda item: item[1])),
     encoding="utf-8")
+
+
+# Global block-state ids. Vanilla numbers a block's states consecutively from its first id. The properties vary in
+# alphabetical name order (the report lists them in declaration order), the last one fastest, and each property
+# counts through its values in report order. The check below fails the build if the report stops following that.
+blocks = json.loads((root / "reports" / "blocks.json").read_text(encoding="utf-8"))
+lines = []
+for name, block in blocks.items():
+    properties = dict(sorted(block.get("properties", {}).items()))
+    states = block["states"]
+    first = min(state["id"] for state in states)
+    sizes = [len(values) for values in properties.values()]
+    if len(states) != max(1, __import__("math").prod(sizes)):
+        raise SystemExit(f"{name}: {len(states)} states do not match its {sizes} property values")
+    default = {}
+    for state in states:
+        index = 0
+        for (prop, values), size in zip(properties.items(), sizes):
+            index = index * size + values.index(state["properties"][prop]) if properties else 0
+        if state["id"] != first + index:
+            raise SystemExit(f"{name}: state {state['id']} is not at offset {index} from {first}")
+        if state.get("default"):
+            default = state.get("properties", {})
+    lines.append("\t".join((
+        name, str(first),
+        ";".join(f"{prop}={','.join(values)}" for prop, values in properties.items()),
+        ";".join(f"{prop}={value}" for prop, value in default.items()))))
+out.with_name("block-states.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")

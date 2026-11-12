@@ -65,7 +65,8 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
                 case LEGS -> 37;
                 case CHEST -> 38;
                 case HEAD -> 39;
-                default -> throw new UnsupportedOperationException("Ferrite: not implemented: equipment slot " + equipment);
+                // Player#canUseSlot is false for exactly these two in vanilla: they exist for animals' armor and saddles.
+                case BODY, SADDLE -> throw new UnsupportedOperationException("Ferrite: a player has no " + equipment + " equipment slot (vanilla Player#canUseSlot is false for BODY and SADDLE)");
             };
         }
         return (int) slot;
