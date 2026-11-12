@@ -10,7 +10,9 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final long time;
     /** The world seed as the host reported it when the world was opened; the host's live answer wins. */
     private volatile long seed;
-    private final Pos spawn;
+    /** The spawn as registered, then as {@code setSpawnLocation} last moved it; the host has no spawn getter. */
+    private volatile Pos spawn;
+    private volatile float spawnAngle;
     private final java.util.Map<Pos, org.bukkit.Material> blocks = new java.util.concurrent.ConcurrentHashMap<>();
     /** Full state strings for blocks a plugin placed with {@code setBlockData}; {@link #blocks} holds their material. */
     private final java.util.Map<Pos, String> states = new java.util.concurrent.ConcurrentHashMap<>();
@@ -116,7 +118,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     public Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
         return switch (method.getName()) {
             case "getUID" -> id; case "getName" -> name; case "getTime", "getFullTime" -> hostLong(method.getName() + "()", time);
-            case "getGameTime", "hasStorm", "isThundering", "isClearWeather", "getWeatherDuration", "getThunderDuration", "getClearWeatherDuration", "getDifficulty" -> hostValue(method, null);
+            case "getGameTime", "hasStorm", "isThundering", "isClearWeather", "getWeatherDuration", "getThunderDuration", "getClearWeatherDuration", "getDifficulty" -> hostValue(method);
             case "getMoonPhase" -> moonPhase(method);
             case "getWorldBorder" -> border();
             case "spigot" -> spigot();
@@ -128,7 +130,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "setPVP" -> { pvp = (boolean) args[0]; yield null; }
             case "isAutoSave" -> autoSave;
             case "setAutoSave" -> { autoSave = (boolean) args[0]; try { HostBridge.callVoid("World", id, "setAutoSave(boolean)", autoSave); } catch (UnsupportedOperationException noHost) { /* remembered only */ } yield null; }
-            case "getSpawnLocation" -> location(spawn);
+            case "getSpawnLocation" -> { var at = spawn; yield new org.bukkit.Location(proxy, at.x(), at.y(), at.z(), spawnAngle, 0f); }
             case "getHighestBlockYAt" -> {
                 if (args.length == 3 || (args.length == 2 && args[1] instanceof org.bukkit.HeightMap)) {
                     // The host reads the chunk's stored heightmap, loading the chunk first when nobody holds it.
@@ -192,13 +194,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         try { return Long.parseLong((String) HostBridge.call("World", id, method, String.class)); }
         catch (UnsupportedOperationException offline) { return fallback; }
     }
-    /** A world query the host answers from the live state, converted to the method's return type. */
-    private Object hostValue(java.lang.reflect.Method method, Object fallback) {
-        try { return HostBridge.dispatch("World", id, method, new Object[0]); }
-        catch (UnsupportedOperationException offline) { return fallback; }
+    /**
+     * A world query the host answers from the live state, converted to the method's return type. With no host and
+     * no value remembered it fails with the "not implemented" error, since a made-up weather or difficulty would be
+     * wrong (and {@code null} would be a {@link NullPointerException} for the boolean and numeric queries).
+     */
+    private Object hostValue(java.lang.reflect.Method method) {
+        return HostBridge.dispatch("World", id, method, new Object[0]);
     }
     private Object moonPhase(java.lang.reflect.Method method) {
-        int phase = (int) (hostLong("getMoonPhase()", 0) % 8);
+        // The host reports it; without one it is the day count of the time snapshot mod 8, as in vanilla.
+        long reported = hostLong("getMoonPhase()", -1);
+        int phase = (int) (reported >= 0 ? reported % 8 : Math.floorMod(hostLong("getFullTime()", time) / 24_000L, 8L));
         Class<?> type = method.getReturnType();
         return type.isEnum() ? type.getEnumConstants()[phase] : (Object) Integer.valueOf(phase);
     }
@@ -345,6 +352,16 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 int x, y, z;
                 if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = args.length > 3 ? (int) args[1] : 64; z = (int) args[args.length - 1]; }
                 return climate(method.equals("getTemperature"), x, y, z);
+            }
+            case "setSpawnLocation" -> {
+                // (int x, int y, int z[, float angle]) or (Location): the host moves the world spawn, then it is read back here.
+                int x, y, z;
+                float angle = 0f;
+                if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); angle = l.getYaw(); }
+                else { x = (int) args[0]; y = (int) args[1]; z = (int) args[2]; if (args.length > 3) angle = (float) args[3]; }
+                boolean moved = HostBridge.callBoolean("World", id, "setSpawnLocation(int,int,int,float)", x, y, z, angle);
+                if (moved) { spawnAngle = angle; spawn = new Pos(x, y, z); }
+                return moved;
             }
             case "isGameRule" -> { return (boolean) HostBridge.call("World", id, "isGameRule(String)", Boolean.class, (String) args[0]); }
             case "getGameRules" -> {

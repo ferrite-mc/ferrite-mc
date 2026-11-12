@@ -103,6 +103,43 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
    엔티티 NBT에 함께 적용되어야 하고, 콜백이 엔티티를 거부/취소하는 규칙, 구조물이 여러 리전에
    걸칠 때의 스폰 스케줄링도 정해야 한다.
 
+## `FerriteWorld`의 `UnsupportedOperationException` 16곳 (2026-11-12, W6, 기준 `b50f8d9`)
+
+`FerriteWorld.java`에서 이 이름이 나오는 줄은 16곳이다. 던지는 곳(`throw`) 8줄(예외 9개)과 받아서 처리하는 곳(`catch`) 8줄이다.
+`World`는 동적 프록시라 `setTime`/`setStorm`/`setDifficulty`/날씨 지속시간 같은 메서드는 `FerriteWorld`에 코드가 없고
+`HostBridge.dispatch("World", …)`로 호스트(`plugins.rs`, `worldinfo.rs`)에 간다. 호스트가 없는 JUnit에서만 "not implemented"로 보인다.
+
+던지는 곳 — 모두 "호스트가 그 위치의 데이터를 주지 않음"이라 데이터가 실제로 없을 때의 명시적 거부로 유지한다.
+
+| 메서드 | 예외 | 판단 |
+|---|---|---|
+| `typeAt` (`Block#getType`, `getBlockAt` 등) | `no block data at …` | 호스트가 블록을 돌려주지 않는 위치(미로드 청크·호스트 없음). 공기를 지어내지 않는다. 유지. |
+| `Block#getLightLevel` | `no light data at …` | 같은 이유. 유지. |
+| `Block#getLightFromSky` | `no light data at …` | 같은 이유. 유지. |
+| `getHighestBlockYAt(…, HeightMap)` | `no <HEIGHTMAP> height data` | 호스트가 저장된 높이 지도를 읽지 못한 열. 유지. |
+| `getHighestBlockYAt` 그 밖의 인자 수 | `unsupported … overload` | 도달 불가: Bukkit에는 이 네 가지 오버로드(`(int,int)`, `(Location)`, `(int,int,HeightMap)`, `(Location,HeightMap)`) 말고 없다. |
+| `getHighestBlockYAt(int,int)` | `no height data at …` | 호스트가 높이를 모르는 열. 유지. |
+| `getBiome`/`getComputedBiome` | `no biome data at …` | 호스트가 바이옴을 모르는 위치. 유지. |
+| `climate` (`getTemperature`/`getHumidity`) | `no biome data at …` | 같은 이유. 유지. |
+| `findLightningTarget` | `no height data at …` | 높이를 모르면 대상 위치를 계산할 수 없다. 유지. |
+
+받는 곳 — 호스트가 없거나 읽을 수 없을 때의 동작:
+
+| 위치 | 동작 | 판단 |
+|---|---|---|
+| `setAutoSave` | 호스트가 없으면 값만 기억 | 유지(`isAutoSave`가 되돌려 준다). |
+| `hostLong` (`getTime`, `getFullTime`, `getSeed`, `getMoonPhase`) | 호스트가 없으면 월드 등록 때의 스냅샷 | 유지. **`getMoonPhase`의 폴백은 `0`(항상 보름달)에서 "스냅샷 시간의 일수 mod 8"로 고쳤다.** |
+| `hostValue` (`getGameTime`, `hasStorm`, `isThundering`, `isClearWeather`, 날씨 지속시간, `getDifficulty`) | **고침**: 예전에는 호스트가 없으면 `null`을 돌려줘 `boolean`/`int` 질의는 `NullPointerException`, `Difficulty`는 조용한 `null`이었다. 이제 `Ferrite: not implemented: World#hasStorm()`처럼 명시적으로 거부한다(`set*`로 넣은 값은 `HostBridge`가 기억해 되돌려 준다). |
+| `setRule` (`setGameRule`, `setGameRuleValue`) | 호스트가 거부하거나 없으면 `false` | 유지. |
+| `playersHere`, `hostEntities`, `findRod`, `playEffect`(시청자 순회) | 읽을 수 없는 항목은 건너뜀 | 유지. |
+
+**이번에 고친 것:** `setSpawnLocation(int,int,int[,float])`과 `setSpawnLocation(Location)`을 호스트의 `setworldspawn`에 연결하고,
+성공하면 `getSpawnLocation()`이 새 위치와 각도를 돌려준다(호스트에 스폰 getter가 없어 Java가 기억한다). 예전에는 `Location` 오버로드가 호스트가
+모르는 서명으로 가서 거부됐고, 이동 뒤에도 `getSpawnLocation()`은 등록 때 위치였다.
+
+**이미 호스트가 답하던 것(코드 변경 없이 테스트로 고정):** 월드 보더(`FerriteHostBorder` ↔ `border*()`/`borderSet`/`borderCenter` 등), 시간, 날씨, 난이도, 달 위상.
+`FerriteWorldHostTest`가 호스트 서명 문자열과 되돌려 받는 값을 확인한다.
+
 ## 그 밖에 남은 명시적 미지원 경로와 소유자
 
 | 영역 | 예시 (정확한 이름) | 소유자 / 선행 작업 |

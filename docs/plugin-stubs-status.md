@@ -164,6 +164,10 @@ CMI가 동작한다고 말할 수 없다.
 - **장비 슬롯**: 플레이어가 쓰는 6개 슬롯은 이미 모두 연결돼 있었고, `BODY`·`SADDLE` 거부 사유를 바닐라 `canUseSlot` 근거로 정확히 적었다.
   검증: `PlayerBreadthTest`, `FerriteBlockStatesTest`.
 
+- **`FerriteWorld`** (W6 4번): "16곳"은 `UnsupportedOperationException`이 나오는 줄 수이며 던지는 줄 8개와 `catch` 줄 8개다(`docs/plugin-api-stubs.md`에 줄별 표).
+  보더·난이도·시간·날씨는 이미 호스트가 답하고 있었다. 고친 것: `setSpawnLocation` 연결과 `getSpawnLocation` 갱신, 호스트 없는 `hasStorm` 등의 `null`/NPE를
+  명시적 거부로, 호스트 없는 `getMoonPhase`의 고정 보름달을 시간 기반 계산으로. 검증: `FerriteWorldHostTest`.
+
 ## 2026-11-11 — W5: 런타임 월드 재접속과 플레이어 동작
 
 - **재접속 갭 닫힘.** 플레이어 파일(`Saved.world`)이 런타임 월드 UUID를 저장하고, 접속 시 그 월드가 로드돼
