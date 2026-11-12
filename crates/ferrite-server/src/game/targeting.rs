@@ -7,7 +7,7 @@
 //! untargetable into this small table (bounded by the online player count, cleared when the
 //! player leaves) and target lists are filtered through it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard};
 
 use uuid::Uuid;
@@ -41,11 +41,9 @@ pub fn forget(player: Uuid) {
     }
 }
 
-/// Drops the players mobs may not target from a position map.
-pub fn retain_targetable<V>(players: &mut HashMap<Uuid, V>) {
-    if let Some(set) = table().as_ref() {
-        players.retain(|uuid, _| !set.contains(uuid));
-    }
+/// The players hostile mobs may not target right now.
+pub fn untargetable() -> HashSet<Uuid> {
+    table().clone().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -53,7 +51,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creative_and_spectator_players_are_dropped_from_mob_targets() {
+    fn creative_and_spectator_players_are_published_until_they_change_mode_or_leave() {
         let (survival, creative, spectator, adventure) = (
             Uuid::from_u128(0x7a01),
             Uuid::from_u128(0x7a02),
@@ -64,22 +62,13 @@ mod tests {
         publish(creative, 1);
         publish(adventure, 2);
         publish(spectator, 3);
-        let mut players: HashMap<Uuid, u8> = [survival, creative, spectator, adventure]
-            .into_iter()
-            .map(|u| (u, 0))
-            .collect();
-        retain_targetable(&mut players);
-        let mut kept: Vec<_> = players.keys().copied().collect();
-        kept.sort();
-        assert_eq!(kept, vec![survival, adventure]);
-        // Switching back to survival makes the player targetable again, and leaving clears it.
+        let set = untargetable();
+        assert!(!set.contains(&survival) && !set.contains(&adventure));
+        assert!(set.contains(&creative) && set.contains(&spectator));
         publish(creative, 0);
-        publish(spectator, 3);
         forget(spectator);
-        let mut again: HashMap<Uuid, u8> =
-            [creative, spectator].into_iter().map(|u| (u, 0)).collect();
-        retain_targetable(&mut again);
-        assert_eq!(again.len(), 2);
+        let set = untargetable();
+        assert!(!set.contains(&creative) && !set.contains(&spectator));
         for u in [survival, creative, adventure] {
             forget(u);
         }

@@ -5523,14 +5523,12 @@ impl Region {
                 ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             );
         }
-        // Every player still counts for spawning and despawning; only targeting skips creative
-        // and spectator players (published by their owner).
-        let positions: Vec<_> = players.values().copied().collect();
-        super::targeting::retain_targetable(&mut players);
+        let untargetable = super::targeting::untargetable();
         let targets: Vec<_> = players
             .iter()
             .map(|(&uuid, &pos)| ai::Target { uuid, pos })
             .collect();
+        let positions: Vec<_> = players.into_values().collect();
         let trading = self.trading_traders();
         self.tick_trader_lifetimes(&trading, ctx);
         let holders = {
@@ -5544,10 +5542,11 @@ impl Region {
             .iter()
             .map(|(holder, (pos, _))| (*holder, *pos))
             .collect();
-        for event in ai::tick_with_owner_attacks_and_holders(
+        for event in ai::tick_full(
             &mut self.entities,
             blocks,
             &targets,
+            &untargetable,
             owner_attacks,
             &holder_positions,
             &mut self.rng,
