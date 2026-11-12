@@ -6,7 +6,7 @@ Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레
 Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **상태 (2026-11-08)**: 생존·게임 시스템을 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 이제 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. 전체 Rust 테스트, clippy, fmt, Java Gradle 테스트와 Linux/Windows CI가 통과했습니다. **실제 26.3 클라이언트 접속은 아직 검증하지 않았습니다.**
+- **상태 (2026-11-12)**: 생존·게임 시스템과 플러그인 API 일부를 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속과 전체 플러그인 생태계 호환은 아직 검증하지 않았습니다.**
 - **라이선스**: GPL-3.0-or-later
 
 > **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
@@ -26,8 +26,48 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 **엔드**: 포탈 활성화와 차원 이동, 도착 플랫폼, 바닐라 월드젠 호스트, 공허 판정, 드래곤 보스바·전투·수정 회복/파괴, 출구 포탈과 게이트웨이를 구현했습니다. 드래곤의 선회·돌진(strafe)·착지/대기/이륙·숨결·화염구 행동, 8개 서브 히트박스, 4개 수정 기반 단계별 재소환, 전투/단계 저장·복원, 게이트웨이 생성 빔(`Age` 블록 엔티티; 서버가 나이를 올리고 저장해 재로드 때 빔이 처음부터 다시 시작되지 않음), 첫 귀환 때의 크레딧 신호(`WIN_GAME`)와 "Free the End" 업적도 서버 쪽에는 구현되어 있습니다. 남은 서버 쪽 차이는 착지 후 스캔/공격/불꽃 서브페이즈의 정확한 타이밍, 보라색 텔레포트 빔과 2400틱 자동 빔, 외곽 섬 탐색 반경입니다. 빔 렌더링, 드래곤 움직임, 보스바, 크레딧 화면 등 실제 클라이언트 화면은 확인하지 않았습니다([`docs/end-dimension.md`](docs/end-dimension.md), 수동 점검표 [`docs/manual-checklist.md`](docs/manual-checklist.md)).
 
 플러그인 API는 Paper `Server`/`Player`의 일부만 처리합니다. 처리하지 않는 호출은
-`UnsupportedOperationException("Ferrite: not implemented: …")`로 드러납니다. EssentialsX 같은
-대형 플러그인의 모든 경로와 NMS 의존 플러그인은 아직 동작하지 않습니다.
+`UnsupportedOperationException("Ferrite: not implemented: …")` 또는 명시적인 `NoSuchMethodError`로
+드러납니다. EssentialsX 같은 대형 플러그인의 모든 경로와 NMS 의존 플러그인은 아직 동작하지 않습니다.
+
+### 플러그인 API 현황 (코드 대조: 2026-11-12)
+
+`main`의 Java 구현, Rust 호스트 디스패처, 회귀 테스트를 대조한 결과다. 호스트가 없는
+JUnit 폴백 프로브의 `not implemented` 목록은 실제 서버 미구현 목록과 같지 않다. 실제
+호스트 경로가 있는지와 명시적 거부 경로를 구분해야 한다.
+
+**구현되어 테스트로 고정된 범위**
+
+- `Server#createWorld`/`unloadWorld`: 런타임 월드 생성·저장·언로드·재오픈. 기본 월드는
+  언로드하지 않으며, 플레이어가 남아 있으면 언로드를 거부한다.
+- 런타임 월드 재접속: `Saved.world`의 월드 UUID를 읽어 접속 위치·플레이어 상태·플러그인
+  스냅샷을 해당 월드로 복원한다.
+- `Player#breakBlock`, 플레이어 권한으로 실행하는 `Player#chat("/명령")`,
+  `Player#performCommand`, 슬롯 파괴·피격·아이템 줍기 애니메이션.
+- `RegistryAccess`의 41개 레지스트리, `PotionEffectType`, `playEffect`, 장비 슬롯 6개.
+  `GameRule`과 `MemoryKey` 레지스트리만 값 타입/기본값 데이터 부족으로 거부한다.
+- 셜커 상자 메뉴(27칸·중첩 금지·파괴 시 내용물 배출), 모루 마법 합성,
+  `World#spawnArrow`, `World#getInfiniburn`.
+- 구조물의 블록·블록 엔티티 캡처/배치, 회전·반전·무결성·`BlockTransformer`,
+  런타임 월드의 비플레이어 엔티티 스냅샷과 `EntityTransformer` 배치.
+  `EntityFactory#createEntitySnapshot`도 호스트 SNBT 파싱 경로가 있다.
+
+**코드에서 확인한 명시적 미지원 또는 제한**
+
+- `Player#launchProjectile(Trident)` 및 호스트가 알지 못하는 투사체.
+  물약 콜백의 내용물 변경도 지원하지 않는다.
+- `Player#openCartographyTable`: 지도 저장소, `idcounts`, 지도 데이터 컴포넌트가 없어
+  잠금·축소를 올바르게 구현할 수 없으므로 메뉴 자체를 거부한다.
+- `MapCanvas`의 일부 메서드, 스타일/번역 지도 커서 캡션, 숨김 커서 전송.
+- 구조물 엔티티 스냅샷 열거는 **런타임 월드만** NBT를 제공한다. 기본 오버월드와
+  네더·엔드의 비플레이어 엔티티는 NBT 기반 구조물 캡처/재생성 대상에서 제외된다.
+- 아이템 메타 중 지원 표에 없는 타입, 컨테이너·리스트 PDC 타입, 책 등 일부 메타,
+  표지판 외 블록 엔티티 `sendBlockUpdate`, 일부 `BlockData`/청크 스냅샷.
+- NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
+  `CraftMagicNumbers`)와 Paper 전체 생명주기 API.
+
+상세한 메서드별 소유자·근거·테스트는 [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md),
+[`docs/plugin-stubs-status.md`](docs/plugin-stubs-status.md), [`docs/plugin-api-audit.md`](docs/plugin-api-audit.md)에
+기록한다. 실제 마인크래프트 클라이언트 화면과 실제 대형 플러그인 부팅은 아직 확인하지 않았다.
 
 ## 빌드와 실행
 
@@ -66,7 +106,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. 2026-11-08 기준
+서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. 기존 CI 기준
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `java/ferrite-api-impl`의 `./gradlew test`가 통과했습니다.
 [main CI run 42398148054](https://github.com/yxshadxw/ferrite-mc/actions/runs/42398148054)도 Linux와
@@ -111,8 +151,9 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 
 ## 해야 할 일
 
-- 남은 게임·플러그인 작업: 드래곤 착지 서브페이즈 타이밍과 보라색 텔레포트 빔, 여러 월드의
-  플러그인 블록 엔티티 접근, Paper/Bukkit 및 NMS 호환 범위 확대.
+- 남은 게임·플러그인 작업: 드래곤 착지 서브페이즈 타이밍과 보라색 텔레포트 빔, 기본 월드·
+  네더·엔드의 비플레이어 엔티티 NBT 경계, 지도 제작대·삼지창, Paper/Bukkit 및 NMS
+  호환 범위 확대.
 - 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
   피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI, 플러그인 동작을 통합 서버에서 확인.
 - 최적화 조사 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),

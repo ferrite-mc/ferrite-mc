@@ -27,11 +27,10 @@ CMI가 동작한다고 말할 수 없다.
 - **Server 경계 정리.** help map(명령 맵 기반 + `registerHelpTopicFactory`), recipes(바닐라
   데이터팩), maps(메모리 `MapView`), tags(block/item/fluid/entity_type/game_event)는 기존 경계로
   구현되어 있음을 확인하고 JUnit `serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest`로
-  고정했다. `createWorld`/`unloadWorld`는 이후 런타임 월드로 구현되었고(`plugin-api-stubs.md` 참고, 이 줄은 2026-11-09 시점의 기록이다), 당시 `EntityFactory#createEntitySnapshot`(비플레이어
-  엔티티 NBT 경계 없음)은 구현하지 않았고 소유자/이유/선행 작업을 `docs/plugin-api-stubs.md`에 적었다.
-- **구조물 엔티티는 계속 미지원.** `Structure#getEntities`는 빈 목록, `EntityTransformer` 목록은
-  명시적 거부다. 필요한 선행 작업 3가지(호스트 비플레이어 엔티티 조회 경계, 템플릿 `entities`
-  저장, 변환 위치 스폰 경로)를 `docs/plugin-api-stubs.md`에 정확히 적었다.
+  고정했다. `createWorld`/`unloadWorld`와 `EntityFactory#createEntitySnapshot`도 구현되어 있다.
+- **구조물 엔티티 경계 확인.** `Structure#getEntities`, `fill(..., true)`, `EntityTransformer`,
+  스냅샷 재생성은 런타임 월드에서 구현되어 있다. 기본 월드·네더·엔드는 호스트가 저장 NBT를
+  제공하지 않아 구조물 엔티티 캡처/재생성 대상에서 제외된다.
 - **Paper/NMS 전체 호환이 아니다.** `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
   `CraftMagicNumbers`는 계속 `NoSuchMethodError`이고, 실제 클라이언트로 드래그 화면을 확인한
   것은 아니다.
@@ -51,8 +50,8 @@ CMI가 동작한다고 말할 수 없다.
   실제 Rust 호스트(`facts.rs`, `network.rs`, `extra.rs`)가 답한다. 실제 서버 기준 남은 경로는
   `plugin-api-stubs.md`의 "남은 명시적 미지원 경로" 표와 아래 "오늘 못한 것"을 따른다.
 - **Paper/NMS 호환 전체가 완료된 것은 아니다.** NMS-타입 `CraftItemStack.asNMSCopy`,
-  `CraftWorld#getHandle`, `CraftMagicNumbers`는 계속 의도적 미지원이며, 비플레이어 엔티티 조회와
-  구조물 엔티티는 호스트 경계가 아직 없다.
+  `CraftWorld#getHandle`, `CraftMagicNumbers`는 계속 의도적 미지원이며, 기본 월드·네더·엔드의
+  비플레이어 엔티티 NBT 경계도 아직 없다.
 
 ## 2026-11-08 — fb-32 후속 (advancement/potion/timed bans)
 
@@ -174,11 +173,12 @@ CMI가 동작한다고 말할 수 없다.
   있으면 `player_worlds`/추적/리전/글로벌 플레이어/플러그인 스냅샷 모두 그 월드로 시작한다. 월드가 없으면
   저장된 차원으로 대체한다. 회귀 테스트 `integration::player_rejoins_the_runtime_world_they_left_in`.
 - `70b4ba4`(접속 스냅샷, `ChangeDimension` 푸시, 런타임 월드 플레이어의 `/summon end_crystal`)를 가져왔다.
-- 새로 동작: `Player#breakBlock`, `Player#chat("/명령")`(플레이어 권한), 1-인자 `broadcastSlotBreak`,
+- 새로 동작: `Player#breakBlock`, `Player#chat("/명령")`(플레이어 권한), `Player#performCommand`,
+  1-인자 `broadcastSlotBreak`,
   `broadcastHurtAnimation(Collection)`, `playPickupItemAnimation(Item,int)`. 규칙과 한계는
   `docs/plugin-api-stubs.md`의 "런타임 월드와 플레이어 동작" 표.
-- **여전히 미구현:** `Structure#getEntities`와 비어 있지 않은 `EntityTransformer`(템플릿 엔티티 저장과 변환 위치 스폰
-  op가 없음), `Player#performCommand`(호스트 명령 핸들러 없음). Paper 전체 호환이 아니다.
+- **여전히 미구현:** Paper 전체 호환은 아니며, 기본 월드·네더·엔드의 비플레이어 엔티티 NBT
+  구조물 경계, 지도 제작대, 삼지창 투사체 등은 계속 제한된다.
 
 ## 다음 단계 제안
 
@@ -198,8 +198,7 @@ CMI가 동작한다고 말할 수 없다.
 - 전체 `cargo test --workspace`에서 `chest_contents_are_shared_saved_and_spilled_when_broken`가 부하 시 한 번 실패했고 단독 실행은 통과했다(불안정 테스트로 의심, 원인 미조사).
 - 엔드와 피스톤은 `main`에 병합되어 서버 측 동작과 봇/단위 테스트가 있다. 남은 것은 실제 클라이언트
   화면 검증과 문서에 적힌 근사 동작(드래곤 선회, 게이트웨이 빔, 피스톤 애니메이션)이다.
-- **구조물 API:** `StructureManager.createStructure()`가 메모리 구조물을 돌려준다. `fill`(영역 복사), `place`(회전·반전·무결성·팔레트), `getPalettes`, `saveStructure`/`loadStructure`(파일·스트림·키), `deleteStructure`, `getStructureFile`, `copy` 구현됨. 회전·반전 시 `facing`, `axis`, 표지판 `rotation`, 계단/레일 `shape`, 문 `hinge`, 수평 연결 키(`north`/`east`/`south`/`west`)가 함께 돈다. `BlockTransformer`는 회전/반전된 상태에서 호출되고, 블록 엔티티 데이터(상자·표지판 등)는 호스트에서 한 번에 읽어 최종 변환 위치에 `/data merge block`으로 되돌린다. 엔티티는 담지 않으며(플러그인이 플레이어 외 엔티티를 못 본다), 월드가 블록 상태 속성까지 주고받아 `fill`/`place`가 상태를 보존한다. 키로 읽은 템플릿은 그대로 서버(`/place template`)가 놓으며 `fill`은 할 수 없다.
-- **구조물 엔티티/`EntityTransformer`:** `Structure#getEntities()`는 항상 빈 목록이고, `fill`과 파일 로드 모두 구조물 영역의 엔티티를 수집하지 않는다. 현재 호스트의 `World#getEntities*`는 접속 플레이어만 돌려주고 비플레이어 엔티티의 타입·위치·NBT 스냅샷을 주는 API가 없으며, 템플릿 파일의 `entities` 목록도 Java 쪽에서 읽지 않는다. 따라서 콜백을 호출할 엔티티가 없어 비어 있지 않은 `EntityTransformer` 목록은 `UnsupportedOperationException`으로 명시적으로 거부한다. 이를 구현하려면 먼저 (1) 호스트의 구조물 영역 비플레이어 엔티티 조회/복원, (2) 템플릿 `entities` 로드와 저장, (3) 변환된 위치에 엔티티를 스폰하는 경로가 필요하다.
+- **구조물 API:** `StructureManager.createStructure()`가 메모리 구조물을 돌려준다. `fill`(영역 복사), `place`(회전·반전·무결성·팔레트), `getPalettes`, `saveStructure`/`loadStructure`(파일·스트림·키), `deleteStructure`, `getStructureFile`, `copy` 구현됨. 회전·반전 시 `facing`, `axis`, 표지판 `rotation`, 계단/레일 `shape`, 문 `hinge`, 수평 연결 키(`north`/`east`/`south`/`west`)가 함께 돈다. `BlockTransformer`와 `EntityTransformer`는 변환된 위치에서 호출되고, 블록 엔티티 데이터(상자·표지판 등)는 호스트에서 한 번에 읽어 최종 변환 위치에 `/data merge block`으로 되돌린다. 런타임 월드의 비플레이어 엔티티는 저장 NBT를 캡처해 회전·반전 후 스냅샷으로 재생성한다. 기본 월드·네더·엔드는 저장 NBT 경계가 없어 엔티티를 캡처하지 않는다. 키로 읽은 템플릿은 그대로 서버(`/place template`)가 놓으며 `fill`은 할 수 없다.
 - **인챈트 레거시 타겟:** `Enchantment#getItemTarget`은 바닐라 인챈트 43개 모두 값을 돌려준다. `primary_items`가 있으면 그 태그를 우선하므로(예: `thorns`는 `supported_items`가 `#enchantable/armor`이지만 `primary_items`가 `#enchantable/chest_armor`라 `ARMOR_TORSO`) 레거시 Bukkit과 같다. 단일 `enchantable/*` 태그로 대응되지 않는 데이터팩 인챈트(아이템 목록 등)는 계속 `UnsupportedOperationException`이다. `EnchantmentTarget.ALL`은 어떤 바닐라 인챈트도 쓰지 않는다.
 - **셜커 상자 / 모루 / 지도 제작대 (W6 후속):**
   - 셜커 상자(16색 + 무색)는 `minecraft:shulker_box` 메뉴(27칸, 제목 `container.shulkerBox`)로 열리고 내용물은 모든 색이 공유하는 `minecraft:shulker_box` 블록 엔티티의 `Items`에 저장된다. 셜커 상자는 칸 클릭·Shift 클릭·호퍼·드로퍼 모두에서 들어가지 않는다(중첩 금지). 부수면 내용물이 바닥에 흩어진다. 바닐라는 루트 테이블 `copy_components`로 내용물을 아이템에 담아 떨어뜨리지만 `ferrite-loot`이 `copy_components`를 불투명 처리해 적용하지 않으므로, 내용물을 잃지 않도록 흩뿌리는 쪽을 택했다(바닐라와 다름). 플러그인이 `Bukkit.createInventory(…, InventoryType.SHULKER_BOX)`로 만든 27칸 인벤토리는 `OpenInventory`의 `shulker` 플래그로 셜커 메뉴로 열린다(다른 크기의 셜커 인벤토리는 거부).

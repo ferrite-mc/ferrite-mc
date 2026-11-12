@@ -72,36 +72,26 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | `Player#playPickupItemAnimation(Item,int)` | `plugins/network.rs`, `PluginPacket::PickupAnimation`, `facts::EntityFact::entity_id` | 호스트가 아는 아이템 엔티티의 네트워크 id로 `TakeItemEntity`를 플레이어 청크 시청자에게 보낸다. 모르는 아이템이나 0 이하 수량은 미구현 오류. | `network::pickup_animation_names_the_item_entity_and_a_positive_count` |
 
 한계: `breakBlock`은 크리에이티브에서 검을 든 경우의 제한과 도구 내구도 소모, 월드 보더 검사를 하지 않는다.
-`Player#performCommand`는 여전히 호스트 명령 핸들러가 없어 `false`다.
+`Player#performCommand`는 `Native.dispatchCommand`와 서버 명령 디스패처를 통해 구현되어 있다.
 
-### 경계가 없어 구현하지 않은 것 (소유자와 이유)
+### 경계별 구현 상태와 남은 제한
 
 | API | 소유자 | 왜 지금 구현할 수 없는가 | 필요한 선행 작업 |
 |---|---|---|---|
-| `EntityFactory#createEntitySnapshot` | `ferrite-server` 엔티티 스냅샷 + `ferrite-entity` | 호스트에 접속 플레이어 외 엔티티의 타입·위치·NBT 스냅샷을 주는 경계가 없다. NMS 파싱을 가장하지 않는다. | (1) 리전 소유 엔티티의 읽기 전용 NBT/위치 스냅샷 op, (2) 스냅샷에서 엔티티를 다시 스폰하는 경로, (3) 두 경로의 리전 핸드오프/취소 규칙. |
-| `Structure#getEntities`, `Structure#place(..., EntityTransformer)` | `ferrite-server/src/plugins/worldgen.rs` + Java 구조물 | 구조물이 엔티티를 담지 않고, 템플릿 파일의 `entities` 목록도 읽지 않는다. 콜백을 부를 엔티티 자체가 없다. | 아래 "구조물 엔티티 선행 작업 3가지" 참고. |
+| `EntityFactory#createEntitySnapshot` | `ferrite-server/src/plugins/snapshot.rs` + `FerriteEntitySnapshot` | 구현됨. 호스트가 SNBT를 파싱해 타입·위치·UUID·체력·속도·이름을 반환하고, 저장 NBT 스냅샷은 런타임 월드에서 재생성한다. | 기본 월드·네더·엔드는 비플레이어 엔티티의 저장 NBT 조회를 제공하지 않아 구조물 캡처 대상에서 제외된다. |
+| `Structure#getEntities`, `Structure#place(..., EntityTransformer)` | `CapturedStructure` + `ferrite-server/src/plugins/snapshot.rs` | 런타임 월드에서 `ferriteEntities`로 비플레이어 엔티티 NBT를 캡처하고, 변환기 호출 뒤 `ferriteSpawnSnapshot`으로 재생성한다. | 기본 월드·네더·엔드는 저장 NBT 경계가 없어 엔티티 목록이 비어 있을 수 있다. |
 
-### 구조물 엔티티 선행 작업 3가지
+### 구조물 엔티티 경계 검증
 
-> 2026-11-11 확인: 런타임 월드의 비플레이어 엔티티는 이제 `facts::EntityFact`(NBT 포함, `World#ferriteEntities`)로
-> 읽을 수 있지만, 기본 월드(오버월드)는 NBT 없이 라이브 핸들 스냅샷만 준다. 구조물 영역 조회·템플릿
-> `entities` 저장·변환 위치 스폰 경로는 여전히 없으므로 `Structure#getEntities`와 비어 있지 않은
-> `EntityTransformer`는 이 레인에서 구현하지 않았다. 막힌 지점은 아래 2번(`CapturedStructure`와
-> `StructureNbt`가 엔티티를 담지 않음)과 3번(변환 위치 스폰 op 없음)이다.
+> 2026-11-12 코드 대조: 런타임 월드의 비플레이어 엔티티는 `facts::EntityFact`(NBT 포함,
+> `World#ferriteEntities`)로 읽고 `ferriteSpawnSnapshot`으로 재생성한다. 기본 월드·네더·엔드는
+> 저장 NBT 경계가 없어 구조물 엔티티 캡처/재생성 대상에서 제외된다. 따라서 아래 선행 작업은
+> 완료되었고, 남은 일은 세 차원에 대한 안전한 저장 NBT 경계를 추가하는 것이다.
 
-1. **호스트 비플레이어 엔티티 조회 경계** — 구조물 영역(청크 범위)을 소유한 리전 스레드에서
-   플레이어 외 엔티티의 UUID, 타입, 위치/회전, 전체 NBT를 읽는 `worldgen.rs` op가 필요하다.
-   현재 `World#getEntities*`는 접속 플레이어만 돌려준다. 구조물이 여러 리전에 걸치면 리전별
-   스냅샷을 모아야 하므로 `Signal::EntityTransfer`/`RegionData` 같은 명시적 핸드오프 규칙과
-   같은-리전/교차-리전 테스트가 함께 필요하다.
-2. **구조물/템플릿의 엔티티 저장** — `CapturedStructure`가 캡처한 엔티티 목록을 보관하고
-   `StructureNbt`가 템플릿 파일의 `entities`(pos/blockPos/nbt)를 읽고 써야 하며,
-   `Structure#getEntities`/`getEntityCount`가 그 스냅샷을 돌려줘야 한다. `fill(..., true)`도
-   엔티티를 수집해야 한다.
-3. **변환된 위치에 스폰하는 경로** — `EntityTransformer` 콜백을 소유 리전 스레드에서 호출한 뒤,
-   변환된 위치에 NBT로 엔티티를 스폰하는 호스트 op가 필요하다. 회전/반전/integrity가 위치와
-   엔티티 NBT에 함께 적용되어야 하고, 콜백이 엔티티를 거부/취소하는 규칙, 구조물이 여러 리전에
-   걸칠 때의 스폰 스케줄링도 정해야 한다.
+1. **완료:** 호스트가 런타임 월드의 구조물 청크 범위에서 UUID·타입·위치·회전·NBT를 읽는다.
+2. **완료:** `CapturedStructure`가 `fill(..., true)` 결과를 보관하고 구조물 API로 노출한다.
+3. **완료:** `EntityTransformer`를 최종 위치에서 호출하고, 허용된 엔티티를 변환된 위치에
+   저장 NBT로 재생성한다. 기본 월드·네더·엔드의 NBT 경계를 추가하는 것이 후속 작업이다.
 
 ## `FerriteWorld`의 `UnsupportedOperationException` 16곳 (2026-11-12, W6, 기준 `b50f8d9`)
 
