@@ -29,10 +29,19 @@ final class FerriteMapView implements org.bukkit.map.MapView {
 
     FerriteMapView(World world) {
         this.world = java.util.Objects.requireNonNull(world, "world");
-        this.hosted = HostBridge.available();
-        this.id = hosted
-            ? HostBridge.callInt("Server", "server", "allocateMap(String,int,int,int,boolean,boolean)", dimensionKey(world), scale.ordinal(), 0, 0, true, false)
-            : NEXT_ID.getAndIncrement();
+        int allocated = HostBridge.available() ? allocate(world) : -1;
+        // A host that does not answer with an id (a test transport, an older host) leaves the
+        // view in-memory with a local counter id; it is then never written back.
+        this.hosted = allocated >= 0;
+        this.id = hosted ? allocated : NEXT_ID.getAndIncrement();
+    }
+
+    private int allocate(World world) {
+        try {
+            return HostBridge.callInt("Server", "server", "allocateMap(String,int,int,int,boolean,boolean)", dimensionKey(world), scale.ordinal(), 0, 0, true, false);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private static String dimensionKey(World world) { return world.getKey().toString(); }
