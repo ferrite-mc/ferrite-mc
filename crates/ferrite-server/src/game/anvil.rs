@@ -1101,8 +1101,10 @@ impl AnvilChunkSource {
         }
         Ok((count, chunks))
     }
-    /// Records a modified column for streaming and eventual Anvil writeback.
-    /// TODO: call this when block-editing gameplay is implemented.
+    /// Records a modified column, with caller-supplied light, for streaming and eventual Anvil
+    /// writeback. Gameplay edits go through [`Self::set_block`], which does the same bookkeeping;
+    /// this exists so tests can inject a column with exact light data.
+    #[cfg(test)]
     pub fn mark_modified(
         &self,
         x: i32,

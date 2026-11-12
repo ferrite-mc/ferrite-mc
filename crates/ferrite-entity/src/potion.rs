@@ -4,7 +4,8 @@
 //! the `minecraft:potion` registry, optional custom effects, a custom color and a custom name.
 //! Drinking applies the potion's effects (`PotionContents.applyToLivingEntity`). Splash potions
 //! are thrown projectiles (`arrow::Kind::SplashPotion`) that burst where they land; lingering
-//! potions are not implemented yet.
+//! potions (`arrow::Kind::LingeringPotion`) leave a [`PotionCloud`], which is simulated on the
+//! server only: no area-effect-cloud entity is sent to clients yet.
 //!
 //! Durations and amplifiers mirror the vanilla `Potions` registrations; the effect ids come from
 //! [`Effect`](crate::effect::Effect), and potion ids are checked against the 26.3 registry
@@ -355,6 +356,115 @@ fn int(tag: &Tag) -> Option<i32> {
     }
 }
 
+/// Vanilla `AreaEffectCloud` left by a lingering potion (`ThrownPotion.makeAreaOfEffectCloud`).
+///
+/// It starts with a 3 block radius, waits 10 ticks, then shrinks evenly over its 600 ticks. Every
+/// fifth tick it applies its effects to whoever stands inside and has not been hit during the last
+/// `REAPPLICATION_DELAY` ticks; each application costs half a block of radius. It ends when it
+/// has run its course or its radius falls under half a block. Effect durations are a quarter of
+/// the potion's, except for instant effects. Only the server side is modelled: no entity is sent
+/// to clients.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PotionCloud {
+    pub center: ferrite_math::Vec3,
+    pub effects: Vec<MobEffectInstance>,
+    age: u32,
+    radius: f32,
+    radius_per_tick: f32,
+    /// Who was hit and the tick until which they are skipped.
+    victims: Vec<(uuid::Uuid, u32)>,
+}
+
+impl PotionCloud {
+    pub const RADIUS: f32 = 3.0;
+    pub const RADIUS_ON_USE: f32 = -0.5;
+    pub const MIN_RADIUS: f32 = 0.5;
+    pub const DURATION: u32 = 600;
+    pub const WAIT: u32 = 10;
+    pub const REAPPLICATION_DELAY: u32 = 20;
+    pub const CHECK_INTERVAL: u32 = 5;
+
+    /// A cloud for the effects of a lingering potion bottle.
+    pub fn lingering(center: ferrite_math::Vec3, potion_effects: &[MobEffectInstance]) -> Self {
+        let effects = potion_effects
+            .iter()
+            .map(|effect| {
+                let mut effect = *effect;
+                if !effect.kind().is_instant() {
+                    effect.duration /= 4;
+                }
+                effect
+            })
+            .collect();
+        Self {
+            center,
+            effects,
+            age: 0,
+            radius: Self::RADIUS,
+            radius_per_tick: -Self::RADIUS / Self::DURATION as f32,
+            victims: Vec::new(),
+        }
+    }
+
+    pub fn age(&self) -> u32 {
+        self.age
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    /// Advances one tick over `candidates` (uuid and feet position of everything that can be
+    /// affected). Returns `None` once the cloud is gone, otherwise the effects to apply this
+    /// tick as `(uuid, effect)`.
+    pub fn tick(
+        &mut self,
+        candidates: impl IntoIterator<Item = (uuid::Uuid, [f64; 3])>,
+    ) -> Option<Vec<(uuid::Uuid, MobEffectInstance)>> {
+        self.age += 1;
+        if self.age >= Self::WAIT + Self::DURATION {
+            return None;
+        }
+        if self.age >= Self::WAIT {
+            self.radius += self.radius_per_tick;
+            if self.radius < Self::MIN_RADIUS {
+                return None;
+            }
+        }
+        let mut applied = Vec::new();
+        if !self.age.is_multiple_of(Self::CHECK_INTERVAL) {
+            return Some(applied);
+        }
+        let now = self.age;
+        self.victims.retain(|(_, until)| now < *until);
+        if self.effects.is_empty() {
+            return Some(applied);
+        }
+        for (id, pos) in candidates {
+            if self.victims.iter().any(|(victim, _)| *victim == id) {
+                continue;
+            }
+            let dx = pos[0] - self.center.x;
+            let dz = pos[2] - self.center.z;
+            let radius = f64::from(self.radius);
+            // Vanilla looks inside a box one block tall around the cloud and tests the
+            // horizontal distance against the radius.
+            if dx * dx + dz * dz > radius * radius
+                || !(-1.0..=2.0).contains(&(pos[1] - self.center.y))
+            {
+                continue;
+            }
+            self.victims.push((id, now + Self::REAPPLICATION_DELAY));
+            applied.extend(self.effects.iter().map(|effect| (id, *effect)));
+            self.radius += Self::RADIUS_ON_USE;
+            if self.radius < Self::MIN_RADIUS {
+                return None;
+            }
+        }
+        Some(applied)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +592,109 @@ mod tests {
                 .all_effects()
                 .is_empty()
         );
+    }
+
+    fn cloud_at_origin(effects: &[MobEffectInstance]) -> PotionCloud {
+        PotionCloud::lingering(ferrite_math::Vec3::new(0.0, 64.0, 0.0), effects)
+    }
+
+    fn speed(duration: i32) -> MobEffectInstance {
+        MobEffectInstance::ambient(Effect::Speed.id(), duration, 0)
+    }
+
+    /// Runs the cloud until `age`, with nobody inside, and returns it.
+    fn aged(mut cloud: PotionCloud, age: u32) -> PotionCloud {
+        while cloud.age() < age {
+            assert!(cloud.tick([]).is_some());
+        }
+        cloud
+    }
+
+    #[test]
+    fn a_lingering_cloud_quarters_effect_durations_but_not_instant_ones() {
+        let instant = MobEffectInstance::new(Effect::InstantHealth.id(), 1, 0);
+        let cloud = cloud_at_origin(&[speed(3600), instant]);
+        assert_eq!(cloud.effects[0].duration, 900);
+        assert_eq!(cloud.effects[1].duration, 1);
+    }
+
+    #[test]
+    fn a_cloud_applies_effects_every_fifth_tick_inside_its_radius() {
+        let id = uuid::Uuid::from_u128(1);
+        let mut cloud = cloud_at_origin(&[speed(3600)]);
+        for _ in 1..PotionCloud::CHECK_INTERVAL {
+            assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]), Some(Vec::new()));
+        }
+        let applied = cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, id);
+        assert_eq!(applied[0].1.duration, 900);
+    }
+
+    #[test]
+    fn someone_outside_the_radius_or_far_above_is_not_affected() {
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 4);
+        let near = uuid::Uuid::from_u128(1);
+        let far = uuid::Uuid::from_u128(2);
+        let high = uuid::Uuid::from_u128(3);
+        let applied = cloud
+            .tick([
+                (near, [2.5, 64.0, 0.0]),
+                (far, [3.5, 64.0, 0.0]),
+                (high, [0.0, 70.0, 0.0]),
+            ])
+            .unwrap();
+        assert_eq!(
+            applied.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [near]
+        );
+    }
+
+    #[test]
+    fn a_hit_costs_half_a_block_and_the_victim_waits_twenty_ticks() {
+        let id = uuid::Uuid::from_u128(1);
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 4);
+        let before = cloud.radius();
+        assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap().len(), 1);
+        assert!((before + PotionCloud::RADIUS_ON_USE - cloud.radius()).abs() < 1e-4);
+        // Ticks 10, 15 and 20 are checks too, but the victim is skipped until tick 25.
+        for _ in 0..19 {
+            let applied = cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap();
+            assert!(applied.is_empty(), "age {}", cloud.age());
+        }
+        assert_eq!(cloud.age(), 24);
+        assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_cloud_waits_ten_ticks_before_it_shrinks_and_ends_after_its_duration() {
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), PotionCloud::WAIT - 1);
+        assert_eq!(cloud.radius(), PotionCloud::RADIUS);
+        cloud.tick([]).unwrap();
+        assert!(cloud.radius() < PotionCloud::RADIUS);
+        let mut ticks = cloud.age();
+        while cloud.tick([]).is_some() {
+            ticks += 1;
+        }
+        // The radius reaches half a block before the full duration is over.
+        assert!(ticks < PotionCloud::WAIT + PotionCloud::DURATION);
+        assert!(ticks > PotionCloud::DURATION / 2);
+    }
+
+    #[test]
+    fn enough_hits_dissolve_the_cloud() {
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 4);
+        let people: Vec<_> = (0..8u128)
+            .map(|n| (uuid::Uuid::from_u128(n + 1), [0.0, 64.0, 0.0]))
+            .collect();
+        // 3.0 - 0.5 * 6 = 0.0 < 0.5: the sixth person ends it.
+        assert_eq!(cloud.tick(people), None);
+    }
+
+    #[test]
+    fn a_cloud_without_effects_applies_nothing() {
+        let mut cloud = aged(cloud_at_origin(&[]), 4);
+        let id = uuid::Uuid::from_u128(1);
+        assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]), Some(Vec::new()));
     }
 }

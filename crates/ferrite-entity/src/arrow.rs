@@ -123,6 +123,8 @@ pub enum Kind {
     WindCharge,
     /// `minecraft:splash_potion`: arcs like a thrown item; the region bursts the potion where it lands.
     SplashPotion,
+    /// `minecraft:lingering_potion`: arcs like a splash potion; the region leaves a cloud where it lands.
+    LingeringPotion,
 }
 
 impl Kind {
@@ -140,6 +142,7 @@ impl Kind {
             Self::ExperienceBottle => "experience_bottle",
             Self::WindCharge => "wind_charge",
             Self::SplashPotion => "splash_potion",
+            Self::LingeringPotion => "lingering_potion",
         }
     }
 
@@ -154,8 +157,14 @@ impl Kind {
             "experience_bottle" => Some(Self::ExperienceBottle),
             "wind_charge" => Some(Self::WindCharge),
             "splash_potion" => Some(Self::SplashPotion),
+            "lingering_potion" => Some(Self::LingeringPotion),
             _ => None,
         }
+    }
+
+    /// A thrown potion bottle, whose contents the region keeps beside the projectile.
+    pub fn is_potion(self) -> bool {
+        matches!(self, Self::SplashPotion | Self::LingeringPotion)
     }
 
     pub fn entity_type(self) -> u16 {
@@ -180,6 +189,7 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::ExperienceBottle,
         Kind::WindCharge,
         Kind::SplashPotion,
+        Kind::LingeringPotion,
     ]
     .into_iter()
     .find(|kind| kind.entity_type() == data.kind)
@@ -271,7 +281,7 @@ pub fn tick_thrown(
                 vel.x *= DRAG;
                 vel.z *= DRAG;
             }
-            Kind::SplashPotion => {
+            Kind::SplashPotion | Kind::LingeringPotion => {
                 vel.y -= POTION_GRAVITY;
                 vel.x *= DRAG;
                 vel.y *= DRAG;
@@ -582,6 +592,39 @@ mod tests {
         assert_eq!(landed.len(), 1);
         assert_eq!((landed[0].kind, landed[0].uuid), (Kind::SplashPotion, uuid));
         assert_eq!(landed[0].owner, Some(Uuid::from_u128(4)));
+    }
+
+    #[test]
+    fn a_lingering_potion_flies_like_a_splash_potion_and_reports_its_kind() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let potion = store.insert(new_thrown(
+            Kind::LingeringPotion,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 0.5),
+            Some(Uuid::from_u128(5)),
+        ));
+        let uuid = store.data(potion).unwrap().uuid;
+        assert_eq!(
+            Kind::thrown_from_name("minecraft:lingering_potion"),
+            Some(Kind::LingeringPotion)
+        );
+        assert_eq!(
+            kind_of(store.data(potion).unwrap()),
+            Some(Kind::LingeringPotion)
+        );
+        assert!(Kind::LingeringPotion.is_potion() && Kind::SplashPotion.is_potion());
+        assert!(!Kind::Snowball.is_potion());
+        tick_thrown(&mut store, &world, &[]);
+        let vel = store.vel(potion).unwrap();
+        assert!((vel.y + POTION_GRAVITY * DRAG).abs() < 1.0e-9);
+        store.set_vel(potion, Vec3::new(0.0, -8.0, 0.0));
+        let landed = tick_thrown(&mut store, &world, &[]);
+        assert_eq!(landed.len(), 1);
+        assert_eq!(
+            (landed[0].kind, landed[0].uuid),
+            (Kind::LingeringPotion, uuid)
+        );
     }
 
     #[test]

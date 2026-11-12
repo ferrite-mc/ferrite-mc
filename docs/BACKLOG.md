@@ -59,8 +59,10 @@ server-side only.
   perched scanning/attacking/flaming subphases, the purple teleport beam and the automatic
   2400-tick gateway beam (`docs/end-dimension.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
-  bottle, wind charge and splash potion are in (`ferrite-entity/src/arrow.rs`). Missing: lingering
-  potion and its area-effect cloud, fishing bobber.
+  bottle, wind charge, splash and lingering potion are in (`ferrite-entity/src/arrow.rs`). A
+  lingering cloud applies its effects to players (`potion::PotionCloud`) but no area-effect-cloud
+  entity is sent to clients, so it is invisible, and it affects players only, like the splash
+  potion; mobs are not affected. Missing: fishing bobber.
 - Shoulder parrot is bookkeeping only (`set/get/releaseShoulderEntity*`): no entity, no display.
 - Structure entities: `Structure#getEntities()` returns the captured entities; non-empty
   `EntityTransformer` lists are still refused (`CapturedStructure.java`, `FerriteTemplate.java`).
