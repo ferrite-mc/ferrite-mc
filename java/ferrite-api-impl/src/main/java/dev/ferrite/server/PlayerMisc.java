@@ -221,8 +221,8 @@ public abstract class PlayerMisc extends PlayerStubs {
     // ---- projectiles ----------------------------------------------------------------------------
     /**
      * Shoots an arrow, snowball, egg, ender pearl, experience bottle, splash or lingering potion, wind charge, small
-     * fireball or fireball from the eyes, at the power vanilla gives the item that throws it. A trident is refused: the
-     * host's {@code launchThrown} does not accept it. A potion launches as a bare bottle because the call cannot carry
+     * fireball or fireball from the eyes, at the power vanilla gives the item that throws it. A trident flies at
+     * vanilla's 2.5 and is owned by the player. A potion launches as a bare bottle because the call cannot carry
      * its contents, so a callback that tries to set them fails instead of being dropped.
      */
     @Override public <T extends org.bukkit.entity.Projectile> T launchProjectile(Class<? extends T> projectile, org.bukkit.util.Vector velocity, java.util.function.Consumer<? super T> callback) {
@@ -240,8 +240,8 @@ public abstract class PlayerMisc extends PlayerStubs {
             power = 0.5;
         }
         else if (org.bukkit.entity.WindCharge.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.WIND_CHARGE;
-        else if (org.bukkit.entity.Trident.class.isAssignableFrom(projectile))
-            throw new UnsupportedOperationException("Ferrite: Player#launchProjectile(" + projectile.getSimpleName() + ") is not available: the host's launchThrown only accepts snowball, egg, ender pearl, fireballs, experience bottle, wind charge and potions, and has no trident launch");
+        // Vanilla Trident.PROJECTILE_SHOOT_POWER; the host gives it the default trident item, the thrown-trident damage and the player as owner.
+        else if (org.bukkit.entity.Trident.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.TRIDENT; power = 2.5; }
         else if (!projectile.isAssignableFrom(org.bukkit.entity.Arrow.class)) throw new UnsupportedOperationException("Ferrite: not implemented: Player#launchProjectile(" + projectile.getSimpleName() + ")");
         var eye = getEyeLocation();
         var direction = velocity != null ? velocity.clone() : eye.getDirection().multiply(thrown != null ? power : 3.0);

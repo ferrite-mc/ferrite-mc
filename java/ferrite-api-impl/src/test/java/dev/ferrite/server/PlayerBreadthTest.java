@@ -104,10 +104,19 @@ class PlayerBreadthTest {
         assertEquals(3.0, Double.parseDouble(call[5]), 1e-9);
     }
 
-    @Test void aTridentIsRefusedWithoutReachingTheHost() {
-        var error = assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.Trident.class));
-        assertTrue(error.getMessage().contains("Trident") && error.getMessage().contains("launchThrown"), error.getMessage());
-        assertTrue(calls.isEmpty(), "nothing is launched");
+    @Test void aTridentLaunchesAtItsVanillaPowerOwnedByThePlayer() {
+        assertLaunch(org.bukkit.entity.Trident.class, EntityType.TRIDENT, 2.5);
+    }
+
+    @Test void aTridentWithAnExplicitVelocityKeepsEveryComponent() {
+        var handle = player.launchProjectile(org.bukkit.entity.Trident.class, new org.bukkit.util.Vector(0.25, -1, 2));
+        assertEquals(EntityType.TRIDENT, handle.getType());
+        var call = only("launchThrown(Location,EntityType,double,double,double,String,String)");
+        assertEquals("TRIDENT", call[3].toUpperCase(java.util.Locale.ROOT));
+        assertEquals(0.25, Double.parseDouble(call[4]), 1e-9);
+        assertEquals(-1.0, Double.parseDouble(call[5]), 1e-9);
+        assertEquals(2.0, Double.parseDouble(call[6]), 1e-9);
+        assertEquals(PLAYER_ID, call[7]);
     }
 
     @Test void potionContentsCannotBeDroppedSilentlyByACallback() {

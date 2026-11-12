@@ -8322,6 +8322,22 @@ impl Region {
                 Vec3::new(velocity[0], velocity[1], velocity[2]),
                 owner,
             ),
+            // `Player#launchProjectile(Trident)`: vanilla gives the thrown trident a plain trident
+            // item, which `land_tridents` drops (or returns, with Loyalty) when the flight ends.
+            "minecraft:trident" => {
+                let (Some(owner), Some(stack)) =
+                    (owner, ferrite_item::ItemStack::from_name("minecraft:trident"))
+                else {
+                    return false;
+                };
+                let record = arrow::new_trident(
+                    pos,
+                    Vec3::new(velocity[0], velocity[1], velocity[2]),
+                    Some(owner),
+                );
+                self.thrown_tridents.insert(uuid, (owner, stack));
+                record
+            }
             "minecraft:arrow" => ferrite_entity::arrow::new_arrow(
                 pos,
                 Vec3::new(velocity[0], velocity[1], velocity[2]),
@@ -11566,6 +11582,34 @@ mod tests {
         assert_eq!(data.yaw, 180.0);
         assert_eq!(region.entities.pos(key).unwrap().x, 40.5);
         assert_eq!(region.entities.keys().len(), 1);
+    }
+
+    #[test]
+    fn a_plugin_launched_trident_keeps_identity_owner_velocity_and_returns_as_an_item() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let uuid = Uuid::from_u128(0x7121);
+        let owner = Uuid::from_u128(0xa11);
+        assert!(region.plugin_spawn(
+            [8.0, 70.0, 8.0],
+            "minecraft:trident",
+            None,
+            [0.0, 0.5, 2.5],
+            uuid,
+            Some(owner),
+        ));
+        let key = *region.entities.keys().first().expect("spawned");
+        let data = region.entities.data(key).unwrap();
+        assert_eq!(data.uuid, uuid);
+        assert_eq!(arrow::kind_of(data), Some(arrow::Kind::Trident));
+        let state = data.arrow.expect("flying state");
+        assert_eq!(state.owner, Some(owner));
+        assert_eq!(state.damage, arrow::TRIDENT_DAMAGE);
+        let vel = region.entities.vel(key).unwrap();
+        assert_eq!((vel.x, vel.y, vel.z), (0.0, 0.5, 2.5));
+        let (kept_owner, stack) = region.thrown_tridents.get(&uuid).expect("tracked");
+        assert_eq!(*kept_owner, owner);
+        assert_eq!(stack.name(), Some("minecraft:trident"));
     }
 
     #[test]

@@ -177,7 +177,10 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
     let (kind, block) = match call.method.as_str() {
         "launchThrown(Location,EntityType,double,double,double,String,String)" => {
             let kind = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
-            ferrite_entity::arrow::Kind::thrown_from_name(&kind)?;
+            // A trident is not one of the item-thrown kinds, but the region has its own launch for it.
+            if kind != "minecraft:trident" {
+                ferrite_entity::arrow::Kind::thrown_from_name(&kind)?;
+            }
             velocity = [
                 number(call.args.get(2)?)?,
                 number(call.args.get(3)?)?,
@@ -425,6 +428,29 @@ mod tests {
                 kind: "minecraft:small_fireball".into(),
                 block: None,
                 velocity: [0.0, 0.5, 1.5],
+                uuid: Uuid::from_u128(9),
+            })
+        );
+        assert_eq!(
+            spawn_command(&call(
+                "launchThrown(Location,EntityType,double,double,double,String,String)",
+                &[
+                    &at,
+                    "TRIDENT",
+                    "0",
+                    "0.5",
+                    "2.5",
+                    "00000000-0000-0000-0000-0000000000aa",
+                    "00000000-0000-0000-0000-000000000009",
+                ],
+            )),
+            Some(PlayerCommand::SpawnEntity {
+                world: ferrite_plugin::default_world_id(),
+                owner: Some(Uuid::from_u128(0xaa)),
+                center: [1.0, 70.0, 2.0],
+                kind: "minecraft:trident".into(),
+                block: None,
+                velocity: [0.0, 0.5, 2.5],
                 uuid: Uuid::from_u128(9),
             })
         );
