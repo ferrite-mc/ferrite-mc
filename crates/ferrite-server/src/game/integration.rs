@@ -673,7 +673,11 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
     // slowly sometimes, so allow five minutes before calling it a failure.
     tokio::time::timeout(std::time::Duration::from_secs(300), async {
         loop {
-            let body = bot.until(BossBar::ID).await;
+            // The respawn stage ticks with the region, so a loaded runner can take most of
+            // this window; keep the packet wait as long as the enclosing timeout.
+            let body = bot
+                .until_within(BossBar::ID, std::time::Duration::from_secs(300))
+                .await;
             if matches!(
                 BossBar::decode(&mut body.as_slice()).unwrap().action,
                 BossBarAction::Add { .. }
