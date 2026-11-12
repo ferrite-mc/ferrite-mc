@@ -2,8 +2,9 @@
 //!
 //! A potion item carries the `minecraft:potion_contents` component: an optional potion id from
 //! the `minecraft:potion` registry, optional custom effects, a custom color and a custom name.
-//! Drinking applies the potion's effects (`PotionContents.applyToLivingEntity`). Splash and
-//! lingering potions are not implemented yet.
+//! Drinking applies the potion's effects (`PotionContents.applyToLivingEntity`). Splash potions
+//! are thrown projectiles (`arrow::Kind::SplashPotion`) that burst where they land; lingering
+//! potions are not implemented yet.
 //!
 //! Durations and amplifiers mirror the vanilla `Potions` registrations; the effect ids come from
 //! [`Effect`](crate::effect::Effect), and potion ids are checked against the 26.3 registry
