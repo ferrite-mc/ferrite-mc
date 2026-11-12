@@ -1131,6 +1131,8 @@ pub struct Region {
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// The bottle each splash potion in flight was thrown from, keyed by projectile uuid.
     pub thrown_potions: HashMap<Uuid, ferrite_item::ItemStack>,
+    /// Clouds left by landed lingering potions. They are not sent to clients and not saved.
+    pub potion_clouds: Vec<ferrite_entity::potion::PotionCloud>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
     /// Mobs `/damage` hurt this tick, waiting for their hurt animation.
@@ -1190,6 +1192,7 @@ impl RegionData for Region {
         self.players.extend(other.players);
         self.entities.merge(other.entities);
         self.thrown_potions.extend(other.thrown_potions);
+        self.potion_clouds.extend(other.potion_clouds);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
         self.generator.merge(other.generator);
@@ -1212,9 +1215,20 @@ impl RegionData for Region {
             .partition(|update| in_sections(update.pos));
         self.delayed_updates = staying;
         let moving_pistons = self.moving_pistons.split(in_sections);
+        let (potion_clouds, staying_clouds) = std::mem::take(&mut self.potion_clouds)
+            .into_iter()
+            .partition(|cloud| {
+                in_sections([
+                    cloud.center.x.floor() as i32,
+                    0,
+                    cloud.center.z.floor() as i32,
+                ])
+            });
+        self.potion_clouds = staying_clouds;
         let mut result = Self {
             plugin_explosions: Vec::new(),
             breath_clouds: Vec::new(),
+            potion_clouds,
             delayed_updates,
             moving_pistons,
             thrown_tridents: HashMap::new(),
@@ -3143,7 +3157,7 @@ impl Player {
                 );
             }
             // A potion keeps its contents so the burst can apply them where it lands.
-            let contents = (kind == arrow::Kind::SplashPotion).then(|| stack.copy_with_count(1));
+            let contents = kind.is_potion().then(|| stack.copy_with_count(1));
             self.menus.launched.push((kind, contents));
             return;
         }
@@ -7929,6 +7943,11 @@ impl Region {
             {
                 self.splash_potion([landing.pos.x, landing.pos.y, landing.pos.z], &bottle);
             }
+            if landing.kind == arrow::Kind::LingeringPotion
+                && let Some(bottle) = self.thrown_potions.remove(&landing.uuid)
+            {
+                self.linger_potion(landing.pos, &bottle);
+            }
             if landing.kind == arrow::Kind::Egg {
                 ferrite_entity::breed::hatch_egg(&mut self.entities, landing.pos, &mut self.rng);
             }
@@ -8662,16 +8681,7 @@ impl Region {
     /// Vanilla `ThrownPotion.applySplash`: every player within four blocks gains the potion's
     /// effects, with the duration falling off with distance.
     fn splash_potion(&mut self, center: [f64; 3], stack: &ferrite_item::ItemStack) {
-        let effects = match stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS)
-        {
-            Some(ferrite_item::Component::PotionContents(contents)) => {
-                ferrite_entity::potion::effects_from_component(&contents)
-            }
-            Some(ferrite_item::Component::Opaque(tag)) => PotionContents::from_tag(&tag)
-                .map(|contents| contents.all_effects())
-                .unwrap_or_default(),
-            _ => return,
-        };
+        let effects = Self::bottle_effects(stack);
         if effects.is_empty() {
             return;
         }
@@ -8692,6 +8702,60 @@ impl Region {
                 p.apply_effect(instance);
             }
         }
+    }
+
+    /// The effects a potion bottle carries, or none when it is not a potion.
+    fn bottle_effects(
+        stack: &ferrite_item::ItemStack,
+    ) -> Vec<ferrite_entity::effect::MobEffectInstance> {
+        match stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS) {
+            Some(ferrite_item::Component::PotionContents(contents)) => {
+                ferrite_entity::potion::effects_from_component(&contents)
+            }
+            Some(ferrite_item::Component::Opaque(tag)) => PotionContents::from_tag(&tag)
+                .map(|contents| contents.all_effects())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Vanilla `ThrownPotion.makeAreaOfEffectCloud`: a lingering potion leaves a cloud where it
+    /// lands. A bottle with no effects leaves nothing.
+    fn linger_potion(&mut self, center: ferrite_math::Vec3, stack: &ferrite_item::ItemStack) {
+        let effects = Self::bottle_effects(stack);
+        if effects.is_empty() {
+            return;
+        }
+        self.potion_clouds
+            .push(ferrite_entity::potion::PotionCloud::lingering(
+                center, &effects,
+            ));
+    }
+
+    /// Ticks every lingering cloud and applies what it reaches to the players of this region.
+    fn tick_potion_clouds(&mut self) {
+        if self.potion_clouds.is_empty() {
+            return;
+        }
+        let candidates: Vec<(Uuid, [f64; 3])> = self
+            .players
+            .values()
+            .filter(|p| p.gamemode != 3 && !p.survival.dead)
+            .map(|p| (p.uuid, p.pos))
+            .collect();
+        let mut clouds = std::mem::take(&mut self.potion_clouds);
+        clouds.retain_mut(|cloud| {
+            let Some(applied) = cloud.tick(candidates.iter().copied()) else {
+                return false;
+            };
+            for (uuid, effect) in applied {
+                if let Some(p) = self.players.get_mut(&uuid) {
+                    p.apply_effect(effect);
+                }
+            }
+            true
+        });
+        self.potion_clouds = clouds;
     }
 
     /// A fire charge: light the facing block when fire may be placed there.
@@ -8925,7 +8989,7 @@ impl Region {
             let eye = combat::eye_position(feet);
             // Vanilla `shootFromRotation(.., 1.5, 1.0)`; a potion is lobbed: 20 degrees upward
             // at half the speed (`ThrowablePotionItem`).
-            let (pitch, power) = if kind == arrow::Kind::SplashPotion {
+            let (pitch, power) = if kind.is_potion() {
                 (p.pitch - 20.0, 0.5)
             } else {
                 (p.pitch, 1.5)
@@ -9423,6 +9487,7 @@ impl Region {
             self.sync_trades();
             self.land_tridents();
             self.tick_dragon_effects(ctx);
+            self.tick_potion_clouds();
             self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
         }
         let alive: Vec<ferrite_math::Vec3> = self
@@ -10356,6 +10421,70 @@ mod tests {
         assert!(taken.thrown_potions.contains_key(&uuid));
         taken.merge(region);
         assert!(taken.thrown_potions.contains_key(&uuid));
+    }
+
+    fn lingering_bottle(potion: &str) -> ferrite_item::ItemStack {
+        let mut bottle = ferrite_item::ItemStack::from_name("minecraft:lingering_potion")
+            .expect("vanilla lingering potion");
+        bottle.components.insert(
+            ferrite_item::component_ids::POTION_CONTENTS,
+            ferrite_item::Component::PotionContents(ferrite_item::PotionContents {
+                potion: Some(potion.into()),
+                ..Default::default()
+            }),
+        );
+        bottle
+    }
+
+    #[test]
+    fn a_lingering_bottle_with_effects_leaves_a_cloud_and_water_leaves_none() {
+        let mut region = Region::default();
+        let at = ferrite_math::Vec3::new(8.5, 64.0, 8.5);
+        region.linger_potion(at, &lingering_bottle("minecraft:water"));
+        assert!(region.potion_clouds.is_empty());
+        region.linger_potion(at, &lingering_bottle("minecraft:swiftness"));
+        assert_eq!(region.potion_clouds.len(), 1);
+        let cloud = &region.potion_clouds[0];
+        assert_eq!(cloud.center, at);
+        assert!(!cloud.effects.is_empty());
+        // Swiftness lasts 3:00 in a bottle; the cloud gives a quarter of that.
+        assert_eq!(cloud.effects[0].duration, 3600 / 4);
+    }
+
+    #[test]
+    fn a_potion_cloud_follows_its_section_through_a_region_split_and_merge() {
+        let mut region = Region::default();
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        let elsewhere: HashSet<_> = [SectionPos(40, 40)].into();
+        let other = region.split(&elsewhere);
+        assert!(other.potion_clouds.is_empty());
+        assert_eq!(region.potion_clouds.len(), 1);
+
+        let here: HashSet<_> = [SectionPos(0, 0)].into();
+        let mut taken = region.split(&here);
+        assert!(region.potion_clouds.is_empty());
+        assert_eq!(taken.potion_clouds.len(), 1);
+        taken.merge(region);
+        assert_eq!(taken.potion_clouds.len(), 1);
+    }
+
+    #[test]
+    fn ticking_an_empty_cloud_list_is_harmless_and_a_cloud_expires() {
+        let mut region = Region::default();
+        region.tick_potion_clouds();
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:swiftness"),
+        );
+        for _ in 0..(ferrite_entity::potion::PotionCloud::WAIT
+            + ferrite_entity::potion::PotionCloud::DURATION)
+        {
+            region.tick_potion_clouds();
+        }
+        assert!(region.potion_clouds.is_empty());
     }
 
     fn dropped_items(region: &Region) -> Vec<&'static str> {

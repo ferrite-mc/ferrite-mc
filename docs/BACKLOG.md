@@ -46,26 +46,26 @@ server-side only.
 
 ## 2. Entity and mob parity
 
-- Investigate the reported entity replacement when a player leaves and returns to chunks. The
-  coordinator currently increments region/scheduler holds for every viewer but releases only
-  the last one; test overlapping viewers and repeated unload/reload with stable entity UUID,
-  position and health. Also test immediate re-entry while entity persistence is pending.
-- Vanilla mob AI parity is incomplete. Region-local AI previously saw only players in the same
-  region, allowing a nearby player across a boundary to trigger hostile-mob despawn. Verify the
-  in-progress snapshot and remote attack routing with boundary movement, despawn and combat;
-  audit pathfinding, goal selection and behavior against vanilla for each affected mob.
-- In-progress work on 2026-11-10 in `release/v0.1.6`: first/last-viewer holder accounting and an
-  in-memory handoff for entity saves were changed; cross-region player snapshots and melee
-  routing were wired. Final integration tests and real-client reproduction are still required.
-  A remotely blocked melee hit does not yet knock back the attacking mob.
+- Entity replacement when a player leaves and returns to chunks is pinned by regression tests
+  (`two_viewers_one_leaving_first_then_reentry_keeps_one_entity` in `game/mod.rs`,
+  `a_chunk_stays_held_until_the_last_viewer_releases_it` in `game/region.rs`). A real-client
+  reproduction is still outstanding.
+- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
+  the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
+  Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
+  hold their fuse out to seven blocks and skeletons strafe. Pathfinding and goal selection are
+  still to be audited against vanilla for each affected mob; do not claim full parity.
 - Dragon: the strafe phase and the gateway creation beam are implemented. What is left is the
   perched scanning/attacking/flaming subphases, the purple teleport beam and the automatic
   2400-tick gateway beam (`docs/end-dimension.md`).
-- Projectiles beyond arrow, snowball, egg, ender pearl and fireball: potion, experience bottle,
-  thrown trident, wind charge, fishing bobber.
+- Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
+  bottle, wind charge, splash and lingering potion are in (`ferrite-entity/src/arrow.rs`). A
+  lingering cloud applies its effects to players (`potion::PotionCloud`) but no area-effect-cloud
+  entity is sent to clients, so it is invisible, and it affects players only, like the splash
+  potion; mobs are not affected. Missing: fishing bobber.
 - Shoulder parrot is bookkeeping only (`set/get/releaseShoulderEntity*`): no entity, no display.
-- Structure entities: `Structure#getEntities()` is always empty and `EntityTransformer` lists are
-  refused. This needs host-side non-player entity snapshots inside a structure region first.
+- Structure entities: `Structure#getEntities()` returns the captured entities; non-empty
+  `EntityTransformer` lists are still refused (`CapturedStructure.java`, `FerriteTemplate.java`).
 - Metadata breadth per entity type, attribute packets, passengers/vehicles beyond `/ride`.
 
 ## 3. Plugin API breadth
@@ -92,8 +92,7 @@ server-side only.
 
 - Multi-version translation layer (the WIP branch `wip/day2-2026-10-28` has the start).
 - Compression and encryption off the reader and writer threads.
-- Keepalive/read-timeout parity (30 s), chat and command rate limits.
-- Chunk packet cache invalidation when a block entity changes (`game/anvil.rs` cache stats).
+- Chat and command rate limits. The 30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).
 
 ## 6. Performance and operations
 
