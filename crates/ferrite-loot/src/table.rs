@@ -6,7 +6,7 @@ use crate::files::{json_files, read_json, relative_stem};
 use crate::function::{self, Function};
 use crate::number::NumberProvider;
 use crate::tags::ItemTags;
-use crate::{Definitions, Error, LootContext, Result, Rng, normalize_id};
+use crate::{Definitions, Error, LootContext, LootStack, Result, Rng, normalize_id};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,15 @@ impl LootTable {
     /// Stacks are `(namespaced item id, count)`. Entries whose count ends at
     /// zero after functions are omitted; stacks are not merged.
     pub fn roll(&self, context: &LootContext, rng: &mut impl Rng) -> Vec<(String, i32)> {
+        self.roll_stacks(context, rng)
+            .into_iter()
+            .map(|stack| (stack.item, stack.count))
+            .collect()
+    }
+
+    /// Rolls the table like [`LootTable::roll`], keeping the components `copy_components`
+    /// attached (see [`LootContext::block_entity_components`]).
+    pub fn roll_stacks(&self, context: &LootContext, rng: &mut impl Rng) -> Vec<LootStack> {
         let mut drops = Vec::new();
         self.roll_into(context, rng, &mut drops);
         drops
@@ -75,7 +84,7 @@ impl LootTable {
         &self,
         context: &LootContext,
         rng: &mut impl Rng,
-        out: &mut Vec<(String, i32)>,
+        out: &mut Vec<LootStack>,
     ) {
         let start = out.len();
         for pool in &self.pools {

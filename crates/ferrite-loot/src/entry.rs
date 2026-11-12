@@ -4,7 +4,7 @@ use crate::condition::Condition;
 use crate::function::{self, Function};
 use crate::number::NumberProvider;
 use crate::table::LootTable;
-use crate::{LootContext, Rng};
+use crate::{LootContext, LootStack, Rng};
 
 /// One pool of a loot table.
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ impl LootPool {
         &self,
         context: &LootContext,
         rng: &mut impl Rng,
-        out: &mut Vec<(String, i32)>,
+        out: &mut Vec<LootStack>,
     ) {
         if !self
             .conditions
@@ -55,7 +55,7 @@ impl LootPool {
             for stack in &mut stacks {
                 function::apply(&self.functions, stack, context, rng);
             }
-            out.extend(stacks.into_iter().filter(|(_, count)| *count > 0));
+            out.extend(stacks.into_iter().filter(|stack| stack.count > 0));
         }
     }
 }
@@ -127,15 +127,15 @@ impl Entry {
         &self,
         context: &LootContext,
         rng: &mut impl Rng,
-        out: &mut Vec<(String, i32)>,
+        out: &mut Vec<LootStack>,
     ) {
         let mut stacks = Vec::new();
         match &self.kind {
-            EntryKind::Item { name } => stacks.push((name.clone(), 1)),
+            EntryKind::Item { name } => stacks.push(LootStack::new(name.clone())),
             EntryKind::Tag { items, .. } => {
                 if let Some(bound) = i32::try_from(items.len()).ok().filter(|bound| *bound > 0) {
                     let index = rng.next_int(bound) as usize;
-                    stacks.push((items[index].clone(), 1));
+                    stacks.push(LootStack::new(items[index].clone()));
                 }
             }
             EntryKind::Alternatives(children) | EntryKind::Sequence(children) => {
@@ -160,7 +160,7 @@ impl Entry {
         for stack in &mut stacks {
             function::apply(&self.functions, stack, context, rng);
         }
-        out.extend(stacks.into_iter().filter(|(_, count)| *count > 0));
+        out.extend(stacks.into_iter().filter(|stack| stack.count > 0));
     }
 }
 
