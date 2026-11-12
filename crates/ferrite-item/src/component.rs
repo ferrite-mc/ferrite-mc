@@ -13,6 +13,7 @@ use ferrite_text::Component as Text;
 
 use crate::Error;
 use crate::component_ids as ids;
+use crate::stack::ItemStack;
 
 /// Number of entries of the `minecraft:data_component_type` registry.
 pub const COMPONENT_COUNT: usize = ids::COUNT;
@@ -828,6 +829,286 @@ impl TooltipDisplay {
     }
 }
 
+/// Vanilla's limit on `minecraft:container` slots (`ItemContainerContents.MAX_SIZE`).
+pub const CONTAINER_MAX_SLOTS: usize = 256;
+
+/// Vanilla's limit on the pages of a book.
+pub const BOOK_MAX_PAGES: usize = 100;
+
+/// A value with an optional chat-filtered variant (vanilla `Filterable`): the text a player
+/// typed, and what a client with chat filtering sees instead.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Filterable<T> {
+    /// The unfiltered value.
+    pub raw: T,
+    /// The filtered value, when the server filtered it.
+    pub filtered: Option<T>,
+}
+
+impl<T> Filterable<T> {
+    /// A value that was not filtered.
+    pub fn plain(raw: T) -> Self {
+        Self {
+            raw,
+            filtered: None,
+        }
+    }
+
+    /// The save form: the bare value, or `{raw, filtered}` when a filtered variant exists.
+    fn to_tag(&self, convert: impl Fn(&T) -> Tag) -> Tag {
+        match &self.filtered {
+            None => convert(&self.raw),
+            Some(filtered) => {
+                let mut compound = Compound::new();
+                compound.insert("raw".into(), convert(&self.raw));
+                compound.insert("filtered".into(), convert(filtered));
+                Tag::Compound(compound)
+            }
+        }
+    }
+
+    /// The `{raw, filtered}` form, used when a list mixes both shapes.
+    fn to_full_tag(&self, convert: impl Fn(&T) -> Tag) -> Tag {
+        let mut compound = Compound::new();
+        compound.insert("raw".into(), convert(&self.raw));
+        if let Some(filtered) = &self.filtered {
+            compound.insert("filtered".into(), convert(filtered));
+        }
+        Tag::Compound(compound)
+    }
+
+    /// Reads either save form. A compound with a `raw` key is the full form, like vanilla's
+    /// codec, which tries it before the bare value.
+    fn from_tag(tag: &Tag, convert: impl Fn(&Tag) -> Option<T>) -> Option<Self> {
+        if let Tag::Compound(compound) = tag
+            && let Some(raw) = compound.get("raw")
+        {
+            return Some(Self {
+                raw: convert(raw)?,
+                filtered: match compound.get("filtered") {
+                    Some(filtered) => Some(convert(filtered)?),
+                    None => None,
+                },
+            });
+        }
+        convert(tag).map(Self::plain)
+    }
+}
+
+/// `minecraft:writable_book_content`, the pages of a book and quill.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WritableBookContent {
+    /// Page text, at most [`BOOK_MAX_PAGES`] pages of 1024 UTF-16 units each.
+    pub pages: Vec<Filterable<String>>,
+}
+
+/// `minecraft:written_book_content`, a signed book.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WrittenBookContent {
+    /// The title, at most 32 UTF-16 units.
+    pub title: Filterable<String>,
+    /// The author's name.
+    pub author: String,
+    /// Copy generation: 0 original, 1 copy of the original, 2 copy of a copy, 3 tattered.
+    pub generation: i32,
+    /// Page text, at most [`BOOK_MAX_PAGES`] pages.
+    pub pages: Vec<Filterable<Text>>,
+    /// Whether the pages' selectors and scores were already resolved.
+    pub resolved: bool,
+}
+
+/// Builds a homogeneous NBT list from tags, or `None` for the kinds this does not need.
+fn homogeneous_list(tags: &[Tag]) -> Option<Tag> {
+    if let Some(strings) = tags
+        .iter()
+        .map(|tag| match tag {
+            Tag::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+    {
+        return Some(Tag::List(List::String(strings)));
+    }
+    tags.iter()
+        .map(|tag| match tag {
+            Tag::Compound(value) => Some(value.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|compounds| Tag::List(List::Compound(compounds)))
+}
+
+/// The elements of a list tag as individual tags, for the list kinds pages can use.
+fn list_elements(tag: &Tag) -> Option<Vec<Tag>> {
+    match tag {
+        Tag::List(List::End) => Some(Vec::new()),
+        Tag::List(List::String(values)) => Some(values.iter().cloned().map(Tag::String).collect()),
+        Tag::List(List::Compound(values)) => {
+            Some(values.iter().cloned().map(Tag::Compound).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Writes pages: the bare shape when no page needs the full form and the elements agree on a
+/// list kind, otherwise every page in its `{raw, filtered}` form.
+fn pages_to_tag<T>(pages: &[Filterable<T>], convert: impl Fn(&T) -> Tag) -> Tag {
+    let bare: Vec<Tag> = pages.iter().map(|page| page.to_tag(&convert)).collect();
+    if pages.iter().all(|page| page.filtered.is_none())
+        && bare
+            .iter()
+            .all(|tag| !matches!(tag, Tag::Compound(c) if c.contains_key("raw")))
+        && let Some(list) = homogeneous_list(&bare)
+    {
+        return list;
+    }
+    let full: Vec<Compound> = pages
+        .iter()
+        .filter_map(|page| match page.to_full_tag(&convert) {
+            Tag::Compound(compound) => Some(compound),
+            _ => None,
+        })
+        .collect();
+    Tag::List(List::Compound(full))
+}
+
+fn pages_from_tag<T>(tag: &Tag, convert: impl Fn(&Tag) -> Option<T>) -> Option<Vec<Filterable<T>>> {
+    let elements = list_elements(tag)?;
+    if elements.len() > BOOK_MAX_PAGES {
+        return None;
+    }
+    elements
+        .iter()
+        .map(|element| Filterable::from_tag(element, &convert))
+        .collect()
+}
+
+fn string_of(tag: &Tag) -> Option<String> {
+    match tag {
+        Tag::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+impl WritableBookContent {
+    fn to_tag(&self) -> Tag {
+        let mut compound = Compound::new();
+        if !self.pages.is_empty() {
+            compound.insert(
+                "pages".into(),
+                pages_to_tag(&self.pages, |page| Tag::String(page.clone())),
+            );
+        }
+        Tag::Compound(compound)
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        let pages = match compound.get("pages") {
+            Some(pages) => pages_from_tag(pages, string_of)?,
+            None => Vec::new(),
+        };
+        Some(Self { pages })
+    }
+}
+
+impl WrittenBookContent {
+    fn to_tag(&self) -> Tag {
+        let mut compound = Compound::new();
+        compound.insert(
+            "title".into(),
+            self.title.to_tag(|t| Tag::String(t.clone())),
+        );
+        compound.insert("author".into(), Tag::String(self.author.clone()));
+        if self.generation != 0 {
+            compound.insert("generation".into(), Tag::Int(self.generation));
+        }
+        if !self.pages.is_empty() {
+            compound.insert("pages".into(), pages_to_tag(&self.pages, Text::to_nbt));
+        }
+        if self.resolved {
+            compound.insert("resolved".into(), Tag::Byte(1));
+        }
+        Tag::Compound(compound)
+    }
+
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        let generation = match compound.get("generation") {
+            None => 0,
+            Some(tag) => as_int(tag).filter(|g| (0..=3).contains(g))?,
+        };
+        let resolved = match compound.get("resolved") {
+            None => false,
+            Some(Tag::Byte(value)) => *value != 0,
+            Some(_) => return None,
+        };
+        let pages = match compound.get("pages") {
+            Some(pages) => pages_from_tag(pages, |tag| Text::from_nbt(tag).ok())?,
+            None => Vec::new(),
+        };
+        Some(Self {
+            title: Filterable::from_tag(compound.get("title")?, string_of)?,
+            author: string_of(compound.get("author")?)?,
+            generation,
+            pages,
+            resolved,
+        })
+    }
+}
+
+/// The save form of `minecraft:container`: the occupied slots as `{slot, item}`.
+fn container_to_tag(slots: &[ItemStack]) -> Result<Tag, Error> {
+    let mut entries = Vec::new();
+    for (slot, stack) in slots.iter().enumerate() {
+        if stack.is_empty() {
+            continue;
+        }
+        let mut entry = Compound::new();
+        entry.insert("slot".into(), Tag::Int(slot as i32));
+        entry.insert("item".into(), Tag::Compound(stack.to_nbt()?));
+        entries.push(entry);
+    }
+    Ok(Tag::List(if entries.is_empty() {
+        List::End
+    } else {
+        List::Compound(entries)
+    }))
+}
+
+/// Reads the save form of `minecraft:container` into a dense slot list ending at the last
+/// occupied slot. A slot outside `0..256`, a repeated slot, a missing field or an unreadable
+/// item makes the whole value invalid (`None`), so it stays opaque instead of losing items.
+fn container_from_tag(tag: &Tag) -> Option<Vec<ItemStack>> {
+    let entries = match tag {
+        Tag::List(List::End) => return Some(Vec::new()),
+        Tag::List(List::Compound(entries)) => entries,
+        _ => return None,
+    };
+    let mut slots: Vec<ItemStack> = Vec::new();
+    for entry in entries {
+        let slot = usize::try_from(as_int(entry.get("slot")?)?)
+            .ok()
+            .filter(|slot| *slot < CONTAINER_MAX_SLOTS)?;
+        let Some(Tag::Compound(item)) = entry.get("item") else {
+            return None;
+        };
+        let stack = ItemStack::from_nbt(item).ok().filter(|s| !s.is_empty())?;
+        if slots.len() <= slot {
+            slots.resize(slot + 1, ItemStack::empty());
+        }
+        if !slots[slot].is_empty() {
+            return None;
+        }
+        slots[slot] = stack;
+    }
+    Some(slots)
+}
+
 /// A typed data component value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Component {
@@ -873,6 +1154,14 @@ pub enum Component {
     LodestoneTracker(LodestoneTracker),
     /// `minecraft:tooltip_display`, which hides tooltip lines.
     TooltipDisplay(TooltipDisplay),
+    /// `minecraft:container`, the stacks inside a shulker box, chest or barrel item. The list is
+    /// dense (empty slots are empty stacks) and ends at the last occupied slot when read from
+    /// the save format; the network form keeps whatever length it arrived with.
+    Container(Vec<ItemStack>),
+    /// `minecraft:writable_book_content`, the pages of a book and quill.
+    WritableBookContent(WritableBookContent),
+    /// `minecraft:written_book_content`, a signed book.
+    WrittenBookContent(WrittenBookContent),
     /// A component without a typed variant, or a value whose NBT shape did not match its typed
     /// variant. Kept verbatim.
     Opaque(Tag),
@@ -908,6 +1197,9 @@ impl Component {
             Self::Trim(_) => ids::TRIM,
             Self::LodestoneTracker(_) => ids::LODESTONE_TRACKER,
             Self::TooltipDisplay(_) => ids::TOOLTIP_DISPLAY,
+            Self::Container(_) => ids::CONTAINER,
+            Self::WritableBookContent(_) => ids::WRITABLE_BOOK_CONTENT,
+            Self::WrittenBookContent(_) => ids::WRITTEN_BOOK_CONTENT,
             Self::Opaque(_) | Self::Raw(_) => return None,
         })
     }
@@ -936,6 +1228,9 @@ impl Component {
             Self::Trim(_) => "trim",
             Self::LodestoneTracker(_) => "lodestone_tracker",
             Self::TooltipDisplay(_) => "tooltip_display",
+            Self::Container(_) => "container",
+            Self::WritableBookContent(_) => "writable_book_content",
+            Self::WrittenBookContent(_) => "written_book_content",
             Self::Opaque(_) => "opaque",
             Self::Raw(_) => "raw",
         }
@@ -978,6 +1273,9 @@ impl Component {
             Self::Trim(trim) => Tag::Compound(trim.to_compound()),
             Self::LodestoneTracker(tracker) => Tag::Compound(tracker.to_compound()),
             Self::TooltipDisplay(display) => display.to_tag()?,
+            Self::Container(slots) => container_to_tag(slots)?,
+            Self::WritableBookContent(book) => book.to_tag(),
+            Self::WrittenBookContent(book) => book.to_tag(),
             Self::Opaque(tag) => tag.clone(),
             Self::Raw(_) => return Err(Error::NoNbtForm("raw")),
         })
@@ -1024,6 +1322,13 @@ impl Component {
             ids::TRIM => Trim::from_tag(tag).map(Self::Trim),
             ids::LODESTONE_TRACKER => LodestoneTracker::from_tag(tag).map(Self::LodestoneTracker),
             ids::TOOLTIP_DISPLAY => TooltipDisplay::from_tag(tag).map(Self::TooltipDisplay),
+            ids::CONTAINER => container_from_tag(tag).map(Self::Container),
+            ids::WRITABLE_BOOK_CONTENT => {
+                WritableBookContent::from_tag(tag).map(Self::WritableBookContent)
+            }
+            ids::WRITTEN_BOOK_CONTENT => {
+                WrittenBookContent::from_tag(tag).map(Self::WrittenBookContent)
+            }
             _ => None,
         };
         typed.unwrap_or_else(|| Self::Opaque(tag.clone()))

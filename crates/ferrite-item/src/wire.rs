@@ -43,6 +43,9 @@ use crate::component::{
     AttributeModifier, AttributeOperation, Component, ComponentPatch, CustomModelData,
     Enchantments, EquipmentSlot, Food, Rarity, Tool, ToolRule, TooltipDisplay,
 };
+use crate::component::{
+    BOOK_MAX_PAGES, CONTAINER_MAX_SLOTS, Filterable, WritableBookContent, WrittenBookContent,
+};
 use crate::component_ids as ids;
 use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count};
 
@@ -229,32 +232,26 @@ impl ItemStack {
         if usize::from(self.item) >= item_count() {
             return Err(WireError::InvalidItemId(i32::from(self.item)));
         }
-        let mut added = Vec::new();
-        for (id, component) in self.components.added() {
-            if let Some(expected) = component.type_id()
-                && expected != id
-            {
-                return Err(WireError::ComponentIdMismatch {
-                    kind: component.kind(),
-                    id,
-                });
-            }
-            added.push((id, encode_component(component)?));
-        }
-        let removed: Vec<u16> = self.components.removed().collect();
+        let (added, removed) = encode_patch_parts(&self.components)?;
 
         write_varint(self.count, out);
         write_varint(i32::from(self.item), out);
-        write_varint(len_i32(added.len())?, out);
-        write_varint(len_i32(removed.len())?, out);
-        for (id, payload) in added {
-            write_varint(i32::from(id), out);
-            out.extend_from_slice(&payload);
+        write_patch(added, removed, out)
+    }
+
+    /// Appends the stack as an item template (item id, count, component patch), the form
+    /// containers use for their stacks.
+    fn encode_template_into(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        if !(1..=MAX_COUNT).contains(&self.count) {
+            return Err(WireError::InvalidCount(self.count));
         }
-        for id in removed {
-            write_varint(i32::from(id), out);
+        if usize::from(self.item) >= item_count() {
+            return Err(WireError::InvalidItemId(i32::from(self.item)));
         }
-        Ok(())
+        let (added, removed) = encode_patch_parts(&self.components)?;
+        write_varint(i32::from(self.item), out);
+        write_varint(self.count, out);
+        write_patch(added, removed, out)
     }
 
     /// Decodes a network slot, requiring the buffer to end exactly at the slot.
@@ -272,6 +269,42 @@ impl ItemStack {
         let stack = decode_slot(&mut reader)?;
         Ok((stack, reader.pos))
     }
+}
+
+/// The encoded component payloads and removed ids of a patch.
+type PatchParts = (Vec<(u16, Vec<u8>)>, Vec<u16>);
+
+fn encode_patch_parts(patch: &ComponentPatch) -> Result<PatchParts, WireError> {
+    let mut added = Vec::new();
+    for (id, component) in patch.added() {
+        if let Some(expected) = component.type_id()
+            && expected != id
+        {
+            return Err(WireError::ComponentIdMismatch {
+                kind: component.kind(),
+                id,
+            });
+        }
+        added.push((id, encode_component(component)?));
+    }
+    Ok((added, patch.removed().collect()))
+}
+
+fn write_patch(
+    added: Vec<(u16, Vec<u8>)>,
+    removed: Vec<u16>,
+    out: &mut Vec<u8>,
+) -> Result<(), WireError> {
+    write_varint(len_i32(added.len())?, out);
+    write_varint(len_i32(removed.len())?, out);
+    for (id, payload) in added {
+        write_varint(i32::from(id), out);
+        out.extend_from_slice(&payload);
+    }
+    for id in removed {
+        write_varint(i32::from(id), out);
+    }
+    Ok(())
 }
 
 fn decode_slot(reader: &mut Reader<'_>) -> Result<ItemStack, WireError> {
@@ -406,9 +439,72 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
                 })
                 .ok()?,
         }),
+        ids::CONTAINER => Component::Container(decode_container(&mut reader)?),
+        ids::WRITABLE_BOOK_CONTENT => Component::WritableBookContent(WritableBookContent {
+            pages: reader
+                .prefixed(BOOK_MAX_PAGES, |reader| {
+                    let raw = reader.string(1024)?.to_owned();
+                    let filtered =
+                        reader.optional(|reader| reader.string(1024).map(str::to_owned))?;
+                    Ok(Filterable { raw, filtered })
+                })
+                .ok()?,
+        }),
+        ids::WRITTEN_BOOK_CONTENT => {
+            let title = Filterable {
+                raw: reader.string(32).ok()?.to_owned(),
+                filtered: reader
+                    .optional(|reader| reader.string(32).map(str::to_owned))
+                    .ok()?,
+            };
+            let author = reader.string(32767).ok()?.to_owned();
+            let generation = reader.varint().ok().filter(|g| (0..=3).contains(g))?;
+            let pages = reader
+                .prefixed(BOOK_MAX_PAGES, |reader| {
+                    let raw = reader.text()?;
+                    let filtered = reader.optional(Reader::text)?;
+                    Ok(Filterable { raw, filtered })
+                })
+                .ok()?;
+            let resolved = reader.bool().ok()?;
+            Component::WrittenBookContent(WrittenBookContent {
+                title,
+                author,
+                generation,
+                pages,
+                resolved,
+            })
+        }
         _ => return None,
     };
     (reader.remaining() == 0).then_some(component)
+}
+
+/// Reads a `minecraft:container` payload: up to 256 optional item templates.
+fn decode_container(reader: &mut Reader<'_>) -> Option<Vec<ItemStack>> {
+    reader
+        .prefixed(CONTAINER_MAX_SLOTS, |reader| {
+            Ok(reader
+                .optional(decode_template)?
+                .unwrap_or_else(ItemStack::empty))
+        })
+        .ok()
+}
+
+/// Reads one item template (item id, count, component patch), the form containers and bundles
+/// use for their stacks. A template always holds at least one item.
+fn decode_template(reader: &mut Reader<'_>) -> Result<ItemStack, WireError> {
+    let item = reader.item_id()?;
+    let count = reader.count()?;
+    if count == 0 {
+        return Err(WireError::InvalidCount(0));
+    }
+    let components = decode_patch(reader, 1)?;
+    Ok(ItemStack {
+        item,
+        count,
+        components,
+    })
 }
 
 /// One entry of `PotionContents.custom_effects`. A hidden (nested) effect has no NBT form, so
@@ -674,6 +770,47 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
                 None => out.push(0),
             }
             out.push(u8::from(tracker.tracked));
+        }
+        Component::Container(slots) => {
+            if slots.len() > CONTAINER_MAX_SLOTS {
+                return Err(WireError::ArrayTooLong(slots.len(), CONTAINER_MAX_SLOTS));
+            }
+            write_count(slots.len(), &mut out)?;
+            for stack in slots {
+                if stack.is_empty() {
+                    out.push(0);
+                } else {
+                    out.push(1);
+                    stack.encode_template_into(&mut out)?;
+                }
+            }
+        }
+        Component::WritableBookContent(book) => {
+            check_len(book.pages.len(), BOOK_MAX_PAGES)?;
+            write_count(book.pages.len(), &mut out)?;
+            for page in &book.pages {
+                write_string_max(&page.raw, 1024, &mut out)?;
+                write_filtered(page.filtered.as_deref(), 1024, &mut out)?;
+            }
+        }
+        Component::WrittenBookContent(book) => {
+            write_string_max(&book.title.raw, 32, &mut out)?;
+            write_filtered(book.title.filtered.as_deref(), 32, &mut out)?;
+            write_string_max(&book.author, 32767, &mut out)?;
+            write_varint(book.generation, &mut out);
+            check_len(book.pages.len(), BOOK_MAX_PAGES)?;
+            write_count(book.pages.len(), &mut out)?;
+            for page in &book.pages {
+                out.extend_from_slice(&nbt_bytes(&page.raw.to_nbt())?);
+                match &page.filtered {
+                    Some(filtered) => {
+                        out.push(1);
+                        out.extend_from_slice(&nbt_bytes(&filtered.to_nbt())?);
+                    }
+                    None => out.push(0),
+                }
+            }
+            out.push(u8::from(book.resolved));
         }
         Component::Opaque(_) => return Err(WireError::NotRepresentable(component.kind())),
         Component::Raw(bytes) => out.extend_from_slice(bytes),
@@ -1743,6 +1880,39 @@ fn write_string(value: &str, out: &mut Vec<u8>) -> Result<(), WireError> {
     write_count(value.len(), out)?;
     out.extend_from_slice(value.as_bytes());
     Ok(())
+}
+
+fn check_len(len: usize, max: usize) -> Result<(), WireError> {
+    if len > max {
+        return Err(WireError::ArrayTooLong(len, max));
+    }
+    Ok(())
+}
+
+/// Writes a string after checking it fits in `max_chars` UTF-16 units, as the reader requires.
+fn write_string_max(value: &str, max_chars: usize, out: &mut Vec<u8>) -> Result<(), WireError> {
+    if value.encode_utf16().count() > max_chars {
+        return Err(WireError::StringTooLong(value.len(), max_chars));
+    }
+    write_string(value, out)
+}
+
+/// Writes an optional filtered string: a presence flag, then the string.
+fn write_filtered(
+    value: Option<&str>,
+    max_chars: usize,
+    out: &mut Vec<u8>,
+) -> Result<(), WireError> {
+    match value {
+        Some(value) => {
+            out.push(1);
+            write_string_max(value, max_chars, out)
+        }
+        None => {
+            out.push(0);
+            Ok(())
+        }
+    }
 }
 
 fn write_optional<T>(value: Option<T>, out: &mut Vec<u8>, write: impl FnOnce(T, &mut Vec<u8>)) {
