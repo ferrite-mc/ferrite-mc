@@ -60,6 +60,9 @@
 //! ```
 
 mod condition;
+mod data;
+mod enchant;
+mod entity;
 mod entry;
 mod files;
 mod function;
@@ -70,8 +73,10 @@ mod tags;
 use ferrite_nbt::Tag;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub use condition::{BlockPredicate, Condition, EnchantmentPredicate, ToolPredicate};
+pub use entity::{DamageFacts, EntityFacts};
 pub use entry::{Entry, EntryKind, LootPool};
 pub use function::{BonusFormula, ComponentSource, Function, FunctionKind};
 pub use number::{IntRange, NumberProvider};
@@ -187,6 +192,62 @@ pub struct LootContext {
     /// `BlockEntity.collectComponents`), keyed by namespaced component name. Read by
     /// `copy_components` with `source: block_entity`; empty when the block has no block entity.
     pub block_entity_components: BTreeMap<String, Tag>,
+    /// Luck of the looter (vanilla `LootContext.getLuck`): Luck of the Sea plus the luck
+    /// attribute for fishing, `0` elsewhere. It shifts entry weights by `quality * luck` and adds
+    /// `floor(bonus_rolls * luck)` rolls to a pool.
+    pub luck: f32,
+    /// The entity the loot belongs to (`this`): the killed mob, the fishing hook. `None` leaves
+    /// `entity_properties` on it satisfied.
+    pub this_entity: Option<EntityFacts>,
+    /// The damage that caused the drop (`attacker`, `direct_attacker`, damage source
+    /// predicates). `None` leaves those conditions satisfied.
+    pub damage_source: Option<DamageFacts>,
+    /// Item, registry and world facts only the server knows. Without it enchanting, stack
+    /// limits, item damage and map functions leave the stack unchanged.
+    pub host: Option<Arc<dyn LootHost>>,
+    /// Where the loot is rolled (vanilla `ORIGIN`), for `location_check`. Without it (or
+    /// without a [`LootHost`]) location checks are satisfied.
+    pub origin: Option<[f64; 3]>,
+}
+
+/// What loot functions ask the embedding server about items and the world.
+pub trait LootHost: std::fmt::Debug + Send + Sync {
+    /// The enchantability (`minecraft:enchantable` component) of an item, if it has one.
+    fn enchantability(&self, item: &str) -> Option<i32>;
+    /// The durability (`minecraft:max_damage`) of a damageable item.
+    fn max_damage(&self, item: &str) -> Option<i32>;
+    /// The maximum stack size of an item.
+    fn max_stack_size(&self, item: &str) -> i32;
+    /// One component of an item's defaults (`minecraft:attribute_modifiers` of a sword), as NBT.
+    fn default_component(&self, _item: &str, _component: &str) -> Option<Tag> {
+        None
+    }
+    /// Every id of a registry (`minecraft:potion`), in registry order.
+    fn registry_ids(&self, _registry: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// The biome id at a block position.
+    fn biome_at(&self, _pos: [i32; 3]) -> Option<String> {
+        None
+    }
+    /// The block id and state properties at a block position.
+    fn block_at(&self, _pos: [i32; 3]) -> Option<(String, BTreeMap<String, String>)> {
+        None
+    }
+    /// Builds the map components (`minecraft:map_id`, decorations, ...) of an exploration map
+    /// pointing at the closest of `destinations` (structure ids) from the context origin, or
+    /// `None` when there is none. The default finds nothing, which leaves the stack as it is
+    /// like vanilla's "no structure found".
+    fn exploration_map(
+        &self,
+        _origin: [f64; 3],
+        _destinations: &[String],
+        _decoration: &str,
+        _zoom: i32,
+        _skip_existing_chunks: bool,
+    ) -> Option<Vec<(String, Tag)>> {
+        None
+    }
 }
 
 impl LootContext {
@@ -219,6 +280,7 @@ pub(crate) fn normalize_id(id: &str) -> String {
 }
 
 /// Read-only data shared by every table while loading.
+#[derive(Debug)]
 pub(crate) struct Definitions {
     /// Namespace of the loaded data pack (`minecraft` for vanilla).
     pub(crate) namespace: String,
@@ -226,6 +288,8 @@ pub(crate) struct Definitions {
     pub(crate) predicates: BTreeMap<String, Value>,
     /// Resolved item tags (`data/<namespace>/tags/item/**`).
     pub(crate) tags: tags::ItemTags,
+    /// Enchantments, smelting recipes and non-item tags.
+    pub(crate) data: Arc<data::GameData>,
 }
 
 impl Definitions {
@@ -236,5 +300,23 @@ impl Definitions {
         } else {
             format!("{}:{id}", self.namespace)
         }
+    }
+}
+
+#[cfg(test)]
+mod shipped_data {
+    use super::*;
+
+    fn generated() -> Option<LootTables> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vanilla/26.3/generated/data/minecraft/loot_table");
+        dir.is_dir().then(|| LootTables::load(dir).unwrap())
+    }
+
+    /// Every function, condition and entry type of the 1447 shipped loot tables is evaluated.
+    #[test]
+    fn no_shipped_loot_table_needs_an_unsupported_type() {
+        let Some(tables) = generated() else { return };
+        assert_eq!(tables.unsupported(), Vec::<String>::new());
     }
 }

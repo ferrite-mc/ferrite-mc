@@ -43,6 +43,7 @@ mod store;
 pub mod tame;
 pub mod tnt;
 pub mod tracker;
+pub mod variant;
 pub mod villager;
 
 pub use id::{EntityKey, allocate_id, random_uuid};

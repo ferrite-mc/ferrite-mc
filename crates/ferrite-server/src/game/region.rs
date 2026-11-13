@@ -662,6 +662,10 @@ pub(super) fn broadcast_tracked_chunk(
     }
 }
 pub enum Signal {
+    /// A `/clone` between dimensions whose source half has run (see `CrossClone`).
+    CrossClone(Box<super::commands_world::CrossClone>),
+    /// The `move` half of a cross-dimension clone, after the destination was written.
+    CrossCloneClear(Box<super::commands_world::CrossClone>),
     Transfer {
         to: ChunkPos,
         player: Box<Player>,
@@ -1628,10 +1632,25 @@ impl TraderSync<'_> {
         }
         let xp = player.take_trader_xp();
         let sold = merge_trader_trades(self.entities, player.uuid, trader, &trades);
+        push_trades(player.uuid, player.pos[1], sold);
         if sold > 0 || xp > 0 {
             add_trader_xp(self.entities, trader, xp);
             self.refresh(player);
         }
+    }
+}
+
+/// `AbstractVillager.notifyTrade` -> `CriteriaTriggers.TRADE`, once per sale merged.
+fn push_trades(player: Uuid, y: f64, sold: i32) {
+    for _ in 0..sold {
+        super::recipe_unlock::push_plain(
+            player,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:villager_trade",
+                player_y: y,
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -3115,6 +3134,14 @@ impl Player {
         if !matches!(self.gamemode, 1 | 3) {
             self.inventory.remove(slot, 1);
         }
+        super::recipe_unlock::push_plain(
+            self.uuid,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:used_totem",
+                item: Some("minecraft:totem_of_undying".into()),
+                ..Default::default()
+            },
+        );
         self.survival.health = 1.0;
         self.survival.dead = false;
         self.survival.death_cause = None;
@@ -4504,6 +4531,29 @@ impl Player {
                             set.remove(&self.uuid);
                         }
                     }
+                    {
+                        // `LevitationTrigger`: how far the player has risen since the effect began.
+                        let mut starts = super::recipe_unlock::LEVITATION_START
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if self.effects.has(ferrite_entity::effect::Effect::Levitation) {
+                            let start = *starts.entry(self.uuid).or_insert(self.pos);
+                            super::recipe_unlock::push_plain(
+                                self.uuid,
+                                super::recipe_unlock::PlainEvent {
+                                    trigger: "minecraft:levitation",
+                                    delta: [
+                                        self.pos[0] - start[0],
+                                        self.pos[1] - start[1],
+                                        self.pos[2] - start[2],
+                                    ],
+                                    ..Default::default()
+                                },
+                            );
+                        } else {
+                            starts.remove(&self.uuid);
+                        }
+                    }
                     super::recipe_unlock::EFFECTS
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -5867,10 +5917,11 @@ impl Region {
                     self.entities.pos(key)?,
                     mob.age < 0,
                     mob.last_killer,
+                    mob.fire > 0,
                 ))
             })
             .collect();
-        for (key, kind, pos, baby, killer) in dead {
+        for (key, kind, pos, baby, killer, burning) in dead {
             if let Some(killer) = killer {
                 super::recipe_unlock::KILLS
                     .lock()
@@ -5920,7 +5971,7 @@ impl Region {
             let drops = if baby {
                 Vec::new()
             } else {
-                super::drops::mob_drops(kind, &mut self.rng)
+                super::drops::mob_drops_by(kind, &mut self.rng, killer, burning)
             };
             for stack in drops
                 .into_iter()
@@ -6679,7 +6730,10 @@ impl Region {
             })
             .collect();
         for (player, trader, trades, xp) in open {
-            merge_trader_trades(&mut self.entities, player, trader, &trades);
+            let sold = merge_trader_trades(&mut self.entities, player, trader, &trades);
+            if let Some(at) = self.players.get(&player) {
+                push_trades(player, at.pos[1], sold);
+            }
             add_trader_xp(&mut self.entities, trader, xp);
         }
     }
@@ -7019,6 +7073,44 @@ impl Region {
 
     /// Right-clicks on entities: food puts an adult animal in love or speeds a baby up
     /// (vanilla `Animal.mobInteract`); the item is used up outside creative mode.
+    /// The variant of a cat or wolf, picked from the biome it stands in the first time it is
+    /// needed (vanilla picks it when the animal spawns; this server has no spawn-time hook for
+    /// every spawn path). Returns its registry id.
+    fn settle_variant(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+    ) -> Option<&'static str> {
+        let (kind, variant) = {
+            let state = ferrite_entity::mob::state(&self.entities, key)?;
+            (state.kind, state.variant)
+        };
+        ferrite_entity::variant::names(kind)?;
+        let index = match variant {
+            Some(index) => index,
+            None => {
+                let at = self.entities.pos(key)?;
+                let biome = ctx.source.as_ref().and_then(|source| {
+                    source.biome_name(
+                        at.x.floor() as i32,
+                        at.y.floor() as i32,
+                        at.z.floor() as i32,
+                    )
+                });
+                let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
+                let index = super::variants::select(
+                    kind,
+                    biome.as_deref(),
+                    super::variants::moon_brightness(day_time),
+                    &mut self.rng,
+                )?;
+                ferrite_entity::mob::state_mut(&mut self.entities, key)?.variant = Some(index);
+                index
+            }
+        };
+        ferrite_entity::variant::name(kind, index)
+    }
+
     fn resolve_uses(&mut self, ctx: &TickContext) {
         let uuids: Vec<Uuid> = self.players.keys().copied().collect();
         for uuid in uuids {
@@ -7088,10 +7180,13 @@ impl Region {
                         self.broadcast_status(ctx, key, status);
                     }
                     if used == ferrite_entity::tame::Used::Tamed {
+                        let variant = self.settle_variant(ctx, key);
+                        let kind = ferrite_entity::mob::state(&self.entities, key)
+                            .map_or("", |state| state.kind.name());
                         super::recipe_unlock::TAMED
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .push(uuid);
+                            .push((uuid, kind, variant));
                     }
                     if used != ferrite_entity::tame::Used::Consumed
                         && used != ferrite_entity::tame::Used::Tamed
@@ -8261,7 +8356,7 @@ impl Region {
         if !thunder {
             return;
         }
-        for at in hits {
+        for (at, thrower) in hits {
             let near = self.entities.query_vec(ferrite_math::AABB::new(
                 at.x - 3.0,
                 at.y - 3.0,
@@ -8270,10 +8365,25 @@ impl Region {
                 at.y + 3.0,
                 at.z + 3.0,
             ));
+            let mut victims = Vec::new();
             for key in near {
                 if mob::is_mob(&self.entities, key) {
                     mob::hurt(&mut self.entities, key, 5.0, None);
+                    if let Some(state) = mob::state(&self.entities, key) {
+                        victims.push(state.kind.name().to_owned());
+                    }
                 }
+            }
+            // `LightningBolt.tick` -> `CHANNELED_LIGHTNING` for the player who channeled it.
+            if let Some(thrower) = thrower {
+                super::recipe_unlock::push_plain(
+                    thrower,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:channeled_lightning",
+                        victims,
+                        ..Default::default()
+                    },
+                );
             }
             static NEXT: std::sync::atomic::AtomicI32 =
                 std::sync::atomic::AtomicI32::new(1_800_000_000);
@@ -8369,6 +8479,21 @@ impl Region {
             }
         }
         self.strike_channeled(ctx);
+        for (owner, kind) in
+            std::mem::take(&mut *arrow::HURT.lock().unwrap_or_else(|e| e.into_inner()))
+        {
+            // `ServerPlayer.awardHit`-style `PLAYER_HURT_ENTITY`: the projectile is the damage's
+            // direct entity, and every arrow and trident is a `#minecraft:is_projectile` source.
+            super::recipe_unlock::push_plain(
+                owner,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:player_hurt_entity",
+                    direct: Some(format!("minecraft:{kind}")),
+                    projectile: true,
+                    ..Default::default()
+                },
+            );
+        }
         let shot: Vec<_> =
             std::mem::take(&mut *arrow::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
         super::recipe_unlock::KILLS
@@ -9717,6 +9842,19 @@ impl Region {
         };
         if let bobber::Reel::Caught { .. } = outcome {
             for stack in super::drops::fishing_catch(&rod, &mut self.rng) {
+                // `FishingHook.retrieve` -> `FISHING_ROD_HOOKED`: the `item` predicate is tried
+                // against each caught stack.
+                super::recipe_unlock::push_plain(
+                    p.uuid,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:fishing_rod_hooked",
+                        item: u16::try_from(stack.item_id)
+                            .ok()
+                            .and_then(ferrite_item::item_name)
+                            .map(str::to_owned),
+                        ..Default::default()
+                    },
+                );
                 let vel = bobber::catch_velocity(at, eye);
                 self.entities
                     .insert(item::new_item(at, vel, stack, &mut self.rng));
@@ -10351,8 +10489,25 @@ impl Region {
             let mut data = super::beacon::load(source, pos);
             let levels = super::beacon::scan_levels(source, pos);
             if data.levels != levels {
+                let was_active = data.levels > 0;
                 data.levels = levels;
                 super::beacon::store(source, pos, &data);
+                if !was_active && levels > 0 {
+                    // `BeaconBlockEntity.tick`: on activation every player within the box
+                    // `(x, y - 4, z)` grown by (10, 5, 10) gets `construct_beacon`.
+                    for player in self.players.values() {
+                        if super::beacon::near_activation(pos, player.pos) {
+                            super::recipe_unlock::push_plain(
+                                player.uuid,
+                                super::recipe_unlock::PlainEvent {
+                                    trigger: "minecraft:construct_beacon",
+                                    level: Some(levels),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                }
             }
             if levels <= 0 {
                 continue;
@@ -13239,6 +13394,7 @@ mod tests {
                 dimension,
                 tags: Default::default(),
                 custom_name: None,
+                health: None,
             });
     }
 

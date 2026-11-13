@@ -9,6 +9,7 @@ pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
 mod targeting;
+mod variants;
 mod waypoints;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn, write_spawn};
 #[cfg(test)]
@@ -2083,6 +2084,62 @@ async fn run(
                  signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
                   Signal::Hold{world,chunk,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,world,chunk);},
                   Signal::HoldBatch{world,chunks,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,world,chunks);},
+                  Signal::CrossClone(clone) => {
+                      let tell = |reply: &Option<OutboundSender>, text: &str| match reply {
+                          Some(tx) => chat(tx, text),
+                          None => tracing::info!("{text}"),
+                      };
+                      let clone = *clone;
+                      match &clone.read {
+                          Err(error) => tell(&clone.reply, error),
+                          Ok(_) => {
+                              let target = Arc::clone(dimensions.source(clone.target_dimension));
+                              let tracking = tracking.clone();
+                              let signals = signal_tx.clone();
+                              let chunk = ChunkPos(
+                                  clone.destination[0].div_euclid(16),
+                                  clone.destination[2].div_euclid(16),
+                              );
+                              worlds.schedule_at_chunk(clone.target_dimension, chunk, move |_region| {
+                                  let Ok(read) = &clone.read else { return };
+                                  match commands_world::apply_clone_write(
+                                      read,
+                                      clone.destination,
+                                      &*target,
+                                      &tracking,
+                                  ) {
+                                      Ok(outcome) => {
+                                          if let Some(tx) = &clone.reply {
+                                              chat(tx, &outcome.message);
+                                          } else {
+                                              tracing::info!("{}", outcome.message);
+                                          }
+                                          if clone.mover == commands_world::CloneMove::Move {
+                                              let _ = signals
+                                                  .send(Signal::CrossCloneClear(Box::new(clone.clone())));
+                                          }
+                                      }
+                                      Err(error) => tell(&clone.reply, &error),
+                                  }
+                              });
+                          }
+                      }
+                  },
+                  Signal::CrossCloneClear(clone) => {
+                      let clone = *clone;
+                      if let Ok(read) = &clone.read {
+                          let origin = Arc::clone(dimensions.source(clone.source_dimension));
+                          let tracking = tracking.clone();
+                          let chunk = ChunkPos(
+                              read.min[0].div_euclid(16),
+                              read.min[2].div_euclid(16),
+                          );
+                          let read = read.clone();
+                          worlds.schedule_at_chunk(clone.source_dimension, chunk, move |_region| {
+                              let _ = commands_world::apply_clone_clear(&read, &*origin, &tracking);
+                          });
+                      }
+                  },
                   Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
                   Signal::MobMelee{dimension,player,damage,from,attacker}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from,attacker});}},
                   Signal::MobKnockback{world_id,attacker,at,source}=>route_mob_knockback(&worlds,world_id,attacker,at,source),
@@ -2231,7 +2288,7 @@ async fn run(
                          let tamed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::TAMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !tamed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for who in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed()); }
+                             for (who, kind, variant) in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed(kind, variant)); }
                          }
                      }
                      {
@@ -2578,6 +2635,7 @@ async fn run(
                           stop: &stop_tx,
                           signals: &signal_tx,
                           worlds: &worlds,
+                          dimensions: &dimensions,
                           dimension: runtime_dimension,
                           tracking: &tracking,
                       };
@@ -2709,6 +2767,7 @@ async fn run(
                           stop: &stop_tx,
                           signals: &signal_tx,
                           worlds: &worlds,
+                          dimensions: &dimensions,
                           dimension: Dimension::Overworld,
                           tracking: &tracking,
                       };
@@ -3722,6 +3781,7 @@ struct CommandRuntime<'a> {
     stop: &'a tokio::sync::watch::Sender<bool>,
     signals: &'a mpsc::UnboundedSender<Signal>,
     worlds: &'a Worlds,
+    dimensions: &'a Arc<DimensionRegistry>,
     /// The dimension the command source acts in.
     dimension: Dimension,
     tracking: &'a region::Tracking,
@@ -4112,6 +4172,79 @@ impl CommandRuntime<'_> {
         }
     }
 
+    /// `/clone ... from <dimension>` / `to <dimension>` with two different dimensions: the read
+    /// runs on the region owning the source corner in the source dimension, then hands the
+    /// snapshot to the loop (`Signal::CrossClone`), which writes it on the destination
+    /// dimension's region. Returns whether the command was a cross-dimension clone.
+    fn cross_dimension_clone(
+        &self,
+        command: &commands_world::WorldCommand,
+        origin: &commands_world::Origin,
+    ) -> bool {
+        let commands_world::WorldCommand::Clone {
+            begin,
+            end,
+            destination,
+            mode,
+            options,
+        } = command
+        else {
+            return false;
+        };
+        let named = |name: &Option<String>| match name {
+            Some(key) => Dimension::from_key(key).ok_or_else(|| key.clone()),
+            None => Ok(self.dimension),
+        };
+        let (source_dimension, target_dimension) = match (
+            named(&options.source_dimension),
+            named(&options.target_dimension),
+        ) {
+            (Ok(source), Ok(target)) => (source, target),
+            (Err(key), _) | (_, Err(key)) => {
+                self.reply.text(&format!("Unknown dimension '{key}'"));
+                return true;
+            }
+        };
+        if source_dimension == self.dimension && target_dimension == self.dimension {
+            return false;
+        }
+        let (begin, end, destination) = (
+            commands_world::resolve(begin, origin),
+            commands_world::resolve(end, origin),
+            commands_world::resolve(destination, origin),
+        );
+        let source_chunk = ChunkPos(
+            begin[0].min(end[0]).div_euclid(16),
+            begin[2].min(end[2]).div_euclid(16),
+        );
+        let target_chunk = ChunkPos(destination[0].div_euclid(16), destination[2].div_euclid(16));
+        if self.worlds.owner(source_dimension, source_chunk).is_none()
+            || self.worlds.owner(target_dimension, target_chunk).is_none()
+        {
+            self.reply.text("Chunk not loaded");
+            return true;
+        }
+        let source = Arc::clone(self.dimensions.source(source_dimension));
+        let (mode, options) = (*mode, options.clone());
+        let signals = self.signals.clone();
+        let reply = self.reply.outbound.cloned();
+        self.worlds
+            .schedule_at_chunk(source_dimension, source_chunk, move |_region| {
+                let read = commands_world::clone_read(begin, end, mode, &options, &*source);
+                let _ = signals.send(region::Signal::CrossClone(Box::new(
+                    commands_world::CrossClone {
+                        read,
+                        destination,
+                        source_dimension,
+                        target_dimension,
+                        mover: options.mover,
+                        reply,
+                    },
+                )));
+            });
+        true
+    }
+
     fn teleport_feedback(
         &self,
         targets: &[selectors::SelectedEntity],
@@ -4175,6 +4308,9 @@ impl CommandRuntime<'_> {
                     yaw: 0.0,
                     pitch: 0.0,
                 };
+                if self.cross_dimension_clone(&command, &origin) {
+                    return false;
+                }
                 let chunk = commands_world::command_chunk(&command, &origin);
                 if self.worlds.owner(self.dimension, chunk).is_some() {
                     if let Some(source) = self.source.clone() {
@@ -4485,6 +4621,26 @@ impl CommandRuntime<'_> {
                         }
                         if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
                             let killer = causing.as_ref().map(|a| a.name.as_str());
+                            let block = self
+                                .dimensions
+                                .source(target.dimension)
+                                .block(
+                                    target.pos[0].floor() as i32,
+                                    target.pos[1].floor() as i32,
+                                    target.pos[2].floor() as i32,
+                                )
+                                .and_then(|state| u16::try_from(state).ok())
+                                .and_then(ferrite_data::blocks::state)
+                                .map(|(name, _)| name);
+                            let source =
+                                source
+                                    .clone()
+                                    .with_fall(damage_source::FallInfo::from_snapshot(
+                                        crate::plugins::facts::fall_distance(target.uuid)
+                                            .unwrap_or(0.0),
+                                        applied,
+                                        block,
+                                    ));
                             let message = props.as_ref().map(|props| {
                                 damage_source::death_message(props, &target.name, &source, killer)
                             });
@@ -4854,10 +5010,12 @@ impl CommandRuntime<'_> {
                 stacks,
                 table,
             } => {
+                let mut tracked = Vec::new();
                 for target in &targets {
                     let Some((_, mailbox, _)) = self.mailboxes.get(target) else {
                         continue;
                     };
+                    tracked.extend(stacks.iter().cloned());
                     for stack in &stacks {
                         let components = stack
                             .components
@@ -4875,7 +5033,7 @@ impl CommandRuntime<'_> {
                         });
                     }
                 }
-                let (key, args) = commands_loot::success_feedback(&stacks, table.as_deref());
+                let (key, args) = commands_loot::success_feedback(&tracked, table.as_deref());
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 self.reply.key(key, &args);
                 false

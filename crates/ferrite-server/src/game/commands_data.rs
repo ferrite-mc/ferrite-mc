@@ -330,14 +330,16 @@ fn operations(target: Target) -> Vec<ferrite_command::NodeBuilder<Source>> {
         literal::<Source>("set")
             .then(value_node(target, |_, tag| ModifyOp::Set(tag)))
             .then(from_node(target, |_, tag| ModifyOp::Set(tag)))
-            .then(string_node(target, |_, tag| ModifyOp::Set(tag))),
+            .then(string_node(target, |_, tag| ModifyOp::Set(tag)))
+            .then(compute_node(target, |_, tag| ModifyOp::Set(tag))),
     );
     for (name, make) in plain {
         out.push(
             literal::<Source>(name)
                 .then(value_node(target, make))
                 .then(from_node(target, make))
-                .then(string_node(target, make)),
+                .then(string_node(target, make))
+                .then(compute_node(target, make)),
         );
     }
     let insert: MakeOp = |ctx, tag| ModifyOp::Insert(insert_index(ctx), tag);
@@ -346,10 +348,68 @@ fn operations(target: Target) -> Vec<ferrite_command::NodeBuilder<Source>> {
             argument::<Source>("index", ArgumentType::integer_range(0, i32::MAX))
                 .then(value_node(target, insert))
                 .then(from_node(target, insert))
-                .then(string_node(target, insert)),
+                .then(string_node(target, insert))
+                .then(compute_node(target, insert)),
         ),
     );
     out
+}
+
+/// `compute block <pos>|default|entity <target> float|integer <provider>`: the value of a
+/// context number provider (`commands_late`), as a float or int tag.
+fn compute_node(target: Target, make: MakeOp) -> ferrite_command::NodeBuilder<Source> {
+    use super::commands_late::{block_context, default_context, entity_context, provider_value};
+    type ContextFn =
+        fn(&CommandContext<Source>) -> Result<super::commands_late::Context, CommandError>;
+    let kinds = move |context: ContextFn| {
+        let leaf = move |float: bool| {
+            argument::<Source>(
+                "provider",
+                ArgumentType::opaque(if float {
+                    "minecraft:context_float_provider"
+                } else {
+                    "minecraft:context_int_provider"
+                }),
+            )
+            .executes(move |ctx| {
+                let raw = ctx.string("provider").unwrap_or_default().to_owned();
+                let value = provider_value(&raw, float, &context(ctx)?)?;
+                let tag = if float {
+                    Tag::Float(value as f32)
+                } else {
+                    Tag::Int(value as i32)
+                };
+                modify(ctx, target, move |_| Ok(make(ctx, tag.clone())))
+            })
+        };
+        (
+            literal::<Source>("float").then(leaf(true)),
+            literal::<Source>("integer").then(leaf(false)),
+        )
+    };
+    let (block_float, block_int) = kinds(block_context);
+    let (default_float, default_int) = kinds(default_context);
+    let (entity_float, entity_int) = kinds(entity_context);
+    literal::<Source>("compute")
+        .then(
+            literal::<Source>("block").then(
+                argument::<Source>("computePos", ArgumentType::BlockPos)
+                    .then(block_float)
+                    .then(block_int),
+            ),
+        )
+        .then(
+            literal::<Source>("default")
+                .then(default_float)
+                .then(default_int),
+        )
+        .then(
+            literal::<Source>("entity").then(
+                argument::<Source>("computeTarget", ArgumentType::entity())
+                    .then(entity_float)
+                    .then(entity_int),
+            ),
+        )
 }
 
 /// `from block|entity|storage <source> [sourcePath]`, resolving the source value immediately.
@@ -1064,5 +1124,31 @@ mod tests {
             run("data modify storage dst bad set string storage src text 0 99").unwrap_err();
         assert_eq!(error.to_string(), "Invalid substring indices: 0 to 99");
         run("data modify storage dst list insert 0 from storage src text").unwrap();
+    }
+
+    #[test]
+    fn modify_compute_stores_the_provider_value() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        let run = |command: &str| tree.execute(command, source.clone());
+        run("data modify storage c n set compute default integer {type:\"minecraft:constant\",value:7}")
+            .unwrap();
+        run("data modify storage c f set compute default float {type:\"minecraft:constant\",value:1.5}")
+            .unwrap();
+        run("data modify storage c l append compute default integer {type:\"minecraft:constant\",value:3}")
+            .unwrap();
+        // A named provider from the extracted data.
+        run("data modify storage c coal set compute default integer minecraft:cooking/time_coal")
+            .unwrap();
+        let state = source.state.lock().unwrap();
+        let text = snbt::format(state.storage.get("minecraft:c").unwrap());
+        assert!(text.contains("n:7"), "{text}");
+        assert!(text.contains("f:1.5f"), "{text}");
+        assert!(text.contains("l:[3]"), "{text}");
+        assert!(text.contains("coal:"), "{text}");
+        drop(state);
+        let error = run("data modify storage c bad set compute default integer minecraft:nope")
+            .unwrap_err();
+        assert!(error.to_string().contains("nope"), "{error}");
     }
 }

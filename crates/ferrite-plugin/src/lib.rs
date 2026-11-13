@@ -486,7 +486,7 @@ pub enum PluginPacket {
         color: String,
         glowing: bool,
     },
-    /// `Player#sendBlockUpdate`: a container or furnace snapshot shown to one player only
+    /// `Player#sendBlockUpdate`: a container, furnace, banner or skull snapshot shown to one player only
     /// (`ClientboundBlockEntityDataPacket`). `items` are `(slot, material, count)`; `furnace` is
     /// `[BurnTime, BurnTimeTotal, CookTime, CookTimeTotal]`.
     TileUpdate {
@@ -494,6 +494,10 @@ pub enum PluginPacket {
         entity: String,
         items: Vec<(u8, String, i32)>,
         furnace: Option<[i16; 4]>,
+        /// Banner layers `(pattern id, dye color)`.
+        patterns: Vec<(String, String)>,
+        /// Skull profile `(name, uuid as four ints)`; either part may be absent.
+        profile: Option<(Option<String>, Option<[i32; 4]>)>,
     },
     /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
     Equipment {

@@ -395,6 +395,9 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
             blocks: std::sync::Arc::new(blocks),
             entities: std::sync::Arc::new(entities),
             spawns: std::sync::Arc::default(),
+            // Features, structures and jigsaws are placed by their own generators, which do not
+            // run the template's edge fix-up.
+            strict: true,
         }),
     )
 }
@@ -402,10 +405,11 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
 /// `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]`.
 ///
 /// `strict` sets `StructurePlaceSettings.knownShape`, which in `StructureTemplate.placeInWorld`
-/// only gates the neighbour shape update at the template's edge (`updateShapeAtEdge`). Template
-/// blocks are written exactly as stored here and no shape update ever runs, so a strict
-/// placement matches vanilla and a non-strict one lacks the edge fix-ups (fence and wall
-/// connections to neighbouring blocks, for example).
+/// only gates the neighbour shape updates at the template's edge (`updateShapeAtEdge`) and per
+/// placed block (`Block.updateFromNeighbourShapes`). A strict placement writes the blocks as
+/// stored. A non-strict one runs [`commands_world::fix_template_edges`], which reproduces the
+/// support rules (a block that cannot survive becomes air) but not the connection rules (fence,
+/// wall and pane connections, stairs shapes), because this server has none.
 fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let id = ctx.string("template").unwrap_or_default().to_owned();
     let Some(template) = Template::load(&id) else {
@@ -447,6 +451,8 @@ fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             blocks: std::sync::Arc::new(blocks),
             entities: std::sync::Arc::new(entities),
             spawns: std::sync::Arc::new(template.place_entities(rotation, mirror)),
+            // The last word of the command, `strict`, is a literal that follows the seed.
+            strict: ctx.input().split_whitespace().last() == Some("strict"),
         }),
     )
 }

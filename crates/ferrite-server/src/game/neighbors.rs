@@ -150,8 +150,9 @@ pub fn can_survive(state: u16, pos: [i32; 3], world: &impl BlockWorld) -> bool {
     if name == "torch" || name.ends_with("_torch") {
         return face_sturdy(world, pos, Direction::Down);
     }
-    // LanternBlock: hanging lanterns hang from a ceiling, the rest stand on a floor.
-    if name.ends_with("lantern") {
+    // LanternBlock: hanging lanterns hang from a ceiling, the rest stand on a floor. Only the
+    // lanterns have the `hanging` property: `sea_lantern` and `jack_o_lantern` are full blocks.
+    if name.ends_with("lantern") && property(state, "hanging").is_some() {
         return if property(state, "hanging") == Some("true") {
             face_sturdy(world, pos, Direction::Up)
         } else {
@@ -537,5 +538,19 @@ mod tests {
         assert!(removed.is_empty());
         assert_eq!(west.grid.get([16, 64, 0]), wall);
         assert!(west.sent.is_empty());
+    }
+
+    #[test]
+    fn full_blocks_named_lantern_need_no_support() {
+        // Regression: `ends_with("lantern")` matched `sea_lantern` and `jack_o_lantern`, so a
+        // block update next to one with nothing underneath turned it into air.
+        let grid = Grid::new();
+        for name in ["sea_lantern", "jack_o_lantern"] {
+            assert!(can_survive(state(name), [0, 5, 0], &grid), "{name}");
+        }
+        // A real lantern still needs its floor, or its ceiling when it hangs.
+        assert!(!can_survive(state("lantern"), [0, 5, 0], &grid));
+        let hanging = state_with("lantern", &[("hanging", "true")]);
+        assert!(!can_survive(hanging, [0, 5, 0], &grid));
     }
 }

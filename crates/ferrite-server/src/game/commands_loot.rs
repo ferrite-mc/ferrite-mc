@@ -155,7 +155,13 @@ fn block_pos_of(ctx: &CommandContext<Source>) -> Result<[i32; 3], CommandError> 
 fn block_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootContext, CommandError> {
     let [x, y, z] = block_pos_of(ctx)?;
     let source = ctx.source();
-    let mut context = LootContext::default();
+    let mut context = LootContext {
+        origin: Some([f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5]),
+        host: Some(super::drops::ServerLootHost::with_world(
+            source.world.clone(),
+        )),
+        ..LootContext::default()
+    };
     if let Some((name, props)) = source
         .world
         .as_ref()
@@ -184,7 +190,16 @@ fn block_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootContext
 
 /// Vanilla `LootCommand.dropFishingLoot`: origin and tool only, no block.
 fn fishing_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootContext, CommandError> {
-    let mut context = LootContext::default();
+    let [x, y, z] = block_pos_of(ctx)?;
+    // The command sets no luck: vanilla `LootParams` defaults it to 0, so Luck of the Sea on the
+    // tool does not apply to `/loot fish`.
+    let mut context = LootContext {
+        origin: Some([f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5]),
+        host: Some(super::drops::ServerLootHost::with_world(
+            ctx.source().world.clone(),
+        )),
+        ..LootContext::default()
+    };
     tool_context(ctx, tool, &mut context)?;
     Ok(context)
 }
@@ -192,8 +207,16 @@ fn fishing_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootConte
 /// Vanilla `LootCommand.dropKillLoot`: the command source is the attacker. A player source sets
 /// `LAST_DAMAGE_PLAYER` (so `killed_by_player` conditions pass) and its main-hand looting level
 /// feeds `enchanted_count_increase`/`apply_bonus`.
-fn kill_context(source: &Source) -> LootContext {
-    let mut context = LootContext::default();
+fn kill_context(source: &Source, entity_type: &str) -> LootContext {
+    let mut context = LootContext {
+        origin: Some(source.origin),
+        host: Some(super::drops::default_host()),
+        this_entity: Some(ferrite_loot::EntityFacts {
+            entity_type: entity_type.to_owned(),
+            ..Default::default()
+        }),
+        ..LootContext::default()
+    };
     let Some(uuid) = source.uuid else {
         return context;
     };
@@ -206,14 +229,25 @@ fn kill_context(source: &Source) -> LootContext {
         return context;
     }
     context.killed_by_player = true;
-    if let Some(held) = HELD_TOOLS
+    let held = HELD_TOOLS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&uuid)
-        .and_then(|hands| hands[0].clone())
-    {
+        .and_then(|hands| hands[0].clone());
+    if let Some(held) = &held {
         context.looting = held.looting;
     }
+    // Vanilla `dropKillLoot`: the command source is the attacker and the direct attacker.
+    let attacker = ferrite_loot::EntityFacts {
+        entity_type: "minecraft:player".to_owned(),
+        mainhand: held.map(|held| (held.item, held.tool_enchantments)),
+        ..Default::default()
+    };
+    context.damage_source = Some(ferrite_loot::DamageFacts {
+        damage_type: "minecraft:generic_kill".to_owned(),
+        source_entity: Some(attacker.clone()),
+        direct_entity: Some(attacker),
+    });
     context
 }
 
@@ -364,13 +398,14 @@ fn rolled(ctx: &CommandContext<Source>, from: From) -> Result<Rolled, CommandErr
             let Some(kind) = first.kind else {
                 return Err(no_table());
             };
+            let key = ferrite_data::entity_props::get(kind).key;
             let table = format!(
                 "minecraft:entities/{}",
-                ferrite_data::entity_props::get(kind)
-                    .key
-                    .trim_start_matches("minecraft:")
+                key.trim_start_matches("minecraft:")
             );
-            let stacks = roll_stacks(&table, &kill_context(source)).ok_or_else(no_table)?;
+            let entity_type = format!("minecraft:{}", key.trim_start_matches("minecraft:"));
+            let stacks =
+                roll_stacks(&table, &kill_context(source, &entity_type)).ok_or_else(no_table)?;
             Ok(Rolled {
                 stacks,
                 table: Some(table),
@@ -384,15 +419,16 @@ fn block_label(block: &str) -> String {
     block.to_owned()
 }
 
-/// Vanilla `RESPONSE_WITH(OUT)_LOOT_TABLE`: one stack reads "Dropped 3 Stone", anything else
-/// "Dropped N items"; a table adds "from loot table <id>". N is the sum of the stack counts.
+/// Vanilla `RESPONSE_WITH(OUT)_LOOT_TABLE` (read from `LootCommand` and
+/// `CommandResponseTracker`): every stack a target accepted is tracked once, one tracked stack
+/// reads "Dropped 3 Stone" (its own count), anything else "Dropped N items" where N is the
+/// number of tracked stacks, not the sum of their counts. A table adds "from loot table <id>".
 pub fn success_feedback(
-    stacks: &[ferrite_item::ItemStack],
+    tracked: &[ferrite_item::ItemStack],
     table: Option<&str>,
 ) -> (&'static str, Vec<String>) {
-    let total: i32 = stacks.iter().map(|stack| stack.count).sum();
     let mut args = Vec::new();
-    let key = match (stacks, table) {
+    let key = match (tracked, table) {
         ([one], with_table) => {
             args.push(one.count.to_string());
             args.push(item_display(one.item));
@@ -403,7 +439,7 @@ pub fn success_feedback(
             }
         }
         (_, with_table) => {
-            args.push(total.to_string());
+            args.push(tracked.len().to_string());
             if with_table.is_some() {
                 "commands.drop.success.multiple_with_table"
             } else {
@@ -420,7 +456,7 @@ pub fn success_feedback(
 fn give(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
     let Rolled { stacks, table } = rolled(ctx, from)?;
     let targets = resolved_targets(ctx, "players")?;
-    let total: i32 = stacks.iter().map(|stack| stack.count).sum();
+    let tracked = i32::try_from(stacks.len() * targets.len()).unwrap_or(i32::MAX);
     send(
         ctx.source(),
         Action::LootGive {
@@ -429,18 +465,22 @@ fn give(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
             table,
         },
     )?;
-    Ok(total)
+    Ok(tracked)
 }
 
 fn insert_loot(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
-    let stacks = rolled(ctx, from)?.stacks;
+    let Rolled { stacks, table } = rolled(ctx, from)?;
     send(
         ctx.source(),
         Action::Slots {
             mode: SlotMode::Insert,
             target: SlotTarget::Block(super::commands_item::block_pos(ctx, "targetPos")?),
             slots: String::new(),
-            source: SlotSource::Stacks(stacks),
+            source: SlotSource::Loot {
+                stacks,
+                table,
+                count: None,
+            },
         },
     )
 }
@@ -452,26 +492,17 @@ fn spawn_loot(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandEr
     };
     let source = ctx.source();
     let pos = coords.resolve(source.origin, source.yaw, source.pitch);
-    let total: i32 = stacks.iter().map(|stack| stack.count).sum();
+    let tracked = i32::try_from(stacks.len()).unwrap_or(i32::MAX);
     send(source, Action::DropItems { pos, stacks, table })?;
-    Ok(total)
+    Ok(tracked)
 }
 
-/// `replace`: `<slot> [<count>]` names `count` consecutive slots starting at `slot`.
+/// `replace`: `<slot> [<count>]` names `count` consecutive slots starting at `slot`; vanilla
+/// defaults `count` to the number of rolled stacks, and slots past the stacks are emptied.
 fn replace(ctx: &CommandContext<Source>, from: From, block: bool) -> Result<i32, CommandError> {
-    let stacks = rolled(ctx, from)?.stacks;
-    let slot = ctx.string("slot").unwrap_or_default();
-    let count = ctx.integer("count").unwrap_or(1).max(1);
-    let slots = match slot
-        .rsplit_once('.')
-        .and_then(|(p, n)| Some((p, n.parse::<i32>().ok()?)))
-    {
-        Some((prefix, first)) if count > 1 => (0..count)
-            .map(|i| format!("{prefix}.{}", first + i))
-            .collect::<Vec<_>>()
-            .join(","),
-        _ => slot.to_owned(),
-    };
+    let Rolled { stacks, table } = rolled(ctx, from)?;
+    let slot = ctx.string("slot").unwrap_or_default().to_owned();
+    let count = ctx.integer("count");
     let target = if block {
         SlotTarget::Block(super::commands_item::block_pos(ctx, "targetPos")?)
     } else {
@@ -480,10 +511,14 @@ fn replace(ctx: &CommandContext<Source>, from: From, block: bool) -> Result<i32,
     send(
         ctx.source(),
         Action::Slots {
-            mode: SlotMode::Replace,
+            mode: SlotMode::Override,
             target,
-            slots,
-            source: SlotSource::Stacks(stacks),
+            slots: slot,
+            source: SlotSource::Loot {
+                stacks,
+                table,
+                count,
+            },
         },
     )
 }
@@ -655,7 +690,11 @@ mod tests {
         let two = [stack("minecraft:stone", 64), stack("minecraft:stone", 6)];
         let (key, args) = success_feedback(&two, None);
         assert_eq!(key, "commands.drop.success.multiple");
-        assert_eq!(args, ["70"], "the total is the sum of the counts");
+        assert_eq!(
+            args,
+            ["2"],
+            "the number is the tracked stacks, not their counts"
+        );
         let (key, args) = success_feedback(&[], Some("minecraft:entities/zombie"));
         assert_eq!(key, "commands.drop.success.multiple_with_table");
         assert_eq!(args, ["0", "minecraft:entities/zombie"]);
@@ -728,14 +767,14 @@ mod tests {
             .lock()
             .unwrap()
             .insert(player, [HeldTool::from_stack(&sword), None]);
-        let by_player = kill_context(&source(Some(player), state.clone()));
+        let by_player = kill_context(&source(Some(player), state.clone()), "minecraft:blaze");
         assert!(by_player.killed_by_player);
         assert_eq!(by_player.looting, 3);
         // The console, or an entity that is not a player, kills without credit.
-        let console = kill_context(&source(None, state.clone()));
+        let console = kill_context(&source(None, state.clone()), "minecraft:blaze");
         assert!(!console.killed_by_player);
         assert_eq!(console.looting, 0);
-        let mob = kill_context(&source(Some(Uuid::from_u128(12)), state));
+        let mob = kill_context(&source(Some(Uuid::from_u128(12)), state), "minecraft:blaze");
         assert!(!mob.killed_by_player);
     }
 

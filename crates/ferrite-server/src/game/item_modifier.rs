@@ -111,6 +111,57 @@ enum Step {
         levels: Vec<(String, Number)>,
         add: bool,
     },
+    /// Every function the loot crate evaluates (enchanting, smelting, attributes, ...), run
+    /// through `ferrite_loot` with the stack converted to its NBT components and back.
+    Loot(LootStep),
+}
+
+/// A `ferrite_loot` function; two steps are equal when they print the same.
+#[derive(Debug, Clone)]
+struct LootStep(ferrite_loot::Function);
+
+impl PartialEq for LootStep {
+    fn eq(&self, other: &Self) -> bool {
+        format!("{:?}", self.0) == format!("{:?}", other.0)
+    }
+}
+
+/// The item modifier's loot context: vanilla `LootContextParamSets.COMMAND` gives the origin
+/// and `this` entity, and nothing about a kill.
+fn loot_context() -> ferrite_loot::LootContext {
+    ferrite_loot::LootContext {
+        this_entity: Some(ferrite_loot::EntityFacts::default()),
+        host: Some(super::drops::default_host()),
+        ..ferrite_loot::LootContext::default()
+    }
+}
+
+fn to_loot(stack: &ItemStack) -> Option<ferrite_loot::LootStack> {
+    let mut out = ferrite_loot::LootStack::new(ferrite_item::item_name(stack.item)?);
+    out.count = stack.count;
+    for (id, component) in stack.components.added() {
+        if let (Some(name), Ok(tag)) = (ferrite_item::component_name(id), component.to_nbt()) {
+            out.components.insert(name.to_owned(), tag);
+        }
+    }
+    Some(out)
+}
+
+fn from_loot(stack: ferrite_loot::LootStack, previous: &ItemStack) -> ItemStack {
+    let Some(item) = ferrite_item::item_id(&stack.item) else {
+        return ItemStack::empty();
+    };
+    let mut out = ItemStack::with_count(item, stack.count);
+    // A function that swaps the item (smelting, an enchanted book) starts from its defaults.
+    if item == previous.item {
+        out.components = previous.components.clone();
+    }
+    for (name, tag) in &stack.components {
+        if let Some(id) = ferrite_item::component_id(name) {
+            out.components.insert(id, Component::from_nbt(id, tag));
+        }
+    }
+    out
 }
 
 /// A function condition.
@@ -303,6 +354,50 @@ fn id_of(text: &str) -> String {
     }
 }
 
+/// Function types this module evaluates itself; every other one goes to `ferrite_loot`.
+const NATIVE: [&str; 14] = [
+    "minecraft:sequence",
+    "minecraft:set_count",
+    "minecraft:limit_count",
+    "minecraft:set_damage",
+    "minecraft:set_components",
+    "minecraft:set_name",
+    "minecraft:set_lore",
+    "minecraft:set_item",
+    "minecraft:set_potion",
+    "minecraft:set_custom_data",
+    "minecraft:set_ominous_bottle_amplifier",
+    "minecraft:discard",
+    "minecraft:explosion_decay",
+    "minecraft:set_enchantments",
+];
+
+/// Rewrites the pre-26 `function`/`condition` keys of a (nested) function to `type`, the key the
+/// loot crate reads.
+fn with_type_keys(value: &Value) -> Value {
+    match value {
+        Value::Array(list) => Value::Array(list.iter().map(with_type_keys).collect()),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, inner) in map {
+                let legacy = matches!(key.as_str(), "function" | "condition")
+                    && !map.contains_key("type")
+                    && inner.is_string();
+                if legacy {
+                    out.insert(
+                        "type".to_owned(),
+                        Value::String(id_of(inner.as_str().unwrap_or(""))),
+                    );
+                } else {
+                    out.insert(key.clone(), with_type_keys(inner));
+                }
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
 fn parse_into(value: &Value, out: &mut Vec<Function>) -> Result<(), String> {
     if let Value::Array(list) = value {
         return list.iter().try_for_each(|entry| parse_into(entry, out));
@@ -310,6 +405,25 @@ fn parse_into(value: &Value, out: &mut Vec<Function>) -> Result<(), String> {
     let object = value
         .as_object()
         .ok_or("an item modifier is a function or a list of functions")?;
+    let native_kind = object
+        .get("type")
+        .or_else(|| object.get("function"))
+        .and_then(Value::as_str)
+        .map(id_of);
+    if let Some(kind) = native_kind.as_deref()
+        && !NATIVE.contains(&kind)
+    {
+        let tables = super::drops::tables()
+            .ok_or_else(|| format!("'{kind}' needs the vanilla loot data, which is not loaded"))?;
+        let function = tables
+            .parse_function(&with_type_keys(&Value::Object(object.clone())))
+            .map_err(|error| format!("unsupported item modifier function: {error}"))?;
+        out.push(Function {
+            conditions: Vec::new(),
+            step: Step::Loot(LootStep(function)),
+        });
+        return Ok(());
+    }
     let mut conditions = Vec::new();
     for key in ["conditions", "condition"] {
         match object.get(key) {
@@ -578,6 +692,20 @@ impl ItemModifier {
                 }
                 Step::Discard => stack = ItemStack::empty(),
                 Step::ExplosionDecay => {}
+                Step::Loot(step) => {
+                    if let Some(mut rolled) = to_loot(&stack) {
+                        step.0.apply_to(
+                            &mut rolled,
+                            &loot_context(),
+                            &mut super::drops::LootRng(rng),
+                        );
+                        stack = if rolled.count > 0 {
+                            from_loot(rolled, &stack)
+                        } else {
+                            ItemStack::empty()
+                        };
+                    }
+                }
                 Step::SetEnchantments { levels, add } => {
                     let mut compound = Compound::new();
                     if *add
@@ -888,8 +1016,8 @@ mod tests {
     fn unsupported_or_invalid_parts_fail_loading_with_their_name() {
         for (json, needle) in [
             (
-                r#"{"function":"minecraft:enchant_randomly"}"#,
-                "enchant_randomly",
+                r#"{"function":"minecraft:set_contents","component":"minecraft:container","entries":[]}"#,
+                "set_contents",
             ),
             (
                 r#"{"function":"set_count","count":1,"conditions":[{"condition":"minecraft:weather_check"}]}"#,
@@ -900,15 +1028,6 @@ mod tests {
                 "minecraft:nope",
             ),
             (r#"{"function":"set_count"}"#, "count"),
-            (
-                r##"{"type":"minecraft:enchant_with_levels","levels":30,"options":"#minecraft:on_random_loot"}"##,
-                "enchant_with_levels",
-            ),
-            (r#"{"type":"minecraft:furnace_smelt"}"#, "furnace_smelt"),
-            (
-                r#"{"type":"minecraft:apply_bonus","enchantment":"minecraft:fortune","formula":"minecraft:ore_drops"}"#,
-                "apply_bonus",
-            ),
             (r#"{"count":1}"#, "type"),
             (r#"[1]"#, "function"),
             ("not json", "expected"),
@@ -916,5 +1035,91 @@ mod tests {
             let error = ItemModifier::parse(json).unwrap_err();
             assert!(error.contains(needle), "{json}: {error}");
         }
+    }
+
+    fn item(name: &str, count: i32) -> ItemStack {
+        ItemStack::with_count(ferrite_item::item_id(name).unwrap(), count)
+    }
+
+    fn component(stack: &ItemStack, name: &str) -> Option<Tag> {
+        let id = ferrite_item::component_id(name)?;
+        stack.effective_component(id).and_then(|c| c.to_nbt().ok())
+    }
+
+    /// The rest of the loot functions run through the loot crate (needs the vanilla data).
+    #[test]
+    fn loot_functions_run_in_item_modifiers() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        // enchant_with_levels: an iron pickaxe (enchantability 14) gets real enchantments.
+        let pick = run(
+            r##"{"type":"minecraft:enchant_with_levels","levels":30,"options":"#minecraft:on_random_loot"}"##,
+            item("minecraft:iron_pickaxe", 1),
+        );
+        assert!(matches!(
+            component(&pick, "minecraft:enchantments"),
+            Some(Tag::Compound(levels)) if !levels.is_empty()
+        ));
+        // ... and a book becomes an enchanted book with stored enchantments.
+        let book = run(
+            r##"{"type":"minecraft:enchant_with_levels","levels":30,"options":"#minecraft:on_random_loot"}"##,
+            item("minecraft:book", 1),
+        );
+        assert_eq!(
+            book.item,
+            ferrite_item::item_id("minecraft:enchanted_book").unwrap()
+        );
+        assert!(component(&book, "minecraft:stored_enchantments").is_some());
+        // enchant_randomly respects what the item supports.
+        let rod = run(
+            r#"{"type":"minecraft:enchant_randomly","options":["minecraft:sharpness","minecraft:unbreaking"]}"#,
+            item("minecraft:fishing_rod", 1),
+        );
+        let Some(Tag::Compound(levels)) = component(&rod, "minecraft:enchantments") else {
+            panic!("no enchantments on the rod");
+        };
+        assert_eq!(levels.keys().collect::<Vec<_>>(), ["minecraft:unbreaking"]);
+        // furnace_smelt keeps the count of the input stack.
+        let cooked = run(
+            r#"{"type":"minecraft:furnace_smelt"}"#,
+            item("minecraft:beef", 3),
+        );
+        assert_eq!(
+            (cooked.item, cooked.count),
+            (ferrite_item::item_id("minecraft:cooked_beef").unwrap(), 3)
+        );
+        // set_stew_effect only touches suspicious stew.
+        let stew = run(
+            r#"{"type":"minecraft:set_stew_effect","effects":[{"type":"minecraft:blindness","duration":5}]}"#,
+            item("minecraft:suspicious_stew", 1),
+        );
+        assert!(component(&stew, "minecraft:suspicious_stew_effects").is_some());
+        let bowl = run(
+            r#"{"type":"minecraft:set_stew_effect","effects":[{"type":"minecraft:blindness","duration":5}]}"#,
+            item("minecraft:stone", 1),
+        );
+        assert!(component(&bowl, "minecraft:suspicious_stew_effects").is_none());
+        // set_instrument picks one of the tag's horns.
+        let horn = run(
+            r##"{"type":"minecraft:set_instrument","options":"#minecraft:regular_goat_horns"}"##,
+            item("minecraft:goat_horn", 1),
+        );
+        assert!(matches!(
+            component(&horn, "minecraft:instrument"),
+            Some(Tag::String(_))
+        ));
+        // A condition of a delegated function is evaluated by the loot crate.
+        let never = run(
+            r#"{"type":"minecraft:furnace_smelt","conditions":[{"condition":"minecraft:random_chance","chance":0.0}]}"#,
+            item("minecraft:beef", 1),
+        );
+        assert_eq!(never.item, ferrite_item::item_id("minecraft:beef").unwrap());
+        // enchanted_count_increase needs an attacker, which item modifiers do not have.
+        let same = run(
+            r#"{"type":"minecraft:enchanted_count_increase","count":2,"enchantment":"minecraft:looting"}"#,
+            item("minecraft:stone", 2),
+        );
+        assert_eq!(same.count, 2);
     }
 }

@@ -132,12 +132,99 @@ pub struct Party {
     pub named_weapon: Option<String>,
 }
 
+/// `FallLocation`: where the victim was falling when the damage was recorded
+/// (`FallLocation.getCurrentFallLocation`: the block of its last climbable position, or water).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallLocation {
+    Generic,
+    Ladder,
+    Vines,
+    WeepingVines,
+    TwistingVines,
+    Scaffolding,
+    OtherClimbable,
+    Water,
+}
+
+impl FallLocation {
+    /// `FallLocation.id`, the end of `death.fell.accident.<id>`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Ladder => "ladder",
+            Self::Vines => "vines",
+            Self::WeepingVines => "weeping_vines",
+            Self::TwistingVines => "twisting_vines",
+            Self::Scaffolding => "scaffolding",
+            Self::OtherClimbable => "other_climbable",
+            Self::Water => "water",
+        }
+    }
+
+    /// `FallLocation.blockToFallLocation` for the block a climbing victim last touched
+    /// (`block` is a namespaced block id; `trapdoor` stands for the `trapdoors` block tag).
+    pub fn of_climbable(block: &str) -> Self {
+        let name = block.strip_prefix("minecraft:").unwrap_or(block);
+        match name {
+            "ladder" => Self::Ladder,
+            "vine" => Self::Vines,
+            "weeping_vines" | "weeping_vines_plant" => Self::WeepingVines,
+            "twisting_vines" | "twisting_vines_plant" => Self::TwistingVines,
+            "scaffolding" => Self::Scaffolding,
+            _ if name.ends_with("_trapdoor") => Self::Ladder,
+            _ => Self::OtherClimbable,
+        }
+    }
+}
+
+/// The `CombatEntry` data the fall death messages read: `CombatTracker.recordDamage` stores the
+/// victim's fall distance, the fall location and the damage with the source.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct FallInfo {
+    /// `LivingEntity.fallDistance` when the damage was recorded.
+    pub distance: f32,
+    /// The damage dealt.
+    pub damage: f32,
+    /// `None` when the victim was neither climbing nor in water.
+    pub location: Option<FallLocation>,
+}
+
+impl FallInfo {
+    /// Current published fall state for a command hit. Earlier climbable positions and
+    /// combat entries are not retained, so they must not be invented here.
+    pub fn from_snapshot(distance: f32, damage: f32, block: Option<&str>) -> Self {
+        let location = match block {
+            Some("minecraft:water") => Some(FallLocation::Water),
+            Some(block) if ferrite_data::tags::contains("block", "climbable", block) => {
+                Some(FallLocation::of_climbable(block))
+            }
+            _ => None,
+        };
+        Self {
+            distance,
+            damage,
+            location,
+        }
+    }
+
+    /// `CombatTracker.getMostSignificantFall` for a victim whose only combat entry is a
+    /// `#minecraft:is_fall` hit (`fall`, `ender_pearl`, `stalagmite`): the fall entry wins with
+    /// a distance over 5; otherwise the entry counts when it has a fall location and more than
+    /// 5 damage.
+    pub fn is_significant(&self) -> bool {
+        self.distance > 5.0 || (self.location.is_some() && self.damage > 5.0)
+    }
+}
+
 /// `DamageSource`: the type plus the direct and causing entities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Source {
     pub type_id: String,
     pub direct: Option<Party>,
     pub causing: Option<Party>,
+    /// The victim's fall data. The default (nothing fallen, not climbing) is right for
+    /// `/damage` on a standing victim; callers that know better set it with [`Self::with_fall`].
+    pub fall: FallInfo,
 }
 
 impl Source {
@@ -149,7 +236,14 @@ impl Source {
             type_id: type_id.to_owned(),
             direct,
             causing,
+            fall: FallInfo::default(),
         }
+    }
+
+    /// The same source with the victim's recorded fall data.
+    pub fn with_fall(mut self, fall: FallInfo) -> Self {
+        self.fall = fall;
+        self
     }
 
     /// `DamageSource.scalesWithDifficulty`.
@@ -180,8 +274,11 @@ pub fn scale_for_difficulty(amount: f32, difficulty: i32) -> f32 {
 /// `intentional_game_design` type). `kill_credit` is the name of whoever last hurt the victim,
 /// used when the source names no entity.
 ///
-/// `fall_variants` (`fall`, `ender_pearl`) normally reads the victim's recorded fall location;
-/// Ferrite keeps no combat history, so it uses the plain `death.attack.<message_id>` message.
+/// `fall_variants` (`fall`, `ender_pearl`) follow `CombatTracker.getDeathMessage` for a victim
+/// whose only combat entry is this hit: a significant fall (see [`FallInfo::is_significant`])
+/// reads `death.fell.accident.<location>`, anything else the plain `death.attack.<message_id>`.
+/// Ferrite keeps no combat history, so the `death.fell.assist` / `finish` / `killer` messages,
+/// which need an earlier attacker, are not produced.
 pub fn death_message_key(
     props: &TypeProps,
     victim: &str,
@@ -189,6 +286,13 @@ pub fn death_message_key(
     kill_credit: Option<&str>,
 ) -> (String, Vec<String>) {
     let base = format!("death.attack.{}", props.message_id);
+    if props.death_message_type == DeathMessageType::FallVariants && source.fall.is_significant() {
+        let location = source.fall.location.unwrap_or(FallLocation::Generic);
+        return (
+            format!("death.fell.accident.{}", location.id()),
+            vec![victim.to_owned()],
+        );
+    }
     if props.death_message_type == DeathMessageType::IntentionalGameDesign {
         // The message links to the Minecraft Wiki page of the same name; only the text is kept.
         let link = format!("[{}]", link_text(&props.message_id));
@@ -409,6 +513,106 @@ mod tests {
         assert_eq!(key, "death.attack.badRespawnPoint.message");
         assert_eq!(args[0], "Alice");
         assert!(args[1].starts_with('[') && args[1].ends_with(']'));
+    }
+
+    #[test]
+    fn fall_variants_read_the_recorded_fall() {
+        // CombatTracker.getMostSignificantFall / getFallMessage, read from the 26.3 jar.
+        let props = TypeProps {
+            message_id: "fall".into(),
+            scaling: Scaling::Always,
+            exhaustion: 0.0,
+            death_message_type: DeathMessageType::FallVariants,
+        };
+        let key = |fall: FallInfo| {
+            death_message_key(
+                &props,
+                "Alice",
+                &Source::new("minecraft:fall", None, None).with_fall(fall),
+                None,
+            )
+            .0
+        };
+        // Nothing fallen: the plain message, as for `/damage` on a standing victim.
+        assert_eq!(key(FallInfo::default()), "death.attack.fall");
+        // A fall of exactly 5 is not significant; over 5 it is.
+        let fall = |distance, damage, location| FallInfo {
+            distance,
+            damage,
+            location,
+        };
+        assert_eq!(key(fall(5.0, 2.0, None)), "death.attack.fall");
+        assert_eq!(key(fall(5.5, 3.0, None)), "death.fell.accident.generic");
+        // A location makes a hit of more than 5 damage count even after a short fall.
+        assert_eq!(
+            key(fall(1.0, 6.0, Some(FallLocation::Ladder))),
+            "death.fell.accident.ladder"
+        );
+        assert_eq!(
+            key(fall(1.0, 5.0, Some(FallLocation::Ladder))),
+            "death.attack.fall"
+        );
+        assert_eq!(
+            key(fall(9.0, 6.0, Some(FallLocation::Water))),
+            "death.fell.accident.water"
+        );
+        assert_eq!(
+            FallLocation::of_climbable("minecraft:ladder"),
+            FallLocation::Ladder
+        );
+        assert_eq!(
+            FallLocation::of_climbable("minecraft:oak_trapdoor"),
+            FallLocation::Ladder
+        );
+        assert_eq!(
+            FallLocation::of_climbable("minecraft:twisting_vines_plant"),
+            FallLocation::TwistingVines
+        );
+        assert_eq!(
+            FallLocation::of_climbable("minecraft:cave_vines"),
+            FallLocation::OtherClimbable
+        );
+    }
+
+    #[test]
+    fn command_fall_snapshot_uses_distance_and_only_known_locations() {
+        let generic = FallInfo::from_snapshot(7.0, 4.0, Some("minecraft:stone"));
+        assert!(generic.is_significant());
+        assert_eq!(generic.location, None);
+        let water = FallInfo::from_snapshot(1.0, 6.0, Some("minecraft:water"));
+        assert_eq!(water.location, Some(FallLocation::Water));
+        assert!(water.is_significant());
+        assert!(!FallInfo::from_snapshot(0.0, 6.0, None).is_significant());
+        if ferrite_data::tags::contains("block", "climbable", "minecraft:ladder") {
+            assert_eq!(
+                FallInfo::from_snapshot(1.0, 6.0, Some("minecraft:ladder")).location,
+                Some(FallLocation::Ladder)
+            );
+        }
+    }
+
+    #[test]
+    fn every_fall_location_message_exists_in_the_language_file() {
+        // The 26.3 language file has no `death.fell.accident.water` (vanilla emits the key
+        // anyway, so a client shows it raw); the other locations all have a translation.
+        if !lang() {
+            return;
+        }
+        for location in [
+            FallLocation::Generic,
+            FallLocation::Ladder,
+            FallLocation::Vines,
+            FallLocation::WeepingVines,
+            FallLocation::TwistingVines,
+            FallLocation::Scaffolding,
+            FallLocation::OtherClimbable,
+        ] {
+            let key = format!("death.fell.accident.{}", location.id());
+            assert!(
+                super::super::commands::translate_key(&key, &["x".into()]).is_some(),
+                "{key} missing from the language file"
+            );
+        }
     }
 
     #[test]

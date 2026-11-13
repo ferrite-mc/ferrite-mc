@@ -501,6 +501,11 @@ pub fn set_fall_distance(player: Uuid, distance: f32) {
     fall_registry().lock().unwrap().insert(player, distance);
 }
 
+/// Last distance published by the player's region owner.
+pub fn fall_distance(player: Uuid) -> Option<f32> {
+    fall_registry().lock().unwrap().get(&player).copied()
+}
+
 type SentChunks = HashMap<Uuid, std::collections::HashSet<(i32, i32)>>;
 
 fn sent_registry() -> &'static Mutex<SentChunks> {
@@ -907,8 +912,10 @@ mod tests {
         };
         assert_eq!(answer(&call), None);
         set_fall_distance(player, 3.5);
+        assert_eq!(fall_distance(player), Some(3.5));
         assert_eq!(answer(&call).as_deref(), Some("3.5"));
         forget(player);
+        assert_eq!(fall_distance(player), None);
         assert_eq!(answer(&call), None);
     }
 

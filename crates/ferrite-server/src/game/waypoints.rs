@@ -479,6 +479,7 @@ mod tests {
                 dimension: Dimension::Overworld,
                 tags: Default::default(),
                 custom_name: None,
+                health: None,
             });
         }
         let mut attributes = BTreeMap::new();
