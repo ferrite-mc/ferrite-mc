@@ -740,6 +740,8 @@ mod tests {
                 entity: "minecraft:barrel".into(),
                 items: vec![(2, "minecraft:stone".into(), 5)],
                 furnace: None,
+                patterns: Vec::new(),
+                profile: None,
             }
         );
         let refused = |entity: &str| {
@@ -748,8 +750,8 @@ mod tests {
                 &[&location("4", "65", "-3"), entity, ""],
             ))
         };
-        assert_eq!(refused("minecraft:skull"), None);
-        assert_eq!(refused("minecraft:banner"), None);
+        assert_eq!(refused("minecraft:beacon"), None);
+        assert_eq!(refused("minecraft:sign_but_not_here"), None);
     }
 
     #[test]

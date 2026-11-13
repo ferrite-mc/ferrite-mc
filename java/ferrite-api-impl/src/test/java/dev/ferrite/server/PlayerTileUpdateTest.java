@@ -115,12 +115,59 @@ class PlayerTileUpdateTest {
         assertArrayEquals(new String[]{"item,0,minecraft:iron_ore,5", "furnace,12,0,30,100"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
     }
 
+    private static com.destroystokyo.paper.profile.PlayerProfile profile(String name, java.util.UUID id, boolean textures) {
+        return (com.destroystokyo.paper.profile.PlayerProfile) Proxy.newProxyInstance(PlayerTileUpdateTest.class.getClassLoader(), new Class<?>[]{com.destroystokyo.paper.profile.PlayerProfile.class}, (self, method, args) -> switch (method.getName()) {
+            case "getName" -> name;
+            case "getUniqueId" -> id;
+            case "getProperties" -> textures ? java.util.Set.of(new com.destroystokyo.paper.profile.ProfileProperty("textures", "abc")) : java.util.Set.<com.destroystokyo.paper.profile.ProfileProperty>of();
+            case "toString" -> "Profile";
+            case "hashCode" -> 1;
+            case "equals" -> self == args[0];
+            default -> throw new UnsupportedOperationException(method.getName());
+        });
+    }
+
+    @Test void aBannerSendsItsPatternLayers() {
+        var layers = List.of(
+            new org.bukkit.block.banner.Pattern(org.bukkit.DyeColor.RED, org.bukkit.block.banner.PatternType.STRIPE_TOP),
+            new org.bukkit.block.banner.Pattern(org.bukkit.DyeColor.LIGHT_BLUE, org.bukkit.block.banner.PatternType.CROSS));
+        var banner = tile(org.bukkit.block.Banner.class, Material.WHITE_BANNER, null, java.util.Map.of("getPatterns", layers));
+        player.sendBlockUpdate(at(), banner);
+        assertEquals("minecraft:banner", calls.get(0)[4]);
+        assertArrayEquals(new String[]{"pattern,minecraft:stripe_top,red", "pattern,minecraft:cross,light_blue"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+    }
+
+    @Test void aSkullSendsItsProfileNameAndUuidAndRefusesTexturesAndSounds() {
+        var id = java.util.UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        var plain = new java.util.HashMap<String, Object>();
+        plain.put("getPlayerProfile", profile("Notch", id, false));
+        plain.put("getNoteBlockSound", null);
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, plain));
+        assertEquals("minecraft:skull", calls.get(0)[4]);
+        assertEquals("profile,Notch," + id, calls.get(0)[5]);
+        calls.clear();
+        var mob = new java.util.HashMap<String, Object>();
+        mob.put("getPlayerProfile", null);
+        mob.put("getNoteBlockSound", null);
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.ZOMBIE_HEAD, null, mob));
+        assertEquals("", calls.get(0)[5]);
+        calls.clear();
+        var textured = new java.util.HashMap<String, Object>();
+        textured.put("getPlayerProfile", profile("Notch", id, true));
+        textured.put("getNoteBlockSound", null);
+        var error = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, textured)));
+        assertTrue(error.getMessage().contains("textures"), error.getMessage());
+        var sound = new java.util.HashMap<String, Object>();
+        sound.put("getPlayerProfile", null);
+        sound.put("getNoteBlockSound", org.bukkit.NamespacedKey.minecraft("entity.pig.ambient"));
+        assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, sound)));
+        assertTrue(calls.isEmpty());
+    }
+
     @Test void unmodelledFamiliesAndItemMetadataAreRefusedBeforeTheHost() {
-        var banner = tile(org.bukkit.block.Banner.class, Material.WHITE_BANNER, null, java.util.Map.of());
-        var error = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), banner));
-        assertTrue(error.getMessage().contains("WHITE_BANNER") && error.getMessage().contains("banner, skull"), error.getMessage());
-        var skull = tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, java.util.Map.of());
-        assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), skull));
+        var beacon = tile(org.bukkit.block.Beacon.class, Material.BEACON, null, java.util.Map.of());
+        var error = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), beacon));
+        assertTrue(error.getMessage().contains("BEACON") && error.getMessage().contains("no other block entity model"), error.getMessage());
 
         var named = new ItemStack(Material.STONE);
         var meta = named.getItemMeta();
