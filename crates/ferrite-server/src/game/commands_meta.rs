@@ -1583,10 +1583,13 @@ fn team_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal("join").then(
-                argument("team", ArgumentType::opaque("minecraft:team")).then(
-                    argument("members", ArgumentType::ScoreHolder { multiple: true })
-                        .executes(join_team),
-                ),
+                argument("team", ArgumentType::opaque("minecraft:team"))
+                    // `/team join <team>` joins the executing entity.
+                    .executes(join_team)
+                    .then(
+                        argument("members", ArgumentType::ScoreHolder { multiple: true })
+                            .executes(join_team),
+                    ),
             ),
         )
         .then(literal("leave").then(
@@ -1644,9 +1647,21 @@ fn team_tree() -> NodeBuilder<Source> {
                             }),
                         ),
                     )
-                    .then(literal("nametagVisibility").then(nametag_visibility_literals()))
-                    .then(literal("collisionRule").then(collision_literals()))
-                    .then(literal("deathMessageVisibility").then(death_visibility_literals())),
+                    .then(rule_literal(
+                        "nametagVisibility",
+                        &VISIBILITY,
+                        TeamModify::NametagVisibility,
+                    ))
+                    .then(rule_literal(
+                        "collisionRule",
+                        &COLLISION,
+                        TeamModify::CollisionRule,
+                    ))
+                    .then(rule_literal(
+                        "deathMessageVisibility",
+                        &VISIBILITY,
+                        TeamModify::DeathMessageVisibility,
+                    )),
             ),
         )
         .then(
@@ -1656,57 +1671,25 @@ fn team_tree() -> NodeBuilder<Source> {
         )
 }
 
-fn nametag_visibility_literals() -> NodeBuilder<Source> {
-    literal::<Source>("always")
-        .executes(|ctx| team_modify(ctx, TeamModify::NametagVisibility("always")))
-        .then(
-            literal::<Source>("hideForOtherTeams").executes(|ctx| {
-                team_modify(ctx, TeamModify::NametagVisibility("hideForOtherTeams"))
-            }),
-        )
-        .then(
-            literal::<Source>("hideForOwnTeam")
-                .executes(|ctx| team_modify(ctx, TeamModify::NametagVisibility("hideForOwnTeam"))),
-        )
-        .then(
-            literal::<Source>("never")
-                .executes(|ctx| team_modify(ctx, TeamModify::NametagVisibility("never"))),
-        )
+/// One literal per accepted value under `nametagVisibility`, `deathMessageVisibility` or
+/// `collisionRule`: siblings, as in commands.json (they used to be nested under the first one,
+/// which made every value but the first unreachable).
+fn rule_literal(
+    name: &'static str,
+    values: &[&'static str],
+    make: fn(&'static str) -> TeamModify,
+) -> NodeBuilder<Source> {
+    let mut node = literal::<Source>(name);
+    for value in values {
+        let value: &'static str = value;
+        node =
+            node.then(literal::<Source>(value).executes(move |ctx| team_modify(ctx, make(value))));
+    }
+    node
 }
 
-fn death_visibility_literals() -> NodeBuilder<Source> {
-    literal::<Source>("always")
-        .executes(|ctx| team_modify(ctx, TeamModify::DeathMessageVisibility("always")))
-        .then(literal::<Source>("hideForOtherTeams").executes(|ctx| {
-            team_modify(ctx, TeamModify::DeathMessageVisibility("hideForOtherTeams"))
-        }))
-        .then(
-            literal::<Source>("hideForOwnTeam").executes(|ctx| {
-                team_modify(ctx, TeamModify::DeathMessageVisibility("hideForOwnTeam"))
-            }),
-        )
-        .then(
-            literal::<Source>("never")
-                .executes(|ctx| team_modify(ctx, TeamModify::DeathMessageVisibility("never"))),
-        )
-}
-
-fn collision_literals() -> NodeBuilder<Source> {
-    literal::<Source>("always")
-        .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("always")))
-        .then(
-            literal::<Source>("never")
-                .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("never"))),
-        )
-        .then(
-            literal::<Source>("pushOtherTeams")
-                .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("pushOtherTeams"))),
-        )
-        .then(
-            literal::<Source>("pushOwnTeam")
-                .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("pushOwnTeam"))),
-        )
-}
+const VISIBILITY: [&str; 4] = ["always", "hideForOtherTeams", "hideForOwnTeam", "never"];
+const COLLISION: [&str; 4] = ["always", "never", "pushOtherTeams", "pushOwnTeam"];
 
 #[derive(Debug, Clone, Copy)]
 enum TeamModify {
@@ -1883,7 +1866,16 @@ fn member_names(ctx: &CommandContext<Source>, members: &BTreeSet<Uuid>) -> Vec<S
 }
 
 fn member_uuids(ctx: &CommandContext<Source>) -> Result<Vec<(Uuid, String)>, CommandError> {
-    let names = holders(ctx, "members")?;
+    let names = if ctx.argument("members").is_some() {
+        holders(ctx, "members")?
+    } else {
+        vec![
+            ctx.source()
+                .name
+                .clone()
+                .ok_or_else(super::commands::player_only)?,
+        ]
+    };
     let state = ctx.source().state.lock().unwrap();
     Ok(names
         .into_iter()
@@ -2347,5 +2339,42 @@ mod tests {
         assert!(error.to_string().contains("already exists"));
         let error = tree.execute("team join missing @s", source).unwrap_err();
         assert!(error.to_string().contains("Unknown team"));
+    }
+
+    #[test]
+    fn team_options_accept_every_value_and_join_defaults_to_self() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source(2);
+        execute(&tree, source.clone(), &mut received, "team add red");
+        // Regression: the 2nd..4th value of each option used to be nested under the first
+        // literal (`nametagVisibility always never`), so `... never` did not parse.
+        for input in [
+            "team modify red nametagVisibility always",
+            "team modify red nametagVisibility hideForOtherTeams",
+            "team modify red nametagVisibility hideForOwnTeam",
+            "team modify red nametagVisibility never",
+            "team modify red deathMessageVisibility never",
+            "team modify red deathMessageVisibility hideForOwnTeam",
+            "team modify red collisionRule never",
+            "team modify red collisionRule pushOtherTeams",
+            "team modify red collisionRule pushOwnTeam",
+        ] {
+            execute(&tree, source.clone(), &mut received, input);
+        }
+        assert_eq!(
+            source.state.lock().unwrap().teams["red"].collision_rule,
+            "pushOwnTeam"
+        );
+        assert!(
+            tree.execute(
+                "team modify red nametagVisibility always never",
+                source.clone()
+            )
+            .is_err(),
+            "the nested forms are gone"
+        );
+        // `team join <team>` joins the executing entity.
+        let actions = execute(&tree, source.clone(), &mut received, "team join red");
+        assert_eq!(feedback_text(&actions), vec!["Added Alice to team red"]);
     }
 }

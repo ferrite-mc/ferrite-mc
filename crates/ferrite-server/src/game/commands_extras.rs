@@ -1049,20 +1049,38 @@ fn stop_sound(
 // ---------------------------------------------------------------------------------------------
 
 fn particle_tree() -> NodeBuilder<Source> {
+    // `[force|normal [<viewers>]]` after the count, per commands.json.
+    let mode = |name: &'static str, force: bool| {
+        literal::<Source>(name)
+            .executes(move |ctx| particle(ctx, true, true, true, force))
+            .then(
+                argument("viewers", ArgumentType::players())
+                    .executes(move |ctx| particle(ctx, true, true, true, force)),
+            )
+    };
     literal::<Source>("particle")
         .requires(gamemasters())
         .restricted(true)
         .then(
             argument("name", ArgumentType::opaque("minecraft:particle"))
-                .executes(|ctx| particle(ctx, false, false, false))
+                .executes(|ctx| particle(ctx, false, false, false, false))
                 .then(
                     argument("pos", ArgumentType::Vec3)
-                        .executes(|ctx| particle(ctx, true, false, false))
+                        .executes(|ctx| particle(ctx, true, false, false, false))
                         .then(
                             argument("delta", ArgumentType::Vec3).then(
-                                argument("speed", ArgumentType::float()).then(
+                                argument(
+                                    "speed",
+                                    ArgumentType::Float {
+                                        min: 0.0,
+                                        max: f32::MAX,
+                                    },
+                                )
+                                .then(
                                     argument("count", ArgumentType::integer_range(0, i32::MAX))
-                                        .executes(|ctx| particle(ctx, true, true, true)),
+                                        .executes(|ctx| particle(ctx, true, true, true, false))
+                                        .then(mode("force", true))
+                                        .then(mode("normal", false)),
                                 ),
                             ),
                         ),
@@ -1070,11 +1088,14 @@ fn particle_tree() -> NodeBuilder<Source> {
         )
 }
 
+/// `force` shows the particle up to 512 blocks away, `normal` up to 32 (vanilla
+/// `ServerLevel.sendParticles`); only players in the command's dimension see it.
 fn particle(
     ctx: &CommandContext<Source>,
     positional: bool,
     has_delta: bool,
     full: bool,
+    force: bool,
 ) -> Result<i32, CommandError> {
     let raw = ctx.string("name").unwrap_or_default().to_owned();
     let particle = registry_id("minecraft:particle_type", &raw)?;
@@ -1092,24 +1113,46 @@ fn particle(
         .argument("speed")
         .and_then(ArgumentValue::as_f32)
         .unwrap_or(0.0);
-    if speed < 0.0 {
-        return Err(CommandError::failed(format!(
-            "Float must not be less than 0.0: found {}",
-            ferrite_command::error::java_float(speed)
-        )));
-    }
     let count = if full {
         ctx.integer("count").unwrap_or(1)
     } else {
         1
     };
+    let candidates: Vec<Uuid> = if ctx.argument("viewers").is_some() {
+        resolved_targets(ctx, "viewers")?
+    } else {
+        let state = ctx.source().state.lock().unwrap();
+        state.players.iter().map(|p| p.uuid).collect()
+    };
+    let range = if force { 512.0_f64 } else { 32.0_f64 };
+    let viewers: Vec<Uuid> = {
+        let state = ctx.source().state.lock().unwrap();
+        candidates
+            .into_iter()
+            .filter(|uuid| {
+                state.players.iter().any(|p| {
+                    p.uuid == *uuid
+                        && p.dimension == ctx.source().dimension
+                        && (0..3)
+                            .map(|i| (p.pos[i].floor() + 0.5 - position[i]).powi(2))
+                            .sum::<f64>()
+                            < range * range
+                })
+            })
+            .collect()
+    };
+    if viewers.is_empty() {
+        return Err(CommandError::failed(
+            "The particle was not visible for anybody",
+        ));
+    }
     packets(
         ctx,
-        Vec::new(),
+        viewers,
         PlayerPacket::Particles(LevelParticles {
             particle: ferrite_protocol::VarInt(particle),
-            long_distance: false,
-            always_show: true,
+            long_distance: force,
+            always_show: force,
             x: position[0],
             y: position[1],
             z: position[2],
@@ -1890,6 +1933,35 @@ mod tests {
         let error = run("particle not_a_particle", 2).0.unwrap_err();
         assert!(error_text(error).contains("not_a_particle"));
         denied("particle minecraft:flame");
+    }
+
+    #[test]
+    fn particle_force_normal_viewers_and_range() {
+        // commands.json: `... <count> [force|normal [<viewers>]]`.
+        let actions = success("particle minecraft:flame 1 64 1 0 0 0 0 5 force @s");
+        match only_packet(&actions) {
+            PlayerPacket::Particles(packet) => {
+                assert!(packet.always_show && packet.long_distance, "force");
+            }
+            other => panic!("expected particles, got {other:?}"),
+        }
+        let actions = success("particle minecraft:flame 1 64 1 0 0 0 0 5 normal");
+        match only_packet(&actions) {
+            PlayerPacket::Particles(packet) => {
+                assert!(!packet.always_show && !packet.long_distance, "normal");
+            }
+            other => panic!("expected particles, got {other:?}"),
+        }
+        // 100 blocks away: not visible with `normal` (32), visible with `force` (512).
+        let far = run("particle minecraft:flame 100 64 0 0 0 0 0 5 normal", 2).0;
+        assert!(error_text(far.unwrap_err()).contains("not visible for anybody"));
+        success("particle minecraft:flame 100 64 0 0 0 0 0 5 force");
+        assert!(
+            run("particle minecraft:flame 1 64 1 0 0 0 -1 5", 2)
+                .0
+                .is_err(),
+            "speed min 0"
+        );
     }
 
     #[test]
