@@ -9733,6 +9733,8 @@ impl Region {
             );
             tracing::info!(player = %p.name, dropped, "player died; experience orbs dropped");
         }
+        // `ServerPlayer.die` stops riding: the world loop detaches the corpse on its next plan.
+        super::ride::request_dismount(p.uuid);
         send(
             p,
             &PlayerCombatKill {
