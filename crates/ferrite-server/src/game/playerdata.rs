@@ -39,6 +39,10 @@ pub struct Saved {
     /// The selected hotbar slot.
     #[serde(default)]
     pub selected: u8,
+    /// The entity the player was riding when they left (vanilla keeps it as `RootVehicle`). The
+    /// vehicle stays in its chunk; a rejoin seats the player on it again if it still exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<Uuid>,
     /// Older saves: `(window-0 menu slot, item id, count)` for non-empty slots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inventory: Vec<(u8, i32, i32)>,
@@ -113,6 +117,7 @@ impl Saved {
             seen_credits,
             dimension: dimension.key().to_owned(),
             world: None,
+            vehicle: None,
             items,
             selected: inventory.selected_slot() as u8,
             inventory: Vec::new(),
@@ -123,6 +128,13 @@ impl Saved {
     #[must_use]
     pub fn in_world(mut self, world: Option<Uuid>) -> Self {
         self.world = world;
+        self
+    }
+
+    /// Records the vehicle the player is riding, so a rejoin seats them on it again.
+    #[must_use]
+    pub fn riding(mut self, vehicle: Option<Uuid>) -> Self {
+        self.vehicle = vehicle;
         self
     }
 
@@ -244,10 +256,12 @@ mod tests {
             true,
             &inventory,
         )
-        .in_world(Some(Uuid::from_u128(99)));
+        .in_world(Some(Uuid::from_u128(99)))
+        .riding(Some(Uuid::from_u128(0x7e1d)));
         save_to(&dir, &uuid, &saved).unwrap();
         let loaded = load_from(&dir, &uuid).unwrap();
         assert_eq!(loaded, saved);
+        assert_eq!(loaded.vehicle, Some(Uuid::from_u128(0x7e1d)));
         assert!(loaded.seen_credits);
         assert_eq!(loaded.inventory(), inventory);
         assert_eq!(loaded.inventory().get(ferrite_inventory::OFFHAND), &sword);
