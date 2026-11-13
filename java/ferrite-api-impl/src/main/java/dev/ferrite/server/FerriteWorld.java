@@ -176,6 +176,19 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         };
     }
 
+    private final java.util.Set<java.util.UUID> created = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** The one entity type whose API class is {@code api}; a class several types share (Monster, Mob, ...) cannot be spawned. */
+    static org.bukkit.entity.EntityType entityTypeOf(Class<?> api) {
+        java.util.Objects.requireNonNull(api, "class");
+        org.bukkit.entity.EntityType found = null;
+        for (var type : org.bukkit.entity.EntityType.values()) {
+            if (type == org.bukkit.entity.EntityType.UNKNOWN || type == org.bukkit.entity.EntityType.PLAYER || type.getEntityClass() != api) continue;
+            if (found != null) throw new IllegalArgumentException("Ferrite: " + api.getName() + " is the class of both " + found + " and " + type);
+            found = type;
+        }
+        if (found == null) throw new IllegalArgumentException("Ferrite: cannot spawn " + api.getName() + ": no entity type has exactly that class");
+        return found;
+    }
     private static final Object NONE = new Object();
     private final java.util.Map<String, java.util.Map<org.bukkit.plugin.Plugin, org.bukkit.metadata.MetadataValue>> metadata = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> spawnLimits = new java.util.concurrent.ConcurrentHashMap<>();
@@ -647,6 +660,37 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 var handle = DroppedItem.of(at, stack, proxy, uuid);
                 if (args.length > 2 && args[2] instanceof java.util.function.Consumer<?> consumer) { @SuppressWarnings("unchecked") var typed = (java.util.function.Consumer<org.bukkit.entity.Item>) consumer; typed.accept(handle); }
                 HostBridge.callVoid("World", id, method + "(Location,ItemStack,String)", at, stack, uuid.toString());
+                yield handle;
+            }
+            case "createEntity" -> {
+                // An entity of the class that is not in the world yet; addEntity puts it there.
+                var at = ((org.bukkit.Location) args[0]).clone();
+                var type = entityTypeOf((Class<?>) args[1]);
+                var uuid = java.util.UUID.randomUUID();
+                created.add(uuid);
+                yield SpawnedEntity.of(type, at, proxy, uuid);
+            }
+            case "addEntity" -> {
+                var entity = (org.bukkit.entity.Entity) java.util.Objects.requireNonNull(args[0], "entity");
+                if (!created.remove(entity.getUniqueId()))
+                    throw new IllegalArgumentException("Ferrite: World#addEntity only accepts an entity from World#createEntity that is not in a world yet: " + entity);
+                var at = entity.getLocation();
+                var type = entity.getType();
+                HostBridge.callVoid("World", id, "spawnEntity(Location,EntityType,String)", at, type, entity.getUniqueId().toString());
+                yield entity;
+            }
+            case "spawn" -> {
+                // (Location, Class, ...): any of the RegionAccessor overloads. The entity is spawned first and the
+                // consumer sees the live entity, where Bukkit calls it just before adding; the spawn reason and
+                // randomizeData have no host effect (no creature spawn event is fired for plugin spawns).
+                var at = ((org.bukkit.Location) args[0]).clone();
+                var type = entityTypeOf((Class<?>) args[1]);
+                java.util.function.Consumer<?> consumer = null;
+                for (int i = 2; i < args.length; i++) if (args[i] instanceof java.util.function.Consumer<?> c) consumer = c;
+                var uuid = java.util.UUID.randomUUID();
+                var handle = SpawnedEntity.of(type, at, proxy, uuid);
+                HostBridge.callVoid("World", id, "spawnEntity(Location,EntityType,String)", at, type, uuid.toString());
+                if (consumer != null) { @SuppressWarnings("unchecked") var typed = (java.util.function.Consumer<org.bukkit.entity.Entity>) consumer; typed.accept(handle); }
                 yield handle;
             }
             case "spawnEntity" -> {

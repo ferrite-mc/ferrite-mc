@@ -270,4 +270,29 @@ class FerriteWorldHostTest {
         assertThrows(IllegalArgumentException.class, () -> border.setCenter(0, -3.0E7));
         assertTrue(calls.isEmpty(), "rejected values never reach the host");
     }
+
+    @Test void spawnMapsTheClassToItsEntityTypeAndRunsTheConsumerOnTheHandle() {
+        replies.put("spawnEntity(Location,EntityType,String)", "");
+        var seen = new ArrayList<org.bukkit.entity.Entity>();
+        var spawned = world.spawn(new Location(world, 1, 64, 2), org.bukkit.entity.Zombie.class, seen::add);
+        assertEquals(org.bukkit.entity.EntityType.ZOMBIE, spawned.getType());
+        assertEquals(List.of(spawned), seen);
+        assertTrue(calls.stream().anyMatch(c -> c.startsWith("spawnEntity(Location,EntityType,String)")), calls.toString());
+        // Classes that more than one entity type shares cannot be spawned.
+        assertThrows(IllegalArgumentException.class, () -> world.spawn(new Location(world, 0, 64, 0), org.bukkit.entity.Monster.class));
+        assertThrows(IllegalArgumentException.class, () -> world.spawn(new Location(world, 0, 64, 0), org.bukkit.entity.Player.class));
+    }
+
+    @Test void createEntityKeepsTheEntityOutOfTheWorldUntilAddEntity() {
+        replies.put("spawnEntity(Location,EntityType,String)", "");
+        var created = world.createEntity(new Location(world, 3, 64, 3), org.bukkit.entity.Cow.class);
+        assertEquals(org.bukkit.entity.EntityType.COW, created.getType());
+        assertTrue(calls.stream().noneMatch(c -> c.startsWith("spawnEntity")), "not spawned yet: " + calls);
+        assertSame(created, world.addEntity(created));
+        assertTrue(calls.stream().anyMatch(c -> c.startsWith("spawnEntity(Location,EntityType,String)")), calls.toString());
+        // The same handle cannot be added twice, and a foreign entity is refused.
+        assertThrows(IllegalArgumentException.class, () -> world.addEntity(created));
+        var other = world.spawn(new Location(world, 0, 64, 0), org.bukkit.entity.Cow.class);
+        assertThrows(IllegalArgumentException.class, () -> world.addEntity(other));
+    }
 }
