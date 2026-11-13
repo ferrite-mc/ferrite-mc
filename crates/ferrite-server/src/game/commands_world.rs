@@ -1020,7 +1020,6 @@ pub struct ClonedBlock {
 #[derive(Debug, Clone)]
 pub struct CloneRead {
     pub min: [i32; 3],
-    pub max: [i32; 3],
     pub copied: Vec<ClonedBlock>,
 }
 
@@ -1066,7 +1065,7 @@ pub fn clone_read(
             }
         }
     }
-    Ok(CloneRead { min, max, copied })
+    Ok(CloneRead { min, copied })
 }
 
 fn note_change(at: [i32; 3], state: u32, changes: &mut Vec<Change>) {

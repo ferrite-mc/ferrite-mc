@@ -153,6 +153,8 @@ pub struct FunctionStore {
         BTreeMap<String, Result<std::sync::Arc<super::item_modifier::ItemModifier>, String>>,
     /// `data/<ns>/predicate/**/*.json`, raw JSON, later packs overriding earlier ones.
     predicates: BTreeMap<String, serde_json::Value>,
+    /// `data/<ns>/test_instance/**/*.json`, raw JSON, for `/test`.
+    test_instances: BTreeMap<String, serde_json::Value>,
 }
 
 impl FunctionStore {
@@ -241,6 +243,14 @@ impl FunctionStore {
                 }
                 self.item_modifiers.insert(id, loaded);
             }
+            for (relative, path) in files_in(&namespace.join("test_instance"), "json") {
+                if let Ok(text) = std::fs::read_to_string(&path)
+                    && let Ok(value) = serde_json::from_str(&text)
+                {
+                    self.test_instances
+                        .insert(format!("{name}:{relative}"), value);
+                }
+            }
             for (relative, path) in files_in(&namespace.join("predicate"), "json") {
                 match std::fs::read_to_string(&path)
                     .map_err(|error| error.to_string())
@@ -298,6 +308,11 @@ impl FunctionStore {
         id: &str,
     ) -> Option<&Result<std::sync::Arc<super::item_modifier::ItemModifier>, String>> {
         self.item_modifiers.get(id)
+    }
+
+    /// The datapack test instances, by id.
+    pub fn test_instances(&self) -> &BTreeMap<String, serde_json::Value> {
+        &self.test_instances
     }
 
     /// The datapack predicate `id` (`ns:path`), if a loaded pack defines it.
