@@ -1646,6 +1646,15 @@ pub fn restore(saved: Option<&super::playerdata::Saved>) -> PlayerInventory {
     saved.map_or_else(PlayerInventory::new, super::playerdata::Saved::inventory)
 }
 
+/// Whether a stack carries a potion (`PotionContents.potion` is set), as `PotionSlot.onTake`
+/// requires before it triggers `brewed_potion`.
+fn holds_potion(stack: &ItemStack) -> bool {
+    matches!(
+        stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS),
+        Some(ferrite_item::Component::PotionContents(contents)) if contents.potion.is_some()
+    )
+}
+
 #[cfg(test)]
 mod click_name_tests {
     use super::*;
@@ -1662,13 +1671,4 @@ mod click_name_tests {
         assert_eq!(click_names(ClickInput::Swap, 3).0, "NUMBER_KEY");
         assert_eq!(click_names(ClickInput::Throw, 1).0, "CONTROL_DROP");
     }
-}
-
-/// Whether a stack carries a potion (`PotionContents.potion` is set), as `PotionSlot.onTake`
-/// requires before it triggers `brewed_potion`.
-fn holds_potion(stack: &ItemStack) -> bool {
-    matches!(
-        stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS),
-        Some(ferrite_item::Component::PotionContents(contents)) if contents.potion.is_some()
-    )
 }
