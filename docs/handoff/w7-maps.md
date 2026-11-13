@@ -109,5 +109,18 @@ passes alone in 102 s), Java `FerriteMapIdTest` 3 and `FerriteMerchantMapTest` 4
   and a Windows run lost the connection in `runtime_world_gap7_create_edit_enter_leave_unload_reopen`,
   which passed in the next full run and, in the AI PR, was traced, for the AI PR, to an unrelated change of mine rather
   than to maps.
-* Performance: not measured for maps. `send_held_maps` clones two stacks and looks up the store
-  each tick; no benchmark was run, so no speed-up is claimed.
+* Performance (follow-up branch `w7-ai-matrix`): `Player::send_held_maps` runs for both held
+  stacks of every player on every tick. It cloned each stack and read the id through
+  `ItemStack::effective_component`, which for an item without an explicit `map_id` decodes that
+  item's whole default-component table from NBT. `map_id` now reads the stack's own patch by
+  reference (no item has a default `map_id`; pinned by `no_item_has_a_default_map_id`).
+  Measured with `cargo test --release -p ferrite-item map_id_read_cost -- --ignored --nocapture`
+  (three runs, same host, 200 000 calls each):
+
+  | stack | before | after |
+  |---|---|---|
+  | plain item (e.g. diamond sword) | 10.1-10.3 us | 0.7 ns |
+  | filled map | 72-77 ns | 2.3-2.8 ns |
+
+  This is a micro-benchmark of the id read only, not an end-to-end tick measurement; the 800-bot
+  A/B belongs to lane 4.
