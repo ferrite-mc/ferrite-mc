@@ -142,6 +142,9 @@ pub enum WorldCommand {
         /// Mobs and other entities of the template, spawned by the world loop (`mod.rs`) in the
         /// chunk each one stands in; positions are relative to `pos`.
         spawns: std::sync::Arc<Vec<super::structure_template::TemplateEntity>>,
+        /// `strict` (`StructurePlaceSettings.knownShape`): leave the placed blocks as stored. A
+        /// non-strict placement fixes up the template's edges (see [`fix_template_edges`]).
+        strict: bool,
     },
 }
 
@@ -734,13 +737,16 @@ pub fn execute(
             name,
             blocks,
             entities,
+            strict,
             ..
         } => {
             let [ox, oy, oz] = resolve(pos, origin);
             let mut changes = Vec::new();
+            let mut placed = std::collections::HashSet::new();
             for ([x, y, z], state) in blocks.iter() {
                 let (x, y, z) = (ox + x, oy + y, oz + z);
                 if world.block(x, y, z).is_some() && world.set_block(x, y, z, u32::from(*state)) {
+                    placed.insert([x, y, z]);
                     changes.push(Change {
                         location: BlockPos::new(x, y, z).pack(),
                         state: u32::from(*state),
@@ -749,6 +755,9 @@ pub fn execute(
             }
             if changes.is_empty() {
                 return Err("Chunk not loaded".into());
+            }
+            if !strict {
+                fix_template_edges(world, &placed, &mut changes);
             }
             for ([x, y, z], data) in entities.iter() {
                 world.set_block_entity([ox + x, oy + y, oz + z], data);
@@ -765,6 +774,81 @@ pub fn execute(
                 },
             })
         }
+    }
+}
+
+/// Support rules of a block world for [`neighbors::can_survive`](super::neighbors::can_survive).
+struct Support<'a, W: WorldBlocks + ?Sized>(&'a W);
+
+impl<W: WorldBlocks + ?Sized> super::neighbors::BlockWorld for Support<'_, W> {
+    fn block(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+        self.0
+            .block(x, y, z)
+            .and_then(|state| u16::try_from(state).ok())
+    }
+}
+
+/// The non-strict part of `StructureTemplate.placeInWorld`, once every block is written:
+///
+/// 1. `updateShapeAtEdge`: for every face between a placed block and a position the template did
+///    not place (`DiscreteVoxelShape.forAllFaces`), both blocks get `updateShape` for that face;
+/// 2. for every placed block, `Block.updateFromNeighbourShapes` (all six neighbours).
+///
+/// Ferrite's only shape rule is support: `updateShape` of a block whose `canSurvive` fails gives
+/// air (torches, buttons, rails, pressure plates, redstone wire ... in
+/// [`neighbors::can_survive`](super::neighbors::can_survive)). That is what is reproduced here.
+/// The rules that only change a block's *state* (fence, wall, pane, stairs and redstone-wire
+/// connections, door halves, chest halves) do not exist in this server yet, so those blocks keep
+/// the state the template stored. The `updateNeighborsAt` block updates (redstone) are not sent.
+fn fix_template_edges<W: WorldBlocks + ?Sized>(
+    world: &W,
+    placed: &std::collections::HashSet<[i32; 3]>,
+    changes: &mut Vec<Change>,
+) {
+    use ferrite_math::Direction;
+    const ORDER: [Direction; 6] = [
+        Direction::West,
+        Direction::East,
+        Direction::Down,
+        Direction::Up,
+        Direction::North,
+        Direction::South,
+    ];
+    let Some(air) = ferrite_data::blocks::default_state("air") else {
+        return;
+    };
+    let mut remove_if_unsupported = |at: [i32; 3], changes: &mut Vec<Change>| {
+        let Some(state) = world
+            .block(at[0], at[1], at[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return;
+        };
+        if !super::neighbors::can_survive(state, at, &Support(world))
+            && world.set_block(at[0], at[1], at[2], u32::from(air))
+        {
+            changes.push(Change {
+                location: BlockPos::new(at[0], at[1], at[2]).pack(),
+                state: u32::from(air),
+            });
+        }
+    };
+    // The placed positions in a stable order, so a run is reproducible.
+    let mut order: Vec<[i32; 3]> = placed.iter().copied().collect();
+    order.sort_unstable();
+    for at in &order {
+        for direction in ORDER {
+            let (dx, dy, dz) = direction.step();
+            let outside = [at[0] + dx, at[1] + dy, at[2] + dz];
+            if placed.contains(&outside) {
+                continue;
+            }
+            remove_if_unsupported(*at, changes);
+            remove_if_unsupported(outside, changes);
+        }
+    }
+    for at in &order {
+        remove_if_unsupported(*at, changes);
     }
 }
 
@@ -1868,6 +1952,7 @@ mod tests {
                     nbt: unknown,
                 },
             ]),
+            strict: false,
         };
         let spawned = template_spawns(&command, &origin());
         assert_eq!(spawned.len(), 1, "the unknown type is dropped");
@@ -1890,6 +1975,154 @@ mod tests {
         );
     }
 
+    fn template_of(blocks: Vec<([i32; 3], u16)>, strict: bool) -> WorldCommand {
+        WorldCommand::Template {
+            pos: pos(10.0, 64.0, 10.0),
+            name: "t".into(),
+            blocks: std::sync::Arc::new(blocks),
+            entities: std::sync::Arc::default(),
+            spawns: std::sync::Arc::default(),
+            strict,
+        }
+    }
+
+    fn state(name: &str) -> u16 {
+        ferrite_data::blocks::default_state(name).expect(name)
+    }
+
+    #[test]
+    fn a_non_strict_template_drops_a_placed_block_that_cannot_survive() {
+        // `StructureTemplate.placeInWorld` -> `updateShapeAtEdge` / `updateFromNeighbourShapes`:
+        // a torch placed on nothing is replaced by air. A strict placement leaves it.
+        let torch = state("minecraft:torch");
+        let stone = state("minecraft:stone");
+        let loose = vec![([0, 0, 0], torch)];
+        let world = TestWorld::new();
+        let outcome = execute(&template_of(loose.clone(), false), &origin(), &world).unwrap();
+        assert_eq!(world.get(10, 64, 10), 0, "the unsupported torch is air");
+        assert_eq!(outcome.changes.len(), 2, "the placement and its removal");
+        let strict = TestWorld::new();
+        execute(&template_of(loose, true), &origin(), &strict).unwrap();
+        assert_eq!(strict.get(10, 64, 10), u32::from(torch));
+        // On a stone from the same template the torch stays, whatever the order of the blocks.
+        for blocks in [
+            vec![([0, 0, 0], stone), ([0, 1, 0], torch)],
+            vec![([0, 1, 0], torch), ([0, 0, 0], stone)],
+        ] {
+            let world = TestWorld::new();
+            execute(&template_of(blocks, false), &origin(), &world).unwrap();
+            assert_eq!(world.get(10, 65, 10), u32::from(torch));
+        }
+    }
+
+    #[test]
+    fn a_non_strict_template_also_updates_the_world_blocks_at_its_edge() {
+        // A torch of the world stands on stone; the template replaces that stone with a slab that
+        // gives no support from above... here: with air. The neighbour outside the template
+        // loses its support, and only the edge face between them can tell.
+        let torch = state("minecraft:torch");
+        let stone = state("minecraft:stone");
+        for (strict, survives) in [(false, false), (true, true)] {
+            let world = TestWorld::new();
+            world.put(10, 64, 10, stone);
+            world.put(10, 65, 10, torch);
+            execute(
+                &template_of(vec![([0, 0, 0], 0)], strict),
+                &origin(),
+                &world,
+            )
+            .unwrap();
+            assert_eq!(
+                world.get(10, 65, 10) == u32::from(torch),
+                survives,
+                "{strict}"
+            );
+        }
+        // Not touching the template: a torch two blocks above is left alone.
+        let world = TestWorld::new();
+        world.put(10, 66, 10, torch);
+        execute(
+            &template_of(vec![([0, 0, 0], state("minecraft:stone"))], false),
+            &origin(),
+            &world,
+        )
+        .unwrap();
+        assert_eq!(world.get(10, 66, 10), u32::from(torch));
+    }
+
+    #[test]
+    fn extracted_templates_keep_their_blocks_under_the_non_strict_fix_up() {
+        // Vanilla's templates are built so that the fix-up removes (almost) nothing; a block this
+        // server removes is a support rule that is stricter than vanilla's `updateShape`.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vanilla/26.3/generated/data/minecraft/structure");
+        let mut files = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "nbt") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        let mut removed_by: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut total = 0;
+        // Every eighth template keeps the run short; all 1511 pass (checked by hand).
+        for path in files.iter().step_by(8) {
+            let relative = path.strip_prefix(&root).unwrap().with_extension("");
+            let id = format!(
+                "minecraft:{}",
+                relative.to_string_lossy().replace('\\', "/")
+            );
+            let Some(template) = super::super::structure_template::Template::load(&id) else {
+                continue;
+            };
+            let (blocks, _) = template.place_with_entities(
+                super::super::structure_template::Rotation::None,
+                super::super::structure_template::Mirror::None,
+                1.0,
+                1,
+            );
+            let world = TestWorld::new();
+            let Ok(outcome) = execute(&template_of(blocks.clone(), false), &origin(), &world)
+            else {
+                continue;
+            };
+            total += 1;
+            for change in &outcome.changes[blocks.len()..] {
+                let at = BlockPos::unpack(change.location);
+                let old = blocks
+                    .iter()
+                    .find(|([x, y, z], _)| (10 + x, 64 + y, 10 + z) == (at.x, at.y, at.z))
+                    .map(|(_, state)| {
+                        ferrite_data::blocks::state(*state).map_or("?", |(name, _)| name)
+                    });
+                *removed_by
+                    .entry(format!("{:?} in {id}", old.unwrap_or("?")))
+                    .or_default() += 1;
+            }
+        }
+        // What is left is a block whose support lies outside its own template (a hanging lantern,
+        // a door or flower at the edge, a wall torch): vanilla's `updateShape` removes those in
+        // an empty world too, and jigsaw pieces avoid it with `knownShape`.
+        let unexpected: Vec<_> = removed_by
+            .keys()
+            .filter(|key| {
+                !["lantern\"", "door\"", "poppy\"", "wall_torch\""]
+                    .iter()
+                    .any(|name| key.split(" in ").next().unwrap_or("").ends_with(name))
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "{unexpected:?} over {total} templates"
+        );
+    }
+
     #[test]
     fn templates_place_their_block_entities_beside_the_blocks() {
         let chest = ferrite_data::blocks::default_state("minecraft:chest").unwrap();
@@ -1906,6 +2139,7 @@ mod tests {
                 blocks: std::sync::Arc::new(vec![([1, 0, 2], chest)]),
                 entities: std::sync::Arc::new(vec![([1, 0, 2], data)]),
                 spawns: std::sync::Arc::default(),
+                strict: false,
             },
             &origin(),
             &world,
