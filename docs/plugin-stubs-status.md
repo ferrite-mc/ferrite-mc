@@ -13,6 +13,25 @@
 단위 테스트(Rust, JUnit)도 있다.
 CMI가 동작한다고 말할 수 없다.
 
+## 2026-11-13 — plugins-z (호스트 데이터, 블록 엔티티, 호환 증명)
+
+실제 클라이언트로 확인한 것은 없다. 아래는 코드와 테스트, 서버 jar(`javap`)로 확인했다.
+
+- **`Player#sendBlockUpdate` 배너/머리:** `BannerBlockEntity.saveAdditional`은 `patterns`(`{pattern, color}` 목록)를,
+  `SkullBlockEntity`는 `profile`(`ResolvableProfile$Partial`: `name`=`PLAYER_NAME`, `id`=`UUIDUtil.CODEC` int 배열)을 저장한다.
+  `tile_update.rs`가 패턴 id(`data/minecraft/banner_pattern`)와 염료 이름 16개를 검증해 `BlockEntityData`로 보낸다.
+  프로필 속성(텍스처)과 노트블록 소리는 `UnsupportedOperationException`으로 거부한다(속성 인코딩은 jar 코덱으로 확인하지 못했다).
+- **`ChunkData#getBiome`:** 가짜 PLAINS를 없애고 거부한다. `ChunkSnapshot#contains(Biome)`/`getBiome`은 호스트 바이옴 소스를 읽고,
+  실제 JVM 호스트 테스트가 확인한다.
+- **월드젠 질의:** `vanilla_host.rs::plugin_world_queries_are_answered_by_the_real_jar`가 실제 26.3 jar로 바이옴 위치, 구조물 위치,
+  구조물 시작, `hasStructureAt`를 확인한다(`FERRITE_TEST_ACCEPT_EULA=true`, `tools/build_worldgen_host.py` 필요).
+- **스텁 카탈로그:** `docs/plugin-api-stubs.md`의 새 분류 절을 따른다(Player 12, World 14가 정말 열려 있음).
+- **호환 증명:** `/typical patterns`가 PDC, 인벤토리 GUI, 스코어보드, 타이틀, 액션바, 사운드, 설정, 권한, 체력을 실제 JVM 호스트와
+  봇 클라이언트로 돌리고, 던진 호출이 하나라도 있으면 테스트가 실패한다. 이번 실행에서는 모두 통과했다. 여전히 던지는 호출:
+  `Chunk#getChunkSnapshot(boolean,boolean,boolean)` ("not implemented"; `World#getEmptyChunkSnapshot`은 동작).
+- **테스트 도구:** `plugin_command_world`도 `plugin_lifecycle`처럼 Windows에서 `gradlew.bat`을 cmd로 실행한다(Windows에서 실행해 보지는 않았다).
+- **NMS는 그대로:** `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`는 `NoSuchMethodError`.
+
 ## 2026-11-09 — fb-plugin (InventoryDragEvent + Server 경계 정리)
 
 - **`InventoryDragEvent` 발화.** `container.rs`가 `ClickInput::QuickCraft`를 건너뛰지 않는다.

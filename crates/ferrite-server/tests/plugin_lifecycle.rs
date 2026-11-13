@@ -970,6 +970,33 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         &stdout,
         &stderr,
     );
+    // Realistic plugin patterns (PDC, inventory GUI, scoreboard, title, action bar, sound, config,
+    // permission, health) through the real JVM host. Every call logs `ok` or the exception it
+    // threw; the ones below are required to work, anything else is listed in docs/plugin-stubs-status.md.
+    bot.raw(7, "typical patterns");
+    for expected in [
+        "pattern pdc ok visits 1",
+        "pattern gui ok open size 9 slot4 DIAMOND",
+        "pattern scoreboard ok score 7",
+        "pattern title ok sent",
+        "pattern actionbar ok sent",
+        "pattern sound ok played",
+        "pattern health ok ok",
+    ] {
+        wait_for_line(&events, expected, &stdout, &stderr);
+    }
+    wait_for_prefix(&events, "pattern config ok value ", &stdout, &stderr);
+    wait_for_prefix(&events, "pattern permission ok has ", &stdout, &stderr);
+    // No pattern may have thrown; a throw names the call in the failure message.
+    let log = fs::read_to_string(&events).unwrap();
+    let threw: Vec<&str> = log
+        .lines()
+        .filter(|l| l.starts_with("pattern ") && l.contains(" threw "))
+        .collect();
+    assert!(
+        threw.is_empty(),
+        "typical plugin calls that throw: {threw:?}"
+    );
     // Health, food and experience writes reach the region player and are sent to the client.
     bot.raw(7, "typical state");
     wait_for_line(&events, "state 7.5 11 12 0.25 123", &stdout, &stderr);
