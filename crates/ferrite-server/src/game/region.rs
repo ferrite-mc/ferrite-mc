@@ -954,6 +954,11 @@ impl ferrite_entity::falling::FallingWorld for FallingAdapter<'_> {
 }
 
 impl BlockGetter for TickBlocks<'_> {
+    fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        self.source?;
+        Some(SpawnEnv::light(self, x, y, z))
+    }
+
     fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
         let source = self.source?;
         *self
