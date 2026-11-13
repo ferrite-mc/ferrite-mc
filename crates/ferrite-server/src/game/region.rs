@@ -13351,6 +13351,7 @@ mod tests {
                 dimension,
                 tags: Default::default(),
                 custom_name: None,
+                health: None,
             });
     }
 

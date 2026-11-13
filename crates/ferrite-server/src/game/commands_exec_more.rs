@@ -700,6 +700,7 @@ mod tests {
                 dimension: crate::game::Dimension::Overworld,
                 tags: ["boss".to_owned()].into_iter().collect(),
                 custom_name: None,
+                health: None,
             });
         tree.execute(
             "execute as @e[tag=boss] at @s run data merge storage t {seen:1}",

@@ -51,6 +51,8 @@ pub struct EntityFacts {
     pub pos: [f64; 3],
     /// Dimension id (`minecraft:overworld`).
     pub dimension: String,
+    /// A mob's current health (the NBT `Health` a `minecraft:nbt` predicate can match).
+    pub health: Option<f32>,
 }
 
 /// What a provider can look at: the block it is evaluated for, if any, and the entity of the
@@ -102,6 +104,17 @@ fn entity_matches(facts: &EntityFacts, predicate: &Value) -> bool {
                 _ => false,
             }
         }
+        // `NbtPredicate`: the SNBT (a string, or a compound) must be contained in the entity's
+        // data. Only the fields the command view has are there: `id`, `Pos` and `Health` (mobs).
+        "minecraft:nbt" => {
+            let expected = match wanted {
+                Value::String(text) => ferrite_nbt::snbt::parse(text).ok(),
+                _ => None,
+            };
+            expected.is_some_and(|expected| {
+                super::selectors::nbt_matches(&expected, &entity_nbt(facts))
+            })
+        }
         "minecraft:location" => wanted.as_object().is_some_and(|location| {
             location.iter().all(|(field, value)| match field.as_str() {
                 "dimension" => value.as_str().map(namespaced).as_deref() == Some(&facts.dimension),
@@ -118,6 +131,18 @@ fn entity_matches(facts: &EntityFacts, predicate: &Value) -> bool {
         }),
         _ => false,
     })
+}
+
+/// The NBT a `minecraft:nbt` entity predicate is matched against.
+fn entity_nbt(facts: &EntityFacts) -> ferrite_nbt::Tag {
+    use ferrite_nbt::{Compound, List, Tag};
+    let mut nbt = Compound::new();
+    nbt.insert("id".into(), Tag::String(facts.kind.clone()));
+    nbt.insert("Pos".into(), Tag::List(List::Double(facts.pos.to_vec())));
+    if let Some(health) = facts.health {
+        nbt.insert("Health".into(), Tag::Float(health));
+    }
+    Tag::Compound(nbt)
 }
 
 fn blocks_match(blocks: &Value, name: &str) -> bool {
@@ -240,6 +265,7 @@ fn facts_of(entity: &super::selectors::SelectedEntity) -> EntityFacts {
             .to_owned(),
         pos: entity.pos,
         dimension: entity.dimension.key().to_owned(),
+        health: entity.health,
     }
 }
 
@@ -680,6 +706,7 @@ mod tests {
             kind: "minecraft:pig".to_owned(),
             pos,
             dimension: "minecraft:overworld".to_owned(),
+            health: Some(10.0),
         }
     }
 
@@ -709,11 +736,39 @@ mod tests {
             with_target(by_height, Some(pig([0.0, 10.0, 0.0]))),
             Some(2.0)
         );
-        // A predicate entry this server has no data for (health, equipment, ...) never matches.
+        // A predicate entry this server has no data for (equipment, flags, ...) never matches.
         let by_health = r#"{"type":"minecraft:conditional","condition":{
             "type":"minecraft:entity_properties","entity":"target_entity",
             "predicate":{"minecraft:health":{"min":1}}},"on_true":1,"on_false":0}"#;
         assert_eq!(with_target(by_health, Some(pig([0.0; 3]))), Some(0.0));
+        // `minecraft:nbt` sees the mob's real `Health` (vanilla `NbtPredicate`, a partial match).
+        let by_nbt = |nbt: &str| {
+            format!(
+                r#"{{"type":"minecraft:conditional","condition":{{
+            "type":"minecraft:entity_properties","entity":"target_entity",
+            "predicate":{{"minecraft:nbt":"{nbt}"}}}},"on_true":1,"on_false":0}}"#
+            )
+        };
+        assert_eq!(
+            with_target(&by_nbt("{Health:10f}"), Some(pig([0.0; 3]))),
+            Some(1.0)
+        );
+        assert_eq!(
+            with_target(&by_nbt("{Health:20f}"), Some(pig([0.0; 3]))),
+            Some(0.0)
+        );
+        let unhurt = EntityFacts {
+            health: None,
+            ..pig([0.0; 3])
+        };
+        assert_eq!(
+            with_target(&by_nbt("{Health:10f}"), Some(unhurt)),
+            Some(0.0)
+        );
+        assert_eq!(
+            with_target(&by_nbt("{oops"), Some(pig([0.0; 3]))),
+            Some(0.0)
+        );
         // `this` only exists in the `default` source, not in the `entity` one.
         let this = by_type.replace("target_entity", "this");
         assert_eq!(with_target(&this, Some(pig([0.0; 3]))), Some(1.0));
@@ -730,6 +785,7 @@ mod tests {
             pos: [1.0, 2.0, 3.0],
             yaw: 0.0,
             pitch: 0.0,
+            health: None,
         };
         assert_eq!(facts_of(&selected(None)).kind, "minecraft:player");
         assert_eq!(facts_of(&selected(None)).dimension, "minecraft:the_nether");

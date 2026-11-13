@@ -727,6 +727,7 @@ mod tests {
                     dimension: super::super::Dimension::Overworld,
                     tags: Default::default(),
                     custom_name: None,
+                    health: None,
                 });
             }
         }
@@ -880,6 +881,7 @@ mod tests {
                 dimension: super::super::Dimension::Overworld,
                 tags: Default::default(),
                 custom_name: None,
+                health: None,
             });
         let steps = plan(&state);
         assert_eq!(

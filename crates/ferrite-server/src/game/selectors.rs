@@ -26,6 +26,8 @@ pub struct SelectedEntity {
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// A mob's current health; `None` for players and entities that have none.
+    pub health: Option<f32>,
 }
 
 /// A player or region entity plus the state selector options filter on.
@@ -77,6 +79,9 @@ impl Candidate {
                 text.push('"');
             }
             text.push(']');
+        }
+        if let Some(health) = self.selected.health {
+            text.push_str(&format!(",Health:{health:?}f"));
         }
         if self.selected.player {
             text.push_str(&format!(
@@ -208,6 +213,7 @@ fn candidates(state: &GameState) -> Vec<Candidate> {
                 pos: player.pos,
                 yaw: player.yaw,
                 pitch: player.pitch,
+                health: None,
             },
             kind: None,
             gamemode: Some(player.game_mode),
@@ -231,6 +237,7 @@ fn candidates(state: &GameState) -> Vec<Candidate> {
                 pos: entity.pos,
                 yaw: entity.yaw,
                 pitch: entity.pitch,
+                health: entity.health,
             },
             kind: Some(entity.kind),
             gamemode: None,
@@ -592,6 +599,7 @@ mod tests {
             dimension: crate::game::Dimension::Overworld,
             tags: BTreeSet::from(["boss".to_owned()]),
             custom_name: Some("Boss".into()),
+            health: None,
         });
         (state, alice, zombie)
     }
@@ -686,6 +694,28 @@ mod tests {
         .unwrap();
         assert_eq!(selected.len(), 1);
         assert!(!selected[0].player);
+
+        // A mob's real `Health` is part of the NBT a selector can match.
+        {
+            let mut entity = state
+                .entities
+                .lock()
+                .unwrap()
+                .entries()
+                .next()
+                .unwrap()
+                .clone();
+            entity.health = Some(7.5);
+            state.entities.lock().unwrap().insert(entity);
+        }
+        let hurt =
+            resolve_selection(&state, &target("@e[nbt={Health:7.5f}]"), None, [0.0; 3]).unwrap();
+        assert_eq!(hurt.len(), 1);
+        assert_eq!(hurt[0].health, Some(7.5));
+        // No entity has that health: the selector finds nothing.
+        assert!(
+            resolve_selection(&state, &target("@e[nbt={Health:20f}]"), None, [0.0; 3]).is_err()
+        );
 
         // Scores and teams apply to players.
         state.players[0].team = Some("red".into());

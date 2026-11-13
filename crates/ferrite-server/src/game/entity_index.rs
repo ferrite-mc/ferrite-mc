@@ -25,6 +25,8 @@ pub struct CommandEntity {
     pub tags: BTreeSet<String>,
     /// Custom name from NBT/metadata, when the entity has one.
     pub custom_name: Option<String>,
+    /// Current health of a mob; players' health lives in their region, not in this view.
+    pub health: Option<f32>,
 }
 
 impl CommandEntity {
@@ -107,6 +109,7 @@ impl EntityIndex {
                 dimension,
                 tags: data.tags.clone(),
                 custom_name: None,
+                health: data.mob.as_ref().map(|mob| mob.health),
             };
             owned.insert(entity.uuid);
             self.insert(entity);
@@ -156,5 +159,30 @@ mod tests {
         store.flags_mut(key).unwrap().set(Flags::REMOVED, true);
         index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
         assert!(index.get(uuid).is_none());
+    }
+
+    #[test]
+    fn sync_publishes_a_mobs_current_health() {
+        use ferrite_entity::mob::{MobKind, new_mob};
+        let mut store = EntityStore::default();
+        let pig = store.insert(new_mob(
+            MobKind::Pig,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(3),
+        ));
+        let plain = store.insert(record(5.5, 64.0, 5.5));
+        ferrite_entity::mob::state_mut(&mut store, pig)
+            .unwrap()
+            .health = 4.0;
+        let mut index = EntityIndex::default();
+        index.sync(
+            &mut HashSet::new(),
+            &store,
+            crate::game::Dimension::Overworld,
+        );
+        let uuid = store.data(pig).unwrap().uuid;
+        assert_eq!(index.get(uuid).unwrap().health, Some(4.0));
+        let other = store.data(plain).unwrap().uuid;
+        assert_eq!(index.get(other).unwrap().health, None);
     }
 }
