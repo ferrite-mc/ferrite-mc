@@ -61,6 +61,23 @@ impl NumberProvider {
         }
     }
 
+    /// Draws a float: constants as written, `uniform` as `min + nextFloat * (max - min)`
+    /// (vanilla `UniformGenerator.getFloat`), `binomial` as its integer draw.
+    pub fn get_float(&self, rng: &mut impl Rng) -> f32 {
+        match self {
+            Self::Constant(value) => *value as f32,
+            Self::Uniform { min, max } => {
+                let (min, max) = (*min as f32, *max as f32);
+                if max <= min {
+                    min
+                } else {
+                    min + rng.next_float() * (max - min)
+                }
+            }
+            Self::Binomial { .. } => self.get_int(rng) as f32,
+        }
+    }
+
     /// Draws an integer from this provider.
     pub fn get_int(&self, rng: &mut impl Rng) -> i32 {
         match self {

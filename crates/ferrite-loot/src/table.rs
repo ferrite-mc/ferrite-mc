@@ -1,9 +1,10 @@
 //! Loot table loading, reference resolution and the public registry.
 
 use crate::condition::{self, Condition};
+use crate::data::GameData;
 use crate::entry::{Entry, EntryKind, LootPool};
 use crate::files::{json_files, read_json, relative_stem};
-use crate::function::{self, Function};
+use crate::function::{self, Function, FunctionKind};
 use crate::number::NumberProvider;
 use crate::tags::ItemTags;
 use crate::{Definitions, Error, LootContext, LootStack, Result, Rng, normalize_id};
@@ -126,6 +127,11 @@ impl LootTables {
             namespace: namespace.clone(),
             predicates: load_predicates(&base.join("predicate"), &namespace)?,
             tags: ItemTags::load(&base.join("tags/item"), &namespace)?,
+            data: std::sync::Arc::new(GameData::load(
+                &base,
+                &namespace,
+                ItemTags::load(&base.join("tags/item"), &namespace)?,
+            )?),
         };
 
         let mut raw = BTreeMap::new();
@@ -176,6 +182,16 @@ impl LootTables {
     /// Every loaded table id, sorted.
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.tables.keys().map(String::as_str)
+    }
+
+    /// Every function, condition and entry type the shipped data uses that this crate does not
+    /// evaluate (`function:minecraft:...`), sorted. Empty means every loaded table rolls fully.
+    pub fn unsupported(&self) -> Vec<String> {
+        let mut found = std::collections::BTreeSet::new();
+        for table in self.tables.values() {
+            walk_table(table, &mut found);
+        }
+        found.into_iter().collect()
     }
 
     /// Number of resolved item tags.
@@ -450,5 +466,66 @@ impl Loader<'_> {
             }
         }
         functions
+    }
+}
+
+fn walk_table(table: &LootTable, found: &mut std::collections::BTreeSet<String>) {
+    walk_functions(&table.functions, found);
+    for pool in &table.pools {
+        walk_conditions(&pool.conditions, found);
+        walk_functions(&pool.functions, found);
+        for entry in &pool.entries {
+            walk_entry(entry, found);
+        }
+    }
+}
+
+fn walk_entry(entry: &Entry, found: &mut std::collections::BTreeSet<String>) {
+    walk_conditions(&entry.conditions, found);
+    walk_functions(&entry.functions, found);
+    match &entry.kind {
+        EntryKind::Opaque { kind } => {
+            found.insert(format!("entry:{kind}"));
+        }
+        EntryKind::Alternatives(children)
+        | EntryKind::Sequence(children)
+        | EntryKind::Group(children) => {
+            for child in children {
+                walk_entry(child, found);
+            }
+        }
+        EntryKind::Table(table) => walk_table(table, found),
+        _ => {}
+    }
+}
+
+fn walk_functions(functions: &[Function], found: &mut std::collections::BTreeSet<String>) {
+    for function in functions {
+        walk_conditions(&function.conditions, found);
+        match &function.kind {
+            FunctionKind::Opaque { kind, .. } => {
+                found.insert(format!("function:{kind}"));
+            }
+            FunctionKind::Filtered {
+                on_pass, on_fail, ..
+            } => {
+                walk_functions(on_pass, found);
+                walk_functions(on_fail, found);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn walk_conditions(conditions: &[Condition], found: &mut std::collections::BTreeSet<String>) {
+    for condition in conditions {
+        match condition {
+            Condition::Opaque { kind } => {
+                found.insert(format!("condition:{kind}"));
+            }
+            Condition::Inverted(inner) => walk_conditions(std::slice::from_ref(inner), found),
+            Condition::AnyOf(inner) | Condition::AllOf(inner) => walk_conditions(inner, found),
+            _ => {}
+        }
     }
 }

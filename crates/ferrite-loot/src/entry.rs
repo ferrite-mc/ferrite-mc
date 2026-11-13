@@ -41,9 +41,10 @@ impl LootPool {
             .rolls
             .get_int(rng)
             .max(0)
-            .saturating_add(self.bonus_rolls.get_int(rng).max(0));
-        for _ in 0..rolls {
-            let Some(entry) = select(&self.entries, rng) else {
+            // Vanilla: rolls + floor(bonus_rolls * luck).
+            .saturating_add((self.bonus_rolls.get_float(rng) * context.luck).floor() as i32);
+        for _ in 0..rolls.max(0) {
+            let Some(entry) = select(&self.entries, context.luck, rng) else {
                 break;
             };
             if !entry.passes(context, rng) {
@@ -164,11 +165,18 @@ impl Entry {
     }
 }
 
+/// An entry's selection weight: `max(floor(weight + quality * luck), 0)` (vanilla
+/// `LootPoolSingletonContainer.getWeight`).
+fn effective_weight(entry: &Entry, luck: f32) -> i64 {
+    let weight = (entry.weight as f32 + entry.quality as f32 * luck).floor();
+    (weight as i64).max(0)
+}
+
 /// Picks one entry by weight. A non-positive total selects nothing.
-fn select<'a>(entries: &'a [Entry], rng: &mut impl Rng) -> Option<&'a Entry> {
+fn select<'a>(entries: &'a [Entry], luck: f32, rng: &mut impl Rng) -> Option<&'a Entry> {
     let total: i64 = entries
         .iter()
-        .map(|entry| i64::from(entry.weight.max(0)))
+        .map(|entry| effective_weight(entry, luck))
         .sum();
     if total <= 0 {
         return None;
@@ -177,7 +185,7 @@ fn select<'a>(entries: &'a [Entry], rng: &mut impl Rng) -> Option<&'a Entry> {
     let bound = i32::try_from(total).unwrap_or(i32::MAX);
     let mut roll = i64::from(rng.next_int(bound));
     for entry in entries {
-        roll -= i64::from(entry.weight.max(0));
+        roll -= effective_weight(entry, luck);
         if roll < 0 {
             return Some(entry);
         }
