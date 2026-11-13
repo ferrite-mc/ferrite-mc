@@ -142,7 +142,9 @@ fn roll_block(
 }
 
 /// What breaking `state` with `tool` drops (vanilla `Block.getDrops`, only when the player
-/// `hasCorrectToolForDrops`), as plain id and count stacks.
+/// `hasCorrectToolForDrops`), as plain id and count stacks. The game itself uses
+/// [`block_drop_stacks`], which keeps components; this is the plain form the tests compare.
+#[cfg(test)]
 pub fn block_drops(
     state: u16,
     tool: &ferrite_item::ItemStack,
