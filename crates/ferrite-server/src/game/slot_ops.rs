@@ -52,7 +52,7 @@ pub fn player_slots(names: &str) -> Result<Vec<i16>, String> {
             "armor.legs" => slots.push(37),
             "armor.chest" => slots.push(38),
             "armor.head" => slots.push(39),
-            "weapon.mainhand" => slots.push(-1),
+            "weapon.mainhand" | "weapon" => slots.push(-1),
             "weapon.offhand" => slots.push(40),
             _ => match one("container.", 36, 0)
                 .or_else(|| one("hotbar.", 9, 0))
@@ -611,6 +611,8 @@ mod tests {
         assert!(block_slots("hotbar.0", 27).is_err());
         assert_eq!(player_slots("weapon.mainhand").unwrap(), vec![-1]);
         assert_eq!(player_slots("weapon.*").unwrap(), vec![-1, 40]);
+        // `weapon` is a SlotRanges name of its own (the main hand).
+        assert_eq!(player_slots("weapon").unwrap(), vec![-1]);
         assert_eq!(player_slots("inventory.0,hotbar.8").unwrap(), vec![9, 8]);
         assert!(player_slots("hotbar.9").is_err());
     }

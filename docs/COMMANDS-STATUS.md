@@ -314,11 +314,19 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
     `set_writable_book_pages`, `set_written_book_pages`, `toggle_tooltips`. Number providers
     other than constant and uniform (`binomial`, `score`, `storage`) and conditions other than
     those above are not supported either.
-  - BLOCKED (lane/blocked-x, not started): the vanilla `slots` and `sourceSlots` arguments are a slot-source language
-    (`SlotSourceArgument`: filters, limits, composites); Ferrite parses only plain names
-    (`container.N`, `hotbar.*`, `weapon.mainhand`, ...). Non-player entities have no inventory
-    here, so only players are written. Success/failure message texts were not re-read from the
-    jar.
+  - Slot arguments (read from the 26.3 jar, `SlotSourceArgument` / `SlotRanges`): a source is a
+    `SlotRanges` name or a `SlotSource` registry id / inline definition (types in
+    `world/item/slot`: `group`, `limit_slots`, `filtered`, `contents`, `slot_range`, `empty`,
+    transformed). Ferrite parses the plain player/container names (`container.N|*`,
+    `hotbar.*`, `inventory.*`, `armor.*`, `weapon`, `weapon.*`) only. BLOCKED: composite
+    slot sources (no shipped data pack defines any, so none can be tested against vanilla data),
+    `enderchest.`, `horse.`, `mob.inventory.`, `player.cursor`, `player.crafting.N`,
+    `armor.body`, `saddle`. Non-player entities have no inventory here, so only players are
+    written. Not verified with a real client.
+  - Item-modifier functions not implemented (no verified component format here): `set_contents`,
+    `modify_contents`, `copy_custom_data` (NBT paths), `set_custom_model_data`, `set_fireworks`,
+    `set_writable_book_pages`, `set_written_book_pages`, `set_random_dyes`, `fill_player_head`.
+    All other vanilla functions run through `ferrite-loot`.
 - `/ride <target> mount <vehicle>|dismount`: rides live in a server-side table (`ride.rs`); the
   client gets `set_passengers` (id 109) for everyone online, and every tick the rider is teleported
   to the vehicle's seat. Sneaking dismounts. Players cannot be ridden. Untested against a real

@@ -2737,7 +2737,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             data.join("broken.json"),
-            r#"{"function":"minecraft:enchant_randomly"}"#,
+            r#"{"function":"minecraft:set_contents"}"#,
         )
         .unwrap();
         let mut game = GameState::default();
@@ -2789,17 +2789,14 @@ mod tests {
                 "item modify entity @s hotbar.0 test:missing",
                 "test:missing",
             ),
-            (
-                "item modify entity @s hotbar.0 test:broken",
-                "enchant_randomly",
-            ),
+            ("item modify entity @s hotbar.0 test:broken", "set_contents"),
             (
                 "item modify entity @s hotbar.0 {\"function\":\"nope\"}",
                 "nope",
             ),
             (
                 "item replace entity @s hotbar.1 from entity @s hotbar.0 test:broken",
-                "enchant_randomly",
+                "set_contents",
             ),
         ] {
             let (result, actions) = run(line, 2);

@@ -135,6 +135,7 @@ pub struct Party {
 /// `FallLocation`: where the victim was falling when the damage was recorded
 /// (`FallLocation.getCurrentFallLocation`: the block of its last climbable position, or water).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // built by callers that know the victim's climbable block
 pub enum FallLocation {
     Generic,
     Ladder,
@@ -146,6 +147,7 @@ pub enum FallLocation {
     Water,
 }
 
+#[allow(dead_code)]
 impl FallLocation {
     /// `FallLocation.id`, the end of `death.fell.accident.<id>`.
     pub fn id(self) -> &'static str {
@@ -224,6 +226,7 @@ impl Source {
     }
 
     /// The same source with the victim's recorded fall data.
+    #[allow(dead_code)]
     pub fn with_fall(mut self, fall: FallInfo) -> Self {
         self.fall = fall;
         self
