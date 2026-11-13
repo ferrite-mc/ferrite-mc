@@ -63,6 +63,7 @@ pub use dimension::{
 mod commands_data;
 #[cfg(test)]
 pub(crate) use commands_data::{BlockData, apply_block};
+mod block_tags;
 mod commands_exec;
 mod commands_extras;
 mod commands_item;

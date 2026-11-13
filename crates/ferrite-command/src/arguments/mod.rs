@@ -125,6 +125,10 @@ pub enum ArgumentType {
     Vec3,
     Vec2,
     BlockState,
+    /// `minecraft:block_predicate`: a block state, or `#tag`, with optional `[properties]` and
+    /// `{nbt}`. Unspecified properties are wildcards. Parsed into [`ArgumentValue::BlockState`]
+    /// whose `id` starts with `#` for a tag.
+    BlockPredicate,
     Component,
     Message,
     ResourceLocation,
@@ -467,6 +471,7 @@ impl ArgumentType {
             Self::Vec3 => "minecraft:vec3",
             Self::Vec2 => "minecraft:vec2",
             Self::BlockState => "minecraft:block_state",
+            Self::BlockPredicate => "minecraft:block_predicate",
             Self::Component => "minecraft:component",
             Self::Message => "minecraft:message",
             Self::ResourceLocation => "minecraft:resource_location",
@@ -557,6 +562,7 @@ impl ArgumentType {
                 )
             }
             Self::BlockState => ArgumentValue::BlockState(parse_block_state(reader)?),
+            Self::BlockPredicate => ArgumentValue::BlockState(parse_block_predicate(reader)?),
             Self::Component => ArgumentValue::Component(scan::read_token(reader)?),
             Self::Message => ArgumentValue::Message(reader.read_rest().to_owned()),
             Self::ResourceLocation | Self::Dimension => {
@@ -635,6 +641,13 @@ impl ArgumentType {
             Self::Rotation => &["0 0", "~ ~", "~-5 ~5"],
             Self::EntityAnchor => &["feet", "eyes"],
             Self::BlockState => &["stone", "minecraft:stone", "stone[foo=bar]", "foo{bar=baz}"],
+            Self::BlockPredicate => &[
+                "stone",
+                "minecraft:stone",
+                "stone[foo=bar]",
+                "#stone",
+                "#minecraft:stone[foo=bar]{baz=nbt}",
+            ],
             Self::Component => &["\"hello world\"", "\"\"", "{text:\"hello world\"}"],
             Self::Message => &["Hello world!", "foo", "@e", "Hello @p :)"],
             Self::ResourceLocation => &["foo", "foo:bar", "012"],
@@ -804,6 +817,7 @@ impl ArgumentType {
             "minecraft:vec3" => Self::Vec3,
             "minecraft:vec2" => Self::Vec2,
             "minecraft:block_state" => Self::BlockState,
+            "minecraft:block_predicate" => Self::BlockPredicate,
             "minecraft:component" => Self::Component,
             "minecraft:message" => Self::Message,
             "minecraft:resource_location" => Self::ResourceLocation,
@@ -847,6 +861,16 @@ fn parse_time(reader: &mut StringReader, min: i32) -> Result<i32, CommandSyntaxE
         return Err(minecraft::time_too_low(reader, ticks, min));
     }
     Ok(ticks)
+}
+
+fn parse_block_predicate(reader: &mut StringReader) -> Result<BlockStateValue, CommandSyntaxError> {
+    if reader.peek_is('#') {
+        reader.skip();
+        let mut value = parse_block_state(reader)?;
+        value.id.insert(0, '#');
+        return Ok(value);
+    }
+    parse_block_state(reader)
 }
 
 fn parse_block_state(reader: &mut StringReader) -> Result<BlockStateValue, CommandSyntaxError> {
@@ -1036,6 +1060,24 @@ mod tests {
                 nbt: Some("{a:1}".into()),
             })
         );
+    }
+
+    #[test]
+    fn block_predicate_accepts_tags_and_wildcard_properties() {
+        let v = parse(&ArgumentType::BlockPredicate, "#logs[axis=y]{a:1} x").unwrap();
+        assert_eq!(
+            v,
+            ArgumentValue::BlockState(BlockStateValue {
+                id: "#minecraft:logs".into(),
+                properties: vec![("axis".into(), "y".into())],
+                nbt: Some("{a:1}".into()),
+            })
+        );
+        assert_eq!(
+            ArgumentType::BlockPredicate.parser_id(),
+            "minecraft:block_predicate"
+        );
+        assert!(parse(&ArgumentType::BlockPredicate, "oak_log").is_ok());
     }
 
     #[test]

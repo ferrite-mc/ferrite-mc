@@ -42,10 +42,37 @@ pub enum FillMode {
     Outline,
 }
 
+/// Which blocks of the source `/clone` copies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloneMode {
     Replace,
     Masked,
+    /// `filtered <filter>`: only blocks the [`CloneOptions::filter`] matches.
+    Filtered,
+}
+
+/// `force|move|normal` of `/clone`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CloneMove {
+    /// Overlapping source and destination areas fail.
+    #[default]
+    Normal,
+    /// Overlap is allowed.
+    Force,
+    /// The copied source blocks become air afterwards.
+    Move,
+}
+
+/// The parts of `/clone` beyond the mask: filter, move mode, `strict` and dimensions.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CloneOptions {
+    pub filter: Option<BlockFilter>,
+    pub mover: CloneMove,
+    /// Accepted; no extracted data says what it changes (see COMMANDS-STATUS.md).
+    pub strict: bool,
+    /// `from <sourceDimension>` / `to <targetDimension>` when given.
+    pub source_dimension: Option<String>,
+    pub target_dimension: Option<String>,
 }
 
 /// A parsed block-state argument. Unspecified properties are wildcards, like vanilla's block
@@ -54,17 +81,26 @@ pub enum CloneMode {
 pub struct BlockFilter {
     id: String,
     props: Vec<(String, String)>,
+    /// The members of a `#tag` filter, resolved when the command is parsed.
+    tag: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 }
 
 impl BlockFilter {
-    fn matches(&self, state: u32) -> bool {
+    /// Whether `state` passes: the block (or a member of the tag) matches and every listed
+    /// property has that value; unlisted properties are wildcards.
+    pub fn matches(&self, state: u32) -> bool {
         let Ok(state) = u16::try_from(state) else {
             return false;
         };
         let Some((name, props)) = ferrite_data::blocks::state(state) else {
             return false;
         };
-        normalized(name) == self.id
+        let block = normalized(name);
+        let block_matches = match &self.tag {
+            Some(members) => members.contains(&block),
+            None => block == self.id,
+        };
+        block_matches
             && self
                 .props
                 .iter()
@@ -94,6 +130,7 @@ pub enum WorldCommand {
         end: Coordinates,
         destination: Coordinates,
         mode: CloneMode,
+        options: CloneOptions,
     },
     /// `/place template`: blocks relative to `pos`, already rotated, mirrored and thinned.
     Template {
@@ -140,6 +177,10 @@ pub trait WorldBlocks {
     fn place_block_entity(&self, _pos: [i32; 3], _state: u32, _nbt: Option<&Tag>) -> bool {
         false
     }
+    /// The block entity at a position, as saved by vanilla (`/clone` copies it).
+    fn block_entity_at(&self, _pos: [i32; 3]) -> Option<ferrite_nbt::Compound> {
+        None
+    }
     /// Stores a block entity as saved by vanilla (its `id` names the type); false when the
     /// world cannot hold it.
     fn set_block_entity(&self, _pos: [i32; 3], _data: &ferrite_nbt::Compound) -> bool {
@@ -159,6 +200,10 @@ impl WorldBlocks for super::anvil::AnvilChunkSource {
     }
     fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool {
         super::anvil::AnvilChunkSource::set_block(self, x, y, z, state).is_ok()
+    }
+    fn block_entity_at(&self, pos: [i32; 3]) -> Option<ferrite_nbt::Compound> {
+        self.block_entity(pos[0], pos[1], pos[2])
+            .map(|entity| entity.data)
     }
     fn set_block_entity(&self, pos: [i32; 3], data: &ferrite_nbt::Compound) -> bool {
         let Some(Tag::String(id)) = data.get("id") else {
@@ -313,7 +358,10 @@ fn setblock_tree() -> ferrite_command::NodeBuilder<Source> {
                     .executes(setblock_execute(SetMode::Replace))
                     .then(literal("replace").executes(setblock_execute(SetMode::Replace)))
                     .then(literal("destroy").executes(setblock_execute(SetMode::Destroy)))
-                    .then(literal("keep").executes(setblock_execute(SetMode::Keep))),
+                    .then(literal("keep").executes(setblock_execute(SetMode::Keep)))
+                    // `strict` is in the 26.3 tree; what it changes is not in the extracted
+                    // data, so it behaves like `replace` (see COMMANDS-STATUS.md).
+                    .then(literal("strict").executes(setblock_execute(SetMode::Replace))),
             ),
         )
 }
@@ -338,6 +386,28 @@ fn setblock_execute(
 }
 
 fn fill_tree() -> ferrite_command::NodeBuilder<Source> {
+    // commands.json: `<block> [destroy|hollow|keep|outline|strict|replace [<filter> [destroy|
+    // hollow|outline|strict]]]`. `strict` is accepted and behaves like `replace`.
+    let filtered = |name: &'static str, mode: FillMode| {
+        literal::<Source>(name).executes(fill_execute(mode, true))
+    };
+    fill_root(
+        literal::<Source>("replace")
+            .executes(fill_execute(FillMode::Replace, false))
+            .then(
+                argument("filter", ArgumentType::BlockPredicate)
+                    .executes(fill_execute(FillMode::Replace, true))
+                    .then(filtered("destroy", FillMode::Destroy))
+                    .then(filtered("hollow", FillMode::Hollow))
+                    .then(filtered("outline", FillMode::Outline))
+                    .then(filtered("strict", FillMode::Replace)),
+            ),
+    )
+}
+
+fn fill_root(
+    replace: ferrite_command::NodeBuilder<Source>,
+) -> ferrite_command::NodeBuilder<Source> {
     literal::<Source>("fill")
         .requires(|s| s.permission >= 2)
         .then(
@@ -345,21 +415,15 @@ fn fill_tree() -> ferrite_command::NodeBuilder<Source> {
                 argument("to", ArgumentType::BlockPos).then(
                     argument("block", ArgumentType::BlockState)
                         .executes(fill_execute(FillMode::Replace, false))
-                        .then(fill_mode("replace", FillMode::Replace))
-                        .then(fill_mode("destroy", FillMode::Destroy))
-                        .then(fill_mode("keep", FillMode::Keep))
-                        .then(fill_mode("hollow", FillMode::Hollow))
-                        .then(fill_mode("outline", FillMode::Outline)),
+                        .then(replace)
+                        .then(literal("destroy").executes(fill_execute(FillMode::Destroy, false)))
+                        .then(literal("keep").executes(fill_execute(FillMode::Keep, false)))
+                        .then(literal("hollow").executes(fill_execute(FillMode::Hollow, false)))
+                        .then(literal("outline").executes(fill_execute(FillMode::Outline, false)))
+                        .then(literal("strict").executes(fill_execute(FillMode::Replace, false))),
                 ),
             ),
         )
-}
-
-/// One `<mode> [filter]` branch of `/fill`.
-fn fill_mode(name: &'static str, mode: FillMode) -> ferrite_command::NodeBuilder<Source> {
-    literal::<Source>(name)
-        .executes(fill_execute(mode, false))
-        .then(argument("filter", ArgumentType::BlockState).executes(fill_execute(mode, true)))
 }
 
 fn fill_execute(
@@ -388,28 +452,108 @@ fn fill_execute(
     }
 }
 
+/// `[force|move|normal]` leaves below a mask node.
+fn clone_movers(
+    node: ferrite_command::NodeBuilder<Source>,
+    mode: CloneMode,
+    strict: bool,
+    with_dimensions: bool,
+) -> ferrite_command::NodeBuilder<Source> {
+    let run = move |mover: CloneMove| clone_execute(mode, mover, strict, with_dimensions);
+    node.executes(run(CloneMove::Normal))
+        .then(literal("force").executes(run(CloneMove::Force)))
+        .then(literal("move").executes(run(CloneMove::Move)))
+        .then(literal("normal").executes(run(CloneMove::Normal)))
+}
+
+/// `filtered|masked|replace` below a destination (with `strict` as an optional prefix).
+fn clone_masks(strict: bool, with_dimensions: bool) -> Vec<ferrite_command::NodeBuilder<Source>> {
+    vec![
+        literal::<Source>("filtered").then(clone_movers(
+            argument("filter", ArgumentType::BlockPredicate),
+            CloneMode::Filtered,
+            strict,
+            with_dimensions,
+        )),
+        clone_movers(
+            literal("masked"),
+            CloneMode::Masked,
+            strict,
+            with_dimensions,
+        ),
+        clone_movers(
+            literal("replace"),
+            CloneMode::Replace,
+            strict,
+            with_dimensions,
+        ),
+    ]
+}
+
+fn clone_destination(with_dimensions: bool) -> ferrite_command::NodeBuilder<Source> {
+    let mut destination =
+        argument::<Source>("destination", ArgumentType::BlockPos).executes(clone_execute(
+            CloneMode::Replace,
+            CloneMove::Normal,
+            false,
+            with_dimensions,
+        ));
+    for mask in clone_masks(false, with_dimensions) {
+        destination = destination.then(mask);
+    }
+    let mut strict = literal::<Source>("strict").executes(clone_execute(
+        CloneMode::Replace,
+        CloneMove::Normal,
+        true,
+        with_dimensions,
+    ));
+    for mask in clone_masks(true, with_dimensions) {
+        strict = strict.then(mask);
+    }
+    destination.then(strict)
+}
+
 fn clone_tree() -> ferrite_command::NodeBuilder<Source> {
+    // commands.json: `clone <begin> <end> <destination> [...]`, `... to <targetDimension>
+    // <destination> [...]` and `clone from <sourceDimension> <begin> <end> ...`.
+    let area = |with_dimensions: bool| {
+        argument::<Source>("begin", ArgumentType::BlockPos).then(
+            argument::<Source>("end", ArgumentType::BlockPos)
+                .then(clone_destination(with_dimensions))
+                .then(
+                    literal::<Source>("to").then(
+                        argument::<Source>("targetDimension", ArgumentType::Dimension)
+                            .then(clone_destination(true)),
+                    ),
+                ),
+        )
+    };
     literal::<Source>("clone")
         .requires(|s| s.permission >= 2)
+        .then(area(false))
         .then(
-            argument("begin", ArgumentType::BlockPos).then(
-                argument("end", ArgumentType::BlockPos).then(
-                    argument("destination", ArgumentType::BlockPos)
-                        .executes(clone_execute(CloneMode::Replace))
-                        .then(literal("replace").executes(clone_execute(CloneMode::Replace)))
-                        .then(literal("masked").executes(clone_execute(CloneMode::Masked))),
-                ),
+            literal::<Source>("from").then(
+                argument::<Source>("sourceDimension", ArgumentType::Dimension).then(area(true)),
             ),
         )
 }
 
 fn clone_execute(
     mode: CloneMode,
+    mover: CloneMove,
+    strict: bool,
+    _with_dimensions: bool,
 ) -> impl Fn(&CommandContext<Source>) -> Result<i32, CommandError> + Send + Sync + 'static {
     move |ctx| {
         let begin = position(ctx, "begin")?;
         let end = position(ctx, "end")?;
         let destination = position(ctx, "destination")?;
+        let filter = if mode == CloneMode::Filtered {
+            Some(filter_argument(ctx)?)
+        } else {
+            None
+        };
+        let dimension = |name: &str| ctx.string(name).map(str::to_owned);
         dispatch(
             ctx.source(),
             WorldCommand::Clone {
@@ -417,6 +561,13 @@ fn clone_execute(
                 end,
                 destination,
                 mode,
+                options: CloneOptions {
+                    filter,
+                    mover,
+                    strict,
+                    source_dimension: dimension("sourceDimension"),
+                    target_dimension: dimension("targetDimension"),
+                },
             },
         )
     }
@@ -477,11 +628,23 @@ pub fn resolve_block(value: &BlockStateValue) -> Result<u16, CommandError> {
 }
 
 pub fn resolve_filter(value: &BlockStateValue) -> Result<BlockFilter, CommandError> {
+    if let Some(tag) = value.id.strip_prefix('#') {
+        // `arguments.block.tag.unknown`
+        let members = super::block_tags::members(tag).ok_or_else(|| {
+            CommandError::failed(format!("Unknown block tag '{}'", normalized(tag)))
+        })?;
+        return Ok(BlockFilter {
+            id: value.id.clone(),
+            props: value.properties.clone(),
+            tag: Some(members),
+        });
+    }
     let id = normalized(&value.id);
     validate_block(&id, &value.properties)?;
     Ok(BlockFilter {
         id,
         props: value.properties.clone(),
+        tag: None,
     })
 }
 
@@ -554,11 +717,13 @@ pub fn execute(
             end,
             destination,
             mode,
+            options,
         } => clone(
             resolve(begin, origin),
             resolve(end, origin),
             resolve(destination, origin),
             *mode,
+            options,
             world,
         ),
         WorldCommand::Template {
@@ -816,8 +981,22 @@ fn clone(
     end: [i32; 3],
     destination: [i32; 3],
     mode: CloneMode,
+    options: &CloneOptions,
     world: &dyn WorldBlocks,
 ) -> Result<Outcome, String> {
+    // The command runs against one world (the executor's); cloning to or from another
+    // dimension needs a second world on the same region thread, which is not available here.
+    let here = world.dimension().key();
+    for named in [&options.source_dimension, &options.target_dimension]
+        .into_iter()
+        .flatten()
+    {
+        if named != here {
+            return Err(format!(
+                "Cloning between dimensions is not supported by this server ({named} is not the command's dimension {here})"
+            ));
+        }
+    }
     let (min, max) = bounds(begin, end);
     let volume = volume(min, max);
     if volume > MAX_BLOCKS {
@@ -825,53 +1004,94 @@ fn clone(
             "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {volume})"
         ));
     }
-    // Snapshot first: source and destination may overlap.
-    let mut source = Vec::with_capacity(volume as usize);
+    let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    let mut destination_max = [0; 3];
+    for axis in 0..3 {
+        destination_max[axis] = destination[axis]
+            .checked_add(size[axis])
+            .ok_or_else(|| "Invalid position".to_string())?;
+    }
+    // `commands.clone.overlap`: overlapping areas fail unless `force` or the clone is a no-op.
+    let overlap =
+        (0..3).all(|axis| min[axis] <= destination_max[axis] && destination[axis] <= max[axis]);
+    if overlap && options.mover != CloneMove::Force {
+        return Err("The source and destination areas cannot overlap".into());
+    }
+    // Snapshot first: source and destination may overlap (`force`).
+    struct Source {
+        at: [i32; 3],
+        state: u32,
+        entity: Option<ferrite_nbt::Compound>,
+    }
+    let mut copied = Vec::new();
     for x in min[0]..=max[0] {
         for y in min[1]..=max[1] {
             for z in min[2]..=max[2] {
-                source.push(
-                    world
-                        .block(x, y, z)
-                        .ok_or_else(|| "Chunk not loaded".to_string())?,
-                );
+                let state = world
+                    .block(x, y, z)
+                    .ok_or_else(|| "Chunk not loaded".to_string())?;
+                let take = match mode {
+                    CloneMode::Replace => true,
+                    CloneMode::Masked => !is_air(state),
+                    CloneMode::Filtered => options
+                        .filter
+                        .as_ref()
+                        .is_some_and(|filter| filter.matches(state)),
+                };
+                if take {
+                    copied.push(Source {
+                        at: [x, y, z],
+                        state,
+                        entity: world.block_entity_at([x, y, z]),
+                    });
+                }
             }
         }
     }
     let mut changes = Vec::new();
-    let mut count = 0u128;
-    let mut index = 0usize;
-    for x in min[0]..=max[0] {
-        for y in min[1]..=max[1] {
-            for z in min[2]..=max[2] {
-                let state = source[index];
-                index += 1;
-                if mode == CloneMode::Masked && is_air(state) {
-                    continue;
+    let mut touched = std::collections::BTreeMap::new();
+    let mut note = |at: [i32; 3], state: u32, changes: &mut Vec<Change>| {
+        let location = BlockPos::new(at[0], at[1], at[2]).pack();
+        changes.retain(|change: &Change| change.location != location);
+        changes.push(Change { location, state });
+    };
+    if options.mover == CloneMove::Move {
+        // The copied source blocks become air before the destination is written.
+        for block in &copied {
+            let old = world.block(block.at[0], block.at[1], block.at[2]);
+            if old != Some(u32::from(air())) {
+                if !world.set_block(block.at[0], block.at[1], block.at[2], u32::from(air())) {
+                    return Err("Chunk not loaded".into());
                 }
-                let tx = destination[0]
-                    .checked_add(x - min[0])
-                    .ok_or_else(|| "Invalid position".to_string())?;
-                let ty = destination[1]
-                    .checked_add(y - min[1])
-                    .ok_or_else(|| "Invalid position".to_string())?;
-                let tz = destination[2]
-                    .checked_add(z - min[2])
-                    .ok_or_else(|| "Invalid position".to_string())?;
-                let old = world
-                    .block(tx, ty, tz)
-                    .ok_or_else(|| "Chunk not loaded".to_string())?;
-                count += 1;
-                if old != state {
-                    if !world.set_block(tx, ty, tz, state) {
-                        return Err("Chunk not loaded".into());
-                    }
-                    changes.push(Change {
-                        location: BlockPos::new(tx, ty, tz).pack(),
-                        state,
-                    });
-                }
+                note(block.at, u32::from(air()), &mut changes);
             }
+        }
+    }
+    let mut count = 0u128;
+    for block in &copied {
+        let target = [
+            destination[0] + block.at[0] - min[0],
+            destination[1] + block.at[1] - min[1],
+            destination[2] + block.at[2] - min[2],
+        ];
+        let old = world
+            .block(target[0], target[1], target[2])
+            .ok_or_else(|| "Chunk not loaded".to_string())?;
+        count += 1;
+        if old != block.state || block.entity.is_some() {
+            if !world.set_block(target[0], target[1], target[2], block.state) {
+                return Err("Chunk not loaded".into());
+            }
+            note(target, block.state, &mut changes);
+        }
+        touched.insert(target, block.entity.clone());
+    }
+    for (target, entity) in touched {
+        if let Some(mut data) = entity {
+            data.insert("x".into(), Tag::Int(target[0]));
+            data.insert("y".into(), Tag::Int(target[1]));
+            data.insert("z".into(), Tag::Int(target[2]));
+            world.set_block_entity(target, &data);
         }
     }
     if count == 0 {
@@ -945,6 +1165,14 @@ mod tests {
         fn set_block(&self, x: i32, y: i32, z: i32, state: u32) -> bool {
             self.blocks.borrow_mut().insert((x, y, z), state);
             true
+        }
+        fn block_entity_at(&self, pos: [i32; 3]) -> Option<ferrite_nbt::Compound> {
+            self.entities
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(at, _)| *at == pos)
+                .map(|(_, data)| data.clone())
         }
         fn set_block_entity(&self, pos: [i32; 3], data: &ferrite_nbt::Compound) -> bool {
             self.entities.borrow_mut().push((pos, data.clone()));
@@ -1227,6 +1455,7 @@ mod tests {
                 end: pos(1.0, 64.0, 0.0),
                 destination: pos(0.0, 64.0, 3.0),
                 mode: CloneMode::Replace,
+                options: CloneOptions::default(),
             },
             &origin(),
             &world,
@@ -1242,6 +1471,7 @@ mod tests {
                 end: pos(1.0, 64.0, 0.0),
                 destination: pos(0.0, 64.0, 5.0),
                 mode: CloneMode::Masked,
+                options: CloneOptions::default(),
             },
             &origin(),
             &world,
@@ -1256,6 +1486,7 @@ mod tests {
                 end: pos(10.0, 64.0, 0.0),
                 destination: pos(12.0, 64.0, 0.0),
                 mode: CloneMode::Masked,
+                options: CloneOptions::default(),
             },
             &origin(),
             &world,
@@ -1268,12 +1499,227 @@ mod tests {
                 end: pos(200.0, 64.0, 200.0),
                 destination: pos(0.0, 64.0, 0.0),
                 mode: CloneMode::Replace,
+                options: CloneOptions::default(),
             },
             &origin(),
             &world,
         )
         .unwrap_err();
         assert!(too_many.contains("Too many blocks"), "{too_many}");
+    }
+
+    fn clone_with(
+        world: &TestWorld,
+        begin: (f64, f64, f64),
+        end: (f64, f64, f64),
+        destination: (f64, f64, f64),
+        mode: CloneMode,
+        options: CloneOptions,
+    ) -> Result<Outcome, String> {
+        execute(
+            &WorldCommand::Clone {
+                begin: pos(begin.0, begin.1, begin.2),
+                end: pos(end.0, end.1, end.2),
+                destination: pos(destination.0, destination.1, destination.2),
+                mode,
+                options,
+            },
+            &origin(),
+            world,
+        )
+    }
+
+    #[test]
+    fn clone_overlap_force_move_and_filter() {
+        let world = TestWorld::new();
+        let log = block("minecraft:oak_log");
+        world.put(0, 64, 0, stone());
+        world.put(1, 64, 0, log);
+        // Normal clone of overlapping areas fails like vanilla's `commands.clone.overlap`.
+        let error = clone_with(
+            &world,
+            (0.0, 64.0, 0.0),
+            (1.0, 64.0, 0.0),
+            (1.0, 64.0, 0.0),
+            CloneMode::Replace,
+            CloneOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "The source and destination areas cannot overlap");
+        assert_eq!(world.get(2, 64, 0), 0, "nothing was written");
+        // `force` allows it and reads the source before writing.
+        clone_with(
+            &world,
+            (0.0, 64.0, 0.0),
+            (1.0, 64.0, 0.0),
+            (1.0, 64.0, 0.0),
+            CloneMode::Replace,
+            CloneOptions {
+                mover: CloneMove::Force,
+                ..CloneOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(world.get(1, 64, 0), u32::from(stone()));
+        assert_eq!(world.get(2, 64, 0), u32::from(log));
+        // `filtered #logs` copies only the log.
+        let tag = resolve_filter(&BlockStateValue {
+            id: "#minecraft:logs".into(),
+            properties: vec![],
+            nbt: None,
+        })
+        .unwrap();
+        let outcome = clone_with(
+            &world,
+            (0.0, 64.0, 0.0),
+            (2.0, 64.0, 0.0),
+            (0.0, 64.0, 5.0),
+            CloneMode::Filtered,
+            CloneOptions {
+                filter: Some(tag),
+                ..CloneOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.message, "Successfully cloned 1 block(s)");
+        assert_eq!(world.get(2, 64, 5), u32::from(log));
+        assert_eq!(world.get(0, 64, 5), 0);
+        // `move` clears the copied source blocks.
+        clone_with(
+            &world,
+            (1.0, 64.0, 0.0),
+            (2.0, 64.0, 0.0),
+            (1.0, 64.0, 8.0),
+            CloneMode::Replace,
+            CloneOptions {
+                mover: CloneMove::Move,
+                ..CloneOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(world.get(1, 64, 8), u32::from(stone()));
+        assert_eq!(world.get(1, 64, 0), 0);
+        assert_eq!(world.get(2, 64, 0), 0);
+    }
+
+    #[test]
+    fn clone_copies_block_entities_and_rejects_other_dimensions() {
+        let world = TestWorld::new();
+        world.put(0, 64, 0, block("minecraft:chest"));
+        let mut data = ferrite_nbt::Compound::new();
+        data.insert("id".into(), Tag::String("minecraft:chest".into()));
+        data.insert("CustomName".into(), Tag::String("loot".into()));
+        world.set_block_entity([0, 64, 0], &data);
+        clone_with(
+            &world,
+            (0.0, 64.0, 0.0),
+            (0.0, 64.0, 0.0),
+            (4.0, 64.0, 0.0),
+            CloneMode::Replace,
+            CloneOptions::default(),
+        )
+        .unwrap();
+        let copied = world
+            .block_entity_at([4, 64, 0])
+            .expect("block entity copied");
+        assert_eq!(copied.get("CustomName"), Some(&Tag::String("loot".into())));
+        assert_eq!(copied.get("x"), Some(&Tag::Int(4)));
+        // A dimension other than the command's is an honest error, not a silent clone.
+        let error = clone_with(
+            &world,
+            (0.0, 64.0, 0.0),
+            (0.0, 64.0, 0.0),
+            (8.0, 64.0, 0.0),
+            CloneMode::Replace,
+            CloneOptions {
+                target_dimension: Some("minecraft:the_nether".into()),
+                ..CloneOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("between dimensions is not supported"),
+            "{error}"
+        );
+        assert_eq!(world.get(8, 64, 0), 0);
+        // The command's own dimension is accepted.
+        clone_with(
+            &world,
+            (0.0, 64.0, 0.0),
+            (0.0, 64.0, 0.0),
+            (8.0, 64.0, 0.0),
+            CloneMode::Replace,
+            CloneOptions {
+                source_dimension: Some("minecraft:overworld".into()),
+                target_dimension: Some("minecraft:overworld".into()),
+                ..CloneOptions::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn clone_and_fill_trees_follow_commands_json() {
+        let tree = super::super::commands::dispatcher();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let operator = source(2, tx);
+        let mut seen = |input: &str| -> WorldCommand {
+            tree.execute(input, operator.clone())
+                .unwrap_or_else(|e| panic!("{input}: {e:?}"));
+            match rx.try_recv().unwrap() {
+                Action::World(command) => command,
+                other => panic!("{input}: {other:?}"),
+            }
+        };
+        let WorldCommand::Clone { mode, options, .. } =
+            seen("clone 0 64 0 1 64 1 4 64 4 filtered #minecraft:logs[axis=y] move")
+        else {
+            panic!("clone");
+        };
+        assert_eq!(mode, CloneMode::Filtered);
+        assert_eq!(options.mover, CloneMove::Move);
+        assert!(options.filter.is_some());
+        let WorldCommand::Clone { options, .. } = seen(
+            "clone from minecraft:overworld 0 64 0 1 64 1 to minecraft:overworld 4 64 4 strict masked force",
+        ) else {
+            panic!("clone");
+        };
+        assert!(options.strict);
+        assert_eq!(options.mover, CloneMove::Force);
+        assert_eq!(
+            options.source_dimension.as_deref(),
+            Some("minecraft:overworld")
+        );
+        assert_eq!(
+            options.target_dimension.as_deref(),
+            Some("minecraft:overworld")
+        );
+        seen("clone 0 64 0 1 64 1 to minecraft:the_end 4 64 4");
+        // fill: the filter follows `replace`, with a trailing mode.
+        let WorldCommand::Fill { mode, filter, .. } =
+            seen("fill 0 64 0 2 64 2 glass replace #minecraft:logs hollow")
+        else {
+            panic!("fill");
+        };
+        assert_eq!(mode, FillMode::Hollow);
+        assert!(filter.is_some());
+        let WorldCommand::Fill { mode, filter, .. } = seen("fill 0 64 0 2 64 2 glass replace")
+        else {
+            panic!("fill");
+        };
+        assert_eq!((mode, filter.is_some()), (FillMode::Replace, false));
+        seen("fill 0 64 0 2 64 2 glass strict");
+        seen("setblock 1 2 3 stone strict");
+        // The old non-vanilla `<mode> <filter>` forms are gone.
+        assert!(
+            tree.execute("fill 0 64 0 2 64 2 glass destroy stone", operator.clone())
+                .is_err()
+        );
+        assert!(
+            tree.execute("fill 0 64 0 2 64 2 glass replace #minecraft:nope", operator)
+                .is_err(),
+            "unknown block tag"
+        );
     }
 
     #[test]
