@@ -45,7 +45,10 @@ fn namespaced(id: &str) -> String {
     }
 }
 
-fn holders(ctx: &CommandContext<Source>, name: &str) -> Result<Vec<String>, CommandError> {
+pub(super) fn holders(
+    ctx: &CommandContext<Source>,
+    name: &str,
+) -> Result<Vec<String>, CommandError> {
     let state = ctx.source().state.lock().unwrap();
     match ctx.argument(name) {
         Some(ArgumentValue::ScoreHolder(ScoreHolder::All)) => {
@@ -511,6 +514,32 @@ fn set_display(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
         "commands.scoreboard.objectives.display.set",
         vec![name, objective],
     )
+}
+
+/// Fails with vanilla's unknown-objective message unless `objective` exists.
+pub(super) fn check_objective(
+    ctx: &CommandContext<Source>,
+    objective: &str,
+) -> Result<(), CommandError> {
+    let state = ctx.source().state.lock().unwrap();
+    require_objective(&state, objective).map(|_| ())
+}
+
+/// Stores `value` as `holder`'s score and tells the clients (`/execute store ... score`).
+pub(super) fn write_score(
+    ctx: &CommandContext<Source>,
+    holder: &str,
+    objective: &str,
+    value: i32,
+) -> Result<(), CommandError> {
+    {
+        let mut state = ctx.source().state.lock().unwrap();
+        require_objective(&state, objective)?;
+        state
+            .scores
+            .insert((holder.to_owned(), objective.to_owned()), value);
+    }
+    send_score(ctx, holder, objective, value).map(|_| ())
 }
 
 fn set_score(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
