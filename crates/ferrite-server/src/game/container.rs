@@ -1147,6 +1147,7 @@ impl Player {
                             mode: method,
                             display_name: (method != 1).then_some(PlainText(display)),
                             render_type: (method != 1).then(|| VarInt(i32::from(hearts))),
+                            number_format: None,
                         },
                     ),
                     S::Display { slot, name } => send(
@@ -1167,6 +1168,7 @@ impl Player {
                             objective,
                             value: VarInt(score),
                             display_name: None,
+                            number_format: None,
                         },
                     ),
                     S::Team {

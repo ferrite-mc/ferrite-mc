@@ -151,6 +151,10 @@ pub struct FunctionStore {
     /// `data/<ns>/item_modifier/**/*.json`; a file that fails to load keeps its reason.
     item_modifiers:
         BTreeMap<String, Result<std::sync::Arc<super::item_modifier::ItemModifier>, String>>,
+    /// `data/<ns>/predicate/**/*.json`, raw JSON, later packs overriding earlier ones.
+    predicates: BTreeMap<String, serde_json::Value>,
+    /// `data/<ns>/test_instance/**/*.json`, raw JSON, for `/test`.
+    test_instances: BTreeMap<String, serde_json::Value>,
 }
 
 impl FunctionStore {
@@ -239,6 +243,27 @@ impl FunctionStore {
                 }
                 self.item_modifiers.insert(id, loaded);
             }
+            for (relative, path) in files_in(&namespace.join("test_instance"), "json") {
+                if let Ok(text) = std::fs::read_to_string(&path)
+                    && let Ok(value) = serde_json::from_str(&text)
+                {
+                    self.test_instances
+                        .insert(format!("{name}:{relative}"), value);
+                }
+            }
+            for (relative, path) in files_in(&namespace.join("predicate"), "json") {
+                match std::fs::read_to_string(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
+                {
+                    Ok(value) => {
+                        self.predicates.insert(format!("{name}:{relative}"), value);
+                    }
+                    Err(reason) => {
+                        tracing::warn!(%reason, path = %path.display(), "predicate cannot be read");
+                    }
+                }
+            }
             for (relative, path) in files_in(&namespace.join("tags/function"), "json") {
                 self.load_tag(&format!("{name}:{relative}"), &path);
             }
@@ -283,6 +308,16 @@ impl FunctionStore {
         id: &str,
     ) -> Option<&Result<std::sync::Arc<super::item_modifier::ItemModifier>, String>> {
         self.item_modifiers.get(id)
+    }
+
+    /// The datapack test instances, by id.
+    pub fn test_instances(&self) -> &BTreeMap<String, serde_json::Value> {
+        &self.test_instances
+    }
+
+    /// The datapack predicate `id` (`ns:path`), if a loaded pack defines it.
+    pub fn predicate(&self, id: &str) -> Option<&serde_json::Value> {
+        self.predicates.get(id)
     }
 
     pub fn get(&self, name: &str) -> Option<&Function> {

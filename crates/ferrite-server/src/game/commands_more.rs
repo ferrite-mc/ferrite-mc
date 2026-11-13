@@ -22,6 +22,8 @@ use super::commands_extras::PlayerPacket;
 /// State owned by these commands, kept inside [`super::commands::GameState`].
 #[derive(Debug, Clone, Default)]
 pub struct MoreState {
+    /// Ids of the test instances that failed in the last `/test run`, for `/test runfailed`.
+    pub failed_tests: Vec<String>,
     /// `/random` sequences: id -> generator state.
     pub sequences: BTreeMap<String, u64>,
     /// `/setidletimeout`: minutes before an idle player is kicked; 0 disables it.
@@ -33,11 +35,12 @@ pub struct MoreState {
     /// `/scoreboard objectives modify <o> numberformat` as `blank`, `fixed:<text>` or
     /// `styled:<style>`. Kept as state only: the `SetObjective` packet this protocol crate
     /// writes has no number-format field.
-    pub objective_number_format: BTreeMap<String, String>,
+    pub objective_number_format: BTreeMap<String, ferrite_protocol::packets::play::NumberFormat>,
     /// `/scoreboard players display name`: `(holder, objective)` -> component text.
     pub score_display_name: BTreeMap<(String, String), String>,
     /// `/scoreboard players display numberformat`, in the same encoding as above.
-    pub score_number_format: BTreeMap<(String, String), String>,
+    pub score_number_format:
+        BTreeMap<(String, String), ferrite_protocol::packets::play::NumberFormat>,
     /// Game time of each player's last action, for `/setidletimeout`.
     pub last_active: BTreeMap<uuid::Uuid, i64>,
     /// `/tick`: shared with the game loop and the region ticks.
@@ -2220,9 +2223,9 @@ fn test_tree() -> NodeBuilder<Source> {
     let with_run = |node: NodeBuilder<Source>| node.executes(no_tests);
     root = root
         .then(with_optional_args(
-            with_run(literal::<Source>("clearall")),
+            literal::<Source>("clearall").executes(test_clearall),
             vec![int("radius")],
-            no_tests,
+            test_clearall,
         ))
         .then(
             literal::<Source>("create").then(
@@ -2286,22 +2289,24 @@ fn test_tree() -> NodeBuilder<Source> {
         ]
     };
     root.then(
-        with_optional_args(with_run(literal::<Source>("runfailed")), repeat(), no_tests).then(
-            with_optional_args(
-                argument::<Source>("onlyRequiredTests", ArgumentType::Bool).executes(no_tests),
-                repeat(),
-                no_tests,
-            ),
-        ),
+        with_optional_args(
+            literal::<Source>("runfailed").executes(test_runfailed),
+            repeat(),
+            test_runfailed,
+        )
+        .then(with_optional_args(
+            argument::<Source>("onlyRequiredTests", ArgumentType::Bool).executes(test_runfailed),
+            repeat(),
+            test_runfailed,
+        )),
     )
 }
 
-/// The ids of the test instances in vanilla's `data/minecraft/test_instance`. Datapack-provided
-/// instances are not read.
-fn test_instance_ids() -> Vec<String> {
+/// The vanilla test instances (`data/minecraft/test_instance`, extracted locally) by id.
+fn vanilla_test_instances() -> std::collections::BTreeMap<String, serde_json::Value> {
     let relative = "vanilla/26.3/generated/data/minecraft/test_instance";
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut ids = Vec::new();
+    let mut found = std::collections::BTreeMap::new();
     for dir in [std::path::PathBuf::from(relative), root.join(relative)] {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
@@ -2310,16 +2315,36 @@ fn test_instance_ids() -> Vec<String> {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json")
                 && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(value) = serde_json::from_str(&text)
             {
-                ids.push(format!("minecraft:{stem}"));
+                found.insert(format!("minecraft:{stem}"), value);
             }
         }
-        if !ids.is_empty() {
+        if !found.is_empty() {
             break;
         }
     }
-    ids.sort();
-    ids
+    found
+}
+
+/// Vanilla instances overlaid with the datapack ones (a datapack wins on the same id).
+fn test_instances(source: &Source) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut all = vanilla_test_instances();
+    let state = source.state.lock().unwrap();
+    all.extend(
+        state
+            .functions
+            .test_instances()
+            .iter()
+            .map(|(id, value)| (id.clone(), value.clone())),
+    );
+    all
+}
+
+#[cfg(test)]
+fn test_instance_ids() -> Vec<String> {
+    vanilla_test_instances().into_keys().collect()
 }
 
 /// `*` matches any run of characters; a selector without a namespace means `minecraft:`.
@@ -2345,8 +2370,8 @@ fn selector_matches(pattern: &str, id: &str) -> bool {
 /// lang keys, not verified against vanilla's source).
 fn selected_tests(ctx: &CommandContext<Source>) -> Result<Vec<String>, CommandError> {
     let pattern = ctx.string("tests").unwrap_or_default().to_owned();
-    let matches: Vec<String> = test_instance_ids()
-        .into_iter()
+    let matches: Vec<String> = test_instances(ctx.source())
+        .into_keys()
         .filter(|id| selector_matches(&pattern, id))
         .collect();
     if matches.is_empty() {
@@ -2374,15 +2399,157 @@ fn test_locate(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     Ok(0)
 }
 
-/// `/test run|runmultiple|verify`: running an instance needs the test framework (placing the
-/// instance's structure, a test-instance block entity and a per-tick runner), which this
-/// server does not have, so a selected instance fails instead of reporting a result.
+/// How one test instance ended.
+enum TestOutcome {
+    Passed,
+    Failed(String),
+}
+
+/// Runs one instance without placing a structure. Vanilla's `minecraft:function` instance
+/// (`FunctionGameTestInstance.run`) looks its `function` up in the `test_function` registry, whose
+/// only entry in 26.3 is `minecraft:always_pass` (`BuiltinTestFunctions`), which succeeds at
+/// once. Any other function id fails like vanilla's missing-registry-entry exception, and
+/// `minecraft:block_based` instances need the structure, test-block and redstone framework, so
+/// they fail with a message saying so instead of reporting a result.
+fn run_test_instance(instance: &serde_json::Value) -> TestOutcome {
+    let max_ticks = instance["max_ticks"].as_i64().unwrap_or(0);
+    let setup_ticks = instance["setup_ticks"].as_i64().unwrap_or(0);
+    match instance["type"].as_str() {
+        Some("minecraft:function") => {
+            let function = instance["function"].as_str().unwrap_or("");
+            if function == "minecraft:always_pass" {
+                if setup_ticks > max_ticks && max_ticks > 0 {
+                    return TestOutcome::Failed(
+                        Feedback::new("test.error.timeout.no_result", vec![max_ticks.to_string()])
+                            .text,
+                    );
+                }
+                TestOutcome::Passed
+            } else {
+                TestOutcome::Failed(format!("Missing test function {function}"))
+            }
+        }
+        other => TestOutcome::Failed(format!(
+            "Test instance type {} is not supported: it needs the structure, test-block and redstone framework",
+            other.unwrap_or("<missing>")
+        )),
+    }
+}
+
+/// Runs `tests` `times` times (stopping at the first failure when `until_failed`), reports the
+/// vanilla summary lines and remembers the failures for `/test runfailed`. Nothing is placed in
+/// the world, so `rotationSteps` and `testsPerRow` have nothing to lay out.
+fn run_tests(
+    ctx: &CommandContext<Source>,
+    tests: Vec<String>,
+    times: i32,
+    until_failed: bool,
+) -> Result<i32, CommandError> {
+    let instances = test_instances(ctx.source());
+    let total = i32::try_from(tests.len())
+        .unwrap_or(i32::MAX)
+        .saturating_mul(times.max(1));
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback::new(
+            "commands.test.run.running",
+            vec![total.to_string()],
+        )),
+    )?;
+    let (mut run, mut required_failed, mut optional_failed) = (0, 0, 0);
+    let mut failed_ids = Vec::new();
+    'rounds: for _ in 0..times.max(1) {
+        for id in &tests {
+            let Some(instance) = instances.get(id) else {
+                continue;
+            };
+            run += 1;
+            if let TestOutcome::Failed(reason) = run_test_instance(instance) {
+                tracing::info!(test = %id, %reason, "test instance failed");
+                if instance["required"].as_bool().unwrap_or(true) {
+                    required_failed += 1;
+                } else {
+                    optional_failed += 1;
+                }
+                if !failed_ids.contains(id) {
+                    failed_ids.push(id.clone());
+                }
+                if until_failed {
+                    break 'rounds;
+                }
+            }
+        }
+    }
+    ctx.source().state.lock().unwrap().more.failed_tests = failed_ids;
+    let summary = |key: &'static str, args: Vec<String>| {
+        send(ctx.source(), Action::Feedback(Feedback::new(key, args)))
+    };
+    summary("commands.test.summary", vec![run.to_string()])?;
+    if required_failed == 0 {
+        summary("commands.test.summary.all_required_passed", vec![])?;
+    } else {
+        summary(
+            "commands.test.summary.failed",
+            vec![required_failed.to_string()],
+        )?;
+    }
+    if optional_failed > 0 {
+        summary(
+            "commands.test.summary.optional_failed",
+            vec![optional_failed.to_string()],
+        )?;
+    }
+    Ok(run)
+}
+
+fn repeat_options(ctx: &CommandContext<Source>) -> (i32, bool) {
+    let until_failed = matches!(
+        ctx.argument("untilFailed"),
+        Some(ferrite_command::ArgumentValue::Bool(true))
+    );
+    (
+        ctx.integer("numberOfTimes").unwrap_or(1).max(1),
+        until_failed,
+    )
+}
+
+/// `/test run|runmultiple|verify <tests>`.
 fn test_run(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let tests = selected_tests(ctx)?;
-    Err(CommandError::failed(format!(
-        "Cannot run {}: the game test framework (structure placement, test-instance blocks and the tick runner) is not implemented",
-        tests.join(", ")
-    )))
+    let (times, until_failed) = repeat_options(ctx);
+    run_tests(ctx, tests, times, until_failed)
+}
+
+/// `/test runfailed [numberOfTimes] [untilFailed] ...`: the failures of the last run.
+fn test_runfailed(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let failed = ctx.source().state.lock().unwrap().more.failed_tests.clone();
+    if failed.is_empty() {
+        return Err(failure("commands.test.no_tests", vec![]));
+    }
+    let only_required = matches!(
+        ctx.argument("onlyRequiredTests"),
+        Some(ferrite_command::ArgumentValue::Bool(true))
+    );
+    let instances = test_instances(ctx.source());
+    let tests: Vec<String> = failed
+        .into_iter()
+        .filter(|id| {
+            !only_required
+                || instances
+                    .get(id)
+                    .is_none_or(|i| i["required"].as_bool().unwrap_or(true))
+        })
+        .collect();
+    if tests.is_empty() {
+        return Err(failure("commands.test.no_tests", vec![]));
+    }
+    let (times, until_failed) = repeat_options(ctx);
+    run_tests(ctx, tests, times, until_failed)
+}
+
+/// `/test clearall`: this server never places test structures, so there is nothing to clear.
+fn test_clearall(_: &CommandContext<Source>) -> Result<i32, CommandError> {
+    Err(failure("commands.test.clear.error.no_tests", vec![]))
 }
 
 fn profile_text(name: &str, id: uuid::Uuid) -> String {
@@ -3113,11 +3280,31 @@ mod tests {
         assert_eq!(error.to_string(), "Test nope could not be found");
         let error = run("test run other:*", 2, fresh(), None).0.unwrap_err();
         assert_eq!(error.to_string(), "Found no test instances");
-        // An instance that exists cannot be run here, and says so instead of passing.
-        let error = run("test run minecraft:always_pass", 2, fresh(), None)
-            .0
-            .unwrap_err();
-        assert!(error.to_string().contains("not implemented"), "{error}");
+        // `always_pass` is the one built-in test function (BuiltinTestFunctions), so it passes.
+        let (result, actions) = run("test run minecraft:always_pass", 2, fresh(), None);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(
+            feedback_texts(&actions),
+            vec![
+                "Running 1 test(s)...",
+                "Game Test complete! 1 test(s) were run",
+                "All required tests passed :)"
+            ]
+        );
+        assert_eq!(
+            run("test clearall", 2, fresh(), None)
+                .0
+                .unwrap_err()
+                .to_string(),
+            "Could not find any tests to clear"
+        );
+        assert_eq!(
+            run("test runfailed", 2, fresh(), None)
+                .0
+                .unwrap_err()
+                .to_string(),
+            "No tests to run"
+        );
         let (result, actions) = run("test locate minecraft:*", 2, fresh(), None);
         assert_eq!(result.unwrap(), 0);
         let texts: Vec<_> = actions
@@ -3154,6 +3341,72 @@ mod tests {
             assert_eq!(result.unwrap_err().to_string(), text);
             assert!(actions.is_empty(), "{input}: no success feedback");
         }
+    }
+
+    fn feedback_texts(actions: &[Action]) -> Vec<&str> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Feedback(f) => Some(f.text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn datapack_test_instances_run_and_runfailed_repeats_the_failures() {
+        let dir = std::env::temp_dir().join(format!("ferrite-tests-{}", Uuid::new_v4()));
+        let instances = dir.join("datapacks/t/data/demo/test_instance");
+        std::fs::create_dir_all(&instances).unwrap();
+        let base = |function: &str, required: bool| {
+            format!(
+                r#"{{"type":"minecraft:function","environment":"minecraft:default","function":"{function}","max_ticks":1,"required":{required},"setup_ticks":1,"structure":"minecraft:empty"}}"#
+            )
+        };
+        std::fs::write(
+            instances.join("ok.json"),
+            base("minecraft:always_pass", true),
+        )
+        .unwrap();
+        std::fs::write(instances.join("bad.json"), base("demo:missing", true)).unwrap();
+        std::fs::write(instances.join("soft.json"), base("demo:missing", false)).unwrap();
+        std::fs::write(
+            instances.join("blocks.json"),
+            r#"{"type":"minecraft:block_based","environment":"minecraft:default","max_ticks":1,"setup_ticks":0,"structure":"minecraft:empty"}"#,
+        )
+        .unwrap();
+        let state = fresh();
+        state.lock().unwrap().functions =
+            Arc::new(crate::game::functions::FunctionStore::load(Some(&dir)));
+        let (result, actions) = run("test run demo:ok", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(
+            feedback_texts(&actions).last(),
+            Some(&"All required tests passed :)")
+        );
+        let (result, actions) = run("test run demo:*", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 4);
+        assert_eq!(
+            feedback_texts(&actions),
+            vec![
+                "Running 4 test(s)...",
+                "Game Test complete! 4 test(s) were run",
+                "2 required test(s) failed :(",
+                "1 optional test(s) failed"
+            ]
+        );
+        // `runfailed` repeats the three failures; with `true` only the required two.
+        let (result, actions) = run("test runfailed", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(feedback_texts(&actions)[0], "Running 3 test(s)...");
+        let (result, _) = run("test runfailed true", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 2);
+        // `untilFailed` stops at the first failure of a repeated run.
+        let (result, _) = run("test run demo:ok 5 true", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 5);
+        let (result, _) = run("test run demo:bad 5 true", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1092,27 +1092,30 @@ fn fill(
     })
 }
 
-fn clone(
+/// One block `/clone` read from the source area.
+#[derive(Debug, Clone)]
+pub struct ClonedBlock {
+    pub at: [i32; 3],
+    pub state: u32,
+    pub entity: Option<ferrite_nbt::Compound>,
+}
+
+/// The blocks read from a source area, ready to be written (possibly into another dimension).
+#[derive(Debug, Clone)]
+pub struct CloneRead {
+    pub min: [i32; 3],
+    pub copied: Vec<ClonedBlock>,
+}
+
+/// Reads the blocks of `begin..=end` that `mode` selects (`commands.clone.toobig` and the
+/// snapshot step of vanilla's `CloneCommands`).
+pub fn clone_read(
     begin: [i32; 3],
     end: [i32; 3],
-    destination: [i32; 3],
     mode: CloneMode,
     options: &CloneOptions,
     world: &dyn WorldBlocks,
-) -> Result<Outcome, String> {
-    // The command runs against one world (the executor's); cloning to or from another
-    // dimension needs a second world on the same region thread, which is not available here.
-    let here = world.dimension().key();
-    for named in [&options.source_dimension, &options.target_dimension]
-        .into_iter()
-        .flatten()
-    {
-        if named != here {
-            return Err(format!(
-                "Cloning between dimensions is not supported by this server ({named} is not the command's dimension {here})"
-            ));
-        }
-    }
+) -> Result<CloneRead, String> {
     let (min, max) = bounds(begin, end);
     let volume = volume(min, max);
     if volume > MAX_BLOCKS {
@@ -1120,25 +1123,7 @@ fn clone(
             "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {volume})"
         ));
     }
-    let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-    let mut destination_max = [0; 3];
-    for axis in 0..3 {
-        destination_max[axis] = destination[axis]
-            .checked_add(size[axis])
-            .ok_or_else(|| "Invalid position".to_string())?;
-    }
-    // `commands.clone.overlap`: overlapping areas fail unless `force` or the clone is a no-op.
-    let overlap =
-        (0..3).all(|axis| min[axis] <= destination_max[axis] && destination[axis] <= max[axis]);
-    if overlap && options.mover != CloneMove::Force {
-        return Err("The source and destination areas cannot overlap".into());
-    }
     // Snapshot first: source and destination may overlap (`force`).
-    struct Source {
-        at: [i32; 3],
-        state: u32,
-        entity: Option<ferrite_nbt::Compound>,
-    }
     let mut copied = Vec::new();
     for x in min[0]..=max[0] {
         for y in min[1]..=max[1] {
@@ -1155,7 +1140,7 @@ fn clone(
                         .is_some_and(|filter| filter.matches(state)),
                 };
                 if take {
-                    copied.push(Source {
+                    copied.push(ClonedBlock {
                         at: [x, y, z],
                         state,
                         entity: world.block_entity_at([x, y, z]),
@@ -1164,31 +1149,47 @@ fn clone(
             }
         }
     }
+    Ok(CloneRead { min, copied })
+}
+
+fn note_change(at: [i32; 3], state: u32, changes: &mut Vec<Change>) {
+    let location = BlockPos::new(at[0], at[1], at[2]).pack();
+    changes.retain(|change: &Change| change.location != location);
+    changes.push(Change { location, state });
+}
+
+/// `move`: the copied source blocks become air.
+pub fn clone_clear_source(
+    read: &CloneRead,
+    world: &dyn WorldBlocks,
+) -> Result<Vec<Change>, String> {
     let mut changes = Vec::new();
-    let mut touched = std::collections::BTreeMap::new();
-    let note = |at: [i32; 3], state: u32, changes: &mut Vec<Change>| {
-        let location = BlockPos::new(at[0], at[1], at[2]).pack();
-        changes.retain(|change: &Change| change.location != location);
-        changes.push(Change { location, state });
-    };
-    if options.mover == CloneMove::Move {
-        // The copied source blocks become air before the destination is written.
-        for block in &copied {
-            let old = world.block(block.at[0], block.at[1], block.at[2]);
-            if old != Some(u32::from(air())) {
-                if !world.set_block(block.at[0], block.at[1], block.at[2], u32::from(air())) {
-                    return Err("Chunk not loaded".into());
-                }
-                note(block.at, u32::from(air()), &mut changes);
+    for block in &read.copied {
+        let old = world.block(block.at[0], block.at[1], block.at[2]);
+        if old != Some(u32::from(air())) {
+            if !world.set_block(block.at[0], block.at[1], block.at[2], u32::from(air())) {
+                return Err("Chunk not loaded".into());
             }
+            note_change(block.at, u32::from(air()), &mut changes);
         }
     }
+    Ok(changes)
+}
+
+/// Writes a snapshot at `destination` (the minimum corner), block entities included.
+pub fn clone_write(
+    read: &CloneRead,
+    destination: [i32; 3],
+    world: &dyn WorldBlocks,
+    changes: &mut Vec<Change>,
+) -> Result<u128, String> {
     let mut count = 0u128;
-    for block in &copied {
+    let mut touched = std::collections::BTreeMap::new();
+    for block in &read.copied {
         let target = [
-            destination[0] + block.at[0] - min[0],
-            destination[1] + block.at[1] - min[1],
-            destination[2] + block.at[2] - min[2],
+            destination[0] + block.at[0] - read.min[0],
+            destination[1] + block.at[1] - read.min[1],
+            destination[2] + block.at[2] - read.min[2],
         ];
         let old = world
             .block(target[0], target[1], target[2])
@@ -1198,7 +1199,7 @@ fn clone(
             if !world.set_block(target[0], target[1], target[2], block.state) {
                 return Err("Chunk not loaded".into());
             }
-            note(target, block.state, &mut changes);
+            note_change(target, block.state, changes);
         }
         touched.insert(target, block.entity.clone());
     }
@@ -1210,6 +1211,123 @@ fn clone(
             world.set_block_entity(target, &data);
         }
     }
+    Ok(count)
+}
+
+/// The hand-off of a `/clone` between dimensions: the read happened on the source dimension's
+/// region, the write is scheduled on the destination's, and `move` clears the source last.
+#[derive(Debug, Clone)]
+pub struct CrossClone {
+    pub read: Result<CloneRead, String>,
+    pub destination: [i32; 3],
+    pub source_dimension: super::Dimension,
+    pub target_dimension: super::Dimension,
+    pub mover: CloneMove,
+    /// The player's chat, when a player ran the command.
+    pub reply: Option<ferrite_net::game::OutboundSender>,
+}
+
+/// Sends the changed blocks of a clone to the players tracking them.
+fn broadcast_changes(changes: &[Change], world: &dyn WorldBlocks, tracking: &Tracking) {
+    for change in changes {
+        let pos = BlockPos::unpack(change.location);
+        world.place_block_entity([pos.x, pos.y, pos.z], change.state, None);
+    }
+    let tracking = tracking.lock().unwrap();
+    for change in changes {
+        let pos = BlockPos::unpack(change.location);
+        let update = packet(&BlockUpdate {
+            location: change.location,
+            block_state: VarInt(change.state as i32),
+        });
+        super::region::broadcast_tracked_chunk(
+            &tracking,
+            world.world_id(),
+            (pos.x.div_euclid(16), pos.z.div_euclid(16)),
+            &update,
+        );
+    }
+}
+
+/// The destination half of a cross-dimension clone, run on the destination's region.
+pub fn apply_clone_write(
+    read: &CloneRead,
+    destination: [i32; 3],
+    world: &dyn WorldBlocks,
+    tracking: &Tracking,
+) -> Result<Outcome, String> {
+    let mut changes = Vec::new();
+    let count = clone_write(read, destination, world, &mut changes)?;
+    if count == 0 {
+        return Err("No blocks were cloned".into());
+    }
+    broadcast_changes(&changes, world, tracking);
+    Ok(Outcome {
+        changes,
+        message: format!("Successfully cloned {count} block(s)"),
+    })
+}
+
+/// The source half of a cross-dimension `move`, run on the source's region.
+pub fn apply_clone_clear(
+    read: &CloneRead,
+    world: &dyn WorldBlocks,
+    tracking: &Tracking,
+) -> Result<(), String> {
+    let changes = clone_clear_source(read, world)?;
+    broadcast_changes(&changes, world, tracking);
+    Ok(())
+}
+
+fn clone(
+    begin: [i32; 3],
+    end: [i32; 3],
+    destination: [i32; 3],
+    mode: CloneMode,
+    options: &CloneOptions,
+    world: &dyn WorldBlocks,
+) -> Result<Outcome, String> {
+    // A clone between dimensions is split by the world loop into a read on the source
+    // dimension's region and a write on the destination's (`clone_read`/`clone_write`);
+    // by the time a command reaches this function both areas are in `world`.
+    let here = world.dimension().key();
+    for named in [&options.source_dimension, &options.target_dimension]
+        .into_iter()
+        .flatten()
+    {
+        if named != here {
+            return Err(format!(
+                "Cloning between dimensions needs the world loop ({named} is not the command's dimension {here})"
+            ));
+        }
+    }
+    let (min, max) = bounds(begin, end);
+    let area = volume(min, max);
+    if area > MAX_BLOCKS {
+        return Err(format!(
+            "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {area})"
+        ));
+    }
+    let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    let mut destination_max = [0; 3];
+    for axis in 0..3 {
+        destination_max[axis] = destination[axis]
+            .checked_add(size[axis])
+            .ok_or_else(|| "Invalid position".to_string())?;
+    }
+    // `commands.clone.overlap`: overlapping areas fail unless `force` or the clone is a no-op.
+    let overlap =
+        (0..3).all(|axis| min[axis] <= destination_max[axis] && destination[axis] <= max[axis]);
+    if overlap && options.mover != CloneMove::Force {
+        return Err("The source and destination areas cannot overlap".into());
+    }
+    let read = clone_read(begin, end, mode, options, world)?;
+    let mut changes = if options.mover == CloneMove::Move {
+        clone_clear_source(&read, world)?
+    } else {
+        Vec::new()
+    };
+    let count = clone_write(&read, destination, world, &mut changes)?;
     if count == 0 {
         // `commands.clone.failed`
         return Err("No blocks were cloned".into());
@@ -1754,7 +1872,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            error.contains("between dimensions is not supported"),
+            error.contains("between dimensions needs the world loop"),
             "{error}"
         );
         assert_eq!(world.get(8, 64, 0), 0);
