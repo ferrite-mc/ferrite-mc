@@ -1329,6 +1329,8 @@ impl Player {
                 entity,
                 items,
                 furnace,
+                patterns,
+                profile,
             } => {
                 let Some(type_id) =
                     ferrite_data::registries::id("minecraft:block_entity_type", &entity)
@@ -1340,7 +1342,9 @@ impl Player {
                     &ferrite_protocol::packets::play::BlockEntityData {
                         location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
                         block_type: VarInt(type_id),
-                        nbt: crate::plugins::tile_update::nbt(&items, furnace),
+                        nbt: crate::plugins::tile_update::nbt(
+                            &entity, &items, furnace, &patterns, profile,
+                        ),
                     },
                 );
             }

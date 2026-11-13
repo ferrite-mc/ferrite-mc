@@ -24,8 +24,15 @@ final class FerriteChunkData implements ChunkData {
 
     @Override public int getMinHeight() { return minHeight; }
     @Override public int getMaxHeight() { return maxHeight; }
-    /** Biome selection belongs to the generator's biome provider; this buffer has no biome override. */
-    @Override public Biome getBiome(int x, int y, int z) { return Biome.PLAINS; }
+    /**
+     * {@code Server#createChunkData(World)} gives a buffer with no chunk coordinates, so there is no host
+     * chunk to read a biome from, and biome selection belongs to the generator's biome provider, which the
+     * host does not run. Answering {@code PLAINS} would invent data, so the query is refused (bounds are still checked).
+     */
+    @Override public Biome getBiome(int x, int y, int z) {
+        if (!inside(x, y, z)) throw new IndexOutOfBoundsException("x/y/z outside the chunk data: " + x + "," + y + "," + z);
+        throw new UnsupportedOperationException("Ferrite: ChunkData#getBiome is not implemented: a chunk data buffer from createChunkData(World) is not tied to a chunk, so the host has no biome for it; use ChunkSnapshot#getBiome or World#getBiome on a loaded chunk");
+    }
 
     @Override public void setBlock(int x, int y, int z, Material material) { setBlock(x, y, z, java.util.Objects.requireNonNull(material, "material").createBlockData()); }
     @Override public void setBlock(int x, int y, int z, MaterialData material) { setBlock(x, y, z, material.getItemType().createBlockData()); }
