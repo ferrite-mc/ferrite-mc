@@ -218,6 +218,14 @@ pub trait LootHost: std::fmt::Debug + Send + Sync {
     fn max_damage(&self, item: &str) -> Option<i32>;
     /// The maximum stack size of an item.
     fn max_stack_size(&self, item: &str) -> i32;
+    /// One component of an item's defaults (`minecraft:attribute_modifiers` of a sword), as NBT.
+    fn default_component(&self, _item: &str, _component: &str) -> Option<Tag> {
+        None
+    }
+    /// Every id of a registry (`minecraft:potion`), in registry order.
+    fn registry_ids(&self, _registry: &str) -> Vec<String> {
+        Vec::new()
+    }
     /// The biome id at a block position.
     fn biome_at(&self, _pos: [i32; 3]) -> Option<String> {
         None

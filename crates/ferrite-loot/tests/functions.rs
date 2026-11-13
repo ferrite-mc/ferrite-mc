@@ -371,3 +371,88 @@ fn location_checks_use_the_hosts_biome() {
     assert!(!drops.contains_key("minecraft:bamboo"), "{drops:?}");
     assert!(!drops.is_empty());
 }
+
+fn run(tables: &LootTables, json: &str, stack: &mut LootStack, context: &LootContext) {
+    let function = tables
+        .parse_function(&serde_json::from_str(json).unwrap())
+        .unwrap();
+    function.apply_to(stack, context, &mut Lcg(5));
+}
+
+#[test]
+fn simple_item_functions_write_their_components() {
+    let Some(tables) = tables() else { return };
+    let context = LootContext::default();
+
+    let mut sword = LootStack::new("minecraft:iron_sword");
+    run(
+        &tables,
+        r#"{"type":"minecraft:set_attributes","replace":true,"modifiers":[{"attribute":"minecraft:attack_damage","id":"minecraft:test","amount":3,"operation":"add_value","slot":"mainhand"}]}"#,
+        &mut sword,
+        &context,
+    );
+    let Some(Tag::List(ferrite_nbt::List::Compound(mods))) =
+        sword.components.get("minecraft:attribute_modifiers")
+    else {
+        panic!("no attribute modifiers: {:?}", sword.components);
+    };
+    assert_eq!(mods.len(), 1);
+    assert_eq!(mods[0].get("amount"), Some(&Tag::Double(3.0)));
+
+    let mut item = LootStack::new("minecraft:stone");
+    run(
+        &tables,
+        r#"{"type":"minecraft:toggle_tooltips","toggles":{"minecraft:enchantments":false}}"#,
+        &mut item,
+        &context,
+    );
+    assert!(item.components.contains_key("minecraft:tooltip_display"));
+
+    let mut chest = LootStack::new("minecraft:chest");
+    run(
+        &tables,
+        r#"{"type":"minecraft:set_loot_table","loot_table_id":"minecraft:chests/simple_dungeon","seed":9}"#,
+        &mut chest,
+        &context,
+    );
+    assert!(chest.components.contains_key("minecraft:container_loot"));
+
+    let mut book = LootStack::new("minecraft:written_book");
+    run(
+        &tables,
+        r#"{"type":"minecraft:set_book_cover","title":"Hi","author":"Me","generation":1}"#,
+        &mut book,
+        &context,
+    );
+    assert!(
+        book.components
+            .contains_key("minecraft:written_book_content")
+    );
+
+    let mut star = LootStack::new("minecraft:firework_star");
+    run(
+        &tables,
+        r#"{"type":"minecraft:set_firework_explosion","shape":"star","colors":[255],"trail":true}"#,
+        &mut star,
+        &context,
+    );
+    assert!(star.components.contains_key("minecraft:firework_explosion"));
+
+    let mut banner = LootStack::new("minecraft:white_banner");
+    run(
+        &tables,
+        r#"{"type":"minecraft:set_banner_pattern","append":false,"patterns":[{"pattern":"minecraft:creeper","color":"lime"}]}"#,
+        &mut banner,
+        &context,
+    );
+    assert!(banner.components.contains_key("minecraft:banner_patterns"));
+
+    let mut potion = LootStack::new("minecraft:potion");
+    run(
+        &tables,
+        r#"{"type":"minecraft:set_random_potion","options":["minecraft:swiftness"]}"#,
+        &mut potion,
+        &context,
+    );
+    assert!(potion.components.contains_key("minecraft:potion_contents"));
+}

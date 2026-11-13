@@ -22,6 +22,8 @@ pub struct EntityFacts {
     pub baby: bool,
     /// The held main-hand item and its enchantments, if the entity holds something.
     pub mainhand: Option<(String, BTreeMap<String, i32>)>,
+    /// The entity's custom name as plain text (`copy_name`).
+    pub custom_name: Option<String>,
     /// What the entity rides.
     pub vehicle: Option<Box<EntityFacts>>,
     /// Further facts keyed `components/<component>` (value as text, for example

@@ -163,6 +163,64 @@ pub enum FunctionKind {
         /// Amplifier provider.
         amplifier: NumberProvider,
     },
+    /// Copies an entity's custom name.
+    CopyName {
+        /// Entity role (`this`, `attacker`, `direct_attacker`).
+        source: String,
+    },
+    /// Adds (or sets) attribute modifiers.
+    SetAttributes {
+        /// The modifiers to add.
+        modifiers: Vec<AttributeModifier>,
+        /// Replaces the item's existing modifiers instead of extending them.
+        replace: bool,
+    },
+    /// Sets banner patterns.
+    SetBannerPattern {
+        /// `(pattern id, dye color)` layers.
+        patterns: Vec<(String, String)>,
+        /// Appends to the existing layers instead of replacing them.
+        append: bool,
+    },
+    /// Sets the title, author and generation of a written book.
+    SetBookCover {
+        /// New title, if any.
+        title: Option<String>,
+        /// New author, if any.
+        author: Option<String>,
+        /// New generation, if any.
+        generation: Option<i32>,
+    },
+    /// Sets the loot table of a container item.
+    SetLootTable {
+        /// Loot table id.
+        table: String,
+        /// Seed; `0` means random at open time.
+        seed: i64,
+    },
+    /// Shows or hides parts of the tooltip.
+    ToggleTooltips {
+        /// Component id and whether it is shown.
+        toggles: Vec<(String, bool)>,
+    },
+    /// A random potion.
+    SetRandomPotion {
+        /// Candidate ids; `None` means every potion.
+        options: Option<Vec<String>>,
+    },
+    /// Updates fields of a firework star.
+    SetFireworkExplosion {
+        /// Shape (`small_ball`, `star`, ...).
+        shape: Option<String>,
+        /// Colors as RGB ints.
+        colors: Option<Vec<i32>>,
+        /// Fade colors as RGB ints.
+        fade_colors: Option<Vec<i32>>,
+        /// Trail flag.
+        trail: Option<bool>,
+        /// Twinkle flag.
+        twinkle: Option<bool>,
+    },
     /// Removes the stack.
     Discard,
     /// A function this crate passes through untouched, retaining its JSON.
@@ -172,6 +230,21 @@ pub enum FunctionKind {
         /// Raw function JSON.
         value: Value,
     },
+}
+
+/// One `set_attributes` modifier.
+#[derive(Debug, Clone)]
+pub struct AttributeModifier {
+    /// Attribute id (`minecraft:attack_damage`).
+    pub attribute: String,
+    /// Modifier id.
+    pub id: String,
+    /// Amount provider.
+    pub amount: NumberProvider,
+    /// `add_value`, `add_multiplied_base` or `add_multiplied_total`.
+    pub operation: String,
+    /// Slots to choose from at random (`mainhand`, `any`, ...).
+    pub slots: Vec<String>,
 }
 
 /// The component source of `copy_components`.
@@ -412,6 +485,142 @@ pub(crate) fn parse(value: &Value, definitions: &Definitions) -> Option<Function
         "minecraft:set_ominous_bottle_amplifier" => FunctionKind::SetOminousBottleAmplifier {
             amplifier: NumberProvider::parse(object.get("amplifier")),
         },
+        "minecraft:copy_name" => FunctionKind::CopyName {
+            source: object
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("this")
+                .to_owned(),
+        },
+        "minecraft:set_attributes" => FunctionKind::SetAttributes {
+            modifiers: object
+                .get("modifiers")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .map(|modifier| AttributeModifier {
+                            attribute: normalize_id(
+                                modifier
+                                    .get("attribute")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(""),
+                            ),
+                            id: normalize_id(
+                                modifier.get("id").and_then(Value::as_str).unwrap_or(""),
+                            ),
+                            amount: NumberProvider::parse(modifier.get("amount")),
+                            operation: modifier
+                                .get("operation")
+                                .and_then(Value::as_str)
+                                .unwrap_or("add_value")
+                                .to_owned(),
+                            slots: match modifier.get("slot") {
+                                Some(Value::String(slot)) => vec![slot.clone()],
+                                Some(Value::Array(slots)) => slots
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect(),
+                                _ => Vec::new(),
+                            },
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            replace: object
+                .get("replace")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        },
+        "minecraft:set_banner_pattern" => FunctionKind::SetBannerPattern {
+            patterns: object
+                .get("patterns")
+                .and_then(Value::as_array)
+                .map(|layers| {
+                    layers
+                        .iter()
+                        .map(|layer| {
+                            (
+                                normalize_id(
+                                    layer.get("pattern").and_then(Value::as_str).unwrap_or(""),
+                                ),
+                                layer
+                                    .get("color")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("white")
+                                    .to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            append: object
+                .get("append")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        "minecraft:set_book_cover" => FunctionKind::SetBookCover {
+            // A filterable string is `"text"` or `{"raw": "text", "filtered": "..."}`.
+            title: object.get("title").and_then(|title| {
+                title
+                    .as_str()
+                    .or_else(|| title.get("raw").and_then(Value::as_str))
+                    .map(str::to_owned)
+            }),
+            author: object
+                .get("author")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            generation: object
+                .get("generation")
+                .and_then(Value::as_i64)
+                .map(|generation| generation as i32),
+        },
+        "minecraft:set_loot_table" => FunctionKind::SetLootTable {
+            table: normalize_id(
+                object
+                    .get("loot_table_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            ),
+            seed: object.get("seed").and_then(Value::as_i64).unwrap_or(0),
+        },
+        "minecraft:toggle_tooltips" => FunctionKind::ToggleTooltips {
+            toggles: object
+                .get("toggles")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(id, shown)| Some((normalize_id(id), shown.as_bool()?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        "minecraft:set_random_potion" => FunctionKind::SetRandomPotion {
+            options: object
+                .get("options")
+                .map(|options| definitions.data.resolve_ids("potion", options)),
+        },
+        "minecraft:set_firework_explosion" => {
+            let colors = |key: &str| {
+                object.get(key).and_then(Value::as_array).map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_i64)
+                        .map(|color| color as i32)
+                        .collect()
+                })
+            };
+            FunctionKind::SetFireworkExplosion {
+                shape: object
+                    .get("shape")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                colors: colors("colors"),
+                fade_colors: colors("fade_colors"),
+                trail: object.get("trail").and_then(Value::as_bool),
+                twinkle: object.get("twinkle").and_then(Value::as_bool),
+            }
+        }
         "minecraft:discard" => FunctionKind::Discard,
         other => FunctionKind::Opaque {
             kind: other.to_owned(),
@@ -843,6 +1052,214 @@ impl FunctionKind {
                 stack.components.insert(
                     "minecraft:ominous_bottle_amplifier".to_owned(),
                     Tag::Int(level),
+                );
+            }
+            Self::CopyName { source } => {
+                let entity = match source.as_str() {
+                    "this" => context.this_entity.as_ref(),
+                    "attacker" => context
+                        .damage_source
+                        .as_ref()
+                        .and_then(|damage| damage.source_entity.as_ref()),
+                    "direct_attacker" => context
+                        .damage_source
+                        .as_ref()
+                        .and_then(|damage| damage.direct_entity.as_ref()),
+                    _ => None,
+                };
+                if let Some(name) = entity.and_then(|entity| entity.custom_name.clone()) {
+                    stack
+                        .components
+                        .insert("minecraft:custom_name".to_owned(), Tag::String(name));
+                }
+            }
+            Self::SetAttributes { modifiers, replace } => {
+                let mut list = if *replace {
+                    Vec::new()
+                } else {
+                    let existing = stack
+                        .components
+                        .get("minecraft:attribute_modifiers")
+                        .cloned()
+                        .or_else(|| {
+                            context.host.as_ref().and_then(|host| {
+                                host.default_component(&stack.item, "minecraft:attribute_modifiers")
+                            })
+                        });
+                    match existing {
+                        Some(Tag::List(ferrite_nbt::List::Compound(list))) => list,
+                        _ => Vec::new(),
+                    }
+                };
+                for modifier in modifiers {
+                    if modifier.slots.is_empty() {
+                        continue;
+                    }
+                    let slot = &modifier.slots[rng
+                        .next_int(i32::try_from(modifier.slots.len()).unwrap_or(i32::MAX))
+                        as usize];
+                    let mut entry = ferrite_nbt::Compound::new();
+                    entry.insert("type".to_owned(), Tag::String(modifier.attribute.clone()));
+                    entry.insert("id".to_owned(), Tag::String(modifier.id.clone()));
+                    entry.insert(
+                        "amount".to_owned(),
+                        Tag::Double(f64::from(modifier.amount.get_float(rng))),
+                    );
+                    entry.insert(
+                        "operation".to_owned(),
+                        Tag::String(modifier.operation.clone()),
+                    );
+                    entry.insert("slot".to_owned(), Tag::String(slot.clone()));
+                    list.push(entry);
+                }
+                stack.components.insert(
+                    "minecraft:attribute_modifiers".to_owned(),
+                    Tag::List(ferrite_nbt::List::Compound(list)),
+                );
+            }
+            Self::SetBannerPattern { patterns, append } => {
+                let mut layers = if *append {
+                    match stack.components.remove("minecraft:banner_patterns") {
+                        Some(Tag::List(ferrite_nbt::List::Compound(list))) => list,
+                        _ => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                };
+                for (pattern, color) in patterns {
+                    let mut layer = ferrite_nbt::Compound::new();
+                    layer.insert("pattern".to_owned(), Tag::String(pattern.clone()));
+                    layer.insert("color".to_owned(), Tag::String(color.clone()));
+                    layers.push(layer);
+                }
+                stack.components.insert(
+                    "minecraft:banner_patterns".to_owned(),
+                    Tag::List(ferrite_nbt::List::Compound(layers)),
+                );
+            }
+            Self::SetBookCover {
+                title,
+                author,
+                generation,
+            } => {
+                let mut book = match stack.components.remove("minecraft:written_book_content") {
+                    Some(Tag::Compound(book)) => book,
+                    _ => {
+                        let mut empty = ferrite_nbt::Compound::new();
+                        let mut title = ferrite_nbt::Compound::new();
+                        title.insert("raw".to_owned(), Tag::String(String::new()));
+                        empty.insert("title".to_owned(), Tag::Compound(title));
+                        empty.insert("author".to_owned(), Tag::String(String::new()));
+                        empty
+                    }
+                };
+                if let Some(title) = title {
+                    let mut raw = ferrite_nbt::Compound::new();
+                    raw.insert("raw".to_owned(), Tag::String(title.clone()));
+                    book.insert("title".to_owned(), Tag::Compound(raw));
+                }
+                if let Some(author) = author {
+                    book.insert("author".to_owned(), Tag::String(author.clone()));
+                }
+                if let Some(generation) = generation {
+                    book.insert("generation".to_owned(), Tag::Int(*generation));
+                }
+                stack.components.insert(
+                    "minecraft:written_book_content".to_owned(),
+                    Tag::Compound(book),
+                );
+            }
+            Self::SetLootTable { table, seed } => {
+                let mut loot = ferrite_nbt::Compound::new();
+                loot.insert("loot_table".to_owned(), Tag::String(table.clone()));
+                if *seed != 0 {
+                    loot.insert("seed".to_owned(), Tag::Long(*seed));
+                }
+                stack
+                    .components
+                    .insert("minecraft:container_loot".to_owned(), Tag::Compound(loot));
+            }
+            Self::ToggleTooltips { toggles } => {
+                let mut display = match stack.components.remove("minecraft:tooltip_display") {
+                    Some(Tag::Compound(display)) => display,
+                    _ => ferrite_nbt::Compound::new(),
+                };
+                let mut hidden = match display.shift_remove("hidden_components") {
+                    Some(Tag::List(ferrite_nbt::List::String(list))) => list,
+                    _ => Vec::new(),
+                };
+                for (component, shown) in toggles {
+                    hidden.retain(|id| id != component);
+                    if !shown {
+                        hidden.push(component.clone());
+                    }
+                }
+                if !hidden.is_empty() {
+                    display.insert(
+                        "hidden_components".to_owned(),
+                        Tag::List(ferrite_nbt::List::String(hidden)),
+                    );
+                }
+                stack.components.insert(
+                    "minecraft:tooltip_display".to_owned(),
+                    Tag::Compound(display),
+                );
+            }
+            Self::SetRandomPotion { options } => {
+                let candidates = match options {
+                    Some(ids) => ids.clone(),
+                    None => context
+                        .host
+                        .as_ref()
+                        .map(|host| host.registry_ids("minecraft:potion"))
+                        .unwrap_or_default(),
+                };
+                if candidates.is_empty() {
+                    return;
+                }
+                let index = rng.next_int(i32::try_from(candidates.len()).unwrap_or(i32::MAX));
+                let mut contents = match stack.components.remove("minecraft:potion_contents") {
+                    Some(Tag::Compound(contents)) => contents,
+                    _ => ferrite_nbt::Compound::new(),
+                };
+                contents.insert(
+                    "potion".to_owned(),
+                    Tag::String(candidates[index as usize].clone()),
+                );
+                stack.components.insert(
+                    "minecraft:potion_contents".to_owned(),
+                    Tag::Compound(contents),
+                );
+            }
+            Self::SetFireworkExplosion {
+                shape,
+                colors,
+                fade_colors,
+                trail,
+                twinkle,
+            } => {
+                let mut star = match stack.components.remove("minecraft:firework_explosion") {
+                    Some(Tag::Compound(star)) => star,
+                    _ => ferrite_nbt::Compound::new(),
+                };
+                if let Some(shape) = shape {
+                    star.insert("shape".to_owned(), Tag::String(shape.clone()));
+                }
+                if let Some(colors) = colors {
+                    star.insert("colors".to_owned(), Tag::IntArray(colors.clone()));
+                }
+                if let Some(fade) = fade_colors {
+                    star.insert("fade_colors".to_owned(), Tag::IntArray(fade.clone()));
+                }
+                if let Some(trail) = trail {
+                    star.insert("has_trail".to_owned(), Tag::Byte(i8::from(*trail)));
+                }
+                if let Some(twinkle) = twinkle {
+                    star.insert("has_twinkle".to_owned(), Tag::Byte(i8::from(*twinkle)));
+                }
+                stack.components.insert(
+                    "minecraft:firework_explosion".to_owned(),
+                    Tag::Compound(star),
                 );
             }
             Self::Discard => stack.count = 0,

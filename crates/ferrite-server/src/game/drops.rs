@@ -67,6 +67,29 @@ impl ferrite_loot::LootHost for ServerLootHost {
         ferrite_item::item_defaults_by_name(item).map_or(64, |defaults| defaults.max_stack_size)
     }
 
+    fn default_component(&self, item: &str, component: &str) -> Option<ferrite_nbt::Tag> {
+        let id = ferrite_item::item_id(item)?;
+        let component = ferrite_item::component_id(component)?;
+        ferrite_item::default_components(id)?.remove(&component)
+    }
+
+    fn registry_ids(&self, registry: &str) -> Vec<String> {
+        ferrite_data::registries::entries(registry)
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| {
+                        if name.contains(':') {
+                            (*name).to_owned()
+                        } else {
+                            format!("minecraft:{name}")
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn block_at(
         &self,
         pos: [i32; 3],
@@ -275,6 +298,7 @@ pub fn block_drop_stacks(
 
 /// Rolls a mob's entity loot table with a player credited for the kill (vanilla
 /// `LivingEntity.dropFromLootTable`), for example leather and beef for a cow.
+#[cfg(test)]
 pub fn mob_drops(
     kind: ferrite_entity::mob::MobKind,
     rng: &mut ferrite_entity::Rng,

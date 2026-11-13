@@ -52,7 +52,7 @@ pub(crate) struct Smelting {
 
 /// Registry data shared by every function of one loaded pack.
 #[derive(Debug, Default)]
-pub(crate) struct GameData {
+pub struct GameData {
     pub(crate) item_tags: ItemTags,
     pub(crate) enchantments: Vec<Enchantment>,
     pub(crate) smelting: Vec<Smelting>,
