@@ -50,6 +50,9 @@ pub enum Criterion {
     /// `nether_travel`: the distance between where the player entered the Nether and where they
     /// came back out.
     NetherTravel(DistanceCheck),
+    /// A trigger whose conditions are a few plain predicates (an item, an entity type, a loot
+    /// table, a level, the player's height, the damage's direct entity).
+    Plain(Plain),
     /// A trigger this server cannot evaluate (or one whose conditions are richer than the
     /// supported shape); the payload is the trigger id, read by [`coverage`].
     #[cfg_attr(not(test), allow(dead_code))]
@@ -633,6 +636,166 @@ pub enum Event {
     /// The player came back from the Nether; `delta` is where they stand now minus where they
     /// entered the Nether, in the overworld (`nether_travel`).
     NetherTravel { delta: [f64; 3] },
+    /// One of the [`PLAIN_TRIGGERS`] fired.
+    Plain(PlainEvent),
+}
+
+/// The triggers [`Plain`] criteria cover. Each one has an emission site in the world loop.
+pub const PLAIN_TRIGGERS: &[&str] = &[
+    "minecraft:used_totem",
+    "minecraft:brewed_potion",
+    "minecraft:construct_beacon",
+    "minecraft:enchanted_item",
+    "minecraft:villager_trade",
+    "minecraft:fishing_rod_hooked",
+    "minecraft:player_hurt_entity",
+];
+
+/// The plain predicates of one criterion; an empty list or `None` matches anything.
+#[derive(Debug, Clone, Default)]
+pub struct Plain {
+    pub trigger: String,
+    /// Item ids or `#tags` of the item the trigger names.
+    pub items: Vec<String>,
+    /// Entity type ids or `#tags` of the entity the trigger names.
+    pub entities: Vec<String>,
+    pub table: Option<String>,
+    pub level: Option<Range>,
+    /// The height the player must stand at.
+    pub player_y: Option<Range>,
+    /// Entity types of the damage's direct entity (`player_hurt_entity`).
+    pub direct: Vec<String>,
+    /// The damage must be a projectile (`#minecraft:is_projectile`).
+    pub projectile: bool,
+}
+
+/// What happened, for a [`Plain`] criterion to match.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlainEvent {
+    pub trigger: &'static str,
+    pub item: Option<String>,
+    pub entity: Option<String>,
+    pub table: Option<String>,
+    pub level: Option<i32>,
+    pub player_y: f64,
+    pub direct: Option<String>,
+    pub projectile: bool,
+}
+
+impl Plain {
+    fn matches(&self, event: &PlainEvent) -> bool {
+        let named = |wanted: &[String], kind: &str, got: &Option<String>| {
+            wanted.is_empty()
+                || got
+                    .as_deref()
+                    .is_some_and(|id| id_matches(wanted, kind, id))
+        };
+        self.trigger == event.trigger
+            && named(&self.items, "item", &event.item)
+            && named(&self.entities, "entity_type", &event.entity)
+            && named(&self.direct, "entity_type", &event.direct)
+            && self
+                .table
+                .as_ref()
+                .is_none_or(|wanted| event.table.as_ref().is_some_and(|got| got == wanted))
+            && self.level.as_ref().is_none_or(|range| {
+                event
+                    .level
+                    .is_some_and(|level| range.contains(f64::from(level)))
+            })
+            && self
+                .player_y
+                .as_ref()
+                .is_none_or(|range| range.contains(event.player_y))
+            && (!self.projectile || event.projectile)
+    }
+}
+
+/// Reads an entity predicate that asks for nothing but an entity type (a plain id, a list or a
+/// `#tag`).
+fn entity_types(entity: &serde_json::Value) -> Option<Vec<String>> {
+    let predicate = entity["predicate"].as_object()?;
+    if entity["type"] != "minecraft:entity_properties"
+        || entity["entity"] != "this"
+        || predicate.len() != 1
+    {
+        return None;
+    }
+    let list = alternatives(predicate.get("minecraft:entity_type")?);
+    (!list.is_empty()).then_some(list)
+}
+
+/// Reads the conditions of a [`PLAIN_TRIGGERS`] criterion, or `None` when it asks for more than
+/// a [`Plain`] checks.
+fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
+    let mut out = Plain {
+        trigger: trigger.to_owned(),
+        ..Plain::default()
+    };
+    let Some(object) = conditions.as_object() else {
+        return conditions.is_null().then_some(out);
+    };
+    for (key, value) in object {
+        match key.as_str() {
+            "item" => {
+                let item = value.as_object()?;
+                if item.len() != 1 {
+                    return None;
+                }
+                out.items = alternatives(item.get("items")?);
+            }
+            "entity" => out.entities = entity_types(value)?,
+            "loot_tables" => out.table = Some(value.as_str()?.to_owned()),
+            "level" => out.level = Some(range_of(value)?),
+            "player" => {
+                let location = value["predicate"].as_object()?;
+                if value["type"] != "minecraft:entity_properties"
+                    || value["entity"] != "this"
+                    || location.len() != 1
+                {
+                    return None;
+                }
+                let position = location.get("minecraft:location")?["position"].as_object()?;
+                if position.len() != 1 {
+                    return None;
+                }
+                out.player_y = Some(range_of(position.get("y")?)?);
+            }
+            "damage" => {
+                let kind = value.as_object()?.get("type")?.as_object()?;
+                if value.as_object()?.len() != 1 {
+                    return None;
+                }
+                for (key, value) in kind {
+                    match key.as_str() {
+                        "direct_entity" => {
+                            let direct = value.as_object()?;
+                            if direct.len() != 1 {
+                                return None;
+                            }
+                            out.direct = alternatives(direct.get("minecraft:entity_type")?);
+                        }
+                        "tags" => {
+                            let tags = value.as_array()?;
+                            let [tag] = tags.as_slice() else { return None };
+                            if tag["id"] != "#minecraft:is_projectile" || tag["expected"] != true {
+                                return None;
+                            }
+                            out.projectile = true;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Queues a [`PlainEvent`] for the world loop.
+pub fn push_plain(player: Uuid, event: PlainEvent) {
+    push_event(player, Event::Plain(event));
 }
 
 /// Events since the last drain, `(player, event)`.
@@ -657,6 +820,7 @@ pub fn criteria_for_event(event: &Event) -> Vec<String> {
                 (Criterion::NetherTravel(wanted), Event::NetherTravel { delta }) => {
                     wanted.matches(*delta)
                 }
+                (Criterion::Plain(wanted), Event::Plain(happened)) => wanted.matches(happened),
                 _ => false,
             };
             if hit {
@@ -831,6 +995,8 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                 .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Consumes),
             Some("minecraft:player_killed_entity") => kill_type(&c["conditions"])
                 .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Kills),
+            Some(id) if PLAIN_TRIGGERS.contains(&id) => plain(id, &c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Plain),
             _ => Criterion::Other(trigger.clone()),
         };
         criteria.insert(name.clone(), kind);
@@ -924,6 +1090,11 @@ fn trigger_of(criterion: &Criterion) -> &'static str {
         Criterion::KilledByEntity => "minecraft:entity_killed_player",
         Criterion::NetherTravel(_) => "minecraft:nether_travel",
         Criterion::HasEffects(_) => "minecraft:effects_changed",
+        Criterion::Plain(plain) => PLAIN_TRIGGERS
+            .iter()
+            .find(|id| **id == plain.trigger)
+            .copied()
+            .unwrap_or(""),
         Criterion::Other(_) => "",
     }
 }
@@ -1508,6 +1679,111 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    fn plain(trigger: &'static str) -> PlainEvent {
+        PlainEvent {
+            trigger,
+            ..PlainEvent::default()
+        }
+    }
+
+    fn fired(event: PlainEvent) -> Vec<String> {
+        criteria_for_event(&Event::Plain(event))
+    }
+
+    #[test]
+    fn plain_triggers_complete_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let totem = fired(PlainEvent {
+            item: Some("minecraft:totem_of_undying".into()),
+            ..plain("minecraft:used_totem")
+        });
+        assert!(has(
+            &totem,
+            "minecraft:adventure/totem_of_undying#used_totem"
+        ));
+        assert!(fired(plain("minecraft:used_totem")).is_empty());
+        assert!(has(
+            &fired(plain("minecraft:brewed_potion")),
+            "minecraft:nether/brew_potion#potion"
+        ));
+        assert!(has(
+            &fired(plain("minecraft:enchanted_item")),
+            "minecraft:story/enchant_item#enchanted_item"
+        ));
+        let beacon = |level| {
+            fired(PlainEvent {
+                level: Some(level),
+                ..plain("minecraft:construct_beacon")
+            })
+        };
+        assert!(has(&beacon(1), "minecraft:nether/create_beacon#beacon"));
+        assert!(!has(
+            &beacon(1),
+            "minecraft:nether/create_full_beacon#beacon"
+        ));
+        assert!(has(
+            &beacon(4),
+            "minecraft:nether/create_full_beacon#beacon"
+        ));
+        let trade = |y| {
+            fired(PlainEvent {
+                player_y: y,
+                ..plain("minecraft:villager_trade")
+            })
+        };
+        assert!(has(&trade(64.0), "minecraft:adventure/trade#traded"));
+        let height = "minecraft:adventure/trade_at_world_height#trade_at_world_height";
+        assert!(!has(&trade(64.0), height));
+        assert!(has(&trade(319.0), height));
+        let caught = |item: &str| {
+            fired(PlainEvent {
+                item: Some(item.into()),
+                ..plain("minecraft:fishing_rod_hooked")
+            })
+        };
+        assert!(has(
+            &caught("minecraft:cod"),
+            "minecraft:husbandry/fishy_business#cod"
+        ));
+        assert!(!has(
+            &caught("minecraft:cod"),
+            "minecraft:husbandry/fishy_business#salmon"
+        ));
+        assert!(caught("minecraft:stick").is_empty());
+        let hurt = |direct: &str, projectile| {
+            fired(PlainEvent {
+                direct: Some(direct.into()),
+                projectile,
+                ..plain("minecraft:player_hurt_entity")
+            })
+        };
+        let arrow = "minecraft:adventure/shoot_arrow#shot_arrow";
+        assert!(has(&hurt("minecraft:arrow", true), arrow));
+        assert!(has(&hurt("minecraft:spectral_arrow", true), arrow));
+        assert!(!has(&hurt("minecraft:trident", true), arrow));
+        assert!(has(
+            &hurt("minecraft:trident", true),
+            "minecraft:adventure/throw_trident#shot_trident"
+        ));
+        // A melee hit has no projectile as its direct entity.
+        assert!(hurt("minecraft:player", false).is_empty());
+    }
+
+    #[test]
+    fn plain_conditions_the_server_cannot_check_stay_unevaluated() {
+        let counted = serde_json::json!({"item": {"items": "minecraft:cod", "count": 2}});
+        assert!(super::plain("minecraft:fishing_rod_hooked", &counted).is_none());
+        let rod = serde_json::json!({"rod": {"items": "minecraft:fishing_rod"}});
+        assert!(super::plain("minecraft:fishing_rod_hooked", &rod).is_none());
+        let blocked = serde_json::json!({
+            "damage": {"blocked": true, "type": {"tags": [{"expected": true, "id": "#minecraft:is_projectile"}]}}
+        });
+        assert!(super::plain("minecraft:player_hurt_entity", &blocked).is_none());
     }
 
     #[test]

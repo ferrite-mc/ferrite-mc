@@ -396,6 +396,10 @@ pub struct PlayerHit {
 /// Mobs a player's arrow killed since the region last looked: shooter and entity type.
 pub static KILLS: std::sync::Mutex<Vec<(Uuid, &'static str)>> = std::sync::Mutex::new(Vec::new());
 
+/// Mobs a player's projectile hurt (vanilla `player_hurt_entity` with the projectile as the direct
+/// entity) since the region last looked: shooter and the projectile's entity type name.
+pub static HURT: std::sync::Mutex<Vec<(Uuid, &'static str)>> = std::sync::Mutex::new(Vec::new());
+
 fn remove(store: &mut EntityStore, key: EntityKey) {
     if let Some(flags) = store.flags_mut(key) {
         flags.set(Flags::REMOVED, true);
@@ -511,6 +515,13 @@ pub fn tick_arrows_with_parts(
                 CHANNELED.lock().unwrap_or_else(|e| e.into_inner()).push(at);
             }
             if let Some(owner) = arrow.owner {
+                if hurt.is_some_and(|h| !matches!(h, mob::Hurt::Immune))
+                    && let Some(kind) = store.data(key).and_then(kind_of)
+                {
+                    HURT.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((owner, kind.entity_name()));
+                }
                 mob::credit(store, target, owner);
                 mob::retaliate(store, target, owner);
                 if matches!(hurt, Some(mob::Hurt::Died))
@@ -852,6 +863,33 @@ mod tests {
         assert!(mob::state(&store, cow).is_some_and(|mob| mob.is_dead()));
         let kills = KILLS.lock().unwrap();
         assert!(kills.contains(&(shooter, "minecraft:cow")));
+    }
+
+    #[test]
+    fn a_projectile_that_hurts_a_mob_is_reported_for_the_advancement_trigger() {
+        let world = TestWorld::flat(64);
+        let archer = Uuid::from_u128(0xa7c4e5);
+        let thrower = Uuid::from_u128(0x7a1de7);
+        // One cow per projectile: a second hit inside the hurt cooldown would not count.
+        for (shooter, name) in [(archer, "arrow"), (thrower, "trident")] {
+            let mut store = EntityStore::default();
+            store.insert(new_mob(
+                MobKind::Cow,
+                Vec3::new(0.5, 64.0, 6.0),
+                &mut Rng::new(2),
+            ));
+            let from = Vec3::new(0.5, 64.9, 0.5);
+            let vel = Vec3::new(0.0, 0.0, 2.0);
+            if name == "arrow" {
+                store.insert(new_arrow(from, vel, 2.0, Some(shooter), &mut Rng::new(1)));
+            } else {
+                store.insert(new_trident(from, vel, Some(shooter)));
+            }
+            for _ in 0..60 {
+                tick_arrows(&mut store, &world, &[]);
+            }
+            assert!(HURT.lock().unwrap().contains(&(shooter, name)), "{name}");
+        }
     }
 
     #[test]

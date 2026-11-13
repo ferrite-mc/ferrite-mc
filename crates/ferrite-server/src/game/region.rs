@@ -1628,10 +1628,25 @@ impl TraderSync<'_> {
         }
         let xp = player.take_trader_xp();
         let sold = merge_trader_trades(self.entities, player.uuid, trader, &trades);
+        push_trades(player.uuid, player.pos[1], sold);
         if sold > 0 || xp > 0 {
             add_trader_xp(self.entities, trader, xp);
             self.refresh(player);
         }
+    }
+}
+
+/// `AbstractVillager.notifyTrade` -> `CriteriaTriggers.TRADE`, once per sale merged.
+fn push_trades(player: Uuid, y: f64, sold: i32) {
+    for _ in 0..sold {
+        super::recipe_unlock::push_plain(
+            player,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:villager_trade",
+                player_y: y,
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -3115,6 +3130,14 @@ impl Player {
         if !matches!(self.gamemode, 1 | 3) {
             self.inventory.remove(slot, 1);
         }
+        super::recipe_unlock::push_plain(
+            self.uuid,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:used_totem",
+                item: Some("minecraft:totem_of_undying".into()),
+                ..Default::default()
+            },
+        );
         self.survival.health = 1.0;
         self.survival.dead = false;
         self.survival.death_cause = None;
@@ -6679,7 +6702,10 @@ impl Region {
             })
             .collect();
         for (player, trader, trades, xp) in open {
-            merge_trader_trades(&mut self.entities, player, trader, &trades);
+            let sold = merge_trader_trades(&mut self.entities, player, trader, &trades);
+            if let Some(at) = self.players.get(&player) {
+                push_trades(player, at.pos[1], sold);
+            }
             add_trader_xp(&mut self.entities, trader, xp);
         }
     }
@@ -8369,6 +8395,21 @@ impl Region {
             }
         }
         self.strike_channeled(ctx);
+        for (owner, kind) in
+            std::mem::take(&mut *arrow::HURT.lock().unwrap_or_else(|e| e.into_inner()))
+        {
+            // `ServerPlayer.awardHit`-style `PLAYER_HURT_ENTITY`: the projectile is the damage's
+            // direct entity, and every arrow and trident is a `#minecraft:is_projectile` source.
+            super::recipe_unlock::push_plain(
+                owner,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:player_hurt_entity",
+                    direct: Some(format!("minecraft:{kind}")),
+                    projectile: true,
+                    ..Default::default()
+                },
+            );
+        }
         let shot: Vec<_> =
             std::mem::take(&mut *arrow::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
         super::recipe_unlock::KILLS
@@ -9717,6 +9758,19 @@ impl Region {
         };
         if let bobber::Reel::Caught { .. } = outcome {
             for stack in super::drops::fishing_catch(&rod, &mut self.rng) {
+                // `FishingHook.retrieve` -> `FISHING_ROD_HOOKED`: the `item` predicate is tried
+                // against each caught stack.
+                super::recipe_unlock::push_plain(
+                    p.uuid,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:fishing_rod_hooked",
+                        item: u16::try_from(stack.item_id)
+                            .ok()
+                            .and_then(ferrite_item::item_name)
+                            .map(str::to_owned),
+                        ..Default::default()
+                    },
+                );
                 let vel = bobber::catch_velocity(at, eye);
                 self.entities
                     .insert(item::new_item(at, vel, stack, &mut self.rng));
@@ -10351,8 +10405,25 @@ impl Region {
             let mut data = super::beacon::load(source, pos);
             let levels = super::beacon::scan_levels(source, pos);
             if data.levels != levels {
+                let was_active = data.levels > 0;
                 data.levels = levels;
                 super::beacon::store(source, pos, &data);
+                if !was_active && levels > 0 {
+                    // `BeaconBlockEntity.tick`: on activation every player within the box
+                    // `(x, y - 4, z)` grown by (10, 5, 10) gets `construct_beacon`.
+                    for player in self.players.values() {
+                        if super::beacon::near_activation(pos, player.pos) {
+                            super::recipe_unlock::push_plain(
+                                player.uuid,
+                                super::recipe_unlock::PlainEvent {
+                                    trigger: "minecraft:construct_beacon",
+                                    level: Some(levels),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                }
             }
             if levels <= 0 {
                 continue;
