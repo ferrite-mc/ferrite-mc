@@ -419,15 +419,16 @@ fn block_label(block: &str) -> String {
     block.to_owned()
 }
 
-/// Vanilla `RESPONSE_WITH(OUT)_LOOT_TABLE`: one stack reads "Dropped 3 Stone", anything else
-/// "Dropped N items"; a table adds "from loot table <id>". N is the sum of the stack counts.
+/// Vanilla `RESPONSE_WITH(OUT)_LOOT_TABLE` (read from `LootCommand` and
+/// `CommandResponseTracker`): every stack a target accepted is tracked once, one tracked stack
+/// reads "Dropped 3 Stone" (its own count), anything else "Dropped N items" where N is the
+/// number of tracked stacks, not the sum of their counts. A table adds "from loot table <id>".
 pub fn success_feedback(
-    stacks: &[ferrite_item::ItemStack],
+    tracked: &[ferrite_item::ItemStack],
     table: Option<&str>,
 ) -> (&'static str, Vec<String>) {
-    let total: i32 = stacks.iter().map(|stack| stack.count).sum();
     let mut args = Vec::new();
-    let key = match (stacks, table) {
+    let key = match (tracked, table) {
         ([one], with_table) => {
             args.push(one.count.to_string());
             args.push(item_display(one.item));
@@ -438,7 +439,7 @@ pub fn success_feedback(
             }
         }
         (_, with_table) => {
-            args.push(total.to_string());
+            args.push(tracked.len().to_string());
             if with_table.is_some() {
                 "commands.drop.success.multiple_with_table"
             } else {
@@ -455,7 +456,7 @@ pub fn success_feedback(
 fn give(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
     let Rolled { stacks, table } = rolled(ctx, from)?;
     let targets = resolved_targets(ctx, "players")?;
-    let total: i32 = stacks.iter().map(|stack| stack.count).sum();
+    let tracked = i32::try_from(stacks.len() * targets.len()).unwrap_or(i32::MAX);
     send(
         ctx.source(),
         Action::LootGive {
@@ -464,18 +465,22 @@ fn give(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
             table,
         },
     )?;
-    Ok(total)
+    Ok(tracked)
 }
 
 fn insert_loot(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandError> {
-    let stacks = rolled(ctx, from)?.stacks;
+    let Rolled { stacks, table } = rolled(ctx, from)?;
     send(
         ctx.source(),
         Action::Slots {
             mode: SlotMode::Insert,
             target: SlotTarget::Block(super::commands_item::block_pos(ctx, "targetPos")?),
             slots: String::new(),
-            source: SlotSource::Stacks(stacks),
+            source: SlotSource::Loot {
+                stacks,
+                table,
+                count: None,
+            },
         },
     )
 }
@@ -487,26 +492,17 @@ fn spawn_loot(ctx: &CommandContext<Source>, from: From) -> Result<i32, CommandEr
     };
     let source = ctx.source();
     let pos = coords.resolve(source.origin, source.yaw, source.pitch);
-    let total: i32 = stacks.iter().map(|stack| stack.count).sum();
+    let tracked = i32::try_from(stacks.len()).unwrap_or(i32::MAX);
     send(source, Action::DropItems { pos, stacks, table })?;
-    Ok(total)
+    Ok(tracked)
 }
 
-/// `replace`: `<slot> [<count>]` names `count` consecutive slots starting at `slot`.
+/// `replace`: `<slot> [<count>]` names `count` consecutive slots starting at `slot`; vanilla
+/// defaults `count` to the number of rolled stacks, and slots past the stacks are emptied.
 fn replace(ctx: &CommandContext<Source>, from: From, block: bool) -> Result<i32, CommandError> {
-    let stacks = rolled(ctx, from)?.stacks;
-    let slot = ctx.string("slot").unwrap_or_default();
-    let count = ctx.integer("count").unwrap_or(1).max(1);
-    let slots = match slot
-        .rsplit_once('.')
-        .and_then(|(p, n)| Some((p, n.parse::<i32>().ok()?)))
-    {
-        Some((prefix, first)) if count > 1 => (0..count)
-            .map(|i| format!("{prefix}.{}", first + i))
-            .collect::<Vec<_>>()
-            .join(","),
-        _ => slot.to_owned(),
-    };
+    let Rolled { stacks, table } = rolled(ctx, from)?;
+    let slot = ctx.string("slot").unwrap_or_default().to_owned();
+    let count = ctx.integer("count");
     let target = if block {
         SlotTarget::Block(super::commands_item::block_pos(ctx, "targetPos")?)
     } else {
@@ -515,10 +511,14 @@ fn replace(ctx: &CommandContext<Source>, from: From, block: bool) -> Result<i32,
     send(
         ctx.source(),
         Action::Slots {
-            mode: SlotMode::Replace,
+            mode: SlotMode::Override,
             target,
-            slots,
-            source: SlotSource::Stacks(stacks),
+            slots: slot,
+            source: SlotSource::Loot {
+                stacks,
+                table,
+                count,
+            },
         },
     )
 }
@@ -690,7 +690,11 @@ mod tests {
         let two = [stack("minecraft:stone", 64), stack("minecraft:stone", 6)];
         let (key, args) = success_feedback(&two, None);
         assert_eq!(key, "commands.drop.success.multiple");
-        assert_eq!(args, ["70"], "the total is the sum of the counts");
+        assert_eq!(
+            args,
+            ["2"],
+            "the number is the tracked stacks, not their counts"
+        );
         let (key, args) = success_feedback(&[], Some("minecraft:entities/zombie"));
         assert_eq!(key, "commands.drop.success.multiple_with_table");
         assert_eq!(args, ["0", "minecraft:entities/zombie"]);
