@@ -72,7 +72,7 @@ server-side only.
 
 - `Server#createWorld`/`unloadWorld` are implemented (runtime worlds, section 8). Creator options
   Ferrite cannot honour still throw `UnsupportedOperationException`.
-- `World#sendBlockUpdate` supports signs only. `World#unloadChunk` does not force-unload a live
+- `Player#sendBlockUpdate` supports signs, chests, barrels, shulker boxes and furnaces; any other tile state (banner, skull, ...) throws `UnsupportedOperationException` because the host has no block-entity model for it (`plugins/tile_update.rs` `FAMILIES`). `World#unloadChunk` does not force-unload a live
   chunk: it succeeds after unload and returns false while a player or `/forceload` holds it.
 - Ender pearls now route cross-region landings through the world loop to the owner's region. A
   landing after the player changes dimension is ignored.
@@ -80,12 +80,26 @@ server-side only.
   `CraftMagicNumbers`) stay `NoSuchMethodError` by design.
 - Block snapshots are opt-in, so `Block#getType` for arbitrary coordinates throws.
 
+### Plugin lane status (verified against code 2026-11-13; not verified with a real client)
+
+| # | Item | Status | Evidence |
+|---|---|---|---|
+| 1 | Runtime world: persist/restore player world, join snapshot, crystal routing, immediate world after dimension change | done | `container.rs` writes `PlayerData::in_world`; join inserts `player_worlds` before `plugin_location`; `Signal::ChangeDimension` calls `update_player_location` right after `player_worlds.insert` (that handler is inside the coordinator loop and has no isolated test; only the helpers are tested); tests `playerdata` in_world round trip, `plugin_location_reports_the_players_current_world`, `crystal_from_a_runtime_world_player_lands_in_that_world` |
+| 2 | `Player#breakBlock`, `chat`, 1-arg `broadcastSlotBreak`, `broadcastHurtAnimation`, `playPickupItemAnimation` | done | Java `PlayerMisc`/`PlayerSight` + stubs; host `plugins/playerops.rs`, `broadcast.rs`, `network.rs`; JUnit `PlayerActionsTest`, host tests in those modules |
+| 3a | `Player#sendBlockUpdate` beyond signs | partly done, rest blocked | containers and furnaces done; banner/skull blocked: no block-entity model (`tile_update.rs` `FAMILIES`), Java refuses with `UnsupportedOperationException` |
+| 3b | `Player#playEffect` data types | done for confirmed call sites | `FerriteEffectData.java` (Number, Boolean for 4 events, Color, Axis, BlockData, BlockFace for `WHITE_SMOKE_SHOOT`); `JukeboxSong` and other Booleans/BlockFaces refused: registry ids of data-driven registries are not in the generated reports |
+| 4 | Cartography table and map store | done | `game/map_menu.rs`, `game/map.rs` `MapStore::allocate`, tests listed in `plugin-stubs-status.md` |
+| 5 | Paper lifecycle manager | done for `LifecycleEvents.COMMANDS` | `FerriteLifecycleManager`, `FerriteLifecycleTest`; bootstrap-only events refused (host does not run `PluginBootstrap`) |
+| 6 | World environments | NORMAL/NETHER/THE_END only; others refused | `FerriteServer.createWorld` throws; host double-checks in `main.rs`; `ApiSurfaceTest` covers the refusal |
+| 7 | `AnvilChunkSource::mark_modified` | done | the method is `#[cfg(test)]`; real edits go through `set_block`, and the gap-7 test shows a plugin-set block surviving unload/reopen |
+| 8 | Gap-7 steps and overlapping commands | done | gap-7 steps run on the command thread, no async scheduler; `plugin_command_world::overlapping_plugin_commands_are_serialized_and_leave_world_state_intact` |
+
 ## 4. World interaction and gameplay
 
 - Waterlogged edge cases, fluid/redstone interaction, flow into unloaded chunks.
 - Neighbour-update ordering and placement rules; audit crop growth and gravity-block chains against
   vanilla before implementing.
-- Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is refused: locking and zooming out need a map data model (saved map store, map id allocator, typed `map_id`) that does not exist yet.
+- Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is implemented (`game/map_menu.rs` over `game/map.rs` `MapStore`; zoom out, lock, clone, restart persistence are unit-tested).
 - Maps: only the visible cursor decoration is sent; hidden cursors and styled captions are refused.
 
 ## 5. Protocol and networking

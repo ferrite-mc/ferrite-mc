@@ -122,7 +122,7 @@ CMI가 동작한다고 말할 수 없다.
   `refreshChunk`/`getChunkGenerationState`/`unloadChunk`, 기온·습도(바이옴 데이터, 높이 보정은 노이즈 없이), 전투 추적기(호스트가 보고한 피해를 기록, 낙하 위치 종류는 GENERIC),
   눈덩이·달걀·엔더 진주·작은 화염구(플레이어가 던질 수 있고 `launchProjectile`로도 발사; 진주는 같은 리전의 던진 사람만 순간이동 + 낙하 피해 5, 달걀은 닭을 낳지 않음; 작은 화염구는 직선 비행, 착탄 지점의 몹에 5 피해와 100틱 점화, 불 블록 생성).
 - **장부만 있는 것:** 어깨 앵무새(`set/get/releaseShoulderEntity*`는 Java에서 기억만 하고 게임엔 앵무새도, 클라이언트 표시도 없다).
-- **마지막에 붙인 것:** 큰 화염구(직선 비행, 닿는 곳에서 불 붙는 위력 1 폭발), `findLightningRod/Target`(불러온 열의 맨 위 블록만 보고 128칸 안에서 가장 가까운 피뢰침을 찾는다), `sendBlockUpdate`는 표지판만(다른 타일 상태는 `UnsupportedOperationException`).
+- **마지막에 붙인 것:** 큰 화염구(직선 비행, 닿는 곳에서 불 붙는 위력 1 폭발), `findLightningRod/Target`(불러온 열의 맨 위 블록만 보고 128칸 안에서 가장 가까운 피뢰침을 찾는다), `sendBlockUpdate`는 표지판·상자·통·셜커 상자·화로류(그 밖의 타일 상태는 `UnsupportedOperationException`).
 - **아이템 메타:** `PlayerInventory.setItem` 등이 이름·로어·인챈트·불괴·커스텀 모델 데이터·수리 비용·내구도를 실제 슬롯 컴포넌트로 보낸다(`setItemMeta`). 아이템 PDC는 `BYTE`·`SHORT`·`INTEGER`·`LONG`·`FLOAT`·`DOUBLE`·`BOOLEAN`·`STRING`·`BYTE_ARRAY`·`INTEGER_ARRAY`·`LONG_ARRAY`를 키와 타입을 보존해 `minecraft:custom_data`로 보내고, `serializeToBytes`/`readFromBytes`도 지원한다. 아이템 플래그는 `minecraft:tooltip_display`로 보내며 `HIDE_ADDITIONAL_TOOLTIP`은 26.3에 개별 컴포넌트가 없어 전체 툴팁 숨김으로 근사한다. 컨테이너/리스트 PDC 타입과 책 같은 나머지 메타는 조용히 버리지 않고 `UnsupportedOperationException`. 실제 클라이언트 렌더링은 미검증.
 - **월드젠 쪽:** `World#getStructures(x,z[,Structure])` 구현됨(호스트 op 10 `structure starts` → `getStructureStarts(int,int)` → `GeneratedStructure`, 조각(`getPieces`)은 비어 있음). `createExplorerMap`(Server 3개)은 가장 가까운 구조물을 호스트로 찾아 그 중심의 `MapView`가 달린 FILLED_MAP을 돌려준다(못 찾으면 null). 지형 렌더링과 마커 커서는 없고, 맵 연결(`MapMeta`)은 Java 쪽 메타에만 있어 Rust 아이템(material+amount)로는 전달되지 않는다.
   (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
@@ -193,7 +193,7 @@ CMI가 동작한다고 말할 수 없다.
 - `sendMap`은 보이는 커서 장식을 보낸다. 숨김 커서는 26.3 decoration 레코드에 visibility 비트가 없어 보내지 않으며, 스타일·번역 캡션은 거부한다. 기후 높이 보정은 노이즈를 무시한다.
 - 어깨 앵무새는 장부만 있고 화면에는 안 나온다.
 - 아이템 메타: 책 메타처럼 이름·로어·인챈트·불괴·모델·수리비·내구도·PDC·아이템 플래그 밖의 메타를 `setItem`으로 쓰는 경로는 거부한다. PDC는 위 원시/배열 타입만 지원하며, `HIDE_ADDITIONAL_TOOLTIP`은 전체 툴팁 숨김으로 근사한다.
-- `unloadChunk` 강제 언로드 없음. `findLightningRod`는 불러온 열의 맨 위 블록만 본다. `sendBlockUpdate`는 표지판만.
+- `unloadChunk` 강제 언로드 없음. `findLightningRod`는 불러온 열의 맨 위 블록만 본다. `Player#sendBlockUpdate`는 표지판·컨테이너·화로류만 보낸다(배너·머리 등은 호스트에 블록 엔티티 모델이 없어 거부, 근거: `plugins/tile_update.rs`의 `FAMILIES` 7종과 `PlayerMisc.sendBlockUpdate`).
 - 실제 마인크래프트 클라이언트에서 렌더링은 한 번도 확인하지 못했다(단위·Gradle 테스트만).
 - 전체 `cargo test --workspace`에서 `chest_contents_are_shared_saved_and_spilled_when_broken`가 부하 시 한 번 실패했고 단독 실행은 통과했다(불안정 테스트로 의심, 원인 미조사).
 - 엔드와 피스톤은 `main`에 병합되어 서버 측 동작과 봇/단위 테스트가 있다. 남은 것은 실제 클라이언트
@@ -203,4 +203,4 @@ CMI가 동작한다고 말할 수 없다.
 - **셜커 상자 / 모루 / 지도 제작대 (W6 후속):**
   - 셜커 상자(16색 + 무색)는 `minecraft:shulker_box` 메뉴(27칸, 제목 `container.shulkerBox`)로 열리고 내용물은 모든 색이 공유하는 `minecraft:shulker_box` 블록 엔티티의 `Items`에 저장된다. 셜커 상자는 칸 클릭·Shift 클릭·호퍼·드로퍼 모두에서 들어가지 않는다(중첩 금지). 부수면 내용물이 바닥에 흩어진다. 바닐라는 루트 테이블 `copy_components`로 내용물을 아이템에 담아 떨어뜨리지만 `ferrite-loot`이 `copy_components`를 불투명 처리해 적용하지 않으므로, 내용물을 잃지 않도록 흩뿌리는 쪽을 택했다(바닐라와 다름). 플러그인이 `Bukkit.createInventory(…, InventoryType.SHULKER_BOX)`로 만든 27칸 인벤토리는 `OpenInventory`의 `shulker` 플래그로 셜커 메뉴로 열린다(다른 크기의 셜커 인벤토리는 거부).
   - 모루: 두 번째 칸의 마법 부여 책/같은 아이템의 마법이 합쳐진다. 같은 레벨은 +1, 다른 레벨은 높은 쪽, 최대 레벨 상한, `supported_items`에 없거나 `exclusive_set`과 충돌하는 마법은 제외(모두 제외되면 결과 없음), 비용은 `anvil_cost × 결과 레벨`(책이면 가중치 절반, 최소 1)이다. 마법 데이터는 생성된 `enchantment/*.json`과 `tags/`에서 읽는다. 크리에이티브 무시(`hasInfiniteMaterials`)와 책 이름 변경 세부 사항은 구현하지 않았다. 같은 아이템 내구도 합치기는 실제로 수리될 때만 2레벨을 받도록 고쳤다.
-  - 지도 제작대: 계속 거부한다(`openCartographyTable`은 호스트가 처리하지 않는다). 잠금(유리판)과 축소(종이)는 새 지도 id를 만들고 저장된 지도 데이터(축척, 잠금, 중심, 색상, 장식)를 복사해야 하는데 서버에는 지도 데이터 저장소(`data/map_<id>.dat`), id 할당기(`idcounts`), 타입이 있는 `map_id` 컴포넌트가 없다(`minecraft:map_id`는 불투명, `sendMapData`는 패킷만 보낸다). 복제만 되는 메뉴는 가짜 구현이라 만들지 않았다.
+  - 지도 제작대: **구현됨**(2026-11-13 코드로 확인). `openCartographyTable`은 `OpenStation("cartography")`로 메뉴를 열고(`plugins/inventory.rs`), 결과(축소·잠금·복제)와 새 지도 생성은 저장된 지도 저장소(`game/map.rs`의 `MapStore::allocate`)를 거치는 `game/map_menu.rs`가 맡는다. 단위 테스트: `map_menu::zooming_out_creates_a_blank_larger_map_and_keeps_the_source`, `locking_copies_the_pixels_into_a_new_locked_map`, `cloning_shares_the_id_and_creates_no_file`, `a_new_map_survives_a_restart`, `two_players_taking_at_once_get_distinct_maps`. 실제 클라이언트로는 확인하지 못했다.

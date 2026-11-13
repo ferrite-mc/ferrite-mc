@@ -140,7 +140,6 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | HostBridge 반환 변환 | `HostBridge#call`의 미지원 반환 타입 | Java 브리지 |
 | BlockData | `BlockData#<미지원 메서드>` (재질별) | Java `FerriteBlockData` |
 | 청크 스냅샷/청크 데이터 | `ChunkSnapshot#contains(Biome)`; `ChunkData#getBiome` | 호스트 청크/바이옴 데이터 |
-| Paper 생명주기 | `InternalAPIBridge#createPluginLifecycleEventManager` | Paper lifecycle API |
 | 포션/인챈트/레지스트리 | `Enchantment` 속성, `RegistryAccess` 중 `GameRule`(`game_rule`)과 `MemoryKey`(`memory_module_type`)만 미지원 — 생성된 보고서에 값 타입·기본값이 없고 `MemoryKey` 생성자가 private이라 `UnsupportedOperationException("Ferrite: registry minecraft:... is not available: ...")`로 거부한다. 그 밖의 `RegistryKey` 레지스트리 41개는 생성 데이터로 `size`/`keyStream`/`stream`/`iterator`/`get`이 동작한다(내장 레지스트리는 `registries.json`, 데이터 기반 레지스트리 21개는 `data/minecraft/<이름>/*.json`, `Particle`/`PotionType`은 enum 상수를 키로 색인, `MusicInstrument`는 `instrument/*.json`의 `use_duration`·`range`·`sound_event`·`description`을 읽는다). 레지스트리 태그(`hasTag`/`getTag`/`getTags`)는 그대로이며 `Server#getTags`(`FerriteTags`)만 실제 데이터를 쓴다. Rust 호스트에는 레지스트리 호출이 없다. (`PotionEffectType`은 구현됨: 색·카테고리·attribute는 `FerritePotionEffectData` 표, `getId`는 생성된 `registries.json`의 protocol id, `getAttributeModifierAmount`는 바닐라 `amount*(amplifier+1)`, `isEnabledByFeature`는 26.3에서 required feature를 쓰는 효과가 없어 항상 true, `getDurationModifier`는 26.3 `MobEffect`에 해당 필드가 없어 1.0) | `ferrite-data` 데이터/호스트 |
 | 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Java `FerriteLoot` — 생성 데이터팩의 `loot_table`/`predicate`/`tags`를 읽고 `FerriteItemStack`/`FerriteItemMeta`로 스택을 만든다. luck·bonus rolls·looting·killer/this_entity를 반영하고, `enchant_randomly`의 최대 레벨/호환성은 호스트의 `Enchantment` 응답을 쓴다(호스트가 없으면 1레벨/호환으로 폴백). 폭발 반경·블록 엔티티 데이터·미모델링 컴포넌트는 불투명 처리한다. |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
@@ -151,6 +150,8 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | 월드젠 호스트 | `locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE` | vanilla 월드젠 호스트 (EULA 때문에 개발자 로컬만) |
 
 ## 생성된 전체 목록 (호스트 없는 폴백 프로브)
+
+> 2026-11-13 확인: 이 목록은 자동 생성 시점의 것이라 낡았다. `openCartographyTable`은 지도 제작대 메뉴를 열고, `breakBlock`·`broadcastHurtAnimation`·`playPickupItemAnimation`은 호스트가 처리하며, Paper 생명주기(`LifecycleEvents.COMMANDS`)는 `FerriteLifecycleManager`가 구현한다. 아래 목록에 있다는 이유로 미구현이라 판단하지 않는다.
 
 <details><summary>Player (106)</summary>
 
