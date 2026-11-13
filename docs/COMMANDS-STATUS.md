@@ -49,6 +49,23 @@ Partial behaviour confirmed in source today:
   `/item` entry below for the supported functions).
 - `/attribute`: defaults come from the target's entity type (`attributes::limits_for`); an
   attribute the type does not carry (and every non-living type) fails `failed.no_attribute`.
+- `/execute` (`commands_exec.rs`), verified by tests against the live dispatcher:
+  - Implemented: `as`, `at`, `positioned <pos>`, `positioned as`, `rotated`, `facing`, `align`,
+    `anchored`, `in`, `run`; `if|unless` `block`, `blocks`, `entity`, `predicate`, `dimension`,
+    `data block|entity|storage`, `score` (`<op>` and `matches <range>`, selector holders);
+    `store result|success` into `block`, `entity` (players), `storage` (namespaced ids) and `score`.
+  - Conditions fork like vanilla: a false test in front of `run` runs nothing and reports
+    nothing; ending the chain at the test reports `Test failed` (or returns 1).
+  - Not implemented (each fails with `command.unknown.argument`): `on <relation>`, `summon`,
+    `positioned over <heightmap>`, `if|unless` `biome`, `items`, `slots`, `loaded`, `function`,
+    `stopwatch`, and `store ... bossbar`. `execute store ... entity` only reaches players.
+  - A `return` ran by one fork of `execute as @a run return ...` does not stop the other forks.
+- `/function` and `/return`: `return <n>`, `return fail` and `return run <command>` end the
+  innermost running function, also when reached through `execute ... run return`; outside a
+  function they fail. A command that fails inside a function is reported to the source and the
+  function carries on, as in vanilla. Syntax errors still abort the function at run time (vanilla
+  refuses to load such a function). `function <id> with storage|block|entity ...` is not
+  implemented (only the inline `{...}` compound is).
 - `/damage`: `from <cause>` only matters for death messages, which are not modelled
   (`commands.rs`, line 665).
 

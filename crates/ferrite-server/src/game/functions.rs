@@ -443,7 +443,22 @@ pub fn run(
     let _frame = Frame::enter();
     let mut result = 0;
     for line in lines {
-        result = tree.execute(line.trim_start(), nested.clone())?;
+        result = match tree.execute(line.trim_start(), nested.clone()) {
+            Ok(value) => value,
+            // Vanilla tells the source why a line failed and carries on with the next one.
+            Err(CommandError::Failed(message)) => {
+                super::commands::send(
+                    source,
+                    super::commands::Action::Feedback(super::commands::Feedback {
+                        key: "commands.function.line_failed",
+                        args: vec![line.trim_start().to_owned(), message.clone()],
+                        text: message,
+                    }),
+                )?;
+                0
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(returned) = Frame::returned() {
             return Ok(returned);
         }
@@ -866,6 +881,31 @@ mod tests {
         let (source, _received) = source(&tree, FunctionStore::default());
         assert!(tree.execute("return 1", source.clone()).is_err());
         assert!(tree.execute("return fail", source).is_err());
+    }
+
+    #[test]
+    fn a_failing_command_is_reported_and_the_function_carries_on() {
+        // The second merge changes nothing, which fails; vanilla reports it and runs the rest.
+        let functions = store(&[(
+            "test:carry",
+            "data merge storage t {a:1}\ndata merge storage t {a:1}\nsay after",
+        )]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, mut received) = source(&tree, functions);
+        tree.execute("function test:carry", source).unwrap();
+        let actions: Vec<Action> = std::iter::from_fn(|| received.try_recv().ok()).collect();
+        assert!(
+            actions.iter().any(
+                |action| matches!(action, Action::Feedback(f) if f.text.contains("Nothing changed"))
+            ),
+            "the failure is reported to the source: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::Broadcast(f) if f.text.contains("after"))),
+            "the line after the failure still runs: {actions:?}"
+        );
     }
 
     #[test]
