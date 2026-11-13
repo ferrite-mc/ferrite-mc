@@ -1,12 +1,19 @@
 //! Data-pack item modifiers (`data/<namespace>/item_modifier/**/*.json`), as `/item modify` and
 //! `/item ... from ... <modifier>` apply them to item stacks.
 //!
-//! Vanilla ships no item modifiers, so everything here is exercised with fixtures. A modifier is one
-//! function object or a list of them (a `minecraft:sequence` nests more). Supported functions:
-//! `set_count`, `limit_count`, `set_damage`, `set_components`, `set_name`, `set_lore` (replace),
-//! `set_enchantments`. Conditions are limited to `minecraft:random_chance` with a constant chance. Any
-//! other function or condition makes the whole modifier fail to load with a reason that names it, so
-//! nothing is silently skipped.
+//! Vanilla ships no item modifiers (the generated data has no `item_modifier` directory), so
+//! everything here is exercised with fixtures. A modifier is one function object or a list of
+//! them (a `minecraft:sequence` nests more). In 26.3 the function and condition type is the
+//! `"type"` key (older data used `"function"`/`"condition"`, still accepted).
+//!
+//! Supported functions: `set_count`, `limit_count`, `set_damage`, `set_components`, `set_name`
+//! (`custom_name` and `item_name`), `set_lore` (all four list modes), `set_enchantments`,
+//! `set_item`, `set_potion`, `set_custom_data`, `set_ominous_bottle_amplifier`, `discard`,
+//! `explosion_decay` (a no-op: the command context has no explosion) and `sequence`.
+//! Conditions: `random_chance` with a constant chance, and `inverted`/`all_of`/`any_of` over
+//! those. Any other function or condition makes the whole modifier fail to load with a reason
+//! that names it, so nothing is silently skipped. See `docs/COMMANDS-STATUS.md` for why the
+//! remaining vanilla functions are not supported.
 
 use ferrite_item::{Component, ItemStack, component_ids as ids};
 use ferrite_nbt::{Compound, Tag};
@@ -81,18 +88,201 @@ enum Step {
         add: bool,
     },
     SetComponents(Vec<(u16, Tag)>),
-    SetName(Tag),
-    SetLore(Tag),
+    /// `set_name`: the text and whether it targets `item_name` instead of `custom_name`.
+    SetName {
+        name: Tag,
+        item_name: bool,
+    },
+    SetLore {
+        lines: Vec<Tag>,
+        op: ListOp,
+    },
+    SetItem(u16),
+    /// `set_potion`: the potion id (`minecraft:healing`).
+    SetPotion(String),
+    /// `set_custom_data`: merged into the stack's custom data.
+    SetCustomData(Compound),
+    SetOminousBottleAmplifier(Number),
+    /// `discard` (and nothing else of the filter machinery): the stack disappears.
+    Discard,
+    /// `explosion_decay` needs an explosion radius, which the command context does not have.
+    ExplosionDecay,
     SetEnchantments {
         levels: Vec<(String, Number)>,
         add: bool,
     },
 }
 
+/// A function condition.
+#[derive(Debug, Clone, PartialEq)]
+enum Cond {
+    /// `minecraft:random_chance` with a constant chance.
+    Chance(f64),
+    Inverted(Box<Cond>),
+    AllOf(Vec<Cond>),
+    AnyOf(Vec<Cond>),
+}
+
+impl Cond {
+    fn test(&self, rng: &mut ferrite_entity::Rng) -> bool {
+        match self {
+            Self::Chance(chance) => f64::from(rng.next_int(1_000_000)) / 1_000_000.0 < *chance,
+            Self::Inverted(inner) => !inner.test(rng),
+            Self::AllOf(terms) => terms.iter().all(|term| term.test(rng)),
+            Self::AnyOf(terms) => terms.iter().any(|term| term.test(rng)),
+        }
+    }
+
+    fn parse(value: &Value) -> Result<Self, String> {
+        let kind = value
+            .get("type")
+            .or_else(|| value.get("condition"))
+            .and_then(Value::as_str)
+            .map(id_of)
+            .ok_or("a condition needs a 'type'")?;
+        let terms = |key: &str| -> Result<Vec<Cond>, String> {
+            value
+                .get(key)
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{kind} needs '{key}'"))?
+                .iter()
+                .map(Cond::parse)
+                .collect()
+        };
+        match kind.as_str() {
+            "minecraft:random_chance" => {
+                let chance = match value.get("chance") {
+                    Some(Value::Number(number)) => number.as_f64(),
+                    Some(Value::Object(object)) => object.get("value").and_then(Value::as_f64),
+                    _ => None,
+                };
+                chance
+                    .map(Self::Chance)
+                    .ok_or_else(|| "random_chance needs a constant 'chance'".to_owned())
+            }
+            "minecraft:inverted" => Ok(Self::Inverted(Box::new(Self::parse(
+                value.get("term").ok_or("inverted needs 'term'")?,
+            )?))),
+            "minecraft:all_of" => Ok(Self::AllOf(terms("terms")?)),
+            "minecraft:any_of" => Ok(Self::AnyOf(terms("terms")?)),
+            other => Err(format!("unsupported item modifier condition '{other}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Function {
-    chance: Option<f64>,
+    conditions: Vec<Cond>,
     step: Step,
+}
+
+/// `ListOperation` of `set_lore`.
+#[derive(Debug, Clone, PartialEq)]
+enum ListOp {
+    ReplaceAll,
+    ReplaceSection { offset: usize, size: Option<usize> },
+    Insert { offset: usize },
+    Append,
+}
+
+impl ListOp {
+    fn parse(object: &serde_json::Map<String, Value>) -> Result<Self, String> {
+        let offset = |what: &str| -> Result<usize, String> {
+            match object.get("offset") {
+                None => Ok(0),
+                Some(value) => value
+                    .as_u64()
+                    .map(|n| n as usize)
+                    .ok_or_else(|| format!("{what} offset must be a non-negative integer")),
+            }
+        };
+        match object.get("mode").and_then(Value::as_str) {
+            None | Some("replace_all") => Ok(Self::ReplaceAll),
+            Some("replace_section") => Ok(Self::ReplaceSection {
+                offset: offset("replace_section")?,
+                size: object
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize),
+            }),
+            Some("insert") => Ok(Self::Insert {
+                offset: offset("insert")?,
+            }),
+            Some("append") => Ok(Self::Append),
+            Some(other) => Err(format!("unknown set_lore mode '{other}'")),
+        }
+    }
+
+    /// Applies the operation to `current`, or `None` when vanilla's bounds checks reject it.
+    fn apply(&self, current: Vec<Tag>, lines: Vec<Tag>) -> Option<Vec<Tag>> {
+        const LIMIT: usize = 256;
+        let result = match self {
+            Self::ReplaceAll => lines,
+            Self::Append => current.into_iter().chain(lines).collect(),
+            Self::Insert { offset } => {
+                if *offset > current.len() {
+                    return None;
+                }
+                let mut out = current;
+                out.splice(*offset..*offset, lines);
+                out
+            }
+            Self::ReplaceSection { offset, size } => {
+                if *offset > current.len() {
+                    return None;
+                }
+                let end = (*offset + size.unwrap_or(lines.len())).min(current.len());
+                let mut out = current;
+                out.splice(*offset..end, lines);
+                out
+            }
+        };
+        (result.len() <= LIMIT).then_some(result)
+    }
+}
+
+/// Lore lines as one homogeneous NBT list (strings stay strings unless a compound is present).
+fn lore_list(lines: Vec<Tag>) -> Tag {
+    if lines.iter().any(|line| matches!(line, Tag::Compound(_))) {
+        let compounds = lines
+            .into_iter()
+            .map(|line| match line {
+                Tag::Compound(compound) => compound,
+                Tag::String(text) => {
+                    let mut compound = Compound::new();
+                    compound.insert("text".to_owned(), Tag::String(text));
+                    compound
+                }
+                _ => Compound::new(),
+            })
+            .collect();
+        Tag::List(ferrite_nbt::List::Compound(compounds))
+    } else {
+        let strings = lines
+            .into_iter()
+            .filter_map(|line| match line {
+                Tag::String(text) => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if strings.is_empty() {
+            Tag::List(ferrite_nbt::List::End)
+        } else {
+            Tag::List(ferrite_nbt::List::String(strings))
+        }
+    }
+}
+
+fn lore_lines(tag: Option<Tag>) -> Vec<Tag> {
+    match tag {
+        Some(Tag::List(ferrite_nbt::List::String(lines))) => {
+            lines.into_iter().map(Tag::String).collect()
+        }
+        Some(Tag::List(ferrite_nbt::List::Compound(lines))) => {
+            lines.into_iter().map(Tag::Compound).collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// A parsed item modifier.
@@ -120,28 +310,25 @@ fn parse_into(value: &Value, out: &mut Vec<Function>) -> Result<(), String> {
     let object = value
         .as_object()
         .ok_or("an item modifier is a function or a list of functions")?;
-    let mut chance = None;
-    if let Some(conditions) = object.get("conditions") {
-        for condition in conditions.as_array().ok_or("conditions must be a list")? {
-            let kind = condition
-                .get("condition")
-                .and_then(Value::as_str)
-                .map(id_of)
-                .unwrap_or_default();
-            if kind != "minecraft:random_chance" {
-                return Err(format!("unsupported item modifier condition '{kind}'"));
+    let mut conditions = Vec::new();
+    for key in ["conditions", "condition"] {
+        match object.get(key) {
+            None => {}
+            Some(Value::Array(list)) => {
+                for condition in list {
+                    conditions.push(Cond::parse(condition)?);
+                }
             }
-            let Some(Value::Number(number)) = condition.get("chance") else {
-                return Err("random_chance needs a constant 'chance'".into());
-            };
-            chance = Some(number.as_f64().unwrap_or(1.0));
+            Some(single @ Value::Object(_)) => conditions.push(Cond::parse(single)?),
+            Some(_) => return Err(format!("'{key}' must be a condition or a list of them")),
         }
     }
     let kind = object
-        .get("function")
+        .get("type")
+        .or_else(|| object.get("function"))
         .and_then(Value::as_str)
         .map(id_of)
-        .ok_or("a function object needs a 'function' type")?;
+        .ok_or("a function object needs a 'type'")?;
     let step = match kind.as_str() {
         "minecraft:sequence" => {
             let inner = object
@@ -149,12 +336,11 @@ fn parse_into(value: &Value, out: &mut Vec<Function>) -> Result<(), String> {
                 .ok_or("sequence needs 'functions'")?;
             let mut nested = Vec::new();
             parse_into(inner, &mut nested)?;
-            // A sequence's own chance gates every nested function.
+            // A sequence's own conditions gate every nested function.
             for mut function in nested {
-                function.chance = match (chance, function.chance) {
-                    (Some(a), Some(b)) => Some(a * b),
-                    (a, b) => a.or(b),
-                };
+                let mut all = conditions.clone();
+                all.append(&mut function.conditions);
+                function.conditions = all;
                 out.push(function);
             }
             return Ok(());
@@ -196,21 +382,62 @@ fn parse_into(value: &Value, out: &mut Vec<Function>) -> Result<(), String> {
             Step::SetComponents(set)
         }
         "minecraft:set_name" => {
-            if object.get("target").is_some_and(|t| t != "custom_name") {
-                return Err("set_name only supports the custom_name target".into());
+            if object.get("entity").is_some() {
+                return Err("set_name with an 'entity' (name resolution) is not supported".into());
             }
-            Step::SetName(tag_of(object.get("name").ok_or("set_name needs 'name'")?)?)
+            let item_name = match object.get("target").and_then(Value::as_str) {
+                None | Some("custom_name") => false,
+                Some("item_name") => true,
+                Some(other) => return Err(format!("unknown set_name target '{other}'")),
+            };
+            Step::SetName {
+                name: tag_of(object.get("name").ok_or("set_name needs 'name'")?)?,
+                item_name,
+            }
         }
         "minecraft:set_lore" => {
-            if object
-                .get("mode")
-                .and_then(Value::as_str)
-                .is_some_and(|m| m != "replace_all")
-            {
-                return Err("set_lore only supports mode replace_all".into());
+            if object.get("entity").is_some() {
+                return Err("set_lore with an 'entity' (name resolution) is not supported".into());
             }
-            Step::SetLore(tag_of(object.get("lore").ok_or("set_lore needs 'lore'")?)?)
+            let lore = object.get("lore").ok_or("set_lore needs 'lore'")?;
+            let lines = match lore {
+                Value::Array(list) => list.iter().map(tag_of).collect::<Result<Vec<_>, _>>()?,
+                single => vec![tag_of(single)?],
+            };
+            Step::SetLore {
+                lines,
+                op: ListOp::parse(object)?,
+            }
         }
+        "minecraft:set_item" => {
+            let name = object
+                .get("item")
+                .and_then(Value::as_str)
+                .ok_or("set_item needs 'item'")?;
+            Step::SetItem(
+                ferrite_item::item_id(&id_of(name))
+                    .ok_or_else(|| format!("unknown item '{name}'"))?,
+            )
+        }
+        "minecraft:set_potion" => Step::SetPotion(id_of(
+            object
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("set_potion needs 'id'")?,
+        )),
+        "minecraft:set_custom_data" => {
+            let tag = tag_of(object.get("tag").ok_or("set_custom_data needs 'tag'")?)?;
+            let Tag::Compound(compound) = tag else {
+                return Err("set_custom_data 'tag' must be an object".into());
+            };
+            Step::SetCustomData(compound)
+        }
+        "minecraft:set_ominous_bottle_amplifier" => Step::SetOminousBottleAmplifier(Number::parse(
+            object.get("amplifier"),
+            "set_ominous_bottle_amplifier amplifier",
+        )?),
+        "minecraft:discard" => Step::Discard,
+        "minecraft:explosion_decay" => Step::ExplosionDecay,
         "minecraft:set_enchantments" => {
             let enchantments = object
                 .get("enchantments")
@@ -230,7 +457,7 @@ fn parse_into(value: &Value, out: &mut Vec<Function>) -> Result<(), String> {
         }
         other => return Err(format!("unsupported item modifier function '{other}'")),
     };
-    out.push(Function { chance, step });
+    out.push(Function { conditions, step });
     Ok(())
 }
 
@@ -249,9 +476,7 @@ impl ItemModifier {
             if stack.is_empty() {
                 break;
             }
-            if let Some(chance) = function.chance
-                && f64::from(rng.next_int(1_000_000)) / 1_000_000.0 >= chance
-            {
+            if !function.conditions.iter().all(|cond| cond.test(rng)) {
                 continue;
             }
             match &function.step {
@@ -288,16 +513,71 @@ impl ItemModifier {
                         stack.components.insert(*id, Component::from_nbt(*id, tag));
                     }
                 }
-                Step::SetName(tag) => {
-                    stack
-                        .components
-                        .insert(ids::CUSTOM_NAME, Component::from_nbt(ids::CUSTOM_NAME, tag));
+                Step::SetName { name, item_name } => {
+                    let id = if *item_name {
+                        ids::ITEM_NAME
+                    } else {
+                        ids::CUSTOM_NAME
+                    };
+                    stack.components.insert(id, Component::from_nbt(id, name));
                 }
-                Step::SetLore(tag) => {
-                    stack
-                        .components
-                        .insert(ids::LORE, Component::from_nbt(ids::LORE, tag));
+                Step::SetLore { lines, op } => {
+                    let current = lore_lines(
+                        stack
+                            .effective_component(ids::LORE)
+                            .and_then(|lore| lore.to_nbt().ok()),
+                    );
+                    // A section outside the existing lines makes the function a no-op, like a
+                    // rejected `ListOperation` in vanilla.
+                    if let Some(next) = op.apply(current, lines.clone()) {
+                        stack
+                            .components
+                            .insert(ids::LORE, Component::from_nbt(ids::LORE, &lore_list(next)));
+                    }
                 }
+                Step::SetItem(item) => stack.item = *item,
+                Step::SetPotion(potion) => {
+                    let mut contents = match stack
+                        .effective_component(ids::POTION_CONTENTS)
+                        .and_then(|c| c.to_nbt().ok())
+                    {
+                        Some(Tag::Compound(existing)) => existing,
+                        _ => Compound::new(),
+                    };
+                    contents.insert("potion".to_owned(), Tag::String(potion.clone()));
+                    stack.components.insert(
+                        ids::POTION_CONTENTS,
+                        Component::from_nbt(ids::POTION_CONTENTS, &Tag::Compound(contents)),
+                    );
+                }
+                Step::SetCustomData(tag) => {
+                    let mut data = match stack
+                        .effective_component(ids::CUSTOM_DATA)
+                        .and_then(|c| c.to_nbt().ok())
+                    {
+                        Some(Tag::Compound(existing)) => existing,
+                        _ => Compound::new(),
+                    };
+                    for (key, value) in tag.iter() {
+                        data.insert(key.clone(), value.clone());
+                    }
+                    stack.components.insert(
+                        ids::CUSTOM_DATA,
+                        Component::from_nbt(ids::CUSTOM_DATA, &Tag::Compound(data)),
+                    );
+                }
+                Step::SetOminousBottleAmplifier(amplifier) => {
+                    let value = amplifier.eval(rng).floor() as i32;
+                    if let Some(id) =
+                        ferrite_item::component_id("minecraft:ominous_bottle_amplifier")
+                    {
+                        stack
+                            .components
+                            .insert(id, Component::from_nbt(id, &Tag::Int(value.clamp(0, 4))));
+                    }
+                }
+                Step::Discard => stack = ItemStack::empty(),
+                Step::ExplosionDecay => {}
                 Step::SetEnchantments { levels, add } => {
                     let mut compound = Compound::new();
                     if *add
@@ -465,6 +745,146 @@ mod tests {
     }
 
     #[test]
+    fn the_26_3_type_key_is_what_data_packs_use() {
+        // 26.3 loot functions and conditions are keyed by "type" (see the blaze loot table).
+        let modifier = r#"[
+            {"type":"minecraft:set_count","count":5},
+            {"type":"minecraft:set_count","count":2,"add":true,
+             "conditions":[{"type":"minecraft:random_chance","chance":1}]}
+        ]"#;
+        assert_eq!(run(modifier, stone(1)).count, 7);
+        // The legacy keys keep working.
+        assert_eq!(
+            run(r#"{"function":"set_count","count":4}"#, stone(1)).count,
+            4
+        );
+    }
+
+    #[test]
+    fn inverted_all_of_and_any_of_combine_conditions() {
+        let gated = |condition: &str| {
+            let json = format!(r#"{{"type":"set_count","count":9,"conditions":[{condition}]}}"#);
+            run(&json, stone(1)).count
+        };
+        let always = r#"{"type":"random_chance","chance":1}"#;
+        let never = r#"{"type":"random_chance","chance":0}"#;
+        assert_eq!(
+            gated(&format!(r#"{{"type":"inverted","term":{never}}}"#)),
+            9
+        );
+        assert_eq!(
+            gated(&format!(r#"{{"type":"inverted","term":{always}}}"#)),
+            1
+        );
+        assert_eq!(
+            gated(&format!(
+                r#"{{"type":"all_of","terms":[{always},{never}]}}"#
+            )),
+            1
+        );
+        assert_eq!(
+            gated(&format!(
+                r#"{{"type":"any_of","terms":[{never},{always}]}}"#
+            )),
+            9
+        );
+    }
+
+    #[test]
+    fn set_item_potion_custom_data_and_discard() {
+        let out = run(
+            r#"{"type":"set_item","item":"minecraft:diamond"}"#,
+            stone(3),
+        );
+        assert_eq!(ferrite_item::item_name(out.item), Some("minecraft:diamond"));
+        assert_eq!(out.count, 3, "set_item keeps the count");
+        assert!(ItemModifier::parse(r#"{"type":"set_item","item":"minecraft:nope"}"#).is_err());
+
+        let potion = ferrite_item::ItemStack::with_count(
+            ferrite_item::item_id("minecraft:potion").unwrap(),
+            1,
+        );
+        let out = run(r#"{"type":"set_potion","id":"minecraft:slowness"}"#, potion);
+        let contents = out
+            .components
+            .get(ids::POTION_CONTENTS)
+            .and_then(|c| c.to_nbt().ok())
+            .expect("potion contents");
+        let Tag::Compound(contents) = contents else {
+            panic!("compound");
+        };
+        assert_eq!(
+            contents.get("potion"),
+            Some(&Tag::String("minecraft:slowness".into()))
+        );
+
+        let out = run(
+            r#"[{"type":"set_custom_data","tag":{"a":1}},{"type":"set_custom_data","tag":{"b":"x"}}]"#,
+            stone(1),
+        );
+        let Some(Tag::Compound(data)) = out
+            .components
+            .get(ids::CUSTOM_DATA)
+            .and_then(|c| c.to_nbt().ok())
+        else {
+            panic!("custom data");
+        };
+        assert!(
+            data.get("a").is_some() && data.get("b").is_some(),
+            "merged: {data:?}"
+        );
+
+        assert!(run(r#"{"type":"discard"}"#, stone(5)).is_empty());
+        // `explosion_decay` has no explosion to decay in the command context.
+        assert_eq!(run(r#"{"type":"explosion_decay"}"#, stone(5)).count, 5);
+    }
+
+    #[test]
+    fn set_name_targets_and_lore_list_operations() {
+        let out = run(
+            r#"{"type":"set_name","name":"Plain","target":"item_name"}"#,
+            stone(1),
+        );
+        assert!(out.components.get(ids::ITEM_NAME).is_some());
+        assert!(out.components.get(ids::CUSTOM_NAME).is_none());
+        let lore = |json: &str, stack: ItemStack| -> Vec<String> {
+            let out = run(json, stack);
+            match out.components.get(ids::LORE).and_then(|c| c.to_nbt().ok()) {
+                Some(Tag::List(ferrite_nbt::List::String(lines))) => lines,
+                other => panic!("lore list expected, got {other:?}"),
+            }
+        };
+        let base = run(r#"{"type":"set_lore","lore":["a","b","c"]}"#, stone(1));
+        let with = |json: &str| lore(json, base.clone());
+        assert_eq!(
+            with(r#"{"type":"set_lore","lore":["x"],"mode":"append"}"#),
+            ["a", "b", "c", "x"]
+        );
+        assert_eq!(
+            with(r#"{"type":"set_lore","lore":["x"],"mode":"insert","offset":1}"#),
+            ["a", "x", "b", "c"]
+        );
+        assert_eq!(
+            with(
+                r#"{"type":"set_lore","lore":["x"],"mode":"replace_section","offset":1,"size":2}"#
+            ),
+            ["a", "x"]
+        );
+        assert_eq!(
+            with(r#"{"type":"set_lore","lore":["x","y"],"mode":"replace_all"}"#),
+            ["x", "y"]
+        );
+        // An insert past the end is rejected by vanilla's ListOperation: the lore stays.
+        assert_eq!(
+            with(r#"{"type":"set_lore","lore":["x"],"mode":"insert","offset":9}"#),
+            ["a", "b", "c"]
+        );
+        assert!(
+            ItemModifier::parse(r#"{"type":"set_lore","lore":["x"],"mode":"sideways"}"#).is_err()
+        );
+    }
+
+    #[test]
     fn unsupported_or_invalid_parts_fail_loading_with_their_name() {
         for (json, needle) in [
             (
@@ -480,7 +900,16 @@ mod tests {
                 "minecraft:nope",
             ),
             (r#"{"function":"set_count"}"#, "count"),
-            (r#"{"count":1}"#, "function"),
+            (
+                r##"{"type":"minecraft:enchant_with_levels","levels":30,"options":"#minecraft:on_random_loot"}"##,
+                "enchant_with_levels",
+            ),
+            (r#"{"type":"minecraft:furnace_smelt"}"#, "furnace_smelt"),
+            (
+                r#"{"type":"minecraft:apply_bonus","enchantment":"minecraft:fortune","formula":"minecraft:ore_drops"}"#,
+                "apply_bonus",
+            ),
+            (r#"{"count":1}"#, "type"),
             (r#"[1]"#, "function"),
             ("not json", "expected"),
         ] {
