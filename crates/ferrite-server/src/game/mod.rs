@@ -3903,7 +3903,7 @@ impl CommandRuntime<'_> {
             return;
         };
         let path = attribute.strip_prefix("minecraft:").unwrap_or(attribute);
-        let Some(limits) = attributes::default_for(path, target.player) else {
+        let Some(limits) = attributes::limits_for(target, path) else {
             self.reply.key(
                 "commands.attribute.failed.no_attribute",
                 &[&target.name, attribute],

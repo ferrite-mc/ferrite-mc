@@ -445,6 +445,15 @@ fn entity_answer(call: &HostCall) -> Option<String> {
         ),
         "getVelocity()" => format!("{}{sep}{}{sep}{}", fact.vel[0], fact.vel[1], fact.vel[2]),
         "getHealth()" => fact.health?.to_string(),
+        // The type's default `max_health`, the same table the mob's health pool starts from.
+        "getMaxHealth()" => {
+            fact.health?;
+            ferrite_data::entity_props::by_name(fact.kind)
+                .and_then(|props| {
+                    ferrite_data::entity_props::default_attribute(props.id, "max_health")
+                })?
+                .to_string()
+        }
         "getEntityType()" => fact.kind.to_owned(),
         _ => return None,
     })
@@ -755,6 +764,44 @@ mod tests {
             method: method.into(),
             args: Vec::new(),
         }
+    }
+
+    #[test]
+    fn living_entities_report_their_type_max_health() {
+        let fact = |kind: &'static str, health: Option<f32>| EntityFact {
+            entity_id: 1,
+            kind,
+            pos: [0.0; 3],
+            vel: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            health,
+            world: None,
+            item: None,
+            snbt: None,
+        };
+        let cow = Uuid::from_u128(0xc0c0_0001);
+        let item = Uuid::from_u128(0xc0c0_0002);
+        {
+            let mut registry = entity_registry().lock().unwrap();
+            registry.insert(cow, fact("minecraft:cow", Some(4.0)));
+            registry.insert(item, fact("minecraft:item", None));
+        }
+        let ask = |uuid: Uuid, method: &str| {
+            entity_answer(&HostCall {
+                owner: "Entity".into(),
+                subject: uuid.to_string(),
+                method: method.into(),
+                args: Vec::new(),
+            })
+        };
+        assert_eq!(ask(cow, "getMaxHealth()").as_deref(), Some("10"));
+        assert_eq!(ask(cow, "getHealth()").as_deref(), Some("4"));
+        assert_eq!(ask(item, "getMaxHealth()"), None);
+        assert_eq!(ask(Uuid::from_u128(0xdead), "getMaxHealth()"), None);
+        let mut registry = entity_registry().lock().unwrap();
+        registry.remove(&cow);
+        registry.remove(&item);
     }
 
     #[test]

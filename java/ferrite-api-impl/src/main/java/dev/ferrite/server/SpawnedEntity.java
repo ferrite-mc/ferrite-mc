@@ -66,6 +66,7 @@ final class SpawnedEntity {
                 return NOT_HANDLED;
             }
             case "getHealth": { String text = ask(uuid, "getHealth()"); if (text == null) return NOT_HANDLED; return Double.parseDouble(text); }
+            case "getMaxHealth": { String text = ask(uuid, "getMaxHealth()"); if (text == null) return NOT_HANDLED; return Double.parseDouble(text); }
             case "damage": { if (args.length == 1 && args[0] instanceof Double d) { tell(uuid, "damage(double)", d); return null; } return NOT_HANDLED; }
             default: return NOT_HANDLED;
         }
