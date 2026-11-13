@@ -33,6 +33,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
     }
     static boolean contains(String registry, org.bukkit.NamespacedKey key) { return KEYS.getOrDefault(registry, java.util.Set.of()).contains(key.toString()); }
     @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) {
+        if (type == org.bukkit.GameRule.class) return cast(cached("game_rule", FerriteRegistryAccess::gameRuleRegistry));
         if (type == org.bukkit.block.BlockType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.BLOCK);
         if (type == org.bukkit.inventory.ItemType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.ITEM);
         if (type == org.bukkit.inventory.MenuType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.MENU);
@@ -53,6 +54,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         return unavailable(type.getName());
     }
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(io.papermc.paper.registry.RegistryKey<T> type) {
+        if (type.equals(io.papermc.paper.registry.RegistryKey.GAME_RULE)) return cast(cached("game_rule", FerriteRegistryAccess::gameRuleRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.MENU)) return cast(cached("menu", FerriteRegistryAccess::menuRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.BLOCK)) return cast(cached("block", FerriteRegistryAccess::blockRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.ITEM)) return cast(cached("item", FerriteRegistryAccess::itemRegistry));
@@ -430,6 +432,23 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             case "entity_place", "lightning_strike", "teleport" -> 14;
             case "entity_die", "explode" -> 15;
             default -> 0;
+        };
+    }
+    private static org.bukkit.Registry<org.bukkit.GameRule<?>> gameRuleRegistry() {
+        var definitions = FerriteGameRuleData.load(FerriteRegistryAccess.class.getResourceAsStream("/ferrite/game-rules.json"), KEYS.get("game_rule"));
+        return new KeyedRegistry<>("game_rule") {
+            private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.GameRule<?>> entries = new java.util.concurrent.ConcurrentHashMap<>();
+            @Override public org.bukkit.GameRule<?> get(org.bukkit.NamespacedKey key) {
+                java.util.Objects.requireNonNull(key, "key");
+                var definition = definitions.get(key);
+                if (definition == null) return null;
+                var existing = entries.get(key);
+                if (existing != null) return existing;
+                // GameRule's static aliases re-enter this registry; computeIfAbsent cannot support that.
+                var created = FerriteGameRule.create(definition);
+                var prior = entries.putIfAbsent(key, created);
+                return prior == null ? created : prior;
+            }
         };
     }
     private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> unavailable(String name) { return new UnavailableRegistry<>(name); }
