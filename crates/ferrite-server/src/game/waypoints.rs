@@ -32,8 +32,10 @@ pub struct Locator {
     pub ranges: HashMap<Uuid, (f64, f64)>,
 }
 
-/// Players wearing a carved pumpkin or a mob head, which hide them from the locator bar. The
-/// region threads refresh it on `Command::ScanInventory`.
+/// Players the locator bar hides: wearing a carved pumpkin or a mob head, sneaking (vanilla's
+/// `waypoint_transmit_range_crouch` modifier on `ServerPlayer`) or under the invisibility effect
+/// (`effect.waypoint_transmit_range_hide`); each is a -1 `add_multiplied_total` modifier on
+/// `waypoint_transmit_range`. The region threads refresh it on `Command::ScanInventory`.
 pub static HEAD_HIDDEN: std::sync::Mutex<std::collections::BTreeSet<Uuid>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
@@ -48,6 +50,11 @@ pub const HIDING_HEAD_ITEMS: [&str; 8] = [
     "minecraft:wither_skeleton_skull",
     "minecraft:zombie_head",
 ];
+
+/// Whether a player transmits nothing: a hiding head item, sneaking or invisibility.
+pub fn hides(head_item: Option<&str>, sneaking: bool, invisible: bool) -> bool {
+    sneaking || invisible || head_item.is_some_and(|name| HIDING_HEAD_ITEMS.contains(&name))
+}
 
 /// The `(transmit, receive)` ranges of one player: the attribute with its stored modifiers, plus
 /// the head item's hide modifier (`add_multiplied_total` of -1) when it is worn.
@@ -116,7 +123,8 @@ fn desired(receiver: &OnlinePlayer, source: &OnlinePlayer, range: f64) -> Option
     }
     let d: Vec<f64> = (0..3).map(|i| receiver.pos[i] - source.pos[i]).collect();
     let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-    if distance > range {
+    // `doesSourceIgnoreReceiver`: ignored once the distance reaches the range.
+    if distance >= range {
         return None;
     }
     if distance > FAR {
@@ -170,7 +178,10 @@ impl Locator {
                 if rid == sid || spectators.contains(sid) {
                     continue;
                 }
+                // `WaypointTransmitter.doesSourceIgnoreReceiver`: a spectator receiver is never
+                // ignored, whatever the ranges say.
                 let range = match (self.ranges.get(sid), self.ranges.get(rid)) {
+                    _ if spectators.contains(rid) => f64::INFINITY,
                     (Some((transmit, _)), Some((_, receive))) => transmit.min(*receive),
                     _ => f64::INFINITY,
                 };
@@ -314,6 +325,42 @@ mod tests {
         let (transmit, _) = player_ranges(&BTreeMap::new(), b, true);
         assert_eq!(transmit, 0.0);
         assert_eq!(player_ranges(&BTreeMap::new(), b, false), (6e7, 6e7));
+    }
+
+    #[test]
+    fn sneaking_invisibility_and_hiding_heads_hide_a_transmitter() {
+        assert!(!hides(None, false, false));
+        assert!(!hides(Some("minecraft:diamond_helmet"), false, false));
+        assert!(hides(Some("minecraft:carved_pumpkin"), false, false));
+        assert!(hides(Some("minecraft:zombie_head"), false, false));
+        assert!(hides(None, true, false), "sneaking");
+        assert!(hides(None, false, true), "invisibility effect");
+        let b = Uuid::from_u128(2);
+        assert_eq!(player_ranges(&BTreeMap::new(), b, hides(None, true, false)).0, 0.0);
+        // A range of exactly zero reaches nobody, even someone standing in the same spot.
+        let (a, b) = (Uuid::from_u128(1), b);
+        let mut online = HashMap::new();
+        online.insert(a, player([0.0; 3], Dimension::Overworld));
+        online.insert(b, player([0.0; 3], Dimension::Overworld));
+        let mut locator = Locator::default();
+        locator.ranges.insert(a, (6e7, 6e7));
+        locator.ranges.insert(b, (0.0, 6e7));
+        let sent = locator.sync(&online, &BTreeMap::new(), &Default::default());
+        assert!(sent.iter().all(|(r, _)| *r != a), "hidden b is not shown to a");
+    }
+
+    #[test]
+    fn a_spectator_receiver_ignores_the_ranges() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut online = HashMap::new();
+        online.insert(a, player([0.0; 3], Dimension::Overworld));
+        online.insert(b, player([50.0, 0.0, 0.0], Dimension::Overworld));
+        let mut locator = Locator::default();
+        locator.ranges.insert(a, (6e7, 6e7));
+        locator.ranges.insert(b, (10.0, 6e7));
+        let spectators = std::collections::BTreeSet::from([a]);
+        let sent = locator.sync(&online, &BTreeMap::new(), &spectators);
+        assert!(sent.iter().any(|(r, _)| *r == a), "spectator a sees out-of-range b");
     }
 
     #[test]

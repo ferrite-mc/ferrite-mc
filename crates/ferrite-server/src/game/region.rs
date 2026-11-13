@@ -4492,11 +4492,14 @@ impl Player {
                         })
                         .collect();
                     {
-                        let hidden = ferrite_item::item_name(
-                            self.inventory.get(ferrite_inventory::HEAD).item,
-                        )
-                        .is_some_and(|name| super::waypoints::HIDING_HEAD_ITEMS.contains(&name))
-                            && !self.inventory.get(ferrite_inventory::HEAD).is_empty();
+                        let head = self.inventory.get(ferrite_inventory::HEAD);
+                        let hidden = super::waypoints::hides(
+                            (!head.is_empty())
+                                .then(|| ferrite_item::item_name(head.item))
+                                .flatten(),
+                            self.sneaking,
+                            self.effects.has(ferrite_entity::effect::Effect::Invisibility),
+                        );
                         let mut set = super::waypoints::HEAD_HIDDEN
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
