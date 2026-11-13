@@ -240,7 +240,6 @@ impl Locator {
         let mut keep = std::collections::HashSet::new();
         for (rid, receiver) in online {
             for (sid, source_pos, source_dimension, transmit) in &sources {
-                let sid = sid;
                 if rid == sid {
                     continue;
                 }
