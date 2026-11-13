@@ -314,6 +314,41 @@ impl GameMode {
     }
 }
 
+/// Vanilla's `RangeArgument.intRange` syntax: `n`, `n..`, `..n` or `a..b`, whole numbers only.
+fn check_int_range(token: &str) -> Result<(), CommandSyntaxError> {
+    let error = |key: &'static str, message: &str| {
+        CommandSyntaxError::new(key, Vec::new(), message.to_owned())
+    };
+    let whole = |text: &str| text.parse::<i32>().is_ok();
+    let (min, max) = match token.split_once("..") {
+        Some((min, max)) => (min, max),
+        None => (token, token),
+    };
+    if token.is_empty() || token == ".." {
+        return Err(error(
+            "argument.range.empty",
+            "Expected value or range of values",
+        ));
+    }
+    for part in [min, max].into_iter().filter(|part| !part.is_empty()) {
+        if !whole(part) {
+            return Err(error(
+                "argument.range.ints",
+                "Only whole numbers allowed, not decimals",
+            ));
+        }
+    }
+    if let (Ok(min), Ok(max)) = (min.parse::<i32>(), max.parse::<i32>())
+        && min > max
+    {
+        return Err(error(
+            "argument.range.swapped",
+            "Min cannot be bigger than max",
+        ));
+    }
+    Ok(())
+}
+
 fn check_range<T: PartialOrd + Copy>(
     reader: &mut StringReader,
     start: usize,
@@ -553,7 +588,17 @@ impl ArgumentType {
                     ArgumentValue::Resource { tag, id }
                 }
             }
-            Self::Opaque { .. } => ArgumentValue::Raw(scan::read_token(reader)?),
+            Self::Opaque { parser, .. } => {
+                let start = reader.cursor();
+                let token = scan::read_token(reader)?;
+                if parser == "minecraft:int_range"
+                    && let Err(error) = check_int_range(&token)
+                {
+                    reader.set_cursor(start);
+                    return Err(error.with_context(reader));
+                }
+                ArgumentValue::Raw(token)
+            }
         })
     }
 
@@ -844,6 +889,36 @@ mod tests {
 
     fn parse(ty: &ArgumentType, s: &str) -> Result<ArgumentValue, CommandSyntaxError> {
         ty.parse(&mut StringReader::new(s.to_owned()))
+    }
+
+    #[test]
+    fn int_range_arguments_validate_at_parse_time() {
+        let parse = |input: &str| {
+            let mut reader = StringReader::new(input.to_owned());
+            ArgumentType::opaque("minecraft:int_range").parse(&mut reader)
+        };
+        for good in ["5", "-3", "1..", "..7", "2..9", "4..4"] {
+            assert_eq!(
+                parse(good).unwrap(),
+                ArgumentValue::Raw(good.to_owned()),
+                "{good}"
+            );
+        }
+        for (bad, key) in [
+            ("7..3", "argument.range.swapped"),
+            ("1.5", "argument.range.ints"),
+            ("a..b", "argument.range.ints"),
+            ("..", "argument.range.empty"),
+        ] {
+            assert_eq!(parse(bad).unwrap_err().translation_key(), key, "{bad}");
+        }
+        // Other opaque parsers stay unchecked.
+        let mut reader = StringReader::new("7..3".to_owned());
+        assert!(
+            ArgumentType::opaque("minecraft:float_range")
+                .parse(&mut reader)
+                .is_ok()
+        );
     }
 
     #[test]
