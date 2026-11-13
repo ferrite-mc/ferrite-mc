@@ -128,6 +128,12 @@ pub enum Command {
         position: [i32; 3],
         ticket: u64,
     },
+    /// A plugin put the player to bed; the verdict answers the waiting plugin call.
+    PluginSleep {
+        position: [i32; 3],
+        force: bool,
+        ticket: u64,
+    },
     Input(ServerboundPlay),
     Leave,
     SetMode(i32),
@@ -4390,6 +4396,15 @@ impl Player {
                             feedback.as_ref(),
                         );
                     }
+                    continue;
+                }
+                Command::PluginSleep {
+                    position,
+                    force,
+                    ticket,
+                } => {
+                    let slept = super::blocks::plugin_sleep(self, position, force);
+                    crate::plugins::playerops::complete(ticket, slept);
                     continue;
                 }
                 Command::PluginBreakBlock { position, ticket } => {

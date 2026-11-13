@@ -622,6 +622,14 @@ pub enum PlayerCommand {
         slot: u8,
         damage: i32,
     },
+    /// `Player#sleep(Location, boolean)`: the owning region answers the waiting plugin call
+    /// through `ticket` with whether the player lay down.
+    Sleep {
+        player: uuid::Uuid,
+        position: [i32; 3],
+        force: bool,
+        ticket: u64,
+    },
     /// `Player#startRiptideAttack`: a riptide spin of `ticks` ticks that hurts each mob it touches
     /// for `damage` once (`LivingEntity#startAutoSpinAttack`).
     RiptideAttack {

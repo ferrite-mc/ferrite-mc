@@ -73,6 +73,25 @@ pub fn handle(call: &HostCall, send: impl Fn(PlayerCommand)) -> Option<String> {
             pending().lock().unwrap().remove(&ticket);
             Some(broke.to_string())
         }
+        "sleep(int,int,int,boolean)" => {
+            let mut axis = call.args.iter().take(3).map(|v| v.parse::<i32>().ok());
+            let position = [axis.next()??, axis.next()??, axis.next()??];
+            let force = match call.args.get(3)?.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return None,
+            };
+            let (ticket, verdict) = begin();
+            send(PlayerCommand::Sleep {
+                player,
+                position,
+                force,
+                ticket,
+            });
+            let slept = verdict.recv_timeout(BREAK_WAIT).unwrap_or(false);
+            pending().lock().unwrap().remove(&ticket);
+            Some(slept.to_string())
+        }
         _ => None,
     }
 }
@@ -119,6 +138,37 @@ mod tests {
                 "{bad:?}"
             );
             assert_eq!(sent.into_inner(), 0);
+        }
+    }
+
+    #[test]
+    fn sleep_waits_for_the_regions_verdict_and_checks_its_arguments() {
+        for verdict in [true, false] {
+            let reply = handle(
+                &call("sleep(int,int,int,boolean)", &["1", "64", "-3", "true"]),
+                |c| {
+                    let PlayerCommand::Sleep {
+                        position,
+                        force,
+                        ticket,
+                        ..
+                    } = c
+                    else {
+                        panic!("unexpected {c:?}")
+                    };
+                    assert_eq!((position, force), ([1, 64, -3], true));
+                    complete(ticket, verdict);
+                },
+            );
+            assert_eq!(reply, Some(verdict.to_string()));
+        }
+        for bad in [["1", "64", "-3", "maybe"], ["x", "64", "-3", "true"]] {
+            assert_eq!(
+                handle(&call("sleep(int,int,int,boolean)", &bad), |_| panic!(
+                    "sent"
+                )),
+                None
+            );
         }
     }
 

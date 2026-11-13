@@ -179,6 +179,12 @@ fn use_bed(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     if property(state, "occupied") == Some("true") {
         return true;
     }
+    lie_in_bed(player, head, foot);
+    true
+}
+
+/// Both bed halves turn occupied and the player starts sleeping at the foot.
+fn lie_in_bed(player: &mut Player, head: [i32; 3], foot: [i32; 3]) {
     for part in [head, foot] {
         if let Some(part_state) = state_at(player, part)
             && let Some(next) = with_props(part_state, &[("occupied", "true")])
@@ -190,6 +196,38 @@ fn use_bed(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     super::recipe_unlock::push_event(player.uuid, super::recipe_unlock::Event::SleptInBed);
     crate::plugins::facts::set_sleeping(player.uuid, true);
     player.spawn = Some(foot);
+}
+
+/// The two halves of the bed whose block state is `state` at `pos`, as `(head, foot)`.
+fn bed_halves(pos: [i32; 3], state: u16) -> ([i32; 3], [i32; 3]) {
+    let (dx, dz) = match property(state, "facing").unwrap_or("north") {
+        "north" => (0, -1),
+        "south" => (0, 1),
+        "west" => (-1, 0),
+        _ => (1, 0),
+    };
+    if property(state, "part") == Some("head") {
+        (pos, [pos[0] - dx, pos[1], pos[2] - dz])
+    } else {
+        ([pos[0] + dx, pos[1], pos[2] + dz], pos)
+    }
+}
+
+/// `Player#sleep(Location, boolean)`: the player lies down in the bed at `pos`. It fails for a
+/// block that is no bed, a bed someone sleeps in, or a player already asleep. Without `force` a
+/// dimension where beds explode refuses too; with it the player sleeps there anyway.
+pub fn plugin_sleep(player: &mut Player, pos: [i32; 3], force: bool) -> bool {
+    let Some(state) = state_at(player, pos).filter(|state| is_bed(*state)) else {
+        return false;
+    };
+    if player.sleeping.is_some()
+        || property(state, "occupied") == Some("true")
+        || !(force || player.dimension.bed_works())
+    {
+        return false;
+    }
+    let (head, foot) = bed_halves(pos, state);
+    lie_in_bed(player, head, foot);
     true
 }
 
@@ -944,6 +982,32 @@ pub fn sign_messages(entity: &ferrite_world::BlockEntity, front: bool) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bed_halves_are_found_from_either_part_and_any_facing() {
+        let red_bed = blocks::default_state("red_bed").unwrap();
+        for (facing, (dx, dz)) in [
+            ("north", (0, -1)),
+            ("south", (0, 1)),
+            ("west", (-1, 0)),
+            ("east", (1, 0)),
+        ] {
+            let foot_state = with_props(red_bed, &[("part", "foot"), ("facing", facing)]).unwrap();
+            let head_state = with_props(red_bed, &[("part", "head"), ("facing", facing)]).unwrap();
+            let foot = [10, 64, 10];
+            let head = [10 + dx, 64, 10 + dz];
+            assert_eq!(
+                bed_halves(foot, foot_state),
+                (head, foot),
+                "{facing} from the foot"
+            );
+            assert_eq!(
+                bed_halves(head, head_state),
+                (head, foot),
+                "{facing} from the head"
+            );
+        }
+    }
 
     #[test]
     fn copper_scrapes_one_stage_and_waxes_keeping_its_state() {

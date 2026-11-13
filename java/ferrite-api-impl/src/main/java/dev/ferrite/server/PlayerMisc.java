@@ -97,6 +97,16 @@ public abstract class PlayerMisc extends PlayerStubs {
         HostBridge.callVoid("Player", getUniqueId(), "startRiptideAttack(int,float)", duration, damage);
     }
 
+    /**
+     * Puts the player to bed at {@code location}; false when that block is no bed, someone sleeps in it, the player is
+     * already asleep, or (without {@code force}) beds explode in the dimension. The player must be in that world.
+     */
+    @Override public boolean sleep(org.bukkit.Location location, boolean force) {
+        Objects.requireNonNull(location, "location");
+        if (location.getWorld() == null || !location.getWorld().equals(getWorld())) return false;
+        return HostBridge.callBoolean("Player", getUniqueId(), "sleep(int,int,int,boolean)", location.getBlockX(), location.getBlockY(), location.getBlockZ(), force);
+    }
+
     /** {@link org.bukkit.Chunk#getChunkKey(int, int)} of every chunk {@link #getSentChunks()} reports. */
     @Override public java.util.Set<Long> getSentChunkKeys() {
         var keys = new java.util.LinkedHashSet<Long>();

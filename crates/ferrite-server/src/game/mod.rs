@@ -3097,6 +3097,20 @@ fn route_plugin_command(
                     .push_back(Command::ItemDamage { slot, damage });
             }
         }
+        PlayerCommand::Sleep {
+            player,
+            position,
+            force,
+            ticket,
+        } => match mailboxes.get(&player) {
+            Some((_, mailbox, _)) => mailbox.lock().unwrap().push_back(Command::PluginSleep {
+                position,
+                force,
+                ticket,
+            }),
+            // Nobody to put to bed: the waiting plugin call gets its answer now.
+            None => crate::plugins::playerops::complete(ticket, false),
+        },
         PlayerCommand::RiptideAttack {
             player,
             ticks,

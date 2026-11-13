@@ -63,7 +63,14 @@ class PlayerBreadthTest {
     // ---- canCriticalAttack / getSentChunkKeys -------------------------------------------------------------------
 
     private void answer(java.util.Map<String, String> replies) {
-        HostBridge.transport = (owner, subject, method, args) -> replies.getOrDefault(method, "");
+        HostBridge.transport = (owner, subject, method, args) -> {
+            var parts = new ArrayList<String>();
+            parts.add(owner);
+            parts.add(method);
+            for (var part : String.valueOf(args).split(java.util.regex.Pattern.quote(String.valueOf(HostBridge.ARG)), -1)) parts.add(part);
+            calls.add(parts.toArray(String[]::new));
+            return replies.getOrDefault(method, "");
+        };
     }
 
     @Test void aCriticalAttackNeedsAChargedFallingSwingAgainstALivingTarget() {
@@ -110,6 +117,21 @@ class PlayerBreadthTest {
         assertThrows(IllegalArgumentException.class, () -> player.startRiptideAttack(20, -1f, null));
         assertThrows(IllegalArgumentException.class, () -> player.startRiptideAttack(20, Float.NaN, null));
         assertTrue(calls.isEmpty());
+    }
+
+    @Test void sleepSendsTheBlockAndForceAndReturnsTheHostVerdictOnlyInThePlayersWorld() {
+        answer(java.util.Map.of("sleep(int,int,int,boolean)", "true"));
+        assertTrue(player.sleep(new org.bukkit.Location(player.getWorld(), 4.5, 70, -2.5), true));
+        var call = only("sleep(int,int,int,boolean)");
+        assertEquals("4", call[2]);
+        assertEquals("70", call[3]);
+        assertEquals("-3", call[4]);
+        assertEquals("true", call[5]);
+        answer(java.util.Map.of("sleep(int,int,int,boolean)", "false"));
+        assertFalse(player.sleep(new org.bukkit.Location(player.getWorld(), 0, 64, 0), false));
+        var calledBefore = calls.size();
+        assertFalse(player.sleep(new org.bukkit.Location(null, 0, 64, 0), false));
+        assertEquals(calledBefore, calls.size());
     }
 
     // ---- launchProjectile ------------------------------------------------------------------------------------
