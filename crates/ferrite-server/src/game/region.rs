@@ -5867,10 +5867,11 @@ impl Region {
                     self.entities.pos(key)?,
                     mob.age < 0,
                     mob.last_killer,
+                    mob.fire > 0,
                 ))
             })
             .collect();
-        for (key, kind, pos, baby, killer) in dead {
+        for (key, kind, pos, baby, killer, burning) in dead {
             if let Some(killer) = killer {
                 super::recipe_unlock::KILLS
                     .lock()
@@ -5920,7 +5921,7 @@ impl Region {
             let drops = if baby {
                 Vec::new()
             } else {
-                super::drops::mob_drops(kind, &mut self.rng)
+                super::drops::mob_drops_by(kind, &mut self.rng, killer, burning)
             };
             for stack in drops
                 .into_iter()

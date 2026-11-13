@@ -24,12 +24,41 @@ pub enum Condition {
     MatchTool(ToolPredicate),
     /// Checks the broken block id and block state properties.
     BlockStateProperty(BlockPredicate),
-    /// Kept opaque; always satisfied.
+    /// Checks an entity role (`this`, `attacker`, `direct_attacker`) against a predicate. Always
+    /// satisfied while the context carries no entity facts at all.
     EntityProperties {
         /// Entity role the predicate applies to (`this`, `attacker`, ...).
         entity: Option<String>,
         /// Raw predicate JSON.
         predicate: Value,
+        /// Registry data for tag lookups.
+        data: std::sync::Arc<crate::data::GameData>,
+    },
+    /// Checks the damage source against a predicate. Always satisfied while the context carries
+    /// no damage facts.
+    DamageSourceProperties {
+        /// Raw predicate JSON.
+        predicate: Value,
+        /// Registry data for tag lookups.
+        data: std::sync::Arc<crate::data::GameData>,
+    },
+    /// Chance by enchantment level of the attacker (`random_chance_with_enchanted_bonus`).
+    RandomChanceWithEnchantedBonus {
+        /// Chance without the enchantment.
+        unenchanted: f32,
+        /// `(base, per_level_above_first)` of the linear chance with the enchantment.
+        enchanted: (f32, f32),
+        /// Enchantment whose level selects the chance (looting).
+        enchantment: String,
+    },
+    /// Checks the biome and block at the origin plus an offset.
+    LocationCheck {
+        /// Offset from the origin.
+        offset: [i32; 3],
+        /// Raw `predicate` (`biomes`, `block`).
+        predicate: Value,
+        /// Registry data for tags.
+        data: std::sync::Arc<crate::data::GameData>,
     },
     /// Negates another condition.
     Inverted(Box<Condition>),
@@ -64,7 +93,61 @@ impl Condition {
             },
             Self::MatchTool(predicate) => predicate.test(context),
             Self::BlockStateProperty(predicate) => predicate.test(context),
-            Self::EntityProperties { .. } | Self::Opaque { .. } => true,
+            Self::EntityProperties {
+                entity,
+                predicate,
+                data,
+            } => {
+                if context.this_entity.is_none() && context.damage_source.is_none() {
+                    return true;
+                }
+                let facts = match entity.as_deref().unwrap_or("this") {
+                    "this" => context.this_entity.as_ref(),
+                    "attacker" => context
+                        .damage_source
+                        .as_ref()
+                        .and_then(|damage| damage.source_entity.as_ref()),
+                    "direct_attacker" => context
+                        .damage_source
+                        .as_ref()
+                        .and_then(|damage| damage.direct_entity.as_ref()),
+                    _ => None,
+                };
+                facts.is_some_and(|facts| crate::entity::entity_matches(predicate, facts, data))
+            }
+            Self::RandomChanceWithEnchantedBonus {
+                unenchanted,
+                enchanted,
+                enchantment,
+            } => {
+                let level = context.enchantment_level(enchantment);
+                let chance = if level > 0 {
+                    enchanted.0 + enchanted.1 * (level - 1) as f32
+                } else {
+                    *unenchanted
+                };
+                rng.next_float() < chance
+            }
+            Self::LocationCheck {
+                offset,
+                predicate,
+                data,
+            } => {
+                let (Some(origin), Some(host)) = (context.origin, context.host.as_deref()) else {
+                    return true;
+                };
+                let pos = [
+                    origin[0].floor() as i32 + offset[0],
+                    origin[1].floor() as i32 + offset[1],
+                    origin[2].floor() as i32 + offset[2],
+                ];
+                location_matches(predicate, pos, host, data)
+            }
+            Self::DamageSourceProperties { predicate, data } => match &context.damage_source {
+                None => context.this_entity.is_none(),
+                Some(damage) => crate::entity::damage_matches(predicate, damage, data),
+            },
+            Self::Opaque { .. } => true,
             Self::Inverted(condition) => !condition.test(context, rng),
             Self::AnyOf(conditions) => conditions
                 .iter()
@@ -217,6 +300,34 @@ fn parse_object(
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             predicate: object.get("predicate").cloned().unwrap_or(Value::Null),
+            data: definitions.data.clone(),
+        },
+        "minecraft:random_chance_with_enchanted_bonus" => {
+            let linear = object.get("enchanted_chance");
+            Condition::RandomChanceWithEnchantedBonus {
+                unenchanted: float(object.get("unenchanted_chance")) as f32,
+                enchanted: (
+                    float(linear.and_then(|v| v.get("base").or_else(|| v.get("value")))) as f32,
+                    float(linear.and_then(|v| v.get("per_level_above_first"))) as f32,
+                ),
+                enchantment: object
+                    .get("enchantment")
+                    .and_then(Value::as_str)
+                    .unwrap_or("minecraft:looting")
+                    .to_owned(),
+            }
+        }
+        "minecraft:location_check" => {
+            let offset = |key: &str| object.get(key).and_then(Value::as_i64).unwrap_or(0) as i32;
+            Condition::LocationCheck {
+                offset: [offset("offsetX"), offset("offsetY"), offset("offsetZ")],
+                predicate: object.get("predicate").cloned().unwrap_or(Value::Null),
+                data: definitions.data.clone(),
+            }
+        }
+        "minecraft:damage_source_properties" => Condition::DamageSourceProperties {
+            predicate: object.get("predicate").cloned().unwrap_or(Value::Null),
+            data: definitions.data.clone(),
         },
         "minecraft:inverted" => Condition::Inverted(Box::new(
             object
@@ -432,4 +543,38 @@ fn property_value(value: &Value) -> String {
         Value::Number(value) => value.to_string(),
         _ => String::new(),
     }
+}
+
+/// `location_check` predicate: `biomes` (ids and tags) and `block` (`blocks`, `state`).
+fn location_matches(
+    predicate: &Value,
+    pos: [i32; 3],
+    host: &dyn crate::LootHost,
+    data: &crate::data::GameData,
+) -> bool {
+    let Some(object) = predicate.as_object() else {
+        return false;
+    };
+    object.iter().all(|(key, wanted)| match key.as_str() {
+        "biomes" => host.biome_at(pos).is_some_and(|biome| {
+            data.resolve_ids("worldgen/biome", wanted)
+                .contains(&normalize_id(&biome))
+        }),
+        "block" => host.block_at(pos).is_some_and(|(block, state)| {
+            let blocks_ok = wanted.get("blocks").is_none_or(|blocks| {
+                data.resolve_ids("block", blocks)
+                    .contains(&normalize_id(&block))
+            });
+            let state_ok = wanted
+                .get("state")
+                .and_then(Value::as_object)
+                .is_none_or(|props| {
+                    props
+                        .iter()
+                        .all(|(name, value)| value.as_str() == state.get(name).map(String::as_str))
+                });
+            blocks_ok && state_ok
+        }),
+        _ => false,
+    })
 }

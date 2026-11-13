@@ -314,7 +314,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
     `set_writable_book_pages`, `set_written_book_pages`, `toggle_tooltips`. Number providers
     other than constant and uniform (`binomial`, `score`, `storage`) and conditions other than
     those above are not supported either.
-  - Not verified: the vanilla `slots` and `sourceSlots` arguments are a slot-source language
+  - BLOCKED (lane/blocked-x, not started): the vanilla `slots` and `sourceSlots` arguments are a slot-source language
     (`SlotSourceArgument`: filters, limits, composites); Ferrite parses only plain names
     (`container.N`, `hotbar.*`, `weapon.mainhand`, ...). Non-player entities have no inventory
     here, so only players are written. Success/failure message texts were not re-read from the
@@ -383,9 +383,9 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
     damage type's key is checked to exist in it.
   - Result and message follow vanilla: the command returns 1, the success message shows the
     requested amount as a Java float (`4.0`).
-  - Not done: `fall_variants` (`fall`, `ender_pearl`) use the plain `death.attack.fall` text
-    instead of the `death.fell.*` variants (needs the combat history and the victim's fall
-    location, which Ferrite does not track); the sound/effect (`effects`) of a type, damage type
+  - `fall_variants` now follow `CombatTracker.getDeathMessage` for a single fall entry
+    (`death.fell.accident.*`, unit-tested); callers still pass the default fall data, and
+    `death.fell.assist|finish|killer` need a combat history Ferrite lacks. Not done: the sound/effect (`effects`) of a type, damage type
     exhaustion and the armor/enchantment reduction of `/damage` are not applied (the survival
     model ignores armor: `DamageKind::bypasses_armor` is true only for explosions while the
     vanilla `bypasses_armor` tag lists 19 other types and not explosions; it is not read by

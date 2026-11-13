@@ -179,6 +179,8 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.item.target.not_a_container" => "Target position %s, %s, %s is not a container",
         "commands.item.source.no_such_slot" => "The source does not have slot %s",
         "commands.item.target.no_such_slot" => "The target does not have slot %s",
+        "commands.item.target.no_such_slot.unnamed" => "The target does not have slot %s",
+        "commands.item.source.no_such_slot.unnamed" => "The source does not have slot %s",
         "commands.item.target.no_changes" => "No targets accepted item into slot %s",
         "commands.item.block.set.success" => "Replaced a slot at %s, %s, %s with %s",
 

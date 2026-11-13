@@ -689,6 +689,14 @@ pub enum SlotTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotSource {
     Stacks(Vec<ferrite_item::ItemStack>),
+    /// Rolled loot for `/loot insert|replace`, answered with vanilla's `commands.drop.*`
+    /// messages. `count` is the `<count>` argument of `replace` (vanilla defaults it to the
+    /// number of stacks).
+    Loot {
+        stacks: Vec<ferrite_item::ItemStack>,
+        table: Option<String>,
+        count: Option<i32>,
+    },
     FromBlock {
         pos: [i32; 3],
         slots: String,

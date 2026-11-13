@@ -4854,10 +4854,12 @@ impl CommandRuntime<'_> {
                 stacks,
                 table,
             } => {
+                let mut tracked = Vec::new();
                 for target in &targets {
                     let Some((_, mailbox, _)) = self.mailboxes.get(target) else {
                         continue;
                     };
+                    tracked.extend(stacks.iter().cloned());
                     for stack in &stacks {
                         let components = stack
                             .components
@@ -4875,7 +4877,7 @@ impl CommandRuntime<'_> {
                         });
                     }
                 }
-                let (key, args) = commands_loot::success_feedback(&stacks, table.as_deref());
+                let (key, args) = commands_loot::success_feedback(&tracked, table.as_deref());
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 self.reply.key(key, &args);
                 false
