@@ -176,6 +176,28 @@ pub fn mount_in(
     Ok(())
 }
 
+/// Seats `rider` on `vehicle` again after a reload. The saved pair was valid when it was written,
+/// so capacity is not rechecked; a rider that already rides something is left alone. If the
+/// vehicle is not loaded yet the transit grace in [`plan`] waits for it.
+pub fn restore(rider: Uuid, vehicle: Uuid) {
+    if rider == vehicle {
+        return;
+    }
+    let mut rides = rides();
+    if rides.contains_key(&rider) {
+        return;
+    }
+    let order = NEXT_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    rides.insert(
+        rider,
+        Seat {
+            vehicle,
+            order,
+            absent: 0,
+        },
+    );
+}
+
 /// Takes `rider` off whatever it rides; the vehicle it left.
 pub fn dismount(rider: Uuid) -> Option<Uuid> {
     rides().remove(&rider).map(|s| s.vehicle)
