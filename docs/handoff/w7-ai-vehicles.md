@@ -7,7 +7,8 @@ repository; nothing was validated with a graphical client.
 |---|---|---|---|
 | #8 | `w7-maps` | `3ec1678` | persistent maps and the cartography table (see `w7-maps.md`) |
 | #9 | `w7-ai-vehicles` | `aa66167` | creative/spectator targeting, ride order/capacity/chains |
-| follow-up | `w7-ai-matrix` | see its PR | Hard skeleton cooldown, spider light, ride dimension/death fixes, this matrix |
+| #14 | `w7-ai-matrix` | `fdfc887` | Hard skeleton cooldown, spider light, ride dimension/death fixes, this matrix |
+| follow-up | `w7-ride-seats` | see its PR | vanilla seat attachment points, region-transit grace, ride persistence |
 
 ## Defects fixed
 
@@ -66,15 +67,26 @@ while reading, not an exhaustive comparison against vanilla.
   that owns the rider's chunk each tick, so a vehicle crossing a region border keeps working in
   principle. There is **no test** that moves a vehicle across a region border, splits or merges
   regions with a ride active, unloads a vehicle's chunk while mounted, or saves and reloads a ride.
-- Rides are not persisted across a restart.
+- Region transit: a vehicle missing from the snapshot for up to `TRANSIT_GRACE_TICKS` (10)
+  consecutive plan ticks keeps its rider; only a longer absence detaches
+  (`a_vehicle_in_transit_between_regions_keeps_its_rider_for_a_short_grace`).
+- Persistence: a rider entity saves `RideVehicle` (vehicle UUID) and is re-seated when its chunk
+  reloads (`a_saved_rider_is_seated_on_its_vehicle_again_after_the_chunk_reloads`); a player's
+  save carries `vehicle` and the join re-links it (`ride::restore`). Vanilla instead saves
+  `RootVehicle`/`Passengers` NBT and removes the vehicle with the logged-out player; Ferrite keeps
+  the vehicle in the world and re-links if it still exists. If it never loads, the transit
+  grace drops the ride and the player is not stuck. No integration test restarts a server with a
+  mounted player; the join re-link has only the unit-level coverage above.
 - Runtime worlds share a vanilla dimension type and are indistinguishable in the command
   snapshot, so a ride between two runtime worlds of the same type is not ended (R4 limitation).
 
 ## Unsupported / not done
 
-- **Per-type seat offsets.** Placement is a fixed lift (`SEAT_LIFT = 0.6`). Vanilla uses
-  `EntityAttachments` passenger points, which are not in the generated reports; extracting them
-  from the jar's `EntityType` initialiser was not done and no numbers were invented.
+- **Seat offsets** now follow vanilla: vehicle PASSENGER point (rotated by yaw) minus rider
+  VEHICLE point, from `ferrite_data::entity_props` attachments (cross-checked by running the 26.3
+  jar's own `EntityAttachments` over all entity types; only happy ghast's 4-point passenger list
+  differs and is not represented). Not modelled: baby scale, horse/llama rearing offset, horse
+  body-yaw copy to the rider. Unknown kinds fall back to a 0.6 lift.
 - Player steering for vehicles other than saddled horses; dismount-position safety search.
 - Nether/End ambient light for the spider rule.
 - Boats, minecarts and camels have a seat capacity but no steering.

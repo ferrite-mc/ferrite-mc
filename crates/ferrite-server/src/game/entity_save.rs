@@ -30,6 +30,8 @@ use uuid::Uuid;
 
 /// Directory below the world folder that holds the per-chunk entity sidecars.
 pub const DIRECTORY: &str = "entities";
+/// Key of the vehicle a saved rider sits on (a UUID as four ints).
+const RIDE_VEHICLE: &str = "RideVehicle";
 /// Chunk data version written into each sidecar (`level.dat`/chunk save format of 26.3).
 const DATA_VERSION: i32 = 5023;
 
@@ -155,7 +157,11 @@ pub fn load(world: &Path, chunk: (i32, i32)) -> Vec<EntityRecord> {
         }
     };
     match binary::read_compressed(&bytes, binary::Compression::Gzip) {
-        Ok((_, tag)) => from_nbt(&tag),
+        Ok((_, tag)) => {
+            let records = from_nbt(&tag);
+            restore_rides(&tag, &records);
+            records
+        }
         Err(error) => {
             tracing::warn!(path = %path.display(), %error, "ignoring a corrupt entity file");
             Vec::new()
@@ -205,13 +211,19 @@ pub fn to_nbt(records: &[EntityRecord]) -> Tag {
         .iter()
         .filter(|record| !is_runtime_only(record))
         .filter_map(|record| {
-            entity_to_nbt(record).or_else(|| {
+            let mut saved = entity_to_nbt(record).or_else(|| {
                 tracing::warn!(
                     uuid = %record.data.uuid,
                     "skipping an entity that cannot be saved"
                 );
                 None
-            })
+            })?;
+            // Vanilla keeps passengers with their vehicle (`Passengers`); a sidecar per chunk
+            // cannot nest across chunks, so the rider records which vehicle it sits on.
+            if let Some(vehicle) = super::ride::vehicle_of(record.data.uuid) {
+                saved.insert(RIDE_VEHICLE.into(), Tag::IntArray(uuid_words(vehicle)));
+            }
+            Some(saved)
         })
         .collect();
     root.insert("Entities".into(), Tag::List(List::Compound(entities)));
@@ -236,6 +248,25 @@ pub fn from_nbt(tag: &Tag) -> Vec<EntityRecord> {
         return Vec::new();
     };
     entities.iter().filter_map(entity_from_nbt).collect()
+}
+
+/// Seats the riders of a loaded chunk on the vehicles their records name.
+fn restore_rides(tag: &Tag, records: &[EntityRecord]) {
+    let Tag::Compound(root) = tag else {
+        return;
+    };
+    let Some(Tag::List(List::Compound(entities))) = root.get("Entities") else {
+        return;
+    };
+    let loaded: std::collections::HashSet<Uuid> = records.iter().map(|r| r.data.uuid).collect();
+    for entity in entities {
+        if let (Some(rider), Some(vehicle)) =
+            (uuid_field(entity, "UUID"), uuid_field(entity, RIDE_VEHICLE))
+            && loaded.contains(&rider)
+        {
+            super::ride::restore(rider, vehicle);
+        }
+    }
 }
 
 fn uuid_words(uuid: Uuid) -> Vec<i32> {
@@ -926,6 +957,42 @@ mod tests {
         let loaded = from_nbt(&to_nbt(&[record]));
         assert_eq!(loaded.len(), 1);
         assert_eq!(ferrite_entity::item::full_stack(&loaded[0].data), shulker);
+    }
+
+    #[test]
+    fn a_saved_rider_is_seated_on_its_vehicle_again_after_the_chunk_reloads() {
+        let _turn = super::super::ride::test_turn();
+        let world = temp_world("rider-persists");
+        let rider = mob_record();
+        let rider_uuid = rider.data.uuid;
+        let vehicle = Uuid::from_u128(0x7e1d_0001);
+        let other = mob_record();
+        super::super::ride::mount(rider_uuid, vehicle, false).unwrap();
+
+        // Saving writes the link, the server stops, and the next start has an empty ride table.
+        save(&world, (0, 0), &[rider.clone(), other.clone()]).unwrap();
+        super::super::ride::forget(rider_uuid);
+        assert_eq!(super::super::ride::vehicle_of(rider_uuid), None);
+
+        let loaded = load(&world, (0, 0));
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            super::super::ride::vehicle_of(rider_uuid),
+            Some(vehicle),
+            "the saved ride is back"
+        );
+        assert_eq!(
+            super::super::ride::vehicle_of(other.data.uuid),
+            None,
+            "a mob that was not riding stays unmounted"
+        );
+
+        // A rider that dismounted before the next save is written without a link.
+        super::super::ride::dismount(rider_uuid);
+        save(&world, (0, 0), &[rider]).unwrap();
+        load(&world, (0, 0));
+        assert_eq!(super::super::ride::vehicle_of(rider_uuid), None);
+        let _ = std::fs::remove_dir_all(&world);
     }
 
     #[test]

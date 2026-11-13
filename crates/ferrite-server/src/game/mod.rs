@@ -2383,6 +2383,7 @@ async fn run(
                    let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
                    let start_mode = saved.as_ref().map_or_else(|| command_state.lock().unwrap().default_gamemode, |s| s.gamemode);
                    command_state.lock().unwrap().join_session(uuid, session, name.clone(), start_mode, max_players as i32);
+                   if let Some(vehicle) = saved.as_ref().and_then(|s| s.vehicle) { ride::restore(uuid, vehicle); }
                    if start_mode == 3 { command_state.lock().unwrap().more.spectators.insert(uuid); }
                    command_state.lock().unwrap().set_position(uuid, start_pos, start_yaw, start_pitch);
                    command_state.lock().unwrap().set_dimension(uuid, start_dimension);
@@ -2554,8 +2555,9 @@ async fn run(
                       }}
                   }},
                   GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
-                  GameMessage::Left{session,uuid}=>{ride::forget(uuid); if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
-                    if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);}},
+                  GameMessage::Left{session,uuid}=>{if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
+                    // The region forgets the rides after saving the player; with no region to ask, do it now.
+                    if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);} else { ride::forget(uuid); }},
                   GameMessage::CreateRuntimeWorld{name,dimension,spawn,seed,complete}=>{
                       let result = (|| -> Result<(Uuid, String, [i32; 3], i64), String> {
                           let dimension = Dimension::from_key(&dimension).ok_or_else(|| format!("unknown world dimension {dimension}"))?;
