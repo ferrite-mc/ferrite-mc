@@ -746,7 +746,8 @@ mod tests {
         let (outbound, mut rx) = OutboundSender::channel(1 << 20);
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, Mailbox::default(), outbound));
-        route_plugin_command(command, &mailboxes, &mut HashMap::new(), &|_| None);
+        let state = Arc::new(Mutex::new(commands::GameState::default()));
+        route_plugin_command(command, &mailboxes, &mut HashMap::new(), &|_| None, &state);
         std::iter::from_fn(|| rx.try_recv()).collect()
     }
 
@@ -786,6 +787,7 @@ mod tests {
         let (outbound, _rx) = OutboundSender::channel(1 << 20);
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, mailbox.clone(), outbound));
+        let state = Arc::new(Mutex::new(commands::GameState::default()));
         for target in [Uuid::from_u128(8), player] {
             route_plugin_command(
                 ferrite_plugin::PlayerCommand::VisualExperience {
@@ -796,12 +798,38 @@ mod tests {
                 &mailboxes,
                 &mut HashMap::new(),
                 &|_| None,
+                &state,
             );
         }
         let commands: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
         assert!(
             matches!(commands.as_slice(), [Command::PluginVisualExperience { progress, level: Some(12) }] if *progress == 0.75)
         );
+    }
+
+    #[test]
+    fn plugin_gamemode_updates_locator_spectators() {
+        let player = Uuid::from_u128(7);
+        let (outbound, _rx) = OutboundSender::channel(1 << 20);
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(player, (1, Mailbox::default(), outbound));
+        let state = Arc::new(Mutex::new(commands::GameState::default()));
+        for (mode, spectator) in [
+            (ferrite_plugin::GameMode::Spectator, true),
+            (ferrite_plugin::GameMode::Survival, false),
+        ] {
+            route_plugin_command(
+                ferrite_plugin::PlayerCommand::SetGameMode { player, mode },
+                &mailboxes,
+                &mut HashMap::new(),
+                &|_| None,
+                &state,
+            );
+            assert_eq!(
+                state.lock().unwrap().more.spectators.contains(&player),
+                spectator
+            );
+        }
     }
 
     #[test]
@@ -2216,6 +2244,13 @@ async fn run(
                          }
                      }
                      {
+                         let blocks = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::BLOCKS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !blocks.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for record in blocks { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_block(&record)); }
+                         }
+                     }
+                     {
                          let crafted = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::CRAFTED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !crafted.is_empty() {
                              let mut game = command_state.lock().unwrap();
@@ -2229,11 +2264,15 @@ async fn run(
                          for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }
                          let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          let mut game = command_state.lock().unwrap();
+                         let tick_criteria = recipe_unlock::criteria_for_tick();
                          for uuid in online.keys() {
                              if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
                                  last_held.insert(*uuid, items.clone());
                                  recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
                                  game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
+                             }
+                             if !tick_criteria.is_empty() {
+                                 game.more.advancements.entry(*uuid).or_default().extend(tick_criteria.iter().cloned());
                              }
                          }
                      }
@@ -2396,7 +2435,7 @@ async fn run(
                    let entity=ferrite_entity::allocate_id();
                    emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
                    let (actions, _) = mpsc::unbounded_channel();
-                   if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
+                   if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
                        let mut packet = Vec::new(); VarInt(16).encode(&mut packet); packet.extend(tree.body); let _ = outbound.send(Outbound::Packet(packet.into()));
                    }
                    emit(&outbound, &SetHeldSlot { slot: VarInt(start_inventory.selected_slot() as i32) });
@@ -2485,7 +2524,7 @@ async fn run(
                       let (actions, mut received) = mpsc::unbounded_channel();
                       let (origin, yaw, pitch) = online.get(&uuid).map_or(([0.0; 3], 0.0, 0.0), |player| (player.pos, player.yaw, player.pitch));
                       let name = command_state.lock().unwrap().players.iter().find(|p| p.uuid == uuid).map(|p| p.name.clone());
-                      let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                       if let Err(error) = command_tree.execute(command.trim_start_matches('/'), command_source) { emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(error.to_string()), overlay:false }); }
                       let source_name = online.get(&uuid).map_or_else(|| "Server".to_owned(), |player| player.name.clone());
                       let runtime_dimension = online.get(&uuid).map_or(Dimension::Overworld, |p| p.dimension);
@@ -2617,7 +2656,7 @@ async fn run(
                   },
                   GameMessage::Console{command,complete}=>{
                       let (actions, mut received) = mpsc::unbounded_channel();
-                      let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                       let result = command_tree.execute(command.trim().trim_start_matches('/'), command_source).map_err(|e| e.to_string());
                       let mut stop = false;
                       let mut runtime = CommandRuntime {
@@ -2743,7 +2782,7 @@ async fn run(
                             if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
                                 let (actions, _) = mpsc::unbounded_channel();
                                 let permission = *permissions.get(&player).unwrap_or(&0);
-                                let source_for = commands::Source { permission, origin: op.pos, yaw: op.yaw, pitch: op.pitch, uuid: Some(player), name: Some(op.name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: op.dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                                let source_for = commands::Source { permission, origin: op.pos, yaw: op.yaw, pitch: op.pitch, uuid: Some(player), name: Some(op.name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: op.dimension, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                                 if let Ok(tree) = command_tree.serialize_commands(&source_for, registry) {
                                     let mut packet = Vec::new();
                                     VarInt(16).encode(&mut packet);
@@ -2814,7 +2853,7 @@ async fn run(
                          Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
                             worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                         }
-                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog)),
+                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog), &command_state),
                          // The plugin host dropped its sender (no plugins loaded): stop polling.
                          None => plugin_commands = None,
                      }
@@ -2856,6 +2895,7 @@ fn route_plugin_command(
     mailboxes: &HashMap<Uuid, (u64, Mailbox, OutboundSender)>,
     permissions: &mut HashMap<Uuid, u8>,
     travel: &dyn Fn(Uuid) -> Option<TravelTarget>,
+    state: &Arc<Mutex<commands::GameState>>,
 ) {
     use ferrite_plugin::PlayerCommand;
     match command {
@@ -3007,6 +3047,11 @@ fn route_plugin_command(
                 ferrite_plugin::GameMode::Adventure => 2,
                 ferrite_plugin::GameMode::Spectator => 3,
             };
+            if mode == 3 {
+                state.lock().unwrap().more.spectators.insert(player);
+            } else {
+                state.lock().unwrap().more.spectators.remove(&player);
+            }
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::SetMode(mode));
             }
@@ -3925,6 +3970,10 @@ impl CommandRuntime<'_> {
         op: commands::AttributeOp,
     ) {
         use commands::AttributeOp;
+        if targets.is_empty() {
+            self.reply.key("argument.entity.notfound.entity", &[]);
+            return;
+        }
         let [target] = targets else {
             self.reply.key("argument.entity.toomany", &[]);
             return;
@@ -4585,7 +4634,7 @@ impl CommandRuntime<'_> {
                         target.pos,
                         yaw,
                         pitch,
-                        self.dimension,
+                        target.dimension,
                     );
                 }
                 if let Some(first) = targets.first() {
@@ -4751,6 +4800,16 @@ impl CommandRuntime<'_> {
                         return false;
                     }
                 };
+                if let Some(target) = targets.iter().find(|target| {
+                    !target.player
+                        && target.kind.is_some_and(|kind| {
+                            ferrite_data::entity_props::get(kind).attributes.is_empty()
+                        })
+                }) {
+                    self.reply
+                        .key("commands.swing.failed.notliving", &[&target.name]);
+                    return false;
+                }
                 let action = if off_hand { 3 } else { 0 };
                 for target in &targets {
                     if target.player {

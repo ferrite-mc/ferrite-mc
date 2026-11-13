@@ -21,6 +21,8 @@ pub struct SelectedEntity {
     pub player: bool,
     /// Entity type protocol id; `None` for players.
     pub kind: Option<u16>,
+    /// Dimension the entity lives in, so commands can keep it there when they move it.
+    pub dimension: crate::game::Dimension,
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
@@ -202,6 +204,7 @@ fn candidates(state: &GameState) -> Vec<Candidate> {
                 name: player.name.clone(),
                 player: true,
                 kind: None,
+                dimension: player.dimension,
                 pos: player.pos,
                 yaw: player.yaw,
                 pitch: player.pitch,
@@ -224,6 +227,7 @@ fn candidates(state: &GameState) -> Vec<Candidate> {
                 name: entity.display_name(),
                 player: false,
                 kind: Some(entity.kind),
+                dimension: entity.dimension,
                 pos: entity.pos,
                 yaw: entity.yaw,
                 pitch: entity.pitch,
