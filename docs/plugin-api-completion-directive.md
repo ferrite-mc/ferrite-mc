@@ -212,3 +212,48 @@
   재생성한다. 실제 서버 경로에 남은 의도적 거부는 메서드명·이유·대체 API를 표로 쓴다.
 - README에는 “NMS 미지원” 같은 포괄 문구를 남기지 말고, 위의 정확한 클래스·메서드와
   구현 상태를 반영한다.
+
+## 10. 구현 현황 (2026-11-14, 브랜치 `yxshadxw/plugin-new`)
+
+이 절은 위 지시서를 코드와 대조해 **끝낸 것**, **원래 구현돼 있던 것(문서가 낡음)**,
+**아직 남은 것**을 가른다. 아래 "끝냄"의 각 줄은 같은 커밋에 테스트가 있다.
+
+### 10.1 이번에 끝낸 것
+
+| 항목 | 구현 | 테스트 |
+|---|---|---|
+| `World#getChunksAtAsync(int,int,int,int,boolean,Runnable)` | `FerriteWorld` (`getChunkAtAsync`와 같은 규칙: 청크 핸들은 뷰이므로 콜백은 즉시, 역순 범위는 `IllegalArgumentException`) | `FerriteChunkDataTest#chunkRectangleAsync...` |
+| `Player#canCriticalAttack(Entity)` | `PlayerMisc` — 바닐라 `Player.attack`의 치명타 조건(쿨다운 > 0.9, 낙하, 공중, 사다리·물·실명·탑승·달리기 아님, 생명체 대상) | `PlayerBreadthTest#aCriticalAttack...` |
+| `Player#getSentChunkKeys()` | `PlayerMisc` — `getSentChunks()`를 `Chunk#getChunkKey`로 변환 | `PlayerBreadthTest#sentChunkKeys...` |
+| `Player#startRiptideAttack(int,float,ItemStack)` | Java `PlayerMisc` → `PlayerCommand::RiptideAttack`(`ferrite-plugin`) → `plugins/inventory.rs` → `game/mod.rs` → 리전 `Command::RiptideAttack` → `Region::spin_attacks`/`spin_victims`(회전 중 상자 주변 몹에 한 번씩 피해, 킬 크레딧·보복·피격 애니메이션) | Java `PlayerBreadthTest#aRiptideAttack...`, Rust `inventory::tests::riptide_attack_calls...`, `region::tests::a_riptide_spin_picks_each_mob_in_reach_once` |
+| `Player#sleep(Location,boolean)` | Java `PlayerMisc` → `PlayerCommand::Sleep`(티켓으로 리전 판정을 기다림, `breakBlock`과 같은 방식) → `blocks::plugin_sleep`(침대가 아니거나, 점유 중이거나, 이미 자는 중이거나, 침대가 터지는 차원에서 `force=false`이면 `false`) | Java `PlayerBreadthTest#sleepSends...`, Rust `playerops::tests::sleep_waits...`, `blocks::tests::bed_halves...` |
+| `sendBlockUpdate`: 디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된 책장 | `plugins/tile_update.rs` `FAMILIES` + `PlayerMisc#sendBlockUpdate` | Rust `tile_update::tests::the_item_container_families...`, Java `PlayerTileUpdateTest` |
+| `sendBlockUpdate`: 머리 프로필 properties(텍스처) | `property,<이름>,<값>,<서명>` 항목 → `ResolvableProfile.properties` (개수·길이 상한은 바닐라 값) | Rust `a_skull_carries_its_texture_properties...`, Java `aSkullSendsItsProfileTextures...` |
+| `sendBlockUpdate`: 스냅샷 아이템의 `ItemMeta` | `ItemMetaWire`(인벤토리 슬롯과 같은 직렬화) → `meta,<슬롯>,<hex>` → `with_meta` | Rust `a_stack_in_the_snapshot_can_carry_metadata`, Java `aStackWithMetadataSends...` |
+
+### 10.2 문서가 낡았던 것 (코드에는 이미 있음)
+
+- 배너 `patterns`와 머리 profile name/uuid는 이미 `sendBlockUpdate`로 간다.
+- PDC의 컨테이너·컨테이너 배열·중첩 리스트 타입은 `FerriteDataContainer`가 구현하고
+  `ItemPdcNestingTest`가 검증한다. 지원하지 않는 PDC 타입은 예외로 거부한다.
+- `Player#launchProjectile`은 삼지창·눈덩이·달걀·진주·경험치 병·물약·바람 구슬·화염구를 지원한다.
+- `World#getChunkGenerationState(Async)`, `unloadChunkRequest`, `isChunkInUse`, `getLoadedChunks`,
+  `locateNearestBiome`/`Structure`, `hasStructureAt`, `getStructures`는 `FerriteWorld`가 처리한다.
+  호스트 없는 카탈로그(`build/catalog/*-missing.txt`)에 나온다는 이유만으로 미구현이 아니다.
+- 11-13 `commands/plugins` 후속(lane `blocked-x/y/z`, `plugins-z`)은 PR #24·#25로 통합돼 있고,
+  PR #25 이후 브랜치에만 남은 커밋은 테스트·문서 3개뿐이어서 이 브랜치에 체리픽했다(`blocked-y`와 `blocked-z`는 남은 것이 없다).
+
+### 10.3 아직 남은 것 (코드 근거가 있는 목록)
+
+호스트 라우트도 Java 케이스도 없는 서명만 적었다(`World`는 카탈로그와 `crates/**`·Java `case`를 대조).
+
+- **Player:** `fireworkBoost`(폭죽 엔티티 모델 없음), `getConnection`, `loadData`, `postEffects`, `spawnAt`.
+- **World:** `addEntity`, `createEntity`, `spawn` 일부 overload, `createExplosion` 일부 overload,
+  `getFluidData`(흐름 방향 계산에 이웃 블록 충돌 정보가 필요), `getTileEntityCount`/`getTickableTileEntityCount`,
+  `getWorldPath`, `isVoidDamageEnabled`(setter가 게임 루프에 연결돼야 한다), `locateAllPoiInRange`,
+  `locateNearestPoi`, `vanillaBiomeProvider`.
+- **블록 엔티티:** 주크박스·교탁·명령 블록·스포너·벌집·스컬크 센서·구조물 블록·침대. 26.3의 NBT 키 이름을
+  확인할 수 있는 자료(서버 코드)가 로컬에 없어서 추측으로 구현하지 않았다. `UnsupportedOperationException`을 유지한다.
+- **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), Paper 생명주기(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
+- 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
+

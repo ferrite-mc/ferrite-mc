@@ -72,7 +72,7 @@ server-side only.
 
 - `Server#createWorld`/`unloadWorld` are implemented (runtime worlds, section 8). Creator options
   Ferrite cannot honour still throw `UnsupportedOperationException`.
-- `Player#sendBlockUpdate` supports signs, chests, barrels, shulker boxes and furnaces; any other tile state (banner, skull, ...) throws `UnsupportedOperationException` because the host has no block-entity model for it (`plugins/tile_update.rs` `FAMILIES`). `World#unloadChunk` does not force-unload a live
+- `Player#sendBlockUpdate` supports signs, banners, skulls (with textures), chests, barrels, shulker boxes, furnaces, dispensers, droppers, hoppers, brewing stands, crafters, campfires and chiseled bookshelves, with item metadata on snapshot stacks; any other tile state throws `UnsupportedOperationException` because the host has no block-entity model for it (`plugins/tile_update.rs` `FAMILIES`). `World#unloadChunk` does not force-unload a live
   chunk: it succeeds after unload and returns false while a player or `/forceload` holds it.
 - Ender pearls now route cross-region landings through the world loop to the owner's region. A
   landing after the player changes dimension is ignored.

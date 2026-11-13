@@ -67,7 +67,8 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 - 구조물 엔티티 스냅샷 열거는 **런타임 월드만** NBT를 제공한다. 기본 오버월드와
   네더·엔드의 비플레이어 엔티티는 NBT 기반 구조물 캡처/재생성 대상에서 제외된다.
 - 아이템 메타 중 지원 표에 없는 타입, 지원하지 않는 PDC 타입, 표지판·상자·통·셜커
-  상자·화로 계열 외 블록 엔티티 `sendBlockUpdate`, 일부 `BlockData`/청크 스냅샷.
+  표지판·배너·머리·상자·통·셜커 상자·화로·디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된
+  책장 외 블록 엔티티(주크박스·교탁·명령 블록·스포너 등)의 `sendBlockUpdate`, 일부 `BlockData`/청크 스냅샷.
 - `RegistryAccess`의 `GameRule`·`MemoryKey` 값 객체처럼 생성 데이터에 타입·기본값이
   없는 항목.
 - NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
