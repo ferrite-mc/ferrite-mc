@@ -3908,6 +3908,8 @@ impl Player {
                 Command::Leave => {
                     trader.commit(self);
                     self.save_on_exit();
+                    // After the save, which records the vehicle the player was riding.
+                    super::ride::forget(self.uuid);
                     return false;
                 }
                 Command::SetMode(mode) => {
