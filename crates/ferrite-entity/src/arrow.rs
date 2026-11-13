@@ -42,8 +42,9 @@ pub struct ArrowState {
     pub channeling: bool,
 }
 
-/// Where channeling tridents hit a mob since the region last looked.
-pub static CHANNELED: std::sync::Mutex<Vec<Vec3>> = std::sync::Mutex::new(Vec::new());
+/// Where channeling tridents hit a mob since the region last looked, and who threw them.
+pub static CHANNELED: std::sync::Mutex<Vec<(Vec3, Option<Uuid>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Entity type id of `minecraft:arrow`.
 pub fn arrow_type() -> u16 {
@@ -512,7 +513,10 @@ pub fn tick_arrows_with_parts(
             if arrow.channeling
                 && let Some(at) = store.pos(target)
             {
-                CHANNELED.lock().unwrap_or_else(|e| e.into_inner()).push(at);
+                CHANNELED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((at, arrow.owner));
             }
             if let Some(owner) = arrow.owner {
                 if hurt.is_some_and(|h| !matches!(h, mob::Hurt::Immune))
@@ -942,7 +946,7 @@ mod tests {
         }
         let hits = CHANNELED.lock().unwrap().clone();
         assert_eq!(hits.len(), 1);
-        assert!((hits[0].z - 6.0).abs() < 1.0);
+        assert!((hits[0].0.z - 6.0).abs() < 1.0);
     }
 
     #[test]

@@ -1556,6 +1556,21 @@ impl Player {
         let Some(opened) = block_container::at(&source, [pos.x, pos.y, pos.z]) else {
             return false;
         };
+        // `RandomizableContainer.unpackLootTable`, then `PLAYER_GENERATES_CONTAINER_LOOT`.
+        for table in block_container::unpack_loot_tables(
+            &source,
+            &opened,
+            self.uuid.as_u128() as u64 ^ 0x9e37_79b9_7f4a_7c15,
+        ) {
+            super::recipe_unlock::push_plain(
+                self.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:player_generates_container_loot",
+                    table: Some(table),
+                    ..Default::default()
+                },
+            );
+        }
         let items = block_container::load(&source, &opened);
         let (rows, title) = (opened.rows, opened.title);
         let shulker = block_container::is_shulker_box(opened.block);

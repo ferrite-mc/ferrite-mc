@@ -685,6 +685,9 @@ pub const PLAIN_TRIGGERS: &[&str] = &[
     "minecraft:villager_trade",
     "minecraft:fishing_rod_hooked",
     "minecraft:player_hurt_entity",
+    "minecraft:levitation",
+    "minecraft:player_generates_container_loot",
+    "minecraft:channeled_lightning",
 ];
 
 /// The plain predicates of one criterion; an empty list or `None` matches anything.
@@ -703,6 +706,11 @@ pub struct Plain {
     pub direct: Vec<String>,
     /// The damage must be a projectile (`#minecraft:is_projectile`).
     pub projectile: bool,
+    /// The offset the player moved (`levitation`).
+    pub distance: Option<DistanceCheck>,
+    /// Entity types, one list per victim a criterion names; each must match a different victim
+    /// (`channeled_lightning`).
+    pub victims: Vec<Vec<String>>,
 }
 
 /// What happened, for a [`Plain`] criterion to match.
@@ -716,6 +724,10 @@ pub struct PlainEvent {
     pub player_y: f64,
     pub direct: Option<String>,
     pub projectile: bool,
+    /// Where the player is now minus where the effect began (`levitation`).
+    pub delta: [f64; 3],
+    /// The entity types of everything a lightning bolt hit (`channeled_lightning`).
+    pub victims: Vec<String>,
 }
 
 impl Plain {
@@ -744,6 +756,31 @@ impl Plain {
                 .as_ref()
                 .is_none_or(|range| range.contains(event.player_y))
             && (!self.projectile || event.projectile)
+            && self
+                .distance
+                .as_ref()
+                .is_none_or(|distance| distance.matches(event.delta))
+            && self.victims_hit(&event.victims)
+    }
+
+    /// Every wanted victim is matched by a different entity the bolt hit.
+    fn victims_hit(&self, hit: &[String]) -> bool {
+        fn assign(wanted: &[Vec<String>], hit: &[String], used: &mut Vec<bool>) -> bool {
+            let Some((first, rest)) = wanted.split_first() else {
+                return true;
+            };
+            for (index, entity) in hit.iter().enumerate() {
+                if !used[index] && id_matches(first, "entity_type", entity) {
+                    used[index] = true;
+                    if assign(rest, hit, used) {
+                        return true;
+                    }
+                    used[index] = false;
+                }
+            }
+            false
+        }
+        assign(&self.victims, hit, &mut vec![false; hit.len()])
     }
 }
 
@@ -797,6 +834,14 @@ fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
                 }
                 out.player_y = Some(range_of(position.get("y")?)?);
             }
+            "distance" => {
+                out.distance = Some(travel_distance(&serde_json::json!({"distance": value}))?);
+            }
+            "victims" => {
+                for victim in value.as_array()? {
+                    out.victims.push(entity_types(victim)?);
+                }
+            }
             "damage" => {
                 let kind = value.as_object()?.get("type")?.as_object()?;
                 if value.as_object()?.len() != 1 {
@@ -828,6 +873,9 @@ fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
     }
     Some(out)
 }
+
+/// Where each player's levitation began, so `levitation` can tell how far they have risen.
+pub static LEVITATION_START: Mutex<BTreeMap<Uuid, [f64; 3]>> = Mutex::new(BTreeMap::new());
 
 /// Queues a [`PlainEvent`] for the world loop.
 pub fn push_plain(player: Uuid, event: PlainEvent) {
@@ -1829,6 +1877,59 @@ mod tests {
         ));
         // A melee hit has no projectile as its direct entity.
         assert!(hurt("minecraft:player", false).is_empty());
+    }
+
+    #[test]
+    fn levitation_and_channeled_lightning_check_distance_and_victims() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let rose = |height: f64| {
+            fired(PlainEvent {
+                delta: [0.0, height, 0.0],
+                ..plain("minecraft:levitation")
+            })
+        };
+        assert!(!has(&rose(49.9), "minecraft:end/levitate#levitated"));
+        assert!(has(&rose(50.0), "minecraft:end/levitate#levitated"));
+        let struck = |victims: &[&str]| {
+            fired(PlainEvent {
+                victims: victims.iter().map(|v| (*v).to_owned()).collect(),
+                ..plain("minecraft:channeled_lightning")
+            })
+        };
+        let villager = "minecraft:adventure/very_very_frightening#struck_villager";
+        assert!(has(
+            &struck(&["minecraft:cow", "minecraft:villager"]),
+            villager
+        ));
+        assert!(!has(&struck(&["minecraft:cow"]), villager));
+        assert!(!has(&struck(&[]), villager));
+    }
+
+    #[test]
+    fn generating_container_loot_completes_the_bastion_advancement_per_table() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let loot = |table: &str| {
+            fired(PlainEvent {
+                table: Some(table.to_owned()),
+                ..plain("minecraft:player_generates_container_loot")
+            })
+        };
+        let bridge = loot("minecraft:chests/bastion_bridge");
+        assert!(has(
+            &bridge,
+            "minecraft:nether/loot_bastion#loot_bastion_bridge"
+        ));
+        assert!(!has(
+            &bridge,
+            "minecraft:nether/loot_bastion#loot_bastion_treasure"
+        ));
+        assert!(loot("minecraft:chests/simple_dungeon").is_empty());
     }
 
     #[test]

@@ -4527,6 +4527,29 @@ impl Player {
                             set.remove(&self.uuid);
                         }
                     }
+                    {
+                        // `LevitationTrigger`: how far the player has risen since the effect began.
+                        let mut starts = super::recipe_unlock::LEVITATION_START
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if self.effects.has(ferrite_entity::effect::Effect::Levitation) {
+                            let start = *starts.entry(self.uuid).or_insert(self.pos);
+                            super::recipe_unlock::push_plain(
+                                self.uuid,
+                                super::recipe_unlock::PlainEvent {
+                                    trigger: "minecraft:levitation",
+                                    delta: [
+                                        self.pos[0] - start[0],
+                                        self.pos[1] - start[1],
+                                        self.pos[2] - start[2],
+                                    ],
+                                    ..Default::default()
+                                },
+                            );
+                        } else {
+                            starts.remove(&self.uuid);
+                        }
+                    }
                     super::recipe_unlock::EFFECTS
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -8328,7 +8351,7 @@ impl Region {
         if !thunder {
             return;
         }
-        for at in hits {
+        for (at, thrower) in hits {
             let near = self.entities.query_vec(ferrite_math::AABB::new(
                 at.x - 3.0,
                 at.y - 3.0,
@@ -8337,10 +8360,25 @@ impl Region {
                 at.y + 3.0,
                 at.z + 3.0,
             ));
+            let mut victims = Vec::new();
             for key in near {
                 if mob::is_mob(&self.entities, key) {
                     mob::hurt(&mut self.entities, key, 5.0, None);
+                    if let Some(state) = mob::state(&self.entities, key) {
+                        victims.push(state.kind.name().to_owned());
+                    }
                 }
+            }
+            // `LightningBolt.tick` -> `CHANNELED_LIGHTNING` for the player who channeled it.
+            if let Some(thrower) = thrower {
+                super::recipe_unlock::push_plain(
+                    thrower,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:channeled_lightning",
+                        victims,
+                        ..Default::default()
+                    },
+                );
             }
             static NEXT: std::sync::atomic::AtomicI32 =
                 std::sync::atomic::AtomicI32::new(1_800_000_000);
