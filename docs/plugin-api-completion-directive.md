@@ -229,6 +229,9 @@
 | `Player#sleep(Location,boolean)` | Java `PlayerMisc` → `PlayerCommand::Sleep`(티켓으로 리전 판정을 기다림, `breakBlock`과 같은 방식) → `blocks::plugin_sleep`(침대가 아니거나, 점유 중이거나, 이미 자는 중이거나, 침대가 터지는 차원에서 `force=false`이면 `false`) | Java `PlayerBreadthTest#sleepSends...`, Rust `playerops::tests::sleep_waits...`, `blocks::tests::bed_halves...` |
 | `sendBlockUpdate`: 디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된 책장 | `plugins/tile_update.rs` `FAMILIES` + `PlayerMisc#sendBlockUpdate` | Rust `tile_update::tests::the_item_container_families...`, Java `PlayerTileUpdateTest` |
 | `sendBlockUpdate`: 머리 프로필 properties(텍스처) | `property,<이름>,<값>,<서명>` 항목 → `ResolvableProfile.properties` (개수·길이 상한은 바닐라 값) | Rust `a_skull_carries_its_texture_properties...`, Java `aSkullSendsItsProfileTextures...` |
+| `World#spawn`(모든 overload), `createEntity`, `addEntity` | `FerriteWorld` — 클래스 → `EntityType`(정확히 한 타입이 그 클래스일 때만, `Monster`처럼 여럿이 공유하면 `IllegalArgumentException`), 기존 `spawnEntity` 호스트 라우트 재사용. `createEntity`가 만든 핸들만 `addEntity`로 넣을 수 있다. consumer는 생성 뒤 라이브 핸들에 불린다(Bukkit은 직전). 스폰 사유·`randomizeData`는 효과가 없고 `CreatureSpawnEvent`는 쏘지 않는다 | `FerriteWorldHostTest#spawnMaps...`, `#createEntityKeeps...` |
+| `World#createExplosion`(모든 overload) | Java가 `(Location, power, fire, breakBlocks)`로 정규화(출처 엔티티는 위치가 없을 때 중심만 정한다) → `PlayerCommand::Explosion{world,..}` → 기본 월드 또는 런타임 월드의 소유 리전. 다른 월드의 위치는 `IllegalArgumentException` | Java `#everyExplosionOverload...`, Rust `blasts::tests::a_runtime_world_gets_its_own_explosion` |
+| `Server#addRecipe`/`removeRecipe`/`clearRecipes`/`resetRecipes` | `FerriteRecipes`가 `ShapedRecipe`/`ShapelessRecipe`(`MaterialChoice`만)를 바닐라 레시피 JSON으로 호스트에 보냄 → `game/crafting.rs` 오버레이(바닐라 먼저, 제거된 id는 건너뜀, 그다음 플러그인 레시피) → `ferrite-recipe::match_crafting_in`. `ExactChoice`와 메타가 있는 결과는 `UnsupportedOperationException`. 제작 메뉴 결과에 반영되며, 클라이언트 레시피북·자동 채우기에는 나오지 않는다 | Rust `crafting::tests::a_plugin_recipe_crafts_until_it_is_removed`·`removing_a_vanilla_recipe...`·`clearing_hides...`, `plugins::craft::tests::adding_and_removing...`, `ferrite-recipe` `runtime_recipes_match...`, Java `PluginRecipeHostTest` |
 | `sendBlockUpdate`: 스냅샷 아이템의 `ItemMeta` | `ItemMetaWire`(인벤토리 슬롯과 같은 직렬화) → `meta,<슬롯>,<hex>` → `with_meta` | Rust `a_stack_in_the_snapshot_can_carry_metadata`, Java `aStackWithMetadataSends...` |
 
 ### 10.2 문서가 낡았던 것 (코드에는 이미 있음)
@@ -248,12 +251,13 @@
 호스트 라우트도 Java 케이스도 없는 서명만 적었다(`World`는 카탈로그와 `crates/**`·Java `case`를 대조).
 
 - **Player:** `fireworkBoost`(폭죽 엔티티 모델 없음), `getConnection`, `loadData`, `postEffects`, `spawnAt`.
-- **World:** `addEntity`, `createEntity`, `spawn` 일부 overload, `createExplosion` 일부 overload,
-  `getFluidData`(흐름 방향 계산에 이웃 블록 충돌 정보가 필요), `getTileEntityCount`/`getTickableTileEntityCount`,
+- **World:** `getFluidData`(흐름 방향 계산에 이웃 블록 충돌 정보가 필요), `getTileEntityCount`/`getTickableTileEntityCount`,
   `getWorldPath`, `isVoidDamageEnabled`(setter가 게임 루프에 연결돼야 한다), `locateAllPoiInRange`,
   `locateNearestPoi`, `vanillaBiomeProvider`.
 - **블록 엔티티:** 주크박스·교탁·명령 블록·스포너·벌집·스컬크 센서·구조물 블록·침대. 26.3의 NBT 키 이름을
   확인할 수 있는 자료(서버 코드)가 로컬에 없어서 추측으로 구현하지 않았다. `UnsupportedOperationException`을 유지한다.
-- **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), Paper 생명주기(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
+- **레시피(§7):** 조리·대장간·석재 절단 레시피는 런타임에 추가할 수 없다(Java 목록에만 남는다). 결과 아이템의 메타,
+  `ExactChoice`, 클라이언트 레시피북 표시는 없다.
+- **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 그 밖의 Paper 생명주기·스케줄러(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
 
