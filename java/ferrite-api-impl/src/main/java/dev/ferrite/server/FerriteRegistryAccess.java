@@ -357,7 +357,10 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             case "hashCode" -> System.identityHashCode(proxy);
             case "equals" -> proxy == args[0];
             case "toString" -> "CUSTOM";
-            default -> HostBridge.dispatch("Biome", "", method, args);
+            default -> {
+                if (method.isDefault()) yield java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, args);
+                throw new UnsupportedOperationException("Ferrite: legacy Biome.CUSTOM has no generated registry id for " + method.getName());
+            }
         });
     }
     private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> identityRegistry(String kind, Class<T> type) { return identityRegistry(kind, type, null); }

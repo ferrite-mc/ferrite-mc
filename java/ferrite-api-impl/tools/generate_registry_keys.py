@@ -28,7 +28,7 @@ for name, directory in (("enchantment", "enchantment"), ("worldgen/biome", "worl
     keys[name] = {"minecraft:" + str(path.relative_to(base).with_suffix("")).replace("\\", "/") for path in base.rglob("*.json")}
     if not keys[name]:
         raise SystemExit(f"Missing generated entries in {base}")
-    if name in DATA_DRIVEN:
+    if name in DATA_DRIVEN or name == "worldgen/biome":
         # Match ferrite-net/src/registry.rs: json_files sorts relative file names and
         # load_vanilla enumerates that order for synchronized registry wire ids.
         ids[name] = {key: index for index, key in enumerate(sorted(keys[name]))}
