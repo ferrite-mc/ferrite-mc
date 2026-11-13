@@ -12,8 +12,42 @@ use uuid::Uuid;
 
 use super::commands::{GameState, OnlinePlayer};
 
-/// How far above the vehicle's position a rider is placed.
-const SEAT_LIFT: f64 = 0.6;
+/// Where the rider goes when the generated entity data has no attachment points at all (an old
+/// extraction): a fixed lift above the vehicle, the placement used before attachments.
+const FALLBACK_LIFT: f64 = 0.6;
+
+/// One named single-point attachment (`passenger`, `vehicle`, ...) of an entity type from the
+/// generated vanilla data, `[0, 0, 0]` when the type has none.
+fn attachment(kind: &str, name: &str) -> Option<[f64; 3]> {
+    let props = ferrite_data::entity_props::by_name(kind)?;
+    props
+        .attachments
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, p)| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+}
+
+/// Where a rider of type `rider` sits relative to the origin of a `vehicle` facing `yaw`.
+///
+/// Vanilla `Entity.positionRider`: the vehicle's `PASSENGER` attachment point, turned by the
+/// vehicle's yaw (`EntityAttachments.transformPoint`: `yRot(-yaw * pi/180)`), minus the rider's own
+/// `VEHICLE` attachment point. Scale (babies) and the horse rearing offset
+/// (`AbstractHorse.getPassengerAttachmentPoint` with `standAnim` 0) are not applied.
+pub fn seat_offset(vehicle: &str, yaw: f32, rider: &str) -> [f64; 3] {
+    let (Some(seat), Some(hold)) = (
+        attachment(vehicle, "passenger"),
+        attachment(rider, "vehicle"),
+    ) else {
+        return [0.0, FALLBACK_LIFT, 0.0];
+    };
+    let angle = -f64::from(yaw) * f64::from(0.017_453_292_f32);
+    let (sin, cos) = angle.sin_cos();
+    [
+        seat[0] * cos + seat[2] * sin - hold[0],
+        seat[1] - hold[1],
+        seat[2] * cos - seat[0] * sin - hold[2],
+    ]
+}
 
 /// One seated rider: the vehicle and the order the rider got on in (vanilla keeps passengers in
 /// the order they were added, and the first one steers).
@@ -279,6 +313,14 @@ pub fn network_id(
         .or_else(|| state.entities.lock().ok()?.get(uuid).map(|e| e.network_id))
 }
 
+/// The entity type id (`minecraft:horse`, `minecraft:player`) of a published rider or vehicle.
+fn kind_key(state: &GameState, uuid: Uuid) -> Option<&'static str> {
+    if state.players.iter().any(|p| p.uuid == uuid) {
+        return Some("minecraft:player");
+    }
+    state.entities.lock().ok()?.get(uuid).map(|e| e.type_name())
+}
+
 /// The dimension a player or region entity is published in.
 fn dimension_of(state: &GameState, uuid: Uuid) -> Option<super::Dimension> {
     if let Some(player) = state.players.iter().find(|p| p.uuid == uuid) {
@@ -368,7 +410,7 @@ pub fn plan(state: &GameState) -> Vec<Step> {
             steps.push(Step::Detach { vehicle });
             continue;
         };
-        let Some((live_vehicle_pos, _, _)) = position(state, vehicle) else {
+        let Some((live_vehicle_pos, _, vehicle_rot)) = position(state, vehicle) else {
             rides().remove(&rider);
             steps.push(Step::Detach { vehicle });
             continue;
@@ -384,7 +426,16 @@ pub fn plan(state: &GameState) -> Vec<Step> {
             continue;
         }
         let vehicle_pos = placed.get(&vehicle).copied().unwrap_or(live_vehicle_pos);
-        let to = [vehicle_pos[0], vehicle_pos[1] + SEAT_LIFT, vehicle_pos[2]];
+        let seat = seat_offset(
+            kind_key(state, vehicle).unwrap_or(""),
+            vehicle_rot.0,
+            kind_key(state, rider).unwrap_or(""),
+        );
+        let to = [
+            vehicle_pos[0] + seat[0],
+            vehicle_pos[1] + seat[1],
+            vehicle_pos[2] + seat[2],
+        ];
         placed.insert(rider, to);
         let moved = (0..3).any(|i| (rider_pos[i] - to[i]).abs() > 0.01);
         if moved {
@@ -438,6 +489,18 @@ mod tests {
     }
 
     use super::*;
+
+    fn pig_kind() -> u16 {
+        ferrite_data::entity_props::by_name("minecraft:pig")
+            .expect("the vanilla data knows the pig")
+            .id
+    }
+
+    /// Pig on pig: the pig's PASSENGER point (0.86875 in the 26.3 data) minus the zero
+    /// VEHICLE point of the rider, which is what the test entities are.
+    fn lift() -> f64 {
+        f64::from(0.86875_f32)
+    }
 
     /// The ride table is global, so the tests take turns with the world loop's plans.
     #[test]
@@ -540,8 +603,8 @@ mod tests {
         mount(top, middle, false).unwrap();
         // The base moved; both riders are still where the base used to be.
         let state = state_with(&[
-            (top, 1, [0.5, 64.0 + SEAT_LIFT * 2.0, 0.5]),
-            (middle, 2, [0.5, 64.0 + SEAT_LIFT, 0.5]),
+            (top, 1, [0.5, 64.0 + lift() * 2.0, 0.5]),
+            (middle, 2, [0.5, 64.0 + lift(), 0.5]),
             (base, 3, [10.5, 64.0, 0.5]),
         ]);
         let steps = plan(&state);
@@ -551,10 +614,10 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(target(middle), Some([10.5, 64.0 + SEAT_LIFT, 0.5]));
+        assert_eq!(target(middle), Some([10.5, 64.0 + lift(), 0.5]));
         assert_eq!(
             target(top),
-            Some([10.5, 64.0 + SEAT_LIFT + SEAT_LIFT, 0.5]),
+            Some([10.5, 64.0 + lift() + lift(), 0.5]),
             "the top rider sits on the middle rider's new seat, not its old one"
         );
         dismount(top);
@@ -607,7 +670,7 @@ mod tests {
                 index.insert(super::super::entity_index::CommandEntity {
                     uuid,
                     network_id,
-                    kind: 0,
+                    kind: pig_kind(),
                     pos,
                     yaw: 0.0,
                     pitch: 0.0,
@@ -618,6 +681,45 @@ mod tests {
             }
         }
         state
+    }
+
+    #[test]
+    fn seats_follow_the_vanilla_attachment_points() {
+        // Values read from the 26.3 data (`PASSENGER` of the vehicle, `VEHICLE` of the rider).
+        let at = |vehicle, yaw, rider| seat_offset(vehicle, yaw, rider);
+        let near = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-6);
+        // A player (vehicle point y 0.6) on a horse (passenger y 1.44375).
+        assert!(near(
+            at("minecraft:horse", 0.0, "minecraft:player"),
+            [0.0, 1.44375 - 0.6, 0.0]
+        ));
+        assert!(near(
+            at("minecraft:donkey", 0.0, "minecraft:player"),
+            [0.0, 1.1125 - 0.6, 0.0]
+        ));
+        assert!(near(
+            at("minecraft:mule", 0.0, "minecraft:player"),
+            [0.0, 1.2125 - 0.6, 0.0]
+        ));
+        // A zombie rider hangs 0.7 below its seat.
+        assert!(near(
+            at("minecraft:horse", 0.0, "minecraft:zombie"),
+            [0.0, 1.44375 - 0.7, 0.0]
+        ));
+        // A llama's seat is 0.3 behind its centre and turns with its yaw: yaw 0 faces +z, so
+        // behind is -z; at yaw 90 (facing -x) behind is +x.
+        assert!(near(
+            at("minecraft:llama", 0.0, "minecraft:player"),
+            [0.0, 1.37 - 0.6, -0.3]
+        ));
+        assert!(near(
+            at("minecraft:llama", 90.0, "minecraft:player"),
+            [0.3, 1.37 - 0.6, 0.0]
+        ));
+        assert!(near(
+            at("minecraft:trader_llama", 180.0, "minecraft:player"),
+            [0.0, 1.37 - 0.6, 0.3]
+        ));
     }
 
     #[test]
@@ -680,7 +782,7 @@ mod tests {
         let (rider, vehicle) = (Uuid::from_u128(921), Uuid::from_u128(922));
         mount(rider, vehicle, false).unwrap();
         let state = state_with(&[
-            (rider, 1, [0.5, 64.0 + SEAT_LIFT, 0.5]),
+            (rider, 1, [0.5, 64.0 + lift(), 0.5]),
             (vehicle, 2, [0.5, 64.0, 0.5]),
         ]);
         assert!(plan(&state).is_empty(), "already in the seat");
@@ -693,7 +795,7 @@ mod tests {
             .insert(super::super::entity_index::CommandEntity {
                 uuid: vehicle,
                 network_id: 2,
-                kind: 0,
+                kind: pig_kind(),
                 pos: [300.5, 70.0, -40.5],
                 yaw: 0.0,
                 pitch: 0.0,
@@ -707,10 +809,10 @@ mod tests {
             [Step::Move {
                 rider,
                 rider_is_player: false,
-                rider_pos: [0.5, 64.0 + SEAT_LIFT, 0.5],
+                rider_pos: [0.5, 64.0 + lift(), 0.5],
                 rider_rot: (0.0, 0.0),
                 dimension: super::super::Dimension::Overworld,
-                to: [300.5, 70.0 + SEAT_LIFT, -40.5],
+                to: [300.5, 70.0 + lift(), -40.5],
             }]
         );
         assert_eq!(vehicle_of(rider), Some(vehicle));
@@ -734,7 +836,7 @@ mod tests {
                 rider_pos: [2.5, 64.0, 0.5],
                 rider_rot: (0.0, 0.0),
                 dimension: super::super::Dimension::Overworld,
-                to: [0.5, 64.0 + SEAT_LIFT, 0.5],
+                to: [0.5, 64.0 + lift(), 0.5],
             }]
         );
         assert_eq!(passengers_of(vehicle), vec![rider]);
