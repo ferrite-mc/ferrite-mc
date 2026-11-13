@@ -253,6 +253,8 @@ pub enum Step {
         rider_is_player: bool,
         rider_pos: [f64; 3],
         rider_rot: (f32, f32),
+        /// The dimension both rider and vehicle are in.
+        dimension: super::Dimension,
         to: [f64; 3],
     },
     /// The rider got off (or the vehicle vanished): resend the vehicle's passenger list.
@@ -275,6 +277,14 @@ pub fn network_id(
         .get(&uuid)
         .map(|p| p.entity)
         .or_else(|| state.entities.lock().ok()?.get(uuid).map(|e| e.network_id))
+}
+
+/// The dimension a player or region entity is published in.
+fn dimension_of(state: &GameState, uuid: Uuid) -> Option<super::Dimension> {
+    if let Some(player) = state.players.iter().find(|p| p.uuid == uuid) {
+        return Some(player.dimension);
+    }
+    state.entities.lock().ok()?.get(uuid).map(|e| e.dimension)
 }
 
 fn position(state: &GameState, uuid: Uuid) -> Option<([f64; 3], bool, (f32, f32))> {
@@ -325,6 +335,7 @@ pub fn plan(state: &GameState) -> Vec<Step> {
                 rider_is_player: true,
                 rider_pos: viewer_pos,
                 rider_rot: rot,
+                dimension: dimension_of(state, viewer).unwrap_or(super::Dimension::Overworld),
                 to: target_pos,
             });
         }
@@ -362,6 +373,13 @@ pub fn plan(state: &GameState) -> Vec<Step> {
             steps.push(Step::Detach { vehicle });
             continue;
         };
+        // Vanilla ends a ride when either side changes dimension; coordinates of another world
+        // are meaningless here.
+        if dimension_of(state, rider) != dimension_of(state, vehicle) {
+            rides().remove(&rider);
+            steps.push(Step::Detach { vehicle });
+            continue;
+        }
         if is_controlled(vehicle) {
             continue;
         }
@@ -375,6 +393,7 @@ pub fn plan(state: &GameState) -> Vec<Step> {
                 rider_is_player,
                 rider_pos,
                 rider_rot,
+                dimension: dimension_of(state, rider).unwrap_or(super::Dimension::Overworld),
                 to,
             });
         }
@@ -602,6 +621,60 @@ mod tests {
     }
 
     #[test]
+    fn changing_dimension_ends_the_ride_instead_of_moving_the_rider_across_worlds() {
+        let _turn = test_turn();
+        let (rider, vehicle) = (Uuid::from_u128(1001), Uuid::from_u128(1002));
+        mount(rider, vehicle, false).unwrap();
+        let state = state_with(&[
+            (rider, 1, [0.5, 64.0, 0.5]),
+            (vehicle, 2, [100.5, 64.0, 0.5]),
+        ]);
+        {
+            // The vehicle is published by a Nether region.
+            let mut index = state.entities.lock().unwrap();
+            let mut moved = index.get(vehicle).unwrap().clone();
+            moved.dimension = super::super::Dimension::Nether;
+            index.insert(moved);
+        }
+        let steps = plan(&state);
+        assert_eq!(
+            steps,
+            vec![Step::Detach { vehicle }],
+            "no Move to coordinates in another dimension"
+        );
+        assert_eq!(vehicle_of(rider), None, "the ride ended");
+    }
+
+    #[test]
+    fn a_rider_in_the_nether_is_moved_in_the_nether() {
+        let _turn = test_turn();
+        let (rider, vehicle) = (Uuid::from_u128(1011), Uuid::from_u128(1012));
+        mount(rider, vehicle, false).unwrap();
+        let state = state_with(&[(rider, 1, [0.5, 64.0, 0.5]), (vehicle, 2, [9.5, 64.0, 0.5])]);
+        {
+            let mut index = state.entities.lock().unwrap();
+            for uuid in [rider, vehicle] {
+                let mut moved = index.get(uuid).unwrap().clone();
+                moved.dimension = super::super::Dimension::Nether;
+                index.insert(moved);
+            }
+        }
+        let steps = plan(&state);
+        assert!(
+            matches!(
+                steps.as_slice(),
+                [Step::Move {
+                    dimension: super::super::Dimension::Nether,
+                    ..
+                }]
+            ),
+            "{steps:?}"
+        );
+        forget(rider);
+        forget(vehicle);
+    }
+
+    #[test]
     fn a_teleported_vehicle_carries_its_rider_without_orphaning_it() {
         let _turn = test_turn();
         let (rider, vehicle) = (Uuid::from_u128(921), Uuid::from_u128(922));
@@ -636,6 +709,7 @@ mod tests {
                 rider_is_player: false,
                 rider_pos: [0.5, 64.0 + SEAT_LIFT, 0.5],
                 rider_rot: (0.0, 0.0),
+                dimension: super::super::Dimension::Overworld,
                 to: [300.5, 70.0 + SEAT_LIFT, -40.5],
             }]
         );
@@ -659,6 +733,7 @@ mod tests {
                 rider_is_player: false,
                 rider_pos: [2.5, 64.0, 0.5],
                 rider_rot: (0.0, 0.0),
+                dimension: super::super::Dimension::Overworld,
                 to: [0.5, 64.0 + SEAT_LIFT, 0.5],
             }]
         );
