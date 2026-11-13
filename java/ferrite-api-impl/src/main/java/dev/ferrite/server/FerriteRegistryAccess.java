@@ -367,7 +367,9 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                 T existing = entries.get(key);
                 if (existing != null) return existing;
                 var k = key;
-                T value = factory != null ? factory.apply(key) : type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
+                T value = factory != null ? factory.apply(key) : FerriteRegistryValueProperties.supports(kind)
+                    ? FerriteRegistryValueProperties.create(kind, key, type)
+                    : type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
                     case "getKey", "key" -> k;
                     case "name", "getName" -> k.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_');
                     case "translationKey", "getTranslationKey" -> kind + "." + k.getNamespace() + "." + k.getKey();
@@ -444,7 +446,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             this.reason = name.contains("game_rule") || name.endsWith("GameRule")
                 ? "GameRule needs a value type and default that the generated reports do not contain"
                 : name.contains("memory_module_type") || name.endsWith("MemoryKey")
-                ? "MemoryKey has a private constructor and value types that the generated reports do not contain"
+                ? "MemoryKey exposes only a typed subset and has a private constructor; the full generated registry has no value types"
                 : "no generated vanilla data is mapped to it";
         }
         private UnsupportedOperationException no() { return new UnsupportedOperationException("Ferrite: registry " + name() + " is not available: " + reason); }
