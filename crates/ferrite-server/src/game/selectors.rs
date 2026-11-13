@@ -130,7 +130,7 @@ fn range_f64(raw: &str) -> Option<(f64, f64)> {
     }
 }
 
-fn range_i32(raw: &str) -> Option<(i32, i32)> {
+pub(super) fn range_i32(raw: &str) -> Option<(i32, i32)> {
     let raw = raw.trim();
     match raw.split_once("..") {
         Some((min, max)) => {
