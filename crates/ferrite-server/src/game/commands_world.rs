@@ -102,6 +102,9 @@ pub enum WorldCommand {
         blocks: std::sync::Arc<Vec<([i32; 3], u16)>>,
         /// Block entities (relative position, full NBT) that belong to the blocks.
         entities: std::sync::Arc<Vec<([i32; 3], ferrite_nbt::Compound)>>,
+        /// Mobs and other entities of the template, spawned by the world loop (`mod.rs`) in the
+        /// chunk each one stands in; positions are relative to `pos`.
+        spawns: std::sync::Arc<Vec<super::structure_template::TemplateEntity>>,
     },
 }
 
@@ -566,6 +569,7 @@ pub fn execute(
             name,
             blocks,
             entities,
+            ..
         } => {
             let [ox, oy, oz] = resolve(pos, origin);
             let mut changes = Vec::new();
@@ -628,6 +632,34 @@ pub fn resolve(coords: &Coordinates, origin: &Origin) -> [i32; 3] {
         }
     };
     [x.floor() as i32, y.floor() as i32, z.floor() as i32]
+}
+
+/// The entities a `/place template` command spawns, at their absolute positions. A template
+/// entity of an unknown type is dropped, as a saved one is when a chunk loads.
+pub fn template_spawns(
+    command: &WorldCommand,
+    origin: &Origin,
+) -> Vec<([f64; 3], ferrite_entity::EntityRecord)> {
+    let WorldCommand::Template { pos, spawns, .. } = command else {
+        return Vec::new();
+    };
+    let base = resolve(pos, origin);
+    spawns
+        .iter()
+        .filter_map(|spawn| {
+            let at = [
+                f64::from(base[0]) + spawn.pos[0],
+                f64::from(base[1]) + spawn.pos[1],
+                f64::from(base[2]) + spawn.pos[2],
+            ];
+            let mut nbt = spawn.nbt.clone();
+            nbt.insert(
+                "Pos".into(),
+                ferrite_nbt::Tag::List(ferrite_nbt::List::Double(at.to_vec())),
+            );
+            super::entity_save::entity_from_nbt(&nbt).map(|record| (at, record))
+        })
+        .collect()
 }
 
 /// The chunk whose region owns the command's first block, for routing a world edit.
@@ -1364,6 +1396,55 @@ mod tests {
     }
 
     #[test]
+    fn template_entities_spawn_at_the_origin_plus_their_offset() {
+        let mut nbt = ferrite_nbt::Compound::new();
+        nbt.insert(
+            "id".into(),
+            ferrite_nbt::Tag::String("minecraft:pig".into()),
+        );
+        let mut unknown = ferrite_nbt::Compound::new();
+        unknown.insert(
+            "id".into(),
+            ferrite_nbt::Tag::String("minecraft:nope".into()),
+        );
+        let command = WorldCommand::Template {
+            pos: pos(10.0, 64.0, 10.0),
+            name: "t".into(),
+            blocks: std::sync::Arc::default(),
+            entities: std::sync::Arc::default(),
+            spawns: std::sync::Arc::new(vec![
+                super::super::structure_template::TemplateEntity {
+                    pos: [1.5, 0.0, 2.25],
+                    nbt,
+                },
+                super::super::structure_template::TemplateEntity {
+                    pos: [0.0; 3],
+                    nbt: unknown,
+                },
+            ]),
+        };
+        let spawned = template_spawns(&command, &origin());
+        assert_eq!(spawned.len(), 1, "the unknown type is dropped");
+        assert_eq!(spawned[0].0, [11.5, 64.0, 12.25]);
+        let kind = ferrite_data::entity_props::by_name("minecraft:pig")
+            .unwrap()
+            .id;
+        assert_eq!(spawned[0].1.data.kind, kind);
+        assert!(
+            template_spawns(
+                &WorldCommand::SetBlock {
+                    pos: pos(0.0, 0.0, 0.0),
+                    block: 0,
+                    mode: SetMode::Replace,
+                    nbt: None
+                },
+                &origin()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn templates_place_their_block_entities_beside_the_blocks() {
         let chest = ferrite_data::blocks::default_state("minecraft:chest").unwrap();
         let mut data = ferrite_nbt::Compound::new();
@@ -1378,6 +1459,7 @@ mod tests {
                 name: "structure minecraft:igloo".into(),
                 blocks: std::sync::Arc::new(vec![([1, 0, 2], chest)]),
                 entities: std::sync::Arc::new(vec![([1, 0, 2], data)]),
+                spawns: std::sync::Arc::default(),
             },
             &origin(),
             &world,

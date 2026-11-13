@@ -394,11 +394,18 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
             name: label,
             blocks: std::sync::Arc::new(blocks),
             entities: std::sync::Arc::new(entities),
+            spawns: std::sync::Arc::default(),
         }),
     )
 }
 
 /// `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]`.
+///
+/// `strict` sets `StructurePlaceSettings.knownShape`, which in `StructureTemplate.placeInWorld`
+/// only gates the neighbour shape update at the template's edge (`updateShapeAtEdge`). Template
+/// blocks are written exactly as stored here and no shape update ever runs, so a strict
+/// placement matches vanilla and a non-strict one lacks the edge fix-ups (fence and wall
+/// connections to neighbouring blocks, for example).
 fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let id = ctx.string("template").unwrap_or_default().to_owned();
     let Some(template) = Template::load(&id) else {
@@ -439,6 +446,7 @@ fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             name: id,
             blocks: std::sync::Arc::new(blocks),
             entities: std::sync::Arc::new(entities),
+            spawns: std::sync::Arc::new(template.place_entities(rotation, mirror)),
         }),
     )
 }

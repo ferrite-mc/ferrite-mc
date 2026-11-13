@@ -1993,14 +1993,15 @@ async fn run(
         let mut locator = waypoints::Locator::default();
         offload::Latest::spawn(
             "ferrite-locator",
-            move |(online, styles, spectators, ranges): (
+            move |(online, styles, spectators, ranges, extra): (
                 HashMap<Uuid, commands::OnlinePlayer>,
                 _,
                 _,
                 _,
+                Vec<waypoints::Extra>,
             )| {
                 locator.ranges = ranges;
-                for (receiver, bytes) in locator.sync(&online, &styles, &spectators) {
+                for (receiver, bytes) in locator.sync(&online, &styles, &spectators, &extra) {
                     if let Some(player) = online.get(&receiver) {
                         let _ = player.outbound.send(Outbound::Packet(bytes.into()));
                     }
@@ -2047,6 +2048,8 @@ async fn run(
     };
     let mut scan_tick: u32 = 0;
     let mut last_held: HashMap<Uuid, std::collections::BTreeSet<String>> = HashMap::new();
+    // Where each player stood in the overworld when they entered the Nether (`nether_travel`).
+    let mut entered_nether: HashMap<Uuid, [f64; 3]> = HashMap::new();
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -2131,6 +2134,7 @@ async fn run(
                   Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let world=player.world_id;let chunk=player.chunk;let id=player.uuid;
                     let (arrived_pos, arrived_yaw, arrived_pitch) = (player.pos, player.yaw, player.pitch);
+                    let online_before = online.get(&id).map(|p| (p.dimension, p.pos));
                     worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
                     if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
@@ -2140,6 +2144,15 @@ async fn run(
                       if let Err(error) = plugins.update_player_location(id, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
                     }
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
+                    // `ServerPlayer.triggerDimensionChangeTriggers`: the overworld position where a
+                    // player went into the Nether is kept; coming back out measures the distance.
+                    if let Some(before) = online_before {
+                        if dimension == Dimension::Nether && before.0 != Dimension::Nether { entered_nether.insert(id, before.1); }
+                        else if dimension == Dimension::Overworld && before.0 == Dimension::Nether && let Some(entered) = entered_nether.get(&id) {
+                            recipe_unlock::push_event(id, recipe_unlock::Event::NetherTravel { delta: [arrived_pos[0] - entered[0], arrived_pos[1] - entered[1], arrived_pos[2] - entered[2]] });
+                        }
+                        if dimension != Dimension::Nether { entered_nether.remove(&id); }
+                    }
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
                   },
@@ -2176,7 +2189,8 @@ async fn run(
                          let _t = CoordinatorTimer::new(4);
                          let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          let (styles, spectators, ranges) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone(), online.keys().map(|uuid| (*uuid, waypoints::player_ranges(&game.more.attributes, *uuid, hidden.contains(uuid)))).collect::<HashMap<_, _>>()) };
-                         locator.submit((online.clone(), styles, spectators, ranges));
+                         let extra = { let game = command_state.lock().unwrap(); let index = game.entities.lock().unwrap(); waypoints::non_player_transmitters(&game.more.attributes, &index, |uuid| online.contains_key(uuid)) };
+                         locator.submit((online.clone(), styles, spectators, ranges, extra));
                      }
         laps.lap("locator");
                      {
@@ -2189,8 +2203,7 @@ async fn run(
                              if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
                              let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
                              // Loot and function rewards run as console commands aimed at the player.
-                             for table in recipe_unlock::reward_loot(&id) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command: format!("loot give {name} loot {table}"), complete }); }
-                             if let Some(function) = recipe_unlock::reward_function(&id) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command: format!("execute as {name} at @s run function {function}"), complete }); }
+                             for command in recipe_unlock::reward_commands(&id, &name) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command, complete }); }
                              if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
                          }
                      }
@@ -2231,10 +2244,15 @@ async fn run(
                          }
                      }
                      {
+                         let events = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::EVENTS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !events.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, event) in events { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_event(&event)); }
+                         }
                          let placed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::PLACED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !placed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, block) in placed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_placed(block)); }
+                             for record in placed { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_placed(&record)); }
                          }
                      }
                      {
@@ -2266,11 +2284,15 @@ async fn run(
                          let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          let mut game = command_state.lock().unwrap();
                          let tick_criteria = recipe_unlock::criteria_for_tick();
+                         let effects = recipe_unlock::EFFECTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          for uuid in online.keys() {
                              if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
                                  last_held.insert(*uuid, items.clone());
                                  recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
                                  game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
+                             }
+                             if let Some(active) = effects.get(uuid).filter(|active| !active.is_empty()) {
+                                 game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for_effects(active));
                              }
                              if !tick_criteria.is_empty() {
                                  game.more.advancements.entry(*uuid).or_default().extend(tick_criteria.iter().cloned());
@@ -2498,6 +2520,9 @@ async fn run(
                   }},
                   // Vanilla `ServerPlaceRecipe`: only recipes in the player's recipe book can be placed.
                   GameMessage::Input{uuid,packet:ServerboundPlay::PlaceRecipe(ref place),..} if !command_state.lock().unwrap().more.recipes.get(&uuid).is_some_and(|owned| recipe_packets::display_is_unlocked(owned, place.display_id.0)) => {}
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeSeen{display}}=>{
+                      if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) { recipe_packets::mark_seen(uuid, display, settings.playerdata.as_deref()); }
+                  }
                   GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeBookSettings{book,open,filtering}}=>{
                       if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
                           let mut game = command_state.lock().unwrap();
@@ -4149,10 +4174,23 @@ impl CommandRuntime<'_> {
                 if self.worlds.owner(self.dimension, chunk).is_some() {
                     if let Some(source) = self.source.clone() {
                         let tracking = Arc::clone(self.tracking);
+                        // `/place template` entities spawn in the region that owns the chunk
+                        // each one stands in, after the blocks are written.
+                        let spawns = commands_world::template_spawns(&command, &origin);
                         self.worlds
                             .schedule_at_chunk(self.dimension, chunk, move |_region| {
                                 commands_world::apply_world(&command, &origin, &*source, &tracking);
                             });
+                        for (at, record) in spawns {
+                            let at =
+                                ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+                            if self.worlds.owner(self.dimension, at).is_some() {
+                                self.worlds
+                                    .schedule_at_chunk(self.dimension, at, move |region| {
+                                        region.add_entities(vec![record]);
+                                    });
+                            }
+                        }
                     }
                 } else if let Some(source) = self.source
                     && let Err(error) = commands_world::execute(&command, &origin, &**source)

@@ -28,8 +28,8 @@ pub enum Criterion {
     Consumes(String),
     /// `changed_dimension` into one dimension (no `from`).
     EntersDimension(String),
-    /// `placed_block` of exactly one block id.
-    Places(String),
+    /// `placed_block` of a block id, list or `#tag`, optionally with block state properties.
+    Places(BlockMatch),
     /// `location` with nothing but one plain biome id to match.
     InBiome(String),
     /// `recipe_crafted` of one recipe id with no ingredient condition.
@@ -40,7 +40,20 @@ pub enum Criterion {
     Tames,
     /// `item_used_on_block` with a block, optional state, tool, biome and smoke condition.
     UsedOnBlock(UsedOnBlock),
-    Other,
+    /// `slept_in_bed` with no conditions.
+    Sleeps,
+    /// `entity_killed_player` with no conditions: an entity killed the player.
+    KilledByEntity,
+    /// `effects_changed` with an `effects` map only: every listed effect must be active (with its
+    /// amplifier and duration ranges, when given).
+    HasEffects(Vec<(String, Range, Range)>),
+    /// `nether_travel`: the distance between where the player entered the Nether and where they
+    /// came back out.
+    NetherTravel(DistanceCheck),
+    /// A trigger this server cannot evaluate (or one whose conditions are richer than the
+    /// supported shape); the payload is the trigger id, read by [`coverage`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    Other(String),
 }
 
 /// The conditions of an `item_used_on_block` criterion this server can check.
@@ -312,16 +325,31 @@ fn entered_block(conditions: &serde_json::Value) -> Option<BlockMatch> {
     Some(BlockMatch { blocks, state })
 }
 
-/// The block a `placed_block` criterion asks for, when that is all it asks for.
-fn placed_block(conditions: &serde_json::Value) -> Option<String> {
+/// The block a `placed_block` criterion asks for (an id, a list, a `#tag`, with optional state
+/// properties), when that is all it asks for.
+fn placed_block(conditions: &serde_json::Value) -> Option<BlockMatch> {
     let object = conditions.as_object()?;
     let location = object.get("location")?.as_object()?;
-    if object.len() != 1 || location.len() != 2 || location.get("type")? != "minecraft:match_block"
+    if object.len() != 1 || location.get("type")? != "minecraft:match_block" {
+        return None;
+    }
+    if location
+        .keys()
+        .any(|k| !matches!(k.as_str(), "type" | "blocks" | "state"))
     {
         return None;
     }
-    let name = location.get("blocks")?.as_str()?;
-    (!name.starts_with('#')).then(|| name.to_owned())
+    let blocks = alternatives(location.get("blocks")?);
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut state = Vec::new();
+    if let Some(wanted) = location.get("state") {
+        for (key, value) in wanted.as_object()? {
+            state.push((key.clone(), value.as_str()?.to_owned()));
+        }
+    }
+    Some(BlockMatch { blocks, state })
 }
 
 /// The child a `bred_animals` criterion asks for (`*` for any), when that is all it asks for.
@@ -428,15 +456,210 @@ pub fn criteria_for_tick() -> Vec<String> {
     out
 }
 
-/// Blocks players placed since the last drain, `(player, block id)`.
-pub static PLACED: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
+/// Blocks players placed since the last drain (the state they were placed with).
+pub static PLACED: Mutex<Vec<BlockRecord>> = Mutex::new(Vec::new());
 
 /// Advancement criteria completed by placing a block.
-pub fn criteria_for_placed(block: &str) -> Vec<String> {
+pub fn criteria_for_placed(record: &BlockRecord) -> Vec<String> {
     let mut out = Vec::new();
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
-            if matches!(criterion, Criterion::Places(wanted) if wanted == block) {
+            if matches!(criterion, Criterion::Places(wanted) if wanted.matches(record.block, record.props))
+            {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// A numeric range of a `distance` predicate (`min` and `max` are inclusive).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Range {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+}
+
+impl Range {
+    fn contains(&self, value: f64) -> bool {
+        self.min.is_none_or(|min| value >= min) && self.max.is_none_or(|max| value <= max)
+    }
+}
+
+/// The `distance` predicate of a trigger: ranges over the offset between two positions.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DistanceCheck {
+    pub x: Option<Range>,
+    pub y: Option<Range>,
+    pub z: Option<Range>,
+    /// Distance in the horizontal plane.
+    pub horizontal: Option<Range>,
+    /// Three-dimensional distance.
+    pub absolute: Option<Range>,
+}
+
+impl DistanceCheck {
+    /// Vanilla `DistancePredicate.matches` for an offset `delta` between two positions.
+    pub fn matches(&self, delta: [f64; 3]) -> bool {
+        let horizontal = delta[0].hypot(delta[2]);
+        let absolute = (horizontal * horizontal + delta[1] * delta[1]).sqrt();
+        [
+            (&self.x, delta[0].abs()),
+            (&self.y, delta[1].abs()),
+            (&self.z, delta[2].abs()),
+            (&self.horizontal, horizontal),
+            (&self.absolute, absolute),
+        ]
+        .iter()
+        .all(|(range, value)| range.as_ref().is_none_or(|r| r.contains(*value)))
+    }
+}
+
+fn range_of(value: &serde_json::Value) -> Option<Range> {
+    match value {
+        serde_json::Value::Number(exact) => {
+            let exact = exact.as_f64()?;
+            Some(Range {
+                min: Some(exact),
+                max: Some(exact),
+            })
+        }
+        serde_json::Value::Object(bounds) => Some(Range {
+            min: bounds.get("min").and_then(serde_json::Value::as_f64),
+            max: bounds.get("max").and_then(serde_json::Value::as_f64),
+        }),
+        _ => None,
+    }
+}
+
+/// One active effect of a player, as the region threads report it on every inventory scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectFact {
+    /// `minecraft:speed`
+    pub name: String,
+    pub amplifier: i32,
+    pub duration: i32,
+}
+
+/// Active effects of each player, refreshed on `Command::ScanInventory`.
+pub static EFFECTS: Mutex<BTreeMap<Uuid, Vec<EffectFact>>> = Mutex::new(BTreeMap::new());
+
+/// Advancement criteria completed by having these effects active at once.
+pub fn criteria_for_effects(active: &[EffectFact]) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            let Criterion::HasEffects(wanted) = criterion else {
+                continue;
+            };
+            let all = effects_hold(wanted, active);
+            if all {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// Whether every wanted `(effect, amplifier range, duration range)` is active.
+fn effects_hold(wanted: &[(String, Range, Range)], active: &[EffectFact]) -> bool {
+    !wanted.is_empty()
+        && wanted.iter().all(|(effect, amplifier, duration)| {
+            active.iter().any(|fact| {
+                fact.name == *effect
+                    && amplifier.contains(f64::from(fact.amplifier))
+                    && duration.contains(f64::from(fact.duration))
+            })
+        })
+}
+
+/// The `effects` map of an `effects_changed` criterion, when that is all it asks for.
+fn effects_map(conditions: &serde_json::Value) -> Option<Vec<(String, Range, Range)>> {
+    let object = conditions.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (name, wanted) in object.get("effects")?.as_object()? {
+        let wanted = wanted.as_object()?;
+        let mut amplifier = Range::default();
+        let mut duration = Range::default();
+        for (key, value) in wanted {
+            match key.as_str() {
+                "amplifier" => amplifier = range_of(value)?,
+                "duration" => duration = range_of(value)?,
+                _ => return None,
+            }
+        }
+        out.push((name.clone(), amplifier, duration));
+    }
+    Some(out)
+}
+
+/// `{"distance": {...}}` of `nether_travel`; anything besides the distance makes it unsupported.
+fn travel_distance(conditions: &serde_json::Value) -> Option<DistanceCheck> {
+    let object = conditions.as_object()?;
+    if object
+        .keys()
+        .any(|key| key != "distance" && key != "player")
+    {
+        return None;
+    }
+    if object.get("player").is_some_and(|player| !player.is_null()) {
+        return None;
+    }
+    let mut out = DistanceCheck::default();
+    for (axis, range) in object.get("distance")?.as_object()? {
+        let range = Some(range_of(range)?);
+        match axis.as_str() {
+            "x" => out.x = range,
+            "y" => out.y = range,
+            "z" => out.z = range,
+            "horizontal" => out.horizontal = range,
+            "absolute" => out.absolute = range,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A play event with no data beyond who it happened to, for the triggers that need none.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// The player went to bed (`slept_in_bed`).
+    SleptInBed,
+    /// An entity (a mob or a shooter) killed the player (`entity_killed_player`).
+    KilledByEntity,
+    /// The player came back from the Nether; `delta` is where they stand now minus where they
+    /// entered the Nether, in the overworld (`nether_travel`).
+    NetherTravel { delta: [f64; 3] },
+}
+
+/// Events since the last drain, `(player, event)`.
+pub static EVENTS: Mutex<Vec<(Uuid, Event)>> = Mutex::new(Vec::new());
+
+/// Queues an event for the world loop to turn into advancement criteria.
+pub fn push_event(player: Uuid, event: Event) {
+    EVENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((player, event));
+}
+
+/// Advancement criteria (`<advancement>#<criterion>`) an event completes.
+pub fn criteria_for_event(event: &Event) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            let hit = match (criterion, event) {
+                (Criterion::Sleeps, Event::SleptInBed) => true,
+                (Criterion::KilledByEntity, Event::KilledByEntity) => true,
+                (Criterion::NetherTravel(wanted), Event::NetherTravel { delta }) => {
+                    wanted.matches(*delta)
+                }
+                _ => false,
+            };
+            if hit {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -541,6 +764,7 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
     let function = json["rewards"]["function"].as_str().map(str::to_owned);
     let mut criteria = BTreeMap::new();
     for (name, c) in json["criteria"].as_object()? {
+        let trigger = c["trigger"].as_str().unwrap_or_default().to_owned();
         let kind = match c["trigger"].as_str() {
             Some("minecraft:inventory_changed") => Criterion::Holds(
                 c["conditions"]["items"]
@@ -548,9 +772,8 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                     .map(|a| a.iter().map(|e| alternatives(&e["items"])).collect())
                     .unwrap_or_default(),
             ),
-            Some("minecraft:enter_block") => {
-                entered_block(&c["conditions"]).map_or(Criterion::Other, Criterion::InBlock)
-            }
+            Some("minecraft:enter_block") => entered_block(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::InBlock),
             Some("minecraft:tick")
                 if c["conditions"].is_null()
                     || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
@@ -560,9 +783,8 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             Some("minecraft:recipe_unlocked") => {
                 Criterion::Recipe(c["conditions"]["recipes"].as_str()?.to_owned())
             }
-            Some("minecraft:placed_block") => {
-                placed_block(&c["conditions"]).map_or(Criterion::Other, Criterion::Places)
-            }
+            Some("minecraft:placed_block") => placed_block(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Places),
             Some("minecraft:changed_dimension") => {
                 let conditions = c["conditions"].as_object();
                 match conditions
@@ -570,34 +792,46 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                     .and_then(|o| o.get("to")?.as_str())
                 {
                     Some(to) => Criterion::EntersDimension(to.to_owned()),
-                    None => Criterion::Other,
+                    None => Criterion::Other(trigger.clone()),
                 }
             }
-            Some("minecraft:recipe_crafted") => {
-                crafted_recipe(&c["conditions"]).map_or(Criterion::Other, Criterion::Crafts)
-            }
-            Some("minecraft:location") => {
-                location_biome(&c["conditions"]).map_or(Criterion::Other, Criterion::InBiome)
-            }
+            Some("minecraft:recipe_crafted") => crafted_recipe(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Crafts),
+            Some("minecraft:location") => location_biome(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::InBiome),
             Some("minecraft:tame_animal")
                 if c["conditions"].is_null()
                     || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
             {
                 Criterion::Tames
             }
-            Some("minecraft:item_used_on_block") => {
-                used_on_block(&c["conditions"]).map_or(Criterion::Other, Criterion::UsedOnBlock)
+            Some("minecraft:item_used_on_block") => used_on_block(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::UsedOnBlock),
+            Some("minecraft:slept_in_bed")
+                if c["conditions"].is_null()
+                    || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
+            {
+                Criterion::Sleeps
             }
-            Some("minecraft:bred_animals") => {
-                bred_child(&c["conditions"]).map_or(Criterion::Other, Criterion::Breeds)
+            Some("minecraft:entity_killed_player")
+                if c["conditions"].is_null()
+                    || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
+            {
+                Criterion::KilledByEntity
             }
-            Some("minecraft:consume_item") => {
-                consumed_item(&c["conditions"]).map_or(Criterion::Other, Criterion::Consumes)
-            }
-            Some("minecraft:player_killed_entity") => {
-                kill_type(&c["conditions"]).map_or(Criterion::Other, Criterion::Kills)
-            }
-            _ => Criterion::Other,
+            Some("minecraft:effects_changed") => effects_map(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::HasEffects),
+            Some("minecraft:nether_travel") => travel_distance(&c["conditions"]).map_or_else(
+                || Criterion::Other(trigger.clone()),
+                Criterion::NetherTravel,
+            ),
+            Some("minecraft:bred_animals") => bred_child(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Breeds),
+            Some("minecraft:consume_item") => consumed_item(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Consumes),
+            Some("minecraft:player_killed_entity") => kill_type(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Kills),
+            _ => Criterion::Other(trigger.clone()),
         };
         criteria.insert(name.clone(), kind);
     }
@@ -642,6 +876,56 @@ pub fn unlocked(rule: &Rule, held: &BTreeSet<String>, owned: &BTreeSet<String>) 
         _ => false,
     };
     !rule.requirements.is_empty() && rule.requirements.iter().all(|g| g.iter().any(met))
+}
+
+/// Per trigger id: how many criteria of the extracted advancements this server evaluates and how
+/// many it leaves as [`Criterion::Other`], over `recipes/**` (`recipes = true`) or everything
+/// else. Used by the status document and its test.
+#[cfg(test)]
+pub fn coverage(recipes: bool) -> BTreeMap<String, (usize, usize)> {
+    let mut table: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for rule in rules() {
+        if rule.id.starts_with("minecraft:recipes/") != recipes {
+            continue;
+        }
+        for criterion in rule.criteria.values() {
+            let (name, done) = match criterion {
+                Criterion::Other(trigger) => (trigger.clone(), false),
+                other => (trigger_of(other).to_owned(), true),
+            };
+            let entry = table.entry(name).or_default();
+            if done {
+                entry.0 += 1;
+            } else {
+                entry.1 += 1;
+            }
+        }
+    }
+    table
+}
+
+#[cfg(test)]
+fn trigger_of(criterion: &Criterion) -> &'static str {
+    match criterion {
+        Criterion::Holds(_) => "minecraft:inventory_changed",
+        Criterion::Recipe(_) => "minecraft:recipe_unlocked",
+        Criterion::InBlock(_) => "minecraft:enter_block",
+        Criterion::Ticks => "minecraft:tick",
+        Criterion::Kills(_) => "minecraft:player_killed_entity",
+        Criterion::Consumes(_) => "minecraft:consume_item",
+        Criterion::EntersDimension(_) => "minecraft:changed_dimension",
+        Criterion::Places(_) => "minecraft:placed_block",
+        Criterion::InBiome(_) => "minecraft:location",
+        Criterion::Crafts(_) => "minecraft:recipe_crafted",
+        Criterion::Breeds(_) => "minecraft:bred_animals",
+        Criterion::Tames => "minecraft:tame_animal",
+        Criterion::UsedOnBlock(_) => "minecraft:item_used_on_block",
+        Criterion::Sleeps => "minecraft:slept_in_bed",
+        Criterion::KilledByEntity => "minecraft:entity_killed_player",
+        Criterion::NetherTravel(_) => "minecraft:nether_travel",
+        Criterion::HasEffects(_) => "minecraft:effects_changed",
+        Criterion::Other(_) => "",
+    }
 }
 
 /// Reads the advancement rules now, off the caller's thread. The first `criteria_for_*` call
@@ -744,21 +1028,29 @@ pub fn reward_experience(advancement: &str) -> i32 {
         .map_or(0, |r| r.experience)
 }
 
-/// Loot tables an advancement rolls for the player when completed.
-pub fn reward_loot(advancement: &str) -> Vec<String> {
-    rules()
+/// The console commands that hand a rule's loot and function rewards to `player`: each loot
+/// table through `/loot give` (so the loot code of the server decides the context) and the
+/// function as the player at their position. The vanilla 26.3 advancements carry neither
+/// reward; data packs do.
+pub fn rule_reward_commands(rule: &Rule, player: &str) -> Vec<String> {
+    let mut out: Vec<String> = rule
+        .loot
         .iter()
-        .find(|r| r.id == advancement)
-        .map(|r| r.loot.clone())
-        .unwrap_or_default()
+        .map(|table| format!("loot give {player} loot {table}"))
+        .collect();
+    if let Some(function) = &rule.function {
+        out.push(format!("execute as {player} at @s run function {function}"));
+    }
+    out
 }
 
-/// The function an advancement runs as the player when completed.
-pub fn reward_function(advancement: &str) -> Option<String> {
+/// [`rule_reward_commands`] for the advancement with this id.
+pub fn reward_commands(advancement: &str, player: &str) -> Vec<String> {
     rules()
         .iter()
         .find(|r| r.id == advancement)
-        .and_then(|r| r.function.clone())
+        .map(|rule| rule_reward_commands(rule, player))
+        .unwrap_or_default()
 }
 
 /// Advancement criteria (`<advancement>#<criterion>`) that holding `held` completes, for every
@@ -800,6 +1092,35 @@ mod tests {
                 "loot": ["t:chests/gift"], "function": "t:celebrate"}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn coverage_table_for_the_extracted_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        for recipes in [false, true] {
+            println!(
+                "== {}",
+                if recipes {
+                    "recipes/**"
+                } else {
+                    "other advancements"
+                }
+            );
+            for (trigger, (done, other)) in coverage(recipes) {
+                println!("{trigger}\t{done}\t{other}");
+            }
+        }
+        // Every recipe advancement trigger is evaluated; the one criterion left is the
+        // `impossible` trigger, which vanilla never completes either.
+        let recipes = coverage(true);
+        let open: Vec<_> = recipes
+            .iter()
+            .filter(|(_, (_, other))| *other > 0)
+            .map(|(trigger, counts)| (trigger.as_str(), *counts))
+            .collect();
+        assert_eq!(open, [("minecraft:impossible", (0, 1))], "{recipes:?}");
     }
 
     #[test]
@@ -979,13 +1300,228 @@ mod tests {
     }
 
     #[test]
-    fn placed_block_criteria_match_one_plain_block() {
+    fn placed_block_criteria_match_blocks_tags_and_states() {
         let one = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "minecraft:beetroots"}});
-        assert_eq!(placed_block(&one).as_deref(), Some("minecraft:beetroots"));
+        let wanted = placed_block(&one).expect("plain block");
+        assert!(wanted.matches("minecraft:beetroots", &[("age", "0")]));
+        assert!(!wanted.matches("minecraft:wheat", &[]));
         let tag = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "#minecraft:beds"}});
-        assert_eq!(placed_block(&tag), None);
-        let with_state = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "minecraft:x", "state": {}}});
-        assert_eq!(placed_block(&with_state), None);
+        let beds = placed_block(&tag).expect("tag");
+        if ferrite_data::tags::contains("block", "beds", "red_bed") {
+            assert!(beds.matches("minecraft:red_bed", &[]));
+        }
+        assert!(!beds.matches("minecraft:stone", &[]));
+        let with_state = serde_json::json!({"location": {"type": "minecraft:match_block",
+            "blocks": "minecraft:creaking_heart", "state": {"creaking_heart_state": "awake"}}});
+        let awake = placed_block(&with_state).expect("state");
+        assert!(awake.matches(
+            "minecraft:creaking_heart",
+            &[("creaking_heart_state", "awake")]
+        ));
+        assert!(!awake.matches(
+            "minecraft:creaking_heart",
+            &[("creaking_heart_state", "dormant")]
+        ));
+        assert!(!awake.matches("minecraft:creaking_heart", &[]));
+        // Offsets, `all_of` and the like are left alone.
+        let complex = serde_json::json!({"location": {"type": "minecraft:any_of", "terms": []}});
+        assert!(placed_block(&complex).is_none());
+        let offset = serde_json::json!({"location": {"type": "minecraft:match_block",
+            "blocks": "minecraft:stone", "offsetY": -1}});
+        assert!(placed_block(&offset).is_none());
+    }
+
+    #[test]
+    fn placing_a_block_with_a_state_completes_the_vanilla_criterion() {
+        if rules().is_empty() {
+            return;
+        }
+        let record = |props: &'static [(&'static str, &'static str)]| BlockRecord {
+            player: Uuid::nil(),
+            block: "minecraft:creaking_heart",
+            props,
+        };
+        let awake = criteria_for_placed(&record(&[("creaking_heart_state", "awake")]));
+        assert!(awake.contains(
+            &"minecraft:adventure/heart_transplanter#place_creaking_heart_awake".to_owned()
+        ));
+        assert!(!awake.contains(
+            &"minecraft:adventure/heart_transplanter#place_creaking_heart_dormant".to_owned()
+        ));
+    }
+
+    #[test]
+    fn event_criteria_parse_and_match() {
+        let json = |trigger: &str, conditions: serde_json::Value| serde_json::json!({"criteria": {"c": {"trigger": trigger, "conditions": conditions}}});
+        let slept = parse_rule(
+            "a",
+            &json("minecraft:slept_in_bed", serde_json::Value::Null),
+        )
+        .unwrap();
+        assert!(matches!(slept.criteria["c"], Criterion::Sleeps));
+        let killed = parse_rule(
+            "a",
+            &json("minecraft:entity_killed_player", serde_json::Value::Null),
+        )
+        .unwrap();
+        assert!(matches!(killed.criteria["c"], Criterion::KilledByEntity));
+        let travel = parse_rule(
+            "a",
+            &json(
+                "minecraft:nether_travel",
+                serde_json::json!({"distance": {"horizontal": {"min": 7000.0}}}),
+            ),
+        )
+        .unwrap();
+        let Criterion::NetherTravel(check) = &travel.criteria["c"] else {
+            panic!("{:?}", travel.criteria["c"]);
+        };
+        assert!(check.matches([7000.0, 100.0, 0.0]));
+        assert!(
+            check.matches([-5000.0, 0.0, -5000.0]),
+            "horizontal is the planar distance"
+        );
+        assert!(!check.matches([6999.0, 0.0, 0.0]));
+        assert!(
+            !check.matches([0.0, 9000.0, 0.0]),
+            "height is not horizontal"
+        );
+        let exact = DistanceCheck {
+            y: Some(Range {
+                min: Some(2.0),
+                max: Some(4.0),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            exact.matches([0.0, -3.0, 0.0]),
+            "x, y and z compare absolute offsets"
+        );
+        assert!(!exact.matches([0.0, 5.0, 0.0]));
+        // A conditioned player predicate is not guessed at.
+        let other = parse_rule(
+            "a",
+            &json(
+                "minecraft:nether_travel",
+                serde_json::json!({"player": {}, "distance": {"x": {"min": 1}}}),
+            ),
+        )
+        .unwrap();
+        assert!(matches!(other.criteria["c"], Criterion::Other(_)));
+        let conditioned = parse_rule(
+            "a",
+            &json("minecraft:slept_in_bed", serde_json::json!({"player": []})),
+        )
+        .unwrap();
+        assert!(matches!(conditioned.criteria["c"], Criterion::Other(_)));
+    }
+
+    #[test]
+    fn effects_changed_needs_every_listed_effect_with_its_ranges() {
+        let json = serde_json::json!({"criteria": {"all": {"trigger": "minecraft:effects_changed",
+            "conditions": {"effects": {"minecraft:speed": {}, "minecraft:haste": {"amplifier": {"min": 1}}}}}}});
+        let rule = parse_rule("t:effects", &json).unwrap();
+        let Criterion::HasEffects(wanted) = &rule.criteria["all"] else {
+            panic!("{:?}", rule.criteria["all"]);
+        };
+        assert_eq!(wanted.len(), 2);
+        let fact = |name: &str, amplifier| EffectFact {
+            name: name.to_owned(),
+            amplifier,
+            duration: 100,
+        };
+        let holds = |active: &[EffectFact]| effects_hold(wanted, active);
+        assert!(holds(&[
+            fact("minecraft:speed", 0),
+            fact("minecraft:haste", 1)
+        ]));
+        assert!(
+            !holds(&[fact("minecraft:speed", 0), fact("minecraft:haste", 0)]),
+            "amplifier too low"
+        );
+        assert!(!holds(&[fact("minecraft:speed", 0)]), "haste missing");
+        // A `source` condition is not guessed at.
+        let sourced = parse_rule(
+            "t:x",
+            &serde_json::json!({"criteria": {"c": {"trigger": "minecraft:effects_changed",
+            "conditions": {"source": {}}}}}),
+        )
+        .unwrap();
+        assert!(matches!(sourced.criteria["c"], Criterion::Other(_)));
+    }
+
+    #[test]
+    fn having_every_potion_effect_completes_how_did_we_get_here_style_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        // nether/all_potions asks for 17 effects at once.
+        let wanted: Vec<EffectFact> = rules()
+            .iter()
+            .find(|r| r.id == "minecraft:nether/all_potions")
+            .and_then(|r| match r.criteria.get("all_effects") {
+                Some(Criterion::HasEffects(list)) => Some(list.clone()),
+                _ => None,
+            })
+            .expect("all_potions is evaluated")
+            .into_iter()
+            .map(|(name, _, _)| EffectFact {
+                name,
+                amplifier: 0,
+                duration: 600,
+            })
+            .collect();
+        assert_eq!(wanted.len(), 17);
+        assert!(
+            criteria_for_effects(&wanted)
+                .contains(&"minecraft:nether/all_potions#all_effects".to_owned())
+        );
+        assert!(
+            criteria_for_effects(&wanted[1..])
+                .iter()
+                .all(|c| !c.starts_with("minecraft:nether/all_potions"))
+        );
+    }
+
+    #[test]
+    fn events_complete_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        assert!(
+            criteria_for_event(&Event::SleptInBed)
+                .contains(&"minecraft:adventure/sleep_in_bed#slept_in_bed".to_owned())
+        );
+        assert!(
+            criteria_for_event(&Event::KilledByEntity)
+                .contains(&"minecraft:adventure/root#killed_by_something".to_owned())
+        );
+        assert!(
+            criteria_for_event(&Event::NetherTravel {
+                delta: [7000.0, 0.0, 0.0]
+            })
+            .contains(&"minecraft:nether/fast_travel#travelled".to_owned())
+        );
+        assert!(
+            criteria_for_event(&Event::NetherTravel {
+                delta: [100.0, 0.0, 0.0]
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn loot_and_function_rewards_become_console_commands() {
+        assert_eq!(
+            rule_reward_commands(&rule(), "Steve"),
+            [
+                "loot give Steve loot t:chests/gift",
+                "execute as Steve at @s run function t:celebrate"
+            ]
+        );
+        let bare = parse_rule("t:bare", &serde_json::json!({"criteria": {}})).unwrap();
+        assert!(rule_reward_commands(&bare, "Steve").is_empty());
+        assert!(reward_commands("minecraft:nope/none", "Steve").is_empty());
     }
 
     #[test]
@@ -1023,7 +1559,7 @@ mod tests {
             "ingredients": [{"items": "minecraft:brick"}]})),
         )
         .unwrap();
-        assert!(matches!(rule.criteria["c"], Criterion::Other));
+        assert!(matches!(rule.criteria["c"], Criterion::Other(_)));
     }
 
     #[test]

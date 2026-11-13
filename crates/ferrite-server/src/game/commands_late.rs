@@ -41,10 +41,83 @@ fn data_file(kind: &str, id: &str) -> Option<Value> {
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
-/// What a provider can look at: the block it is evaluated for, if any.
+/// What a provider can look at about an entity: its type, position and dimension. The command
+/// entity snapshot carries nothing else (no health, equipment or flags), so predicates that ask
+/// for more never match.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityFacts {
+    /// Entity type id (`minecraft:pig`), `minecraft:player` for a player.
+    pub kind: String,
+    pub pos: [f64; 3],
+    /// Dimension id (`minecraft:overworld`).
+    pub dimension: String,
+}
+
+/// What a provider can look at: the block it is evaluated for, if any, and the entity of the
+/// `entity` source (vanilla's `TARGET_ENTITY`) or the executing entity of the `default` source
+/// (`THIS_ENTITY`).
 #[derive(Default, Clone)]
 pub struct Context {
     pub block: Option<(String, Vec<(String, String)>)>,
+    pub target_entity: Option<EntityFacts>,
+    pub this_entity: Option<EntityFacts>,
+}
+
+fn in_range(range: &Value, value: f64) -> bool {
+    match range {
+        Value::Number(exact) => exact.as_f64() == Some(value),
+        Value::Object(bounds) => {
+            bounds
+                .get("min")
+                .and_then(Value::as_f64)
+                .is_none_or(|min| value >= min)
+                && bounds
+                    .get("max")
+                    .and_then(Value::as_f64)
+                    .is_none_or(|max| value <= max)
+        }
+        _ => false,
+    }
+}
+
+/// `entity_properties`: the `minecraft:entity_type` and `minecraft:location` (position and
+/// dimension) entries are evaluated; any other entry fails because the data is not there.
+fn entity_matches(facts: &EntityFacts, predicate: &Value) -> bool {
+    let Some(entries) = predicate.as_object() else {
+        return false;
+    };
+    entries.iter().all(|(key, wanted)| match key.as_str() {
+        "minecraft:entity_type" => {
+            let one = |name: &str| match name.strip_prefix('#') {
+                Some(tag) => ferrite_data::tags::contains(
+                    "entity_type",
+                    tag.strip_prefix("minecraft:").unwrap_or(tag),
+                    facts.kind.strip_prefix("minecraft:").unwrap_or(&facts.kind),
+                ),
+                None => namespaced(name) == facts.kind,
+            };
+            match wanted {
+                Value::String(name) => one(name),
+                Value::Array(names) => names.iter().filter_map(Value::as_str).any(one),
+                _ => false,
+            }
+        }
+        "minecraft:location" => wanted.as_object().is_some_and(|location| {
+            location.iter().all(|(field, value)| match field.as_str() {
+                "dimension" => value.as_str().map(namespaced).as_deref() == Some(&facts.dimension),
+                "position" => value.as_object().is_some_and(|axes| {
+                    axes.iter().all(|(axis, range)| match axis.as_str() {
+                        "x" => in_range(range, facts.pos[0]),
+                        "y" => in_range(range, facts.pos[1]),
+                        "z" => in_range(range, facts.pos[2]),
+                        _ => false,
+                    })
+                }),
+                _ => false,
+            })
+        }),
+        _ => false,
+    })
 }
 
 fn blocks_match(blocks: &Value, name: &str) -> bool {
@@ -76,6 +149,21 @@ fn condition(value: &Value, ctx: &Context, depth: u8) -> bool {
                     })
                 })
         }
+        Some("minecraft:entity_properties") => {
+            let facts = match value["entity"].as_str() {
+                Some("this") => ctx.this_entity.as_ref(),
+                Some("target_entity") => ctx.target_entity.as_ref(),
+                _ => None,
+            };
+            facts.is_some_and(|facts| entity_matches(facts, &value["predicate"]))
+        }
+        Some("minecraft:inverted") => !condition(&value["term"], ctx, depth + 1),
+        Some("minecraft:all_of") => value["terms"]
+            .as_array()
+            .is_some_and(|terms| terms.iter().all(|t| condition(t, ctx, depth + 1))),
+        Some("minecraft:any_of") => value["terms"]
+            .as_array()
+            .is_some_and(|terms| terms.iter().any(|t| condition(t, ctx, depth + 1))),
         _ => false,
     }
 }
@@ -139,6 +227,19 @@ pub fn evaluate(
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn facts_of(entity: &super::selectors::SelectedEntity) -> EntityFacts {
+    EntityFacts {
+        kind: entity
+            .kind
+            .map_or("minecraft:player", |kind| {
+                ferrite_data::entity_props::get(kind).key
+            })
+            .to_owned(),
+        pos: entity.pos,
+        dimension: entity.dimension.key().to_owned(),
     }
 }
 
@@ -247,14 +348,49 @@ fn compute_tree() -> NodeBuilder<Source> {
                         .collect(),
                 )
             });
-        Ok(Context { block })
+        Ok(Context {
+            block,
+            ..Context::default()
+        })
+    }
+    fn entity_context(ctx: &CommandContext<Source>) -> Result<Context, CommandError> {
+        let target = entity(ctx, "computeTarget")?;
+        let source = ctx.source();
+        let found = {
+            let state = source.state.lock().unwrap();
+            super::selectors::resolve_selection(&state, &target, source.uuid, source.origin)?
+        };
+        let Some(first) = found.first() else {
+            return Err(CommandError::failed(
+                Feedback::new("argument.entity.notfound.entity", vec![]).text,
+            ));
+        };
+        Ok(Context {
+            target_entity: Some(facts_of(first)),
+            ..Context::default()
+        })
     }
     let (block_float, block_int) = branches(block_context);
-    let (default_float, default_int) = branches(|_| Ok(Context::default()));
-    let (entity_float, entity_int) = branches(|ctx| {
-        entity(ctx, "computeTarget")?;
-        Ok(Context::default())
+    let (default_float, default_int) = branches(|ctx| {
+        // `THIS_ENTITY` is the executing entity, when it is one the command view knows.
+        let source = ctx.source();
+        let this_entity = source.uuid.and_then(|uuid| {
+            let state = source.state.lock().unwrap();
+            super::selectors::resolve_selection(
+                &state,
+                &ferrite_command::arguments::EntityTarget::Uuid(uuid.to_string()),
+                source.uuid,
+                source.origin,
+            )
+            .ok()
+            .and_then(|found| found.first().map(facts_of))
+        });
+        Ok(Context {
+            this_entity,
+            ..Context::default()
+        })
     });
+    let (entity_float, entity_int) = branches(entity_context);
     literal::<Source>("compute")
         .requires(|s| s.permission >= 2)
         .then(
@@ -475,6 +611,7 @@ mod tests {
     fn run(json: &str, kind: &str, block: Option<&str>) -> Option<f64> {
         let ctx = Context {
             block: block.map(|name| (name.to_owned(), vec![])),
+            ..Context::default()
         };
         let mut rng = |_bound: u64| 0;
         evaluate(
@@ -521,5 +658,85 @@ mod tests {
             Some("minecraft:stone"),
         );
         assert!(value.is_some());
+    }
+
+    fn with_target(json: &str, target: Option<EntityFacts>) -> Option<f64> {
+        let ctx = Context {
+            target_entity: target,
+            ..Context::default()
+        };
+        let mut rng = |_bound: u64| 0;
+        evaluate(
+            &serde_json::from_str(json).unwrap(),
+            "context_int_provider",
+            &ctx,
+            &mut rng,
+            0,
+        )
+    }
+
+    fn pig(pos: [f64; 3]) -> EntityFacts {
+        EntityFacts {
+            kind: "minecraft:pig".to_owned(),
+            pos,
+            dimension: "minecraft:overworld".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_entity_context_gives_providers_type_and_position() {
+        let by_type = r#"{"type":"minecraft:conditional","condition":{
+            "type":"minecraft:entity_properties","entity":"target_entity",
+            "predicate":{"minecraft:entity_type":"minecraft:pig"}},"on_true":5,"on_false":1}"#;
+        assert_eq!(with_target(by_type, Some(pig([0.0; 3]))), Some(5.0));
+        let cow = EntityFacts {
+            kind: "minecraft:cow".to_owned(),
+            ..pig([0.0; 3])
+        };
+        assert_eq!(with_target(by_type, Some(cow)), Some(1.0));
+        // Without an entity (the `default` source) the condition cannot hold.
+        assert_eq!(with_target(by_type, None), Some(1.0));
+
+        let by_height = r#"{"type":"minecraft:conditional","condition":{
+            "type":"minecraft:entity_properties","entity":"target_entity",
+            "predicate":{"minecraft:location":{"position":{"y":{"min":64}},
+            "dimension":"minecraft:overworld"}}},"on_true":8,"on_false":2}"#;
+        assert_eq!(
+            with_target(by_height, Some(pig([0.0, 70.0, 0.0]))),
+            Some(8.0)
+        );
+        assert_eq!(
+            with_target(by_height, Some(pig([0.0, 10.0, 0.0]))),
+            Some(2.0)
+        );
+        // A predicate entry this server has no data for (health, equipment, ...) never matches.
+        let by_health = r#"{"type":"minecraft:conditional","condition":{
+            "type":"minecraft:entity_properties","entity":"target_entity",
+            "predicate":{"minecraft:health":{"min":1}}},"on_true":1,"on_false":0}"#;
+        assert_eq!(with_target(by_health, Some(pig([0.0; 3]))), Some(0.0));
+        // `this` only exists in the `default` source, not in the `entity` one.
+        let this = by_type.replace("target_entity", "this");
+        assert_eq!(with_target(&this, Some(pig([0.0; 3]))), Some(1.0));
+    }
+
+    #[test]
+    fn facts_name_players_and_region_entities() {
+        let selected = |kind: Option<u16>| super::super::selectors::SelectedEntity {
+            uuid: uuid::Uuid::nil(),
+            name: String::new(),
+            player: kind.is_none(),
+            kind,
+            dimension: super::super::Dimension::Nether,
+            pos: [1.0, 2.0, 3.0],
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        assert_eq!(facts_of(&selected(None)).kind, "minecraft:player");
+        assert_eq!(facts_of(&selected(None)).dimension, "minecraft:the_nether");
+        let zombie = ferrite_data::entity_props::by_name("minecraft:zombie").unwrap();
+        assert_eq!(
+            facts_of(&selected(Some(zombie.id))).kind,
+            "minecraft:zombie"
+        );
     }
 }

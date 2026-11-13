@@ -2462,11 +2462,15 @@ impl Player {
         drop(positions);
         if placed {
             self.changed_blocks.push([target.x, target.y, target.z]);
-            if let Some((name, _)) = ferrite_data::blocks::state(state) {
+            if let Some((name, props)) = ferrite_data::blocks::state(state) {
                 super::recipe_unlock::PLACED
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((self.uuid, name));
+                    .push(super::recipe_unlock::BlockRecord {
+                        player: self.uuid,
+                        block: name,
+                        props,
+                    });
             }
             // Block entities are created with the block, so the menu, /data and the chunk save
             // all find the state they expect.
@@ -4482,11 +4486,15 @@ impl Player {
                         })
                         .collect();
                     {
-                        let hidden = ferrite_item::item_name(
-                            self.inventory.get(ferrite_inventory::HEAD).item,
-                        )
-                        .is_some_and(|name| super::waypoints::HIDING_HEAD_ITEMS.contains(&name))
-                            && !self.inventory.get(ferrite_inventory::HEAD).is_empty();
+                        let head = self.inventory.get(ferrite_inventory::HEAD);
+                        let hidden = super::waypoints::hides(
+                            (!head.is_empty())
+                                .then(|| ferrite_item::item_name(head.item))
+                                .flatten(),
+                            self.sneaking,
+                            self.effects
+                                .has(ferrite_entity::effect::Effect::Invisibility),
+                        );
                         let mut set = super::waypoints::HEAD_HIDDEN
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
@@ -4496,6 +4504,24 @@ impl Player {
                             set.remove(&self.uuid);
                         }
                     }
+                    super::recipe_unlock::EFFECTS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(
+                            self.uuid,
+                            self.effects
+                                .iter()
+                                .map(|instance| super::recipe_unlock::EffectFact {
+                                    name: format!(
+                                        "minecraft:{}",
+                                        ferrite_entity::effect::Effect::from_id(instance.effect)
+                                            .name()
+                                    ),
+                                    amplifier: instance.amplifier,
+                                    duration: instance.duration,
+                                })
+                                .collect(),
+                        );
                     super::recipe_unlock::HELD
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -7666,6 +7692,23 @@ impl Region {
                 }
                 continue;
             };
+            // A saddled tame horse ridden by a player (also one put there with `/ride`) is
+            // steered by the rider's packets, not by its own AI or by the rider following it.
+            // A rider that is a mob of this region cannot steer.
+            let rider_is_mob = self
+                .entities
+                .keys()
+                .iter()
+                .any(|&k| self.entities.data(k).is_some_and(|d| d.uuid == rider));
+            if !rider_is_mob
+                && ferrite_entity::horse::is_steerable(&self.entities, key)
+                && !super::ride::is_controlled(horse)
+            {
+                super::ride::set_controlled(horse, true);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = true;
+                }
+            }
             let outcome = ferrite_entity::horse::tick_rider(
                 &mut self.entities,
                 key,
@@ -9801,6 +9844,12 @@ impl Region {
             }
         }
         let kind = p.survival.death_cause.unwrap_or(DamageKind::GenericKill);
+        // `Entity.awardKillScore` fires `entity_killed_player` for the entity that dealt the
+        // killing blow: here a mob's melee hit or an arrow. Explosions are not counted because
+        // the damage model does not say whether an entity caused them.
+        if matches!(kind, DamageKind::Mob | DamageKind::Arrow) {
+            super::recipe_unlock::push_event(p.uuid, super::recipe_unlock::Event::KilledByEntity);
+        }
         let message = p
             .survival
             .death_message
@@ -11846,6 +11895,39 @@ mod tests {
         assert!(mob::state(&region.entities, key).unwrap().loot_dropped);
         region.tick(&ctx);
         assert_eq!(dropped_gear(&region).len(), 2, "gear drops exactly once");
+    }
+
+    #[test]
+    fn a_horse_mounted_with_ride_is_steered_by_its_player_rider() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Horse);
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.health = 20.0;
+            state.saddled = true;
+            state.owner = Some(Uuid::from_u128(0x51d1));
+        }
+        let horse = region.entities.data(key).unwrap().uuid;
+        let rider = Uuid::from_u128(0x51d2);
+        assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::mount(rider, horse, false).unwrap();
+        region.tick(&tick_context());
+        assert!(
+            super::super::ride::is_controlled(horse),
+            "steered by the rider"
+        );
+        assert!(mob::state(&region.entities, key).unwrap().no_ai);
+        // Without a saddle the rider cannot steer it.
+        super::super::ride::dismount(rider);
+        super::super::ride::set_controlled(horse, false);
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.saddled = false;
+            state.no_ai = false;
+        }
+        super::super::ride::mount(rider, horse, false).unwrap();
+        region.tick(&tick_context());
+        assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::dismount(rider);
     }
 
     #[test]

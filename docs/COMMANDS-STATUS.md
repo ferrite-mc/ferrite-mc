@@ -73,15 +73,8 @@ documented as partial, the other 71 not known to be partial but not behaviour-te
 
 ## Deltas since 2026-11-04
 
-- Advancement criteria (`game/recipe_unlock.rs`, `Criterion`): plain `player_killed_entity`,
-  `consume_item`, `changed_dimension` (into one dimension), `placed_block` (one block),
-  `location` (one biome), `recipe_crafted`, `bred_animals`, `tame_animal` and
-  `item_used_on_block` are now evaluated. The "Not done" list in `/advancement` below (melee kills,
-  eating/drinking, entering a dimension, placing a plain block) is out of date. Experience and
-  recipe rewards and the chat announcement are given. Loot-table and function rewards are run
-  as `loot give <player> loot <table>` and `execute as <player> at @s run function <fn>`
-  (`game/mod.rs`, `recipe_unlock::reward_loot`/`reward_function`; parsing is unit-tested, the
-  console wiring is not covered by an end-to-end test).
+- Advancement criteria and rewards: see "Lane B: progress and world" at the end of this file
+  (trigger table, rewards, `/recipe`, `/compute`, `/waypoint`, `/place template`, `/ride`).
 - `/waypoint`: spectators do not transmit on the locator bar.
 - `/attribute`: `max_health` feeds the player's survival state.
 - `/debug function` traces to `debug/commands-<time>.txt`; `/dialog show` accepts an inline
@@ -113,26 +106,27 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   criteria). Progress is saved per player (`playerdata/<uuid>.advancements.json`) and sent as
   `update_advancements` (`advancement_packets.rs`; entries are encoded with the server's own codec by
   `tools/extractor/AdvancementExtractor.java`, framing checked against the vanilla packet bytes), so
-  tabs and toasts work. Completion by holding items, the chat announcement, recipe rewards and
-  experience rewards work. Not done: melee kills of a plain entity type (e.g. Monster Hunter) , eating/drinking a plain item (e.g. A Balanced Diet) , entering a dimension (e.g. The End) and placing a plain block (match_block only) complete advancements, but sweep, arrow, fire and explosion kills and every other trigger (travel, location, consume, ...) do not;
-  loot-table and function rewards are given (see the note above).
-- `/recipe`: give/take with the extracted recipe ids; recipes also unlock from play (`recipe_unlock.rs`: every
-  second the held item names are scanned and matched against the `recipes/**` advancements'
-  `inventory_changed` items/tags and `recipe_unlocked`, ignoring counts and components). Unlocked recipes are saved per player
+  tabs and toasts work. Completion from play, the chat announcement and the recipe, experience,
+  loot and function rewards work; **which triggers are evaluated is the table in "Lane B"
+  below** (the earlier prose list here was stale).
+- `/recipe`: give/take with the extracted recipe ids; recipes also unlock from play
+  (`recipe_unlock.rs`, see "Lane B": `inventory_changed`, `recipe_unlocked`, `enter_block` and
+  `tick`, counts and components ignored). Unlocked recipes are saved per player
   (`playerdata/<uuid>.recipes.json`) and sent as `recipe_book_add`/`recipe_book_remove`, plus
   `update_recipes` and `recipe_book_settings` on join (`recipe_packets.rs`; displays are encoded by
   `tools/extractor/RecipeExtractor.java`, which boots the real data-pack loader, and the framing
-  is checked against the vanilla codec bytes). Not done: the `enter_block`/`tick` recipe triggers, the client's `seen_recipe` packet is ignored (the
-  "new" highlight is not tracked). `recipe_book_change_settings` is stored per player
+  is checked against the vanilla codec bytes). The client's `recipe_book_seen_recipe` clears the
+  "new" highlight (see "Lane B"). `recipe_book_change_settings` is stored per player
   (`playerdata/<uuid>.recipebook.json`) and sent back on join.
 - `/compute`: evaluates `context_int_provider` / `context_float_provider` (constant, reference,
-  conditional, div, number_dispatcher, weighted_list, match_block). `entity` context carries no
-  entity data yet.
+  conditional, div, number_dispatcher, weighted_list, match_block, plus the `entity_properties`,
+  `inverted`, `all_of`, `any_of` conditions). The `entity` source gives providers the target's
+  type, position and dimension; see "Lane B" for what that does and does not cover.
 - `/waypoint`: `list` lists online players; `modify` stores color/style per entity and the locator bar
   (`waypoints.rs`, packet 141, byte-checked against the vanilla codec) applies it. Every player is a
   transmitter for the others in the same dimension (azimuth beyond 332 blocks, position inside the
-  view distance, chunk otherwise). Spectators (via /gamemode or join) do not transmit. Not yet: invisible/`waypoint_transmit_range` filtering and spectators set by plugins,
-  non-player transmitters.
+  view distance, chunk otherwise). Transmit range, receive range, hiding (head items, sneaking,
+  invisibility), spectators and non-player transmitters: see "Lane B".
 - `/loot give|insert|replace|spawn <target> loot|mine|fish|kill ...` (lane A, checked on 2026-11-13
   against the 26.3 server jar's `LootCommand` and `CommandResponseTracker` bytecode; tests are in
   `game/commands_loot.rs`):
@@ -233,18 +227,18 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
     (`container.N`, `hotbar.*`, `weapon.mainhand`, ...). Non-player entities have no inventory
     here, so only players are written. Success/failure message texts were not re-read from the
     jar.
-- `/ride <target> mount <vehicle>|dismount`: rides live in a server-side table; the client gets
-  `set_passengers` (id 109) for everyone online, and every tick the rider is teleported to the
-  vehicle's position + 0.6 blocks. Sneaking dismounts. Not simulated: vehicle steering, per-type
-  seat offsets, riding across dimensions, riders surviving a vehicle's region hand-off smoothly.
-  Players cannot be ridden. Untested against a real client.
+- `/ride <target> mount <vehicle>|dismount`: rides live in a server-side table (`ride.rs`); the
+  client gets `set_passengers` (id 109) for everyone online, and every tick the rider is teleported
+  to the vehicle's seat. Sneaking dismounts. Players cannot be ridden. Untested against a real
+  client. What is and is not simulated is listed in "Lane B".
 - `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]` places the block
   palette of a structure template with vanilla's mirror-then-rotate transform about the
   origin, rotating/mirroring `facing`, `axis`, `rotation` and `north/east/south/west`
   properties (stair shapes are not adjusted). Templates are read from
   `vanilla/26.3/generated/data/minecraft/structure/**.nbt`, which `tools/fetch_vanilla.py`
-  extracts from the user's own jar. Block entity data of `/place template` is placed (chests, signs); template entities
-  are not placed, `strict` is accepted and ignored, jigsaw blocks become their `final_state`.
+  extracts from the user's own jar. Block entity data is placed (chests, signs), template
+  entities are spawned and `strict` is documented (see "Lane B"); jigsaw blocks become their
+  `final_state`.
   `/place feature|jigsaw|structure` run the jar's own `/place` in the worldgen host (op 8) on a
   force-loaded area and apply the changed blocks. Block entities (chest contents and loot
   tables, signs) come back from the host as NBT and are stored under their `id`; they need
@@ -312,3 +306,119 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `generator = "vanilla"`); `poi` only finds points of interest of chunks that are stored.
 - Plugin `World#generateTree` runs the matching vanilla feature through the host and keeps block
   states; it reports `false` when nothing was placed and is unavailable without the host.
+
+## Lane B: progress and world
+
+Verified against the code and the 26.3 jar (`javap` on the unobfuscated server jar) on branch
+`lane/commands-b`. Where this section and an older bullet disagree, this section wins. The "not
+re-verified" list at the top of this file is not part of Lane B.
+
+### Advancement triggers
+
+The table is printed by the test `coverage_table_for_the_extracted_advancements`
+(`recipe_unlock.rs`). "Evaluated" is the number of criteria the server can complete; "other" is
+the number it parses but never completes. A criterion that is "other" never fires.
+
+| Trigger | Evaluated / other | Notes |
+|---|---|---|
+| bred_animals | 24 / 3 | only the child kind is known (`Bred`, ferrite-entity `breed.rs`), so parent/partner (frog, sniffer, turtle) is blocked |
+| changed_dimension | 4 / 0 | `to` only |
+| consume_item | 41 / 0 | |
+| effects_changed | 2 / 1 | `all_effects`, `all_potions`; the axolotl `source` criterion is not covered. The server `Effect` enum lacks some effects (bad_omen, conduit_power, ...) |
+| enter_block | 1 / 0 | |
+| entity_killed_player | 1 / 0 | player killed by a mob or arrow; explosions excluded |
+| inventory_changed | 28 / 0 | item names only; counts and components are ignored |
+| item_used_on_block | 10 / 0 | |
+| location | 61 / 6 | single-biome only; structures (stronghold, end_city, bastion, fortress, trial_chambers), `stepping_on` and equipment not done |
+| nether_travel | 1 / 0 | fires on Nether to Overworld, with `distance` (x/y/z/horizontal/absolute) |
+| placed_block | 12 / 3 | not done: pale_oak_log and 2 chiseled_bookshelf offset checks |
+| player_killed_entity | 83 / 6 | plain entity type only; killing_blow/projectile, distance, equipment, dimension not done; tags are rejected by `kill_type` |
+| recipe_crafted | 26 / 1 | decorated pot ingredients not done |
+| slept_in_bed | 1 / 0 | |
+| tame_animal | 1 / 20 | blocked: ferrite-entity has no cat/wolf variants (only horse/llama); `Criterion::Tames` matches unconditioned only |
+| tick | 1 / 0 | |
+
+Not implemented (0 evaluated, count of criteria): allay_drop_item_on_block 1, avoid_vibration 1,
+bee_nest_destroyed 1, brewed_potion 1, channeled_lightning 1, construct_beacon 2,
+crafter_recipe_crafted 1, cured_zombie_villager 1, enchanted_item 1, entity_hurt_player 1,
+fall_after_explosion 1, fall_from_height 1, filled_bucket 6, fishing_rod_hooked 4,
+hero_of_the_village 1, item_durability_changed 1, kill_mob_near_sculk_catalyst 1,
+killed_by_arrow 3, levitation 1, lightning_strike 1, player_generates_container_loot 10,
+player_hurt_entity 3, player_interacted_with_entity 8, player_sheared_equipment 1,
+ride_entity_in_lava 1, shot_crossbow 1, slide_down_block 1, spear_mobs 1, started_riding 1,
+summoned_entity 3, target_hit 1, thrown_item_picked_up_by_entity 2,
+thrown_item_picked_up_by_player 1, used_totem 1, using_item 3, villager_trade 2.
+Reason: no event hook exists for these in the world loop. For the hit and kill triggers the damage
+model (`survival.rs` `DamageKind`, 13 kinds, no attacker identity) and `recipe_unlock::KILLS`
+(only killer and kind) do not carry the data the predicates need. Most of the others were not
+investigated beyond the missing hook.
+
+Recipes (`data/minecraft/recipe/**`): inventory_changed 1886, recipe_unlocked 1739, enter_block 11
+and tick 1 are all evaluated. `minecraft:impossible` (1) never completes, as in vanilla.
+
+Tests: `placed_block_criteria_match_blocks_tags_and_states`,
+`placing_a_block_with_a_state_completes_the_vanilla_criterion`,
+`event_criteria_parse_and_match`, `events_complete_the_vanilla_advancements`,
+`effects_changed_needs_every_listed_effect_with_its_ranges`.
+
+Rewards: experience, recipes, loot and function rewards. Loot and function rewards are turned into
+console commands (`loot give <p> loot <table>`, `execute as <p> at @s run function <fn>`); the
+mapping is tested (`loot_and_function_rewards_become_console_commands`) but running them through
+the console has no end-to-end test. No vanilla 26.3 advancement uses them; they only matter for
+data packs. `effects_changed` is sampled on the 20-tick inventory scan.
+
+### /recipe
+
+`enter_block` and `tick` recipe triggers were already implemented. The seen_recipe packet
+(serverbound play id 48, VarInt display id) is decoded in `ferrite-net` (`ServerboundPlay::RecipeSeen`,
+test `seen_recipe_decodes_the_display_id`). New recipes are sent with notify and highlight flags
+(1 and 2); the join resend carries highlights; removal clears them. Seen state is stored in
+`<uuid>.recipehighlight.json` in the persist dir (our own format; compatibility with vanilla is
+not verified). Tests: `highlighted_recipes_carry_flag_two_and_toast_flag_one`,
+`seen_recipes_lose_their_highlight_and_it_survives_a_reconnect`.
+
+### /compute
+
+The context has `target_entity` and `this_entity` (kind, position, dimension). Supported
+predicates: `entity_properties` (`minecraft:entity_type` including tags, `minecraft:location`
+position and dimension), `inverted`, `all_of`, `any_of`. Unknown predicate entries never match.
+The entity source resolves a selector; the default source uses the executing entity (matches
+vanilla `LootContextSources`). Entity health is not available in the entity index. Feedback
+messages use `commands.compute.success/failed`; vanilla uses
+`command.compute.result.{unnamed,named}.{exact,rounded,invalid}`. There is no lang file here, so the
+texts are unverified.
+
+### /waypoint
+
+Transmit range: a transmitter is shown when `distance < range`; spectator receivers ignore the
+range. Sneaking (crouch modifier) and the invisibility effect shrink the range as in vanilla
+(`waypoint_transmit_range_crouch`, `waypoint_transmit_range_hide`); the check is sampled on the
+20-tick scan, vanilla reacts immediately. Non-player transmitters: any entity with a stored
+`waypoint_transmit_range` attribute above 0 appears on the locator bar (tests
+`a_mob_with_a_transmit_range_shows_up_on_the_locator_bar`,
+`only_entities_with_a_raised_transmit_range_transmit`). `/waypoint modify` and `list` still
+resolve players only, so a mob keeps the default style and colour. Spectators set by plugins:
+unverified.
+
+### /place
+
+`/place template` spawns the template's entities with the vanilla Vec3 rotation, mirror and yaw
+transform (checked in bytecode); the UUID is dropped. Not done: `Facing`/`Tile` fix-up of hanging
+entities, vanilla's all-chunks-loaded check, and the vanilla success message key. `strict` maps to
+`setKnownShape`, which only gates edge shape updates; this server never runs shape updates, so
+`strict` matches vanilla and the non-strict edge fix-ups are missing. Tests: three in
+`structure_template.rs`, `commands_world::template_entities_spawn_at_the_origin_plus_their_offset`,
+`commands::place_template_emits_a_world_action_for_extracted_templates`. `/fillbiome` was not touched
+or re-verified in this pass.
+
+### /ride
+
+Seat offsets follow the vanilla attachment points (`seats_follow_the_vanilla_attachment_points`);
+seat scale, baby size and horse rearing offsets are not applied. Region hand-off keeps the rider for
+a short grace (`a_vehicle_in_transit_between_regions_keeps_its_rider_for_a_short_grace`,
+`a_teleported_vehicle_carries_its_rider_without_orphaning_it`). A cross-dimension move ends the
+ride (`changing_dimension_ends_the_ride_instead_of_moving_the_rider_across_worlds`). Steering works
+only for a saddled, tame, steerable horse with a player rider, however it was mounted
+(`a_horse_mounted_with_ride_is_steered_by_its_player_rider`); boats, minecarts, pigs and striders are
+not steered (the play-input handler only handles sneak). Whether a hand-off shows a visible jump
+cannot be verified without a client.
