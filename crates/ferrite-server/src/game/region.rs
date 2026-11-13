@@ -7045,6 +7045,44 @@ impl Region {
 
     /// Right-clicks on entities: food puts an adult animal in love or speeds a baby up
     /// (vanilla `Animal.mobInteract`); the item is used up outside creative mode.
+    /// The variant of a cat or wolf, picked from the biome it stands in the first time it is
+    /// needed (vanilla picks it when the animal spawns; this server has no spawn-time hook for
+    /// every spawn path). Returns its registry id.
+    fn settle_variant(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+    ) -> Option<&'static str> {
+        let (kind, variant) = {
+            let state = ferrite_entity::mob::state(&self.entities, key)?;
+            (state.kind, state.variant)
+        };
+        ferrite_entity::variant::names(kind)?;
+        let index = match variant {
+            Some(index) => index,
+            None => {
+                let at = self.entities.pos(key)?;
+                let biome = ctx.source.as_ref().and_then(|source| {
+                    source.biome_name(
+                        at.x.floor() as i32,
+                        at.y.floor() as i32,
+                        at.z.floor() as i32,
+                    )
+                });
+                let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
+                let index = super::variants::select(
+                    kind,
+                    biome.as_deref(),
+                    super::variants::moon_brightness(day_time),
+                    &mut self.rng,
+                )?;
+                ferrite_entity::mob::state_mut(&mut self.entities, key)?.variant = Some(index);
+                index
+            }
+        };
+        ferrite_entity::variant::name(kind, index)
+    }
+
     fn resolve_uses(&mut self, ctx: &TickContext) {
         let uuids: Vec<Uuid> = self.players.keys().copied().collect();
         for uuid in uuids {
@@ -7114,10 +7152,13 @@ impl Region {
                         self.broadcast_status(ctx, key, status);
                     }
                     if used == ferrite_entity::tame::Used::Tamed {
+                        let variant = self.settle_variant(ctx, key);
+                        let kind = ferrite_entity::mob::state(&self.entities, key)
+                            .map_or("", |state| state.kind.name());
                         super::recipe_unlock::TAMED
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .push(uuid);
+                            .push((uuid, kind, variant));
                     }
                     if used != ferrite_entity::tame::Used::Consumed
                         && used != ferrite_entity::tame::Used::Tamed

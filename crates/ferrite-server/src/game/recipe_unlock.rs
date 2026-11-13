@@ -38,6 +38,15 @@ pub enum Criterion {
     Breeds(String),
     /// `tame_animal` with no conditions.
     Tames,
+    /// `bred_animals` of two parents of one entity type (frog, sniffer and turtle ask for their
+    /// parents, because their babies are other entities). Ferrite's offspring always has its
+    /// parents' type, so the parents' type is the baby's.
+    BredParents(String),
+    /// `tame_animal` of a cat or wolf with one variant (`minecraft:cat/variant` and the like).
+    TamesVariant {
+        component: String,
+        variant: String,
+    },
     /// `item_used_on_block` with a block, optional state, tool, biome and smoke condition.
     UsedOnBlock(UsedOnBlock),
     /// `slept_in_bed` with no conditions.
@@ -370,6 +379,33 @@ fn bred_child(conditions: &serde_json::Value) -> Option<String> {
     }
     let name = predicate.get("minecraft:entity_type")?.as_str()?;
     (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// The `(component, variant)` a `tame_animal` criterion asks for, when that is all it asks for.
+fn tamed_variant(conditions: &serde_json::Value) -> Option<(String, String)> {
+    let object = conditions.as_object()?;
+    let entity = object.get("entity")?;
+    let predicate = entity["predicate"].as_object()?;
+    if object.len() != 1 || entity["type"] != "minecraft:entity_properties" || predicate.len() != 1
+    {
+        return None;
+    }
+    let components = predicate.get("minecraft:components")?.as_object()?;
+    let [(component, variant)] = components.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    Some((component.clone(), variant.as_str()?.to_owned()))
+}
+
+/// The entity type of both parents of a `bred_animals` criterion that asks for nothing else.
+fn bred_parents(conditions: &serde_json::Value) -> Option<String> {
+    let object = conditions.as_object()?;
+    if object.len() != 2 {
+        return None;
+    }
+    let parent = kill_type(&serde_json::json!({"entity": object.get("parent")?}))?;
+    let partner = kill_type(&serde_json::json!({"entity": object.get("partner")?}))?;
+    (parent == partner).then_some(parent)
 }
 
 /// The biome a `location` criterion asks for, when that is all it asks for.
@@ -839,7 +875,9 @@ pub fn criteria_for_bred(child: &str) -> Vec<String> {
     let mut out = Vec::new();
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
-            if matches!(criterion, Criterion::Breeds(wanted) if wanted == "*" || wanted == child) {
+            if matches!(criterion, Criterion::Breeds(wanted) if wanted == "*" || wanted == child)
+                || matches!(criterion, Criterion::BredParents(wanted) if wanted == child)
+            {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -847,15 +885,28 @@ pub fn criteria_for_bred(child: &str) -> Vec<String> {
     out
 }
 
-/// Players who tamed an animal since the last drain.
-pub static TAMED: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
+/// Players who tamed an animal since the last drain: the player, the animal's entity type id and
+/// its cat or wolf variant.
+pub static TAMED: Mutex<Vec<(Uuid, &'static str, Option<&'static str>)>> = Mutex::new(Vec::new());
 
-/// Advancement criteria completed by taming an animal.
-pub fn criteria_for_tamed() -> Vec<String> {
+/// Advancement criteria completed by taming an `entity` (its type id) with this `variant`.
+pub fn criteria_for_tamed(entity: &str, variant: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
-            if matches!(criterion, Criterion::Tames) {
+            let hit = match criterion {
+                Criterion::Tames => true,
+                Criterion::TamesVariant {
+                    component,
+                    variant: wanted,
+                } => {
+                    let kind = ferrite_entity::mob::MobKind::from_name(entity);
+                    kind.and_then(ferrite_entity::variant::component) == Some(component.as_str())
+                        && variant == Some(wanted.as_str())
+                }
+                _ => false,
+            };
+            if hit {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -969,6 +1020,10 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             {
                 Criterion::Tames
             }
+            Some("minecraft:tame_animal") => tamed_variant(&c["conditions"]).map_or_else(
+                || Criterion::Other(trigger.clone()),
+                |(component, variant)| Criterion::TamesVariant { component, variant },
+            ),
             Some("minecraft:item_used_on_block") => used_on_block(&c["conditions"])
                 .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::UsedOnBlock),
             Some("minecraft:slept_in_bed")
@@ -990,7 +1045,9 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                 Criterion::NetherTravel,
             ),
             Some("minecraft:bred_animals") => bred_child(&c["conditions"])
-                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Breeds),
+                .map(Criterion::Breeds)
+                .or_else(|| bred_parents(&c["conditions"]).map(Criterion::BredParents))
+                .unwrap_or_else(|| Criterion::Other(trigger.clone())),
             Some("minecraft:consume_item") => consumed_item(&c["conditions"])
                 .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Consumes),
             Some("minecraft:player_killed_entity") => kill_type(&c["conditions"])
@@ -1083,8 +1140,8 @@ fn trigger_of(criterion: &Criterion) -> &'static str {
         Criterion::Places(_) => "minecraft:placed_block",
         Criterion::InBiome(_) => "minecraft:location",
         Criterion::Crafts(_) => "minecraft:recipe_crafted",
-        Criterion::Breeds(_) => "minecraft:bred_animals",
-        Criterion::Tames => "minecraft:tame_animal",
+        Criterion::Breeds(_) | Criterion::BredParents(_) => "minecraft:bred_animals",
+        Criterion::Tames | Criterion::TamesVariant { .. } => "minecraft:tame_animal",
         Criterion::UsedOnBlock(_) => "minecraft:item_used_on_block",
         Criterion::Sleeps => "minecraft:slept_in_bed",
         Criterion::KilledByEntity => "minecraft:entity_killed_player",
@@ -1784,6 +1841,77 @@ mod tests {
             "damage": {"blocked": true, "type": {"tags": [{"expected": true, "id": "#minecraft:is_projectile"}]}}
         });
         assert!(super::plain("minecraft:player_hurt_entity", &blocked).is_none());
+    }
+
+    #[test]
+    fn taming_a_cat_or_wolf_completes_the_criterion_of_its_variant() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let calico = criteria_for_tamed("minecraft:cat", Some("minecraft:calico"));
+        assert!(has(
+            &calico,
+            "minecraft:husbandry/complete_catalogue#minecraft:calico"
+        ));
+        assert!(!has(
+            &calico,
+            "minecraft:husbandry/complete_catalogue#minecraft:tabby"
+        ));
+        assert!(!has(
+            &calico,
+            "minecraft:husbandry/whole_pack#minecraft:ashen"
+        ));
+        let ashen = criteria_for_tamed("minecraft:wolf", Some("minecraft:ashen"));
+        assert!(has(
+            &ashen,
+            "minecraft:husbandry/whole_pack#minecraft:ashen"
+        ));
+        assert!(!has(
+            &ashen,
+            "minecraft:husbandry/whole_pack#minecraft:black"
+        ));
+        // The same variant name on the other kind does not count: `black` is both a cat and a wolf.
+        let black_cat = criteria_for_tamed("minecraft:cat", Some("minecraft:black"));
+        assert!(has(
+            &black_cat,
+            "minecraft:husbandry/complete_catalogue#minecraft:black"
+        ));
+        assert!(!has(
+            &black_cat,
+            "minecraft:husbandry/whole_pack#minecraft:black"
+        ));
+        // Without a known variant only the plain `tame_an_animal` criterion fires.
+        let plain = criteria_for_tamed("minecraft:cat", None);
+        assert!(has(
+            &plain,
+            "minecraft:husbandry/tame_an_animal#tamed_animal"
+        ));
+        assert!(!plain.iter().any(|c| c.contains("complete_catalogue")));
+    }
+
+    #[test]
+    fn breeding_counts_for_parent_criteria_of_frogs_sniffers_and_turtles() {
+        if rules().is_empty() {
+            return;
+        }
+        let bred = criteria_for_bred("minecraft:turtle");
+        assert!(
+            bred.iter()
+                .any(|c| c == "minecraft:husbandry/bred_all_animals#minecraft:turtle")
+        );
+        assert!(!bred.iter().any(|c| c.ends_with("#minecraft:sniffer")));
+        // A child criterion still works the same way.
+        assert!(
+            criteria_for_bred("minecraft:cow")
+                .iter()
+                .any(|c| c == "minecraft:husbandry/bred_all_animals#minecraft:cow")
+        );
+        let mismatched = serde_json::json!({
+            "parent": {"type": "minecraft:entity_properties", "entity": "this", "predicate": {"minecraft:entity_type": "minecraft:frog"}},
+            "partner": {"type": "minecraft:entity_properties", "entity": "this", "predicate": {"minecraft:entity_type": "minecraft:toad"}}
+        });
+        assert!(super::bred_parents(&mismatched).is_none());
     }
 
     #[test]

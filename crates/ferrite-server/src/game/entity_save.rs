@@ -614,6 +614,12 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if let Some(owner) = mob.owner {
             c.insert("Owner".into(), Tag::IntArray(uuid_words(owner)));
         }
+        if let Some(variant) = mob
+            .variant
+            .and_then(|v| ferrite_entity::variant::name(mob.kind, v))
+        {
+            c.insert("variant".into(), Tag::String(variant.to_owned()));
+        }
         c.insert("Sitting".into(), Tag::Byte(mob.sitting as i8));
         c.insert("Saddled".into(), Tag::Byte(mob.saddled as i8));
         c.insert("Armor".into(), Tag::Int(i32::from(mob.armor)));
@@ -778,6 +784,10 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.age = int(c, "Age").unwrap_or(0);
                 mob.love = int(c, "InLove").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
                 mob.owner = uuid_field(c, "Owner");
+                mob.variant = match c.get("variant") {
+                    Some(Tag::String(name)) => ferrite_entity::variant::index(mob.kind, name),
+                    _ => None,
+                };
                 mob.sitting = boolean(c, "Sitting");
                 mob.saddled = boolean(c, "Saddled");
                 // The holder's entity id is filled in by the region once the player is there.
@@ -1227,6 +1237,43 @@ mod tests {
         assert_eq!(pack[4].count, 3);
         assert!(pack[0].is_empty());
         super::super::equine_chest::clear(uuid);
+    }
+
+    #[test]
+    fn a_cat_and_a_wolf_keep_their_variant_through_a_save() {
+        let mut records = Vec::new();
+        for (kind, name) in [
+            (MobKind::Cat, "minecraft:calico"),
+            (MobKind::Wolf, "minecraft:ashen"),
+        ] {
+            let mut record =
+                ferrite_entity::mob::new_mob(kind, Vec3::new(0.5, 64.0, 0.5), &mut Rng::default());
+            record.data.mob.as_mut().unwrap().variant = ferrite_entity::variant::index(kind, name);
+            records.push(record);
+        }
+        let tag = to_nbt(&records);
+        let Tag::Compound(root) = &tag else {
+            unreachable!()
+        };
+        let Some(Tag::List(List::Compound(saved))) = root.get("Entities") else {
+            unreachable!()
+        };
+        assert_eq!(
+            saved[0].get("variant"),
+            Some(&Tag::String("minecraft:calico".into()))
+        );
+        let loaded = from_nbt(&tag);
+        let variants: Vec<_> = loaded
+            .iter()
+            .map(|r| {
+                let state = r.data.mob.as_ref().unwrap();
+                ferrite_entity::variant::name(state.kind, state.variant.unwrap())
+            })
+            .collect();
+        assert_eq!(
+            variants,
+            [Some("minecraft:calico"), Some("minecraft:ashen")]
+        );
     }
 
     #[test]

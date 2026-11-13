@@ -321,6 +321,8 @@ pub struct MobState {
     pub love: u16,
     /// The player who fed the animal, for the breeding advancement.
     pub love_cause: Option<uuid::Uuid>,
+    /// Index into [`crate::variant`]'s table for a cat or wolf; `None` until one is picked.
+    pub variant: Option<u8>,
     /// Ticks spent next to the mate.
     pub breed_timer: u16,
     /// The player a tamed animal belongs to (`TamableAnimal.owner`).
@@ -384,6 +386,7 @@ impl MobState {
             age: 0,
             love: 0,
             love_cause: None,
+            variant: None,
             breed_timer: 0,
             owner: None,
             sitting: false,

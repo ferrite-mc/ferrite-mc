@@ -9,6 +9,7 @@ pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
 mod targeting;
+mod variants;
 mod waypoints;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn, write_spawn};
 #[cfg(test)]
@@ -2231,7 +2232,7 @@ async fn run(
                          let tamed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::TAMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !tamed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for who in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed()); }
+                             for (who, kind, variant) in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed(kind, variant)); }
                          }
                      }
                      {
