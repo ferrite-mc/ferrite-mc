@@ -177,51 +177,158 @@ fn is_item_flag(flag: &str) -> bool {
     )
 }
 
+/// The deepest nesting of containers and lists the bridge accepts (the Java side refuses the
+/// same depth, so a longer chain can only come from a corrupt or hostile payload).
+const PDC_DEPTH: usize = 16;
+
 /// Decodes the item PDC bridge format: an SNBT compound whose entries are
-/// `{"type":"INTEGER", "value":42}` wrappers. The wrapper keeps BOOLEAN distinct from BYTE
-/// and rejects unsupported Bukkit PDC types instead of dropping them.
+/// `{type:"INTEGER", value:42}` wrappers. The wrapper keeps BOOLEAN distinct from BYTE and
+/// rejects unsupported Bukkit PDC types instead of dropping them.
+///
+/// A nested container is a compound of wrappers (`TAG_CONTAINER`), an array of them is a list of
+/// such compounds (`TAG_CONTAINER_ARRAY`), and a list names its element type
+/// (`{type:"LIST", element:"STRING", value:[...]}`; the element of a list of lists reads
+/// `LIST:STRING`). The stored form drops the wrappers: bare values, nested compounds and typed
+/// lists, which is what Paper writes to `minecraft:custom_data`.
 fn item_pdc(snbt: &str) -> Option<ferrite_nbt::Compound> {
     let ferrite_nbt::Tag::Compound(entries) = ferrite_nbt::snbt::parse(snbt).ok()? else {
         return None;
     };
+    pdc_compound(&entries, 0)
+}
+
+fn pdc_compound(entries: &ferrite_nbt::Compound, depth: usize) -> Option<ferrite_nbt::Compound> {
+    use ferrite_nbt::Tag;
+    if depth > PDC_DEPTH {
+        return None;
+    }
     let mut data = ferrite_nbt::Compound::new();
     for (key, wrapper) in entries {
         let (namespace, path) = key.split_once(':')?;
-        if namespace.is_empty() || path.is_empty() || data.contains_key(&key) {
+        if namespace.is_empty() || path.is_empty() {
             return None;
         }
-        let ferrite_nbt::Tag::Compound(wrapper) = wrapper else {
+        let Tag::Compound(wrapper) = wrapper else {
             return None;
         };
-        if wrapper.len() != 2 {
-            return None;
-        }
-        let ferrite_nbt::Tag::String(kind) = wrapper.get("type")? else {
+        let Tag::String(kind) = wrapper.get("type")? else {
             return None;
         };
         let value = wrapper.get("value")?;
-        let matches = match kind.as_str() {
-            "BYTE" | "BOOLEAN" => matches!(value, ferrite_nbt::Tag::Byte(_)),
-            "SHORT" => matches!(value, ferrite_nbt::Tag::Short(_)),
-            "INTEGER" => matches!(value, ferrite_nbt::Tag::Int(_)),
-            "LONG" => matches!(value, ferrite_nbt::Tag::Long(_)),
-            "FLOAT" => matches!(value, ferrite_nbt::Tag::Float(_)),
-            "DOUBLE" => matches!(value, ferrite_nbt::Tag::Double(_)),
-            "STRING" => matches!(value, ferrite_nbt::Tag::String(_)),
-            "BYTE_ARRAY" => matches!(value, ferrite_nbt::Tag::ByteArray(_)),
-            "INTEGER_ARRAY" => matches!(value, ferrite_nbt::Tag::IntArray(_)),
-            "LONG_ARRAY" => matches!(value, ferrite_nbt::Tag::LongArray(_)),
-            _ => false,
+        let shape = if kind == "LIST" {
+            // `type`, `element` and `value`, nothing else.
+            let Tag::String(element) = wrapper.get("element")? else {
+                return None;
+            };
+            if wrapper.len() != 3 {
+                return None;
+            }
+            format!("LIST:{element}")
+        } else {
+            if wrapper.len() != 2 {
+                return None;
+            }
+            kind.clone()
         };
-        if !matches {
-            return None;
-        }
-        if *kind == "BOOLEAN" && !matches!(value, ferrite_nbt::Tag::Byte(0 | 1)) {
-            return None;
-        }
-        data.insert(key, value.clone());
+        data.insert(key.clone(), pdc_value(&shape, value, depth)?);
     }
     Some(data)
+}
+
+/// The stored form of `value` when it is declared as `shape`; `None` when it is not one.
+fn pdc_value(shape: &str, value: &ferrite_nbt::Tag, depth: usize) -> Option<ferrite_nbt::Tag> {
+    use ferrite_nbt::{List, Tag};
+    if depth > PDC_DEPTH {
+        return None;
+    }
+    let ok = match shape {
+        "BYTE" => matches!(value, Tag::Byte(_)),
+        "BOOLEAN" => matches!(value, Tag::Byte(0 | 1)),
+        "SHORT" => matches!(value, Tag::Short(_)),
+        "INTEGER" => matches!(value, Tag::Int(_)),
+        "LONG" => matches!(value, Tag::Long(_)),
+        "FLOAT" => matches!(value, Tag::Float(_)),
+        "DOUBLE" => matches!(value, Tag::Double(_)),
+        "STRING" => matches!(value, Tag::String(_)),
+        "BYTE_ARRAY" => matches!(value, Tag::ByteArray(_)),
+        "INTEGER_ARRAY" => matches!(value, Tag::IntArray(_)),
+        "LONG_ARRAY" => matches!(value, Tag::LongArray(_)),
+        _ => false,
+    };
+    if ok {
+        return Some(value.clone());
+    }
+    match (shape, value) {
+        ("TAG_CONTAINER", Tag::Compound(inner)) => {
+            pdc_compound(inner, depth + 1).map(Tag::Compound)
+        }
+        ("TAG_CONTAINER_ARRAY", Tag::List(List::End)) => Some(Tag::List(List::End)),
+        ("TAG_CONTAINER_ARRAY", Tag::List(List::Compound(items))) => items
+            .iter()
+            .map(|item| pdc_compound(item, depth + 1))
+            .collect::<Option<Vec<_>>>()
+            .map(|items| Tag::List(List::Compound(items))),
+        (list, Tag::List(items)) if list.starts_with("LIST:") => {
+            let element = &list["LIST:".len()..];
+            pdc_list(element, items, depth + 1).map(Tag::List)
+        }
+        _ => None,
+    }
+}
+
+/// A list whose elements are all `element`, converted to their stored form. The list keeps its
+/// element type even when empty.
+fn pdc_list(element: &str, items: &ferrite_nbt::List, depth: usize) -> Option<ferrite_nbt::List> {
+    use ferrite_nbt::{List, Tag};
+    if depth > PDC_DEPTH {
+        return None;
+    }
+    let tags: Vec<Tag> = match items {
+        List::End => Vec::new(),
+        List::Byte(v) => v.iter().map(|x| Tag::Byte(*x)).collect(),
+        List::Short(v) => v.iter().map(|x| Tag::Short(*x)).collect(),
+        List::Int(v) => v.iter().map(|x| Tag::Int(*x)).collect(),
+        List::Long(v) => v.iter().map(|x| Tag::Long(*x)).collect(),
+        List::Float(v) => v.iter().map(|x| Tag::Float(*x)).collect(),
+        List::Double(v) => v.iter().map(|x| Tag::Double(*x)).collect(),
+        List::ByteArray(v) => v.iter().map(|x| Tag::ByteArray(x.clone())).collect(),
+        List::String(v) => v.iter().map(|x| Tag::String(x.clone())).collect(),
+        List::List(v) => v.iter().map(|x| Tag::List(x.clone())).collect(),
+        List::Compound(v) => v.iter().map(|x| Tag::Compound(x.clone())).collect(),
+        List::IntArray(v) => v.iter().map(|x| Tag::IntArray(x.clone())).collect(),
+        List::LongArray(v) => v.iter().map(|x| Tag::LongArray(x.clone())).collect(),
+    };
+    let converted: Vec<Tag> = tags
+        .iter()
+        .map(|tag| pdc_value(element, tag, depth))
+        .collect::<Option<_>>()?;
+    macro_rules! collect {
+        ($variant:ident) => {
+            converted
+                .into_iter()
+                .map(|tag| match tag {
+                    Tag::$variant(x) => Some(x),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(List::$variant)
+        };
+    }
+    match element {
+        "BYTE" | "BOOLEAN" => collect!(Byte),
+        "SHORT" => collect!(Short),
+        "INTEGER" => collect!(Int),
+        "LONG" => collect!(Long),
+        "FLOAT" => collect!(Float),
+        "DOUBLE" => collect!(Double),
+        "STRING" => collect!(String),
+        "BYTE_ARRAY" => collect!(ByteArray),
+        "INTEGER_ARRAY" => collect!(IntArray),
+        "LONG_ARRAY" => collect!(LongArray),
+        "TAG_CONTAINER" => collect!(Compound),
+        _ if element.starts_with("LIST:") || element == "TAG_CONTAINER_ARRAY" => collect!(List),
+        _ => None,
+    }
 }
 
 fn station(player: Uuid, station: &str) -> Option<PlayerCommand> {
@@ -701,6 +808,101 @@ mod tests {
             ))),
             None
         );
+    }
+
+    #[test]
+    fn item_pdc_keeps_nested_containers_arrays_and_typed_lists() {
+        use ferrite_nbt::{List, Tag};
+        let data = item_pdc(concat!(
+            r#"{"ferrite:inner":{type:"TAG_CONTAINER",value:{"#,
+            r#""ferrite:name":{type:"STRING",value:"Grüße 日本語 😀"},"#,
+            r#""ferrite:deeper":{type:"TAG_CONTAINER",value:{"ferrite:n":{type:"INTEGER",value:1}}}}},"#,
+            r#""ferrite:array":{type:"TAG_CONTAINER_ARRAY",value:[{"ferrite:a":{type:"BYTE",value:1b}},{}]},"#,
+            r#""ferrite:ids":{type:"LIST",element:"INTEGER",value:[1,2,3]},"#,
+            r#""ferrite:flags":{type:"LIST",element:"BOOLEAN",value:[1b,0b]},"#,
+            r#""ferrite:none":{type:"LIST",element:"STRING",value:[]},"#,
+            r#""ferrite:boxes":{type:"LIST",element:"TAG_CONTAINER",value:[{"ferrite:s":{type:"SHORT",value:2s}}]},"#,
+            r#""ferrite:matrix":{type:"LIST",element:"LIST:STRING",value:[["p","q"],[]]},"#,
+            r#""ferrite:blobs":{type:"LIST",element:"BYTE_ARRAY",value:[[B;1b],[B;]]}}"#,
+        ))
+        .expect("nested PDC");
+        let Some(Tag::Compound(inner)) = data.get("ferrite:inner") else {
+            panic!("a nested container is a compound of bare values");
+        };
+        assert_eq!(
+            inner.get("ferrite:name"),
+            Some(&Tag::String("Grüße 日本語 😀".into()))
+        );
+        let Some(Tag::Compound(deeper)) = inner.get("ferrite:deeper") else {
+            panic!("two levels deep");
+        };
+        assert_eq!(deeper.get("ferrite:n"), Some(&Tag::Int(1)));
+        let Some(Tag::List(List::Compound(array))) = data.get("ferrite:array") else {
+            panic!("an array of containers is a list of compounds");
+        };
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0].get("ferrite:a"), Some(&Tag::Byte(1)));
+        assert!(array[1].is_empty());
+        assert_eq!(
+            data.get("ferrite:ids"),
+            Some(&Tag::List(List::Int(vec![1, 2, 3])))
+        );
+        assert_eq!(
+            data.get("ferrite:flags"),
+            Some(&Tag::List(List::Byte(vec![1, 0])))
+        );
+        assert_eq!(
+            data.get("ferrite:none"),
+            Some(&Tag::List(List::String(Vec::new()))),
+            "an empty list keeps its element type"
+        );
+        assert!(matches!(
+            data.get("ferrite:boxes"),
+            Some(Tag::List(List::Compound(boxes))) if boxes[0].get("ferrite:s") == Some(&Tag::Short(2))
+        ));
+        assert_eq!(
+            data.get("ferrite:matrix"),
+            Some(&Tag::List(List::List(vec![
+                List::String(vec!["p".into(), "q".into()]),
+                List::String(Vec::new())
+            ])))
+        );
+        assert_eq!(
+            data.get("ferrite:blobs"),
+            Some(&Tag::List(List::ByteArray(vec![vec![1], vec![]])))
+        );
+    }
+
+    #[test]
+    fn item_pdc_refuses_malformed_or_too_deep_nesting() {
+        for invalid in [
+            // A list without its element type, or with a wrong one.
+            r#"{"ferrite:l":{type:"LIST",value:[1]}}"#,
+            r#"{"ferrite:l":{type:"LIST",element:"STRING",value:[1]}}"#,
+            r#"{"ferrite:l":{type:"LIST",element:"NOPE",value:[1]}}"#,
+            r#"{"ferrite:l":{type:"LIST",element:"INTEGER",value:"x"}}"#,
+            // A container whose entries are not wrappers, or a wrong value kind.
+            r#"{"ferrite:c":{type:"TAG_CONTAINER",value:{"ferrite:x":5}}}"#,
+            r#"{"ferrite:c":{type:"TAG_CONTAINER",value:[1]}}"#,
+            r#"{"ferrite:c":{type:"TAG_CONTAINER",value:{"nonamespace":{type:"BYTE",value:1b}}}}"#,
+            r#"{"ferrite:c":{type:"TAG_CONTAINER_ARRAY",value:[1,2]}}"#,
+            // An extra key on a wrapper.
+            r#"{"ferrite:c":{type:"TAG_CONTAINER",value:{},extra:1}}"#,
+            // A boolean list holding something that is not 0 or 1.
+            r#"{"ferrite:l":{type:"LIST",element:"BOOLEAN",value:[2b]}}"#,
+        ] {
+            assert!(item_pdc(invalid).is_none(), "{invalid} must be refused");
+        }
+        let mut deep = String::from(r#"{"ferrite:n":{type:"BYTE",value:1b}}"#);
+        for level in 0..20 {
+            deep = format!(r#"{{"ferrite:l{level}":{{type:"TAG_CONTAINER",value:{deep}}}}}"#);
+        }
+        assert!(item_pdc(&deep).is_none(), "20 levels is past the limit");
+        let mut fine = String::from(r#"{"ferrite:n":{type:"BYTE",value:1b}}"#);
+        for level in 0..10 {
+            fine = format!(r#"{{"ferrite:l{level}":{{type:"TAG_CONTAINER",value:{fine}}}}}"#);
+        }
+        assert!(item_pdc(&fine).is_some(), "10 levels is fine");
     }
 
     #[test]
