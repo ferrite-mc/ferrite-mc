@@ -795,7 +795,7 @@ async fn operator_teleport_command_moves_player() {
     // Vec3 centers absolute integer x/z on the block center, like vanilla.
     assert_eq!([p.x, p.y, p.z], [10.5, 70.0, 20.5]);
 
-    bot.raw(7, "tp @s ~ ~5 ~ rotation 90 10").await;
+    bot.raw(7, "tp @s ~ ~5 ~ 90 10").await;
     let body = bot.until(73).await;
     let p = PositionSync::decode(&mut body.as_slice()).unwrap();
     assert_eq!([p.x, p.y, p.z], [10.5, 75.0, 20.5]);

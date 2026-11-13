@@ -353,10 +353,15 @@ fn effect_tree() -> NodeBuilder<Source> {
             literal("give").then(
                 argument("targets", ArgumentType::entities()).then(
                     argument("effect", effect())
+                        .executes(effect_give_default)
                         .then(
                             literal("infinite").executes(effect_give_infinite).then(
                                 argument("amplifier", ArgumentType::integer_range(0, 255))
-                                    .executes(effect_give_infinite_amplifier),
+                                    .executes(effect_give_infinite)
+                                    .then(
+                                        argument("hideParticles", ArgumentType::Bool)
+                                            .executes(effect_give_infinite),
+                                    ),
                             ),
                         )
                         .then(
@@ -364,7 +369,11 @@ fn effect_tree() -> NodeBuilder<Source> {
                                 .executes(effect_give_seconds)
                                 .then(
                                     argument("amplifier", ArgumentType::integer_range(0, 255))
-                                        .executes(effect_give_seconds_amplifier),
+                                        .executes(effect_give_seconds)
+                                        .then(
+                                            argument("hideParticles", ArgumentType::Bool)
+                                                .executes(effect_give_seconds),
+                                        ),
                                 ),
                         ),
                 ),
@@ -384,21 +393,35 @@ fn effect_clear_specific(ctx: &CommandContext<Source>) -> Result<i32, CommandErr
     effect_clear(ctx, true)
 }
 
-fn effect_give_infinite(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    effect_give(ctx, -1)
+/// The instantaneous effects: their `seconds` are not converted to ticks.
+fn is_instant(effect: i32) -> bool {
+    ["instant_health", "instant_damage", "saturation"]
+        .iter()
+        .any(|name| {
+            ferrite_data::registries::id("minecraft:mob_effect", &format!("minecraft:{name}"))
+                == Some(effect)
+        })
 }
 
-fn effect_give_infinite_amplifier(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+/// `/effect give <targets> <effect>`: vanilla's default is 30 seconds (600 ticks), or a single
+/// tick for an instantaneous effect.
+fn effect_give_default(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let duration = if is_instant(effect_id(ctx)?) { 1 } else { 600 };
+    effect_give(ctx, duration)
+}
+
+fn effect_give_infinite(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     effect_give(ctx, -1)
 }
 
 fn effect_give_seconds(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let seconds = ctx.integer("seconds").unwrap_or(0);
-    effect_give(ctx, seconds.saturating_mul(20))
-}
-
-fn effect_give_seconds_amplifier(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    effect_give_seconds(ctx)
+    let duration = if is_instant(effect_id(ctx)?) {
+        seconds
+    } else {
+        seconds.saturating_mul(20)
+    };
+    effect_give(ctx, duration)
 }
 
 fn effect_give(ctx: &CommandContext<Source>, duration: i32) -> Result<i32, CommandError> {
@@ -428,6 +451,10 @@ fn effect_give(ctx: &CommandContext<Source>, duration: i32) -> Result<i32, Comma
             effect,
             amplifier,
             duration,
+            hide_particles: matches!(
+                ctx.argument("hideParticles"),
+                Some(ArgumentValue::Bool(true))
+            ),
         },
     )?;
     let effect = effect_display(effect);
@@ -1601,6 +1628,7 @@ mod tests {
                 effect,
                 amplifier: 1,
                 duration: 100,
+                hide_particles: false,
                 ..
             } if *effect == speed
         )));
@@ -1623,6 +1651,51 @@ mod tests {
         assert!(error_text(error).contains("not_an_effect"));
         assert!(run("effect clear @s speed", 2).0.is_err());
         denied("effect give @s speed 5");
+    }
+
+    #[test]
+    fn effect_give_defaults_instant_and_hide_particles() {
+        let speed =
+            ferrite_data::registries::id("minecraft:mob_effect", "minecraft:speed").unwrap();
+        let heal = ferrite_data::registries::id("minecraft:mob_effect", "minecraft:instant_health")
+            .unwrap();
+        let given = |input: &str| -> (i32, i32, i32, bool) {
+            let actions = success(input);
+            actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Effect {
+                        effect,
+                        amplifier,
+                        duration,
+                        hide_particles,
+                        ..
+                    } => Some((*effect, *amplifier, *duration, *hide_particles)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{input}: {actions:?}"))
+        };
+        // commands.json: `effect give <targets> <effect>` is executable; vanilla's default is
+        // 30 seconds, and an instantaneous effect lasts one tick.
+        assert_eq!(given("effect give @s speed"), (speed, 0, 600, false));
+        assert_eq!(given("effect give @s instant_health"), (heal, 0, 1, false));
+        // Seconds of an instantaneous effect are not multiplied by 20.
+        assert_eq!(
+            given("effect give @s instant_health 3 1"),
+            (heal, 1, 3, false)
+        );
+        assert_eq!(
+            given("effect give @s speed 10 2 true"),
+            (speed, 2, 200, true)
+        );
+        assert_eq!(
+            given("effect give @s speed infinite 1 true"),
+            (speed, 1, -1, true)
+        );
+        assert_eq!(
+            given("effect give @s speed 10 0 false"),
+            (speed, 0, 200, false)
+        );
     }
 
     #[test]

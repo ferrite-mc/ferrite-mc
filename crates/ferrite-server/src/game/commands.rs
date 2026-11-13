@@ -877,6 +877,8 @@ pub enum Action {
         effect: i32,
         amplifier: i32,
         duration: i32,
+        /// `hideParticles` of `/effect give`.
+        hide_particles: bool,
     },
     /// `/effect clear`: remove one mob effect from the target players.
     RemoveEffect {
@@ -1178,11 +1180,11 @@ fn location_branch(targets: bool) -> ferrite_command::NodeBuilder<Source> {
         return builder;
     }
     builder
+        // commands.json: `<targets> <location> <rotation>` takes the rotation directly, there
+        // is no `rotation` keyword.
         .then(
-            literal("rotation").then(
-                argument("rotation", ArgumentType::Rotation)
-                    .executes(|ctx| send(ctx.source(), location_rotation(ctx, true)?)),
-            ),
+            argument("rotation", ArgumentType::Rotation)
+                .executes(|ctx| send(ctx.source(), location_rotation(ctx, true)?)),
         )
         .then(
             literal("facing")
@@ -3346,7 +3348,7 @@ mod tests {
             }
         );
         assert_eq!(
-            only("tp @s 10 70 20 rotation ~90 ~-10", 2),
+            only("tp @s 10 70 20 ~90 ~-10", 2),
             Action::Teleport {
                 targets: self_target(),
                 dimension: crate::game::Dimension::Overworld,
@@ -3357,6 +3359,8 @@ mod tests {
                 },
             }
         );
+        // Regression: the old `rotation` keyword is not part of the 26.3 tree.
+        assert!(run("tp @s 10 70 20 rotation ~90 ~-10", 2).0.is_err());
         assert_eq!(
             only("tp Alice", 2),
             Action::Teleport {

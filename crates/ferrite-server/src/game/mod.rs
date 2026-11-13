@@ -5321,6 +5321,7 @@ impl CommandRuntime<'_> {
                 effect,
                 amplifier,
                 duration,
+                hide_particles,
             } => {
                 // The client packet keeps command order; the region owns the ticking store.
                 for target in targets {
@@ -5332,8 +5333,9 @@ impl CommandRuntime<'_> {
                                 effect: VarInt(effect),
                                 amplifier: VarInt(amplifier),
                                 duration: VarInt(duration),
-                                // ambient | show particles | show icon, like a normal potion effect.
-                                flags: 0b110,
+                                // ambient | show particles | show icon, like a normal potion
+                                // effect; `hideParticles` clears the particle bit.
+                                flags: if hide_particles { 0b100 } else { 0b110 },
                             }));
                     }
                     if let Some((_, mailbox, _)) = self.mailboxes.get(&target) {
