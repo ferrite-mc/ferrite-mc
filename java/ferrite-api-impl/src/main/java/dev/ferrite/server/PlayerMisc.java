@@ -423,10 +423,15 @@ public abstract class PlayerMisc extends PlayerStubs {
             case FURNACE -> "minecraft:furnace";
             case BLAST_FURNACE -> "minecraft:blast_furnace";
             case SMOKER -> "minecraft:smoker";
+            case DISPENSER -> "minecraft:dispenser";
+            case DROPPER -> "minecraft:dropper";
+            case HOPPER -> "minecraft:hopper";
+            case BREWING_STAND -> "minecraft:brewing_stand";
+            case CRAFTER -> "minecraft:crafter";
             default -> type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
         };
         if (entity == null || !(tileState instanceof org.bukkit.block.Container container))
-            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, banners, skulls, chests, barrels, shulker boxes and furnaces as tile entities, and has no other block entity model to encode");
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, banners, skulls, chests, barrels, shulker boxes, furnaces, dispensers, droppers, hoppers, brewing stands and crafters as tile entities, and has no other block entity model to encode");
         var snapshot = container.getSnapshotInventory();
         var entries = new java.util.ArrayList<String>();
         for (int slot = 0; slot < snapshot.getSize(); slot++) {

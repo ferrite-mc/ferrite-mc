@@ -12,7 +12,7 @@ use ferrite_nbt::{Compound, List, Tag};
 use ferrite_plugin::PluginPacket;
 
 /// `(block entity type, slot count, has furnace timers)`.
-const FAMILIES: [(&str, usize, bool); 7] = [
+const FAMILIES: [(&str, usize, bool); 12] = [
     ("minecraft:chest", 27, false),
     ("minecraft:trapped_chest", 27, false),
     ("minecraft:barrel", 27, false),
@@ -20,6 +20,11 @@ const FAMILIES: [(&str, usize, bool); 7] = [
     ("minecraft:furnace", 3, true),
     ("minecraft:blast_furnace", 3, true),
     ("minecraft:smoker", 3, true),
+    ("minecraft:dispenser", 9, false),
+    ("minecraft:dropper", 9, false),
+    ("minecraft:hopper", 5, false),
+    ("minecraft:brewing_stand", 5, false),
+    ("minecraft:crafter", 9, false),
 ];
 
 /// Vanilla's `minecraft:banner_pattern` entries (`data/minecraft/banner_pattern`), without namespace.
@@ -281,6 +286,28 @@ mod tests {
                 (13, "minecraft:diamond".to_owned(), 3)
             ]
         );
+    }
+
+    #[test]
+    fn dispensers_droppers_hoppers_brewing_stands_and_crafters_are_modelled() {
+        for (entity, slots) in [
+            ("minecraft:dispenser", 9),
+            ("minecraft:dropper", 9),
+            ("minecraft:hopper", 5),
+            ("minecraft:brewing_stand", 5),
+            ("minecraft:crafter", 9),
+        ] {
+            let last = format!("item,{},minecraft:stone,1", slots - 1);
+            assert!(packet([0, 0, 0], entity, &last, SEP).is_some(), "{entity}");
+            let past = format!("item,{slots},minecraft:stone,1");
+            assert_eq!(packet([0, 0, 0], entity, &past, SEP), None, "{entity}");
+            // None of them carries furnace timers.
+            assert_eq!(
+                packet([0, 0, 0], entity, "furnace,0,0,0,0", SEP),
+                None,
+                "{entity}"
+            );
+        }
     }
 
     #[test]
