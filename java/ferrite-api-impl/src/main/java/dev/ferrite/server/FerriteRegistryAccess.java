@@ -32,6 +32,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         return result;
     }
     static boolean contains(String registry, org.bukkit.NamespacedKey key) { return KEYS.getOrDefault(registry, java.util.Set.of()).contains(key.toString()); }
+    static java.util.Set<String> poiTypeKeys() { return java.util.Set.copyOf(KEYS.get("point_of_interest_type")); }
     @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) {
         if (type == org.bukkit.GameRule.class) return cast(cached("game_rule", FerriteRegistryAccess::gameRuleRegistry));
         if (type == org.bukkit.block.BlockType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.BLOCK);
@@ -117,6 +118,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static org.bukkit.Registry<?> byKind(String kind) {
         return switch (kind) {
+            case "point_of_interest_type" -> cached(kind, () -> identityRegistry(kind, io.papermc.paper.entity.poi.PoiType.class, FerritePoiType::new));
             case "particle_type" -> cached(kind, () -> enumRegistry(kind, org.bukkit.Particle.class));
             case "potion" -> cached(kind, () -> enumRegistry(kind, org.bukkit.potion.PotionType.class));
             case "instrument" -> cached(kind, FerriteRegistryAccess::instrumentRegistry);
