@@ -72,6 +72,7 @@ mod commands_meta;
 mod commands_more;
 mod commands_progress;
 mod commands_server;
+mod commands_time;
 #[cfg(test)]
 mod commands_tree_parity;
 mod commands_world;

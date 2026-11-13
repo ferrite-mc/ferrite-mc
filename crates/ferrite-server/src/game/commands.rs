@@ -19,8 +19,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-/// The overworld clock's registry name, used by `/time` feedback.
-pub const OVERWORLD_CLOCK: &str = "minecraft:overworld";
 const SERVER_NAME: &str = "Server";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +139,12 @@ pub struct GameState {
     pub difficulty: i32,
     /// Ticks of the overworld clock (`/time set` and `/time add`).
     pub clock_time: i64,
+    /// `/time pause` and `/time rate` on the overworld clock.
+    pub clock_paused: bool,
+    pub clock_rate: f32,
+    clock_frac: f64,
+    /// The End clock (`minecraft:the_end`), see `commands_time`.
+    pub end_clock: super::commands_time::ClockState,
     /// Total world ticks (`/time query gametime`).
     pub game_time: i64,
     pub weather: Weather,
@@ -197,6 +201,10 @@ impl GameState {
             default_gamemode,
             difficulty: 2,
             clock_time: 0,
+            clock_paused: false,
+            clock_rate: 1.0,
+            clock_frac: 0.0,
+            end_clock: super::commands_time::ClockState::default(),
             game_time: 0,
             weather: Weather::Clear,
             rain_duration: 0,
@@ -401,7 +409,13 @@ impl GameState {
             }
         }
         if advance_time {
-            self.clock_time += 1;
+            if !self.clock_paused {
+                self.clock_frac += f64::from(self.clock_rate);
+                let whole = self.clock_frac.floor();
+                self.clock_time = self.clock_time.saturating_add(whole as i64);
+                self.clock_frac -= whole;
+            }
+            self.end_clock.advance();
         }
         let now = self.game_time;
         let mut due = Vec::new();
@@ -1690,76 +1704,6 @@ fn set_difficulty(ctx: &CommandContext<Source>, value: i32) -> Result<i32, Comma
     Ok(0)
 }
 
-fn time_set(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let ticks = ctx
-        .integer("time")
-        .ok_or_else(|| CommandError::failed("missing time"))?;
-    let source = ctx.source();
-    {
-        let mut state = source.state.lock().unwrap();
-        if state.clock_time == i64::from(ticks) {
-            return Err(syntax_error(
-                "commands.time.set.already_at_time",
-                vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-                format!("Clock {OVERWORLD_CLOCK} is already set to {ticks} tick(s)"),
-            ));
-        }
-        state.clock_time = i64::from(ticks);
-    }
-    emit(source, Action::TimeSet(ticks))?;
-    emit(
-        source,
-        Action::Feedback(Feedback::new(
-            "commands.time.set.absolute",
-            vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-        )),
-    )?;
-    Ok(ticks)
-}
-
-fn time_add(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let delta = ctx
-        .integer("time")
-        .ok_or_else(|| CommandError::failed("missing time"))?;
-    let source = ctx.source();
-    let total = {
-        let mut state = source.state.lock().unwrap();
-        state.clock_time = state.clock_time.saturating_add(i64::from(delta));
-        state.clock_time
-    };
-    emit(source, Action::TimeAdd(delta))?;
-    emit(
-        source,
-        Action::Feedback(Feedback::new(
-            "commands.time.set.absolute",
-            vec![OVERWORLD_CLOCK.into(), total.to_string()],
-        )),
-    )?;
-    Ok(total as i32)
-}
-
-fn time_query(ctx: &CommandContext<Source>, game_time: bool) -> Result<i32, CommandError> {
-    let source = ctx.source();
-    let ticks = {
-        let state = source.state.lock().unwrap();
-        if game_time {
-            state.game_time
-        } else {
-            state.clock_time
-        }
-    };
-    let feedback = if game_time {
-        Feedback::new("commands.time.query.gametime", vec![ticks.to_string()])
-    } else {
-        Feedback::new(
-            "commands.time.query.absolute",
-            vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-        )
-    };
-    emit(source, Action::Feedback(feedback))?;
-    Ok(ticks as i32)
-}
-
 fn set_weather(ctx: &CommandContext<Source>, kind: Weather) -> Result<i32, CommandError> {
     let duration = ctx.integer("duration");
     let source = ctx.source();
@@ -2293,24 +2237,7 @@ pub fn dispatcher() -> CommandDispatcher<Source> {
             .then(literal("normal").executes(|ctx| set_difficulty(ctx, 2)))
             .then(literal("hard").executes(|ctx| set_difficulty(ctx, 3))),
     );
-    tree.register(
-        literal::<Source>("time")
-            .requires(|source| source.permission >= 2)
-            .then(
-                literal("set")
-                    .then(argument("time", ArgumentType::Time { min: 0 }).executes(time_set)),
-            )
-            .then(
-                literal("add").then(
-                    argument("time", ArgumentType::Time { min: i32::MIN }).executes(time_add),
-                ),
-            )
-            .then(
-                literal("query")
-                    .then(literal("time").executes(|ctx| time_query(ctx, false)))
-                    .then(literal("gametime").executes(|ctx| time_query(ctx, true))),
-            ),
-    );
+    super::commands_time::register(&mut tree);
     tree.register(
         literal::<Source>("weather")
             .requires(|source| source.permission >= 2)
@@ -4083,8 +4010,10 @@ mod tests {
         );
 
         let (console, _) = player_source(2, None, state);
+        // `-1` is not a tick count, but it is a valid resource location, so in the 26.3 tree
+        // (`set` has both `<time>` and `<timemarker>`) it parses as a time marker.
         let error = tree.execute("time set -1", console).unwrap_err();
-        assert_eq!(error_key(error), "argument.time.tick_count_too_low");
+        assert_eq!(error_key(error), "commands.time.no_time_marker_found");
     }
 
     #[test]
