@@ -769,42 +769,33 @@ fn function_builder() -> NodeBuilder<Source> {
                     )
                     .executes(execute_with_arguments),
                 )
-                .then(
-                    literal::<Source>("with")
-                        .then(
-                            literal("storage").then(
-                                argument::<Source>("source", ArgumentType::ResourceLocation).then(
-                                    argument::<Source>(
-                                        "path",
-                                        ArgumentType::opaque("minecraft:nbt_path"),
-                                    )
-                                    .executes(|ctx| execute_with_data(ctx, WithSource::Storage)),
-                                ),
-                            ),
-                        )
-                        .then(
-                            literal("entity").then(
-                                argument::<Source>("source", ArgumentType::entity()).then(
-                                    argument::<Source>(
-                                        "path",
-                                        ArgumentType::opaque("minecraft:nbt_path"),
-                                    )
-                                    .executes(|ctx| execute_with_data(ctx, WithSource::Entity)),
-                                ),
-                            ),
-                        )
-                        .then(
-                            literal("block").then(
-                                argument::<Source>("source", ArgumentType::BlockPos).then(
-                                    argument::<Source>(
-                                        "path",
-                                        ArgumentType::opaque("minecraft:nbt_path"),
-                                    )
-                                    .executes(|ctx| execute_with_data(ctx, WithSource::Block)),
-                                ),
-                            ),
+                .then({
+                    let mut with = literal::<Source>("with");
+                    for (name, kind, ty) in [
+                        (
+                            "storage",
+                            WithSource::Storage,
+                            ArgumentType::ResourceLocation,
                         ),
-                ),
+                        ("entity", WithSource::Entity, ArgumentType::entity()),
+                        ("block", WithSource::Block, ArgumentType::BlockPos),
+                    ] {
+                        with = with.then(
+                            literal::<Source>(name).then(
+                                argument::<Source>("source", ty)
+                                    .executes(move |ctx| execute_with_data(ctx, kind))
+                                    .then(
+                                        argument::<Source>(
+                                            "path",
+                                            ArgumentType::opaque("minecraft:nbt_path"),
+                                        )
+                                        .executes(move |ctx| execute_with_data(ctx, kind)),
+                                    ),
+                            ),
+                        );
+                    }
+                    with
+                }),
         )
 }
 
@@ -1207,6 +1198,19 @@ mod tests {
         )
         .unwrap();
         assert!(broadcasts(&mut received)[0].contains("hello Storage"));
+        // The source alone (no path) is executable too and passes the whole compound.
+        source
+            .state
+            .lock()
+            .unwrap()
+            .storage
+            .insert("test:whole".into(), snbt::parse("{who:\"Whole\"}").unwrap());
+        tree.execute(
+            "function test:greet with storage test:whole",
+            source.clone(),
+        )
+        .unwrap();
+        assert!(broadcasts(&mut received)[0].contains("hello Whole"));
         // A path that is not a compound, or a missing storage, fails.
         assert!(
             tree.execute(
