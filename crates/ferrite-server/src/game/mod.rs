@@ -2061,12 +2061,12 @@ async fn run(
                     let chunk=ChunkPos(target[0].div_euclid(16),target[2].div_euclid(16));
                     if worlds.owner(dimension,chunk).is_some(){worlds.schedule_at_chunk(dimension,chunk,move |r|r.remote_block_changed(origin));}
                   },
-                  Signal::FluidPlace{dimension,x,y,z,state}=>{
+                  Signal::FluidPlace{dimension,x,y,z,expected,state}=>{
                     let chunk=ChunkPos(x.div_euclid(16),z.div_euclid(16));
                     if worlds.owner(dimension,chunk).is_some(){
                       let source=dimensions.source(dimension).clone();
                       let tracking=tracking.clone();
-                      worlds.schedule_at_chunk(dimension,chunk,move |r|r.apply_fluid_place(&source,&tracking,(x,y,z),state));
+                      worlds.schedule_at_chunk(dimension,chunk,move |r|r.apply_fluid_place(&source,&tracking,(x,y,z),expected,state));
                     }
                   },
                   Signal::RedstoneChange{dimension,positions}=>{

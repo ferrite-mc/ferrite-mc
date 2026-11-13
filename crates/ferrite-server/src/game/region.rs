@@ -653,6 +653,8 @@ pub enum Signal {
         x: i32,
         y: i32,
         z: i32,
+        /// Destination state observed when the handoff was queued.
+        expected: u32,
         state: u32,
     },
     /// A block changed next to a region boundary: the owner of `target` re-validates its own
@@ -5201,6 +5203,7 @@ impl Region {
         source: &super::anvil::AnvilChunkSource,
         tracking: &Tracking,
         (x, y, z): (i32, i32, i32),
+        expected: u32,
         state: u32,
     ) {
         let chunk = ChunkPos(x.div_euclid(16), z.div_euclid(16));
@@ -5210,7 +5213,7 @@ impl Region {
         let Some(old) = source.block(x, y, z) else {
             return;
         };
-        if old == state {
+        if old != expected || old == state {
             return;
         }
         if let Err(error) = source.compare_set_block(x, y, z, Some(old), state) {

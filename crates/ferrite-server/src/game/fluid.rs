@@ -72,12 +72,13 @@ impl FluidWorld for RegionFluidWorld<'_> {
         if !self.owns(x, z) {
             // Folia ownership: only the owning region writes its chunks. A placement into a
             // loaded neighbour is handed to that region through the world loop.
-            if let (Some(signals), Some(_)) = (&self.signals, self.source.block(x, y, z)) {
+            if let (Some(signals), Some(expected)) = (&self.signals, self.source.block(x, y, z)) {
                 let _ = signals.send(Signal::FluidPlace {
                     dimension: self.source.dimension(),
                     x,
                     y,
                     z,
+                    expected,
                     state,
                 });
             }
@@ -233,9 +234,11 @@ mod tests {
                 x,
                 y,
                 z,
+                expected,
                 state,
             } => {
                 assert_eq!(dimension, source.dimension());
+                assert_eq!(expected, before);
                 assert_eq!((x, y, z, state), (16, 65, 0, water));
             }
             _ => panic!("unexpected hand-off signal"),
@@ -262,6 +265,21 @@ mod tests {
         }
         source.set_block(15, 65, 0, water).unwrap();
         source
+    }
+
+    #[tokio::test]
+    async fn delayed_fluid_handoff_does_not_overwrite_a_new_solid_block() {
+        let source = two_loaded_chunks().await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let stone = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+        let water = u32::from(ferrite_data::blocks::default_state("water").unwrap());
+        let mut east = super::super::region::Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        // The sending region saw air; the destination changed before its message arrived.
+        let expected = source.block(16, 65, 0).unwrap();
+        source.set_block(16, 65, 0, stone).unwrap();
+        east.apply_fluid_place(&source, &tracking, (16, 65, 0), expected, water);
+        assert_eq!(source.block(16, 65, 0), Some(stone));
     }
 
     /// Same region: one region holds both chunks, so water crosses the chunk border directly.
@@ -309,7 +327,7 @@ mod tests {
 
         let mut east = super::super::region::Region::default();
         east.hold_chunk(ChunkPos(1, 0));
-        east.apply_fluid_place(&source, &tracking, (16, 65, 0), state);
+        east.apply_fluid_place(&source, &tracking, (16, 65, 0), air, state);
         assert_eq!(source.block(16, 65, 0), Some(state));
         let (signals, _unused) = tokio::sync::mpsc::unbounded_channel();
         for _ in 0..30 {
