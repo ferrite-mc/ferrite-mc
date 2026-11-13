@@ -68,6 +68,11 @@ public final class TypicalPlugin extends JavaPlugin implements Listener {
         write("enabled.txt", "ok");
     }
 
+    private void probe(String name, java.util.concurrent.Callable<String> call) {
+        try { append("pattern " + name + " ok " + call.call()); }
+        catch (Throwable t) { append("pattern " + name + " threw " + t.getClass().getSimpleName() + ": " + t.getMessage()); }
+    }
+
     private boolean execute(org.bukkit.command.CommandSender sender, String[] args) {
         String sub = args.length == 0 ? "info" : args[0].toLowerCase(java.util.Locale.ROOT);
         append("command " + sub);
@@ -120,6 +125,38 @@ public final class TypicalPlugin extends JavaPlugin implements Listener {
                 var location = player.getLocation();
                 append("tp " + moved + " " + location.getX() + " " + location.getY() + " " + location.getZ());
             }
+            case "patterns" -> {
+                // Realistic plugin patterns in one pass; every call reports `ok` or the exception it threw,
+                // so a call that still throws shows up in events.txt instead of aborting the command.
+                if (!(sender instanceof org.bukkit.entity.Player player)) { sender.sendMessage("player only"); break; }
+                probe("pdc", () -> {
+                    var key = new org.bukkit.NamespacedKey(this, "visits");
+                    var data = player.getPersistentDataContainer();
+                    int visits = data.getOrDefault(key, org.bukkit.persistence.PersistentDataType.INTEGER, 0) + 1;
+                    data.set(key, org.bukkit.persistence.PersistentDataType.INTEGER, visits);
+                    return "visits " + data.get(key, org.bukkit.persistence.PersistentDataType.INTEGER);
+                });
+                probe("gui", () -> {
+                    var gui = getServer().createInventory(null, 9, net.kyori.adventure.text.Component.text("Typical menu"));
+                    gui.setItem(4, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 3));
+                    player.openInventory(gui);
+                    return "open size " + gui.getSize() + " slot4 " + gui.getItem(4).getType();
+                });
+                probe("scoreboard", () -> {
+                    var board = getServer().getScoreboardManager().getNewScoreboard();
+                    var objective = board.registerNewObjective("typical", org.bukkit.scoreboard.Criteria.DUMMY, net.kyori.adventure.text.Component.text("Typical"));
+                    objective.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+                    objective.getScore(player.getName()).setScore(7);
+                    player.setScoreboard(board);
+                    return "score " + objective.getScore(player.getName()).getScore();
+                });
+                probe("title", () -> { player.sendTitle("Typical", "sub", 5, 20, 5); return "sent"; });
+                probe("actionbar", () -> { player.sendActionBar(net.kyori.adventure.text.Component.text("bar")); return "sent"; });
+                probe("sound", () -> { player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1f); return "played"; });
+                probe("config", () -> "value " + getConfig().getString("greeting", "none"));
+                probe("permission", () -> "has " + player.hasPermission("typical.use"));
+                probe("health", () -> { player.setHealth(Math.min(20.0, player.getHealth())); return "ok"; });
+            }
             case "world" -> {
                 var world = getServer().getWorlds().get(0);
                 var ground = world.getBlockAt(0, 64, 0);
@@ -127,7 +164,7 @@ public final class TypicalPlugin extends JavaPlugin implements Listener {
                 append("block " + ground.getType());
                 append("air " + air.getType() + " sky " + air.getLightFromSky() + " dark " + world.getBlockAt(0, 63, 0).getLightFromSky());
                 append("highest " + world.getHighestBlockYAt(0, 0) + " biome " + world.getBiome(0, 64, 0).getKey());
-                var snapshot = world.getChunkAt(0, 0).getChunkSnapshot(false, true, false);
+                var snapshot = world.getEmptyChunkSnapshot(0, 0, false, true);
                 append("snapshot " + snapshot.getBiome(0, 64, 0).getKey() + " has-plains " + snapshot.contains(org.bukkit.block.Biome.PLAINS) + " has-nether " + snapshot.contains(org.bukkit.block.Biome.NETHER_WASTES));
             }
             case "surface" -> {
