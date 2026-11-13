@@ -758,8 +758,9 @@ pub enum PlayerCommand {
     Lightning {
         center: [f64; 3],
     },
-    /// `World#createExplosion` on the default world.
+    /// `World#createExplosion` in the world with this id (the default world or a runtime world).
     Explosion {
+        world: uuid::Uuid,
         center: [f64; 3],
         power: f32,
         fire: bool,

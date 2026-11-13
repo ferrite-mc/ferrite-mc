@@ -295,4 +295,33 @@ class FerriteWorldHostTest {
         var other = world.spawn(new Location(world, 0, 64, 0), org.bukkit.entity.Cow.class);
         assertThrows(IllegalArgumentException.class, () -> world.addEntity(other));
     }
+
+    private String explosionCall() {
+        return calls.stream().filter(c -> c.startsWith("createExplosion(Location,float,boolean,boolean)|")).reduce((first, second) -> second).orElseThrow();
+    }
+
+    @Test void everyExplosionOverloadBecomesOneHostCallWithTheBukkitDefaults() {
+        replies.put("createExplosion(Location,float,boolean,boolean)", "true");
+        replies.put("spawnEntity(Location,EntityType,String)", "");
+        var sep = String.valueOf(HostBridge.ARG);
+        var at = new Location(world, 1, 64, 2);
+        assertTrue(world.createExplosion(at, 3f));
+        assertTrue(explosionCall().endsWith(sep + "3.0" + sep + "false" + sep + "true"), explosionCall());
+        assertTrue(world.createExplosion(at, 3f, true));
+        assertTrue(explosionCall().endsWith(sep + "3.0" + sep + "true" + sep + "true"), explosionCall());
+        assertTrue(world.createExplosion(at, 3f, true, false));
+        assertTrue(explosionCall().endsWith(sep + "3.0" + sep + "true" + sep + "false"), explosionCall());
+        assertTrue(world.createExplosion(1.0, 64.0, 2.0, 4f, false, false));
+        assertTrue(explosionCall().endsWith(sep + "4.0" + sep + "false" + sep + "false"), explosionCall());
+        var source = world.spawn(new Location(world, 9, 70, 9), org.bukkit.entity.Zombie.class);
+        assertTrue(world.createExplosion(source, 2f));
+        assertTrue(explosionCall().contains("9.0"), "centred on the source entity: " + explosionCall());
+        assertTrue(world.createExplosion(source, at, 2f, false, true, true));
+        assertTrue(explosionCall().contains("1.0") && explosionCall().endsWith(sep + "2.0" + sep + "false" + sep + "true"), explosionCall());
+        Bootstrap.registerWorld("00000000-0000-0000-0000-0000000000e6", "host_world_two", 1, 0, 64, 0);
+        var other = org.bukkit.Bukkit.getWorld("host_world_two");
+        try {
+            assertThrows(IllegalArgumentException.class, () -> world.createExplosion(new Location(other, 0, 64, 0), 2f));
+        } finally { ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(other.getUID()); }
+    }
 }

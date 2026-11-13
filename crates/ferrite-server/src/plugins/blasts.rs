@@ -45,9 +45,7 @@ pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "World" || !call.method.starts_with("createExplosion(") {
         return None;
     }
-    if Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id() {
-        return None;
-    }
+    let world = Uuid::parse_str(&call.subject).ok()?;
     // `(Location, power ...)` or `(x, y, z, power ...)`; then optional `setFire`, `breakBlocks`.
     let (center, rest) = if call.method.starts_with("createExplosion(Location,") {
         let mut parts = call
@@ -88,6 +86,7 @@ pub fn explosion_command(call: &HostCall) -> Option<PlayerCommand> {
     let fire = flag(1, false)?;
     let breaks = flag(2, true)?;
     Some(PlayerCommand::Explosion {
+        world,
         center,
         power,
         fire,
@@ -570,6 +569,7 @@ mod tests {
     #[test]
     fn location_and_coordinate_forms_become_one_command() {
         let expected = Some(PlayerCommand::Explosion {
+            world: ferrite_plugin::default_world_id(),
             center: [10.5, 64.0, -3.0],
             power: 4.0,
             fire: true,
@@ -592,10 +592,30 @@ mod tests {
     }
 
     #[test]
+    fn a_runtime_world_gets_its_own_explosion() {
+        let world = Uuid::from_u128(0xabc);
+        let mut other = call("createExplosion(Location,float)", &[&at(), "3"]);
+        other.subject = world.to_string();
+        assert_eq!(
+            explosion_command(&other),
+            Some(PlayerCommand::Explosion {
+                world,
+                center: [10.5, 64.0, -3.0],
+                power: 3.0,
+                fire: false,
+                breaks: true
+            })
+        );
+        other.subject = "not-a-uuid".into();
+        assert_eq!(explosion_command(&other), None);
+    }
+
+    #[test]
     fn defaults_and_refusals() {
         assert_eq!(
             explosion_command(&call("createExplosion(Location,float)", &[&at(), "2"])),
             Some(PlayerCommand::Explosion {
+                world: ferrite_plugin::default_world_id(),
                 center: [10.5, 64.0, -3.0],
                 power: 2.0,
                 fire: false,
@@ -609,6 +629,7 @@ mod tests {
                 &[&at(), "2", "false", "false"]
             )),
             Some(PlayerCommand::Explosion {
+                world: ferrite_plugin::default_world_id(),
                 center: [10.5, 64.0, -3.0],
                 power: 2.0,
                 fire: false,

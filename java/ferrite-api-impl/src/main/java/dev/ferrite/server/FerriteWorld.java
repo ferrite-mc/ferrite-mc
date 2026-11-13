@@ -662,6 +662,24 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 HostBridge.callVoid("World", id, method + "(Location,ItemStack,String)", at, stack, uuid.toString());
                 yield handle;
             }
+            case "createExplosion" -> {
+                // Every overload becomes (Location, power, fire, breakBlocks): the source entity only decides the
+                // centre when there is no location, and the host applies plain vanilla blast rules to everything.
+                int i = 0;
+                org.bukkit.entity.Entity source = args[i] instanceof org.bukkit.entity.Entity e ? e : null;
+                if (source != null) i++;
+                org.bukkit.Location at;
+                if (args[i] instanceof org.bukkit.Location l) { at = l.clone(); i++; }
+                else if (source != null) at = source.getLocation();
+                else if (args[i] instanceof Number) { at = new org.bukkit.Location(proxy, ((Number) args[i]).doubleValue(), ((Number) args[i + 1]).doubleValue(), ((Number) args[i + 2]).doubleValue()); i += 3; }
+                else throw new IllegalArgumentException("Ferrite: World#createExplosion needs a location or a source entity");
+                if (at.getWorld() != null && !at.getWorld().equals(proxy)) throw new IllegalArgumentException("Ferrite: World#createExplosion location is in another world: " + at.getWorld().getName());
+                float power = ((Number) args[i++]).floatValue();
+                boolean fire = i < args.length && args[i] instanceof Boolean b0 && b0; if (i < args.length && args[i] instanceof Boolean) i++;
+                boolean breaks = !(i < args.length && args[i] instanceof Boolean b1) || b1; if (i < args.length && args[i] instanceof Boolean) i++;
+                at.setWorld(proxy);
+                yield HostBridge.callBoolean("World", id, "createExplosion(Location,float,boolean,boolean)", at, power, fire, breaks);
+            }
             case "createEntity" -> {
                 // An entity of the class that is not in the world yet; addEntity puts it there.
                 var at = ((org.bukkit.Location) args[0]).clone();
