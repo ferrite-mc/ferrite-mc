@@ -12,6 +12,11 @@ use uuid::Uuid;
 
 use super::commands::{GameState, OnlinePlayer};
 
+/// Plan ticks a rider or vehicle may be missing from the shared snapshot before the ride ends.
+/// A vehicle that crosses a region border is removed from its old region's store and published
+/// by the new one a tick or two later, which must not be mistaken for the vehicle being gone.
+const TRANSIT_GRACE_TICKS: u8 = 10;
+
 /// Where the rider goes when the generated entity data has no attachment points at all (an old
 /// extraction): a fixed lift above the vehicle, the placement used before attachments.
 const FALLBACK_LIFT: f64 = 0.6;
@@ -55,6 +60,8 @@ pub fn seat_offset(vehicle: &str, yaw: f32, rider: &str) -> [f64; 3] {
 struct Seat {
     vehicle: Uuid,
     order: u64,
+    /// Consecutive plan ticks the rider or the vehicle was missing from the snapshot.
+    absent: u8,
 }
 
 static RIDES: Mutex<BTreeMap<Uuid, Seat>> = Mutex::new(BTreeMap::new());
@@ -158,7 +165,14 @@ pub fn mount_in(
         return Err(MountError::Full);
     }
     let order = NEXT_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    rides.insert(rider, Seat { vehicle, order });
+    rides.insert(
+        rider,
+        Seat {
+            vehicle,
+            order,
+            absent: 0,
+        },
+    );
     Ok(())
 }
 
@@ -405,16 +419,26 @@ pub fn plan(state: &GameState) -> Vec<Step> {
     snapshot = order.into_iter().map(|(_, r, v)| (r, v)).collect();
     let mut placed: HashMap<Uuid, [f64; 3]> = HashMap::new();
     for (rider, vehicle) in snapshot {
-        let Some((rider_pos, rider_is_player, rider_rot)) = position(state, rider) else {
-            rides().remove(&rider);
-            steps.push(Step::Detach { vehicle });
+        let (
+            Some((rider_pos, rider_is_player, rider_rot)),
+            Some((live_vehicle_pos, _, vehicle_rot)),
+        ) = (position(state, rider), position(state, vehicle))
+        else {
+            // Missing from the snapshot: gone, or only between two regions. Wait out the grace.
+            let mut rides = rides();
+            let expired = rides.get_mut(&rider).is_some_and(|seat| {
+                seat.absent = seat.absent.saturating_add(1);
+                seat.absent > TRANSIT_GRACE_TICKS
+            });
+            if expired {
+                rides.remove(&rider);
+                steps.push(Step::Detach { vehicle });
+            }
             continue;
         };
-        let Some((live_vehicle_pos, _, vehicle_rot)) = position(state, vehicle) else {
-            rides().remove(&rider);
-            steps.push(Step::Detach { vehicle });
-            continue;
-        };
+        if let Some(seat) = rides().get_mut(&rider) {
+            seat.absent = 0;
+        }
         // Vanilla ends a ride when either side changes dimension; coordinates of another world
         // are meaningless here.
         if dimension_of(state, rider) != dimension_of(state, vehicle) {
@@ -723,6 +747,34 @@ mod tests {
     }
 
     #[test]
+    fn a_vehicle_in_transit_between_regions_keeps_its_rider_for_a_short_grace() {
+        let _turn = test_turn();
+        let (rider, vehicle) = (Uuid::from_u128(1021), Uuid::from_u128(1022));
+        mount(rider, vehicle, false).unwrap();
+        // The vehicle crossed a region border: its old region stopped publishing it and the new
+        // one has not yet, so for a tick or two only the rider is in the snapshot.
+        let only_rider = state_with(&[(rider, 1, [0.5, 64.0, 0.5])]);
+        for _ in 0..TRANSIT_GRACE_TICKS {
+            assert_eq!(plan(&only_rider), vec![], "no detach while in transit");
+            assert_eq!(vehicle_of(rider), Some(vehicle));
+        }
+        // The destination region publishes it: the ride carries on and the counter resets.
+        let both = state_with(&[(rider, 1, [0.5, 64.0, 0.5]), (vehicle, 2, [9.5, 64.0, 0.5])]);
+        assert!(matches!(plan(&both).as_slice(), [Step::Move { .. }]));
+        for _ in 0..TRANSIT_GRACE_TICKS {
+            assert_eq!(plan(&only_rider), vec![]);
+        }
+        assert_eq!(
+            vehicle_of(rider),
+            Some(vehicle),
+            "the earlier absence was forgiven"
+        );
+        // A vehicle that never comes back ends the ride once the grace is used up.
+        assert_eq!(plan(&only_rider), vec![Step::Detach { vehicle }]);
+        assert_eq!(vehicle_of(rider), None);
+    }
+
+    #[test]
     fn changing_dimension_ends_the_ride_instead_of_moving_the_rider_across_worlds() {
         let _turn = test_turn();
         let (rider, vehicle) = (Uuid::from_u128(1001), Uuid::from_u128(1002));
@@ -849,8 +901,12 @@ mod tests {
         let _turn = test_turn();
         let (rider, vehicle) = (Uuid::from_u128(941), Uuid::from_u128(942));
         mount(rider, vehicle, false).unwrap();
-        // The vehicle was killed or removed from the command snapshot.
+        // The vehicle was killed or removed from the command snapshot and never comes back; the
+        // ride ends once the transit grace (a vehicle between two regions) has run out.
         let state = state_with(&[(rider, 1, [0.5, 64.6, 0.5])]);
+        for _ in 0..TRANSIT_GRACE_TICKS {
+            assert_eq!(plan(&state), []);
+        }
         assert_eq!(plan(&state), [Step::Detach { vehicle }]);
         assert_eq!(vehicle_of(rider), None);
         assert!(passengers_of(vehicle).is_empty());
