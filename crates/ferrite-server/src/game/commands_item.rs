@@ -77,7 +77,7 @@ fn run_with(
 
 /// The stack `with <item>[components] <count>` describes: the count is checked against the item's
 /// stack size and each component is parsed exactly as `/give` parses it.
-fn stack_for(raw: &str, count: i32) -> Result<ItemStack, CommandError> {
+pub(super) fn stack_for(raw: &str, count: i32) -> Result<ItemStack, CommandError> {
     let item = parse_item(raw)?;
     let components = parse_item_components(raw)?;
     let max = ferrite_item::item_defaults(item).map_or(64, |defaults| defaults.max_stack_size);

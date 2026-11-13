@@ -96,45 +96,47 @@ pub fn insert_stack(items: &mut [ItemStack], mut stack: ItemStack) -> ItemStack 
     }
 }
 
-/// Which source stack lands in the `index`th target slot.
-fn pick(stacks: &[ItemStack], index: usize) -> Option<ItemStack> {
-    match stacks.len() {
-        0 => None,
-        1 => stacks.first().cloned(),
-        _ => stacks.get(index).cloned(),
-    }
+/// The stack each of `slot_count` target slots receives, `None` meaning "left alone".
+///
+/// This is vanilla 26.3's `ItemCommands` distribution (read from the server jar's
+/// `ItemProvider` and `SlotCollection.replaceSlotItems`): the target slots are walked in order
+/// and every slot takes the next stack from the provider while the provider has one.
+/// - `replace`: `ItemProvider.of(stacks)`, so slot `i` gets `stacks[i]` and slots past the end of
+///   the list are untouched (a single stack therefore lands in the first slot only).
+/// - `fill`: `ItemProvider.cycle(stacks)`, so slot `i` gets `stacks[i % len]`; every slot is set,
+///   whether it was empty or not.
+/// - `override`: `of(stacks).orElseProvide(EMPTY)`, so slots past the end of the list are cleared.
+pub fn distribute(
+    mode: SlotMode,
+    stacks: &[ItemStack],
+    slot_count: usize,
+) -> Vec<Option<ItemStack>> {
+    (0..slot_count)
+        .map(|index| match mode {
+            SlotMode::Replace => stacks.get(index).cloned(),
+            SlotMode::Fill => (!stacks.is_empty()).then(|| stacks[index % stacks.len()].clone()),
+            SlotMode::Override => Some(stacks.get(index).cloned().unwrap_or_else(ItemStack::empty)),
+            SlotMode::Insert => None,
+        })
+        .collect()
 }
 
-/// Writes `stacks` into `items[slots]` following `mode`; returns how many slots changed.
+/// Writes `stacks` into `items[slots]` following `mode`; returns how many slots were set.
+/// Vanilla counts every slot `SlotAccess.set` accepted, even when the stack did not change.
 pub fn write_container(
     items: &mut [ItemStack],
     slots: &[usize],
     mode: SlotMode,
     stacks: &[ItemStack],
 ) -> usize {
-    let mut changed = 0;
-    for (index, slot) in slots.iter().enumerate() {
-        let new = match mode {
-            SlotMode::Replace => pick(stacks, index),
-            SlotMode::Fill => pick(stacks, index).filter(|_| items[*slot].is_empty()),
-            SlotMode::Override => Some(
-                (if stacks.len() > 1 {
-                    stacks.get(index).cloned()
-                } else {
-                    pick(stacks, index)
-                })
-                .unwrap_or_else(ItemStack::empty),
-            ),
-            SlotMode::Insert => None,
-        };
-        if let Some(new) = new
-            && items[*slot] != new
-        {
+    let mut set = 0;
+    for (slot, new) in slots.iter().zip(distribute(mode, stacks, slots.len())) {
+        if let Some(new) = new {
             items[*slot] = new;
-            changed += 1;
+            set += 1;
         }
     }
-    changed
+    set
 }
 
 fn rng() -> ferrite_entity::Rng {
@@ -423,7 +425,7 @@ impl CommandRuntime<'_> {
                         continue;
                     };
                     let fill = match mode {
-                        SlotMode::Fill => SlotFill::FillEmpty(stacks.clone()),
+                        SlotMode::Fill => SlotFill::Cycle(stacks.clone()),
                         SlotMode::Override => SlotFill::Override(stacks.clone()),
                         _ => SlotFill::Set(stacks.clone()),
                     };
@@ -476,31 +478,75 @@ mod tests {
 
     #[test]
     fn container_writes_follow_the_mode() {
+        // Semantics read from vanilla 26.3 `ItemCommands` (ItemProvider.of / cycle / orElseProvide).
         let stone = ferrite_item::item_id("minecraft:stone").unwrap();
         let dirt = ferrite_item::item_id("minecraft:dirt").unwrap();
-        let mut items = vec![ItemStack::empty(); 4];
-        items[1] = stack(dirt, 5);
-        // Fill leaves occupied slots alone.
-        let changed = write_container(&mut items, &[0, 1, 2], SlotMode::Fill, &[stack(stone, 1)]);
-        assert_eq!(changed, 2);
-        assert_eq!(items[1].item, dirt);
-        // Replace with several stacks maps pairwise and leaves the rest.
-        let changed = write_container(
+        let blank = || {
+            let mut items = vec![ItemStack::empty(); 4];
+            items[1] = stack(dirt, 5);
+            items
+        };
+        // Fill cycles over every selected slot, occupied or not.
+        let mut items = blank();
+        let set = write_container(&mut items, &[0, 1, 2], SlotMode::Fill, &[stack(stone, 1)]);
+        assert_eq!(set, 3);
+        assert!(items[..3].iter().all(|s| s.item == stone));
+        assert!(
+            items[3].is_empty(),
+            "slots outside the selection are untouched"
+        );
+        let mut items = blank();
+        write_container(
+            &mut items,
+            &[0, 1, 2],
+            SlotMode::Fill,
+            &[stack(stone, 1), stack(dirt, 2)],
+        );
+        assert_eq!(
+            (items[0].item, items[1].item, items[2].item),
+            (stone, dirt, stone),
+            "two stacks alternate"
+        );
+        // Replace walks the stacks in order; a single stack reaches the first slot only.
+        let mut items = blank();
+        let set = write_container(
+            &mut items,
+            &[0, 1, 2],
+            SlotMode::Replace,
+            &[stack(stone, 3)],
+        );
+        assert_eq!(set, 1);
+        assert_eq!(items[0], stack(stone, 3));
+        assert_eq!(
+            items[1],
+            stack(dirt, 5),
+            "left alone once the stacks run out"
+        );
+        let mut items = blank();
+        let set = write_container(
             &mut items,
             &[0, 1, 2],
             SlotMode::Replace,
             &[stack(dirt, 2), stack(dirt, 3)],
         );
-        assert_eq!(changed, 2);
-        assert_eq!(items[2].item, stone);
-        // Override clears slots without a stack.
+        assert_eq!(set, 2);
+        assert!(items[2].is_empty());
+        // The count is the slots set, even when the stack was already there.
+        let mut items = blank();
+        assert_eq!(
+            write_container(&mut items, &[1], SlotMode::Replace, &[stack(dirt, 5)]),
+            1
+        );
+        // Override clears the slots after the last stack.
+        let mut items = blank();
         write_container(
             &mut items,
             &[0, 1, 2],
             SlotMode::Override,
-            &[stack(dirt, 2), stack(dirt, 3)],
+            &[stack(stone, 2)],
         );
-        assert!(items[2].is_empty());
+        assert_eq!(items[0], stack(stone, 2));
+        assert!(items[1].is_empty() && items[2].is_empty());
     }
 
     #[test]

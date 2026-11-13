@@ -44,9 +44,7 @@ Partial behaviour confirmed in source today:
   `test_tree`). Vanilla 26.3 ships one test instance (`always_pass`, type `function`, structure
   `minecraft:empty`). Running tests needs a test-instance runner (batching, a test environment,
   structure placement in a test area and the `block_based` test blocks), none of which exists.
-- `/item`: `item[...]` components are applied (same parser as `/give`), and `modify` plus
-  `<modifier>` run data-pack item modifiers from `data/<ns>/item_modifier/**/*.json` (see the
-  `/item` entry below for the supported functions).
+- `/item`: see the `/item` entry under "Partly done" (rewritten 2026-11-13 against the 26.3 server jar).
 - `/attribute`: defaults come from the target's entity type (`attributes::limits_for`); an
   attribute the type does not carry (and every non-living type) fails `failed.no_attribute`.
 - `/execute` (`commands_exec.rs`), verified by tests against the live dispatcher:
@@ -66,8 +64,7 @@ Partial behaviour confirmed in source today:
   function carries on, as in vanilla. Syntax errors still abort the function at run time (vanilla
   refuses to load such a function). `function <id> with storage|block|entity ...` is not
   implemented (only the inline `{...}` compound is).
-- `/damage`: `from <cause>` only matters for death messages, which are not modelled
-  (`commands.rs`, line 665).
+- `/damage`: `from <cause>` is the causing entity now; see the `/damage` entry under "Partly done".
 
 Roots the sections below call partial but that were **not** re-verified today: advancement,
 recipe, compute, waypoint, loot, ride, place, fillbiome, attribute, dialog, spectate, swing, tick,
@@ -136,25 +133,106 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   transmitter for the others in the same dimension (azimuth beyond 332 blocks, position inside the
   view distance, chunk otherwise). Spectators (via /gamemode or join) do not transmit. Not yet: invisible/`waypoint_transmit_range` filtering and spectators set by plugins,
   non-player transmitters.
-- `/loot give|insert|replace|spawn <target> loot|mine|fish|kill ...` roll the extracted tables
-  (`mine` reads the block at the position; `mainhand`/`offhand` count as no tool; `kill` rolls
-  `entities/<type>` of the first selected entity with an empty context). `insert` merges into
-  chest/barrel/hopper/dropper/dispenser/furnace contents and reports "full"; `replace` takes
-  `<slot> [count]` consecutive slots on a block container or a player; `spawn` drops item entities.
-  Stacks over the max size are split.
-- `/item replace|fill|override` work on block containers and player inventories (`container.N`,
-  `hotbar.N`, `inventory.N`, `armor.*`, `weapon.mainhand|offhand|*`, `*` wildcards) with `with`
-  or `from block|entity`. Several source stacks map pairwise onto the slots; `fill` only touches
-  empty slots; `override` clears slots left without a stack (these fill/override semantics are
-  inferred, not checked against vanilla). Item components in the item argument are applied.
-  `modify` and `from ... <modifier>` run data-pack item modifiers (`game/item_modifier.rs`):
-  `set_count`, `limit_count`, `set_damage`, `set_components`, `set_name`, `set_lore`
-  (`replace_all`), `set_enchantments`, `sequence` and constant `random_chance` conditions; an
-  inline JSON modifier or `ns:path` works. Other functions or conditions make the modifier fail
-  to load with a message naming them, and an unknown id gives `argument.item_modifier.unknown`.
-  Only slots the modifier actually changed are written and counted.
-  Non-player entities have no inventory here, so only players are written. Feedback texts are
-  from memory.
+- `/loot give|insert|replace|spawn <target> loot|mine|fish|kill ...` (lane A, checked on 2026-11-13
+  against the 26.3 server jar's `LootCommand` and `CommandResponseTracker` bytecode; tests are in
+  `game/commands_loot.rs`):
+  - `mine <pos> [mainhand|offhand|<item>]`: the block state at the position is the context; no
+    tool argument is an empty hand (vanilla passes `ItemStack.EMPTY`). `mainhand`/`offhand` read
+    the source player's held stack (refreshed by the inventory scan, so up to one scan old) with
+    its enchantments, and fail with `commands.drop.no_held_items` when the source is not an
+    entity (console). `<item>` keeps its component patch, so
+    `diamond_pickaxe[enchantments={"minecraft:silk_touch":1}]` drops the block itself (tested
+    against `blocks/stone`). A shulker box at the position keeps its contents, name and lock on
+    the dropped item (`copy_components` from the block entity, same code as breaking it). A block
+    without a `blocks/<name>` table fails with `commands.drop.no_loot_table.block`.
+  - `kill <entity>`: rolls `entities/<type>` of the selected entity. A player source sets
+    `killed_by_player` (vanilla `LAST_DAMAGE_PLAYER`) and its main-hand looting level; the
+    console or a non-player source kills without credit (tested with `entities/blaze`). Players
+    and types without a table fail with `commands.drop.no_loot_table.entity`.
+  - `fish <table> <pos> [tool]` only passes the tool (vanilla passes origin and tool, no block).
+  - `loot <table>` and `fish` answer with the plain message, `kill` and `mine` with the
+    `..._with_table` message (vanilla's `RESPONSE_WITH(OUT)_LOOT_TABLE`). One stack reads
+    "Dropped 3 Stone", anything else "Dropped N items", N being the sum of the counts; the result
+    of `give` and `spawn` is that total. Oversized rolls are split at the stack size; stacks keep
+    the components the loot functions set.
+  - `insert` merges into chest/barrel/hopper/dropper/dispenser/furnace contents and reports
+    "full"; `replace` takes `<slot> [count]` consecutive slots. Their messages are still the
+    handler's own (`commands.drop.success.multiple` for insert), not vanilla's single/table
+    forms: not changed, not verified against the jar.
+  - Hand-off to lane B (advancement `rewards.loot`): `commands_loot::roll_reward_table`:
+    ```rust
+    pub fn roll_reward_table(table: &str) -> Result<Vec<ferrite_item::ItemStack>, String>
+    ```
+    It rolls the table under the empty reward context, splits stacks at their size and keeps
+    loot-function components; the `Err` text is the "Unknown ID" message naming the table. The
+    caller gives the stacks to the player (e.g. `Action::LootGive { targets, stacks, table:
+    None }`, which hands items over and answers with the loot message, or `Command::Give` for
+    each stack with `feedback: None` for a silent grant).
+  - **Not done, with evidence** (all of it needs `crates/ferrite-loot`, which this lane may not
+    edit; asked of the coordinator in the final report):
+    - `fish` luck: `LootContext` has no luck field and `drops::fishing_catch` documents the same
+      gap (`drops.rs`), so Luck of the Sea and the Luck effect do not change `gameplay/fishing`.
+    - Looting on mob drops: 80 vanilla loot functions are `minecraft:enchanted_count_increase`
+      and `ferrite-loot/src/function.rs` only evaluates `set_count`, `apply_bonus`,
+      `explosion_decay`, `limit_count` and `copy_components` (the others, including
+      `furnace_smelt`, `set_potion`, `enchant_randomly`, `enchant_with_levels`,
+      `exploration_map`, `filtered`, `copy_state`, `set_name`, `set_damage`, are kept opaque).
+      The looting level is in the context (`LootContext::looting`) but only `apply_bonus` and
+      `table_bonus` read it.
+    - Conditions on the killer or the damage source (`entity_properties`,
+      `damage_source_properties`: 49 + 5 uses) are treated as satisfied, so e.g. a skeleton's
+      "killed by a charged creeper" pool cannot be selected.
+    - `kill` rolls `entities/<type>` only; mobs whose table depends on state (sheep colour,
+      `DeathLootTable` NBT) are not handled.
+  - The generated `reports/lang_en_us.json` has `commands.drop.no_loot_table` but the 26.3 jar
+    throws `commands.drop.no_loot_table.entity` and `.block` (checked in `LootCommand`), so the
+    English text for those two comes from `feedback.rs`, not from the language file.
+- `/item replace|fill|override|modify` (lane A; semantics read from the 26.3 server jar's
+  `ItemCommands`, `ItemProvider`, `SlotCollection.replaceSlotItems` and `SlotSelector`; tests in
+  `game/slot_ops.rs` and `game/item_modifier.rs`). Corrected on 2026-11-13, the earlier text here
+  ("fill only touches empty slots", "a single stack goes to every slot") was inferred and wrong:
+  - `replace`: the target slots are walked in order and each takes the next stack; slots past
+    the end of the stack list are left alone. A single `with` stack therefore lands in the
+    **first** slot only.
+  - `fill`: the stacks are cycled over **every** selected slot (`ItemProvider.cycle`), empty or
+    not.
+  - `override`: like `replace`, but slots past the last stack are cleared
+    (`of(stacks).orElseProvide(EMPTY)`).
+  - `modify`: only non-empty slots are modified (`SlotSelector.NON_EMPTY_SLOTS`); Ferrite writes
+    and counts only the slots the modifier changed.
+  - The success count is the number of slots set, not the number whose content differs.
+    `/loot replace` shares this distribution (one rolled stack fills only the first slot).
+  - Same code for block containers and players (`slot_ops::distribute`). Item components in
+    the `with` argument are applied (`item_commands_keep_component_patches`); stacks read by
+    `from block|entity` are copied whole, components included.
+  - Item modifiers: vanilla ships **none** (`vanilla/26.3/generated/data/minecraft` has no
+    `item_modifier` directory), so `modify`/`<modifier>` run data-pack modifiers from disk or
+    inline JSON only. `item_modifier.rs` had never loaded a real 26.3 file: 26.3 keys functions
+    and conditions by `"type"` (every vanilla loot table does), the loader only read
+    `"function"`/`"condition"`. Both keys work now. Supported: `set_count`, `limit_count`,
+    `set_damage`, `set_components`, `set_name` (`custom_name`, `item_name`), `set_lore` (all
+    four list modes), `set_enchantments`, `set_item`, `set_potion`, `set_custom_data`,
+    `set_ominous_bottle_amplifier`, `discard`, `explosion_decay` (a no-op, no explosion in the
+    command context), `sequence`; conditions `random_chance` (constant), `inverted`, `all_of`,
+    `any_of`. Anything else fails loading with a message naming it.
+  - Vanilla functions still missing (42 types in `reports/registries.json`), by reason:
+    needs registry/world data this server does not model: `enchant_randomly`,
+    `enchant_with_levels`, `set_instrument`, `exploration_map`, `furnace_smelt`,
+    `set_random_potion`, `set_random_dyes`, `fill_player_head`; needs loot-context parameters
+    the command context lacks (vanilla rejects these in `item_modifier` too, or they read an
+    entity): `apply_bonus`, `enchanted_count_increase`, `copy_name`, `copy_state`,
+    `copy_custom_data`, `copy_components` (non-block sources); component formats not
+    verified here: `set_attributes`, `set_banner_pattern`, `set_book_cover`,
+    `set_contents`, `modify_contents`, `filtered`, `set_custom_model_data`,
+    `set_firework_explosion`, `set_fireworks`, `set_loot_table`, `set_stew_effect`,
+    `set_writable_book_pages`, `set_written_book_pages`, `toggle_tooltips`. Number providers
+    other than constant and uniform (`binomial`, `score`, `storage`) and conditions other than
+    those above are not supported either.
+  - Not verified: the vanilla `slots` and `sourceSlots` arguments are a slot-source language
+    (`SlotSourceArgument`: filters, limits, composites); Ferrite parses only plain names
+    (`container.N`, `hotbar.*`, `weapon.mainhand`, ...). Non-player entities have no inventory
+    here, so only players are written. Success/failure message texts were not re-read from the
+    jar.
 - `/ride <target> mount <vehicle>|dismount`: rides live in a server-side table; the client gets
   `set_passengers` (id 109) for everyone online, and every tick the rider is teleported to the
   vehicle's position + 0.6 blocks. Sneaking dismounts. Not simulated: vehicle steering, per-type
@@ -197,8 +275,39 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   report time and ticks but write no report file.
 - `/fetchprofile` only knows players who are online (no Mojang API lookup).
 - `/rotate` assumes the target is in the command's dimension.
-- `/damage` maps the damage type to the nearest survival kind; mobs take the plain amount and play the hurt animation,
-  `at <pos>` and `by <entity>` give mobs knockback from that point and make hostile mobs turn on a player attacker; `from` (the indirect cause) and players are not affected by the source.
+- `/damage <target> <amount> [<type> [at <pos> | by <entity> [from <cause>]]]` (lane A; read from
+  the 26.3 jar's `DamageCommand`, `DamageSource`, `CombatTracker` and `Player.hurtServer`; tests
+  in `game/damage_source.rs`, `commands_more.rs` and `region.rs`):
+  - `by` is the direct *and* causing entity, `from` names a different causing entity.
+    Knockback comes from `at` or the direct entity; the causing entity gets the kill credit of a
+    mob (so `killed_by_player` loot and advancement criteria see it) and the mob's anger.
+  - Damage type data comes from `data/minecraft/damage_type/*.json` (`message_id`, `scaling`,
+    `death_message_type`, `exhaustion`); an unknown type is rejected like any registry argument
+    (when the vanilla data is on the machine). Cross-check in
+    `damage_kind_agrees_with_the_bypasses_invulnerability_tag`: for all 51 types the creative
+    exemption matches the `bypasses_invulnerability` tag (`generic_kill`, `out_of_world`).
+  - Player victims scale with difficulty when the type says so (`Player.hurtServer`: peaceful 0,
+    easy `min(a/2+1, a)`, hard `a*3/2`; `when_caused_by_living_non_player` needs a living
+    non-player causing entity). Creative and spectator players are invulnerable except to the
+    `bypasses_invulnerability` types; a zero result fails with
+    `commands.damage.invulnerable` as in vanilla.
+  - A fatal hit announces `death.attack.<message_id>` with the attacker's name, `.item` when a
+    living causing entity holds a custom-named item, `.player` plus the kill credit when nothing
+    caused it, and `death.attack.badRespawnPoint.message` for `intentional_game_design`. The
+    text comes from the loaded `lang_en_us.json` (`%1$s` arguments are supported now); every
+    damage type's key is checked to exist in it.
+  - Result and message follow vanilla: the command returns 1, the success message shows the
+    requested amount as a Java float (`4.0`).
+  - Not done: `fall_variants` (`fall`, `ender_pearl`) use the plain `death.attack.fall` text
+    instead of the `death.fell.*` variants (needs the combat history and the victim's fall
+    location, which Ferrite does not track); the sound/effect (`effects`) of a type, damage type
+    exhaustion and the armor/enchantment reduction of `/damage` are not applied (the survival
+    model ignores armor: `DamageKind::bypasses_armor` is true only for explosions while the
+    vanilla `bypasses_armor` tag lists 19 other types and not explosions; it is not read by
+    `Survival::damage`). A "living" attacker is any non-`misc` entity category, so an armor stand
+    counts as non-living. Players are still hurt through the 13 hand-written `DamageKind`s
+    (`damage_kind` in `game/mod.rs`); the other types only differ in message and scaling.
+    Mobs take the plain amount and play the hurt animation (`mob::hurt`).
 - `/locate biome|structure|poi` ask the vanilla host (ops 5, 6 and 9, need
   `generator = "vanilla"`); `poi` only finds points of interest of chunks that are stored.
 - Plugin `World#generateTree` runs the matching vanilla feature through the host and keeps block

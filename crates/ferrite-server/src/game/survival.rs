@@ -249,6 +249,9 @@ pub struct Survival {
     /// Set by the region once the death drops, message and packets ran.
     pub death_processed: bool,
     pub death_cause: Option<DamageKind>,
+    /// The finished death message of a `/damage` kill (names the attacker and the damage type's
+    /// `message_id`); `None` uses the cause's own text.
+    pub death_message: Option<String>,
     /// The held item currently being eaten (`LivingEntity.useItem`).
     pub eating: Option<Eating>,
     last_synced: (f32, i32, f32),
@@ -282,6 +285,7 @@ impl Default for Survival {
             dead: false,
             death_processed: false,
             death_cause: None,
+            death_message: None,
             eating: None,
             last_synced: (MAX_HEALTH, MAX_FOOD, 5.0),
         }

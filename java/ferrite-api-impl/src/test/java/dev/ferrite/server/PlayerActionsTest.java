@@ -86,4 +86,17 @@ class PlayerActionsTest {
             for (var other : others) server.registerPlayer(other);
         }
     }
+
+    @Test void hurtAnimationAndPickupAnimationEncodeViewersAndTheItemForTheHost() {
+        capture("");
+        player.broadcastHurtAnimation(List.of(player));
+        assertEquals(List.of("Player|broadcastHurtAnimation(Collection)|" + player.getUniqueId()), calls);
+        calls.clear();
+        var itemId = java.util.UUID.fromString("00000000-0000-0000-0000-0000000000f1");
+        var item = (org.bukkit.entity.Item) java.lang.reflect.Proxy.newProxyInstance(
+            getClass().getClassLoader(), new Class<?>[] {org.bukkit.entity.Item.class},
+            (proxy, method, args) -> method.getName().equals("getUniqueId") ? itemId : null);
+        player.playPickupItemAnimation(item, 3);
+        assertEquals(List.of("Player|playPickupItemAnimation(Item,int)|" + itemId + HostBridge.ARG + "3"), calls);
+    }
 }
