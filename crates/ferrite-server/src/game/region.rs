@@ -4498,7 +4498,8 @@ impl Player {
                                 .then(|| ferrite_item::item_name(head.item))
                                 .flatten(),
                             self.sneaking,
-                            self.effects.has(ferrite_entity::effect::Effect::Invisibility),
+                            self.effects
+                                .has(ferrite_entity::effect::Effect::Invisibility),
                         );
                         let mut set = super::waypoints::HEAD_HIDDEN
                             .lock()

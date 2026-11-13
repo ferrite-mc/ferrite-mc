@@ -336,7 +336,10 @@ mod tests {
         assert!(hides(None, true, false), "sneaking");
         assert!(hides(None, false, true), "invisibility effect");
         let b = Uuid::from_u128(2);
-        assert_eq!(player_ranges(&BTreeMap::new(), b, hides(None, true, false)).0, 0.0);
+        assert_eq!(
+            player_ranges(&BTreeMap::new(), b, hides(None, true, false)).0,
+            0.0
+        );
         // A range of exactly zero reaches nobody, even someone standing in the same spot.
         let (a, b) = (Uuid::from_u128(1), b);
         let mut online = HashMap::new();
@@ -346,7 +349,10 @@ mod tests {
         locator.ranges.insert(a, (6e7, 6e7));
         locator.ranges.insert(b, (0.0, 6e7));
         let sent = locator.sync(&online, &BTreeMap::new(), &Default::default());
-        assert!(sent.iter().all(|(r, _)| *r != a), "hidden b is not shown to a");
+        assert!(
+            sent.iter().all(|(r, _)| *r != a),
+            "hidden b is not shown to a"
+        );
     }
 
     #[test]
@@ -360,7 +366,10 @@ mod tests {
         locator.ranges.insert(b, (10.0, 6e7));
         let spectators = std::collections::BTreeSet::from([a]);
         let sent = locator.sync(&online, &BTreeMap::new(), &spectators);
-        assert!(sent.iter().any(|(r, _)| *r == a), "spectator a sees out-of-range b");
+        assert!(
+            sent.iter().any(|(r, _)| *r == a),
+            "spectator a sees out-of-range b"
+        );
     }
 
     #[test]
