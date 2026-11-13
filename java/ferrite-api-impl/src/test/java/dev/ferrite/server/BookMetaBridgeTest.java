@@ -24,6 +24,11 @@ class BookMetaBridgeTest {
         player = (org.bukkit.entity.Player) ensure.invoke(null, "00000000-0000-0000-0000-0000000000ab", "Books");
     }
 
+    @org.junit.jupiter.api.AfterAll static void stop() {
+        var world = org.bukkit.Bukkit.getWorld("books_world");
+        if (world != null) ((FerriteServer) org.bukkit.Bukkit.getServer()).unregisterWorld(world.getUID());
+    }
+
     /** The `setItemMeta` payloads the host would receive, by slot. */
     private static java.util.Map<Integer, String> send(ItemStack... items) {
         var sent = new java.util.HashMap<Integer, String>();
