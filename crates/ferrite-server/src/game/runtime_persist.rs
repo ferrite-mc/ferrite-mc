@@ -15,6 +15,9 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// The refusal for a world a player is still standing in.
+pub(super) const PLAYERS_INSIDE: &str = "cannot unload a runtime world while players are inside it";
+
 /// Everything needed to rebuild a world that was stopped for an unload that then failed.
 struct Salvage {
     holds: HashMap<ChunkPos, usize>,
@@ -38,7 +41,7 @@ pub(super) async fn unload_runtime_world(
         return Ok(false);
     };
     if players_inside {
-        anyhow::bail!("cannot unload a runtime world while players are inside it");
+        anyhow::bail!(PLAYERS_INSIDE);
     }
     // Resolve the storage root before stopping anything, so a missing path cannot strand the world.
     let root = if save {

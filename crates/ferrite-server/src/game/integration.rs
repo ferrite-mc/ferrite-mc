@@ -6262,6 +6262,99 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
     assert!(world.unload_runtime_world(runtime, true).await.unwrap());
 }
 
+/// A player who leaves a runtime world while an unload is already asking must not make it fail:
+/// the coordinator may list the player as inside for a moment after the client saw the departure
+/// (the `Respawn` is queued before the `ChangeDimension` signal). The unload keeps asking for a
+/// short, bounded grace, and still refuses a player who stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unload_waits_briefly_for_a_departing_player_and_still_refuses_one_who_stays() {
+    use ferrite_protocol::packets::play::Respawn;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3");
+    if !root.join("generated/reports/blocks.json").exists() {
+        eprintln!("SKIP: vanilla/26.3/generated is absent");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
+    let source = super::anvil::AnvilChunkSource::new(temp.path().to_path_buf(), registry);
+    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
+    let world = World::start_configured(
+        Some(source),
+        [0, 65, 0],
+        super::WorldSettings {
+            plugin_commands: Some(plugin_commands),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "Stayer").await;
+    let player = ferrite_net::offline_uuid("Stayer");
+    let location = |world| ferrite_plugin::PlayerLocation {
+        world,
+        x: 8.5,
+        y: 65.0,
+        z: 8.5,
+        yaw: 0.0,
+        pitch: 0.0,
+    };
+    let (runtime, _, _, _) = world
+        .create_runtime_world("stay", super::Dimension::Overworld, [0, 65, 0], 0)
+        .await
+        .unwrap();
+    commands
+        .send(ferrite_plugin::PlayerCommand::Teleport {
+            player,
+            location: location(runtime),
+        })
+        .unwrap();
+    let (mut responded, mut positioned) = (0, false);
+    read_until(&mut bot, |id, _| {
+        responded += i32::from(id == Respawn::ID);
+        positioned |= id == 73 && responded > 0;
+        responded >= 2 && positioned
+    })
+    .await;
+    // Still inside after the grace: refused, and the world stays.
+    let started = std::time::Instant::now();
+    let refused = world.unload_runtime_world(runtime, false).await;
+    assert!(
+        refused.is_err_and(|error| error.to_string().contains("players are inside")),
+        "a player who stays must still block the unload"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(400),
+        "the refusal came before the grace ran out: {:?}",
+        started.elapsed()
+    );
+    // Leaving while the unload is asking lets it through.
+    let leave = commands.clone();
+    let origin = ferrite_plugin::default_world_id();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        leave
+            .send(ferrite_plugin::PlayerCommand::Teleport {
+                player,
+                location: location(origin),
+            })
+            .unwrap();
+    });
+    let unloaded = world.unload_runtime_world(runtime, false).await;
+    assert!(
+        matches!(unloaded, Ok(true)),
+        "an unload that began while the player was leaving was refused: {unloaded:?}"
+    );
+}
+
 /// The client is told about a departure (`Respawn`) before the coordinator has handled the
 /// `ChangeDimension` signal that moves the player out of the runtime world's bookkeeping. An
 /// `unloadWorld` issued the moment the client sees the first `Respawn` must therefore not be
