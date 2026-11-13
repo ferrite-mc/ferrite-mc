@@ -271,7 +271,7 @@ fn network_safe(stack: ItemStack) -> ItemStack {
 
 /// Vanilla `ContainerHelper.loadAllItems`: the `Items` list of a block entity, as a viewer can
 /// be sent it (components without a network form are left off).
-fn load_items(entity: Option<&BlockEntity>) -> Vec<ItemStack> {
+pub(super) fn load_items(entity: Option<&BlockEntity>) -> Vec<ItemStack> {
     load_items_raw(entity)
         .into_iter()
         .map(network_safe)
@@ -381,6 +381,31 @@ pub fn take_contents(
         .into_iter()
         .filter(|stack| !stack.is_empty())
         .collect()
+}
+
+/// Everything a destroyed block spills: its inventory, a furnace's slots, a brewing stand's
+/// slots or a jukebox's disc. A shulker box is not handled here, it keeps its contents in the
+/// item it drops (see `shulker`).
+pub fn take_all_contents(
+    source: &AnvilChunkSource,
+    pos: [i32; 3],
+    old_state: u32,
+) -> Vec<ItemStack> {
+    let name = u16::try_from(old_state)
+        .ok()
+        .and_then(ferrite_data::blocks::state)
+        .map(|(name, _)| name);
+    let mut out = take_contents(source, pos, old_state);
+    if name.and_then(super::furnace::kind).is_some() {
+        out.extend(super::furnace::take_contents(source, pos));
+    }
+    if name == Some("minecraft:brewing_stand") {
+        out.extend(super::brewing::take_contents(source, pos));
+    }
+    if name == Some("minecraft:jukebox") {
+        out.extend(super::jukebox::take(source, pos));
+    }
+    out
 }
 
 #[cfg(test)]

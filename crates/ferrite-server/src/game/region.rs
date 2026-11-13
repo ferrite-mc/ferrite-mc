@@ -2040,24 +2040,9 @@ impl Player {
                 let components = super::shulker::take_components(source, pos);
                 self.menus.broken_entities.insert(pos, components);
             } else {
-                for stack in super::block_container::take_contents(source, pos, state) {
+                for stack in super::block_container::take_all_contents(source, pos, state) {
                     self.menus.spilled.push((pos, stack));
                 }
-            }
-            if name.and_then(super::furnace::kind).is_some() {
-                for stack in super::furnace::take_contents(source, pos) {
-                    self.menus.spilled.push((pos, stack));
-                }
-            }
-            if name == Some("minecraft:brewing_stand") {
-                for stack in super::brewing::take_contents(source, pos) {
-                    self.menus.spilled.push((pos, stack));
-                }
-            }
-            if name == Some("minecraft:jukebox")
-                && let Some(disc) = super::jukebox::take(source, pos)
-            {
-                self.menus.spilled.push((pos, disc));
             }
             if name == Some("minecraft:beacon") {
                 let _ = source.update_block_entity(pos[0], pos[1], pos[2], |entity| {
@@ -5684,7 +5669,7 @@ impl Region {
                         let mut broken = Vec::new();
                         self.apply_neighbor_updates(source, ctx, &mut broken);
                         for (pos, state) in broken {
-                            self.spawn_block_drops(pos, state);
+                            self.spawn_block_drops(source, pos, state);
                         }
                     }
                 }
@@ -8346,7 +8331,7 @@ impl Region {
         let mut removed = Vec::new();
         self.apply_neighbor_updates(source, ctx, &mut removed);
         for (pos, state) in removed {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
             self.wake_fluid(ctx, pos);
             changed.push(pos);
         }
@@ -8511,12 +8496,32 @@ impl Region {
         self.entities.insert(record);
     }
 
-    /// Drops the loot table of a block broken by a neighbor or gravity update.
-    fn spawn_block_drops(&mut self, pos: [i32; 3], state: u16) {
+    /// Drops what a block removed by a neighbor, gravity, piston or explosion update leaves
+    /// behind: its loot table (a shulker box with its contents in the item) and the contents of
+    /// any other container, which spill like a player-broken one.
+    fn spawn_block_drops(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        pos: [i32; 3],
+        state: u16,
+    ) {
         let empty = ferrite_item::ItemStack::empty();
-        for stack in super::drops::block_drops(state, &empty, &mut self.rng) {
-            let record = item::pop_resource(pos, stack, &mut self.rng);
+        let is_shulker = ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::block_container::is_shulker_box(name));
+        let entity = if is_shulker {
+            super::shulker::take_components(source, pos)
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        for stack in super::drops::block_drop_stacks(state, &empty, &mut self.rng, &entity) {
+            let record = item::pop_resource_stack(pos, &stack, &mut self.rng);
             self.entities.insert(record);
+        }
+        if !is_shulker {
+            for stack in super::block_container::take_all_contents(source, pos, u32::from(state)) {
+                let record = item::pop_resource_stack(pos, &stack, &mut self.rng);
+                self.entities.insert(record);
+            }
         }
     }
 
@@ -8578,7 +8583,7 @@ impl Region {
         let mut broken = Vec::new();
         self.apply_neighbor_updates(source, ctx, &mut broken);
         for (pos, state) in broken {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
             self.wake_fluid(ctx, pos);
         }
     }
@@ -8995,7 +9000,7 @@ impl Region {
             self.redstone.blocks_changed(&mut world, &piston_changes);
         }
         for &(pos, state) in &destroyed {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
         }
         for &pos in &piston_changes {
             self.updates.block_changed(pos);
@@ -9326,7 +9331,7 @@ impl Region {
         let mut broken = Vec::new();
         self.apply_neighbor_updates(source, ctx, &mut broken);
         for (pos, state) in broken {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
         }
     }
     /// The plugin bridge for events about non-player entities: the live handle on the tick
@@ -9483,7 +9488,7 @@ impl Region {
             }
         }
         for (pos, state) in removed {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
         }
         for pos in &destroyed {
             self.updates.block_changed(*pos);
@@ -10071,7 +10076,7 @@ impl Region {
                 let mut broken = Vec::new();
                 self.apply_neighbor_updates(source, ctx, &mut broken);
                 for (pos, state) in broken {
-                    self.spawn_block_drops(pos, state);
+                    self.spawn_block_drops(source, pos, state);
                 }
             }
             changed.extend(fire_changed);
@@ -12386,6 +12391,230 @@ mod tests {
         assert!(mob::state(&region.entities, cow).unwrap().health < mob::MobKind::Cow.max_health());
         region.explode([8.5, 66.5, 8.5], 4.0, true, &ctx);
         assert_ne!(source.block(8, 65, 9), Some(stone));
+    }
+
+    const SHULKER_BLOCKS: [&str; 17] = [
+        "shulker_box",
+        "white_shulker_box",
+        "orange_shulker_box",
+        "magenta_shulker_box",
+        "light_blue_shulker_box",
+        "yellow_shulker_box",
+        "lime_shulker_box",
+        "pink_shulker_box",
+        "gray_shulker_box",
+        "light_gray_shulker_box",
+        "cyan_shulker_box",
+        "purple_shulker_box",
+        "blue_shulker_box",
+        "brown_shulker_box",
+        "green_shulker_box",
+        "red_shulker_box",
+        "black_shulker_box",
+    ];
+
+    /// The dropped item stacks lying in a region.
+    fn ground_stacks(region: &Region) -> Vec<ferrite_item::ItemStack> {
+        region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|key| region.entities.data(*key))
+            .filter(|data| data.item.is_some())
+            .map(ferrite_entity::item::full_stack)
+            .collect()
+    }
+
+    fn stone_stack(count: i32) -> ferrite_item::ItemStack {
+        ferrite_item::ItemStack::from_name("stone")
+            .unwrap()
+            .copy_with_count(count)
+    }
+
+    fn emeralds(count: i32) -> ferrite_item::ItemStack {
+        ferrite_item::ItemStack::from_name("emerald")
+            .unwrap()
+            .copy_with_count(count)
+    }
+
+    fn container_of(stack: &ferrite_item::ItemStack) -> Vec<ferrite_item::ItemStack> {
+        match stack.components.get(ferrite_item::component_ids::CONTAINER) {
+            Some(ferrite_item::Component::Container(slots)) => slots
+                .iter()
+                .filter(|slot| !slot.is_empty())
+                .cloned()
+                .collect(),
+            other => panic!("expected a typed container component, got {other:?}"),
+        }
+    }
+
+    async fn loaded_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                return source;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("chunk never loaded");
+    }
+
+    fn bare_context(source: &std::sync::Arc<super::super::anvil::AnvilChunkSource>) -> TickContext {
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        TickContext {
+            signals,
+            tracking: Default::default(),
+            positions: Default::default(),
+            source: Some(source.clone()),
+            dimension: super::super::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(super::super::Dimension::Overworld),
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state: Default::default(),
+            trader_spawner: Default::default(),
+            profiler: None,
+            tree: None,
+            hooks: None,
+        }
+    }
+
+    fn fill_box(
+        source: &super::super::anvil::AnvilChunkSource,
+        pos: [i32; 3],
+        block: &str,
+        contents: &[(usize, ferrite_item::ItemStack)],
+    ) -> u32 {
+        let state =
+            u32::from(ferrite_data::blocks::default_state(&format!("minecraft:{block}")).unwrap());
+        source.set_block(pos[0], pos[1], pos[2], state).unwrap();
+        let mut slots = vec![ferrite_item::ItemStack::empty(); 27];
+        for (slot, stack) in contents {
+            slots[*slot] = stack.clone();
+        }
+        super::super::block_container::store_slots(
+            source,
+            pos,
+            &format!("minecraft:{block}"),
+            &slots,
+        );
+        state
+    }
+
+    /// An exploding shulker box (every colour, and the undyed one) drops one item that carries
+    /// its contents; nothing spills loose and no other copy is made.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_explosion_keeps_a_shulker_boxs_contents_in_its_item() {
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        for block in SHULKER_BLOCKS {
+            let mut region = Region::default();
+            region.held_chunks.insert(ChunkPos(0, 0), 1);
+            let sword = {
+                let mut sword = ferrite_item::ItemStack::from_name("diamond_sword").unwrap();
+                sword.components.insert(
+                    ferrite_item::component_ids::REPAIR_COST,
+                    ferrite_item::Component::RepairCost(7),
+                );
+                sword
+            };
+            fill_box(
+                &source,
+                [8, 65, 9],
+                block,
+                &[(0, emeralds(40)), (26, sword.clone())],
+            );
+            region.explode([8.5, 66.5, 8.5], 4.0, true, &ctx);
+            let air = u32::from(ferrite_data::blocks::default_state("minecraft:air").unwrap());
+            assert_eq!(source.block(8, 65, 9), Some(air), "{block} was destroyed");
+            // The blast also breaks the terrain around the box, so look at the box and at its
+            // distinctive contents only.
+            let ground = ground_stacks(&region);
+            let boxes: Vec<_> = ground
+                .iter()
+                .filter(|stack| stack.name() == Some(format!("minecraft:{block}").as_str()))
+                .collect();
+            assert_eq!(boxes.len(), 1, "{block}: exactly one box item");
+            assert_eq!(container_of(boxes[0]), [emeralds(40), sword]);
+            assert!(
+                ground.iter().all(|stack| !matches!(
+                    stack.name(),
+                    Some("minecraft:emerald" | "minecraft:diamond_sword")
+                )),
+                "{block}: no content spilled loose"
+            );
+            // The block entity went with the block: nothing is left to duplicate.
+            assert!(source.block_entity(8, 65, 9).is_none(), "{block}");
+        }
+    }
+
+    /// A box removed by a neighbour update (support lost, piston, gravity) goes through the same
+    /// path as an explosion, and an empty box carries no container.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shulker_box_removed_by_an_update_drops_one_item_with_its_contents() {
+        let source = loaded_source().await;
+        let air = u32::from(ferrite_data::blocks::default_state("minecraft:air").unwrap());
+        for (block, filled) in [("lime_shulker_box", true), ("shulker_box", false)] {
+            let mut region = Region::default();
+            region.held_chunks.insert(ChunkPos(0, 0), 1);
+            let contents: Vec<_> = filled.then(|| (13, stone_stack(5))).into_iter().collect();
+            let state = fill_box(&source, [3, 65, 3], block, &contents);
+            source.set_block(3, 65, 3, air).unwrap();
+            region.spawn_block_drops(&source, [3, 65, 3], state as u16);
+            let ground = ground_stacks(&region);
+            assert_eq!(ground.len(), 1, "{block}");
+            assert_eq!(
+                ground[0].name(),
+                Some(format!("minecraft:{block}").as_str())
+            );
+            if filled {
+                assert_eq!(container_of(&ground[0]), [stone_stack(5)]);
+            } else {
+                assert!(
+                    ground[0]
+                        .components
+                        .get(ferrite_item::component_ids::CONTAINER)
+                        .is_none(),
+                    "an empty box has no container component"
+                );
+            }
+        }
+    }
+
+    /// Other containers destroyed by an explosion or an update spill their contents (they were
+    /// lost before) and are not duplicated by the loot table.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_destroyed_chest_spills_its_contents_once() {
+        let source = loaded_source().await;
+        let air = u32::from(ferrite_data::blocks::default_state("minecraft:air").unwrap());
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let state = fill_box(
+            &source,
+            [3, 65, 3],
+            "chest",
+            &[(0, stone_stack(9)), (5, stone_stack(2))],
+        );
+        source.set_block(3, 65, 3, air).unwrap();
+        region.spawn_block_drops(&source, [3, 65, 3], state as u16);
+        let total: i32 = ground_stacks(&region)
+            .iter()
+            .filter(|stack| stack.name() == Some("minecraft:stone"))
+            .map(|stack| stack.count)
+            .sum();
+        assert_eq!(total, 11, "every stone spilled, once");
+        // A second removal at the same spot finds no block entity left to spill again.
+        let before = ground_stacks(&region).len();
+        region.spawn_block_drops(&source, [3, 65, 3], state as u16);
+        let again: i32 = ground_stacks(&region)
+            .iter()
+            .filter(|stack| stack.name() == Some("minecraft:stone"))
+            .map(|stack| stack.count)
+            .sum();
+        assert_eq!(again, 11, "no second spill");
+        assert!(ground_stacks(&region).len() >= before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

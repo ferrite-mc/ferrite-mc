@@ -309,4 +309,160 @@ mod tests {
         assert_eq!(plain.name(), Some("minecraft:shulker_box"));
         assert!(item_with("minecraft:chest", &BTreeMap::new()).is_none());
     }
+
+    async fn source() -> std::sync::Arc<AnvilChunkSource> {
+        let source = AnvilChunkSource::new_memory();
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                return source;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("chunk never loaded");
+    }
+
+    fn place_box(source: &AnvilChunkSource, block: &str) {
+        let state = ferrite_data::blocks::default_state(block).unwrap();
+        source.set_block(4, 65, 4, u32::from(state)).unwrap();
+    }
+
+    fn carried(block: &str, slots: Vec<ItemStack>) -> ItemStack {
+        let mut item = ItemStack::from_name(block).unwrap();
+        item.components.insert(
+            ferrite_item::component_ids::CONTAINER,
+            Component::Container(slots),
+        );
+        item
+    }
+
+    fn placed_items(source: &AnvilChunkSource) -> Vec<ItemStack> {
+        super::super::block_container::load_items(source.block_entity(4, 65, 4).as_ref())
+    }
+
+    #[tokio::test]
+    async fn every_colour_restores_its_contents_when_placed() {
+        let source = source().await;
+        for block in [
+            "shulker_box",
+            "white_shulker_box",
+            "orange_shulker_box",
+            "magenta_shulker_box",
+            "light_blue_shulker_box",
+            "yellow_shulker_box",
+            "lime_shulker_box",
+            "pink_shulker_box",
+            "gray_shulker_box",
+            "light_gray_shulker_box",
+            "cyan_shulker_box",
+            "purple_shulker_box",
+            "blue_shulker_box",
+            "brown_shulker_box",
+            "green_shulker_box",
+            "red_shulker_box",
+            "black_shulker_box",
+        ] {
+            let name = format!("minecraft:{block}");
+            place_box(&source, &name);
+            let mut slots = vec![ItemStack::empty(); 27];
+            slots[0] = stone(64);
+            slots[13] = stone(7);
+            slots[26] = stone(1);
+            let rejected = apply_item(&source, [4, 65, 4], &carried(block, slots.clone()));
+            assert!(rejected.is_empty(), "{block}");
+            let placed = placed_items(&source);
+            assert_eq!(placed[0], stone(64), "{block}");
+            assert_eq!(placed[13], stone(7), "{block}");
+            assert_eq!(placed[26], stone(1), "{block}");
+            assert_eq!(
+                placed.iter().filter(|s| !s.is_empty()).count(),
+                3,
+                "{block}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_box_and_an_empty_box_both_place() {
+        let source = source().await;
+        place_box(&source, "minecraft:blue_shulker_box");
+        let full: Vec<_> = (0..27).map(|i| stone(i % 64 + 1)).collect();
+        assert!(
+            apply_item(
+                &source,
+                [4, 65, 4],
+                &carried("blue_shulker_box", full.clone())
+            )
+            .is_empty()
+        );
+        let placed = placed_items(&source);
+        assert_eq!(placed.iter().filter(|s| !s.is_empty()).count(), 27);
+        assert_eq!(placed[26], full[26]);
+        // An item with no shulker components leaves the block alone: no contents, no entity.
+        place_box(&source, "minecraft:red_shulker_box");
+        let plain = ItemStack::from_name("red_shulker_box").unwrap();
+        assert!(apply_item(&source, [5, 65, 5], &plain).is_empty());
+    }
+
+    #[tokio::test]
+    async fn nested_shulker_boxes_are_refused_and_handed_back() {
+        let source = source().await;
+        place_box(&source, "minecraft:lime_shulker_box");
+        let inner = carried("pink_shulker_box", vec![stone(3)]);
+        let rejected = apply_item(
+            &source,
+            [4, 65, 4],
+            &carried("lime_shulker_box", vec![stone(5), inner.clone(), stone(2)]),
+        );
+        assert_eq!(
+            rejected,
+            [inner],
+            "the inner box comes back whole, with contents"
+        );
+        let placed = placed_items(&source);
+        assert_eq!(placed[0], stone(5));
+        assert!(placed[1].is_empty(), "the nested box did not go in");
+        assert_eq!(placed[2], stone(2));
+    }
+
+    #[tokio::test]
+    async fn slots_past_the_box_are_handed_back_not_deleted() {
+        let source = source().await;
+        place_box(&source, "minecraft:cyan_shulker_box");
+        let mut slots = vec![ItemStack::empty(); 30];
+        slots[1] = stone(4);
+        slots[28] = stone(9);
+        let rejected = apply_item(&source, [4, 65, 4], &carried("cyan_shulker_box", slots));
+        assert_eq!(rejected, [stone(9)]);
+        assert_eq!(placed_items(&source)[1], stone(4));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_container_does_not_place_or_panic() {
+        let source = source().await;
+        place_box(&source, "minecraft:black_shulker_box");
+        let mut item = ItemStack::from_name("black_shulker_box").unwrap();
+        item.components.insert(
+            ferrite_item::component_ids::CONTAINER,
+            Component::Opaque(Tag::String("garbage".into())),
+        );
+        assert!(apply_item(&source, [4, 65, 4], &item).is_empty());
+        assert!(placed_items(&source).iter().all(ItemStack::is_empty));
+    }
+
+    #[tokio::test]
+    async fn name_and_lock_travel_with_the_item() {
+        let source = source().await;
+        place_box(&source, "minecraft:green_shulker_box");
+        let mut item = ItemStack::from_name("green_shulker_box").unwrap();
+        item.components.insert(
+            ferrite_item::component_ids::CUSTOM_NAME,
+            Component::CustomName(ferrite_text::Component::text("Kiste ✨")),
+        );
+        assert!(apply_item(&source, [4, 65, 4], &item).is_empty());
+        let entity = source
+            .block_entity(4, 65, 4)
+            .expect("a name needs the entity");
+        assert!(entity.data.get("CustomName").is_some());
+    }
 }
