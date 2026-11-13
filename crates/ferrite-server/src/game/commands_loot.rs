@@ -288,6 +288,7 @@ fn split_stacks(rolled: Vec<ferrite_loot::LootStack>) -> Vec<ferrite_item::ItemS
 ///
 /// The caller hands the stacks to the player; `/loot give` does the same through
 /// `Action::LootGive`.
+#[allow(dead_code)] // consumed by lane B (advancement rewards); tested here
 pub fn roll_reward_table(table: &str) -> Result<Vec<ferrite_item::ItemStack>, String> {
     roll_stacks(table, &LootContext::default())
         .ok_or_else(|| Feedback::new("argument.id.unknown", vec![table.to_owned()]).text)
