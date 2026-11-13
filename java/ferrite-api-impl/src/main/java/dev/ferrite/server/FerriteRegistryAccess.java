@@ -367,7 +367,9 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                 T existing = entries.get(key);
                 if (existing != null) return existing;
                 var k = key;
-                T value = factory != null ? factory.apply(key) : type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
+                T value = factory != null ? factory.apply(key) : FerriteLegacyRegistryValues.supports(kind)
+                    ? FerriteLegacyRegistryValues.create(kind, key, type)
+                    : type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
                     case "getKey", "key" -> k;
                     case "name", "getName" -> k.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_');
                     case "translationKey", "getTranslationKey" -> kind + "." + k.getNamespace() + "." + k.getKey();
@@ -380,7 +382,11 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                 return previous == null ? value : previous;
             }
             @Override public int size() { return KEYS.get(kind).size(); }
-            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { return KEYS.get(kind).stream().map(org.bukkit.NamespacedKey::fromString); }
+            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() {
+                var keys = KEYS.get(kind).stream().map(org.bukkit.NamespacedKey::fromString);
+                return FerriteLegacyRegistryValues.supports(kind)
+                    ? keys.sorted(java.util.Comparator.comparingInt(key -> protocolId(kind, key))) : keys;
+            }
             @Override public java.util.stream.Stream<T> stream() { return keyStream().map(this::get); }
             @Override public java.util.Iterator<T> iterator() { return stream().iterator(); }
         };
