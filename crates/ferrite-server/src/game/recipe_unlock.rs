@@ -552,20 +552,25 @@ pub fn criteria_for_effects(active: &[EffectFact]) -> Vec<String> {
             let Criterion::HasEffects(wanted) = criterion else {
                 continue;
             };
-            let all = !wanted.is_empty()
-                && wanted.iter().all(|(effect, amplifier, duration)| {
-                    active.iter().any(|fact| {
-                        fact.name == *effect
-                            && amplifier.contains(f64::from(fact.amplifier))
-                            && duration.contains(f64::from(fact.duration))
-                    })
-                });
+            let all = effects_hold(wanted, active);
             if all {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
     }
     out
+}
+
+/// Whether every wanted `(effect, amplifier range, duration range)` is active.
+fn effects_hold(wanted: &[(String, Range, Range)], active: &[EffectFact]) -> bool {
+    !wanted.is_empty()
+        && wanted.iter().all(|(effect, amplifier, duration)| {
+            active.iter().any(|fact| {
+                fact.name == *effect
+                    && amplifier.contains(f64::from(fact.amplifier))
+                    && duration.contains(f64::from(fact.duration))
+            })
+        })
 }
 
 /// The `effects` map of an `effects_changed` criterion, when that is all it asks for.
@@ -1425,15 +1430,7 @@ mod tests {
             amplifier,
             duration: 100,
         };
-        let holds = |active: &[EffectFact]| {
-            wanted.iter().all(|(effect, amplifier, duration)| {
-                active.iter().any(|f| {
-                    f.name == *effect
-                        && amplifier.contains(f64::from(f.amplifier))
-                        && duration.contains(f64::from(f.duration))
-                })
-            })
-        };
+        let holds = |active: &[EffectFact]| effects_hold(wanted, active);
         assert!(holds(&[
             fact("minecraft:speed", 0),
             fact("minecraft:haste", 1)
