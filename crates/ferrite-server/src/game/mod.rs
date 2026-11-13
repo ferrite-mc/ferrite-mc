@@ -1446,14 +1446,35 @@ impl World {
         done.await
             .map_err(|_| anyhow::anyhow!("plugin attach response lost"))
     }
+    /// How long an unload that finds a player "inside" keeps asking before it refuses. A player
+    /// whose departure `Respawn` the client has already seen can still be listed as inside for a
+    /// moment: the region queues the packet, then hands the player to the coordinator in a
+    /// separate signal, and a starved region thread can sit between the two. The coordinator
+    /// stays the authority (each ask is answered from its own bookkeeping, after the signals it
+    /// has queued); this only gives that signal time to arrive.
+    const UNLOAD_DEPARTURE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+    const UNLOAD_DEPARTURE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
     pub async fn unload_runtime_world(&self, id: Uuid, save: bool) -> anyhow::Result<bool> {
-        let (complete, done) = oneshot::channel();
-        self.sender
-            .send(GameMessage::UnloadRuntimeWorld { id, save, complete })
-            .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
-        done.await
-            .map_err(|_| anyhow::anyhow!("runtime world response lost"))?
-            .map_err(anyhow::Error::msg)
+        let deadline = tokio::time::Instant::now() + Self::UNLOAD_DEPARTURE_GRACE;
+        loop {
+            let (complete, done) = oneshot::channel();
+            self.sender
+                .send(GameMessage::UnloadRuntimeWorld { id, save, complete })
+                .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
+            let answer = done
+                .await
+                .map_err(|_| anyhow::anyhow!("runtime world response lost"))?;
+            match answer {
+                Err(message)
+                    if message.contains(runtime_persist::PLAYERS_INSIDE)
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Self::UNLOAD_DEPARTURE_POLL).await;
+                }
+                other => return other.map_err(anyhow::Error::msg),
+            }
+        }
     }
     pub async fn shutdown(self) -> anyhow::Result<()> {
         let result: anyhow::Result<()> = if *self.stop.borrow() {
