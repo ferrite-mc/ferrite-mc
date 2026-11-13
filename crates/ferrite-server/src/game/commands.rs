@@ -619,11 +619,11 @@ pub enum RotateTo {
 /// How `/item` and `/loot` write into slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotMode {
-    /// A single stack goes to every slot; several go to the slots pairwise.
+    /// Slot `i` takes the `i`th stack; slots past the end of the list are left alone.
     Replace,
-    /// Only empty slots change.
+    /// The stacks are cycled over every selected slot, empty or not (vanilla's `cycle` provider).
     Fill,
-    /// Like replace, but slots left without a stack are cleared when several are given.
+    /// Like replace, but slots past the end of the list are cleared.
     Override,
     /// Adds stacks to a container, merging with what is there (`/loot insert`).
     Insert,

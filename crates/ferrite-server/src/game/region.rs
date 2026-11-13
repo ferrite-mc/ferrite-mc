@@ -110,15 +110,15 @@ fn moving_piston_replay(
         .collect()
 }
 
-/// How `/item` writes stacks into a player's slots.
+/// How `/item` writes stacks into a player's slots (see `slot_ops::distribute`).
 #[derive(Debug, Clone)]
 pub enum SlotFill {
-    /// A single stack goes to every slot; several go to the slots pairwise.
+    /// `replace`/`modify`: slot `i` takes `stacks[i]`; slots past the end are left alone.
     Set(Vec<ferrite_item::ItemStack>),
-    /// Like `Set`, but slots without a matching stack are cleared when several are given.
+    /// `override`: like `Set`, but slots past the end of the list are cleared.
     Override(Vec<ferrite_item::ItemStack>),
-    /// Like `Set`, but only slots that are empty change.
-    FillEmpty(Vec<ferrite_item::ItemStack>),
+    /// `fill`: the stacks are cycled over every slot.
+    Cycle(Vec<ferrite_item::ItemStack>),
 }
 
 pub enum Command {
@@ -2597,33 +2597,15 @@ impl Player {
 
     fn fill_slots(&mut self, slots: &[i16], fill: SlotFill) {
         let slots: Vec<usize> = slots.iter().filter_map(|s| self.resolve_slot(*s)).collect();
-        for (index, slot) in slots.iter().enumerate() {
-            let pick = |stacks: &[ferrite_item::ItemStack]| match stacks.len() {
-                0 => None,
-                1 => stacks.first().cloned(),
-                _ => stacks.get(index).cloned(),
-            };
-            match &fill {
-                SlotFill::Set(stacks) => {
-                    if let Some(stack) = pick(stacks) {
-                        self.put_slot(*slot, stack);
-                    }
-                }
-                SlotFill::Override(stacks) => {
-                    let stack = if stacks.len() > 1 {
-                        stacks.get(index).cloned()
-                    } else {
-                        pick(stacks)
-                    };
-                    self.put_slot(*slot, stack.unwrap_or_else(ferrite_item::ItemStack::empty));
-                }
-                SlotFill::FillEmpty(stacks) => {
-                    if self.inventory.get(*slot).is_empty()
-                        && let Some(stack) = pick(stacks)
-                    {
-                        self.put_slot(*slot, stack);
-                    }
-                }
+        let (mode, stacks) = match fill {
+            SlotFill::Set(stacks) => (super::commands::SlotMode::Replace, stacks),
+            SlotFill::Override(stacks) => (super::commands::SlotMode::Override, stacks),
+            SlotFill::Cycle(stacks) => (super::commands::SlotMode::Fill, stacks),
+        };
+        let assigned = super::slot_ops::distribute(mode, &stacks, slots.len());
+        for (slot, stack) in slots.iter().zip(assigned) {
+            if let Some(stack) = stack {
+                self.put_slot(*slot, stack);
             }
         }
         self.sync_containers();
