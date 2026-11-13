@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 /// Loot tables from the extracted vanilla data, loaded on first use. `None` (no data on this
 /// machine, or a load error) means blocks drop nothing.
-fn tables() -> Option<&'static LootTables> {
+pub(super) fn tables() -> Option<&'static LootTables> {
     static TABLES: OnceLock<Option<LootTables>> = OnceLock::new();
     TABLES
         .get_or_init(|| {
@@ -126,7 +126,7 @@ pub fn preload() {
 }
 
 /// Adapts the entity RNG to loot evaluation.
-struct LootRng<'a>(&'a mut ferrite_entity::Rng);
+pub(super) struct LootRng<'a>(pub(super) &'a mut ferrite_entity::Rng);
 
 impl ferrite_loot::Rng for LootRng<'_> {
     fn next_int(&mut self, bound: i32) -> i32 {
@@ -480,6 +480,25 @@ mod tests {
             }
         }
         assert!(enchanted > 0, "no table enchanted anything");
+    }
+
+    #[test]
+    fn an_exploration_map_without_a_structure_search_stays_unchanged() {
+        use ferrite_loot::LootHost;
+        let destinations = ["minecraft:buried_treasure".to_owned()];
+        // No world at all, and no vanilla terrain behind a world: nothing is found, so the
+        // stack is left as it is, like vanilla's "no structure found".
+        assert!(
+            ServerLootHost::default()
+                .exploration_map([0.0; 3], &destinations, "minecraft:red_x", 1, false)
+                .is_none()
+        );
+        let world = crate::game::anvil::AnvilChunkSource::new_memory();
+        let host = ServerLootHost { world: Some(world) };
+        assert!(
+            host.exploration_map([0.0; 3], &destinations, "minecraft:red_x", 1, false)
+                .is_none()
+        );
     }
 
     #[test]

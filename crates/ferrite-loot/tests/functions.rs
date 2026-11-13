@@ -45,6 +45,7 @@ impl LootHost for Host {
     }
     fn exploration_map(
         &self,
+        _origin: [f64; 3],
         destinations: &[String],
         decoration: &str,
         zoom: i32,

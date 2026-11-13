@@ -232,6 +232,7 @@ pub trait LootHost: std::fmt::Debug + Send + Sync {
     /// like vanilla's "no structure found".
     fn exploration_map(
         &self,
+        _origin: [f64; 3],
         _destinations: &[String],
         _decoration: &str,
         _zoom: i32,
@@ -271,6 +272,7 @@ pub(crate) fn normalize_id(id: &str) -> String {
 }
 
 /// Read-only data shared by every table while loading.
+#[derive(Debug)]
 pub(crate) struct Definitions {
     /// Namespace of the loaded data pack (`minecraft` for vanilla).
     pub(crate) namespace: String,

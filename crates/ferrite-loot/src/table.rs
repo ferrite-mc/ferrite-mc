@@ -101,6 +101,7 @@ impl LootTable {
 /// pack namespace.
 #[derive(Debug)]
 pub struct LootTables {
+    definitions: std::sync::Arc<Definitions>,
     namespace: String,
     tables: BTreeMap<String, LootTable>,
     tag_count: usize,
@@ -144,6 +145,7 @@ impl LootTables {
 
         let tag_count = definitions.tags.len();
         let predicate_count = definitions.predicates.len();
+        let definitions = std::sync::Arc::new(definitions);
         let mut loader = Loader {
             raw: &raw,
             definitions: &definitions,
@@ -156,11 +158,23 @@ impl LootTables {
         }
 
         Ok(Self {
+            definitions,
             namespace,
             tables,
             tag_count,
             predicate_count,
         })
+    }
+
+    /// Parses one loot function (as written in a loot table or an item modifier) against this
+    /// pack's registry data. `Err` names a function type this crate does not evaluate.
+    pub fn parse_function(&self, value: &Value) -> std::result::Result<Function, String> {
+        let function = function::parse(value, &self.definitions)
+            .ok_or_else(|| "a loot function is a JSON object".to_owned())?;
+        match &function.kind {
+            FunctionKind::Opaque { kind, .. } => Err(format!("unsupported function '{kind}'")),
+            _ => Ok(function),
+        }
     }
 
     /// Looks up a table by id. An omitted namespace defaults to the loaded

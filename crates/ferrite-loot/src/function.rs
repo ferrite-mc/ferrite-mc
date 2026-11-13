@@ -217,7 +217,7 @@ pub(crate) fn parse_functions(value: &Value, definitions: &Definitions) -> Vec<F
     }
 }
 
-fn parse(value: &Value, definitions: &Definitions) -> Option<Function> {
+pub(crate) fn parse(value: &Value, definitions: &Definitions) -> Option<Function> {
     let object = value.as_object()?;
     let conditions = ["condition", "conditions"]
         .iter()
@@ -529,6 +529,14 @@ fn component_names(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+impl Function {
+    /// Applies the function to `stack` if its conditions hold. A count driven to zero or below
+    /// means the stack is gone.
+    pub fn apply_to(&self, stack: &mut LootStack, context: &LootContext, rng: &mut impl Rng) {
+        apply(std::slice::from_ref(self), stack, context, rng);
+    }
+}
+
 /// Applies every function whose conditions hold to one stack.
 pub(crate) fn apply(
     functions: &[Function],
@@ -711,11 +719,17 @@ impl FunctionKind {
                 skip_existing_chunks,
             } => {
                 // 26.3 checks only for an empty stack and the origin, not for the item.
-                if context.origin.is_none() {
+                let Some(origin) = context.origin else {
                     return;
-                }
+                };
                 let Some(components) = context.host.as_ref().and_then(|host| {
-                    host.exploration_map(destinations, decoration, *zoom, *skip_existing_chunks)
+                    host.exploration_map(
+                        origin,
+                        destinations,
+                        decoration,
+                        *zoom,
+                        *skip_existing_chunks,
+                    )
                 }) else {
                     return;
                 };
