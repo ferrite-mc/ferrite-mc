@@ -61,7 +61,7 @@ pub enum Criterion {
     NetherTravel(DistanceCheck),
     /// A trigger whose conditions are a few plain predicates (an item, an entity type, a loot
     /// table, a level, the player's height, the damage's direct entity).
-    Plain(Plain),
+    Plain(Box<Plain>),
     /// A trigger this server cannot evaluate (or one whose conditions are richer than the
     /// supported shape); the payload is the trigger id, read by [`coverage`].
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1100,8 +1100,10 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                 .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Consumes),
             Some("minecraft:player_killed_entity") => kill_type(&c["conditions"])
                 .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Kills),
-            Some(id) if PLAIN_TRIGGERS.contains(&id) => plain(id, &c["conditions"])
-                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Plain),
+            Some(id) if PLAIN_TRIGGERS.contains(&id) => plain(id, &c["conditions"]).map_or_else(
+                || Criterion::Other(trigger.clone()),
+                |plain| Criterion::Plain(Box::new(plain)),
+            ),
             _ => Criterion::Other(trigger.clone()),
         };
         criteria.insert(name.clone(), kind);
