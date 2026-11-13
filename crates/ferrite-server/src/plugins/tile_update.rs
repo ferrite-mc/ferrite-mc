@@ -105,6 +105,17 @@ const MAX_PROPERTIES: usize = 16;
 const MAX_PROPERTY_VALUE: usize = 32767;
 const MAX_PROPERTY_SIGNATURE: usize = 1024;
 
+/// Decodes lowercase or uppercase hex; `None` for an odd length or a non-hex digit.
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect()
+}
+
 /// The most a vanilla stack holds; the client rejects larger counts.
 const MAX_COUNT: i32 = 99;
 
@@ -125,6 +136,7 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
     let mut profile = None;
     let mut properties: Vec<(String, String, Option<String>)> = Vec::new();
     let mut items: Vec<(u8, String, i32)> = Vec::new();
+    let mut metas: Vec<(u8, ferrite_plugin::ItemMetaSpec)> = Vec::new();
     let mut timers = None;
     for entry in entries.split(separator).filter(|e| !e.is_empty()) {
         let mut parts = entry.split(',');
@@ -146,6 +158,15 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
                 }
                 ferrite_item::item_id(material)?;
                 items.push((slot, material.to_owned(), count));
+            }
+            // The metadata of a stack, hex encoded because it holds the entry separator itself.
+            "meta" if size > 0 => {
+                let slot: u8 = parts.next()?.parse().ok()?;
+                let payload = String::from_utf8(hex_decode(parts.next()?)?).ok()?;
+                if parts.next().is_some() || metas.iter().any(|(s, _)| *s == slot) {
+                    return None;
+                }
+                metas.push((slot, super::inventory::parse_item_meta(&payload)?));
             }
             "pattern" if banner && patterns.len() < 16 => {
                 let id = parts.next()?;
@@ -206,6 +227,13 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
             _ => return None,
         }
     }
+    // Metadata only makes sense for a stack that is in the snapshot.
+    if metas
+        .iter()
+        .any(|(slot, _)| !items.iter().any(|(item, ..)| item == slot))
+    {
+        return None;
+    }
     items.sort_by_key(|(slot, ..)| *slot);
     Some(PluginPacket::TileUpdate {
         pos,
@@ -215,18 +243,35 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
         patterns,
         profile,
         properties,
+        metas,
     })
 }
 
+/// Applies a stack's metadata to the stack (`with_meta` in the game loop).
+pub type MetaApplier<'a> =
+    &'a dyn Fn(ferrite_item::ItemStack, &ferrite_plugin::ItemMetaSpec) -> ferrite_item::ItemStack;
+
+/// What a snapshot holds, borrowed from the [`PluginPacket::TileUpdate`] that carries it.
+pub struct TileData<'a> {
+    pub items: &'a [(u8, String, i32)],
+    pub furnace: Option<[i16; 4]>,
+    pub patterns: &'a [(String, String)],
+    pub profile: Option<(Option<String>, Option<[i32; 4]>)>,
+    pub properties: &'a [(String, String, Option<String>)],
+    pub metas: &'a [(u8, ferrite_plugin::ItemMetaSpec)],
+}
+
 /// The block entity update tag: vanilla's `Items` list, plus the furnace timers Ferrite keeps.
-pub fn nbt(
-    entity: &str,
-    items: &[(u8, String, i32)],
-    furnace: Option<[i16; 4]>,
-    patterns: &[(String, String)],
-    profile: Option<(Option<String>, Option<[i32; 4]>)>,
-    properties: &[(String, String, Option<String>)],
-) -> Compound {
+pub fn nbt(entity: &str, tile: &TileData<'_>, with_meta: MetaApplier<'_>) -> Compound {
+    let TileData {
+        items,
+        furnace,
+        patterns,
+        profile,
+        properties,
+        metas,
+    } = tile;
+    let (furnace, profile) = (*furnace, profile.clone());
     let mut data = Compound::new();
     if entity == "minecraft:banner" {
         let layers = patterns
@@ -276,9 +321,11 @@ pub fn nbt(
         .iter()
         .filter_map(|(slot, material, count)| {
             let id = ferrite_item::item_id(material)?;
-            let mut entry = ferrite_item::ItemStack::with_count(id, *count)
-                .to_nbt()
-                .ok()?;
+            let mut stack = ferrite_item::ItemStack::with_count(id, *count);
+            if let Some((_, meta)) = metas.iter().find(|(meta_slot, _)| meta_slot == slot) {
+                stack = with_meta(stack, meta);
+            }
+            let mut entry = stack.to_nbt().ok()?;
             entry.insert("Slot".into(), Tag::Byte(*slot as i8));
             Some(entry)
         })
@@ -424,7 +471,19 @@ mod tests {
             );
         }
         assert_eq!(
-            nbt("minecraft:chest", &[], None, &[], None, &[]).get("Items"),
+            nbt(
+                "minecraft:chest",
+                &TileData {
+                    items: &[],
+                    furnace: None,
+                    patterns: &[],
+                    profile: None,
+                    properties: &[],
+                    metas: &[],
+                },
+                &|s, _| s
+            )
+            .get("Items"),
             Some(&Tag::List(List::Compound(Vec::new())))
         );
     }
@@ -443,7 +502,18 @@ mod tests {
         let sent = BlockEntityData {
             location: 0x1234,
             block_type: VarInt(type_id),
-            nbt: nbt("minecraft:blast_furnace", &items, furnace, &[], None, &[]),
+            nbt: nbt(
+                "minecraft:blast_furnace",
+                &TileData {
+                    items: &items,
+                    furnace,
+                    patterns: &[],
+                    profile: None,
+                    properties: &[],
+                    metas: &[],
+                },
+                &|s, _| s,
+            ),
         };
         let mut bytes = Vec::new();
         sent.encode(&mut bytes);
@@ -471,6 +541,7 @@ mod tests {
             patterns,
             profile,
             properties,
+            metas,
             ..
         }) = packet([0, 70, 0], entity, &join(entries), SEP)
         else {
@@ -480,7 +551,18 @@ mod tests {
         let sent = BlockEntityData {
             location: 1,
             block_type: VarInt(type_id),
-            nbt: nbt(entity, &items, furnace, &patterns, profile, &properties),
+            nbt: nbt(
+                entity,
+                &TileData {
+                    items: &items,
+                    furnace,
+                    patterns: &patterns,
+                    profile,
+                    properties: &properties,
+                    metas: &metas,
+                },
+                &|s, _| s,
+            ),
         };
         let mut bytes = Vec::new();
         sent.encode(&mut bytes);
@@ -596,5 +678,114 @@ mod tests {
         assert_eq!(bad("minecraft:skull", &[&long]), None);
         let long_sig = format!("property,textures,v,{}", "s".repeat(1025));
         assert_eq!(bad("minecraft:skull", &[&long_sig]), None);
+    }
+
+    fn hex(text: &str) -> String {
+        text.bytes().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A `setItemMeta` payload with a name, a sharpness enchantment and nothing else.
+    fn named_sharp() -> String {
+        [
+            "\"Hi\"",
+            "",
+            "minecraft:sharpness=3",
+            "0",
+            "",
+            "0",
+            "",
+            "",
+            "",
+        ]
+        .join("\u{1e}")
+    }
+
+    #[test]
+    fn a_stack_in_the_snapshot_can_carry_metadata() {
+        let meta = format!("meta,1,{}", hex(&named_sharp()));
+        let Some(PluginPacket::TileUpdate { metas, items, .. }) = packet(
+            [0, 0, 0],
+            "minecraft:chest",
+            &join(&["item,1,minecraft:diamond_sword,1", &meta]),
+            SEP,
+        ) else {
+            panic!("a valid chest snapshot");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].0, 1);
+        assert_eq!(metas[0].1.name.as_deref(), Some("\"Hi\""));
+        assert_eq!(
+            metas[0].1.enchants,
+            vec![("minecraft:sharpness".to_owned(), 3)]
+        );
+        // The applier decides what the metadata does to the stack; `nbt` hands it each stack once.
+        let named = nbt(
+            "minecraft:chest",
+            &TileData {
+                items: &items,
+                furnace: None,
+                patterns: &[],
+                profile: None,
+                properties: &[],
+                metas: &metas,
+            },
+            &|mut stack, meta| {
+                stack.count = i32::try_from(meta.enchants.len()).unwrap() + 4;
+                stack
+            },
+        );
+        let Some(Tag::List(List::Compound(list))) = named.get("Items") else {
+            panic!("items list");
+        };
+        assert_eq!(list[0].get("count"), Some(&Tag::Int(5)));
+    }
+
+    #[test]
+    fn metadata_without_its_stack_or_in_a_bad_encoding_is_rejected() {
+        let good = hex(&named_sharp());
+        let bad = |entries: &[&str]| packet([0, 0, 0], "minecraft:chest", &join(entries), SEP);
+        assert_eq!(
+            bad(&[&format!("meta,0,{good}")]),
+            None,
+            "no stack in slot 0"
+        );
+        assert_eq!(
+            bad(&["item,0,minecraft:stone,1", &format!("meta,0,{good}x")]),
+            None,
+            "odd hex"
+        );
+        assert_eq!(
+            bad(&["item,0,minecraft:stone,1", "meta,0,zz"]),
+            None,
+            "not hex"
+        );
+        assert_eq!(
+            bad(&[
+                "item,0,minecraft:stone,1",
+                &format!("meta,0,{good}"),
+                &format!("meta,0,{good}")
+            ]),
+            None,
+            "two metas for a slot"
+        );
+        assert_eq!(
+            bad(&[
+                "item,0,minecraft:stone,1",
+                &format!("meta,0,{}", hex("not a payload"))
+            ]),
+            None,
+            "unreadable payload"
+        );
+        assert_eq!(
+            packet(
+                [0, 0, 0],
+                "minecraft:banner",
+                &format!("meta,0,{good}"),
+                SEP
+            ),
+            None,
+            "banners hold no items"
+        );
     }
 }

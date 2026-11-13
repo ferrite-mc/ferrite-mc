@@ -14,6 +14,64 @@ const MAX_ROWS: usize = 6;
 /// Maximum UTF-16 units in a caption that still fit a network NBT string (65,535 bytes).
 const MAX_MAP_CAPTION_UTF16: usize = 21_844;
 
+/// Decodes the payload of `setItemMeta(int,String)`: the metadata fields joined by [`FIELD`].
+/// Anything unreadable refuses the whole payload, so half a stack of metadata is never applied.
+pub fn parse_item_meta(payload: &str) -> Option<ferrite_plugin::ItemMetaSpec> {
+    let mut fields = payload.split(FIELD);
+    let name = fields.next().filter(|s| !s.is_empty()).map(str::to_owned);
+    let items = |field: Option<&str>| -> Vec<String> {
+        field
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.split(ferrite_plugin::HOST_ITEM_SEPARATOR)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let lore = items(fields.next());
+    let mut enchants = Vec::new();
+    for entry in items(fields.next()) {
+        let (id, level) = entry.split_once('=')?;
+        enchants.push((id.to_owned(), level.parse().ok()?));
+    }
+    let unbreakable = fields.next()? == "1";
+    let model = fields
+        .next()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse().ok());
+    let repair = fields.next()?.parse().ok().filter(|r| *r >= 0)?;
+    let flags = fields
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if flags.iter().any(|flag| !is_item_flag(flag)) {
+        return None;
+    }
+    let custom_data = match fields.next() {
+        Some(pdc) if !pdc.is_empty() => Some(item_pdc(pdc)?),
+        _ => None,
+    };
+    // The book field is optional; one that is present but unreadable refuses the whole
+    // call, so a half-written book is never applied.
+    let book = match fields.next() {
+        Some(book) if !book.is_empty() => Some(item_book(book)?),
+        _ => None,
+    };
+    Some(ferrite_plugin::ItemMetaSpec {
+        name,
+        lore,
+        enchants,
+        unbreakable,
+        model,
+        repair,
+        flags,
+        custom_data,
+        book,
+    })
+}
+
 /// The command behind an inventory call, or `None` when it is not one this module handles
 /// (a hopper or dispenser inventory, say, which the menu code cannot show yet).
 pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
@@ -91,60 +149,19 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         }),
         "setItemMeta(int,String)" => {
             let slot = call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?;
-            let mut fields = call.args.get(1)?.split(FIELD);
-            let name = fields.next().filter(|s| !s.is_empty()).map(str::to_owned);
-            let items = |field: Option<&str>| -> Vec<String> {
-                field
-                    .filter(|s| !s.is_empty())
-                    .map(|s| {
-                        s.split(ferrite_plugin::HOST_ITEM_SEPARATOR)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            let lore = items(fields.next());
-            let mut enchants = Vec::new();
-            for entry in items(fields.next()) {
-                let (id, level) = entry.split_once('=')?;
-                enchants.push((id.to_owned(), level.parse().ok()?));
-            }
-            let unbreakable = fields.next()? == "1";
-            let model = fields
-                .next()
-                .filter(|s| !s.is_empty())
-                .and_then(|s| s.parse().ok());
-            let repair = fields.next()?.parse().ok().filter(|r| *r >= 0)?;
-            let flags = fields
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.split(',').map(str::to_owned).collect::<Vec<_>>())
-                .unwrap_or_default();
-            if flags.iter().any(|flag| !is_item_flag(flag)) {
-                return None;
-            }
-            let custom_data = match fields.next() {
-                Some(pdc) if !pdc.is_empty() => Some(item_pdc(pdc)?),
-                _ => None,
-            };
-            // The book field is optional; one that is present but unreadable refuses the whole
-            // call, so a half-written book is never applied.
-            let book = match fields.next() {
-                Some(book) if !book.is_empty() => Some(item_book(book)?),
-                _ => None,
-            };
+            let meta = parse_item_meta(call.args.get(1)?)?;
             Some(PlayerCommand::ItemMeta {
                 player,
                 slot,
-                name,
-                lore,
-                enchants,
-                unbreakable,
-                model,
-                repair,
-                flags,
-                custom_data,
-                book,
+                name: meta.name,
+                lore: meta.lore,
+                enchants: meta.enchants,
+                unbreakable: meta.unbreakable,
+                model: meta.model,
+                repair: meta.repair,
+                flags: meta.flags,
+                custom_data: meta.custom_data,
+                book: meta.book,
             })
         }
         "setItemMapId(int,int)" => Some(PlayerCommand::ItemMapId {

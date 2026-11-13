@@ -233,6 +233,20 @@ pub struct PlayerLocation {
     pub yaw: f32,
     pub pitch: f32,
 }
+/// The metadata a plugin writes onto one stack: name and lore are text JSON, `custom_data` is the
+/// persistent data container.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemMetaSpec {
+    pub name: Option<String>,
+    pub lore: Vec<String>,
+    pub enchants: Vec<(String, i32)>,
+    pub unbreakable: bool,
+    pub model: Option<i32>,
+    pub repair: i32,
+    pub flags: Vec<String>,
+    pub custom_data: Option<ferrite_nbt::Compound>,
+    pub book: Option<BookFields>,
+}
 /// The book a plugin writes onto a writable or written book (Bukkit `BookMeta`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BookFields {
@@ -500,6 +514,8 @@ pub enum PluginPacket {
         profile: Option<(Option<String>, Option<[i32; 4]>)>,
         /// Skull profile properties `(name, value, signature)`, e.g. the `textures` property.
         properties: Vec<(String, String, Option<String>)>,
+        /// Metadata of the stacks in `items`, by slot.
+        metas: Vec<(u8, ItemMetaSpec)>,
     },
     /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
     Equipment {

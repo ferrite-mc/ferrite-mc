@@ -743,6 +743,7 @@ mod tests {
                 patterns: Vec::new(),
                 profile: None,
                 properties: Vec::new(),
+                metas: Vec::new(),
             }
         );
         let refused = |entity: &str| {

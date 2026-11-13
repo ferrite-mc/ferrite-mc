@@ -1332,6 +1332,7 @@ impl Player {
                 patterns,
                 profile,
                 properties,
+                metas,
             } => {
                 let Some(type_id) =
                     ferrite_data::registries::id("minecraft:block_entity_type", &entity)
@@ -1345,11 +1346,15 @@ impl Player {
                         block_type: VarInt(type_id),
                         nbt: crate::plugins::tile_update::nbt(
                             &entity,
-                            &items,
-                            furnace,
-                            &patterns,
-                            profile,
-                            &properties,
+                            &crate::plugins::tile_update::TileData {
+                                items: &items,
+                                furnace,
+                                patterns: &patterns,
+                                profile,
+                                properties: &properties,
+                                metas: &metas,
+                            },
+                            &super::region::with_meta_spec,
                         ),
                     },
                 );

@@ -534,6 +534,27 @@ fn tooltip_display(flags: &[String]) -> Option<ferrite_item::TooltipDisplay> {
     (!flags.is_empty()).then_some(display)
 }
 
+/// [`with_meta`] for the metadata of a tile snapshot item (`Player#sendBlockUpdate`).
+pub(super) fn with_meta_spec(
+    stack: ferrite_item::ItemStack,
+    meta: &ferrite_plugin::ItemMetaSpec,
+) -> ferrite_item::ItemStack {
+    with_meta(
+        stack,
+        &ItemMetaFields {
+            name: meta.name.clone(),
+            lore: meta.lore.clone(),
+            enchants: meta.enchants.clone(),
+            unbreakable: meta.unbreakable,
+            model: meta.model,
+            repair: meta.repair,
+            flags: meta.flags.clone(),
+            custom_data: meta.custom_data.clone(),
+            book: meta.book.clone(),
+        },
+    )
+}
+
 /// Replaces the name, lore, enchantments, unbreakable flag, model, repair cost, tooltip flags
 /// and persistent data of `stack`; text that does not parse is left out.
 pub(super) fn with_meta(

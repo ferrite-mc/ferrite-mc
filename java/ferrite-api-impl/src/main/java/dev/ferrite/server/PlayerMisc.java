@@ -482,9 +482,18 @@ public abstract class PlayerMisc extends PlayerStubs {
         for (int slot = 0; slot < snapshot.getSize(); slot++) {
             var item = snapshot.getItem(slot);
             if (item == null || item.getType().isAir() || item.getAmount() <= 0) continue;
-            if (item.hasItemMeta())
-                throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate cannot carry item metadata (slot " + slot + " holds " + item.getType() + " with meta); the host snapshot encodes material and amount only");
             entries.add("item," + slot + "," + item.getType().getKey() + "," + item.getAmount());
+            if (item.hasItemMeta()) {
+                var wire = ItemMetaWire.of(item);
+                // Wear and a map id are separate host calls on an inventory slot; the tile snapshot has no such step.
+                if (wire.damage() > 0 || wire.mapId() != null)
+                    throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate cannot carry wear or a map view on the " + item.getType() + " in slot " + slot + "; the snapshot carries name, lore, enchantments, flags, model data, repair cost, persistent data and book content");
+                if (wire.meta() != null) {
+                    var hex = new StringBuilder();
+                    for (byte b : wire.meta().getBytes(java.nio.charset.StandardCharsets.UTF_8)) hex.append(String.format("%02x", b));
+                    entries.add("meta," + slot + "," + hex);
+                }
+            }
         }
         if (tileState instanceof org.bukkit.block.Furnace furnace) {
             // Bukkit exposes the remaining burn time but not the fuel's total, so the total is sent as 0.

@@ -189,18 +189,45 @@ class PlayerTileUpdateTest {
         assertTrue(calls.isEmpty());
     }
 
-    @Test void unmodelledFamiliesAndItemMetadataAreRefusedBeforeTheHost() {
+    @Test void unmodelledFamiliesAreRefusedBeforeTheHost() {
         var beacon = tile(org.bukkit.block.Beacon.class, Material.BEACON, null, java.util.Map.of());
         var error = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), beacon));
         assertTrue(error.getMessage().contains("BEACON") && error.getMessage().contains("no other block entity model"), error.getMessage());
+        assertTrue(calls.isEmpty(), "nothing reaches the host: " + calls.size());
+    }
 
-        var named = new ItemStack(Material.STONE);
-        var meta = named.getItemMeta();
+    @Test void aStackWithMetadataSendsItAsAHexEncodedMetaEntry() {
+        var sword = new ItemStack(Material.DIAMOND_SWORD);
+        var meta = sword.getItemMeta();
         meta.setDisplayName("named");
-        named.setItemMeta(meta);
-        var chest = tile(org.bukkit.block.Chest.class, Material.CHEST, inventory(27, java.util.Map.of(2, named)), java.util.Map.of());
+        meta.addEnchant(org.bukkit.enchantments.Enchantment.SHARPNESS, 3, true);
+        sword.setItemMeta(meta);
+        var chest = tile(org.bukkit.block.Chest.class, Material.CHEST, inventory(27, java.util.Map.of(2, sword)), java.util.Map.of());
+        player.sendBlockUpdate(at(), chest);
+        var entries = calls.get(0)[5].split(String.valueOf(HostBridge.ITEM));
+        assertEquals("item,2,minecraft:diamond_sword,1", entries[0]);
+        assertTrue(entries[1].startsWith("meta,2,"), entries[1]);
+        var hex = entries[1].substring("meta,2,".length());
+        var bytes = new byte[hex.length() / 2];
+        for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
+        var fields = new String(bytes, java.nio.charset.StandardCharsets.UTF_8).split("\u001e", -1);
+        assertTrue(fields[0].contains("named"), fields[0]);
+        assertEquals("minecraft:sharpness=3", fields[2]);
+        // A stack without metadata adds no meta entry.
+        calls.clear();
+        var plain = tile(org.bukkit.block.Chest.class, Material.CHEST, inventory(27, java.util.Map.of(0, new ItemStack(Material.STONE))), java.util.Map.of());
+        player.sendBlockUpdate(at(), plain);
+        assertEquals("item,0,minecraft:stone,1", calls.get(0)[5]);
+    }
+
+    @Test void wearOnASnapshotStackIsRefusedBeforeTheHost() {
+        var pick = new ItemStack(Material.DIAMOND_PICKAXE);
+        var meta = (org.bukkit.inventory.meta.Damageable) pick.getItemMeta();
+        meta.setDamage(20);
+        pick.setItemMeta(meta);
+        var chest = tile(org.bukkit.block.Chest.class, Material.CHEST, inventory(27, java.util.Map.of(1, pick)), java.util.Map.of());
         var refused = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), chest));
-        assertTrue(refused.getMessage().contains("slot 2"), refused.getMessage());
+        assertTrue(refused.getMessage().contains("slot 1"), refused.getMessage());
         assertTrue(calls.isEmpty(), "nothing reaches the host: " + calls.size());
     }
 
