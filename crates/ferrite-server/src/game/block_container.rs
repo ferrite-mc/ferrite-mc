@@ -87,6 +87,19 @@ pub fn load_slots(source: &AnvilChunkSource, [x, y, z]: [i32; 3], size: usize) -
     items
 }
 
+/// Items to write back: a slot a viewer left as it was shown keeps the stored stack, with the
+/// components that were hidden from the viewer because they have no network form.
+fn keep_hidden_components(stored: &[ItemStack], shown: &[ItemStack]) -> Vec<ItemStack> {
+    shown
+        .iter()
+        .enumerate()
+        .map(|(slot, stack)| match stored.get(slot) {
+            Some(original) if network_safe(original.clone()) == *stack => original.clone(),
+            _ => stack.clone(),
+        })
+        .collect()
+}
+
 /// Writes the `Items` list of any block entity inventory, creating the block entity when
 /// needed and keeping the rest of its NBT (timers, custom names) untouched.
 pub fn store_slots(
@@ -115,9 +128,10 @@ pub fn store_slots(
         if unchanged {
             return (false, ());
         }
+        let items = keep_hidden_components(&load_items_raw(Some(entity)), items);
         // Vanilla saves an empty `Items` list too, so an emptied container keeps its
         // block entity shape across a reload.
-        entity.data.insert("Items".into(), save_items(items));
+        entity.data.insert("Items".into(), save_items(&items));
         (true, ())
     });
     if let Err(error) = result {
@@ -255,8 +269,17 @@ fn network_safe(stack: ItemStack) -> ItemStack {
     safe
 }
 
-/// Vanilla `ContainerHelper.loadAllItems`: the `Items` list of a block entity.
-fn load_items(entity: Option<&BlockEntity>) -> Vec<ItemStack> {
+/// Vanilla `ContainerHelper.loadAllItems`: the `Items` list of a block entity, as a viewer can
+/// be sent it (components without a network form are left off).
+pub(super) fn load_items(entity: Option<&BlockEntity>) -> Vec<ItemStack> {
+    load_items_raw(entity)
+        .into_iter()
+        .map(network_safe)
+        .collect()
+}
+
+/// The stored items exactly as saved, including components with no network form.
+fn load_items_raw(entity: Option<&BlockEntity>) -> Vec<ItemStack> {
     let mut items = vec![ItemStack::empty(); SIZE];
     let Some(Tag::List(List::Compound(list))) = entity.and_then(|e| e.data.get("Items")) else {
         return items;
@@ -269,7 +292,7 @@ fn load_items(entity: Option<&BlockEntity>) -> Vec<ItemStack> {
             continue;
         };
         match ItemStack::from_nbt(entry) {
-            Ok(stack) => *target = network_safe(stack),
+            Ok(stack) => *target = stack,
             Err(error) => tracing::warn!(%error, "ignoring an unreadable container item"),
         }
     }
@@ -283,7 +306,7 @@ fn save_items(items: &[ItemStack]) -> Tag {
         .enumerate()
         .filter(|(_, stack)| !stack.is_empty())
         .filter_map(|(slot, stack)| {
-            let mut entry = stack.to_nbt().ok()?;
+            let mut entry = super::item_keep::to_nbt_keeping_item(stack)?;
             entry.insert("Slot".into(), Tag::Byte(slot as i8));
             Some(entry)
         })
@@ -323,7 +346,8 @@ pub fn store(source: &AnvilChunkSource, opened: &Opened, items: &[ItemStack]) {
                 data.insert("z".into(), Tag::Int(z));
                 BlockEntity { type_id, data }
             });
-            entity.data.insert("Items".into(), save_items(chunk));
+            let chunk = keep_hidden_components(&load_items_raw(Some(entity)), chunk);
+            entity.data.insert("Items".into(), save_items(&chunk));
             (true, ())
         });
         if let Err(error) = result {
@@ -357,6 +381,31 @@ pub fn take_contents(
         .into_iter()
         .filter(|stack| !stack.is_empty())
         .collect()
+}
+
+/// Everything a destroyed block spills: its inventory, a furnace's slots, a brewing stand's
+/// slots or a jukebox's disc. A shulker box is not handled here, it keeps its contents in the
+/// item it drops (see `shulker`).
+pub fn take_all_contents(
+    source: &AnvilChunkSource,
+    pos: [i32; 3],
+    old_state: u32,
+) -> Vec<ItemStack> {
+    let name = u16::try_from(old_state)
+        .ok()
+        .and_then(ferrite_data::blocks::state)
+        .map(|(name, _)| name);
+    let mut out = take_contents(source, pos, old_state);
+    if name.and_then(super::furnace::kind).is_some() {
+        out.extend(super::furnace::take_contents(source, pos));
+    }
+    if name == Some("minecraft:brewing_stand") {
+        out.extend(super::brewing::take_contents(source, pos));
+    }
+    if name == Some("minecraft:jukebox") {
+        out.extend(super::jukebox::take(source, pos));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -418,6 +467,39 @@ mod tests {
         assert!(source.block_entity(5, 70, 5).is_none());
         // Breaking any other block leaves block entities alone.
         assert!(take_contents(&source, [5, 70, 5], state("stone", &[])).is_empty());
+    }
+
+    /// A stack whose component only exists in the save format (no typed model, so no network
+    /// form) is shown to viewers without it. Editing another slot must not write that stripped
+    /// copy back over the real item.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editing_one_slot_keeps_the_unsendable_components_of_the_others() {
+        let source = loaded().await;
+        source.set_block(6, 70, 6, state("chest", &[])).unwrap();
+        let mut special = ItemStack::from_name("firework_star").unwrap();
+        special.components.insert_opaque(
+            ferrite_item::component_ids::FIREWORK_EXPLOSION,
+            Tag::Compound(Compound::new()),
+        );
+        assert!(
+            special.encode_network().is_err(),
+            "the premise: no network form"
+        );
+        let mut items = vec![ItemStack::empty(); SIZE];
+        items[0] = special.clone();
+        items[1] = ItemStack::from_name("stone").unwrap();
+        store_slots(&source, [6, 70, 6], "minecraft:chest", &items);
+
+        // A viewer sees slot 0 without the component and changes slot 1.
+        let mut shown = load_slots(&source, [6, 70, 6], SIZE);
+        assert!(shown[0].components.is_empty());
+        shown[1] = shown[1].copy_with_count(5);
+        store_slots(&source, [6, 70, 6], "minecraft:chest", &shown);
+
+        let entity = source.block_entity(6, 70, 6).unwrap();
+        let saved = load_items_raw(Some(&entity));
+        assert_eq!(saved[0], special, "the untouched item keeps its component");
+        assert_eq!(saved[1].count, 5);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

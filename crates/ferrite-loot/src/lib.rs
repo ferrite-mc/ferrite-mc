@@ -7,14 +7,24 @@
 //! including inline table objects), so references are resolved once while
 //! loading and the resulting [`LootTable`] is self-contained.
 //!
-//! Evaluation walks pools, entries, conditions and functions and returns plain
-//! `(item id, count)` stacks, in the order vanilla would add them. Components,
-//! enchantments, names and other item metadata are outside this crate's model,
-//! so functions that only touch that metadata (`set_components`, `set_name`,
-//! `copy_components`, `enchant_randomly`, ...) are kept opaque and pass an item
-//! through unchanged. Conditions this crate cannot evaluate (such as
-//! `entity_properties`) are likewise kept opaque and treated as satisfied, so a
-//! table still drops its unconditioned items under a partial context.
+//! Evaluation walks pools, entries, conditions and functions and returns
+//! [`LootStack`]s ([`LootTable::roll_stacks`]) or plain `(item id, count)` pairs
+//! ([`LootTable::roll`]), in the order vanilla would add them.
+//!
+//! A [`LootStack`] carries the data components a loot function attached, keyed by component
+//! name with their NBT values. The one function that attaches components is
+//! `copy_components` with `source: block_entity`: it copies the `include`d (or all but the
+//! `exclude`d) entries of [`LootContext::block_entity_components`], which the caller fills with
+//! what the broken block entity would write onto its item (vanilla
+//! `BlockEntity.collectComponents`). That is how a shulker box keeps its contents, name and
+//! lock when it drops. Other sources (`this`, `attacker`, ...) name entities this crate has no
+//! model of, so they copy nothing.
+//!
+//! Functions that only touch other item metadata (`set_components`, `set_name`,
+//! `enchant_randomly`, ...) are kept opaque and pass an item through unchanged. Conditions
+//! this crate cannot evaluate (such as `entity_properties`) are likewise kept opaque and
+//! treated as satisfied, so a table still drops its unconditioned items under a partial
+//! context.
 //!
 //! Item ids returned by [`LootTable::roll`] are in their namespaced form
 //! (`minecraft:cobblestone`). Ids supplied by callers, such as
@@ -57,14 +67,37 @@ mod number;
 mod table;
 mod tags;
 
+use ferrite_nbt::Tag;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub use condition::{BlockPredicate, Condition, EnchantmentPredicate, ToolPredicate};
 pub use entry::{Entry, EntryKind, LootPool};
-pub use function::{BonusFormula, Function, FunctionKind};
+pub use function::{BonusFormula, ComponentSource, Function, FunctionKind};
 pub use number::{IntRange, NumberProvider};
 pub use table::{LootTable, LootTables};
+
+/// One rolled stack: an item, a count and the data components loot functions attached.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LootStack {
+    /// Namespaced item id.
+    pub item: String,
+    /// Number of items.
+    pub count: i32,
+    /// Components added by `copy_components`, keyed by namespaced component name.
+    pub components: BTreeMap<String, Tag>,
+}
+
+impl LootStack {
+    /// One item with no components.
+    pub fn new(item: impl Into<String>) -> Self {
+        Self {
+            item: item.into(),
+            count: 1,
+            components: BTreeMap::new(),
+        }
+    }
+}
 
 /// Errors produced while loading loot data.
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +183,10 @@ pub struct LootContext {
     pub block_state: BTreeMap<String, String>,
     /// Whether the entity was killed by a player.
     pub killed_by_player: bool,
+    /// The components the broken block entity writes onto its item (vanilla
+    /// `BlockEntity.collectComponents`), keyed by namespaced component name. Read by
+    /// `copy_components` with `source: block_entity`; empty when the block has no block entity.
+    pub block_entity_components: BTreeMap<String, Tag>,
 }
 
 impl LootContext {

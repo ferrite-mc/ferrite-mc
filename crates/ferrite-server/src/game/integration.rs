@@ -3357,6 +3357,27 @@ async fn inventory_of(bot: &mut Bot) -> Vec<ferrite_protocol::packets::play::Ite
     click(bot, -1, 0, ferrite_inventory::ClickInput::Pickup).await
 }
 
+/// [`inventory_of`] with the stacks' components, for tests that look inside carried items.
+async fn inventory_items_of(bot: &mut Bot) -> Vec<ferrite_item::ItemStack> {
+    use ferrite_protocol::packets::play::{ContainerClick, ContainerContent};
+    bot.send(&ContainerClick::<ferrite_item::HashedSlot> {
+        window: VarInt(0),
+        state: VarInt(-1),
+        slot: -1,
+        button: 0,
+        input: VarInt(ferrite_inventory::ClickInput::Pickup.id()),
+        changed: vec![],
+        carried: None,
+    })
+    .await;
+    let body = tokio::time::timeout(std::time::Duration::from_secs(20), bot.until(18))
+        .await
+        .expect("inventory contents");
+    ContainerContent::<ferrite_item::ItemStack>::decode(&mut body.as_slice())
+        .unwrap()
+        .slots
+}
+
 fn plain(name: &str, count: i32) -> ferrite_protocol::packets::play::ItemStack {
     ferrite_protocol::packets::play::ItemStack {
         count,
@@ -3926,10 +3947,11 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
     server.abort();
 }
 
-/// A shulker box opens as the 27-slot `shulker_box` menu, refuses another shulker box, keeps its
-/// contents in the block entity and spills them when it is broken.
+/// A shulker box opens as the 27-slot `shulker_box` menu, refuses another shulker box and keeps
+/// its contents in the block entity. Breaking it drops one box carrying them (no loose items),
+/// and placing that box again restores the contents.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shulker_box_opens_refuses_nesting_saves_contents_and_spills_when_broken() {
+async fn shulker_box_opens_refuses_nesting_saves_contents_and_keeps_them_in_the_dropped_item() {
     use ferrite_inventory::ClickInput::*;
     use ferrite_protocol::{
         packets::play::{
@@ -4026,7 +4048,8 @@ async fn shulker_box_opens_refuses_nesting_saves_contents_and_spills_when_broken
         entity.data.get("Items"),
         Some(ferrite_nbt::Tag::List(ferrite_nbt::List::Compound(items))) if items.len() == 1
     ));
-    // Breaking the box spills the stone, which the player standing on it picks up again.
+    // Breaking the box (creative, with contents) drops one purple box carrying the stone, which
+    // the player standing on it picks up. The stone itself is not spilled.
     keeper
         .send(&PlayerAction {
             status: VarInt(0),
@@ -4038,24 +4061,103 @@ async fn shulker_box_opens_refuses_nesting_saves_contents_and_spills_when_broken
     keeper.until(4).await;
     assert_eq!(source.block(8, 64, 8), Some(0));
     assert!(source.block_entity(8, 64, 8).is_none());
-    let stone = plain("stone", 1).item_id;
+    let stone = ferrite_item::item_id("stone").unwrap();
+    let purple = ferrite_item::item_id("purple_shulker_box").unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-    loop {
-        let total = inventory_of(&mut keeper)
-            .await
-            .iter()
-            .filter(|s| s.item_id == stone)
-            .map(|s| s.count)
-            .sum::<i32>();
-        if total == 40 {
-            break;
+    let (carried, menu_slot) = loop {
+        let held = inventory_items_of(&mut keeper).await;
+        let boxes: Vec<_> = held
+            .into_iter()
+            .enumerate()
+            .filter(|(_, s)| s.item == purple)
+            .collect();
+        if let [(slot, carried)] = boxes.as_slice() {
+            break (carried.clone(), *slot);
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "picked up {total} stone"
+            "picked up {} purple shulker boxes",
+            boxes.len()
         );
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    // The client was sent the box with its contents inside.
+    let Some(ferrite_item::Component::Container(inside)) = carried
+        .components
+        .get(ferrite_item::component_ids::CONTAINER)
+    else {
+        panic!("the dropped box carries a container component: {carried:?}");
+    };
+    assert_eq!(inside[0].item, stone);
+    assert_eq!(inside[0].count, 40);
+    // Give a duplicate spill time to show up, then check nothing loose came back.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let held = inventory_items_of(&mut keeper).await;
+    let loose_stone: i32 = held
+        .iter()
+        .filter(|s| s.item == stone)
+        .map(|s| s.count)
+        .sum();
+    assert_eq!(loose_stone, 0, "the contents travel inside the box");
+    // Placing the carried box elsewhere restores them (the generated terrain is cleared there).
+    for x in 8..=11 {
+        for z in 8..=11 {
+            for y in 64..=66 {
+                source.set_block(x, y, z, 0).unwrap();
+            }
+        }
     }
+    // Look from the eyes (8.5, 65.62, 8.5) at the top of the floor block (10, 63, 10).
+    keeper
+        .send(&MoveRotation {
+            yaw: -45.0,
+            pitch: 29.8,
+            flags: 1,
+        })
+        .await;
+    assert!(
+        (36..45).contains(&menu_slot),
+        "the box landed in the hotbar, slot {menu_slot}"
+    );
+    keeper
+        .send(&ferrite_protocol::packets::play::SetHeldItem {
+            slot: (menu_slot - 36) as i16,
+        })
+        .await;
+    keeper
+        .send(&UseItemOn {
+            hand: VarInt(0),
+            location: BlockPos::new(10, 63, 10).pack(),
+            face: VarInt(1),
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside: false,
+            world_border_hit: false,
+            sequence: VarInt(3),
+        })
+        .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let restored = loop {
+        if let Some(entity) = source.block_entity(10, 64, 10) {
+            break entity;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the box was not placed: block {:?}, floor {:?}",
+            source.block(10, 64, 10),
+            source.block(10, 63, 10)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let Some(ferrite_nbt::Tag::List(ferrite_nbt::List::Compound(items))) =
+        restored.data.get("Items")
+    else {
+        panic!("the placed box has an Items list");
+    };
+    assert_eq!(items.len(), 1);
+    let stack = ferrite_item::ItemStack::from_nbt(&items[0]).unwrap();
+    assert_eq!((stack.name(), stack.count), (Some("minecraft:stone"), 40));
     drop(keeper);
     world.shutdown().await.unwrap();
     server.abort();

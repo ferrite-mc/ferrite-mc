@@ -122,13 +122,6 @@ fn first_slot(items: &[ItemStack]) -> Option<usize> {
     items.iter().position(|stack| !stack.is_empty())
 }
 
-fn plain(stack: &ItemStack) -> ferrite_protocol::packets::play::ItemStack {
-    ferrite_protocol::packets::play::ItemStack {
-        count: stack.count,
-        item_id: i32::from(stack.item),
-    }
-}
-
 fn center([x, y, z]: [i32; 3], offset: [i32; 3]) -> [f64; 3] {
     [
         f64::from(x) + 0.5 + f64::from(offset[0]) * 0.6,
@@ -269,10 +262,10 @@ pub fn item_entity(action: &Action, rng: &mut Rng) -> Option<ferrite_entity::Ent
         } => (pos, velocity, stack),
         _ => return None,
     };
-    Some(ferrite_entity::item::new_item(
+    Some(ferrite_entity::item::new_item_stack(
         Vec3::new(pos[0], pos[1], pos[2]),
         Vec3::new(velocity[0], velocity[1], velocity[2]),
-        plain(stack),
+        stack,
         rng,
     ))
 }

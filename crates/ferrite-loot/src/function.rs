@@ -1,12 +1,12 @@
 //! Loot functions attached to pools, entries and whole tables.
 //!
-//! Functions that only touch item metadata (components, names, enchantments,
-//! potions, ...) are kept opaque: the item id and count pass through
-//! unchanged, because this crate's result model has no component storage.
+//! `copy_components` copies block entity components onto the stack. Functions that only touch
+//! other item metadata (names, enchantments, potions, ...) are kept opaque: the item id,
+//! count and components pass through unchanged.
 
 use crate::condition::{self, Condition};
 use crate::number::{IntRange, NumberProvider};
-use crate::{Definitions, LootContext, Rng};
+use crate::{Definitions, LootContext, LootStack, Rng, normalize_id};
 use serde_json::Value;
 
 /// One loot function and the conditions guarding it.
@@ -42,6 +42,15 @@ pub enum FunctionKind {
         /// Inclusive bounds applied to the count.
         limit: IntRange,
     },
+    /// Copies components from the block entity that was broken into the stack.
+    CopyComponents {
+        /// Where the components come from.
+        source: ComponentSource,
+        /// Components to copy; `None` copies every component not in `exclude`.
+        include: Option<Vec<String>>,
+        /// Components never copied.
+        exclude: Vec<String>,
+    },
     /// A function this crate passes through untouched, retaining its JSON.
     Opaque {
         /// Vanilla function type.
@@ -49,6 +58,15 @@ pub enum FunctionKind {
         /// Raw function JSON.
         value: Value,
     },
+}
+
+/// The component source of `copy_components`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentSource {
+    /// The block entity of the broken block ([`LootContext::block_entity_components`]).
+    BlockEntity,
+    /// An entity source (`this`, `attacker`, ...) this crate has no model of; copies nothing.
+    Unsupported,
 }
 
 /// The `apply_bonus` formulas vanilla 26.3 writes.
@@ -110,6 +128,17 @@ fn parse(value: &Value, definitions: &Definitions) -> Option<Function> {
         "minecraft:limit_count" => FunctionKind::LimitCount {
             limit: IntRange::parse(object.get("limit")),
         },
+        "minecraft:copy_components" => FunctionKind::CopyComponents {
+            source: match object.get("source").and_then(Value::as_str) {
+                Some("block_entity") => ComponentSource::BlockEntity,
+                _ => ComponentSource::Unsupported,
+            },
+            include: object.get("include").map(component_names),
+            exclude: object
+                .get("exclude")
+                .map(component_names)
+                .unwrap_or_default(),
+        },
         other => FunctionKind::Opaque {
             kind: other.to_owned(),
             value: value.clone(),
@@ -118,10 +147,24 @@ fn parse(value: &Value, definitions: &Definitions) -> Option<Function> {
     Some(Function { conditions, kind })
 }
 
+/// The component names of an `include`/`exclude` list, namespaced.
+fn component_names(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(normalize_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Applies every function whose conditions hold to one stack.
 pub(crate) fn apply(
     functions: &[Function],
-    stack: &mut (String, i32),
+    stack: &mut LootStack,
     context: &LootContext,
     rng: &mut impl Rng,
 ) {
@@ -132,18 +175,18 @@ pub(crate) fn apply(
             .all(|condition| condition.test(context, rng))
         {
             function.kind.apply(stack, context, rng);
-            stack.1 = stack.1.max(0);
+            stack.count = stack.count.max(0);
         }
     }
 }
 
 impl FunctionKind {
-    fn apply(&self, stack: &mut (String, i32), context: &LootContext, rng: &mut impl Rng) {
+    fn apply(&self, stack: &mut LootStack, context: &LootContext, rng: &mut impl Rng) {
         match self {
             Self::SetCount { count, add } => {
                 let count = count.get_int(rng);
-                stack.1 = if *add {
-                    stack.1.saturating_add(count)
+                stack.count = if *add {
+                    stack.count.saturating_add(count)
                 } else {
                     count
                 };
@@ -153,7 +196,7 @@ impl FunctionKind {
                 formula,
             } => {
                 let level = context.enchantment_level(enchantment).max(0);
-                stack.1 = formula.apply(stack.1, level, rng);
+                stack.count = formula.apply(stack.count, level, rng);
             }
             Self::ExplosionDecay => {
                 let Some(radius) = context.explosion_radius else {
@@ -167,15 +210,32 @@ impl FunctionKind {
                     return;
                 }
                 let mut kept = 0;
-                for _ in 0..stack.1.max(0) {
+                for _ in 0..stack.count.max(0) {
                     if rng.next_float() < keep {
                         kept += 1;
                     }
                 }
-                stack.1 = kept;
+                stack.count = kept;
             }
             Self::LimitCount { limit } => {
-                stack.1 = limit.clamp(stack.1);
+                stack.count = limit.clamp(stack.count);
+            }
+            Self::CopyComponents {
+                source,
+                include,
+                exclude,
+            } => {
+                if *source != ComponentSource::BlockEntity {
+                    return;
+                }
+                for (name, value) in &context.block_entity_components {
+                    let wanted = include
+                        .as_ref()
+                        .is_none_or(|include| include.contains(name));
+                    if wanted && !exclude.contains(name) {
+                        stack.components.insert(name.clone(), value.clone());
+                    }
+                }
             }
             Self::Opaque { .. } => {}
         }
@@ -287,13 +347,22 @@ mod tests {
                 value: serde_json::json!({"name": "test"}),
             },
         };
-        let mut stack = ("minecraft:stick".to_owned(), 3);
+        let mut stack = LootStack {
+            count: 3,
+            ..LootStack::new("minecraft:stick")
+        };
         apply(
             std::slice::from_ref(&function),
             &mut stack,
             &LootContext::default(),
             &mut Fixed(4),
         );
-        assert_eq!(stack, ("minecraft:stick".to_owned(), 3));
+        assert_eq!(
+            stack,
+            LootStack {
+                count: 3,
+                ..LootStack::new("minecraft:stick")
+            }
+        );
     }
 }

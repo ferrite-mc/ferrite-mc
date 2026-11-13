@@ -635,7 +635,17 @@ fn nested_templates_inside_bundle_and_container_round_trip() {
     let container_stack = stack_with_raw(ids::CONTAINER, container);
     let container_bytes = container_stack.encode_network().expect("container encodes");
     let container_decoded = ItemStack::decode_network(&container_bytes).expect("container decodes");
-    assert_eq!(container_decoded, container_stack);
+    // The container is a typed component now: an empty slot and a one-item template whose own
+    // bundle contents stay raw. The bytes it re-encodes to are exactly the bytes received.
+    let Some(Component::Container(slots)) = container_decoded.components.get(ids::CONTAINER) else {
+        panic!("container decodes to the typed component");
+    };
+    assert_eq!(slots.len(), 2);
+    assert!(slots[0].is_empty());
+    assert_eq!(
+        slots[1].components.get(ids::BUNDLE_CONTENTS),
+        Some(&Component::Raw(vec![1, 1, 1, 0, 0]))
+    );
     assert_eq!(
         container_decoded.encode_network().expect("re-encodes"),
         container_bytes

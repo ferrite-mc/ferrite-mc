@@ -294,6 +294,7 @@ pub enum Command {
         repair: i32,
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
+        book: Option<ferrite_plugin::BookFields>,
     },
     /// A plugin pointed the filled map in a slot at a saved map.
     ItemMapId {
@@ -484,6 +485,7 @@ pub(super) struct ItemMetaFields {
     pub repair: i32,
     pub flags: Vec<String>,
     pub custom_data: Option<ferrite_nbt::Compound>,
+    pub book: Option<ferrite_plugin::BookFields>,
 }
 
 /// Maps Bukkit item flags to the components hidden by `minecraft:tooltip_display`.
@@ -531,9 +533,12 @@ pub(super) fn with_meta(
         ids::REPAIR_COST,
         ids::TOOLTIP_DISPLAY,
         ids::CUSTOM_DATA,
+        ids::WRITABLE_BOOK_CONTENT,
+        ids::WRITTEN_BOOK_CONTENT,
     ] {
         stack.components.remove(id);
     }
+    let item = stack.name().map(str::to_owned);
     let mut put = |component: Component| {
         if let Some(id) = component.type_id() {
             stack.components.insert(id, component);
@@ -572,7 +577,54 @@ pub(super) fn with_meta(
     {
         put(Component::CustomData(data.clone()));
     }
+    // A book's pages belong to its own item only: book metadata sent for any other item has
+    // nothing to attach to and is left out rather than put on the wrong stack.
+    if let Some(book) = &meta.book
+        && let Some(content) = book_content(item.as_deref(), book)
+    {
+        put(content);
+    }
     stack
+}
+
+/// The book component for a `BookMeta`, when `item` is the matching book item.
+fn book_content(
+    item: Option<&str>,
+    book: &ferrite_plugin::BookFields,
+) -> Option<ferrite_item::Component> {
+    use ferrite_item::{Component, Filterable, WritableBookContent, WrittenBookContent};
+    let plain = |raw: String| Filterable {
+        raw,
+        filtered: None,
+    };
+    match (item, book.written) {
+        (Some("minecraft:written_book"), true) => {
+            Some(Component::WrittenBookContent(WrittenBookContent {
+                title: plain(book.title.clone().unwrap_or_default()),
+                author: book.author.clone().unwrap_or_default(),
+                generation: book.generation,
+                pages: book
+                    .pages
+                    .iter()
+                    .map(|page| {
+                        ferrite_text::Component::from_json(page)
+                            .ok()
+                            .map(|text| Filterable {
+                                raw: text,
+                                filtered: None,
+                            })
+                    })
+                    .collect::<Option<_>>()?,
+                resolved: false,
+            }))
+        }
+        (Some("minecraft:writable_book"), false) => {
+            Some(Component::WritableBookContent(WritableBookContent {
+                pages: book.pages.iter().cloned().map(plain).collect(),
+            }))
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn worn_stack(
@@ -2035,27 +2087,19 @@ impl Player {
         let pos = [pos.x, pos.y, pos.z];
         self.changed_blocks.push(pos);
         if let Some(source) = &self.source {
-            for stack in super::block_container::take_contents(source, pos, state) {
-                self.menus.spilled.push((pos, stack));
-            }
             let name = u16::try_from(state)
                 .ok()
                 .and_then(ferrite_data::blocks::state)
                 .map(|(name, _)| name);
-            if name.and_then(super::furnace::kind).is_some() {
-                for stack in super::furnace::take_contents(source, pos) {
+            if name.is_some_and(super::block_container::is_shulker_box) {
+                // A shulker box keeps its contents in the item it drops (vanilla
+                // `ShulkerBoxBlock`), so they are not spilled here.
+                let components = super::shulker::take_components(source, pos);
+                self.menus.broken_entities.insert(pos, components);
+            } else {
+                for stack in super::block_container::take_all_contents(source, pos, state) {
                     self.menus.spilled.push((pos, stack));
                 }
-            }
-            if name == Some("minecraft:brewing_stand") {
-                for stack in super::brewing::take_contents(source, pos) {
-                    self.menus.spilled.push((pos, stack));
-                }
-            }
-            if name == Some("minecraft:jukebox")
-                && let Some(disc) = super::jukebox::take(source, pos)
-            {
-                self.menus.spilled.push((pos, disc));
             }
             if name == Some("minecraft:beacon") {
                 let _ = source.update_block_entity(pos[0], pos[1], pos[2], |entity| {
@@ -2064,6 +2108,25 @@ impl Player {
             }
         }
         true
+    }
+    /// Vanilla `ShulkerBoxBlock.playerWillDestroy`: a creative player who breaks a shulker box
+    /// with contents still drops the box, carrying them (other blocks drop nothing in creative).
+    fn drop_creative_shulker(&mut self, location: i64, state: u32) {
+        let at = ferrite_protocol::types::BlockPos::unpack(location);
+        let at = [at.x, at.y, at.z];
+        let Some(components) = self.menus.broken_entities.remove(&at) else {
+            return;
+        };
+        if !super::shulker::has_contents(&components) {
+            return;
+        }
+        let item = u16::try_from(state)
+            .ok()
+            .and_then(ferrite_data::blocks::state)
+            .and_then(|(name, _)| super::shulker::item_with(name, &components));
+        if let Some(item) = item {
+            self.menus.spilled.push((at, item));
+        }
     }
     /// `Player#breakBlock`: breaks the block as this player would, and says whether it broke.
     /// A refusal (air, an unbreakable block for a non-creative player, a mode that cannot
@@ -2406,6 +2469,16 @@ impl Player {
                 Some("minecraft:beacon") => {
                     if let Some(source) = self.source.clone() {
                         super::beacon::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                Some(block) if super::block_container::is_shulker_box(block) => {
+                    // The item's contents, name and lock go into the new block entity; a
+                    // nested shulker box in it is handed back instead of being placed.
+                    if let Some(source) = self.source.clone() {
+                        let at = [target.x, target.y, target.z];
+                        for stack in super::shulker::apply_item(source.as_ref(), at, &item) {
+                            self.menus.spilled.push((at, stack));
+                        }
                     }
                 }
                 _ => {}
@@ -4375,6 +4448,7 @@ impl Player {
                     repair,
                     flags,
                     custom_data,
+                    book,
                 } => {
                     self.set_item_meta(
                         slot,
@@ -4387,6 +4461,7 @@ impl Player {
                             repair,
                             flags,
                             custom_data,
+                            book,
                         },
                     );
                     continue;
@@ -4596,8 +4671,9 @@ impl Player {
                                             clicked,
                                             material_name(state),
                                         )
-                                    }) {
-                                        self.break_block(p.location, state);
+                                    }) && self.break_block(p.location, state)
+                                    {
+                                        self.drop_creative_shulker(p.location, state);
                                     }
                                 } else if self.gamemode == 0 {
                                     // Zero hardness breaks on the first hit (vanilla: destroy
@@ -5658,7 +5734,7 @@ impl Region {
                         let mut broken = Vec::new();
                         self.apply_neighbor_updates(source, ctx, &mut broken);
                         for (pos, state) in broken {
-                            self.spawn_block_drops(pos, state);
+                            self.spawn_block_drops(source, pos, state);
                         }
                     }
                 }
@@ -7945,25 +8021,16 @@ impl Region {
                     let Some(stack) = leftover else {
                         continue;
                     };
-                    let plain = ItemStack {
-                        count: stack.count,
-                        item_id: i32::from(stack.item),
-                    };
-                    self.entities.insert(item::new_item(
+                    self.entities.insert(item::new_item_stack(
                         pos,
                         ferrite_math::Vec3::ZERO,
-                        plain,
+                        &stack,
                         &mut self.rng,
                     ));
                     continue;
                 }
-                // Item entities hold plain stacks, like every other dropped item.
-                let plain = ItemStack {
-                    count: stack.count,
-                    item_id: i32::from(stack.item),
-                };
                 let mut record =
-                    item::new_item(pos, ferrite_math::Vec3::ZERO, plain, &mut self.rng);
+                    item::new_item_stack(pos, ferrite_math::Vec3::ZERO, &stack, &mut self.rng);
                 if let Some(state) = &mut record.data.item {
                     state.pickup_delay = 10;
                 }
@@ -8329,7 +8396,7 @@ impl Region {
         let mut removed = Vec::new();
         self.apply_neighbor_updates(source, ctx, &mut removed);
         for (pos, state) in removed {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
             self.wake_fluid(ctx, pos);
             changed.push(pos);
         }
@@ -8494,12 +8561,32 @@ impl Region {
         self.entities.insert(record);
     }
 
-    /// Drops the loot table of a block broken by a neighbor or gravity update.
-    fn spawn_block_drops(&mut self, pos: [i32; 3], state: u16) {
+    /// Drops what a block removed by a neighbor, gravity, piston or explosion update leaves
+    /// behind: its loot table (a shulker box with its contents in the item) and the contents of
+    /// any other container, which spill like a player-broken one.
+    fn spawn_block_drops(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        pos: [i32; 3],
+        state: u16,
+    ) {
         let empty = ferrite_item::ItemStack::empty();
-        for stack in super::drops::block_drops(state, &empty, &mut self.rng) {
-            let record = item::pop_resource(pos, stack, &mut self.rng);
+        let is_shulker = ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::block_container::is_shulker_box(name));
+        let entity = if is_shulker {
+            super::shulker::take_components(source, pos)
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        for stack in super::drops::block_drop_stacks(state, &empty, &mut self.rng, &entity) {
+            let record = item::pop_resource_stack(pos, &stack, &mut self.rng);
             self.entities.insert(record);
+        }
+        if !is_shulker {
+            for stack in super::block_container::take_all_contents(source, pos, u32::from(state)) {
+                let record = item::pop_resource_stack(pos, &stack, &mut self.rng);
+                self.entities.insert(record);
+            }
         }
     }
 
@@ -8561,7 +8648,7 @@ impl Region {
         let mut broken = Vec::new();
         self.apply_neighbor_updates(source, ctx, &mut broken);
         for (pos, state) in broken {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
             self.wake_fluid(ctx, pos);
         }
     }
@@ -8589,8 +8676,10 @@ impl Region {
             let Ok(state) = u16::try_from(state) else {
                 continue;
             };
-            for stack in super::drops::block_drops(state, held, &mut self.rng) {
-                let record = item::pop_resource([pos.x, pos.y, pos.z], stack, &mut self.rng);
+            let at = [pos.x, pos.y, pos.z];
+            let entity = p.menus.broken_entities.remove(&at).unwrap_or_default();
+            for stack in super::drops::block_drop_stacks(state, held, &mut self.rng, &entity) {
+                let record = item::pop_resource_stack(at, &stack, &mut self.rng);
                 self.entities.insert(record);
             }
         }
@@ -8976,7 +9065,7 @@ impl Region {
             self.redstone.blocks_changed(&mut world, &piston_changes);
         }
         for &(pos, state) in &destroyed {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
         }
         for &pos in &piston_changes {
             self.updates.block_changed(pos);
@@ -9307,7 +9396,7 @@ impl Region {
         let mut broken = Vec::new();
         self.apply_neighbor_updates(source, ctx, &mut broken);
         for (pos, state) in broken {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
         }
     }
     /// The plugin bridge for events about non-player entities: the live handle on the tick
@@ -9464,7 +9553,7 @@ impl Region {
             }
         }
         for (pos, state) in removed {
-            self.spawn_block_drops(pos, state);
+            self.spawn_block_drops(source, pos, state);
         }
         for pos in &destroyed {
             self.updates.block_changed(*pos);
@@ -9472,15 +9561,10 @@ impl Region {
         self.schedule_gravity(source, &destroyed);
     }
     /// Spawns what a player threw (Q, clicks outside a screen, overflowing crafts) as item
-    /// entities in front of it. Item entities hold plain stacks for now, so components are not
-    /// carried over.
+    /// entities in front of it. The entities carry the stacks' components.
     fn spawn_thrown(&mut self, p: &mut Player) {
         for (block, stack) in p.menus.spilled.drain(..) {
-            let plain = ItemStack {
-                count: stack.count,
-                item_id: i32::from(stack.item),
-            };
-            for record in item::drop_from_container(block, plain, &mut self.rng) {
+            for record in item::drop_from_container_stack(block, &stack, &mut self.rng) {
                 self.entities.insert(record);
             }
         }
@@ -9513,12 +9597,9 @@ impl Region {
             self.use_fishing_rod(p, slot);
         }
         for stack in p.menus.thrown.drain(..) {
-            let plain = ItemStack {
-                count: stack.count,
-                item_id: i32::from(stack.item),
-            };
             let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
-            let record = item::thrown_by_player(feet, 1.62, p.yaw, p.pitch, plain, &mut self.rng);
+            let record =
+                item::thrown_by_player_stack(feet, 1.62, p.yaw, p.pitch, &stack, &mut self.rng);
             self.entities.insert(record);
         }
     }
@@ -9655,6 +9736,8 @@ impl Region {
             0
         };
         let mut initial_drops = Vec::new();
+        // The stacks behind `initial_drops`, so drops a plugin leaves alone keep their components.
+        let mut dropped_stacks = Vec::new();
         if drop_allowed {
             for slot in 0..ferrite_inventory::SIZE {
                 let stack = p.inventory.get(slot);
@@ -9664,6 +9747,7 @@ impl Region {
                 let Some(material) = ferrite_item::item_name(stack.item) else {
                     continue;
                 };
+                dropped_stacks.push(stack.clone());
                 initial_drops.push(ferrite_plugin::ItemSnapshot {
                     material: material.to_owned(),
                     amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
@@ -9701,17 +9785,17 @@ impl Region {
             for slot in 0..ferrite_inventory::SIZE {
                 p.inventory.set(slot, ferrite_item::ItemStack::empty());
             }
-            for drop in &outcome.drops {
-                let Some(item) = ferrite_item::item_id(&drop.material) else {
-                    tracing::warn!(material = %drop.material, "death drop material is unknown");
-                    continue;
+            for stack in super::item_keep::drop_stacks(dropped_stacks, &outcome.drops) {
+                match stack {
+                    Ok(stack) => {
+                        self.entities
+                            .insert(item::pop_resource_stack(pos, &stack, &mut self.rng))
+                    }
+                    Err(material) => {
+                        tracing::warn!(%material, "death drop material is unknown");
+                        continue;
+                    }
                 };
-                let plain = ItemStack {
-                    count: i32::from(drop.amount),
-                    item_id: i32::from(item),
-                };
-                self.entities
-                    .insert(item::pop_resource(pos, plain, &mut self.rng));
             }
             // `ServerPlayer.dropExperience`: `min(level * 7, 100)` points, split by
             // `ExperienceOrb.award` and spawned where the player died.
@@ -10059,7 +10143,7 @@ impl Region {
                 let mut broken = Vec::new();
                 self.apply_neighbor_updates(source, ctx, &mut broken);
                 for (pos, state) in broken {
-                    self.spawn_block_drops(pos, state);
+                    self.spawn_block_drops(source, pos, state);
                 }
             }
             changed.extend(fire_changed);
@@ -12376,6 +12460,230 @@ mod tests {
         assert_ne!(source.block(8, 65, 9), Some(stone));
     }
 
+    const SHULKER_BLOCKS: [&str; 17] = [
+        "shulker_box",
+        "white_shulker_box",
+        "orange_shulker_box",
+        "magenta_shulker_box",
+        "light_blue_shulker_box",
+        "yellow_shulker_box",
+        "lime_shulker_box",
+        "pink_shulker_box",
+        "gray_shulker_box",
+        "light_gray_shulker_box",
+        "cyan_shulker_box",
+        "purple_shulker_box",
+        "blue_shulker_box",
+        "brown_shulker_box",
+        "green_shulker_box",
+        "red_shulker_box",
+        "black_shulker_box",
+    ];
+
+    /// The dropped item stacks lying in a region.
+    fn ground_stacks(region: &Region) -> Vec<ferrite_item::ItemStack> {
+        region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|key| region.entities.data(*key))
+            .filter(|data| data.item.is_some())
+            .map(ferrite_entity::item::full_stack)
+            .collect()
+    }
+
+    fn stone_stack(count: i32) -> ferrite_item::ItemStack {
+        ferrite_item::ItemStack::from_name("stone")
+            .unwrap()
+            .copy_with_count(count)
+    }
+
+    fn emeralds(count: i32) -> ferrite_item::ItemStack {
+        ferrite_item::ItemStack::from_name("emerald")
+            .unwrap()
+            .copy_with_count(count)
+    }
+
+    fn container_of(stack: &ferrite_item::ItemStack) -> Vec<ferrite_item::ItemStack> {
+        match stack.components.get(ferrite_item::component_ids::CONTAINER) {
+            Some(ferrite_item::Component::Container(slots)) => slots
+                .iter()
+                .filter(|slot| !slot.is_empty())
+                .cloned()
+                .collect(),
+            other => panic!("expected a typed container component, got {other:?}"),
+        }
+    }
+
+    async fn loaded_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.expect("chunk load");
+                return source;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("chunk never loaded");
+    }
+
+    fn bare_context(source: &std::sync::Arc<super::super::anvil::AnvilChunkSource>) -> TickContext {
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        TickContext {
+            signals,
+            tracking: Default::default(),
+            positions: Default::default(),
+            source: Some(source.clone()),
+            dimension: super::super::Dimension::Overworld,
+            world_id: crate::game::WorldId::Vanilla(super::super::Dimension::Overworld),
+            raining: false,
+            rules: Default::default(),
+            spawn: [0.0, 65.0, 0.0],
+            command_entities: Default::default(),
+            state: Default::default(),
+            trader_spawner: Default::default(),
+            profiler: None,
+            tree: None,
+            hooks: None,
+        }
+    }
+
+    fn fill_box(
+        source: &super::super::anvil::AnvilChunkSource,
+        pos: [i32; 3],
+        block: &str,
+        contents: &[(usize, ferrite_item::ItemStack)],
+    ) -> u32 {
+        let state =
+            u32::from(ferrite_data::blocks::default_state(&format!("minecraft:{block}")).unwrap());
+        source.set_block(pos[0], pos[1], pos[2], state).unwrap();
+        let mut slots = vec![ferrite_item::ItemStack::empty(); 27];
+        for (slot, stack) in contents {
+            slots[*slot] = stack.clone();
+        }
+        super::super::block_container::store_slots(
+            source,
+            pos,
+            &format!("minecraft:{block}"),
+            &slots,
+        );
+        state
+    }
+
+    /// An exploding shulker box (every colour, and the undyed one) drops one item that carries
+    /// its contents; nothing spills loose and no other copy is made.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_explosion_keeps_a_shulker_boxs_contents_in_its_item() {
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        for block in SHULKER_BLOCKS {
+            let mut region = Region::default();
+            region.held_chunks.insert(ChunkPos(0, 0), 1);
+            let sword = {
+                let mut sword = ferrite_item::ItemStack::from_name("diamond_sword").unwrap();
+                sword.components.insert(
+                    ferrite_item::component_ids::REPAIR_COST,
+                    ferrite_item::Component::RepairCost(7),
+                );
+                sword
+            };
+            fill_box(
+                &source,
+                [8, 65, 9],
+                block,
+                &[(0, emeralds(40)), (26, sword.clone())],
+            );
+            region.explode([8.5, 66.5, 8.5], 4.0, true, &ctx);
+            let air = u32::from(ferrite_data::blocks::default_state("minecraft:air").unwrap());
+            assert_eq!(source.block(8, 65, 9), Some(air), "{block} was destroyed");
+            // The blast also breaks the terrain around the box, so look at the box and at its
+            // distinctive contents only.
+            let ground = ground_stacks(&region);
+            let boxes: Vec<_> = ground
+                .iter()
+                .filter(|stack| stack.name() == Some(format!("minecraft:{block}").as_str()))
+                .collect();
+            assert_eq!(boxes.len(), 1, "{block}: exactly one box item");
+            assert_eq!(container_of(boxes[0]), [emeralds(40), sword]);
+            assert!(
+                ground.iter().all(|stack| !matches!(
+                    stack.name(),
+                    Some("minecraft:emerald" | "minecraft:diamond_sword")
+                )),
+                "{block}: no content spilled loose"
+            );
+            // The block entity went with the block: nothing is left to duplicate.
+            assert!(source.block_entity(8, 65, 9).is_none(), "{block}");
+        }
+    }
+
+    /// A box removed by a neighbour update (support lost, piston, gravity) goes through the same
+    /// path as an explosion, and an empty box carries no container.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shulker_box_removed_by_an_update_drops_one_item_with_its_contents() {
+        let source = loaded_source().await;
+        let air = u32::from(ferrite_data::blocks::default_state("minecraft:air").unwrap());
+        for (block, filled) in [("lime_shulker_box", true), ("shulker_box", false)] {
+            let mut region = Region::default();
+            region.held_chunks.insert(ChunkPos(0, 0), 1);
+            let contents: Vec<_> = filled.then(|| (13, stone_stack(5))).into_iter().collect();
+            let state = fill_box(&source, [3, 65, 3], block, &contents);
+            source.set_block(3, 65, 3, air).unwrap();
+            region.spawn_block_drops(&source, [3, 65, 3], state as u16);
+            let ground = ground_stacks(&region);
+            assert_eq!(ground.len(), 1, "{block}");
+            assert_eq!(
+                ground[0].name(),
+                Some(format!("minecraft:{block}").as_str())
+            );
+            if filled {
+                assert_eq!(container_of(&ground[0]), [stone_stack(5)]);
+            } else {
+                assert!(
+                    ground[0]
+                        .components
+                        .get(ferrite_item::component_ids::CONTAINER)
+                        .is_none(),
+                    "an empty box has no container component"
+                );
+            }
+        }
+    }
+
+    /// Other containers destroyed by an explosion or an update spill their contents (they were
+    /// lost before) and are not duplicated by the loot table.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_destroyed_chest_spills_its_contents_once() {
+        let source = loaded_source().await;
+        let air = u32::from(ferrite_data::blocks::default_state("minecraft:air").unwrap());
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let state = fill_box(
+            &source,
+            [3, 65, 3],
+            "chest",
+            &[(0, stone_stack(9)), (5, stone_stack(2))],
+        );
+        source.set_block(3, 65, 3, air).unwrap();
+        region.spawn_block_drops(&source, [3, 65, 3], state as u16);
+        let total: i32 = ground_stacks(&region)
+            .iter()
+            .filter(|stack| stack.name() == Some("minecraft:stone"))
+            .map(|stack| stack.count)
+            .sum();
+        assert_eq!(total, 11, "every stone spilled, once");
+        // A second removal at the same spot finds no block entity left to spill again.
+        let before = ground_stacks(&region).len();
+        region.spawn_block_drops(&source, [3, 65, 3], state as u16);
+        let again: i32 = ground_stacks(&region)
+            .iter()
+            .filter(|stack| stack.name() == Some("minecraft:stone"))
+            .map(|stack| stack.count)
+            .sum();
+        assert_eq!(again, 11, "no second spill");
+        assert!(ground_stacks(&region).len() >= before);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn region_tick_assigns_a_villager_profession_and_schedule() {
         use ferrite_math::Vec3;
@@ -13585,6 +13893,7 @@ mod worn_stack_tests {
                 data.insert("ferrite:level".into(), ferrite_nbt::Tag::Int(12));
                 data
             }),
+            book: None,
         };
         let stack = with_meta(ferrite_item::ItemStack::with_count(sword, 1), &meta);
         for id in [
@@ -13642,6 +13951,7 @@ mod worn_stack_tests {
             repair: 0,
             flags: vec![],
             custom_data: None,
+            book: None,
         };
         let cleared = with_meta(stack, &bare);
         assert!(
@@ -13659,6 +13969,124 @@ mod worn_stack_tests {
         ferrite_protocol::Encode::encode(&book, &mut wire);
         assert!(wire.windows(3).any(|w| w == b"one"));
         assert!(wire.windows(3).any(|w| w == b"two"));
+    }
+
+    fn book_meta(book: ferrite_plugin::BookFields) -> ItemMetaFields {
+        ItemMetaFields {
+            name: None,
+            lore: Vec::new(),
+            enchants: Vec::new(),
+            unbreakable: false,
+            model: None,
+            repair: 0,
+            flags: Vec::new(),
+            custom_data: None,
+            book: Some(book),
+        }
+    }
+
+    #[test]
+    fn plugin_book_metadata_becomes_typed_components_that_survive_save_and_wire() {
+        let signed = ferrite_plugin::BookFields {
+            written: true,
+            title: Some("Das Buch ✨".into()),
+            author: Some("Álvaro".into()),
+            generation: 2,
+            pages: vec![
+                r#"{"text":"Seite 1: Grüße 日本語 😀"}"#.into(),
+                r#"{"text":"zweite","color":"red"}"#.into(),
+            ],
+        };
+        let stack = with_meta(
+            ferrite_item::ItemStack::from_name("written_book").unwrap(),
+            &book_meta(signed),
+        );
+        let Some(ferrite_item::Component::WrittenBookContent(content)) = stack
+            .components
+            .get(ferrite_item::component_ids::WRITTEN_BOOK_CONTENT)
+        else {
+            panic!("a typed written book component");
+        };
+        assert_eq!(content.title.raw, "Das Buch ✨");
+        assert_eq!(content.author, "Álvaro");
+        assert_eq!(content.generation, 2);
+        assert_eq!(content.pages.len(), 2);
+        // Saved to the world and loaded again.
+        let saved = ferrite_item::ItemStack::from_nbt(&stack.to_nbt().unwrap()).unwrap();
+        assert_eq!(saved, stack);
+        // Sent to a client and read back.
+        let wire =
+            ferrite_item::ItemStack::decode_network(&stack.encode_network().unwrap()).unwrap();
+        assert_eq!(wire, stack);
+
+        let quill = ferrite_plugin::BookFields {
+            written: false,
+            title: None,
+            author: None,
+            generation: 0,
+            pages: vec!["§cred".into(), String::new(), "😀".into()],
+        };
+        let stack = with_meta(
+            ferrite_item::ItemStack::from_name("writable_book").unwrap(),
+            &book_meta(quill),
+        );
+        assert_eq!(
+            ferrite_item::ItemStack::from_nbt(&stack.to_nbt().unwrap()).unwrap(),
+            stack
+        );
+        let Some(ferrite_item::Component::WritableBookContent(content)) = stack
+            .components
+            .get(ferrite_item::component_ids::WRITABLE_BOOK_CONTENT)
+        else {
+            panic!("a typed writable book component");
+        };
+        assert_eq!(content.pages.len(), 3);
+        assert_eq!(content.pages[1].raw, "");
+    }
+
+    #[test]
+    fn book_metadata_on_another_item_is_left_off_and_replaces_older_pages() {
+        let signed = ferrite_plugin::BookFields {
+            written: true,
+            title: Some("T".into()),
+            author: Some("A".into()),
+            generation: 0,
+            pages: vec![r#"{"text":"p"}"#.into()],
+        };
+        // A book and quill cannot take a signed book's pages, and a stone takes none.
+        for item in ["writable_book", "stone"] {
+            let stack = with_meta(
+                ferrite_item::ItemStack::from_name(item).unwrap(),
+                &book_meta(signed.clone()),
+            );
+            assert!(
+                stack
+                    .components
+                    .get(ferrite_item::component_ids::WRITTEN_BOOK_CONTENT)
+                    .is_none()
+            );
+            assert!(
+                stack
+                    .components
+                    .get(ferrite_item::component_ids::WRITABLE_BOOK_CONTENT)
+                    .is_none()
+            );
+        }
+        // Writing metadata again replaces the pages instead of appending to them.
+        let first = with_meta(
+            ferrite_item::ItemStack::from_name("written_book").unwrap(),
+            &book_meta(signed.clone()),
+        );
+        let mut second = signed;
+        second.pages = vec![r#"{"text":"a"}"#.into(), r#"{"text":"b"}"#.into()];
+        let replaced = with_meta(first, &book_meta(second));
+        let Some(ferrite_item::Component::WrittenBookContent(content)) = replaced
+            .components
+            .get(ferrite_item::component_ids::WRITTEN_BOOK_CONTENT)
+        else {
+            panic!("a written book component");
+        };
+        assert_eq!(content.pages.len(), 2);
     }
 
     #[test]

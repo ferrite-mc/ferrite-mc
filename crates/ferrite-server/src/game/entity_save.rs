@@ -556,14 +556,11 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     }
 
     if let Some(item) = &data.item {
-        // The entity's synched slot carries only an item id and a count (the protocol stack has
-        // no component patch), so that is what the sidecar stores.
-        let stack = ferrite_entity::item::stack(data);
-        let stack = u16::try_from(stack.item_id)
-            .ok()
-            .map(|id| ferrite_item::ItemStack::with_count(id, stack.count));
-        if let Some(stack) = stack.filter(|stack| !stack.is_empty()) {
-            c.insert("Item".into(), Tag::Compound(stack.to_nbt().ok()?));
+        // The synched slot holds only an id and a count; the components live in the item state,
+        // so the sidecar stores the stack as `full_stack` assembles it.
+        let stack = ferrite_entity::item::full_stack(data);
+        if let Some(nbt) = super::item_keep::to_nbt_keeping_item(&stack) {
+            c.insert("Item".into(), Tag::Compound(nbt));
         }
         c.insert("Age".into(), Tag::Int(item.age));
         c.insert("PickupDelay".into(), Tag::Int(item.pickup_delay));
@@ -727,6 +724,7 @@ fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             },
         );
         data.item = Some(ItemState {
+            components: stack.components.clone(),
             age: int(c, "Age").unwrap_or(0),
             pickup_delay: int(c, "PickupDelay").unwrap_or(0),
             health: int(c, "ItemHealth").unwrap_or(5),
@@ -931,6 +929,34 @@ mod tests {
         record.data.item.as_mut().unwrap().pickup_delay = 10;
         record.data.item.as_mut().unwrap().age = 42;
         record
+    }
+
+    #[test]
+    fn a_dropped_item_keeps_its_components_through_the_entity_save() {
+        use ferrite_item::{Component, component_ids};
+        let mut rng = Rng::default();
+        let mut shulker = ferrite_item::ItemStack::from_name("lime_shulker_box").unwrap();
+        shulker.components.insert(
+            component_ids::CONTAINER,
+            Component::Container(vec![
+                ferrite_item::ItemStack::from_name("diamond")
+                    .unwrap()
+                    .copy_with_count(7),
+            ]),
+        );
+        shulker.components.insert(
+            component_ids::CUSTOM_NAME,
+            Component::CustomName(ferrite_text::Component::text("Vorräte ✓")),
+        );
+        let record = ferrite_entity::item::new_item_stack(
+            Vec3::new(1.5, 65.0, 2.5),
+            Vec3::ZERO,
+            &shulker,
+            &mut rng,
+        );
+        let loaded = from_nbt(&to_nbt(&[record]));
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(ferrite_entity::item::full_stack(&loaded[0].data), shulker);
     }
 
     #[test]

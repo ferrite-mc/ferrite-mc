@@ -746,7 +746,10 @@ class PlayerExtrasTest {
             assertArrayEquals(new long[]{5L, -6L}, pdc.get(longsKey, org.bukkit.persistence.PersistentDataType.LONG_ARRAY));
             assertNull(pdc.get(byteKey, org.bukkit.persistence.PersistentDataType.INTEGER), "wrong type access is null");
             assertFalse(pdc.has(byteKey, org.bukkit.persistence.PersistentDataType.BOOLEAN));
-            assertThrows(UnsupportedOperationException.class, () -> pdc.set(new org.bukkit.NamespacedKey("ferrite", "unsupported"), org.bukkit.persistence.PersistentDataType.TAG_CONTAINER, new FerriteDataContainer()));
+            // Nested containers and lists used to be refused; they are supported now (see ItemPdcNestingTest).
+            pdc.set(new org.bukkit.NamespacedKey("ferrite", "nested"), org.bukkit.persistence.PersistentDataType.TAG_CONTAINER, new FerriteDataContainer());
+            assertTrue(pdc.has(new org.bukkit.NamespacedKey("ferrite", "nested"), org.bukkit.persistence.PersistentDataType.TAG_CONTAINER));
+            pdc.remove(new org.bukkit.NamespacedKey("ferrite", "nested"));
             pdc.remove(longKey);
             assertFalse(pdc.has(longKey));
             meta.removeItemFlags(org.bukkit.inventory.ItemFlag.HIDE_DESTROYS);

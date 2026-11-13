@@ -53,10 +53,11 @@ mod stack;
 pub mod wire;
 
 pub use component::{
-    AttributeModifier, AttributeOperation, COMPONENT_COUNT, Component, ComponentPatch,
-    ComponentType, CustomModelData, Enchantments, EquipmentSlot, Food, LodestoneTracker,
-    PotionContents, PotionEffect, Rarity, Tool, ToolRule, TooltipDisplay, Trim, component_id,
-    component_name, component_type, component_types,
+    AttributeModifier, AttributeOperation, BOOK_MAX_PAGES, COMPONENT_COUNT, CONTAINER_MAX_SLOTS,
+    Component, ComponentPatch, ComponentType, CustomModelData, Enchantments, EquipmentSlot,
+    Filterable, Food, LodestoneTracker, PotionContents, PotionEffect, Rarity, Tool, ToolRule,
+    TooltipDisplay, Trim, WritableBookContent, WrittenBookContent, component_id, component_name,
+    component_type, component_types,
 };
 pub use defaults::{
     AIR, ItemDefaults, default_components, item_count, item_defaults, item_defaults_by_name,

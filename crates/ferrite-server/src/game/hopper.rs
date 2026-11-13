@@ -335,13 +335,6 @@ pub fn comparator_signal(items: &[ItemStack]) -> u8 {
     u8::try_from(strength).unwrap_or(15).min(15)
 }
 
-fn plain(stack: &ItemStack) -> ferrite_protocol::packets::play::ItemStack {
-    ferrite_protocol::packets::play::ItemStack {
-        count: stack.count,
-        item_id: i32::from(stack.item),
-    }
-}
-
 /// Vanilla `HopperBlockEntity.suckInItems`: moves one item from every item entity resting on
 /// the hopper's top into its slots.
 pub fn suck_up(
@@ -367,18 +360,16 @@ pub fn suck_up(
         {
             continue;
         }
-        let plain_stack = match store.data(key) {
-            Some(data) if data.item.is_some() => ferrite_entity::item::stack(data),
+        // One item of the entity's stack, with its components.
+        let stack = match store.data(key) {
+            Some(data) if data.item.is_some() => {
+                ferrite_entity::item::full_stack(data).copy_with_count(1)
+            }
             _ => continue,
         };
-        let Ok(item) = u16::try_from(plain_stack.item_id) else {
+        if stack.item == ferrite_item::AIR {
             continue;
-        };
-        let stack = ItemStack {
-            item,
-            count: 1,
-            components: ferrite_item::ComponentPatch::new(),
-        };
+        }
         if insert(items, stack).is_some() {
             continue;
         }
@@ -477,11 +468,8 @@ impl Hoppers {
                             f64::from(pos[2]) + 0.5 + dz * 0.6,
                         );
                         let velocity = Vec3::new(dx * 0.12, dy * 0.12, dz * 0.12);
-                        entities.insert(ferrite_entity::item::new_item(
-                            center,
-                            velocity,
-                            plain(&stack),
-                            rng,
+                        entities.insert(ferrite_entity::item::new_item_stack(
+                            center, velocity, &stack, rng,
                         ));
                         moved = true;
                     }
@@ -529,6 +517,31 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         source
+    }
+
+    #[test]
+    fn a_hopper_takes_one_item_with_its_components_from_an_item_entity() {
+        let mut rng = Rng::new(4);
+        let mut named = ItemStack::from_name("stone").unwrap().copy_with_count(3);
+        named.components.insert(
+            ferrite_item::component_ids::REPAIR_COST,
+            ferrite_item::Component::RepairCost(6),
+        );
+        let mut store = EntityStore::default();
+        let key = store.insert(ferrite_entity::item::new_item_stack(
+            Vec3::new(0.5, 65.2, 0.5),
+            Vec3::ZERO,
+            &named,
+            &mut rng,
+        ));
+        let mut items = vec![ItemStack::empty(); SIZE];
+        assert!(suck_up(&mut store, [0, 64, 0], &mut items, &mut rng));
+        assert_eq!(items[0], named.copy_with_count(1));
+        // The two left on the ground still carry the component.
+        assert_eq!(
+            ferrite_entity::item::full_stack(store.data(key).unwrap()),
+            named.copy_with_count(2)
+        );
     }
 
     fn state(name: &str, props: &[(&str, &str)]) -> u32 {
