@@ -7,6 +7,10 @@ on:
         description: Release tag to build and update
         required: true
         default: v0.2.1
+      source_ref:
+        description: Branch or commit to build for a new release tag
+        required: true
+        default: main
   push:
     tags:
       - "v*"
@@ -38,7 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          # A manually dispatched release may create a new tag, so the build
+          # must check out its source ref rather than the not-yet-existing tag.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.source_ref || github.ref_name }}
 
       - name: Install Rust (${{ matrix.toolchain }})
         uses: dtolnay/rust-toolchain@stable
