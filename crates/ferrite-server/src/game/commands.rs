@@ -3056,6 +3056,17 @@ mod tests {
             actions.first(),
             Some(Action::World(crate::game::commands_world::WorldCommand::Template { blocks, .. })) if !blocks.is_empty()
         ));
+        // The two villagers of the igloo basement travel with the command and are not thinned
+        // by the integrity roll.
+        let (result, actions) = run(
+            "place template minecraft:igloo/bottom 0 64 0 none none 0.0",
+            2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(matches!(
+            actions.first(),
+            Some(Action::World(crate::game::commands_world::WorldCommand::Template { spawns, .. })) if spawns.len() == 2
+        ));
     }
 
     #[test]

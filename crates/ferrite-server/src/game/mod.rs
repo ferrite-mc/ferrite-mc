@@ -4147,10 +4147,23 @@ impl CommandRuntime<'_> {
                 if self.worlds.owner(self.dimension, chunk).is_some() {
                     if let Some(source) = self.source.clone() {
                         let tracking = Arc::clone(self.tracking);
+                        // `/place template` entities spawn in the region that owns the chunk
+                        // each one stands in, after the blocks are written.
+                        let spawns = commands_world::template_spawns(&command, &origin);
                         self.worlds
                             .schedule_at_chunk(self.dimension, chunk, move |_region| {
                                 commands_world::apply_world(&command, &origin, &*source, &tracking);
                             });
+                        for (at, record) in spawns {
+                            let at =
+                                ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+                            if self.worlds.owner(self.dimension, at).is_some() {
+                                self.worlds
+                                    .schedule_at_chunk(self.dimension, at, move |region| {
+                                        region.add_entities(vec![record]);
+                                    });
+                            }
+                        }
                     }
                 } else if let Some(source) = self.source
                     && let Err(error) = commands_world::execute(&command, &origin, &**source)

@@ -671,7 +671,7 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     Some(c)
 }
 
-fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
+pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
     let Some(Tag::String(name)) = c.get("id") else {
         tracing::warn!("skipping a saved entity without an id");
         return None;
