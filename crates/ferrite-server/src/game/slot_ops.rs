@@ -137,6 +137,46 @@ pub fn write_container(
     changed
 }
 
+fn rng() -> ferrite_entity::Rng {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos() as u64);
+    ferrite_entity::Rng::new(seed)
+}
+
+/// `stacks` run through `modifier` (empty slots stay empty).
+fn modified(
+    stacks: Vec<ItemStack>,
+    modifier: Option<&super::item_modifier::ItemModifier>,
+) -> Vec<ItemStack> {
+    let Some(modifier) = modifier else {
+        return stacks;
+    };
+    let mut rng = rng();
+    stacks
+        .into_iter()
+        .map(|stack| {
+            if stack.is_empty() {
+                stack
+            } else {
+                modifier.apply(stack, &mut rng)
+            }
+        })
+        .collect()
+}
+
+/// Indexes (into `slots`) whose stack differs once the modifier ran, with the new stacks.
+fn changed(
+    before: &[ItemStack],
+    modifier: &super::item_modifier::ItemModifier,
+) -> Vec<(usize, ItemStack)> {
+    modified(before.to_vec(), Some(modifier))
+        .into_iter()
+        .enumerate()
+        .filter(|(index, after)| *after != before[*index])
+        .collect()
+}
+
 impl CommandRuntime<'_> {
     fn block_container_at(&self, pos: [i32; 3]) -> Option<(String, usize)> {
         let source = self.source.as_ref()?;
@@ -157,7 +197,11 @@ impl CommandRuntime<'_> {
     fn slot_stacks(&self, source: SlotSource) -> Result<Vec<ItemStack>, ()> {
         match source {
             SlotSource::Stacks(stacks) => Ok(stacks),
-            SlotSource::FromBlock { pos, slots } => {
+            SlotSource::FromBlock {
+                pos,
+                slots,
+                modifier,
+            } => {
                 let Some((_, size)) = self.block_container_at(pos) else {
                     self.reply.key(
                         "commands.item.source.not_a_container",
@@ -175,9 +219,16 @@ impl CommandRuntime<'_> {
                     return Err(());
                 };
                 let items = block_container::load_slots(self.source.as_ref().unwrap(), pos, size);
-                Ok(indexes.iter().map(|i| items[*i].clone()).collect())
+                Ok(modified(
+                    indexes.iter().map(|i| items[*i].clone()).collect(),
+                    modifier.as_deref(),
+                ))
             }
-            SlotSource::FromEntity { target, slots } => {
+            SlotSource::FromEntity {
+                target,
+                slots,
+                modifier,
+            } => {
                 let Ok(targets) = self.selection(&target) else {
                     self.reply.key("argument.entity.notfound.entity", &[]);
                     return Err(());
@@ -204,10 +255,101 @@ impl CommandRuntime<'_> {
                 });
                 received
                     .recv_timeout(Duration::from_millis(1500))
+                    .map(|stacks| modified(stacks, modifier.as_deref()))
                     .map_err(|_| {
                         self.reply
                             .key("commands.item.source.no_such_slot", &[&slots])
                     })
+            }
+        }
+    }
+
+    /// `/item modify`: applies `modifier` to each addressed slot of the target; slots it does not
+    /// change are left alone and a run that changes nothing fails.
+    pub(super) fn run_modify(
+        &mut self,
+        target: SlotTarget,
+        slots: String,
+        modifier: &super::item_modifier::ItemModifier,
+    ) {
+        match target {
+            SlotTarget::Block(pos) => {
+                let (x, y, z) = (pos[0].to_string(), pos[1].to_string(), pos[2].to_string());
+                let Some((name, size)) = self.block_container_at(pos) else {
+                    self.reply
+                        .key("commands.item.target.not_a_container", &[&x, &y, &z]);
+                    return;
+                };
+                let source = self.source.clone().unwrap();
+                let Ok(indexes) = block_slots(&slots, size) else {
+                    self.reply
+                        .key("commands.item.target.no_such_slot", &[&slots]);
+                    return;
+                };
+                let mut items = block_container::load_slots(&source, pos, size);
+                let before: Vec<ItemStack> = indexes.iter().map(|i| items[*i].clone()).collect();
+                let updates = changed(&before, modifier);
+                if updates.is_empty() {
+                    self.reply.key("commands.item.target.no_changes", &[&slots]);
+                    return;
+                }
+                let shown = super::commands::item_display(updates[0].1.item);
+                for (index, stack) in updates {
+                    items[indexes[index]] = stack;
+                }
+                block_container::store_slots(&source, pos, &name, &items);
+                self.reply
+                    .key("commands.item.block.set.success", &[&x, &y, &z, &shown]);
+            }
+            SlotTarget::Entities(target) => {
+                let Ok(selected) = self.selection(&target) else {
+                    self.reply.key("argument.entity.notfound.entity", &[]);
+                    return;
+                };
+                let Ok(indexes) = player_slots(&slots) else {
+                    self.reply
+                        .key("commands.item.target.no_such_slot", &[&slots]);
+                    return;
+                };
+                let (mut done, mut who, mut shown) = (0, String::new(), String::new());
+                for entity in selected.iter().filter(|e| e.player) {
+                    let Some((_, mailbox, _)) = self.mailboxes.get(&entity.uuid) else {
+                        continue;
+                    };
+                    let (reply, received) = std::sync::mpsc::channel();
+                    mailbox.lock().unwrap().push_back(Command::ReadSlots {
+                        slots: indexes.clone(),
+                        reply,
+                    });
+                    let Ok(before) = received.recv_timeout(Duration::from_millis(1500)) else {
+                        continue;
+                    };
+                    let updates = changed(&before, modifier);
+                    if updates.is_empty() {
+                        continue;
+                    }
+                    shown = super::commands::item_display(updates[0].1.item);
+                    let (slots_changed, stacks): (Vec<i16>, Vec<ItemStack>) = updates
+                        .into_iter()
+                        .map(|(index, stack)| (indexes[index], stack))
+                        .unzip();
+                    mailbox.lock().unwrap().push_back(Command::ItemSlots {
+                        slots: slots_changed,
+                        fill: SlotFill::Set(stacks),
+                    });
+                    who = entity.name.clone();
+                    done += 1;
+                }
+                match done {
+                    0 => self.reply.key("commands.item.target.no_changes", &[&slots]),
+                    1 => self
+                        .reply
+                        .key("commands.item.entity.set.success.single", &[&who, &shown]),
+                    _ => self.reply.key(
+                        "commands.item.entity.set.success.multiple",
+                        &[&done.to_string(), &shown],
+                    ),
+                }
             }
         }
     }
@@ -359,6 +501,27 @@ mod tests {
             &[stack(dirt, 2), stack(dirt, 3)],
         );
         assert!(items[2].is_empty());
+    }
+
+    #[test]
+    fn modify_reports_only_the_slots_the_modifier_changed() {
+        let stone = ferrite_item::item_id("minecraft:stone").unwrap();
+        let modifier = super::super::item_modifier::ItemModifier::parse(
+            r#"{"function":"set_count","count":5}"#,
+        )
+        .unwrap();
+        let before = vec![
+            stack(stone, 1),
+            ItemStack::empty(),
+            stack(stone, 5),
+            stack(stone, 2),
+        ];
+        let after = changed(&before, &modifier);
+        assert_eq!(
+            after,
+            vec![(0, stack(stone, 5)), (3, stack(stone, 5))],
+            "the empty slot stays empty and the stack already at 5 is not rewritten"
+        );
     }
 
     #[test]

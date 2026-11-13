@@ -147,6 +147,9 @@ fn argument_text(tag: &Tag) -> String {
 pub struct FunctionStore {
     functions: BTreeMap<String, Function>,
     tags: BTreeMap<String, Vec<String>>,
+    /// `data/<ns>/item_modifier/**/*.json`; a file that fails to load keeps its reason.
+    item_modifiers:
+        BTreeMap<String, Result<std::sync::Arc<super::item_modifier::ItemModifier>, String>>,
 }
 
 impl FunctionStore {
@@ -213,6 +216,17 @@ impl FunctionStore {
                     }
                 }
             }
+            for (relative, path) in files_in(&namespace.join("item_modifier"), "json") {
+                let id = format!("{name}:{relative}");
+                let loaded = std::fs::read_to_string(&path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|text| super::item_modifier::ItemModifier::parse(&text))
+                    .map(std::sync::Arc::new);
+                if let Err(reason) = &loaded {
+                    tracing::warn!(%reason, modifier = %id, "item modifier cannot be used");
+                }
+                self.item_modifiers.insert(id, loaded);
+            }
             for (relative, path) in files_in(&namespace.join("tags/function"), "json") {
                 self.load_tag(&format!("{name}:{relative}"), &path);
             }
@@ -249,6 +263,14 @@ impl FunctionStore {
                 tag.push(namespaced(id));
             }
         }
+    }
+
+    /// The item modifier `id` (`ns:path`), or the reason it could not be loaded. `None` when no pack has it.
+    pub fn item_modifier(
+        &self,
+        id: &str,
+    ) -> Option<&Result<std::sync::Arc<super::item_modifier::ItemModifier>, String>> {
+        self.item_modifiers.get(id)
     }
 
     pub fn get(&self, name: &str) -> Option<&Function> {

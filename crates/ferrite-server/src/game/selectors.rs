@@ -19,6 +19,8 @@ pub struct SelectedEntity {
     pub uuid: Uuid,
     pub name: String,
     pub player: bool,
+    /// Entity type protocol id; `None` for players.
+    pub kind: Option<u16>,
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
@@ -199,6 +201,7 @@ fn candidates(state: &GameState) -> Vec<Candidate> {
                 uuid: player.uuid,
                 name: player.name.clone(),
                 player: true,
+                kind: None,
                 pos: player.pos,
                 yaw: player.yaw,
                 pitch: player.pitch,
@@ -220,6 +223,7 @@ fn candidates(state: &GameState) -> Vec<Candidate> {
                 uuid: entity.uuid,
                 name: entity.display_name(),
                 player: false,
+                kind: Some(entity.kind),
                 pos: entity.pos,
                 yaw: entity.yaw,
                 pitch: entity.pitch,
@@ -586,6 +590,23 @@ mod tests {
             custom_name: Some("Boss".into()),
         });
         (state, alice, zombie)
+    }
+
+    #[test]
+    fn attribute_limits_follow_the_selected_entity_type() {
+        use crate::game::attributes::limits_for;
+        let (state, alice, zombie) = state();
+        let selected = resolve_selection(&state, &target("@e"), None, [0.0; 3]).unwrap();
+        let find = |uuid| selected.iter().find(|entity| entity.uuid == uuid).unwrap();
+        assert_eq!(
+            limits_for(find(alice), "attack_damage").unwrap().default,
+            1.0
+        );
+        assert_eq!(
+            limits_for(find(zombie), "attack_damage").unwrap().default,
+            3.0
+        );
+        assert_eq!(limits_for(find(zombie), "minecraft:nope"), None);
     }
 
     #[test]

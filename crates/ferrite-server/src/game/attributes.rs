@@ -79,6 +79,24 @@ pub fn default_for(path: &str, player: bool) -> Option<Range> {
     Some(found)
 }
 
+/// The default of `path` for a non-player entity of protocol type id `kind`: the type's own
+/// default attribute (`DefaultAttributes`). `None` when the type does not carry the attribute
+/// at all, which includes every non-living type: vanilla answers `failed.no_attribute` there.
+pub fn default_for_kind(path: &str, kind: u16) -> Option<Range> {
+    let mut found = range_of(path)?;
+    found.default = ferrite_data::entity_props::default_attribute(kind, path)?;
+    Some(found)
+}
+
+/// The range `/attribute` uses for `target`: players use the player table, other entities their
+/// own type's defaults.
+pub fn limits_for(target: &super::selectors::SelectedEntity, path: &str) -> Option<Range> {
+    match target.kind {
+        Some(kind) if !target.player => default_for_kind(path, kind),
+        _ => default_for(path, target.player),
+    }
+}
+
 /// How a modifier combines with the base value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(clippy::enum_variant_names)] // vanilla names: add_value, add_multiplied_*
@@ -153,5 +171,32 @@ mod tests {
         assert_eq!(Stored::default().value(player, player.default), 0.1);
         assert_eq!(default_for("max_health", false).unwrap().default, 20.0);
         assert!(range_of("minecraft:nope").is_none());
+    }
+
+    fn kind(name: &str) -> u16 {
+        ferrite_data::entity_props::by_name(name).unwrap().id
+    }
+
+    #[test]
+    fn mobs_use_their_own_type_defaults() {
+        let cow = default_for_kind("max_health", kind("cow")).unwrap();
+        assert_eq!(cow.default, 10.0);
+        assert_eq!((cow.min, cow.max), (1.0, 1024.0));
+        let zombie = default_for_kind("movement_speed", kind("zombie")).unwrap();
+        assert_ne!(zombie.default, 0.7);
+        assert_eq!(
+            default_for_kind("attack_damage", kind("zombie"))
+                .unwrap()
+                .default,
+            3.0
+        );
+    }
+
+    #[test]
+    fn types_without_the_attribute_have_none() {
+        // A cow does not attack; items and armor stands are not living at all.
+        assert!(default_for_kind("attack_damage", kind("cow")).is_none());
+        assert!(default_for_kind("max_health", kind("item")).is_none());
+        assert!(default_for_kind("minecraft:nope", kind("cow")).is_none());
     }
 }

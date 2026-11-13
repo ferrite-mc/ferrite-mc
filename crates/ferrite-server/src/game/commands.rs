@@ -638,13 +638,27 @@ pub enum SlotTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotSource {
     Stacks(Vec<ferrite_item::ItemStack>),
-    FromBlock { pos: [i32; 3], slots: String },
-    FromEntity { target: EntityTarget, slots: String },
+    FromBlock {
+        pos: [i32; 3],
+        slots: String,
+        modifier: Option<std::sync::Arc<super::item_modifier::ItemModifier>>,
+    },
+    FromEntity {
+        target: EntityTarget,
+        slots: String,
+        modifier: Option<std::sync::Arc<super::item_modifier::ItemModifier>>,
+    },
 }
 
 /// A command's effect, applied by the game loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// `/item modify`: runs a data-pack item modifier over the stacks in the target's slots.
+    ModifySlots {
+        target: SlotTarget,
+        slots: String,
+        modifier: std::sync::Arc<super::item_modifier::ItemModifier>,
+    },
     /// `/spreadplayers`: scatter the targets (players and other entities) around a point.
     Spread {
         targets: EntityTarget,
@@ -1928,13 +1942,16 @@ pub(crate) fn parse_item_components(
     Ok(components)
 }
 
-/// Rewrites a `/give` component list (`a=1,b={c:"x"}`) as an SNBT compound.
+/// Rewrites a `/give` component list (`a=1,minecraft:b={c:"x"}`) as an SNBT compound. A top-level
+/// key is quoted, so a namespaced component id (`minecraft:damage`) survives SNBT's `:` separator.
 fn brigadier_to_snbt(inner: &str) -> String {
     let mut out = String::with_capacity(inner.len() + 2);
     out.push('{');
     let mut depth = 0usize;
     let mut quoted = false;
     let mut escaped = false;
+    let mut key = String::new();
+    let mut in_key = true;
     for c in inner.chars() {
         if quoted {
             out.push(c);
@@ -1944,6 +1961,25 @@ fn brigadier_to_snbt(inner: &str) -> String {
                 escaped = true;
             } else if c == '"' {
                 quoted = false;
+            }
+            continue;
+        }
+        if in_key && depth == 0 {
+            match c {
+                '=' => {
+                    let name = key.trim();
+                    if name.starts_with('"') {
+                        out.push_str(name);
+                    } else {
+                        out.push('"');
+                        out.push_str(name);
+                        out.push('"');
+                    }
+                    out.push(':');
+                    key.clear();
+                    in_key = false;
+                }
+                _ => key.push(c),
             }
             continue;
         }
@@ -1960,10 +1996,15 @@ fn brigadier_to_snbt(inner: &str) -> String {
                 depth = depth.saturating_sub(1);
                 out.push(c);
             }
-            '=' if depth == 0 => out.push(':'),
+            ',' if depth == 0 => {
+                in_key = true;
+                out.push(c);
+            }
             _ => out.push(c),
         }
     }
+    // A key with no `=` (vanilla's `!component` removal is one) is left for the SNBT parser to reject.
+    out.push_str(key.trim());
     out.push('}');
     out
 }
@@ -2682,6 +2723,122 @@ mod tests {
         std::fs::create_dir_all(&functions).unwrap();
         std::fs::write(functions.join("foo.mcfunction"), "say scheduled\n").unwrap();
         dir
+    }
+
+    fn modifier_world() -> (std::path::PathBuf, Arc<Mutex<GameState>>) {
+        let dir = std::env::temp_dir().join(format!("ferrite-modifier-test-{}", Uuid::new_v4()));
+        let data = dir.join("datapacks/pack/data/test/item_modifier");
+        std::fs::create_dir_all(data.join("nested")).unwrap();
+        std::fs::write(
+            data.join("five.json"),
+            r#"{"function":"minecraft:set_count","count":5}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("nested/fancy.json"),
+            r#"[{"function":"set_name","name":"Fancy"},{"function":"set_count","count":2}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("broken.json"),
+            r#"{"function":"minecraft:enchant_randomly"}"#,
+        )
+        .unwrap();
+        let mut game = GameState::default();
+        game.functions = Arc::new(crate::game::functions::FunctionStore::load(Some(&dir)));
+        (dir, Arc::new(Mutex::new(game)))
+    }
+
+    #[test]
+    fn item_modify_runs_datapack_and_inline_modifiers_and_rejects_the_rest() {
+        let (dir, state) = modifier_world();
+        let run = |line: &str, permission: u8| {
+            run_with_state(line, permission, state.clone(), None, None)
+        };
+        // A data-pack modifier (also one in a sub-folder) and inline JSON all produce the action.
+        for line in [
+            "item modify entity @s hotbar.0 test:five",
+            "item modify block 0 64 0 container.0 test:nested/fancy",
+            r#"item modify entity @s weapon.mainhand {"function":"set_count","count":3}"#,
+        ] {
+            let (result, actions) = run(line, 2);
+            assert!(result.is_ok(), "{line}: {result:?}");
+            assert!(
+                matches!(actions.first(), Some(Action::ModifySlots { .. })),
+                "{line}: {actions:?}"
+            );
+        }
+        // from-forms carry the modifier on the source.
+        let (result, actions) = run(
+            "item replace entity @s hotbar.1 from block 0 64 0 container.0 test:five",
+            2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            matches!(
+                actions.first(),
+                Some(Action::Slots {
+                    source: SlotSource::FromBlock {
+                        modifier: Some(_),
+                        ..
+                    },
+                    ..
+                })
+            ),
+            "{actions:?}"
+        );
+        // Unknown id, unsupported function and invalid inline JSON fail with a reason; nothing runs.
+        for (line, needle) in [
+            (
+                "item modify entity @s hotbar.0 test:missing",
+                "test:missing",
+            ),
+            (
+                "item modify entity @s hotbar.0 test:broken",
+                "enchant_randomly",
+            ),
+            (
+                "item modify entity @s hotbar.0 {\"function\":\"nope\"}",
+                "nope",
+            ),
+            (
+                "item replace entity @s hotbar.1 from entity @s hotbar.0 test:broken",
+                "enchant_randomly",
+            ),
+        ] {
+            let (result, actions) = run(line, 2);
+            assert!(result.unwrap_err().to_string().contains(needle), "{line}");
+            assert!(actions.is_empty(), "{line}: {actions:?}");
+        }
+        // Permission level 2 is required.
+        let (result, actions) = run("item modify entity @s hotbar.0 test:five", 1);
+        assert!(result.is_err() && actions.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn item_component_lists_accept_namespaced_and_bare_ids_and_commas_inside_values() {
+        let parsed = parse_item_components(
+            "minecraft:diamond_pickaxe[minecraft:damage=5,custom_name=\"a,b=c\",minecraft:unbreakable={}]",
+        )
+        .unwrap();
+        let ids: Vec<u16> = parsed.iter().map(|(id, _)| *id).collect();
+        let expected: Vec<u16> = [
+            "minecraft:damage",
+            "minecraft:custom_name",
+            "minecraft:unbreakable",
+        ]
+        .iter()
+        .map(|name| ferrite_item::component_id(name).unwrap())
+        .collect();
+        assert_eq!(ids, expected);
+        assert_eq!(parsed[1].1, ferrite_nbt::Tag::String("a,b=c".into()));
+        assert!(
+            parse_item_components("minecraft:stone[]")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse_item_components("minecraft:stone[!minecraft:damage]").is_err());
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! `/item replace|fill|override|modify` on block containers and entities.
 //!
 //! Writes go through [`Action::Slots`]. Players are the only entities with inventories the
-//! command layer can address, so `entity` targets act on players. Item components in the
-//! `item[...]` argument are ignored, and no item modifiers ship with vanilla data, so
-//! `modify` and every `<modifier>` report `argument.item_modifier.unknown`.
+//! command layer can address, so `entity` targets act on players. Components in the
+//! `item[...]` argument of `with` are parsed like `/give` does and set on the stack. No item
+//! modifiers ship with vanilla data: `modify` and `from ... <modifier>` run a modifier from a data
+//! pack (`item_modifier/*.json`) or inline JSON, and an unknown id reports
+//! `argument.id.unknown` (see `item_modifier.rs` for the supported functions).
 
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
@@ -14,11 +16,12 @@ use ferrite_command::{
 use ferrite_item::ItemStack;
 
 use super::commands_world::WorldCommand;
+use super::item_modifier::ItemModifier;
 use super::structure_template::{Mirror, Rotation, Template};
 
 use super::commands::{
     Action, Feedback, SlotMode, SlotSource, SlotTarget, Source, entity, item_display, parse_item,
-    send,
+    parse_item_components, send,
 };
 
 /// The block position of a `<pos>` argument (relative coordinates resolved).
@@ -60,8 +63,23 @@ fn run_with(
     let raw = ctx
         .string("item")
         .ok_or_else(|| CommandError::failed("Missing item"))?;
+    let stack = stack_for(raw, ctx.integer("count").unwrap_or(1))?;
+    send(
+        ctx.source(),
+        Action::Slots {
+            mode,
+            target: target(ctx, block)?,
+            slots: ctx.string("slots").unwrap_or_default().to_owned(),
+            source: SlotSource::Stacks(vec![stack]),
+        },
+    )
+}
+
+/// The stack `with <item>[components] <count>` describes: the count is checked against the item's
+/// stack size and each component is parsed exactly as `/give` parses it.
+fn stack_for(raw: &str, count: i32) -> Result<ItemStack, CommandError> {
     let item = parse_item(raw)?;
-    let count = ctx.integer("count").unwrap_or(1);
+    let components = parse_item_components(raw)?;
     let max = ferrite_item::item_defaults(item).map_or(64, |defaults| defaults.max_stack_size);
     if !(1..=max).contains(&count) {
         return Err(CommandError::failed(format!(
@@ -69,15 +87,39 @@ fn run_with(
             item_display(item)
         )));
     }
-    send(
-        ctx.source(),
-        Action::Slots {
-            mode,
-            target: target(ctx, block)?,
-            slots: ctx.string("slots").unwrap_or_default().to_owned(),
-            source: SlotSource::Stacks(vec![ItemStack::with_count(item, count)]),
-        },
-    )
+    let mut stack = ItemStack::with_count(item, count);
+    for (id, tag) in &components {
+        stack
+            .components
+            .insert(*id, ferrite_item::Component::from_nbt(*id, tag));
+    }
+    Ok(stack)
+}
+
+/// The modifier a `<modifier>` argument names: inline JSON, or `ns:path` of a data-pack file.
+fn resolve_modifier(
+    ctx: &CommandContext<Source>,
+    raw: &str,
+) -> Result<std::sync::Arc<ItemModifier>, CommandError> {
+    let raw = raw.trim();
+    if raw.starts_with('{') || raw.starts_with('[') {
+        return ItemModifier::parse(raw)
+            .map(std::sync::Arc::new)
+            .map_err(|reason| CommandError::failed(format!("Invalid item modifier: {reason}")));
+    }
+    let id = if raw.contains(':') {
+        raw.to_owned()
+    } else {
+        format!("minecraft:{raw}")
+    };
+    let state = ctx.source().state.lock().unwrap();
+    match state.functions.item_modifier(&id) {
+        Some(Ok(modifier)) => Ok(modifier.clone()),
+        Some(Err(reason)) => Err(CommandError::failed(format!(
+            "Item modifier {id} cannot be used: {reason}"
+        ))),
+        None => Err(unknown_modifier(raw)),
+    }
 }
 
 fn run_from(
@@ -86,19 +128,22 @@ fn run_from(
     block: bool,
     from_block: bool,
 ) -> Result<i32, CommandError> {
-    if let Some(modifier) = ctx.string("modifier") {
-        return Err(unknown_modifier(modifier));
-    }
+    let modifier = ctx
+        .string("modifier")
+        .map(|raw| resolve_modifier(ctx, raw))
+        .transpose()?;
     let slots = ctx.string("sourceSlots").unwrap_or_default().to_owned();
     let source = if from_block {
         SlotSource::FromBlock {
             pos: block_pos(ctx, "source")?,
             slots,
+            modifier,
         }
     } else {
         SlotSource::FromEntity {
             target: entity(ctx, "source")?,
             slots,
+            modifier,
         }
     };
     send(
@@ -144,10 +189,21 @@ fn slot_node(mode: SlotMode, block: bool) -> NodeBuilder<Source> {
         )
 }
 
-fn modify_node() -> NodeBuilder<Source> {
+fn modify_node(block: bool) -> NodeBuilder<Source> {
     argument::<Source>("slots", ArgumentType::opaque("minecraft:slot_source")).then(
-        argument::<Source>("modifier", ArgumentType::opaque("minecraft:loot_modifier"))
-            .executes(|ctx| Err(unknown_modifier(ctx.string("modifier").unwrap_or_default()))),
+        argument::<Source>("modifier", ArgumentType::opaque("minecraft:loot_modifier")).executes(
+            move |ctx| {
+                let modifier = resolve_modifier(ctx, ctx.string("modifier").unwrap_or_default())?;
+                send(
+                    ctx.source(),
+                    Action::ModifySlots {
+                        target: target(ctx, block)?,
+                        slots: ctx.string("slots").unwrap_or_default().to_owned(),
+                        modifier,
+                    },
+                )
+            },
+        ),
     )
 }
 
@@ -161,7 +217,7 @@ fn item_tree() -> NodeBuilder<Source> {
     ] {
         let node = |block: bool| match mode {
             Some(mode) => slot_node(mode, block),
-            None => modify_node(),
+            None => modify_node(block),
         };
         root =
             root.then(
@@ -395,6 +451,27 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_applies_the_components_in_the_item_argument() {
+        let stack = stack_for("minecraft:diamond_pickaxe[minecraft:damage=5]", 1).unwrap();
+        assert_eq!(stack.damage(), 5);
+        assert_eq!(stack.count, 1);
+        assert_eq!(stack_for("minecraft:stone", 3).unwrap().count, 3);
+    }
+
+    #[test]
+    fn with_rejects_unknown_components_bad_syntax_and_bad_counts() {
+        assert!(stack_for("minecraft:stone[minecraft:not_a_component=1]", 1).is_err());
+        assert!(stack_for("minecraft:stone[minecraft:damage=1", 1).is_err());
+        assert!(stack_for("minecraft:not_an_item", 1).is_err());
+        assert!(stack_for("minecraft:stone", 0).is_err());
+        assert!(stack_for("minecraft:stone", 65).is_err());
+        assert!(
+            stack_for("minecraft:diamond_pickaxe", 2).is_err(),
+            "unstackable"
+        );
+    }
 
     #[test]
     fn unknown_modifier_text() {

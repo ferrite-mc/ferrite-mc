@@ -88,6 +88,7 @@ mod explosion;
 mod feedback;
 mod functions;
 pub mod interaction;
+mod item_modifier;
 mod nbt_path;
 mod profile;
 #[cfg(test)]
@@ -3925,7 +3926,7 @@ impl CommandRuntime<'_> {
             return;
         };
         let path = attribute.strip_prefix("minecraft:").unwrap_or(attribute);
-        let Some(limits) = attributes::default_for(path, target.player) else {
+        let Some(limits) = attributes::limits_for(target, path) else {
             self.reply.key(
                 "commands.attribute.failed.no_attribute",
                 &[&target.name, attribute],
@@ -4691,6 +4692,14 @@ impl CommandRuntime<'_> {
                 source,
             } => {
                 self.run_slots(mode, target, slots, source);
+                false
+            }
+            Action::ModifySlots {
+                target,
+                slots,
+                modifier,
+            } => {
+                self.run_modify(target, slots, &modifier);
                 false
             }
             Action::Ride { target, vehicle } => {
