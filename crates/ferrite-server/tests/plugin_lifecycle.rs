@@ -963,6 +963,13 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         &stdout,
         &stderr,
     );
+    // ChunkSnapshot reads the host's biome data: the superflat chunk holds plains and no nether biome.
+    wait_for_line(
+        &events,
+        "snapshot minecraft:plains has-plains true has-nether false",
+        &stdout,
+        &stderr,
+    );
     // Health, food and experience writes reach the region player and are sent to the client.
     bot.raw(7, "typical state");
     wait_for_line(&events, "state 7.5 11 12 0.25 123", &stdout, &stderr);
