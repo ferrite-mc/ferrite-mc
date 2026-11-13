@@ -4514,6 +4514,24 @@ impl Player {
                             set.remove(&self.uuid);
                         }
                     }
+                    super::recipe_unlock::EFFECTS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(
+                            self.uuid,
+                            self.effects
+                                .iter()
+                                .map(|instance| super::recipe_unlock::EffectFact {
+                                    name: format!(
+                                        "minecraft:{}",
+                                        ferrite_entity::effect::Effect::from_id(instance.effect)
+                                            .name()
+                                    ),
+                                    amplifier: instance.amplifier,
+                                    duration: instance.duration,
+                                })
+                                .collect(),
+                        );
                     super::recipe_unlock::HELD
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())

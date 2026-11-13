@@ -2281,11 +2281,15 @@ async fn run(
                          let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          let mut game = command_state.lock().unwrap();
                          let tick_criteria = recipe_unlock::criteria_for_tick();
+                         let effects = recipe_unlock::EFFECTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          for uuid in online.keys() {
                              if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
                                  last_held.insert(*uuid, items.clone());
                                  recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
                                  game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
+                             }
+                             if let Some(active) = effects.get(uuid).filter(|active| !active.is_empty()) {
+                                 game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for_effects(active));
                              }
                              if !tick_criteria.is_empty() {
                                  game.more.advancements.entry(*uuid).or_default().extend(tick_criteria.iter().cloned());

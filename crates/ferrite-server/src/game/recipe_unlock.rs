@@ -44,6 +44,9 @@ pub enum Criterion {
     Sleeps,
     /// `entity_killed_player` with no conditions: an entity killed the player.
     KilledByEntity,
+    /// `effects_changed` with an `effects` map only: every listed effect must be active (with its
+    /// amplifier and duration ranges, when given).
+    HasEffects(Vec<(String, Range, Range)>),
     /// `nether_travel`: the distance between where the player entered the Nether and where they
     /// came back out.
     NetherTravel(DistanceCheck),
@@ -529,6 +532,65 @@ fn range_of(value: &serde_json::Value) -> Option<Range> {
     }
 }
 
+/// One active effect of a player, as the region threads report it on every inventory scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectFact {
+    /// `minecraft:speed`
+    pub name: String,
+    pub amplifier: i32,
+    pub duration: i32,
+}
+
+/// Active effects of each player, refreshed on `Command::ScanInventory`.
+pub static EFFECTS: Mutex<BTreeMap<Uuid, Vec<EffectFact>>> = Mutex::new(BTreeMap::new());
+
+/// Advancement criteria completed by having these effects active at once.
+pub fn criteria_for_effects(active: &[EffectFact]) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            let Criterion::HasEffects(wanted) = criterion else {
+                continue;
+            };
+            let all = !wanted.is_empty()
+                && wanted.iter().all(|(effect, amplifier, duration)| {
+                    active.iter().any(|fact| {
+                        fact.name == *effect
+                            && amplifier.contains(f64::from(fact.amplifier))
+                            && duration.contains(f64::from(fact.duration))
+                    })
+                });
+            if all {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// The `effects` map of an `effects_changed` criterion, when that is all it asks for.
+fn effects_map(conditions: &serde_json::Value) -> Option<Vec<(String, Range, Range)>> {
+    let object = conditions.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (name, wanted) in object.get("effects")?.as_object()? {
+        let wanted = wanted.as_object()?;
+        let mut amplifier = Range::default();
+        let mut duration = Range::default();
+        for (key, value) in wanted {
+            match key.as_str() {
+                "amplifier" => amplifier = range_of(value)?,
+                "duration" => duration = range_of(value)?,
+                _ => return None,
+            }
+        }
+        out.push((name.clone(), amplifier, duration));
+    }
+    Some(out)
+}
+
 /// `{"distance": {...}}` of `nether_travel`; anything besides the distance makes it unsupported.
 fn travel_distance(conditions: &serde_json::Value) -> Option<DistanceCheck> {
     let object = conditions.as_object()?;
@@ -752,6 +814,8 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             {
                 Criterion::KilledByEntity
             }
+            Some("minecraft:effects_changed") => effects_map(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::HasEffects),
             Some("minecraft:nether_travel") => travel_distance(&c["conditions"]).map_or_else(
                 || Criterion::Other(trigger.clone()),
                 Criterion::NetherTravel,
@@ -854,6 +918,7 @@ fn trigger_of(criterion: &Criterion) -> &'static str {
         Criterion::Sleeps => "minecraft:slept_in_bed",
         Criterion::KilledByEntity => "minecraft:entity_killed_player",
         Criterion::NetherTravel(_) => "minecraft:nether_travel",
+        Criterion::HasEffects(_) => "minecraft:effects_changed",
         Criterion::Other(_) => "",
     }
 }
@@ -1344,6 +1409,81 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(conditioned.criteria["c"], Criterion::Other(_)));
+    }
+
+    #[test]
+    fn effects_changed_needs_every_listed_effect_with_its_ranges() {
+        let json = serde_json::json!({"criteria": {"all": {"trigger": "minecraft:effects_changed",
+            "conditions": {"effects": {"minecraft:speed": {}, "minecraft:haste": {"amplifier": {"min": 1}}}}}}});
+        let rule = parse_rule("t:effects", &json).unwrap();
+        let Criterion::HasEffects(wanted) = &rule.criteria["all"] else {
+            panic!("{:?}", rule.criteria["all"]);
+        };
+        assert_eq!(wanted.len(), 2);
+        let fact = |name: &str, amplifier| EffectFact {
+            name: name.to_owned(),
+            amplifier,
+            duration: 100,
+        };
+        let holds = |active: &[EffectFact]| {
+            wanted.iter().all(|(effect, amplifier, duration)| {
+                active.iter().any(|f| {
+                    f.name == *effect
+                        && amplifier.contains(f64::from(f.amplifier))
+                        && duration.contains(f64::from(f.duration))
+                })
+            })
+        };
+        assert!(holds(&[
+            fact("minecraft:speed", 0),
+            fact("minecraft:haste", 1)
+        ]));
+        assert!(
+            !holds(&[fact("minecraft:speed", 0), fact("minecraft:haste", 0)]),
+            "amplifier too low"
+        );
+        assert!(!holds(&[fact("minecraft:speed", 0)]), "haste missing");
+        // A `source` condition is not guessed at.
+        let sourced = parse_rule(
+            "t:x",
+            &serde_json::json!({"criteria": {"c": {"trigger": "minecraft:effects_changed",
+            "conditions": {"source": {}}}}}),
+        )
+        .unwrap();
+        assert!(matches!(sourced.criteria["c"], Criterion::Other(_)));
+    }
+
+    #[test]
+    fn having_every_potion_effect_completes_how_did_we_get_here_style_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        // nether/all_potions asks for 17 effects at once.
+        let wanted: Vec<EffectFact> = rules()
+            .iter()
+            .find(|r| r.id == "minecraft:nether/all_potions")
+            .and_then(|r| match r.criteria.get("all_effects") {
+                Some(Criterion::HasEffects(list)) => Some(list.clone()),
+                _ => None,
+            })
+            .expect("all_potions is evaluated")
+            .into_iter()
+            .map(|(name, _, _)| EffectFact {
+                name,
+                amplifier: 0,
+                duration: 600,
+            })
+            .collect();
+        assert_eq!(wanted.len(), 17);
+        assert!(
+            criteria_for_effects(&wanted)
+                .contains(&"minecraft:nether/all_potions#all_effects".to_owned())
+        );
+        assert!(
+            criteria_for_effects(&wanted[1..])
+                .iter()
+                .all(|c| !c.starts_with("minecraft:nether/all_potions"))
+        );
     }
 
     #[test]
