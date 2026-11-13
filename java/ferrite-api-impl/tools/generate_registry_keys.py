@@ -28,6 +28,10 @@ for name, directory in (("enchantment", "enchantment"), ("worldgen/biome", "worl
     keys[name] = {"minecraft:" + str(path.relative_to(base).with_suffix("")).replace("\\", "/") for path in base.rglob("*.json")}
     if not keys[name]:
         raise SystemExit(f"Missing generated entries in {base}")
+    if name in DATA_DRIVEN:
+        # Match ferrite-net/src/registry.rs: json_files sorts relative file names and
+        # load_vanilla enumerates that order for synchronized registry wire ids.
+        ids[name] = {key: index for index, key in enumerate(sorted(keys[name]))}
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text("".join(f"{kind}\t{key}\n" for kind, values in keys.items() for key in sorted(values)), encoding="utf-8")
 out.with_name("registry-ids.tsv").write_text(
