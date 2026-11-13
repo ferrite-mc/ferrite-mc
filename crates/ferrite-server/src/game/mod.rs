@@ -63,7 +63,9 @@ pub use dimension::{
 mod commands_data;
 #[cfg(test)]
 pub(crate) use commands_data::{BlockData, apply_block};
+mod block_tags;
 mod commands_exec;
+mod commands_exec_more;
 mod commands_extras;
 mod commands_item;
 mod commands_late;
@@ -72,6 +74,9 @@ mod commands_meta;
 mod commands_more;
 mod commands_progress;
 mod commands_server;
+mod commands_time;
+#[cfg(test)]
+mod commands_tree_parity;
 mod commands_world;
 mod container;
 mod crafting;
@@ -4218,41 +4223,19 @@ impl CommandRuntime<'_> {
                 }
                 false
             }
-            Action::DatapackList => {
+            Action::DatapackList(kind) => {
                 let world = self.source.as_ref().and_then(|source| source.path());
-                let packs = functions::datapack_names(world);
-                if packs.is_empty() {
-                    self.reply.key("commands.datapack.list.enabled.none", &[]);
-                    return false;
-                }
-                let disabled = world.map(functions::read_disabled).unwrap_or_default();
-                let enabled: Vec<&str> = packs
-                    .iter()
-                    .filter(|pack| !disabled.contains(*pack))
-                    .map(String::as_str)
-                    .collect();
-                if enabled.is_empty() {
-                    self.reply.key("commands.datapack.list.enabled.none", &[]);
-                } else {
-                    self.reply.key(
-                        "commands.datapack.list.enabled.success",
-                        &[&enabled.len().to_string(), &enabled.join(", ")],
-                    );
-                }
-                let available: Vec<&str> = packs
-                    .iter()
-                    .filter(|pack| disabled.contains(*pack))
-                    .map(String::as_str)
-                    .collect();
-                if !available.is_empty() {
-                    self.reply.key(
-                        "commands.datapack.list.available.success",
-                        &[&available.len().to_string(), &available.join(", ")],
-                    );
+                for (key, args) in functions::datapack_list(world, kind) {
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    self.reply.key(key, &args);
                 }
                 false
             }
-            Action::DatapackSet { pack, enable } => {
+            Action::DatapackSet {
+                pack,
+                enable,
+                placement,
+            } => {
                 let Some(world) = self
                     .source
                     .as_ref()
@@ -4262,45 +4245,24 @@ impl CommandRuntime<'_> {
                     self.reply.key("commands.datapack.unknown", &[&pack]);
                     return false;
                 };
-                let packs = functions::datapack_names(Some(&world));
-                if !packs.contains(&pack) {
-                    self.reply.key("commands.datapack.unknown", &[&pack]);
-                    return false;
-                }
-                let mut disabled = functions::read_disabled(&world);
-                let already = !disabled.contains(&pack);
-                if enable == already {
-                    self.reply.key(
-                        if enable {
-                            "commands.datapack.enable.failed"
-                        } else {
-                            "commands.datapack.disable.failed"
-                        },
-                        &[&pack],
-                    );
-                    return false;
-                }
-                if enable {
-                    disabled.remove(&pack);
-                } else {
-                    disabled.insert(pack.clone());
-                }
-                if let Err(error) = functions::write_disabled(&world, &disabled) {
-                    self.reply
-                        .key("commands.reload.failure", &[&error.to_string()]);
-                    return false;
-                }
-                match functions::reload(Some(&world), self.state) {
-                    Ok(()) => self.reply.key(
-                        if enable {
-                            "commands.datapack.enable.success"
-                        } else {
-                            "commands.datapack.disable.success"
-                        },
-                        &[&pack],
-                    ),
-                    Err(error) => self.reply.key("commands.reload.failure", &[&error]),
-                }
+                let (key, args) = match functions::datapack_set(&world, &pack, enable, &placement) {
+                    Ok(done) => match functions::reload(Some(&world), self.state) {
+                        Ok(()) => done,
+                        Err(error) => ("commands.reload.failure", vec![error]),
+                    },
+                    Err(failed) => failed,
+                };
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
+                false
+            }
+            Action::DatapackCreate { id, description } => {
+                let (key, args) = match self.source.as_ref().and_then(|source| source.path()) {
+                    Some(world) => functions::datapack_create(world, &id, &description),
+                    None => ("commands.datapack.create.io_failure", vec![id]),
+                };
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
                 false
             }
             // Plugin commands run in the dispatch loops, which own the plugin hooks.
@@ -5444,6 +5406,7 @@ impl CommandRuntime<'_> {
                 effect,
                 amplifier,
                 duration,
+                hide_particles,
             } => {
                 // The client packet keeps command order; the region owns the ticking store.
                 for target in targets {
@@ -5455,8 +5418,9 @@ impl CommandRuntime<'_> {
                                 effect: VarInt(effect),
                                 amplifier: VarInt(amplifier),
                                 duration: VarInt(duration),
-                                // ambient | show particles | show icon, like a normal potion effect.
-                                flags: 0b110,
+                                // ambient | show particles | show icon, like a normal potion
+                                // effect; `hideParticles` clears the particle bit.
+                                flags: if hide_particles { 0b100 } else { 0b110 },
                             }));
                     }
                     if let Some((_, mailbox, _)) = self.mailboxes.get(&target) {

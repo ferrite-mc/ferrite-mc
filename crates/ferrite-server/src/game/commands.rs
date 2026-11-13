@@ -19,8 +19,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-/// The overworld clock's registry name, used by `/time` feedback.
-pub const OVERWORLD_CLOCK: &str = "minecraft:overworld";
 const SERVER_NAME: &str = "Server";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +139,12 @@ pub struct GameState {
     pub difficulty: i32,
     /// Ticks of the overworld clock (`/time set` and `/time add`).
     pub clock_time: i64,
+    /// `/time pause` and `/time rate` on the overworld clock.
+    pub clock_paused: bool,
+    pub clock_rate: f32,
+    clock_frac: f64,
+    /// The End clock (`minecraft:the_end`), see `commands_time`.
+    pub end_clock: super::commands_time::ClockState,
     /// Total world ticks (`/time query gametime`).
     pub game_time: i64,
     pub weather: Weather,
@@ -197,6 +201,10 @@ impl GameState {
             default_gamemode,
             difficulty: 2,
             clock_time: 0,
+            clock_paused: false,
+            clock_rate: 1.0,
+            clock_frac: 0.0,
+            end_clock: super::commands_time::ClockState::default(),
             game_time: 0,
             weather: Weather::Clear,
             rain_duration: 0,
@@ -401,7 +409,13 @@ impl GameState {
             }
         }
         if advance_time {
-            self.clock_time += 1;
+            if !self.clock_paused {
+                self.clock_frac += f64::from(self.clock_rate);
+                let whole = self.clock_frac.floor();
+                self.clock_time = self.clock_time.saturating_add(whole as i64);
+                self.clock_frac -= whole;
+            }
+            self.end_clock.advance();
         }
         let now = self.game_time;
         let mut due = Vec::new();
@@ -462,6 +476,14 @@ pub fn load_lang(reports: &std::path::Path) {
 }
 
 fn translate(key: &str) -> Option<&'static str> {
+    #[cfg(test)]
+    if LANG.get().is_none() {
+        // Unit tests see the same vanilla strings the server installs at startup.
+        load_lang(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vanilla/26.3/generated/reports"),
+        );
+    }
     LANG.get()?.get(key).map(String::as_str)
 }
 
@@ -905,6 +927,8 @@ pub enum Action {
         effect: i32,
         amplifier: i32,
         duration: i32,
+        /// `hideParticles` of `/effect give`.
+        hide_particles: bool,
     },
     /// `/effect clear`: remove one mob effect from the target players.
     RemoveEffect {
@@ -921,12 +945,18 @@ pub enum Action {
     Data(super::commands_data::BlockData),
     /// `/reload`: rebuild the datapack function store from disk.
     Reload,
-    /// `/datapack list`: report enabled and disabled packs.
-    DatapackList,
+    /// `/datapack list [available|enabled]`: report enabled and disabled packs.
+    DatapackList(super::commands_server::DatapackListKind),
     /// `/datapack enable|disable`: persist the choice and reload functions.
     DatapackSet {
         pack: String,
         enable: bool,
+        placement: super::commands_server::PackPlacement,
+    },
+    /// `/datapack create <id> <description>`: write an empty pack folder.
+    DatapackCreate {
+        id: String,
+        description: String,
     },
 }
 
@@ -1206,11 +1236,11 @@ fn location_branch(targets: bool) -> ferrite_command::NodeBuilder<Source> {
         return builder;
     }
     builder
+        // commands.json: `<targets> <location> <rotation>` takes the rotation directly, there
+        // is no `rotation` keyword.
         .then(
-            literal("rotation").then(
-                argument("rotation", ArgumentType::Rotation)
-                    .executes(|ctx| send(ctx.source(), location_rotation(ctx, true)?)),
-            ),
+            argument("rotation", ArgumentType::Rotation)
+                .executes(|ctx| send(ctx.source(), location_rotation(ctx, true)?)),
         )
         .then(
             literal("facing")
@@ -1730,76 +1760,6 @@ fn set_difficulty(ctx: &CommandContext<Source>, value: i32) -> Result<i32, Comma
         )),
     )?;
     Ok(0)
-}
-
-fn time_set(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let ticks = ctx
-        .integer("time")
-        .ok_or_else(|| CommandError::failed("missing time"))?;
-    let source = ctx.source();
-    {
-        let mut state = source.state.lock().unwrap();
-        if state.clock_time == i64::from(ticks) {
-            return Err(syntax_error(
-                "commands.time.set.already_at_time",
-                vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-                format!("Clock {OVERWORLD_CLOCK} is already set to {ticks} tick(s)"),
-            ));
-        }
-        state.clock_time = i64::from(ticks);
-    }
-    emit(source, Action::TimeSet(ticks))?;
-    emit(
-        source,
-        Action::Feedback(Feedback::new(
-            "commands.time.set.absolute",
-            vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-        )),
-    )?;
-    Ok(ticks)
-}
-
-fn time_add(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let delta = ctx
-        .integer("time")
-        .ok_or_else(|| CommandError::failed("missing time"))?;
-    let source = ctx.source();
-    let total = {
-        let mut state = source.state.lock().unwrap();
-        state.clock_time = state.clock_time.saturating_add(i64::from(delta));
-        state.clock_time
-    };
-    emit(source, Action::TimeAdd(delta))?;
-    emit(
-        source,
-        Action::Feedback(Feedback::new(
-            "commands.time.set.absolute",
-            vec![OVERWORLD_CLOCK.into(), total.to_string()],
-        )),
-    )?;
-    Ok(total as i32)
-}
-
-fn time_query(ctx: &CommandContext<Source>, game_time: bool) -> Result<i32, CommandError> {
-    let source = ctx.source();
-    let ticks = {
-        let state = source.state.lock().unwrap();
-        if game_time {
-            state.game_time
-        } else {
-            state.clock_time
-        }
-    };
-    let feedback = if game_time {
-        Feedback::new("commands.time.query.gametime", vec![ticks.to_string()])
-    } else {
-        Feedback::new(
-            "commands.time.query.absolute",
-            vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-        )
-    };
-    emit(source, Action::Feedback(feedback))?;
-    Ok(ticks as i32)
 }
 
 fn set_weather(ctx: &CommandContext<Source>, kind: Weather) -> Result<i32, CommandError> {
@@ -2335,24 +2295,7 @@ pub fn dispatcher() -> CommandDispatcher<Source> {
             .then(literal("normal").executes(|ctx| set_difficulty(ctx, 2)))
             .then(literal("hard").executes(|ctx| set_difficulty(ctx, 3))),
     );
-    tree.register(
-        literal::<Source>("time")
-            .requires(|source| source.permission >= 2)
-            .then(
-                literal("set")
-                    .then(argument("time", ArgumentType::Time { min: 0 }).executes(time_set)),
-            )
-            .then(
-                literal("add").then(
-                    argument("time", ArgumentType::Time { min: i32::MIN }).executes(time_add),
-                ),
-            )
-            .then(
-                literal("query")
-                    .then(literal("time").executes(|ctx| time_query(ctx, false)))
-                    .then(literal("gametime").executes(|ctx| time_query(ctx, true))),
-            ),
-    );
+    super::commands_time::register(&mut tree);
     tree.register(
         literal::<Source>("weather")
             .requires(|source| source.permission >= 2)
@@ -3115,12 +3058,41 @@ mod tests {
     fn reload_and_datapack_commands_produce_actions() {
         assert_eq!(only("reload", 4), Action::Reload);
         denied("reload");
-        assert_eq!(only("datapack list", 4), Action::DatapackList);
+        use super::super::commands_server::{DatapackListKind, PackPlacement};
+        assert_eq!(
+            only("datapack list", 4),
+            Action::DatapackList(DatapackListKind::Both)
+        );
+        assert_eq!(
+            only("datapack list available", 4),
+            Action::DatapackList(DatapackListKind::Available)
+        );
+        assert_eq!(
+            only("datapack list enabled", 4),
+            Action::DatapackList(DatapackListKind::Enabled)
+        );
         assert_eq!(
             only("datapack enable pack", 4),
             Action::DatapackSet {
                 pack: "pack".into(),
                 enable: true,
+                placement: PackPlacement::Last,
+            }
+        );
+        assert_eq!(
+            only("datapack enable pack first", 4),
+            Action::DatapackSet {
+                pack: "pack".into(),
+                enable: true,
+                placement: PackPlacement::First,
+            }
+        );
+        assert_eq!(
+            only("datapack enable pack after other", 4),
+            Action::DatapackSet {
+                pack: "pack".into(),
+                enable: true,
+                placement: PackPlacement::After("other".into()),
             }
         );
         assert_eq!(
@@ -3128,8 +3100,13 @@ mod tests {
             Action::DatapackSet {
                 pack: "pack".into(),
                 enable: false,
+                placement: PackPlacement::Last,
             }
         );
+        assert!(matches!(
+            only("datapack create mine {\"text\":\"hi\"}", 4),
+            Action::DatapackCreate { id, .. } if id == "mine"
+        ));
         denied("datapack list");
         assert!(run("datapack enable", 4).0.is_err());
     }
@@ -3334,6 +3311,66 @@ mod tests {
     }
 
     #[test]
+    fn trigger_objective_alone_adds_one_and_the_bare_value_form_is_gone() {
+        let uuid = Uuid::from_u128(7);
+        let mut game = GameState::default();
+        game.join(uuid, "Alice".into(), 1, 20);
+        game.objectives.insert(
+            "t".into(),
+            Objective {
+                criteria: "trigger".into(),
+                display_name: "T".into(),
+                render_type: 0,
+            },
+        );
+        game.objectives.insert(
+            "plain".into(),
+            Objective {
+                criteria: "dummy".into(),
+                display_name: "P".into(),
+                render_type: 0,
+            },
+        );
+        let state = Arc::new(Mutex::new(game));
+        let go = |input: &str| run_with_state(input, 0, state.clone(), Some(uuid), Some("Alice"));
+        // Unprimed: vanilla's `commands.trigger.failed.unprimed`.
+        let error = go("trigger t").0.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot trigger this objective yet")
+        );
+        let prime = || {
+            state
+                .lock()
+                .unwrap()
+                .trigger_enabled
+                .insert(("t".into(), "Alice".into()))
+        };
+        prime();
+        let (result, actions) = go("trigger t");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            feedback_key(&actions),
+            Some("commands.trigger.simple.success")
+        );
+        assert_eq!(
+            state.lock().unwrap().scores[&("Alice".into(), "t".into())],
+            1
+        );
+        // `trigger <objective> <value>` does not exist in vanilla (commands.json).
+        prime();
+        assert!(go("trigger t 5").0.is_err());
+        assert_eq!(
+            state.lock().unwrap().scores[&("Alice".into(), "t".into())],
+            1
+        );
+        // A non-trigger objective: `commands.trigger.failed.invalid`.
+        let error = go("trigger plain").0.unwrap_err();
+        assert!(error.to_string().contains("'trigger' type"));
+    }
+
+    #[test]
     fn list_has_plain_and_uuid_forms_and_rejects_extra_arguments() {
         let (result, actions) = run("list", 0);
         assert!(result.is_ok(), "{result:?}");
@@ -3412,7 +3449,7 @@ mod tests {
             }
         );
         assert_eq!(
-            only("tp @s 10 70 20 rotation ~90 ~-10", 2),
+            only("tp @s 10 70 20 ~90 ~-10", 2),
             Action::Teleport {
                 targets: self_target(),
                 dimension: crate::game::Dimension::Overworld,
@@ -3423,6 +3460,8 @@ mod tests {
                 },
             }
         );
+        // Regression: the old `rotation` keyword is not part of the 26.3 tree.
+        assert!(run("tp @s 10 70 20 rotation ~90 ~-10", 2).0.is_err());
         assert_eq!(
             only("tp Alice", 2),
             Action::Teleport {
@@ -4076,8 +4115,10 @@ mod tests {
         );
 
         let (console, _) = player_source(2, None, state);
+        // `-1` is not a tick count, but it is a valid resource location, so in the 26.3 tree
+        // (`set` has both `<time>` and `<timemarker>`) it parses as a time marker.
         let error = tree.execute("time set -1", console).unwrap_err();
-        assert_eq!(error_key(error), "argument.time.tick_count_too_low");
+        assert_eq!(error_key(error), "commands.time.no_time_marker_found");
     }
 
     #[test]
