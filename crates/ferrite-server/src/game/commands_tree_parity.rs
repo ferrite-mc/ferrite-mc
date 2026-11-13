@@ -57,12 +57,6 @@ pub(super) const ALLOWED: &[(&str, &str, char, &str)] = &[
         "a string parsed as the axes xyz subset by the align handler (`Unknown axis` otherwise)",
     ),
     (
-        "compute",
-        "*: parser vanilla=minecraft:context_*_provider ferrite=minecraft:resource_location",
-        'x',
-        "number providers are not parsed; /compute accepts a resource_location only (see the /compute blocker)",
-    ),
-    (
         "schedule",
         "schedule clear function: parser vanilla=minecraft:resource_location ferrite=minecraft:function",
         'c',
@@ -100,12 +94,6 @@ pub(super) const ALLOWED: &[(&str, &str, char, &str)] = &[
         "the byte/short/int/long/float/double literals are one `type` word plus the scale argument",
     ),
     // /data.
-    (
-        "data",
-        "data modify * target targetPath * compute: only in vanilla",
-        'x',
-        "`data modify ... compute` needs the context int/float providers (blocker in the doc)",
-    ),
     // /team: vanilla takes a `color` argument (and `reset`), ferrite lists the literals.
     (
         "team",

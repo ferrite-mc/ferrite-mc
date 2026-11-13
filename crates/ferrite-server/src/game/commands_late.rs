@@ -243,23 +243,63 @@ fn facts_of(entity: &super::selectors::SelectedEntity) -> EntityFacts {
     }
 }
 
-fn compute(
-    ctx: &CommandContext<Source>,
+/// A provider argument as the JSON the evaluator reads: a registry id (`minecraft:brewing/x`)
+/// or an inline SNBT/JSON compound.
+fn provider_json(raw: &str, kind: &str) -> Result<Value, CommandError> {
+    let raw = raw.trim();
+    if raw.starts_with('{') {
+        let tag = ferrite_nbt::snbt::parse(raw)
+            .map_err(|error| CommandError::failed(format!("Invalid provider: {error}")))?;
+        return Ok(tag_to_json(&tag));
+    }
+    let id = namespaced(raw);
+    data_file(kind, &id).ok_or_else(|| failure("argument.id.unknown", vec![id]))
+}
+
+fn tag_to_json(tag: &ferrite_nbt::Tag) -> Value {
+    use ferrite_nbt::{List, Tag};
+    match tag {
+        Tag::Byte(v) => Value::from(*v),
+        Tag::Short(v) => Value::from(*v),
+        Tag::Int(v) => Value::from(*v),
+        Tag::Long(v) => Value::from(*v),
+        Tag::Float(v) => Value::from(f64::from(*v)),
+        Tag::Double(v) => Value::from(*v),
+        Tag::String(v) => Value::from(v.clone()),
+        Tag::Compound(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), tag_to_json(value)))
+                .collect(),
+        ),
+        Tag::List(List::Compound(items)) => Value::Array(
+            items
+                .iter()
+                .map(|map| tag_to_json(&Tag::Compound(map.clone())))
+                .collect(),
+        ),
+        Tag::List(List::String(items)) => {
+            Value::Array(items.iter().cloned().map(Value::from).collect())
+        }
+        Tag::List(List::Int(items)) => {
+            Value::Array(items.iter().copied().map(Value::from).collect())
+        }
+        _ => Value::Null,
+    }
+}
+
+/// Evaluates the provider named by `raw` (`float` picks the float registry). The error is the
+/// vanilla `commands.compute.failed` when the provider has no value in this context.
+pub(super) fn provider_value(
+    raw: &str,
     float: bool,
-    context: Context,
-) -> Result<i32, CommandError> {
-    let Some(ArgumentValue::ResourceLocation(id)) = ctx.argument("provider") else {
-        return Err(CommandError::failed("missing provider"));
-    };
-    let id = namespaced(id);
+    context: &Context,
+) -> Result<f64, CommandError> {
     let kind = if float {
         "context_float_provider"
     } else {
         "context_int_provider"
     };
-    let Some(json) = data_file(kind, &id) else {
-        return Err(failure("argument.id.unknown", vec![id]));
-    };
+    let json = provider_json(raw, kind)?;
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(1, |d| d.as_nanos() as u64)
@@ -270,9 +310,87 @@ fn compute(
         seed ^= seed << 17;
         seed % bound
     };
-    let Some(value) = evaluate(&json, kind, &context, &mut roll, 0) else {
-        return Err(failure("commands.compute.failed", vec![id]));
+    evaluate(&json, kind, context, &mut roll, 0)
+        .ok_or_else(|| failure("commands.compute.failed", vec![raw.to_owned()]))
+}
+
+pub(super) fn block_context(ctx: &CommandContext<Source>) -> Result<Context, CommandError> {
+    let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("computePos") else {
+        return Err(CommandError::failed("missing computePos"));
     };
+    let source = ctx.source();
+    let origin = super::commands_world::Origin {
+        pos: source.origin,
+        yaw: source.yaw,
+        pitch: source.pitch,
+    };
+    let [x, y, z] = super::commands_world::resolve(coords, &origin);
+    let block = source
+        .world
+        .as_ref()
+        .and_then(|world| world.block(x, y, z))
+        .and_then(|state| u16::try_from(state).ok())
+        .and_then(ferrite_data::blocks::state)
+        .map(|(name, props)| {
+            (
+                namespaced(name),
+                props
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            )
+        });
+    Ok(Context {
+        block,
+        ..Context::default()
+    })
+}
+pub(super) fn entity_context(ctx: &CommandContext<Source>) -> Result<Context, CommandError> {
+    let target = entity(ctx, "computeTarget")?;
+    let source = ctx.source();
+    let found = {
+        let state = source.state.lock().unwrap();
+        super::selectors::resolve_selection(&state, &target, source.uuid, source.origin)?
+    };
+    let Some(first) = found.first() else {
+        return Err(CommandError::failed(
+            Feedback::new("argument.entity.notfound.entity", vec![]).text,
+        ));
+    };
+    Ok(Context {
+        target_entity: Some(facts_of(first)),
+        ..Context::default()
+    })
+}
+pub(super) fn default_context(ctx: &CommandContext<Source>) -> Result<Context, CommandError> {
+    // `THIS_ENTITY` is the executing entity, when it is one the command view knows.
+    let source = ctx.source();
+    let this_entity = source.uuid.and_then(|uuid| {
+        let state = source.state.lock().unwrap();
+        super::selectors::resolve_selection(
+            &state,
+            &ferrite_command::arguments::EntityTarget::Uuid(uuid.to_string()),
+            source.uuid,
+            source.origin,
+        )
+        .ok()
+        .and_then(|found| found.first().map(facts_of))
+    });
+    Ok(Context {
+        this_entity,
+        ..Context::default()
+    })
+}
+
+fn compute(
+    ctx: &CommandContext<Source>,
+    float: bool,
+    context: Context,
+) -> Result<i32, CommandError> {
+    let Some(ArgumentValue::Raw(raw)) = ctx.argument("provider") else {
+        return Err(CommandError::failed("missing provider"));
+    };
+    let value = provider_value(raw, float, &context)?;
     let scale = match ctx.argument("scale") {
         Some(ArgumentValue::Float(scale)) => f64::from(*scale),
         _ => 1.0,
@@ -289,15 +407,24 @@ fn compute(
     };
     send(
         ctx.source(),
-        Action::Feedback(Feedback::new("commands.compute.success", vec![id, text])),
+        Action::Feedback(Feedback::new(
+            "commands.compute.success",
+            vec![raw.clone(), text],
+        )),
     )?;
     Ok(result)
 }
 
 fn compute_tree() -> NodeBuilder<Source> {
-    fn provider(name: &'static str) -> NodeBuilder<Source> {
-        let _ = name;
-        argument::<Source>("provider", ArgumentType::ResourceLocation)
+    fn provider(float: bool) -> NodeBuilder<Source> {
+        argument::<Source>(
+            "provider",
+            ArgumentType::opaque(if float {
+                "minecraft:context_float_provider"
+            } else {
+                "minecraft:context_int_provider"
+            }),
+        )
     }
     fn branches(
         context: impl Fn(&CommandContext<Source>) -> Result<Context, CommandError>
@@ -308,7 +435,7 @@ fn compute_tree() -> NodeBuilder<Source> {
     ) -> (NodeBuilder<Source>, NodeBuilder<Source>) {
         let float_context = context.clone();
         let float = literal::<Source>("float").then(
-            provider("float")
+            provider(true)
                 .executes({
                     let context = float_context.clone();
                     move |ctx| compute(ctx, true, context(ctx)?)
@@ -319,77 +446,11 @@ fn compute_tree() -> NodeBuilder<Source> {
                 ),
         );
         let integer = literal::<Source>("integer")
-            .then(provider("int").executes(move |ctx| compute(ctx, false, context(ctx)?)));
+            .then(provider(false).executes(move |ctx| compute(ctx, false, context(ctx)?)));
         (float, integer)
     }
-    fn block_context(ctx: &CommandContext<Source>) -> Result<Context, CommandError> {
-        let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("computePos") else {
-            return Err(CommandError::failed("missing computePos"));
-        };
-        let source = ctx.source();
-        let origin = super::commands_world::Origin {
-            pos: source.origin,
-            yaw: source.yaw,
-            pitch: source.pitch,
-        };
-        let [x, y, z] = super::commands_world::resolve(coords, &origin);
-        let block = source
-            .world
-            .as_ref()
-            .and_then(|world| world.block(x, y, z))
-            .and_then(|state| u16::try_from(state).ok())
-            .and_then(ferrite_data::blocks::state)
-            .map(|(name, props)| {
-                (
-                    namespaced(name),
-                    props
-                        .iter()
-                        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                        .collect(),
-                )
-            });
-        Ok(Context {
-            block,
-            ..Context::default()
-        })
-    }
-    fn entity_context(ctx: &CommandContext<Source>) -> Result<Context, CommandError> {
-        let target = entity(ctx, "computeTarget")?;
-        let source = ctx.source();
-        let found = {
-            let state = source.state.lock().unwrap();
-            super::selectors::resolve_selection(&state, &target, source.uuid, source.origin)?
-        };
-        let Some(first) = found.first() else {
-            return Err(CommandError::failed(
-                Feedback::new("argument.entity.notfound.entity", vec![]).text,
-            ));
-        };
-        Ok(Context {
-            target_entity: Some(facts_of(first)),
-            ..Context::default()
-        })
-    }
     let (block_float, block_int) = branches(block_context);
-    let (default_float, default_int) = branches(|ctx| {
-        // `THIS_ENTITY` is the executing entity, when it is one the command view knows.
-        let source = ctx.source();
-        let this_entity = source.uuid.and_then(|uuid| {
-            let state = source.state.lock().unwrap();
-            super::selectors::resolve_selection(
-                &state,
-                &ferrite_command::arguments::EntityTarget::Uuid(uuid.to_string()),
-                source.uuid,
-                source.origin,
-            )
-            .ok()
-            .and_then(|found| found.first().map(facts_of))
-        });
-        Ok(Context {
-            this_entity,
-            ..Context::default()
-        })
-    });
+    let (default_float, default_int) = branches(default_context);
     let (entity_float, entity_int) = branches(entity_context);
     literal::<Source>("compute")
         .requires(|s| s.permission >= 2)
