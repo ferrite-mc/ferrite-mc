@@ -60,6 +60,45 @@ class PlayerBreadthTest {
         return matching.get(0);
     }
 
+    // ---- canCriticalAttack / getSentChunkKeys -------------------------------------------------------------------
+
+    private void answer(java.util.Map<String, String> replies) {
+        HostBridge.transport = (owner, subject, method, args) -> replies.getOrDefault(method, "");
+    }
+
+    @Test void aCriticalAttackNeedsAChargedFallingSwingAgainstALivingTarget() {
+        // The player is its own living target; fall distance and water are tracked in Java, the rest comes from the host.
+        var target = player;
+        player.getWorld().getBlockAt(0, 65, 0).setType(org.bukkit.Material.AIR);
+        var falling = new java.util.HashMap<String, String>(java.util.Map.of(
+            "getAttackCooldown()", "1.0", "isOnGround()", "false", "isClimbing()", "false",
+            "hasPotionEffect(PotionEffectType)", "false", "isInsideVehicle()", "false", "isSprinting()", "false",
+            "addPotionEffect(PotionEffect)", "true"));
+        answer(falling);
+        player.setFallDistance(2.5f);
+        assertTrue(player.canCriticalAttack(target));
+        for (var spoiler : java.util.Map.of("getAttackCooldown()", "0.5", "isOnGround()", "true",
+                "isClimbing()", "true",
+                "isInsideVehicle()", "true", "isSprinting()", "true").entrySet()) {
+            var spoiled = new java.util.HashMap<>(falling);
+            spoiled.put(spoiler.getKey(), spoiler.getValue());
+            answer(spoiled);
+            assertFalse(player.canCriticalAttack(target), spoiler.getKey());
+        }
+        answer(falling);
+        player.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS, 100, 0));
+        assertFalse(player.canCriticalAttack(target), "blind");
+        player.removePotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS);
+        assertTrue(player.canCriticalAttack(target), "blindness removed");
+        player.setFallDistance(0f);
+        assertFalse(player.canCriticalAttack(target), "no fall distance");
+    }
+
+    @Test void sentChunkKeysArePackedChunkCoordinates() {
+        answer(java.util.Map.of("getSentChunkCoordinates()", "3,-4" + HostBridge.ITEM + "0,1"));
+        assertEquals(java.util.Set.of(org.bukkit.Chunk.getChunkKey(3, -4), org.bukkit.Chunk.getChunkKey(0, 1)), player.getSentChunkKeys());
+    }
+
     // ---- launchProjectile ------------------------------------------------------------------------------------
 
     private void assertLaunch(Class<? extends org.bukkit.entity.Projectile> requested, EntityType expected, double power) {

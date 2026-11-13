@@ -86,6 +86,24 @@ public abstract class PlayerMisc extends PlayerStubs {
         HostBridge.callVoid("Player", getUniqueId(), "openBookContent(String)", title + field + author + field + String.join(part, pages));
     }
 
+    /** {@link org.bukkit.Chunk#getChunkKey(int, int)} of every chunk {@link #getSentChunks()} reports. */
+    @Override public java.util.Set<Long> getSentChunkKeys() {
+        var keys = new java.util.LinkedHashSet<Long>();
+        for (var chunk : getSentChunks()) keys.add(org.bukkit.Chunk.getChunkKey(chunk.getX(), chunk.getZ()));
+        return keys;
+    }
+
+    /**
+     * Vanilla {@code Player.attack}'s critical-hit test: a charged swing (cooldown above 0.9) while falling, off the
+     * ground, not on a ladder, in water, blind, riding or sprinting, against a living target.
+     */
+    @Override public boolean canCriticalAttack(org.bukkit.entity.Entity entity) {
+        Objects.requireNonNull(entity, "entity");
+        return getAttackCooldown() > 0.9F && getFallDistance() > 0.0F && !isOnGround() && !isClimbing() && !isInWater()
+            && !hasPotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS) && !isInsideVehicle()
+            && entity instanceof org.bukkit.entity.LivingEntity && !isSprinting();
+    }
+
     /** The chunks the client currently has, as the host last recorded them. */
     @Override public java.util.Set<org.bukkit.Chunk> getSentChunks() {
         String text;
