@@ -162,6 +162,17 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
             slot: call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?,
             damage: call.args.get(1)?.parse::<i32>().ok().filter(|d| *d >= 0)?,
         }),
+        // Vanilla keeps the spin in a byte-sized counter; a non-finite or negative damage is refused.
+        "startRiptideAttack(int,float)" => Some(PlayerCommand::RiptideAttack {
+            player,
+            ticks: call.args.first()?.parse::<u8>().ok().filter(|t| *t > 0)?,
+            damage: call
+                .args
+                .get(1)?
+                .parse::<f32>()
+                .ok()
+                .filter(|d| d.is_finite() && *d >= 0.0)?,
+        }),
         "closeInventory()" | "closeInventory(Reason)" => {
             Some(PlayerCommand::CloseInventory { player })
         }
@@ -1210,6 +1221,28 @@ mod tests {
         assert_eq!(inventory_command(&call("41", "1")), None);
         assert_eq!(inventory_command(&call("2", "-1")), None);
         assert_eq!(inventory_command(&call("2", "x")), None);
+    }
+
+    #[test]
+    fn riptide_attack_calls_become_a_spin_command() {
+        let call = |ticks: &str, damage: &str| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "startRiptideAttack(int,float)".into(),
+            args: vec![ticks.into(), damage.into()],
+        };
+        assert_eq!(
+            inventory_command(&call("20", "8.5")),
+            Some(PlayerCommand::RiptideAttack {
+                player: Uuid::parse_str(PLAYER).unwrap(),
+                ticks: 20,
+                damage: 8.5
+            })
+        );
+        assert_eq!(inventory_command(&call("0", "1")), None);
+        assert_eq!(inventory_command(&call("256", "1")), None);
+        assert_eq!(inventory_command(&call("20", "-1")), None);
+        assert_eq!(inventory_command(&call("20", "NaN")), None);
     }
 
     #[test]

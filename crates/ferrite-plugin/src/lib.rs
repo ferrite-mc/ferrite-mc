@@ -622,6 +622,13 @@ pub enum PlayerCommand {
         slot: u8,
         damage: i32,
     },
+    /// `Player#startRiptideAttack`: a riptide spin of `ticks` ticks that hurts each mob it touches
+    /// for `damage` once (`LivingEntity#startAutoSpinAttack`).
+    RiptideAttack {
+        player: uuid::Uuid,
+        ticks: u8,
+        damage: f32,
+    },
     SetOperator {
         player: uuid::Uuid,
         operator: bool,

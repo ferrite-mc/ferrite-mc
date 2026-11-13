@@ -86,6 +86,17 @@ public abstract class PlayerMisc extends PlayerStubs {
         HostBridge.callVoid("Player", getUniqueId(), "openBookContent(String)", title + field + author + field + String.join(part, pages));
     }
 
+    /**
+     * Starts a riptide spin that hurts each mob it touches once for {@code damage}
+     * ({@code LivingEntity#startAutoSpinAttack}). The attack item only picks the client animation in vanilla and the
+     * host plays the trident spin, so it is accepted and not sent.
+     */
+    @Override public void startRiptideAttack(int duration, float damage, org.bukkit.inventory.ItemStack attackItem) {
+        if (duration < 1 || duration > 255) throw new IllegalArgumentException("duration must be 1..255 ticks: " + duration);
+        if (!Float.isFinite(damage) || damage < 0) throw new IllegalArgumentException("damage must be finite and not negative: " + damage);
+        HostBridge.callVoid("Player", getUniqueId(), "startRiptideAttack(int,float)", duration, damage);
+    }
+
     /** {@link org.bukkit.Chunk#getChunkKey(int, int)} of every chunk {@link #getSentChunks()} reports. */
     @Override public java.util.Set<Long> getSentChunkKeys() {
         var keys = new java.util.LinkedHashSet<Long>();

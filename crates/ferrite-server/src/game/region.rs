@@ -306,6 +306,11 @@ pub enum Command {
         slot: u8,
         damage: i32,
     },
+    /// A plugin started a riptide spin (`Player#startRiptideAttack`).
+    RiptideAttack {
+        ticks: u8,
+        damage: f32,
+    },
     /// `/item` on the player's own inventory: writes the stacks into the slots (`-1` is the
     /// selected hotbar slot).
     ItemSlots {
@@ -1188,6 +1193,11 @@ pub struct Player {
     pub sneaking: bool,
     /// Ticks left of a riptide spin (`LivingEntity.autoSpinAttackTicks`).
     pub spin_ticks: u8,
+    /// What the running spin hurts each mob it touches for (`autoSpinAttackDmg`); 0 for a plain
+    /// trident riptide, which only carries the player.
+    pub spin_damage: f32,
+    /// Mobs the running spin already hurt, so one spin hits each of them once.
+    pub spin_hit: Vec<Uuid>,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
     /// The dimension registry, used to swap the chunk source on a dimension change.
@@ -4498,6 +4508,13 @@ impl Player {
                     self.set_item_damage(slot, damage);
                     continue;
                 }
+                Command::RiptideAttack { ticks, damage } => {
+                    self.spin_ticks = ticks;
+                    self.spin_damage = damage;
+                    self.spin_hit.clear();
+                    self.broadcast_spin(true);
+                    continue;
+                }
                 Command::ItemSlots { slots, fill } => {
                     self.fill_slots(&slots, fill);
                     continue;
@@ -5115,6 +5132,29 @@ fn deliver(
             }
         }
     }
+}
+
+/// The mobs in `bbox` a riptide spin has not hurt yet; they are added to `hit` so one spin hurts
+/// each of them once.
+fn spin_victims(
+    entities: &ferrite_entity::EntityStore,
+    bbox: ferrite_math::AABB,
+    hit: &mut Vec<Uuid>,
+) -> Vec<(ferrite_entity::EntityKey, Uuid)> {
+    let mut victims = Vec::new();
+    for key in entities.query_vec(bbox) {
+        if !mob::is_mob(entities, key) {
+            continue;
+        }
+        let Some(target) = entities.data(key).map(|data| data.uuid) else {
+            continue;
+        };
+        if !hit.contains(&target) {
+            hit.push(target);
+            victims.push((key, target));
+        }
+    }
+    victims
 }
 
 /// Sends player metadata to other online players in the same dimension. Player entities are not
@@ -7658,10 +7698,13 @@ impl Region {
             };
             self.open_mount(rider, key);
         }
+        self.spin_attacks();
         for p in self.players.values_mut() {
             if p.spin_ticks > 0 {
                 p.spin_ticks -= 1;
                 if p.spin_ticks == 0 {
+                    p.spin_damage = 0.0;
+                    p.spin_hit.clear();
                     p.broadcast_spin(false);
                 }
             }
@@ -8038,6 +8081,40 @@ impl Region {
             }
         }
         owner_attacks
+    }
+
+    /// A riptide spin with damage (`LivingEntity.checkAutoSpinAttack`) hurts the mobs in the
+    /// spinner's box, widened by one block sideways; each mob is hit once per spin. shortcut:
+    /// vanilla re-hits every tick and leaves the spacing to invulnerability frames.
+    fn spin_attacks(&mut self) {
+        let spinners: Vec<(Uuid, [f64; 3], f32)> = self
+            .players
+            .values()
+            .filter(|p| p.spin_ticks > 0 && p.spin_damage > 0.0 && !p.survival.dead)
+            .map(|p| (p.uuid, p.pos, p.spin_damage))
+            .collect();
+        for (uuid, pos, damage) in spinners {
+            let bbox = ferrite_math::AABB::new(
+                pos[0] - 0.3,
+                pos[1],
+                pos[2] - 0.3,
+                pos[0] + 0.3,
+                pos[1] + 1.8,
+                pos[2] + 0.3,
+            )
+            .inflate(1.0, 0.0, 1.0);
+            let origin = ferrite_math::Vec3::new(pos[0], pos[1], pos[2]);
+            let Some(p) = self.players.get_mut(&uuid) else {
+                continue;
+            };
+            for (key, target) in spin_victims(&self.entities, bbox, &mut p.spin_hit) {
+                if mob::hurt(&mut self.entities, key, damage, Some(origin)).is_some() {
+                    mob::credit(&mut self.entities, key, uuid);
+                    mob::retaliate(&mut self.entities, key, uuid);
+                    self.pending_hurts.push(target);
+                }
+            }
+        }
     }
 
     /// Fires an arrow from a released bow (vanilla `BowItem.releaseUsing`): speed and damage
@@ -13041,6 +13118,34 @@ mod tests {
         assert_eq!(villager.workstation, Some([2, 66, 0]));
         assert_eq!(villager.activity, ferrite_entity::villager::Activity::Work);
         assert_eq!(villager.destination, Some([2, 66, 0]));
+    }
+
+    #[test]
+    fn a_riptide_spin_picks_each_mob_in_reach_once() {
+        let mut region = Region::default();
+        let near = mob::new_mob(
+            mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        );
+        let far = mob::new_mob(
+            mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(40.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(2),
+        );
+        let (near_uuid, far_uuid) = (near.data.uuid, far.data.uuid);
+        region.add_entities(vec![near, far]);
+        let bbox = ferrite_math::AABB::new(-0.3, 64.0, -0.3, 0.3, 65.8, 0.3).inflate(1.0, 0.0, 1.0);
+        let mut hit = Vec::new();
+        let first = spin_victims(&region.entities, bbox, &mut hit);
+        assert_eq!(
+            first.iter().map(|(_, uuid)| *uuid).collect::<Vec<_>>(),
+            vec![near_uuid]
+        );
+        assert_eq!(hit, vec![near_uuid]);
+        // The same spin does not pick the same mob again, and never the one out of reach.
+        assert!(spin_victims(&region.entities, bbox, &mut hit).is_empty());
+        assert!(!hit.contains(&far_uuid));
     }
 
     #[test]

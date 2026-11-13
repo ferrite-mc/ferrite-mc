@@ -99,6 +99,19 @@ class PlayerBreadthTest {
         assertEquals(java.util.Set.of(org.bukkit.Chunk.getChunkKey(3, -4), org.bukkit.Chunk.getChunkKey(0, 1)), player.getSentChunkKeys());
     }
 
+    @Test void aRiptideAttackSendsItsTicksAndDamageAndRefusesNonsense() {
+        player.startRiptideAttack(20, 8.5f, null);
+        var call = only("startRiptideAttack(int,float)");
+        assertEquals("20", call[2]);
+        assertEquals(8.5f, Float.parseFloat(call[3]));
+        calls.clear();
+        assertThrows(IllegalArgumentException.class, () -> player.startRiptideAttack(0, 1f, null));
+        assertThrows(IllegalArgumentException.class, () -> player.startRiptideAttack(256, 1f, null));
+        assertThrows(IllegalArgumentException.class, () -> player.startRiptideAttack(20, -1f, null));
+        assertThrows(IllegalArgumentException.class, () -> player.startRiptideAttack(20, Float.NaN, null));
+        assertTrue(calls.isEmpty());
+    }
+
     // ---- launchProjectile ------------------------------------------------------------------------------------
 
     private void assertLaunch(Class<? extends org.bukkit.entity.Projectile> requested, EntityType expected, double power) {
