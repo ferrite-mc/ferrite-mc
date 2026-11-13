@@ -168,10 +168,10 @@ fn moving_pending_ticks_preserves_remaining_delay() {
     assert_eq!(fluid_state(w.block(1, 0, 0)).kind, FluidKind::Water);
 }
 
-/// Vanilla waterlogged blocks carry a source fluid state but are not `LiquidBlock`s, so the
-/// fluid manager never schedules or spreads them. A waterlogged slab above a hole stays dry.
+/// Water in a bottom slab spreads through the open side faces while the slab blocks downward
+/// flow. SimpleWaterloggedBlock schedules a fluid tick even though the block is not LiquidBlock.
 #[test]
-fn waterlogged_block_never_ticks_as_water() {
+fn waterlogged_slab_spreads_sideways_but_blocks_downward_flow() {
     let mut w = world();
     w.holes.insert((0, 0));
     let wet = state("stone_slab", &[("type", "bottom"), ("waterlogged", "true")]);
@@ -179,13 +179,14 @@ fn waterlogged_block_never_ticks_as_water() {
     let mut ticks = FluidTicks::default();
     ticks.schedule((0, 0, 0), 0);
     ticks.on_block_change(&mut w, (0, 0, 0));
-    ticks.run_until(&mut w, 40);
+    ticks.run_until(&mut w, 0);
     assert_eq!(w.block(0, 0, 0), wet);
-    for pos in [(0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)] {
+    assert_eq!(fluid_state(w.block(0, -1, 0)).kind, FluidKind::Empty);
+    for pos in [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)] {
         assert_eq!(
             fluid_state(w.block(pos.0, pos.1, pos.2)).kind,
-            FluidKind::Empty,
-            "water spread to {pos:?}"
+            FluidKind::Water,
+            "water did not spread to {pos:?}"
         );
     }
 }

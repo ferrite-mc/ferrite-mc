@@ -2,7 +2,7 @@
 //! `#getSpread` and `#getSlopeDistance`.
 use crate::{
     Direction, FluidKind, FluidState, FluidWorld, block_for, can_hold_fluid, can_pass_at,
-    fluid_state, get_new_liquid_with_rules, is_liquid_block, tick_delay,
+    fluid_state, get_new_liquid_with_rules, tick_delay,
 };
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -104,16 +104,16 @@ impl FluidTicks {
         self.changed(world, pos, kind);
     }
     fn changed(&mut self, world: &mut impl FluidWorld, pos: Position, kind: FluidKind) {
-        // Vanilla schedules fluid ticks on `LiquidBlock` only: a waterlogged slab or stairs
-        // carries water but is not a fluid block and must not tick or spread.
+        // Waterlogged blocks also schedule fluid ticks (SimpleWaterloggedBlock.placeLiquid).
+        // Their source water spreads while the containing block remains intact.
         let delay = u64::from(tick_delay(kind, world.ultrawarm()));
-        if delay > 0 && world.owns(pos.0, pos.2) && is_liquid_block(block(world, pos)) {
+        if delay > 0 && world.owns(pos.0, pos.2) {
             self.schedule(pos, delay);
         }
         for d in NEIGHBORS {
             if let Some(n) = offset(pos, d) {
                 let state = block(world, n);
-                if world.owns(n.0, n.2) && is_liquid_block(state) {
+                if world.owns(n.0, n.2) && fluid_state(state).kind != FluidKind::Empty {
                     let f = fluid_state(state);
                     self.schedule(n, u64::from(tick_delay(f.kind, world.ultrawarm())));
                 }
@@ -157,7 +157,7 @@ impl FluidTicks {
         }
         let state = block(world, pos);
         let mut current = fluid_state(state);
-        if current.kind == FluidKind::Empty || !is_liquid_block(state) {
+        if current.kind == FluidKind::Empty {
             return;
         }
         // `LiquidBlock.java#shouldSpreadLiquid` reacts on the lava block.
