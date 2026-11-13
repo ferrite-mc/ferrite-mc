@@ -254,8 +254,8 @@ fn positioned_branch(execute: NodeId) -> NodeBuilder<Source> {
 fn rotated_branch(execute: NodeId) -> NodeBuilder<Source> {
     literal::<Source>("rotated")
         .then(
-            argument::<Source>("rotation", ArgumentType::Rotation).redirect_with(execute, |ctx| {
-                let rotation = match ctx.argument("rotation") {
+            argument::<Source>("rot", ArgumentType::Rotation).redirect_with(execute, |ctx| {
+                let rotation = match ctx.argument("rot") {
                     Some(ArgumentValue::Rotation(rotation)) => *rotation,
                     _ => return Err(CommandError::failed("Missing rotation")),
                 };
@@ -303,23 +303,20 @@ fn facing_branch(execute: NodeId) -> NodeBuilder<Source> {
         )
         .then(literal::<Source>("entity").then(
             argument::<Source>("targets", ArgumentType::entities()).then(
-                argument::<Source>("facingAnchor", ArgumentType::EntityAnchor).fork(
-                    execute,
-                    |ctx| {
-                        let anchor = ctx
-                            .argument("facingAnchor")
-                            .and_then(ArgumentValue::as_entity_anchor)
-                            .unwrap_or(EntityAnchor::Feet);
-                        resolve_in_optional(ctx, "targets")?
-                            .into_iter()
-                            .map(|entity| {
-                                let mut target = entity.pos;
-                                target[1] += anchor.offset();
-                                look_at(ctx, target)
-                            })
-                            .collect()
-                    },
-                ),
+                argument::<Source>("anchor", ArgumentType::EntityAnchor).fork(execute, |ctx| {
+                    let anchor = ctx
+                        .argument("anchor")
+                        .and_then(ArgumentValue::as_entity_anchor)
+                        .unwrap_or(EntityAnchor::Feet);
+                    resolve_in_optional(ctx, "targets")?
+                        .into_iter()
+                        .map(|entity| {
+                            let mut target = entity.pos;
+                            target[1] += anchor.offset();
+                            look_at(ctx, target)
+                        })
+                        .collect()
+                }),
             ),
         ))
 }
@@ -501,7 +498,7 @@ fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
         ),
     );
     let data_block = literal::<Source>("data").then(literal::<Source>("block").then(
-        argument::<Source>("pos", ArgumentType::BlockPos).then(
+        argument::<Source>("source", ArgumentType::BlockPos).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")).gate(
                 execute,
                 unless,
@@ -510,7 +507,7 @@ fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
         ),
     ));
     let data_entity = literal::<Source>("data").then(literal::<Source>("entity").then(
-        argument::<Source>("target", ArgumentType::entities()).then(
+        argument::<Source>("source", ArgumentType::entities()).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")).gate(
                 execute,
                 unless,
@@ -734,7 +731,7 @@ fn condition_data(
                 .is_some_and(|root| path.is_root() || path.get(root).is_some())
         }
         DataKind::Entity => {
-            let target = match ctx.argument("target") {
+            let target = match ctx.argument("source") {
                 Some(ArgumentValue::Entity(target)) => target.clone(),
                 _ => return Err(CommandError::failed("Missing entity target")),
             };
@@ -755,7 +752,7 @@ fn condition_data(
             let Some(world) = &ctx.source().world else {
                 return passed(ctx, unless, false);
             };
-            let pos = block_pos(ctx, "pos")?;
+            let pos = block_pos(ctx, "source")?;
             world
                 .block_entity(pos[0], pos[1], pos[2])
                 .map(|entity| Tag::Compound(entity.data))
@@ -767,7 +764,7 @@ fn condition_data(
 
 fn store_targets(execute: NodeId, success: bool) -> Vec<NodeBuilder<Source>> {
     let block = literal::<Source>("block").then(
-        argument::<Source>("pos", ArgumentType::BlockPos).then(
+        argument::<Source>("target", ArgumentType::BlockPos).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
                 .then(store_type(execute, StoreKind::Block, success)),
         ),
@@ -779,7 +776,7 @@ fn store_targets(execute: NodeId, success: bool) -> Vec<NodeBuilder<Source>> {
         ),
     );
     let storage = literal::<Source>("storage").then(
-        argument::<Source>("source", ArgumentType::ResourceLocation).then(
+        argument::<Source>("target", ArgumentType::ResourceLocation).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
                 .then(store_type(execute, StoreKind::Storage, success)),
         ),
@@ -876,7 +873,7 @@ fn write_store(
     let value = store_value(ctx, ty, success, result);
     match kind {
         StoreKind::Block => {
-            let pos = block_pos(ctx, "pos")?;
+            let pos = block_pos(ctx, "target")?;
             send(
                 ctx.source(),
                 Action::Data(BlockData::Modify {
@@ -902,7 +899,7 @@ fn write_store(
             apply_player_tag(&mut state.players[index], &root);
         }
         StoreKind::Storage => {
-            let id = namespaced(ctx.string("source").unwrap_or(""));
+            let id = namespaced(ctx.string("target").unwrap_or(""));
             let mut state = ctx.source().state.lock().unwrap();
             let root = state
                 .storage

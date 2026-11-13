@@ -13,6 +13,42 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.data.modify.expected_value" => "Expected a value: got %s",
         "commands.data.modify.invalid_index" => "Invalid list index: %s",
         "commands.data.modify.invalid_substring" => "Invalid substring indices: %s to %s",
+        "commands.scoreboard.objectives.modify.displayAutoUpdate.disable" => {
+            "Disabled display auto-update for objective %s"
+        }
+        "commands.scoreboard.objectives.modify.displayAutoUpdate.enable" => {
+            "Enabled display auto-update for objective %s"
+        }
+        "commands.scoreboard.objectives.modify.objectiveFormat.clear" => {
+            "Cleared default number format of objective %s"
+        }
+        "commands.scoreboard.objectives.modify.objectiveFormat.set" => {
+            "Changed default number format of objective %s"
+        }
+        "commands.scoreboard.players.display.name.clear.success.multiple" => {
+            "Cleared display name for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.name.clear.success.single" => {
+            "Cleared display name for %s in %s"
+        }
+        "commands.scoreboard.players.display.name.set.success.multiple" => {
+            "Changed display name to %s for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.name.set.success.single" => {
+            "Changed display name to %s for %s in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.clear.success.multiple" => {
+            "Cleared number format for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.clear.success.single" => {
+            "Cleared number format for %s in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.set.success.multiple" => {
+            "Changed number format for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.set.success.single" => {
+            "Changed number format for %s in %s"
+        }
         "commands.datapack.create.already_exists" => "Pack with name '%s' already exists",
         "commands.datapack.create.invalid_name" => "Invalid characters in new pack name '%s'",
         "commands.datapack.create.io_failure" => "Can't create pack with name '%s'. Check logs",

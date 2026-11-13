@@ -28,6 +28,16 @@ pub struct MoreState {
     pub idle_timeout_minutes: i32,
     /// `/stopwatch`: id -> game time it was (re)started at.
     pub stopwatches: BTreeMap<String, i64>,
+    /// `/scoreboard objectives modify <o> displayautoupdate`: objectives with it enabled.
+    pub objective_auto_update: std::collections::BTreeSet<String>,
+    /// `/scoreboard objectives modify <o> numberformat` as `blank`, `fixed:<text>` or
+    /// `styled:<style>`. Kept as state only: the `SetObjective` packet this protocol crate
+    /// writes has no number-format field.
+    pub objective_number_format: BTreeMap<String, String>,
+    /// `/scoreboard players display name`: `(holder, objective)` -> component text.
+    pub score_display_name: BTreeMap<(String, String), String>,
+    /// `/scoreboard players display numberformat`, in the same encoding as above.
+    pub score_number_format: BTreeMap<(String, String), String>,
     /// Game time of each player's last action, for `/setidletimeout`.
     pub last_active: BTreeMap<uuid::Uuid, i64>,
     /// `/tick`: shared with the game loop and the region ticks.
