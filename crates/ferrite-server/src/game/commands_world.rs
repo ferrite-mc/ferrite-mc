@@ -859,7 +859,7 @@ fn air() -> u16 {
     ferrite_data::blocks::default_state("minecraft:air").unwrap_or(0)
 }
 
-fn is_air(state: u32) -> bool {
+pub(super) fn is_air(state: u32) -> bool {
     u16::try_from(state)
         .ok()
         .and_then(ferrite_data::blocks::state)
@@ -1050,7 +1050,7 @@ fn clone(
     }
     let mut changes = Vec::new();
     let mut touched = std::collections::BTreeMap::new();
-    let mut note = |at: [i32; 3], state: u32, changes: &mut Vec<Change>| {
+    let note = |at: [i32; 3], state: u32, changes: &mut Vec<Change>| {
         let location = BlockPos::new(at[0], at[1], at[2]).pack();
         changes.retain(|change: &Change| change.location != location);
         changes.push(Change { location, state });

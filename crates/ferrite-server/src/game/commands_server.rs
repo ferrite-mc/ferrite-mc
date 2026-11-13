@@ -122,7 +122,7 @@ fn fillbiome_tree() -> NodeBuilder<Source> {
 }
 
 /// The biome ids a `#tag` of `data/minecraft/tags/worldgen/biome` expands to.
-fn biome_tag_members(tag: &str, depth: u8) -> Vec<String> {
+pub(super) fn biome_tag_members(tag: &str, depth: u8) -> Vec<String> {
     let name = tag.trim_start_matches('#');
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
     if depth > 8 || name.contains("..") {

@@ -596,10 +596,7 @@ mod tests {
         assert_eq!(result.unwrap(), 3);
         assert_eq!(key(&actions), "commands.time.query.timeline.repetitions");
         // The moon timeline has a longer period.
-        assert_eq!(
-            run("time query moon", &state).0.unwrap(),
-            (24_000 * 3 + 500) % 192_000
-        );
+        assert_eq!(run("time query moon", &state).0.unwrap(), 24_000 * 3 + 500);
         let text = run("time of minecraft:the_end query minecraft:day", &state)
             .0
             .unwrap_err()

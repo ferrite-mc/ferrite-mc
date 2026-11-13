@@ -1,4 +1,5 @@
-//! Block tags (`data/minecraft/tags/block/*.json`) for block predicates (`#minecraft:logs`).
+//! Block and item tags (`data/minecraft/tags/{block,item}/*.json`) for block and item
+//! predicates (`#minecraft:logs`).
 //!
 //! Tags are read from the extracted vanilla data once and cached. Data-pack block tags are not
 //! consulted (see `docs/COMMANDS-STATUS.md`).
@@ -9,16 +10,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 type Members = Arc<HashSet<String>>;
 
-fn cache() -> &'static Mutex<HashMap<String, Option<Members>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<Members>>>> = OnceLock::new();
+type Cache = Mutex<HashMap<(&'static str, String), Option<Members>>>;
+
+fn cache() -> &'static Cache {
+    static CACHE: OnceLock<Cache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn tag_file(name: &str) -> Option<serde_json::Value> {
+fn tag_file(kind: &str, name: &str) -> Option<serde_json::Value> {
     if name.contains("..") {
         return None;
     }
-    let relative = format!("vanilla/26.3/generated/data/minecraft/tags/block/{name}.json");
+    let relative = format!("vanilla/26.3/generated/data/minecraft/tags/{kind}/{name}.json");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     [PathBuf::from(&relative), root.join(&relative)]
         .iter()
@@ -26,9 +29,9 @@ fn tag_file(name: &str) -> Option<serde_json::Value> {
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
-fn expand(name: &str, depth: u8, out: &mut HashSet<String>) -> bool {
+fn expand(kind: &str, name: &str, depth: u8, out: &mut HashSet<String>) -> bool {
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
-    let Some(json) = tag_file(name) else {
+    let Some(json) = tag_file(kind, name) else {
         return false;
     };
     if depth > 16 {
@@ -38,7 +41,7 @@ fn expand(name: &str, depth: u8, out: &mut HashSet<String>) -> bool {
         let id = value.as_str().or_else(|| value["id"].as_str());
         let Some(id) = id else { continue };
         if let Some(inner) = id.strip_prefix('#') {
-            expand(inner, depth + 1, out);
+            expand(kind, inner, depth + 1, out);
         } else {
             let id = if id.contains(':') {
                 id.to_owned()
@@ -54,14 +57,20 @@ fn expand(name: &str, depth: u8, out: &mut HashSet<String>) -> bool {
 /// The block ids a tag (with or without `#` and `minecraft:`) expands to, or `None` when no
 /// such tag exists.
 pub fn members(tag: &str) -> Option<Members> {
+    members_of("block", tag)
+}
+
+/// The members of a `block` or `item` tag.
+pub fn members_of(kind: &'static str, tag: &str) -> Option<Members> {
     let name = tag.trim_start_matches('#');
     let name = name.strip_prefix("minecraft:").unwrap_or(name).to_owned();
-    if let Some(found) = cache().lock().unwrap().get(&name) {
+    let key = (kind, name.clone());
+    if let Some(found) = cache().lock().unwrap().get(&key) {
         return found.clone();
     }
     let mut set = HashSet::new();
-    let found = expand(&name, 0, &mut set).then(|| Arc::new(set));
-    cache().lock().unwrap().insert(name, found.clone());
+    let found = expand(kind, &name, 0, &mut set).then(|| Arc::new(set));
+    cache().lock().unwrap().insert(key, found.clone());
     found
 }
 
@@ -80,5 +89,7 @@ mod tests {
         assert!(!logs.contains("minecraft:stone"));
         assert!(members("logs").is_some(), "namespace and # are optional");
         assert!(members("#minecraft:no_such_tag").is_none());
+        let planks = members_of("item", "#minecraft:planks").expect("item tag");
+        assert!(planks.contains("minecraft:oak_planks"));
     }
 }

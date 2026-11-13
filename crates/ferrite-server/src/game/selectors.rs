@@ -179,7 +179,7 @@ fn number(tag: &Tag) -> Option<f64> {
 
 /// Vanilla `NbtPredicate.matches`: compound keys are a subset, list lengths must agree, and
 /// numbers compare within the 1e-5 tolerance vanilla uses for floating point NBT.
-fn nbt_matches(expected: &Tag, actual: &Tag) -> bool {
+pub(super) fn nbt_matches(expected: &Tag, actual: &Tag) -> bool {
     if let (Some(expected), Some(actual)) = (number(expected), number(actual)) {
         return (expected - actual).abs() < 1e-5;
     }

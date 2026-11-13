@@ -65,6 +65,7 @@ mod commands_data;
 pub(crate) use commands_data::{BlockData, apply_block};
 mod block_tags;
 mod commands_exec;
+mod commands_exec_more;
 mod commands_extras;
 mod commands_item;
 mod commands_late;
