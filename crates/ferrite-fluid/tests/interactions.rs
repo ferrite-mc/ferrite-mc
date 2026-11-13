@@ -45,6 +45,23 @@ fn tick(w: &mut World, p: (i32, i32, i32)) {
     t.schedule(p, 0);
     t.run_until(w, 0);
 }
+
+#[test]
+fn waterlogged_source_schedules_spread_without_replacing_its_block() {
+    let mut w = world();
+    let wet = state("oak_fence", &[("waterlogged", "true")]);
+    w.set_block(0, 0, 0, wet);
+    for x in -2..=2 {
+        for z in -2..=2 {
+            w.set_block(x, -1, z, id("stone"));
+        }
+    }
+    let mut ticks = FluidTicks::default();
+    ticks.on_block_change(&mut w, (0, 0, 0));
+    ticks.run_until(&mut w, 5);
+    assert_eq!(w.block(0, 0, 0), wet);
+    assert_eq!(fluid_state(w.block(1, 0, 0)).kind, FluidKind::Water);
+}
 #[test]
 fn lava_next_to_water_solidifies_by_source_status() {
     for (level, product) in [("0", "obsidian"), ("1", "cobblestone")] {
