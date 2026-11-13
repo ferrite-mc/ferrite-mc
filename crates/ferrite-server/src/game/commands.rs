@@ -2736,8 +2736,13 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            data.join("broken.json"),
+            data.join("enchanted.json"),
             r#"{"function":"minecraft:enchant_randomly"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("broken.json"),
+            r#"{"function":"minecraft:not_a_function"}"#,
         )
         .unwrap();
         let mut game = GameState::default();
@@ -2755,6 +2760,7 @@ mod tests {
         for line in [
             "item modify entity @s hotbar.0 test:five",
             "item modify block 0 64 0 container.0 test:nested/fancy",
+            "item modify entity @s hotbar.0 test:enchanted",
             r#"item modify entity @s weapon.mainhand {"function":"set_count","count":3}"#,
         ] {
             let (result, actions) = run(line, 2);
@@ -2791,7 +2797,7 @@ mod tests {
             ),
             (
                 "item modify entity @s hotbar.0 test:broken",
-                "enchant_randomly",
+                "not_a_function",
             ),
             (
                 "item modify entity @s hotbar.0 {\"function\":\"nope\"}",
@@ -2799,7 +2805,7 @@ mod tests {
             ),
             (
                 "item replace entity @s hotbar.1 from entity @s hotbar.0 test:broken",
-                "enchant_randomly",
+                "not_a_function",
             ),
         ] {
             let (result, actions) = run(line, 2);

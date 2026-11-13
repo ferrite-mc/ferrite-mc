@@ -4621,6 +4621,26 @@ impl CommandRuntime<'_> {
                         }
                         if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
                             let killer = causing.as_ref().map(|a| a.name.as_str());
+                            let block = self
+                                .dimensions
+                                .source(target.dimension)
+                                .block(
+                                    target.pos[0].floor() as i32,
+                                    target.pos[1].floor() as i32,
+                                    target.pos[2].floor() as i32,
+                                )
+                                .and_then(|state| u16::try_from(state).ok())
+                                .and_then(ferrite_data::blocks::state)
+                                .map(|(name, _)| name);
+                            let source =
+                                source
+                                    .clone()
+                                    .with_fall(damage_source::FallInfo::from_snapshot(
+                                        crate::plugins::facts::fall_distance(target.uuid)
+                                            .unwrap_or(0.0),
+                                        applied,
+                                        block,
+                                    ));
                             let message = props.as_ref().map(|props| {
                                 damage_source::death_message(props, &target.name, &source, killer)
                             });

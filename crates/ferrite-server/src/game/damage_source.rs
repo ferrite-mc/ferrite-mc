@@ -190,6 +190,23 @@ pub struct FallInfo {
 }
 
 impl FallInfo {
+    /// Current published fall state for a command hit. Earlier climbable positions and
+    /// combat entries are not retained, so they must not be invented here.
+    pub fn from_snapshot(distance: f32, damage: f32, block: Option<&str>) -> Self {
+        let location = match block {
+            Some("minecraft:water") => Some(FallLocation::Water),
+            Some(block) if ferrite_data::tags::contains("block", "climbable", block) => {
+                Some(FallLocation::of_climbable(block))
+            }
+            _ => None,
+        };
+        Self {
+            distance,
+            damage,
+            location,
+        }
+    }
+
     /// `CombatTracker.getMostSignificantFall` for a victim whose only combat entry is a
     /// `#minecraft:is_fall` hit (`fall`, `ender_pearl`, `stalagmite`): the fall entry wins with
     /// a distance over 5; otherwise the entry counts when it has a fall location and more than
@@ -555,6 +572,23 @@ mod tests {
             FallLocation::of_climbable("minecraft:cave_vines"),
             FallLocation::OtherClimbable
         );
+    }
+
+    #[test]
+    fn command_fall_snapshot_uses_distance_and_only_known_locations() {
+        let generic = FallInfo::from_snapshot(7.0, 4.0, Some("minecraft:stone"));
+        assert!(generic.is_significant());
+        assert_eq!(generic.location, None);
+        let water = FallInfo::from_snapshot(1.0, 6.0, Some("minecraft:water"));
+        assert_eq!(water.location, Some(FallLocation::Water));
+        assert!(water.is_significant());
+        assert!(!FallInfo::from_snapshot(0.0, 6.0, None).is_significant());
+        if ferrite_data::tags::contains("block", "climbable", "minecraft:ladder") {
+            assert_eq!(
+                FallInfo::from_snapshot(1.0, 6.0, Some("minecraft:ladder")).location,
+                Some(FallLocation::Ladder)
+            );
+        }
     }
 
     #[test]

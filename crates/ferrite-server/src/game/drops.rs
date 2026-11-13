@@ -506,8 +506,8 @@ mod tests {
         assert!(enchanted > 0, "no table enchanted anything");
     }
 
-    #[test]
-    fn an_exploration_map_without_a_structure_search_stays_unchanged() {
+    #[tokio::test]
+    async fn an_exploration_map_without_a_structure_search_stays_unchanged() {
         use ferrite_loot::LootHost;
         let destinations = ["minecraft:buried_treasure".to_owned()];
         // No world at all, and no vanilla terrain behind a world: nothing is found, so the
