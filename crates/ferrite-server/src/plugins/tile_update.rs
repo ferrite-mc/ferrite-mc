@@ -12,7 +12,7 @@ use ferrite_nbt::{Compound, List, Tag};
 use ferrite_plugin::PluginPacket;
 
 /// `(block entity type, slot count, has furnace timers)`.
-const FAMILIES: [(&str, usize, bool); 12] = [
+const FAMILIES: [(&str, usize, bool); 14] = [
     ("minecraft:chest", 27, false),
     ("minecraft:trapped_chest", 27, false),
     ("minecraft:barrel", 27, false),
@@ -25,6 +25,8 @@ const FAMILIES: [(&str, usize, bool); 12] = [
     ("minecraft:hopper", 5, false),
     ("minecraft:brewing_stand", 5, false),
     ("minecraft:crafter", 9, false),
+    ("minecraft:campfire", 4, false),
+    ("minecraft:chiseled_bookshelf", 6, false),
 ];
 
 /// Vanilla's `minecraft:banner_pattern` entries (`data/minecraft/banner_pattern`), without namespace.
@@ -379,13 +381,15 @@ mod tests {
     }
 
     #[test]
-    fn dispensers_droppers_hoppers_brewing_stands_and_crafters_are_modelled() {
+    fn the_item_container_families_are_modelled_with_their_slot_counts() {
         for (entity, slots) in [
             ("minecraft:dispenser", 9),
             ("minecraft:dropper", 9),
             ("minecraft:hopper", 5),
             ("minecraft:brewing_stand", 5),
             ("minecraft:crafter", 9),
+            ("minecraft:campfire", 4),
+            ("minecraft:chiseled_bookshelf", 6),
         ] {
             let last = format!("item,{},minecraft:stone,1", slots - 1);
             assert!(packet([0, 0, 0], entity, &last, SEP).is_some(), "{entity}");

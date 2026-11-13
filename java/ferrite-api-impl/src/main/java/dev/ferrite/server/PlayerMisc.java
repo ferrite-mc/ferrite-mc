@@ -473,14 +473,21 @@ public abstract class PlayerMisc extends PlayerStubs {
             case HOPPER -> "minecraft:hopper";
             case BREWING_STAND -> "minecraft:brewing_stand";
             case CRAFTER -> "minecraft:crafter";
+            case CAMPFIRE, SOUL_CAMPFIRE -> "minecraft:campfire";
+            case CHISELED_BOOKSHELF -> "minecraft:chiseled_bookshelf";
             default -> type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
         };
-        if (entity == null || !(tileState instanceof org.bukkit.block.Container container))
-            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, banners, skulls, chests, barrels, shulker boxes, furnaces, dispensers, droppers, hoppers, brewing stands and crafters as tile entities, and has no other block entity model to encode");
-        var snapshot = container.getSnapshotInventory();
+        if (entity == null)
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, banners, skulls, chests, barrels, shulker boxes, furnaces, dispensers, droppers, hoppers, brewing stands, crafters, campfires and chiseled bookshelves as tile entities, and has no other block entity model to encode");
+        int size;
+        java.util.function.IntFunction<org.bukkit.inventory.ItemStack> stackAt;
+        if (tileState instanceof org.bukkit.block.Campfire campfire) { size = campfire.getSize(); stackAt = campfire::getItem; }
+        else if (tileState instanceof org.bukkit.block.Container container) { var snapshot = container.getSnapshotInventory(); size = snapshot.getSize(); stackAt = snapshot::getItem; }
+        else if (tileState instanceof io.papermc.paper.block.TileStateInventoryHolder holder) { var snapshot = holder.getSnapshotInventory(); size = snapshot.getSize(); stackAt = snapshot::getItem; }
+        else throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") has no item snapshot to encode");
         var entries = new java.util.ArrayList<String>();
-        for (int slot = 0; slot < snapshot.getSize(); slot++) {
-            var item = snapshot.getItem(slot);
+        for (int slot = 0; slot < size; slot++) {
+            var item = stackAt.apply(slot);
             if (item == null || item.getType().isAir() || item.getAmount() <= 0) continue;
             entries.add("item," + slot + "," + item.getType().getKey() + "," + item.getAmount());
             if (item.hasItemMeta()) {

@@ -64,7 +64,10 @@ class PlayerTileUpdateTest {
             case "hashCode" -> System.identityHashCode(self);
             case "equals" -> self == args[0];
             default -> {
-                if (extra.containsKey(method.getName())) yield extra.get(method.getName());
+                if (extra.containsKey(method.getName())) {
+                    var value = extra.get(method.getName());
+                    yield value instanceof java.util.function.IntFunction<?> byIndex ? byIndex.apply((int) args[0]) : value;
+                }
                 throw new UnsupportedOperationException(method.getName());
             }
         }));
@@ -145,6 +148,19 @@ class PlayerTileUpdateTest {
             assertEquals(c.entity(), calls.get(0)[4], c.type().name());
             assertEquals("item," + (c.size() - 1) + ",minecraft:stone,3", calls.get(0)[5], c.type().name());
         }
+    }
+
+    @Test void aCampfireSendsItsFourSlotsAndAChiseledBookshelfItsSix() {
+        var campfire = tile(org.bukkit.block.Campfire.class, Material.CAMPFIRE, null, java.util.Map.of(
+            "getSize", 4, "getItem", (java.util.function.IntFunction<ItemStack>) slot -> slot == 3 ? new ItemStack(Material.BEEF, 1) : null));
+        player.sendBlockUpdate(at(), campfire);
+        assertEquals("minecraft:campfire", calls.get(0)[4]);
+        assertEquals("item,3,minecraft:beef,1", calls.get(0)[5]);
+        calls.clear();
+        var shelf = tile(org.bukkit.block.ChiseledBookshelf.class, Material.CHISELED_BOOKSHELF, inventory(9, java.util.Map.of(5, new ItemStack(Material.BOOK))), java.util.Map.of());
+        player.sendBlockUpdate(at(), shelf);
+        assertEquals("minecraft:chiseled_bookshelf", calls.get(0)[4]);
+        assertEquals("item,5,minecraft:book,1", calls.get(0)[5]);
     }
 
     @Test void aBannerSendsItsPatternLayers() {
