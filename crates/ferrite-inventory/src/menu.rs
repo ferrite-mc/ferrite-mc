@@ -196,6 +196,8 @@ pub enum MenuKind {
     Smithing,
     /// A loom (vanilla `LoomMenu`).
     Loom,
+    /// A cartography table (vanilla `CartographyTableMenu`).
+    Cartography,
     /// A brewing stand (vanilla `BrewingStandMenu`).
     BrewingStand,
     /// A beacon (vanilla `BeaconMenu`).
@@ -223,6 +225,7 @@ impl MenuKind {
             Self::Stonecutter => Some("minecraft:stonecutter".into()),
             Self::Smithing => Some("minecraft:smithing".into()),
             Self::Loom => Some("minecraft:loom".into()),
+            Self::Cartography => Some("minecraft:cartography_table".into()),
             Self::BrewingStand => Some("minecraft:brewing_stand".into()),
             Self::Beacon => Some("minecraft:beacon".into()),
             Self::Merchant => Some("minecraft:merchant".into()),
@@ -407,6 +410,43 @@ pub struct EnchantRules {
     pub supported: bool,
 }
 
+/// What the cartography table needs to know about a saved map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapInfo {
+    /// Zoom level, 0 to 4.
+    pub scale: u8,
+    pub locked: bool,
+}
+
+/// The saved-map store could not finish a cartography result; the take is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapFinishError;
+
+/// Saved-map access for the cartography table. The menu itself is a pure state machine, so the
+/// server supplies the store behind this trait.
+pub trait MapAccess {
+    /// The facts about map `id`, or `None` when no readable map has that id.
+    fn info(&self, _id: i32) -> Option<MapInfo> {
+        None
+    }
+
+    /// Completes a taken cartography result (vanilla `MapItem.onCraftedPostProcess`): a stack
+    /// marked with `map_post_processing` gets a newly created saved map, its `map_id` is pointed
+    /// at it and the marker removed. Returns the new id, or `None` when the stack needed no work.
+    fn finish(&self, _stack: &mut ItemStack) -> Result<Option<i32>, MapFinishError> {
+        Err(MapFinishError)
+    }
+
+    /// Gives back a map [`MapAccess::finish`] created for a result that then did not reach the
+    /// player (the inventory had no room).
+    fn discard(&self, _id: i32) {}
+}
+
+/// A [`MapAccess`] with no maps: a cartography table never offers a result.
+pub struct NoMaps;
+
+impl MapAccess for NoMaps {}
+
 /// A [`Crafter`] that never crafts anything.
 pub struct NoCrafting;
 
@@ -444,6 +484,8 @@ pub struct Clicker<'a> {
     pub levels: i32,
     /// Ids of the recipes the click crafted, once per result taken.
     pub crafted: Vec<String>,
+    /// Saved maps, for the cartography table.
+    pub maps: &'a dyn MapAccess,
 }
 
 impl<'a> Clicker<'a> {
@@ -460,7 +502,14 @@ impl<'a> Clicker<'a> {
             xp: 0.0,
             levels: 0,
             crafted: Vec::new(),
+            maps: &NoMaps,
         }
+    }
+
+    /// Uses `maps` for cartography tables.
+    pub fn with_maps(mut self, maps: &'a dyn MapAccess) -> Self {
+        self.maps = maps;
+        self
     }
 
     fn drop(&mut self, stack: ItemStack) {
@@ -539,6 +588,10 @@ enum Rule {
     Dye,
     /// A loom banner-pattern slot.
     BannerPattern,
+    /// A cartography table's map slot: filled maps only.
+    FilledMap,
+    /// A cartography table's addition slot: paper, an empty map or a glass pane.
+    MapAddition,
     /// A merchant's first or second input slot.
     TradeInput,
     /// A merchant's output slot (`MerchantResultSlot`).
@@ -671,6 +724,7 @@ impl Menu {
             | MenuKind::Stonecutter
             | MenuKind::Smithing
             | MenuKind::Loom
+            | MenuKind::Cartography
             | MenuKind::BrewingStand
             | MenuKind::Beacon
             | MenuKind::Merchant
@@ -685,6 +739,7 @@ impl Menu {
             MenuKind::Grindstone => vec![ItemStack::empty(); 2],
             MenuKind::Stonecutter => vec![ItemStack::empty(); 1],
             MenuKind::Smithing | MenuKind::Loom => vec![ItemStack::empty(); 3],
+            MenuKind::Cartography => vec![ItemStack::empty(); 2],
             MenuKind::BrewingStand => vec![ItemStack::empty(); 5],
             MenuKind::Beacon => vec![ItemStack::empty(); 1],
             MenuKind::Horse { columns, .. } => {
@@ -964,6 +1019,27 @@ impl Menu {
         ];
         standard_inventory_slots(&mut slots);
         Self::with_slots(container_id, MenuKind::Loom, slots)
+    }
+
+    /// A cartography table (vanilla `CartographyTableMenu`): 0 map, 1 addition, 2 result,
+    /// 3..39 inventory.
+    pub fn cartography(container_id: i32) -> Self {
+        let mut slots = vec![
+            SlotDef {
+                store: Store::Container(0),
+                rule: Rule::FilledMap,
+            },
+            SlotDef {
+                store: Store::Container(1),
+                rule: Rule::MapAddition,
+            },
+            SlotDef {
+                store: Store::Result,
+                rule: Rule::Output,
+            },
+        ];
+        standard_inventory_slots(&mut slots);
+        Self::with_slots(container_id, MenuKind::Cartography, slots)
     }
 
     /// A brewing stand (vanilla `BrewingStandMenu`): `0..3` the bottles, `3` the ingredient,
@@ -1286,7 +1362,7 @@ impl Menu {
 
     /// Recomputes a station menu's result from its inputs. Crafting result slots are refreshed
     /// by [`Menu::update_result`] instead.
-    fn refresh_station_result(&mut self, crafter: &dyn Crafter) {
+    fn refresh_station_result(&mut self, crafter: &dyn Crafter, maps: &dyn MapAccess) {
         match self.kind {
             MenuKind::Anvil => self.update_anvil(crafter),
             MenuKind::Grindstone => self.update_grindstone(),
@@ -1313,6 +1389,7 @@ impl Menu {
                 self.sync_data();
             }
             MenuKind::Loom => self.update_loom(),
+            MenuKind::Cartography => self.update_cartography(maps),
             MenuKind::Merchant => self.update_merchant(),
             _ => {}
         }
@@ -1357,6 +1434,36 @@ impl Menu {
         out.count = 1;
         self.station_xp = xp;
         self.result = out;
+        self.sync_data();
+    }
+
+    /// Vanilla `CartographyTableMenu.setupResultSlot`: paper zooms out an unlocked map below the
+    /// largest scale, a glass pane locks an unlocked map and an empty map clones. Zooming out and
+    /// locking only mark the result; the new saved map is created when the player takes it.
+    fn update_cartography(&mut self, maps: &dyn MapAccess) {
+        use ferrite_item::{MapPostProcessing, set_map_post_processing};
+        self.result = ItemStack::empty();
+        let map = self.container[0].clone();
+        let addition = self.container[1].clone();
+        if let Some(id) = ferrite_item::map_id(&map)
+            && !addition.is_empty()
+            && let Some(info) = maps.info(id)
+        {
+            match addition.name() {
+                Some("minecraft:paper") if !info.locked && info.scale < 4 => {
+                    let mut out = map.copy_with_count(1);
+                    set_map_post_processing(&mut out, Some(MapPostProcessing::Scale));
+                    self.result = out;
+                }
+                Some("minecraft:glass_pane") if !info.locked => {
+                    let mut out = map.copy_with_count(1);
+                    set_map_post_processing(&mut out, Some(MapPostProcessing::Lock));
+                    self.result = out;
+                }
+                Some("minecraft:map") => self.result = map.copy_with_count(2),
+                _ => {}
+            }
+        }
         self.sync_data();
     }
 
@@ -1659,10 +1766,9 @@ impl Menu {
     /// ingredient is used up.
     fn do_brew(&mut self, crafter: &dyn Crafter) {
         let ingredient = self.container[3].clone();
-        for slot in 0..3 {
-            let bottle = self.container[slot].clone();
-            if let Some(result) = crafter.brew(&ingredient, &bottle) {
-                self.container[slot] = normalize(result);
+        for slot in self.container.iter_mut().take(3) {
+            if let Some(result) = crafter.brew(&ingredient, slot) {
+                *slot = normalize(result);
             }
         }
         let mut left = ingredient;
@@ -1705,6 +1811,21 @@ impl Menu {
     ) {
         if slot < self.slots.len() {
             let mut p = Clicker::new(inventory, true, crafter);
+            self.put(&mut p, slot, stack);
+        }
+    }
+
+    /// [`Menu::set_slot`] for a menu whose result depends on saved maps (the cartography table).
+    pub fn set_slot_with_maps(
+        &mut self,
+        inventory: &mut PlayerInventory,
+        crafter: &dyn Crafter,
+        maps: &dyn MapAccess,
+        slot: usize,
+        stack: ItemStack,
+    ) {
+        if slot < self.slots.len() {
+            let mut p = Clicker::new(inventory, true, crafter).with_maps(maps);
             self.put(&mut p, slot, stack);
         }
     }
@@ -1800,7 +1921,7 @@ impl Menu {
             Store::Result => self.result = stack,
             Store::Container(i) => {
                 self.container[i] = stack;
-                self.refresh_station_result(p.crafter);
+                self.refresh_station_result(p.crafter, p.maps);
             }
         }
     }
@@ -1845,6 +1966,11 @@ impl Menu {
             // result slot shows. The result slot itself only ever gives items out.
             Rule::TradeInput => true,
             Rule::TradeOutput => false,
+            Rule::FilledMap => ferrite_item::map_id(stack).is_some(),
+            Rule::MapAddition => matches!(
+                stack.name(),
+                Some("minecraft:paper" | "minecraft:map" | "minecraft:glass_pane")
+            ),
             Rule::Potion => is_potion(stack) || stack.name() == Some("minecraft:glass_bottle"),
             Rule::BrewingIngredient => true,
             Rule::BrewingFuel => stack.name() == Some("minecraft:blaze_powder"),
@@ -1889,6 +2015,16 @@ impl Menu {
     fn remove(&mut self, p: &mut Clicker, slot: usize, amount: i32) -> ItemStack {
         if self.slots[slot].rule == Rule::Result {
             return std::mem::take(&mut self.result);
+        }
+        if self.kind == MenuKind::Cartography && self.slots[slot].rule == Rule::Output {
+            // A `ResultContainer` gives up its whole stack. The saved map for a zoomed-out or
+            // locked result is created now, and a store failure refuses the take.
+            let mut out = self.result.clone();
+            if p.maps.finish(&mut out).is_err() {
+                return ItemStack::empty();
+            }
+            self.result = ItemStack::empty();
+            return out;
         }
         let mut stack = self.stack(p, slot);
         let taken = stack.split(amount).unwrap_or_default();
@@ -1985,10 +2121,10 @@ impl Menu {
                     self.anvil_cost = 0;
                 }
                 MenuKind::Grindstone => {
-                    for cell in 0..2 {
-                        let mut left = self.container[cell].clone();
+                    for cell in self.container.iter_mut().take(2) {
+                        let mut left = cell.clone();
                         left.count -= 1;
-                        self.container[cell] = normalize(left);
+                        *cell = normalize(left);
                     }
                     self.result = ItemStack::empty();
                     p.xp += self.station_xp;
@@ -2010,12 +2146,21 @@ impl Menu {
                     {
                         p.crafted.push(id);
                     }
-                    for cell in 0..3 {
-                        let mut left = self.container[cell].clone();
+                    for cell in self.container.iter_mut().take(3) {
+                        let mut left = cell.clone();
                         left.count -= 1;
-                        self.container[cell] = normalize(left);
+                        *cell = normalize(left);
                     }
                     self.result = ItemStack::empty();
+                }
+                MenuKind::Cartography => {
+                    for cell in self.container.iter_mut().take(2) {
+                        let mut left = cell.clone();
+                        left.count -= 1;
+                        *cell = normalize(left);
+                    }
+                    self.result = ItemStack::empty();
+                    self.update_cartography(p.maps);
                 }
                 MenuKind::Merchant => {
                     let Some(trade) = self.trades.get_mut(self.trade) else {
@@ -2407,6 +2552,8 @@ impl Menu {
             return ItemStack::empty();
         }
         let mut stack = original.clone();
+        // A saved map a cartography result needed; given back if the result did not move.
+        let mut created: Option<i32> = None;
         let moved = match self.kind {
             MenuKind::Inventory => {
                 let worn = equipment_slot(&original);
@@ -2508,6 +2655,28 @@ impl Menu {
                         || self.move_item_stack_to(p, &mut stack, 2, 3, false)
                 }
             }
+            MenuKind::Cartography => {
+                if i == 2 {
+                    match p.maps.finish(&mut stack) {
+                        Ok(id) => created = id,
+                        Err(MapFinishError) => return ItemStack::empty(),
+                    }
+                    self.move_item_stack_to(p, &mut stack, 3, 39, true)
+                } else if i < 2 {
+                    self.move_item_stack_to(p, &mut stack, 3, 39, false)
+                } else if ferrite_item::map_id(&original).is_some() {
+                    self.move_item_stack_to(p, &mut stack, 0, 1, false)
+                } else if matches!(
+                    original.name(),
+                    Some("minecraft:paper" | "minecraft:map" | "minecraft:glass_pane")
+                ) {
+                    self.move_item_stack_to(p, &mut stack, 1, 2, false)
+                } else if i < 30 {
+                    self.move_item_stack_to(p, &mut stack, 30, 39, false)
+                } else {
+                    self.move_item_stack_to(p, &mut stack, 3, 30, false)
+                }
+            }
             MenuKind::Merchant => {
                 if i == 2 {
                     self.move_item_stack_to(p, &mut stack, 3, 39, true)
@@ -2578,11 +2747,17 @@ impl Menu {
             }
         };
         if !moved {
+            if let Some(id) = created {
+                p.maps.discard(id);
+            }
             return ItemStack::empty();
         }
         let left = stack.count.max(0);
         self.put(p, i, normalize(stack.clone()));
         if left == original.count {
+            if let Some(id) = created {
+                p.maps.discard(id);
+            }
             return ItemStack::empty();
         }
         self.on_take(p, i);
@@ -2618,11 +2793,21 @@ impl Menu {
                 p.drop(rest);
             }
         }
+        // Vanilla `CartographyTableMenu.removed` returns both inputs and drops the result.
+        if self.kind == MenuKind::Cartography {
+            self.result = ItemStack::empty();
+            for cell in self.container.iter_mut().take(2) {
+                let stack = std::mem::take(cell);
+                if let Some(rest) = p.inventory.place_back(stack) {
+                    p.drop(rest);
+                }
+            }
+        }
         // Vanilla `MerchantMenu.removed` returns both input stacks to the player.
         if self.kind == MenuKind::Merchant {
             self.result = ItemStack::empty();
-            for cell in 0..2 {
-                let stack = std::mem::take(&mut self.container[cell]);
+            for cell in self.container.iter_mut().take(2) {
+                let stack = std::mem::take(cell);
                 if let Some(rest) = p.inventory.place_back(stack) {
                     p.drop(rest);
                 }

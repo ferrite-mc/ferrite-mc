@@ -48,6 +48,7 @@
 
 mod component;
 mod defaults;
+mod map;
 mod stack;
 pub mod wire;
 
@@ -61,6 +62,9 @@ pub use component::{
 pub use defaults::{
     AIR, ItemDefaults, default_components, item_count, item_defaults, item_defaults_by_name,
     item_id, item_name, items,
+};
+pub use map::{
+    MapPostProcessing, map_id, map_post_processing, set_map_id, set_map_post_processing,
 };
 pub use stack::{ItemStack, MAX_COUNT};
 pub use wire::{HashedSlot, WireError};

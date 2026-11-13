@@ -340,15 +340,31 @@ public abstract class PlayerExtras extends PlayerSight {
         return item == null ? org.bukkit.inventory.ItemStack.empty() : item;
     }
     @Override public org.bukkit.entity.FishHook getFishHook() { return null; }
-    // Shoulder parrots are bookkeeping only: the game has no parrot and the client is not shown one.
-    private volatile org.bukkit.entity.Entity shoulderLeft, shoulderRight;
-    @Override public org.bukkit.entity.Entity getShoulderEntityRight() { return shoulderRight; }
-    @Override public org.bukkit.entity.Entity getShoulderEntityLeft() { return shoulderLeft; }
-    @Override public void setShoulderEntityLeft(org.bukkit.entity.Entity entity) { shoulderLeft = shoulder(entity); }
-    @Override public void setShoulderEntityRight(org.bukkit.entity.Entity entity) { shoulderRight = shoulder(entity); }
-    private static org.bukkit.entity.Entity shoulder(org.bukkit.entity.Entity entity) {
+    // Shoulder parrots live in the game: the host owns the table (saved with the player), a write is applied by the
+    // player's own region, and a read returns a detached parrot handle carrying the seated parrot's uuid.
+    private org.bukkit.entity.Entity shoulder(String side) {
+        if (!HostBridge.available()) return null; // no host, so nothing can be seated
+        var reply = (String) HostBridge.call("Player", getUniqueId(), "getShoulder(String)", String.class, side);
+        if (reply == null || reply.isEmpty()) return null;
+        return SpawnedEntity.of(org.bukkit.entity.EntityType.PARROT, getLocation(), getWorld(), java.util.UUID.fromString(reply.split(",", 2)[0]));
+    }
+    @Override public org.bukkit.entity.Entity getShoulderEntityRight() { return shoulder("RIGHT"); }
+    @Override public org.bukkit.entity.Entity getShoulderEntityLeft() { return shoulder("LEFT"); }
+    /** null empties the shoulder, a parrot is seated there (a live one leaves the world), anything else is refused. */
+    private void seat(String side, org.bukkit.entity.Entity entity) {
         if (entity != null && entity.getType() != org.bukkit.entity.EntityType.PARROT) throw new IllegalArgumentException("Only parrots can sit on a shoulder, not " + entity.getType());
-        return entity;
+        HostBridge.callVoid("Player", getUniqueId(), "shoulder(String,String)", side, entity == null ? "CLEAR" : "SEAT:" + entity.getUniqueId());
+    }
+    @Override public void setShoulderEntityLeft(org.bukkit.entity.Entity entity) { seat("LEFT", entity); }
+    @Override public void setShoulderEntityRight(org.bukkit.entity.Entity entity) { seat("RIGHT", entity); }
+    @Override public org.bukkit.entity.Entity releaseLeftShoulderEntity() { return releaseShoulder("LEFT"); }
+    @Override public org.bukkit.entity.Entity releaseRightShoulderEntity() { return releaseShoulder("RIGHT"); }
+    /** The parrot that was on the shoulder, now standing in the world beside the player; null when the shoulder was empty. */
+    private org.bukkit.entity.Entity releaseShoulder(String side) {
+        var parrot = shoulder(side);
+        if (parrot == null) return null;
+        HostBridge.callVoid("Player", getUniqueId(), "shoulder(String,String)", side, "RELEASE");
+        return parrot;
     }
     @Override public double getDefaultGravity() { return 0.08; }
     @Override public float getAirDrag() { return 0.02f; }

@@ -10,7 +10,7 @@ use ferrite_protocol::{
         login::{LoginAcknowledged, LoginStart},
         play::{
             ChunkBatchReceived, ClientKeepAlive, ConfirmTeleport, MovePosition, PlayKeepAlive,
-            PositionSync,
+            PositionSync, ServerboundChatCommand, SystemChat,
         },
     },
 };
@@ -18,6 +18,40 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+/// Bytes read from the server by every bot in this process (for throughput).
+static BYTES_RX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(p50, p90, p99, max)` of an already sorted slice.
+fn dist(sorted: &[f64]) -> (f64, f64, f64, f64) {
+    let at = |p: f64| sorted[((sorted.len() - 1) as f64 * p) as usize];
+    (at(0.5), at(0.9), at(0.99), sorted[sorted.len() - 1])
+}
+
+/// Thread count of this process (`Threads:` in `/proc/self/status`); 0 where unavailable.
+fn thread_count() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Threads:")?.trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Prints `name: n=.., p50=.., p90=.., p99=.., max=..` for a set of millisecond samples.
+fn print_dist(name: &str, mut v: Vec<f64>) {
+    if v.is_empty() {
+        println!("{name}: n=0");
+        return;
+    }
+    v.sort_by(f64::total_cmp);
+    let (p50, p90, p99, max) = dist(&v);
+    println!(
+        "{name}: n={}, p50={p50:.3} ms, p90={p90:.3} ms, p99={p99:.3} ms, max={max:.3} ms",
+        v.len()
+    );
+}
+
 struct Bot {
     stream: TcpStream,
     encoder: FrameEncoder,
@@ -48,6 +82,7 @@ impl Bot {
                     "server closed the connection; last packet ids {:?}",
                     self.recent
                 );
+                BYTES_RX.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 self.decoder.feed(&bytes[..n]);
             }
         })
@@ -268,7 +303,7 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
         listener,
         ServerConfig {
             online_mode: false,
-            max_players: n as u32 + 1,
+            max_players: n as u32 + 2,
             view_distance: 2,
             game: Some(world.sender.clone()),
             ..Default::default()
@@ -280,12 +315,78 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
         .unwrap()
         .iter_mut()
         .for_each(Vec::clear);
+    // Probes (BOTS_PROBES=0 turns them off). Both run on the same runtime as the server and the
+    // bots, so they include the bots' own CPU use; they are for comparing runs of this harness.
+    //  * lateness: 1 ms timers; how late they fire is the scheduling delay every socket task on
+    //    this runtime sees (the question in docs/NET-WRITER-OFFLOAD.md).
+    //  * command: one extra bot sends `/list` about once a second and times the reply, a full
+    //    serverbound-packet -> game -> clientbound-packet round trip. Rate limits allow 1/s.
+    type Timed = std::sync::Arc<std::sync::Mutex<Vec<(std::time::Instant, f64)>>>;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lateness: Timed = Default::default();
+    let command_rtt: Timed = Default::default();
+    if std::env::var("BOTS_PROBES").is_ok_and(|v| v == "0") {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        for _ in 0..4 {
+            let (stop, lateness) = (stop.clone(), lateness.clone());
+            tokio::spawn(async move {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let at = std::time::Instant::now();
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    let late = at
+                        .elapsed()
+                        .saturating_sub(std::time::Duration::from_millis(1));
+                    lateness
+                        .lock()
+                        .unwrap()
+                        .push((at, late.as_secs_f64() * 1000.0));
+                }
+            });
+        }
+        let (stop, command_rtt) = (stop.clone(), command_rtt.clone());
+        let mut probe = Bot::join(addr, "Probe").await;
+        tokio::spawn(async move {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let at = std::time::Instant::now();
+                probe
+                    .send(&ServerboundChatCommand {
+                        command: "list".into(),
+                    })
+                    .await;
+                let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        let body = probe.until(124).await;
+                        if let Ok(chat) = SystemChat::decode(&mut body.as_slice())
+                            && chat.content.0.contains("players online")
+                        {
+                            return;
+                        }
+                    }
+                })
+                .await;
+                if reply.is_ok() {
+                    command_rtt
+                        .lock()
+                        .unwrap()
+                        .push((at, at.elapsed().as_secs_f64() * 1000.0));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            }
+        });
+        // A few seconds of idle samples before the join storm: the like-for-like floor.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
     let start = tokio::time::Instant::now();
+    let storm_start = std::time::Instant::now();
     let (_, cpu_start) = process_usage();
+    BYTES_RX.store(0, std::sync::atomic::Ordering::Relaxed);
+    let join_ms: std::sync::Arc<std::sync::Mutex<Vec<f64>>> = Default::default();
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n + 1));
     let mut tasks = Vec::new();
     for i in 0..n {
         let barrier = barrier.clone();
+        let join_ms = join_ms.clone();
         tasks.push(tokio::spawn(async move {
             // `BOTS_STAGGER_MS` spreads the connects: 800 sockets opened in one instant overflow
             // the accept backlog and are reset before the server ever sees them.
@@ -294,7 +395,12 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
             tokio::time::sleep(std::time::Duration::from_millis(i as u64 * stagger)).await;
+            let joining = std::time::Instant::now();
             let mut bot = Bot::join(addr, &format!("Bot{i}")).await;
+            join_ms
+                .lock()
+                .unwrap()
+                .push(joining.elapsed().as_secs_f64() * 1000.0);
             barrier.wait().await;
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -308,9 +414,23 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             }
         }));
     }
-    tokio::time::timeout(std::time::Duration::from_secs(120), barrier.wait())
+    if tokio::time::timeout(std::time::Duration::from_secs(120), barrier.wait())
         .await
-        .expect("bots did not all join");
+        .is_err()
+    {
+        println!(
+            "{label} JOIN FAILED: only {} of {n} bots joined within 120 s after the storm began",
+            join_ms.lock().unwrap().len()
+        );
+        panic!("bots did not all join");
+    }
+    let walk_start = std::time::Instant::now();
+    let rtt_snapshot = tokio::spawn(async {
+        // Keepalives go out every 10 s; sample near the end of the 30 s walk, before the bots
+        // disconnect and the server forgets their pings.
+        tokio::time::sleep(std::time::Duration::from_secs(27)).await;
+        ferrite_net::settings::ping_snapshot()
+    });
     // Join storm figures first, then restart the samples so the walk is measured on its own.
     {
         let mut samples = world.tick_samples.lock().unwrap();
@@ -362,9 +482,14 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             );
         }
     }
+    let threads_at_peak = thread_count();
+    let mut walked = 0;
     for task in tasks {
-        task.await.unwrap();
+        if task.await.is_ok() {
+            walked += 1;
+        }
     }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let elapsed = start.elapsed().as_secs_f64();
     let (rss, cpu_end) = process_usage();
     let mut samples = world.tick_samples.lock().unwrap().clone();
@@ -372,6 +497,65 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
     let avg = samples.iter().sum::<f64>() / samples.len() as f64;
     let p99 = samples[((samples.len() - 1) as f64 * 0.99) as usize];
     let cache = world.cache_stats();
+    println!(
+        "{label} workload: bots={n}, joined={}/{n}, walked_to_deadline={walked}/{n}, host_cpus={}, \
+         process_threads={threads_at_peak}, walk_s=30, stagger_ms={}, view_distance={}, elapsed_s={elapsed:.1}",
+        join_ms.lock().unwrap().len(),
+        std::thread::available_parallelism().map_or(0, |c| c.get()),
+        std::env::var("BOTS_STAGGER_MS").unwrap_or_else(|_| "0".into()),
+        std::env::var("BOTS_VIEW").unwrap_or_else(|_| "8".into()),
+    );
+    print_dist(
+        &format!("{label} bot join time"),
+        join_ms.lock().unwrap().clone(),
+    );
+    {
+        let (mspt50, mspt90, _, mspt_max) = dist(&samples);
+        println!(
+            "{label} mspt distribution: n={}, p50={mspt50:.3}, p90={mspt90:.3}, p99={p99:.3}, max={mspt_max:.3}",
+            samples.len()
+        );
+    }
+    let received = BYTES_RX.load(std::sync::atomic::Ordering::Relaxed);
+    println!(
+        "{label} throughput: {:.1} MiB received by the bots in {elapsed:.1} s = {:.2} MiB/s total, {:.1} KiB/s per bot",
+        received as f64 / 1048576.0,
+        received as f64 / 1048576.0 / elapsed,
+        received as f64 / 1024.0 / elapsed / n as f64,
+    );
+    if let Ok(pings) = rtt_snapshot.await {
+        print_dist(
+            &format!("{label} keepalive rtt (smoothed per player, server-measured)"),
+            pings.iter().map(|&p| f64::from(p)).collect(),
+        );
+    }
+    {
+        // Phases by wall clock: idle (before the storm), join (storm start .. all joined), walk.
+        let phase = |v: &Timed, from: std::time::Instant, to: std::time::Instant| {
+            v.lock()
+                .unwrap()
+                .iter()
+                .filter(|(at, _)| *at >= from && *at < to)
+                .map(|(_, ms)| *ms)
+                .collect::<Vec<_>>()
+        };
+        let long_ago = storm_start - std::time::Duration::from_secs(3600);
+        let end = std::time::Instant::now();
+        for (name, v) in [
+            ("runtime timer lateness", &lateness),
+            ("/list round trip", &command_rtt),
+        ] {
+            print_dist(
+                &format!("{label} {name}, idle"),
+                phase(v, long_ago, storm_start),
+            );
+            print_dist(
+                &format!("{label} {name}, join storm"),
+                phase(v, storm_start, walk_start),
+            );
+            print_dist(&format!("{label} {name}, walk"), phase(v, walk_start, end));
+        }
+    }
     println!(
         "{label}: bots={n}, avg_mspt={avg:.3}, p99_mspt={p99:.3}, rss_mb={:.1}, cpu_percent={:.1}, samples={}, cache_hit_rate={:.1}%, encodes={}, lookups={}",
         rss as f64 / 1048576.0,

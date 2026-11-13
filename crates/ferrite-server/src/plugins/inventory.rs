@@ -15,8 +15,7 @@ const MAX_ROWS: usize = 6;
 const MAX_MAP_CAPTION_UTF16: usize = 21_844;
 
 /// The command behind an inventory call, or `None` when it is not one this module handles
-/// (a hopper or dispenser inventory, say, which the menu code cannot show yet). The cartography
-/// table is deliberately not handled; see the test `stations_open_for_the_calling_player`.
+/// (a hopper or dispenser inventory, say, which the menu code cannot show yet).
 pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
     if call.owner != "Player" {
         return None;
@@ -31,6 +30,7 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
         "openStonecutter(Location,boolean)" => station(player, "stonecutter"),
         "openSmithingTable(Location,boolean)" => station(player, "smithing"),
         "openLoom(Location,boolean)" => station(player, "loom"),
+        "openCartographyTable(Location,boolean)" => station(player, "cartography"),
         "sendMapData(int,int,boolean,byte[],String)" => {
             use base64::Engine;
             let colors = base64::engine::general_purpose::STANDARD
@@ -140,6 +140,16 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
                 custom_data,
             })
         }
+        "setItemMapId(int,int)" => Some(PlayerCommand::ItemMapId {
+            player,
+            slot: call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?,
+            id: call
+                .args
+                .get(1)?
+                .parse::<i32>()
+                .ok()
+                .filter(|id| *id >= 0)?,
+        }),
         "setItemDamage(int,int)" => Some(PlayerCommand::ItemDamage {
             player,
             slot: call.args.first()?.parse::<u8>().ok().filter(|s| *s <= 40)?,
@@ -388,15 +398,12 @@ mod tests {
                 "{method}"
             );
         }
-        // Cartography tables stay refused. Cloning a map would only need the menu, but locking
-        // and zooming out create a new map id with a copy of the saved map data (scale, locked,
-        // centre, colours, decorations), and the server has no map data model: no
-        // `data/map_<id>.dat` store, no `idcounts` id allocator, and `minecraft:map_id` is an
-        // opaque component. A menu that could only clone would be a fake cartography table.
-        assert_eq!(
+        // A cartography table is a real menu now: its result depends on the saved-map store,
+        // which the player's region supplies when the menu opens.
+        assert!(matches!(
             inventory_command(&call("openCartographyTable(Location,boolean)", "null")),
-            None
-        );
+            Some(PlayerCommand::OpenStation { station, .. }) if station == "cartography"
+        ));
     }
 
     #[test]
@@ -795,6 +802,27 @@ mod tests {
                 hand: 0
             })
         );
+    }
+
+    #[test]
+    fn map_id_calls_become_a_slot_command() {
+        let call = |slot: &str, id: &str| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "setItemMapId(int,int)".into(),
+            args: vec![slot.into(), id.into()],
+        };
+        assert_eq!(
+            inventory_command(&call("2", "17")),
+            Some(PlayerCommand::ItemMapId {
+                player: Uuid::parse_str(PLAYER).unwrap(),
+                slot: 2,
+                id: 17
+            })
+        );
+        assert_eq!(inventory_command(&call("41", "1")), None);
+        assert_eq!(inventory_command(&call("2", "-1")), None);
+        assert_eq!(inventory_command(&call("2", "x")), None);
     }
 
     #[test]

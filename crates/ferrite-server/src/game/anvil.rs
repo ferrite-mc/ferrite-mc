@@ -155,6 +155,25 @@ struct Cache {
     dirty: HashMap<(i32, i32), Dirty>,
     /// Number of `Entry::Pending` in `entries`, so a miss does not count them under the lock.
     pending: usize,
+    /// The biome variant most recently requested. Entries are keyed `(x, z, biome)` but the
+    /// chunk contents do not depend on the variant, so block reads try this key first.
+    biome_hint: i32,
+}
+impl Cache {
+    /// The loaded column of chunk `(x, z)` under any biome variant. Block reads come from game
+    /// code on every tick; scanning every entry for each of them cost O(cache size) under the
+    /// cache lock, so the usual variant is probed by key first.
+    fn ready_column(&self, x: i32, z: i32) -> Option<&Column> {
+        if let Some(Entry::Ready(Ok(column), _)) = self.entries.get(&(x, z, self.biome_hint)) {
+            return Some(column);
+        }
+        self.entries
+            .iter()
+            .find_map(|(&(cx, cz, _), entry)| match entry {
+                Entry::Ready(Ok(column), _) if (cx, cz) == (x, z) => Some(&**column),
+                _ => None,
+            })
+    }
 }
 struct Dirty {
     chunk: ferrite_world::Chunk,
@@ -213,6 +232,7 @@ impl AnvilChunkSource {
                 clock: 0,
                 dirty: HashMap::new(),
                 pending: 0,
+                biome_hint: 0,
             }),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
@@ -256,6 +276,7 @@ impl AnvilChunkSource {
                 clock: 0,
                 dirty: HashMap::new(),
                 pending: 0,
+                biome_hint: 0,
             }),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
@@ -582,14 +603,7 @@ impl AnvilChunkSource {
         if let Some(dirty) = cache.dirty.get(&(x, z)) {
             return Some(f(&dirty.chunk));
         }
-        let column = cache.entries.iter().find_map(|(&(cx, cz, _), entry)| {
-            if (cx, cz) == (x, z)
-                && let Entry::Ready(Ok(column), _) = entry
-            {
-                return Some(column);
-            }
-            None
-        })?;
+        let column = cache.ready_column(x, z)?;
         Some(f(&column.chunk))
     }
     /// Whether the chunk is resident in this source right now (loaded and readable).
@@ -617,18 +631,7 @@ impl AnvilChunkSource {
         let light = if let Some(d) = cache.dirty.get(&key) {
             &d.light
         } else {
-            &cache
-                .entries
-                .iter()
-                .find_map(|(&(cx, cz, _), entry)| {
-                    if (cx, cz) == key
-                        && let Entry::Ready(Ok(column), _) = entry
-                    {
-                        return Some(column);
-                    }
-                    None
-                })?
-                .light
+            &cache.ready_column(key.0, key.1)?.light
         };
         let section =
             usize::try_from(y.div_euclid(16) - self.dimension.min_y().div_euclid(16) + 1).ok()?;
@@ -654,17 +657,7 @@ impl AnvilChunkSource {
                 .chunk
                 .block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8);
         }
-        let column = cache.entries.iter().find_map(|(&(cx, cz, _), entry)| {
-            if (cx, cz) == key {
-                if let Entry::Ready(Ok(c), _) = entry {
-                    Some(c)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })?;
+        let column = cache.ready_column(key.0, key.1)?;
         column
             .chunk
             .block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8)
@@ -678,18 +671,7 @@ impl AnvilChunkSource {
             let light = if let Some(dirty) = cache.dirty.get(&key) {
                 &dirty.light
             } else {
-                &cache
-                    .entries
-                    .iter()
-                    .find_map(|(&(cx, cz, _), entry)| {
-                        if (cx, cz) == key
-                            && let Entry::Ready(Ok(column), _) = entry
-                        {
-                            return Some(column);
-                        }
-                        None
-                    })?
-                    .light
+                &cache.ready_column(key.0, key.1)?.light
             };
             let section = usize::try_from(y.div_euclid(16) + 4).ok()?;
             let index = (y.rem_euclid(16) as usize * 256)
@@ -835,12 +817,7 @@ impl AnvilChunkSource {
             (d.chunk.clone(), d.light.clone())
         } else {
             let column = cache
-                .entries
-                .iter()
-                .find_map(|(&(cx, cz, _), entry)| match entry {
-                    Entry::Ready(Ok(c), _) if (cx, cz) == key => Some(c),
-                    _ => None,
-                })
+                .ready_column(key.0, key.1)
                 .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
             (column.chunk.clone(), column.light.clone())
         };
@@ -891,19 +868,7 @@ impl AnvilChunkSource {
             (d.chunk.clone(), d.light.clone())
         } else {
             let column = cache
-                .entries
-                .iter()
-                .find_map(|(&(cx, cz, _), entry)| {
-                    if (cx, cz) == key {
-                        if let Entry::Ready(Ok(c), _) = entry {
-                            Some(c)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
+                .ready_column(key.0, key.1)
                 .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
             (column.chunk.clone(), column.light.clone())
         };
@@ -955,19 +920,7 @@ impl AnvilChunkSource {
                     (dirty.chunk.clone(), dirty.light.clone())
                 } else {
                     let column = cache
-                        .entries
-                        .iter()
-                        .find_map(|(&(cx, cz, _), entry)| {
-                            if (cx, cz) == key {
-                                if let Entry::Ready(Ok(column), _) = entry {
-                                    Some(column)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        })
+                        .ready_column(key.0, key.1)
                         .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
                     (column.chunk.clone(), column.light.clone())
                 };
@@ -1039,12 +992,7 @@ impl AnvilChunkSource {
                     (d.chunk.clone(), d.light.clone())
                 } else {
                     let column = cache
-                        .entries
-                        .iter()
-                        .find_map(|(&(ex, ez, _), entry)| match entry {
-                            Entry::Ready(Ok(c), _) if (ex, ez) == key => Some(c),
-                            _ => None,
-                        })
+                        .ready_column(key.0, key.1)
                         .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
                     (column.chunk.clone(), column.light.clone())
                 };
@@ -1268,6 +1216,7 @@ impl AnvilChunkSource {
     fn lookup(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Lookup {
         let key = (x, z, biome);
         let mut cache = self.cache.lock().unwrap();
+        cache.biome_hint = biome;
         cache.clock += 1;
         let now = cache.clock;
         let lookups = self.stats.lookups.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1679,6 +1628,59 @@ mod tests {
         VarInt(ChunkData::ID).encode(&mut packet);
         packet.extend(body);
         packet
+    }
+
+    /// Block reads run on every game tick under the cache lock. They used to scan every cache
+    /// entry looking for the chunk, so a read cost grew with the number of loaded chunks (the End
+    /// fight tests spent most of their tick time here). The cost must not depend on cache size.
+    #[tokio::test]
+    async fn block_reads_do_not_scan_the_whole_cache() {
+        async fn load(source: &Arc<AnvilChunkSource>, chunks: i32) {
+            for first in (0..chunks).step_by(100) {
+                for i in first..(first + 100).min(chunks) {
+                    source.prefetch(i % 40, i / 40, 0);
+                }
+                for i in first..(first + 100).min(chunks) {
+                    ready(source, i % 40, i / 40, 0).await;
+                }
+            }
+        }
+        fn best_of(source: &AnvilChunkSource) -> std::time::Duration {
+            (0..7)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    for i in 0..20_000 {
+                        std::hint::black_box(source.block(i % 16, 0, 0));
+                    }
+                    start.elapsed()
+                })
+                .min()
+                .unwrap()
+        }
+        let small = AnvilChunkSource::new_memory();
+        load(&small, 1).await;
+        let large = AnvilChunkSource::new_memory();
+        load(&large, 1500).await;
+        assert!(small.block(1, 0, 0).is_some() && large.block(1, 0, 0).is_some());
+        let (one, many) = (best_of(&small), best_of(&large));
+        eprintln!("block() x20000: 1 chunk cached {one:?}, 1500 chunks cached {many:?}");
+        assert!(
+            many < one * 5,
+            "block reads slow down with the cache: {one:?} with 1 chunk, {many:?} with 1500"
+        );
+    }
+
+    /// Whichever biome variant a chunk was cached under, block reads find it.
+    #[tokio::test]
+    async fn block_reads_find_a_chunk_cached_under_another_biome_variant() {
+        let source = AnvilChunkSource::new_memory();
+        ready(&source, 3, 4, 7).await;
+        source.prefetch(5, 5, 0);
+        ready(&source, 5, 5, 0).await;
+        // The hint now points at variant 0, but chunk (3, 4) is only cached under variant 7.
+        assert!(source.block(3 * 16, 0, 4 * 16).is_some());
+        assert!(source.block(5 * 16, 0, 5 * 16).is_some());
+        assert!(source.block(100 * 16, 0, 0).is_none());
     }
 
     #[tokio::test]

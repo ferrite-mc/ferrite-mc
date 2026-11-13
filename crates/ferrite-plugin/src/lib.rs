@@ -379,6 +379,16 @@ pub enum MessageContent {
     Plain(String),
     AdventureJson(String),
 }
+/// What a plugin does to one of a player's shoulders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShoulderOp {
+    /// Seats the parrot with this uuid there (lifting a live one out of the world).
+    Seat(uuid::Uuid),
+    /// Empties the shoulder without leaving a parrot behind (`setShoulderEntity*(null)`).
+    Clear,
+    /// Puts the parrot on that shoulder into the world beside the player.
+    Release,
+}
 /// A packet a plugin sends to one player; the host builds and delivers it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PluginPacket {
@@ -460,6 +470,15 @@ pub enum PluginPacket {
         lines: [String; 4],
         color: String,
         glowing: bool,
+    },
+    /// `Player#sendBlockUpdate`: a container or furnace snapshot shown to one player only
+    /// (`ClientboundBlockEntityDataPacket`). `items` are `(slot, material, count)`; `furnace` is
+    /// `[BurnTime, BurnTimeTotal, CookTime, CookTimeTotal]`.
+    TileUpdate {
+        pos: [i32; 3],
+        entity: String,
+        items: Vec<(u8, String, i32)>,
+        furnace: Option<[i16; 4]>,
     },
     /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
     Equipment {
@@ -571,6 +590,12 @@ pub enum PlayerCommand {
         repair: i32,
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
+    },
+    /// Points the filled map in a slot at saved map `id` (Bukkit `MapMeta#setMapView`).
+    ItemMapId {
+        player: uuid::Uuid,
+        slot: u8,
+        id: i32,
     },
     ItemDamage {
         player: uuid::Uuid,
@@ -748,6 +773,12 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         event: u8,
         value: f32,
+    },
+    /// `Player#setShoulderEntityLeft/Right` and `releaseLeft/RightShoulderEntity`.
+    Shoulder {
+        player: uuid::Uuid,
+        left: bool,
+        op: ShoulderOp,
     },
     /// Opens a plugin-created chest-style inventory (`Player#openInventory`).
     OpenInventory {

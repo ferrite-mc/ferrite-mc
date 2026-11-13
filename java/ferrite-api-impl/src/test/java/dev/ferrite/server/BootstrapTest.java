@@ -56,6 +56,10 @@ class BootstrapTest {
         System.setProperty("ferrite.native", "false");
         Bootstrap.start(new String[]{System.getProperty("test.plugin.jar"), System.getProperty("test.dependency.jar"), System.getProperty("test.legacy.jar")});
         assertEquals("Ferrite", Bukkit.getServer().getName());
+        // The real fixture plugin registered "testlife" through its COMMANDS lifecycle handler while enabling.
+        assertTrue(Bootstrap.pluginCommands().lines().anyMatch(line -> line.startsWith("testlife\ttlife\t")), Bootstrap.pluginCommands());
+        assertEquals(1, Bootstrap.runPluginCommand("console", "tlife", new String[]{"x"}));
+        assertNotNull(Bukkit.getServer().getCommandMap().getCommand("ferritetest:testlife"));
         assertInstanceOf(org.bukkit.craftbukkit.CraftServer.class, Bukkit.getServer());
         assertEquals(org.bukkit.GameMode.SURVIVAL, Bukkit.getServer().getDefaultGameMode());
         Bukkit.getServer().setDefaultGameMode(org.bukkit.GameMode.ADVENTURE);

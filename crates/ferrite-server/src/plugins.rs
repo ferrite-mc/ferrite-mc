@@ -14,14 +14,17 @@ mod inventory;
 mod item_entity;
 mod items;
 mod loot;
+mod maps;
 mod messaging;
 mod motion;
 mod network;
 pub mod playerops;
 mod riding;
 pub mod rules;
+mod shoulders;
 pub(crate) mod snapshot;
 mod survival;
+pub mod tile_update;
 mod visual;
 pub mod worldgen;
 pub mod worldinfo;
@@ -214,6 +217,15 @@ impl PluginBridge {
                             if let Some(reply) = climate::answer(call) {
                                 return Some(reply);
                             }
+                            if let Some(reply) = shoulders::answer(call) {
+                                return Some(reply);
+                            }
+                            if let (Some(players), Some(command)) =
+                                (&players, shoulders::command(call))
+                            {
+                                players(command);
+                                return Some(String::new());
+                            }
                             if let Some(reply) = facts::answer(call) {
                                 return Some(reply);
                             }
@@ -236,6 +248,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = worldinfo::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = maps::answer(call) {
                                 return Some(reply);
                             }
                             if call.owner == "Player"

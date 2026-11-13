@@ -92,6 +92,8 @@ public final class TestPlugin extends JavaPlugin implements Listener {
         getLogger().info("initial ip ban " + getServer().getIPBans().contains("192.0.2.7"));
         getLogger().info("FerriteTest settings " + getServer().getMotd() + " " + getServer().getMaxPlayers() + " " + getServer().getPort() + " " + getServer().getViewDistance() + " " + getServer().hasWhitelist());
         if (!getName().equals("FerriteLegacyTest")) getLogger().info(dev.ferrite.dependency.Helper.greeting());
+        if (!getName().equals("FerriteLegacyTest")) getLifecycleManager().registerEventHandler(io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents.COMMANDS, event ->
+            event.registrar().register("testlife", "lifecycle command", java.util.List.of("tlife"), (stack, args) -> stack.getSender().sendMessage("life:" + String.join(",", args))));
         getCommand("testping").setExecutor((sender, command, label, args) -> { sender.sendMessage("pong"); return true; });
         var inventoryCommand = getCommand("test-inventory");
         if (inventoryCommand != null) inventoryCommand.setExecutor((sender, command, label, args) -> {
@@ -162,7 +164,17 @@ public final class TestPlugin extends JavaPlugin implements Listener {
                     }
                     case "enter" -> appendEvent("gap7 enter teleport=" + player.teleport(new org.bukkit.Location(w, 1.5, 201, 1.5)));
                     case "leave" -> appendEvent("gap7 leave teleport=" + player.teleport(new org.bukkit.Location(getServer().getWorld("world"), 0.5, 100, 0.5)));
-                    case "spawn" -> appendEvent("gap7 spawn " + w.spawnEntity(new org.bukkit.Location(w, 5.5, 201, 5.5), org.bukkit.entity.EntityType.COW).getUniqueId());
+                    case "spawn" -> {
+                        // The world is empty above the one gold block, so a bare cow would fall into the void
+                        // and die in however many ticks a slow host takes between this step and the unload.
+                        // A walled floor keeps it alive for as long as the test needs.
+                        for (int x = 3; x <= 7; x++) for (int z = 3; z <= 7; z++) {
+                            boolean rim = x == 3 || x == 7 || z == 3 || z == 7;
+                            w.getBlockAt(x, 200, z).setType(org.bukkit.Material.STONE);
+                            if (rim) { w.getBlockAt(x, 201, z).setType(org.bukkit.Material.STONE); w.getBlockAt(x, 202, z).setType(org.bukkit.Material.STONE); }
+                        }
+                        appendEvent("gap7 spawn " + w.spawnEntity(new org.bukkit.Location(w, 5.5, 201, 5.5), org.bukkit.entity.EntityType.COW).getUniqueId());
+                    }
                     case "entities" -> appendEvent("gap7 entities cows=" + w.getEntities().stream().filter(e -> e.getType() == org.bukkit.entity.EntityType.COW).count());
                     // createWorld and unloadWorld run synchronously on the command thread: the bridge releases
                     // its lock while they wait for the game loop, so these calls no longer deadlock the loop.
