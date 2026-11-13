@@ -895,12 +895,18 @@ pub enum Action {
     Data(super::commands_data::BlockData),
     /// `/reload`: rebuild the datapack function store from disk.
     Reload,
-    /// `/datapack list`: report enabled and disabled packs.
-    DatapackList,
+    /// `/datapack list [available|enabled]`: report enabled and disabled packs.
+    DatapackList(super::commands_server::DatapackListKind),
     /// `/datapack enable|disable`: persist the choice and reload functions.
     DatapackSet {
         pack: String,
         enable: bool,
+        placement: super::commands_server::PackPlacement,
+    },
+    /// `/datapack create <id> <description>`: write an empty pack folder.
+    DatapackCreate {
+        id: String,
+        description: String,
     },
 }
 
@@ -2991,12 +2997,41 @@ mod tests {
     fn reload_and_datapack_commands_produce_actions() {
         assert_eq!(only("reload", 4), Action::Reload);
         denied("reload");
-        assert_eq!(only("datapack list", 4), Action::DatapackList);
+        use super::super::commands_server::{DatapackListKind, PackPlacement};
+        assert_eq!(
+            only("datapack list", 4),
+            Action::DatapackList(DatapackListKind::Both)
+        );
+        assert_eq!(
+            only("datapack list available", 4),
+            Action::DatapackList(DatapackListKind::Available)
+        );
+        assert_eq!(
+            only("datapack list enabled", 4),
+            Action::DatapackList(DatapackListKind::Enabled)
+        );
         assert_eq!(
             only("datapack enable pack", 4),
             Action::DatapackSet {
                 pack: "pack".into(),
                 enable: true,
+                placement: PackPlacement::Last,
+            }
+        );
+        assert_eq!(
+            only("datapack enable pack first", 4),
+            Action::DatapackSet {
+                pack: "pack".into(),
+                enable: true,
+                placement: PackPlacement::First,
+            }
+        );
+        assert_eq!(
+            only("datapack enable pack after other", 4),
+            Action::DatapackSet {
+                pack: "pack".into(),
+                enable: true,
+                placement: PackPlacement::After("other".into()),
             }
         );
         assert_eq!(
@@ -3004,8 +3039,13 @@ mod tests {
             Action::DatapackSet {
                 pack: "pack".into(),
                 enable: false,
+                placement: PackPlacement::Last,
             }
         );
+        assert!(matches!(
+            only("datapack create mine {\"text\":\"hi\"}", 4),
+            Action::DatapackCreate { id, .. } if id == "mine"
+        ));
         denied("datapack list");
         assert!(run("datapack enable", 4).0.is_err());
     }

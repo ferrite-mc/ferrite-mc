@@ -7,6 +7,19 @@
 /// The vanilla `en_us` format string for a key.
 fn template(key: &str) -> Option<&'static str> {
     Some(match key {
+        "commands.datapack.create.already_exists" => "Pack with name '%s' already exists",
+        "commands.datapack.create.invalid_name" => "Invalid characters in new pack name '%s'",
+        "commands.datapack.create.io_failure" => "Can't create pack with name '%s'. Check logs",
+        "commands.datapack.create.success" => "Created new empty pack with name '%s'",
+        "commands.datapack.disable.failed" => "Pack '%s' is not enabled!",
+        "commands.datapack.enable.failed" => "Pack '%s' is already enabled!",
+        "commands.datapack.list.available.none" => "There are no more data packs available",
+        "commands.datapack.list.available.success" => "There are %s data pack(s) available: %s",
+        "commands.datapack.list.enabled.none" => "There are no data packs enabled",
+        "commands.datapack.list.enabled.success" => "There are %s data pack(s) enabled: %s",
+        "commands.datapack.modify.disable" => "Disabling data pack %s",
+        "commands.datapack.modify.enable" => "Enabling data pack %s",
+        "commands.datapack.unknown" => "Unknown data pack '%s'",
         "commands.rotate.success" => "Rotated %s",
         "commands.fillbiome.success.count" => {
             "%s biome entries set between %s, %s, %s and %s, %s, %s"

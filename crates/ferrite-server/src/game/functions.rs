@@ -180,6 +180,17 @@ impl FunctionStore {
             })
             .collect();
         packs.sort();
+        // `/datapack enable ... first|last|before|after` persists a load order; packs it does
+        // not mention keep their alphabetical place after the ordered ones. Later packs
+        // override earlier ones.
+        let order = world.map(read_order).unwrap_or_default();
+        let rank = |path: &PathBuf| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| order.iter().position(|ordered| ordered == name))
+                .unwrap_or(usize::MAX)
+        };
+        packs.sort_by_key(rank);
         for pack in packs {
             store.load_pack(&pack);
         }
@@ -324,6 +335,172 @@ pub fn read_disabled(world: &Path) -> BTreeSet<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn order_path(world: &Path) -> PathBuf {
+    world.join("datapacks/.ferrite-order")
+}
+
+/// The load order `/datapack enable` persisted, lowest priority first.
+pub fn read_order(world: &Path) -> Vec<String> {
+    std::fs::read_to_string(order_path(world))
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn write_order(world: &Path, order: &[String]) -> std::io::Result<()> {
+    let dir = world.join("datapacks");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(order_path(world), order.join("\n"))
+}
+
+/// Every pack on disk in load order (lowest priority first): the persisted order, then the
+/// rest alphabetically.
+pub fn ordered_packs(world: &Path) -> Vec<String> {
+    let mut packs = datapack_names(Some(world));
+    let order = read_order(world);
+    packs.sort_by_key(|name| order.iter().position(|o| o == name).unwrap_or(usize::MAX));
+    packs
+}
+
+/// One feedback line: translation key and its arguments.
+pub type PackFeedback = (&'static str, Vec<String>);
+
+fn pack_name(raw: &str) -> &str {
+    raw.strip_prefix("file/").unwrap_or(raw)
+}
+
+/// `/datapack list [available|enabled]`. Only the packs in the world's `datapacks` folder are
+/// known; vanilla's built-in packs (`vanilla`, feature packs) are not modelled.
+pub fn datapack_list(
+    world: Option<&Path>,
+    kind: super::commands_server::DatapackListKind,
+) -> Vec<PackFeedback> {
+    use super::commands_server::DatapackListKind as Kind;
+    let packs = world.map(ordered_packs).unwrap_or_default();
+    let disabled = world.map(read_disabled).unwrap_or_default();
+    let (available, enabled): (Vec<String>, Vec<String>) =
+        packs.into_iter().partition(|pack| disabled.contains(pack));
+    let mut out = Vec::new();
+    if kind != Kind::Available {
+        if enabled.is_empty() {
+            out.push(("commands.datapack.list.enabled.none", Vec::new()));
+        } else {
+            out.push((
+                "commands.datapack.list.enabled.success",
+                vec![enabled.len().to_string(), enabled.join(", ")],
+            ));
+        }
+    }
+    if kind != Kind::Enabled {
+        if available.is_empty() {
+            out.push(("commands.datapack.list.available.none", Vec::new()));
+        } else {
+            out.push((
+                "commands.datapack.list.available.success",
+                vec![available.len().to_string(), available.join(", ")],
+            ));
+        }
+    }
+    out
+}
+
+/// `/datapack enable|disable`. `Err` carries the failure line, `Ok` the success line.
+pub fn datapack_set(
+    world: &Path,
+    pack: &str,
+    enable: bool,
+    placement: &super::commands_server::PackPlacement,
+) -> Result<PackFeedback, PackFeedback> {
+    use super::commands_server::PackPlacement as Placement;
+    let pack = pack_name(pack).to_owned();
+    let mut order = ordered_packs(world);
+    if !order.contains(&pack) {
+        return Err(("commands.datapack.unknown", vec![pack]));
+    }
+    let mut disabled = read_disabled(world);
+    let already = !disabled.contains(&pack);
+    if enable == already {
+        let key = if enable {
+            "commands.datapack.enable.failed"
+        } else {
+            "commands.datapack.disable.failed"
+        };
+        return Err((key, vec![pack]));
+    }
+    if enable {
+        disabled.remove(&pack);
+        order.retain(|name| *name != pack);
+        let at = match placement {
+            Placement::First => 0,
+            Placement::Last => order.len(),
+            Placement::Before(other) | Placement::After(other) => {
+                let other = pack_name(other);
+                let Some(index) = order.iter().position(|name| name == other) else {
+                    return Err(("commands.datapack.unknown", vec![other.to_owned()]));
+                };
+                if matches!(placement, Placement::Before(_)) {
+                    index
+                } else {
+                    index + 1
+                }
+            }
+        };
+        order.insert(at, pack.clone());
+    } else {
+        disabled.insert(pack.clone());
+    }
+    let io = |error: std::io::Error| ("commands.reload.failure", vec![error.to_string()]);
+    write_disabled(world, &disabled).map_err(io)?;
+    write_order(world, &order).map_err(io)?;
+    let key = if enable {
+        "commands.datapack.modify.enable"
+    } else {
+        "commands.datapack.modify.disable"
+    };
+    Ok((key, vec![pack]))
+}
+
+/// `/datapack create <id> <description>`: an empty pack with the current data-pack format.
+/// The invalid-name rules (path separators, control characters, leading dot) are inferred from
+/// the lang keys; vanilla's exact check is not in the extracted data.
+pub fn datapack_create(world: &Path, id: &str, description: &str) -> PackFeedback {
+    let invalid = id.is_empty()
+        || id.starts_with('.')
+        || id
+            .chars()
+            .any(|c| c.is_control() || "/\\:*?\"<>|".contains(c));
+    if invalid {
+        return ("commands.datapack.create.invalid_name", vec![id.to_owned()]);
+    }
+    let dir = world.join("datapacks").join(id);
+    if dir.exists() {
+        return (
+            "commands.datapack.create.already_exists",
+            vec![id.to_owned()],
+        );
+    }
+    let description = serde_json::from_str::<serde_json::Value>(description)
+        .unwrap_or_else(|_| serde_json::Value::String(description.to_owned()));
+    let mcmeta = serde_json::json!({
+        "pack": { "description": description, "min_format": 121, "max_format": 121 }
+    });
+    let write = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::write(
+            dir.join("pack.mcmeta"),
+            serde_json::to_string_pretty(&mcmeta).unwrap_or_default(),
+        )
+    });
+    match write {
+        Ok(()) => ("commands.datapack.create.success", vec![id.to_owned()]),
+        Err(_) => ("commands.datapack.create.io_failure", vec![id.to_owned()]),
+    }
 }
 
 /// Persists disabled pack names. Ferrite has no `level.dat` data-pack settings yet, so this
@@ -722,6 +899,100 @@ mod tests {
             vec!["say one  two".to_owned(), "say three".to_owned()]
         );
         assert!(!function.macros);
+    }
+
+    #[test]
+    fn datapack_create_list_enable_order_and_disable() {
+        use super::super::commands_server::{DatapackListKind as Kind, PackPlacement as At};
+        let dir = tempfile::tempdir().unwrap();
+        let world = dir.path();
+        let keys = |lines: Vec<PackFeedback>| lines.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(
+            keys(datapack_list(Some(world), Kind::Both)),
+            vec![
+                "commands.datapack.list.enabled.none",
+                "commands.datapack.list.available.none"
+            ]
+        );
+        // create: a pack.mcmeta in the current format, then a duplicate and a bad name fail.
+        let (key, _) = datapack_create(world, "a", r#"{"text":"A"}"#);
+        assert_eq!(key, "commands.datapack.create.success");
+        assert_eq!(
+            datapack_create(world, "a", "x").0,
+            "commands.datapack.create.already_exists"
+        );
+        assert_eq!(
+            datapack_create(world, "x/y", "x").0,
+            "commands.datapack.create.invalid_name"
+        );
+        datapack_create(world, "b", "plain text");
+        let meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(world.join("datapacks/a/pack.mcmeta")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["pack"]["min_format"], 121);
+        assert_eq!(meta["pack"]["description"]["text"], "A");
+        // Both packs define the same function; the later one in the load order wins.
+        for (pack, text) in [("a", "say from a"), ("b", "say from b")] {
+            let f = world.join(format!("datapacks/{pack}/data/demo/function"));
+            std::fs::create_dir_all(&f).unwrap();
+            std::fs::write(f.join("f.mcfunction"), text).unwrap();
+        }
+        let winner = || {
+            FunctionStore::load(Some(world))
+                .get("demo:f")
+                .unwrap()
+                .lines[0]
+                .clone()
+        };
+        assert_eq!(winner(), "say from b", "alphabetical by default");
+        // disable b, then enable it `first` (lowest priority): a wins.
+        assert_eq!(
+            datapack_set(world, "b", false, &At::Last).unwrap().0,
+            "commands.datapack.modify.disable"
+        );
+        assert_eq!(
+            datapack_set(world, "b", false, &At::Last).unwrap_err().0,
+            "commands.datapack.disable.failed"
+        );
+        let list = datapack_list(Some(world), Kind::Available);
+        assert_eq!(
+            list,
+            vec![(
+                "commands.datapack.list.available.success",
+                vec!["1".into(), "b".into()]
+            )]
+        );
+        assert_eq!(
+            datapack_set(world, "file/b", true, &At::First).unwrap().0,
+            "commands.datapack.modify.enable"
+        );
+        assert_eq!(
+            datapack_set(world, "b", true, &At::Last).unwrap_err().0,
+            "commands.datapack.enable.failed"
+        );
+        assert_eq!(ordered_packs(world), vec!["b", "a"]);
+        let disabled = read_disabled(world);
+        let store = FunctionStore::load_with_disabled(Some(world), &disabled);
+        assert_eq!(store.get("demo:f").unwrap().lines[0], "say from a");
+        // after / before an existing pack, and unknown packs.
+        datapack_set(world, "b", false, &At::Last).unwrap();
+        datapack_set(world, "b", true, &At::After("a".into())).unwrap();
+        assert_eq!(ordered_packs(world), vec!["a", "b"]);
+        datapack_set(world, "a", false, &At::Last).unwrap();
+        datapack_set(world, "a", true, &At::Before("b".into())).unwrap();
+        assert_eq!(ordered_packs(world), vec!["a", "b"]);
+        assert_eq!(
+            datapack_set(world, "nope", true, &At::Last).unwrap_err().0,
+            "commands.datapack.unknown"
+        );
+        assert_eq!(
+            datapack_set(world, "a", true, &At::Before("nope".into()))
+                .unwrap_err()
+                .0,
+            "commands.datapack.enable.failed"
+        );
+        assert_eq!(winner(), "say from b");
     }
 
     #[test]

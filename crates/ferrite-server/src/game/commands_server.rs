@@ -338,24 +338,88 @@ fn reload_tree() -> NodeBuilder<Source> {
         .executes(|ctx| send(ctx.source(), Action::Reload))
 }
 
+/// Which packs `/datapack list` reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatapackListKind {
+    Both,
+    Available,
+    Enabled,
+}
+
+/// Where `/datapack enable` puts the pack in the load order (the last pack wins).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackPlacement {
+    /// No position given: vanilla puts a pack on top, i.e. last.
+    Last,
+    First,
+    Before(String),
+    After(String),
+}
+
 fn datapack_tree() -> NodeBuilder<Source> {
+    let pack = || argument("name", ArgumentType::string());
+    let enable = |placement: PackPlacement| {
+        move |ctx: &CommandContext<Source>| datapack_set(ctx, true, placement.clone())
+    };
     literal::<Source>("datapack")
         .requires(owners())
         .restricted(true)
-        .then(literal("list").executes(|ctx| send(ctx.source(), Action::DatapackList)))
+        .then(
+            literal("list")
+                .executes(|ctx| send(ctx.source(), Action::DatapackList(DatapackListKind::Both)))
+                .then(literal("available").executes(|ctx| {
+                    send(
+                        ctx.source(),
+                        Action::DatapackList(DatapackListKind::Available),
+                    )
+                }))
+                .then(literal("enabled").executes(|ctx| {
+                    send(
+                        ctx.source(),
+                        Action::DatapackList(DatapackListKind::Enabled),
+                    )
+                })),
+        )
         .then(
             literal("enable").then(
-                argument("name", ArgumentType::word()).executes(|ctx| datapack_set(ctx, true)),
+                pack()
+                    .executes(enable(PackPlacement::Last))
+                    .then(literal("first").executes(enable(PackPlacement::First)))
+                    .then(literal("last").executes(enable(PackPlacement::Last)))
+                    .then(literal("before").then(
+                        argument("existing", ArgumentType::string()).executes(|ctx| {
+                            let other = ctx.string("existing").unwrap_or_default().to_owned();
+                            datapack_set(ctx, true, PackPlacement::Before(other))
+                        }),
+                    ))
+                    .then(literal("after").then(
+                        argument("existing", ArgumentType::string()).executes(|ctx| {
+                            let other = ctx.string("existing").unwrap_or_default().to_owned();
+                            datapack_set(ctx, true, PackPlacement::After(other))
+                        }),
+                    )),
             ),
         )
         .then(
-            literal("disable").then(
-                argument("name", ArgumentType::word()).executes(|ctx| datapack_set(ctx, false)),
-            ),
+            literal("disable")
+                .then(pack().executes(|ctx| datapack_set(ctx, false, PackPlacement::Last))),
+        )
+        .then(
+            literal("create").then(argument("id", ArgumentType::string()).then(
+                argument("description", ArgumentType::Component).executes(|ctx| {
+                    let id = ctx.string("id").unwrap_or_default().to_owned();
+                    let description = ctx.string("description").unwrap_or_default().to_owned();
+                    send(ctx.source(), Action::DatapackCreate { id, description })
+                }),
+            )),
         )
 }
 
-fn datapack_set(ctx: &CommandContext<Source>, enable: bool) -> Result<i32, CommandError> {
+fn datapack_set(
+    ctx: &CommandContext<Source>,
+    enable: bool,
+    placement: PackPlacement,
+) -> Result<i32, CommandError> {
     let pack = ctx
         .string("name")
         .ok_or_else(|| CommandError::failed("missing data pack name"))?;
@@ -364,6 +428,7 @@ fn datapack_set(ctx: &CommandContext<Source>, enable: bool) -> Result<i32, Comma
         Action::DatapackSet {
             pack: pack.to_owned(),
             enable,
+            placement,
         },
     )
 }
