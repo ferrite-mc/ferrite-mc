@@ -192,7 +192,7 @@ fn scoreboard_tree() -> NodeBuilder<Source> {
                             ))
                             .then(number_format_nodes(
                                 literal("numberformat"),
-                                |ctx, format| set_objective_number_format(ctx, format),
+                                set_objective_number_format,
                             ))
                             .then(
                                 literal("rendertype")
@@ -251,7 +251,7 @@ fn scoreboard_tree() -> NodeBuilder<Source> {
                                         "objective",
                                         ArgumentType::opaque("minecraft:objective"),
                                     ),
-                                    |ctx, format| set_score_number_format(ctx, format),
+                                    set_score_number_format,
                                 ),
                             ),
                         )),

@@ -1,78 +1,162 @@
 # Vanilla command coverage
 
-> **Stale snapshot.** The sections below were written on 2026-11-04 and only partly updated
-> afterwards. This block lists what has changed since, checked against source; where the two
-> disagree, this block wins. The root count and tree statement were re-counted on 2026-11-12;
-> see "Recount 2026-11-12" below. The per-command "Partly done" prose has not been re-verified.
+> **Partly stale.** The sections after "Snapshot of 2026-11-04" were written on 2026-11-04 and
+> only partly updated afterwards. The blocks above that heading were re-verified against source
+> and `vanilla/26.3/generated` on 2026-11-13 (lane C); where the two disagree, the upper blocks
+> win. Anything marked "unverified" could not be checked against vanilla's source from here.
 
-## Recount 2026-11-12
+## Tree parity (measured 2026-11-13)
 
-Method (no guessing): the live server tree, `dispatcher()` in
-`crates/ferrite-server/src/game/commands.rs`, was walked in a throwaway test (not committed;
-it used only the public `CommandDispatcher` API: `root_literals`, `node`, `children`,
-`is_executable`, `redirect`) and diffed path by path against
-`vanilla/26.3/generated/reports/commands.json`. Redirecting nodes were treated as leaves on both
-sides. Roots register through `dispatcher()` and the `register` functions of
-`crates/ferrite-server/src/game/commands_{world,extras,server,more,meta,data,exec}.rs` (`more`
-also calls `commands_{progress,late,loot,item}.rs`) plus `functions.rs`. The server builds its
-tree by hand; `crates/ferrite-command/src/vanilla.rs` (`load_vanilla_json`, whose stubs fail
-with `Command not implemented`) is not used by the server.
+`crates/ferrite-server/src/game/commands_tree_parity.rs` walks the live tree (`dispatcher()`)
+through the public `CommandDispatcher` API and diffs it path by path against
+`vanilla/26.3/generated/reports/commands.json` (redirecting nodes are leaves on both sides). It
+is a normal test: it fails on any difference that is not in its explicit allow-list and on any
+allow-list entry that no longer matches (it skips when `vanilla/` is not extracted). Run it with
+`FERRITE_TREE_DUMP=1 cargo test -p ferrite-server --lib tree_matches -- --nocapture` to print
+every difference.
 
 | measure | count |
 |---|---:|
 | vanilla roots in `commands.json` | 94 |
-| vanilla roots registered in Ferrite's tree | 94 |
+| vanilla roots registered | 94 |
 | non-vanilla roots (`tps`, `mspt`, `profile`) | 3 |
-| roots whose tree matches vanilla exactly (same paths, same executable nodes) | 72 |
-| roots whose tree differs in shape | 22 |
+| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 80 |
+| vanilla roots that still differ | 14 |
+| individual differences / allow-list entries covering them | 207 / 26 |
 
-Roots with a different tree shape: clone, data, datapack, effect, execute, fill, function,
-gamerule, item, particle, place, playsound, return, scoreboard, setblock, stopsound, swing, team,
-teleport, test, time, trigger. **A shape difference is not counted as a gap.** The diff compares
-argument names and literal layout, so it also flags a different but possibly equivalent layout
-(for example `clone` takes mask/mode as flags, `time of <clock>` and `execute` are laid out
-differently, `trigger` adds `<value>`, `playsound` and `swing` have non-executable nodes vanilla
-makes executable). Which of these change behaviour has not been checked. That is also why this
-recount does not give a single "implemented" figure.
+Classes: **a** behaviour-equivalent layout, **b** behaviour gap (fixed, or listed as a blocker),
+**c** cosmetic or an extra-lenient extension, **x** a real gap with a blocker written down below,
+**o** owned by another lane. After this lane's work no class-b difference remains in a lane-C
+root; what is left is:
 
-Partial behaviour confirmed in source today:
+| root | class | what differs |
+|---|---|---|
+| advancement, recipe, summon, execute `summon` | c | registry-key arguments parse as `resource_location`; validated when the command runs |
+| locate | c | `resource_or_tag` for vanilla's `resource_or_tag_key` |
+| schedule | c | `schedule clear function` also takes function tags |
+| execute | a | `run` is a redirect to the root; `< <= = > >=` are one `operation` word; `store ... <type>` is one word instead of six literals; `align` takes a string for `swizzle` |
+| execute | c | `if|unless function <name>` ends the chain and reports the result (vanilla needs `run`); `objective`/`loot_predicate` parse as word/`resource_location` |
+| team | a | colours are literals; vanilla has one colour argument |
+| gamerule | c | pre-26 camelCase names are accepted as aliases (unverified whether vanilla 26.3 rejects them) |
+| return | a | `return run` carries the root redirect |
+| compute, data | x | `data modify ... compute` and `/compute`'s provider parsers: the number providers are not parsed in the command tree (see Blockers) |
+| mspt, tps, profile | c | non-vanilla roots |
+| item (`target` vs `targets`), place (`template` executable, parsers), fillbiome (parser) | o | reported to the owning lane |
 
-- `/jfr`: both forms always fail with vanilla's own failure keys (`commands_more.rs`, `jfr_tree`);
-  Ferrite is not a JVM process, so there is nothing to record. Use `/perf`, `/tps`, `/mspt` and
-  `/profile` for native diagnostics. This is deliberate, not a gap to fill.
-- `/test`: every form answers `commands.test.no_tests` (`commands_more.rs`, `no_tests`,
-  `test_tree`). Vanilla 26.3 ships one test instance (`always_pass`, type `function`, structure
-  `minecraft:empty`). Running tests needs a test-instance runner (batching, a test environment,
-  structure placement in a test area and the `block_based` test blocks), none of which exists.
-- `/item`: `item[...]` components are applied (same parser as `/give`), and `modify` plus
-  `<modifier>` run data-pack item modifiers from `data/<ns>/item_modifier/**/*.json` (see the
-  `/item` entry below for the supported functions).
-- `/attribute`: defaults come from the target's entity type (`attributes::limits_for`); an
-  attribute the type does not carry (and every non-living type) fails `failed.no_attribute`.
-- `/execute` (`commands_exec.rs`), verified by tests against the live dispatcher:
-  - Implemented: `as`, `at`, `positioned <pos>`, `positioned as`, `rotated`, `facing`, `align`,
-    `anchored`, `in`, `run`; `if|unless` `block`, `blocks`, `entity`, `predicate`, `dimension`,
-    `data block|entity|storage`, `score` (`<op>` and `matches <range>`, selector holders);
-    `store result|success` into `block`, `entity` (players), `storage` (namespaced ids) and `score`.
-  - Conditions fork like vanilla: a false test in front of `run` runs nothing and reports
-    nothing; ending the chain at the test reports `Test failed` (or returns 1).
-  - Not implemented (each fails with `command.unknown.argument`): `on <relation>`, `summon`,
-    `positioned over <heightmap>`, `if|unless` `biome`, `items`, `slots`, `loaded`, `function`,
-    `stopwatch`, and `store ... bossbar`. `execute store ... entity` only reaches players.
-  - A `return` ran by one fork of `execute as @a run return ...` does not stop the other forks.
-- `/function` and `/return`: `return <n>`, `return fail` and `return run <command>` end the
-  innermost running function, also when reached through `execute ... run return`; outside a
-  function they fail. A command that fails inside a function is reported to the source and the
-  function carries on, as in vanilla. Syntax errors still abort the function at run time (vanilla
-  refuses to load such a function). `function <id> with storage|block|entity ...` is not
-  implemented (only the inline `{...}` compound is).
-- `/damage`: `from <cause>` only matters for death messages, which are not modelled
-  (`commands.rs`, line 665).
+### Differences found and fixed by the audit
 
-Roots the sections below call partial but that were **not** re-verified today: advancement,
-recipe, compute, waypoint, loot, ride, place, fillbiome, attribute, dialog, spectate, swing, tick,
-forceload, debug, perf, fetchprofile, rotate, locate. So: 4 roots confirmed partial, 19 more
-documented as partial, the other 71 not known to be partial but not behaviour-tested here.
+`playsound` (`<sound>` and `<sound> <source>` executable, vanilla range rules), `swing` (bare form),
+`stopsound` (`<t> *` is not executable), `trigger` (`<objective>` alone adds 1; the non-vanilla
+`<objective> <value>` form was removed; the objective lookup used a namespaced key and never
+found plain objectives), `tp ... <rotation>` (no `rotation` keyword), `effect give` (default
+duration, `infinite`, `hideParticles`, instant effects), `particle ... [force|normal [viewers]]`,
+`team modify` option values (nested under the first literal and unreachable), `team join <team>`,
+`datapack list|enable|disable|create` (placement, kinds), `function ... with storage|entity|block`,
+`clone` (`filtered`, `force|move|normal`, `strict`, overlap check, block entities), `fill`
+(`strict`, replace filter, block tags), `setblock ... strict`, `data get ... <scale>`,
+`data modify ... from block|storage` (`from storage` used to sit under the `entity` literal and was
+unreachable), `data modify ... string`, `scoreboard objectives modify displayautoupdate|numberformat`,
+`scoreboard players display name|numberformat`, `test runfailed onlyRequiredTests`, and the argument
+names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
+
+## Lane C command status
+
+- `/execute` (`commands_exec.rs`, `commands_exec_more.rs`), each subcommand has a test against
+  the live dispatcher:
+  - Modifiers: `as`, `at`, `positioned <pos>`, `positioned as` (now takes the entity's full
+    position; it used to keep the old y), `positioned over <heightmap>`, `rotated`, `rotated as`,
+    `facing <pos>`, `facing entity` (a fork), `align`, `anchored`, `in`, `on vehicle|passengers|
+    controller`, `run`. Selectors reach every entity the regions publish, with all selector
+    options; `as|at|if entity` over an empty selection quietly runs nothing, like vanilla's
+    optional entity argument.
+  - Conditions (`if`/`unless`): `block` (wildcard properties, `#tags`, nbt subset), `blocks`
+    (`masked` skips air in the *source*), `biome`, `loaded`, `function`, `stopwatch`, `entity`,
+    `dimension`, `score`, `data block|entity|storage`, `items|slots block` (container blocks),
+    `predicate`.
+  - `store result|success` into `block`, `entity` (players only), `storage`, `score`, `bossbar`
+    (`value|max`).
+  - A fork swallows the errors of its branches like vanilla, so the relations and nodes below are
+    plain redirects: their failure reaches the caller.
+  - **Not supported** (each fails with a message, never silently): `summon` (spawning is
+    scheduled onto the owning region, so the new entity is not visible to the rest of the
+    chain); `on attacker|leasher|origin|owner|target` (the `CommandEntity` snapshot,
+    `game/entity_index.rs`, carries no relation data; `vehicle|passengers|controller` come from
+    the ride table); `if items|slots entity` (entity inventories live in regions and cannot be
+    read while a command runs); item predicates with components; `store ... entity` for
+    non-player entities; `if predicate` is always false (the command layer has no loot context
+    to evaluate datapack predicates in; `commands_late.rs` only knows `match_block`).
+  - A `return` run by one fork of `execute as @a run return ...` does not stop the other forks.
+- `/time` (`commands_time.rs`): `set <time>|<timemarker>`, `add`, `query time|gametime|
+  <timeline> [repetition]`, `pause`, `resume`, `rate`, `of <clock>` for the `overworld` and
+  `the_end` clocks (data from `data/minecraft/world_clock` and `timeline`; the Nether has no
+  default clock). Unverified: that a marker moves to its next occurrence (`already_at_time_marker`
+  when already there), and the `set_time` packet's pause/rate fields (not sent).
+- `/datapack` (`functions.rs`, `commands_server.rs`): `list [available|enabled]`, `enable <name>
+  [first|last|before|after]`, `disable`, `create`. The order is stored in
+  `datapacks/.ferrite-order` (last pack wins) and honoured at load. Unverified: ordering
+  semantics and the invalid-name rule. Not modelled: built-in packs (`vanilla`, feature packs).
+- `/function` and `/return`: `function <id> with storage|block|entity <source> [path]` works for
+  players (entity data) and block entities. `return <n>`, `return fail`, `return run <command>`
+  end the innermost function; outside a function they fail with a **non-vanilla** message
+  (`ferrite.function.return.not_in_function`; the lang file has no key, and whether vanilla
+  accepts `/return` at the top level is unverified).
+- `/clone`: `[strict] [filtered <filter>|masked|replace] [force|move|normal]`, overlap check
+  ("The source and destination areas cannot overlap" unless `force`), `move` clears the source,
+  block entities are copied. **Blocker:** `from <dim>`/`to <dim>` parse, but the command runs on
+  one `WorldBlocks`, so a cross-dimension clone fails (`commands_world.rs`, the clone executor).
+  Unverified: whether vanilla counts only changed blocks.
+- `/fill` and `/setblock`: `strict` is accepted and behaves like `replace`; its real semantics
+  are unverified.
+- `/data`: entity data covers players only (a non-player entity is a blocker: the snapshot does
+  not carry NBT). `data modify ... compute` is not implemented (blocker: the number providers
+  are not parsed in the command tree, see `/compute`). `data get` numeric rules follow
+  vanilla's `getData`/`getNumeric` as remembered; the `%.2f` scale rendering is unverified.
+- `/scoreboard`: `objectives modify displayautoupdate|numberformat` and `players display
+  name|numberformat` store their state (`MoreState`) and send vanilla's feedback. **Blocker:**
+  none of it reaches clients: `ferrite-protocol`'s `SetObjective`/`SetScore` (`packets/play.rs`,
+  near line 2594) writes `false` for the number-format field, so the wire encoding needs a
+  protocol-crate change (out of lane C's scope; reported to the coordinator).
+- `/jfr start|stop` (`commands_more.rs`, `jfr_tree`): Ferrite is not a JVM, so no recording can
+  exist. `start` fails with `commands.jfr.start.failed`; `stop` fails with
+  `commands.jfr.dump.failed` and says why. There is no success path. Faked: nothing. Not
+  modelled: vanilla's already-running vs not-running distinction (no lang key shows one, so it
+  is unverified rather than guessed).
+- `/test`: `run|runmultiple|verify <tests>` resolve the selector (`*` globs, bare ids mean
+  `minecraft:`) against `data/minecraft/test_instance` (vanilla ships only `always_pass`:
+  type `function`, function `minecraft:always_pass`, structure `minecraft:empty`, environment
+  `minecraft:default`). An unknown id fails with `commands.test.error.non_existant_test`, a
+  wildcard that matches nothing with `error.no_test_instances` (the split is inferred from the
+  lang keys). An instance that exists fails with an explicit "not implemented": running one
+  needs structure placement, a test-instance block entity and a per-tick runner, and
+  `minecraft:always_pass` is not even present as a function in the generated data (there is no
+  `function/` directory). `locate` reports started/finished with 0 structures (this server never
+  places any). Every other form, including `runfailed [onlyRequiredTests]`, reports
+  `commands.test.no_tests`. Datapack-provided instances are not read.
+- `/swing` (bare form executes, rejects non-living entities with `failed.notliving`, animation
+  and hand are validated), `/tick` (`query` includes the percentile line), `/attribute`
+  (defaults come from the entity type via `attributes::limits_for`; an attribute the type does not
+  carry fails `failed.no_attribute`; the simulation reads only the player overrides), `/perf` and
+  `/debug` (already-running/not-running state, `debug function` writes
+  `debug/commands-<time>.txt`; `/perf` writes no report), `/forceload`, `/fetchprofile` (online
+  players only), `/rotate` (assumes the command's dimension), `/locate`, `/dialog`, `/spectate`:
+  checked in source for the claims in the old prose below; none of them was compared
+  with vanilla behaviour beyond that, so this lane does not claim parity for them.
+- Feedback templates: `game/feedback.rs` `render()` prints the raw key for an unknown key, so a
+  test (`every_rendered_key_has_the_vanilla_template`) now checks every key passed to `render` has
+  a template equal to `lang_en_us.json`; unit tests load the vanilla lang file, as the server does at
+  start-up.
+
+## Blockers (evidence)
+
+| blocker | evidence |
+|---|---|
+| cross-dimension `clone` | single-world `WorldBlocks` in `commands_world.rs` |
+| `execute summon`, `on attacker|leasher|origin|owner|target`, `if items|slots entity`, `store ... entity` (non-player) | `Action::Summon` is async with no uuid; `CommandEntity` (`entity_index.rs`) has no relation/NBT/inventory |
+| `if predicate` | hard-wired to false in `commands_exec.rs`; only `match_block` exists in `commands_late.rs` |
+| scoreboard number formats on the wire | `ferrite-protocol/src/packets/play.rs` writes `false` for the format field |
+| `data modify ... compute` | no `context_int_provider` / `context_float_provider` parser in `ferrite-command` |
+| `/test` runner | no structure placement / test-instance block / tick runner; `always_pass`'s function is absent from `vanilla/26.3/generated/data/minecraft` |
+| `/jfr` | no JVM |
 
 ## Deltas since 2026-11-04
 
@@ -185,10 +269,9 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   spectator's body follows the target every tick (sneaking ends it). Feedback texts for the new commands
   were written from memory of en_us (argument order not verified against a lang file).
 
-- `/swing` sends the arm-swing animation to viewers; the animation type and duration are
-  validated but not used, and non-living entities are not rejected (`failed.notliving`).
+- `/swing` sends the arm-swing animation to viewers (see "Lane C command status").
 - `/tick sprint <time>|stop` raises the clock to the maximum rate, restores the rate and the
-  frozen state afterwards and broadcasts the report; `/tick query` has no percentile line.
+  frozen state afterwards and broadcasts the report.
   Freeze stops game time, fluid ticks, random ticks and all entity simulation except players.
 - `/forceload` marks are saved per dimension in `data/minecraft/chunk_tickets.dat` (forced
   tickets only) and held again at startup.
