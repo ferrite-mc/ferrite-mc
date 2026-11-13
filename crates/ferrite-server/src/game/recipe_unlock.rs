@@ -1,7 +1,8 @@
 //! Unlocks recipes from play, like the `recipes/**` advancements do: a recipe comes into the
-//! book once the player holds an item its advancement asks for (`inventory_changed`), or already
-//! has the recipe (`recipe_unlocked`). Counts, components and the other triggers (`enter_block`,
-//! `tick`) are not evaluated. The rules are read from the extracted advancement data.
+//! book once the player holds an item its advancement asks for (`inventory_changed`), already
+//! has the recipe (`recipe_unlocked`), enters a matching block (`enter_block`) or ticks
+//! (`tick`). Counts and components are not evaluated. The rules are read from the extracted
+//! advancement data.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,6 +18,10 @@ pub enum Criterion {
     /// Every entry must match a held item; an entry is `(names, is_tag)` alternatives.
     Holds(Vec<Vec<String>>),
     Recipe(String),
+    /// `enter_block` with a block predicate.
+    InBlock(BlockMatch),
+    /// `tick` with no conditions; it fires for every player.
+    Ticks,
     /// `player_killed_entity` with nothing but a plain entity type to match.
     Kills(String),
     /// `consume_item` of one item id, or any item (`*`).
@@ -69,6 +74,43 @@ pub struct UsedRecord {
 
 /// Uses of items on blocks since the last drain.
 pub static USED_ON_BLOCK: Mutex<Vec<UsedRecord>> = Mutex::new(Vec::new());
+
+/// The block predicate of an `enter_block` criterion.
+#[derive(Debug, Clone, Default)]
+pub struct BlockMatch {
+    /// Block ids or `#tags`; empty matches no block.
+    pub blocks: Vec<String>,
+    /// Block state properties that must match.
+    pub state: Vec<(String, String)>,
+}
+
+impl BlockMatch {
+    fn matches(&self, block: &str, props: &[(&str, &str)]) -> bool {
+        !self.blocks.is_empty()
+            && id_matches(&self.blocks, "block", block)
+            && self.state.iter().all(|(key, value)| {
+                props
+                    .iter()
+                    .any(|(k, v)| *k == key.as_str() && *v == value.as_str())
+            })
+    }
+}
+
+/// One block a player entered, for [`criteria_for_block`].
+#[derive(Debug, Clone)]
+pub struct BlockRecord {
+    pub player: Uuid,
+    pub block: &'static str,
+    pub props: &'static [(&'static str, &'static str)],
+}
+
+/// Blocks players entered since the last drain.
+pub static BLOCKS: Mutex<Vec<BlockRecord>> = Mutex::new(Vec::new());
+
+type BlockSnapshot = (&'static str, &'static [(&'static str, &'static str)]);
+
+/// Last block each player stood in, so entering is reported once and leaving re-arms it.
+pub static LAST_BLOCK: Mutex<BTreeMap<Uuid, BlockSnapshot>> = Mutex::new(BTreeMap::new());
 
 fn id_matches(list: &[String], kind: &str, id: &str) -> bool {
     let short = |s: &str| {
@@ -240,6 +282,36 @@ fn consumed_item(conditions: &serde_json::Value) -> Option<String> {
     (!name.starts_with('#')).then(|| name.to_owned())
 }
 
+/// The block predicate of an `enter_block` criterion, when that is all it asks for.
+fn entered_block(conditions: &serde_json::Value) -> Option<BlockMatch> {
+    let object = conditions.as_object()?;
+    // 26.3 puts `blocks`/`state` directly in the conditions; accept the older nested
+    // `block` object too.
+    let block = match object.get("block") {
+        Some(serde_json::Value::Object(_)) => {
+            if object.len() != 1 {
+                return None;
+            }
+            object.get("block")?.as_object()?
+        }
+        _ => object,
+    };
+    if block.len() > 2 {
+        return None;
+    }
+    let blocks = alternatives(block.get("blocks")?);
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut state = Vec::new();
+    if let Some(wanted) = block.get("state").and_then(|value| value.as_object()) {
+        for (key, value) in wanted {
+            state.push((key.clone(), value.as_str()?.to_owned()));
+        }
+    }
+    Some(BlockMatch { blocks, state })
+}
+
 /// The block a `placed_block` criterion asks for, when that is all it asks for.
 fn placed_block(conditions: &serde_json::Value) -> Option<String> {
     let object = conditions.as_object()?;
@@ -321,6 +393,34 @@ pub fn criteria_for_biome(biome: &str) -> Vec<String> {
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
             if matches!(criterion, Criterion::InBiome(wanted) if wanted == biome) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// Advancement criteria completed by entering a block.
+pub fn criteria_for_block(record: &BlockRecord) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if let Criterion::InBlock(wanted) = criterion
+                && wanted.matches(record.block, record.props)
+            {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// Advancement criteria completed by the unconditioned `tick` trigger.
+pub fn criteria_for_tick() -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Ticks) {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -448,6 +548,15 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                     .map(|a| a.iter().map(|e| alternatives(&e["items"])).collect())
                     .unwrap_or_default(),
             ),
+            Some("minecraft:enter_block") => {
+                entered_block(&c["conditions"]).map_or(Criterion::Other, Criterion::InBlock)
+            }
+            Some("minecraft:tick")
+                if c["conditions"].is_null()
+                    || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
+            {
+                Criterion::Ticks
+            }
             Some("minecraft:recipe_unlocked") => {
                 Criterion::Recipe(c["conditions"]["recipes"].as_str()?.to_owned())
             }
@@ -691,6 +800,46 @@ mod tests {
                 "loot": ["t:chests/gift"], "function": "t:celebrate"}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn enter_block_and_tick_criteria_parse() {
+        let rule = parse_rule(
+            "t:water",
+            &serde_json::json!({
+                "criteria": {
+                    "in_water": {"trigger": "minecraft:enter_block",
+                        "conditions": {"block": {"blocks": "minecraft:water"}}},
+                    "every_tick": {"trigger": "minecraft:tick"}
+                }
+            }),
+        )
+        .unwrap();
+        let Criterion::InBlock(block) = &rule.criteria["in_water"] else {
+            panic!("{:?}", rule.criteria["in_water"]);
+        };
+        assert_eq!(block.blocks, ["minecraft:water"]);
+        assert!(block.matches("minecraft:water", &[("level", "0")]));
+        assert!(matches!(rule.criteria["every_tick"], Criterion::Ticks));
+    }
+
+    #[test]
+    fn enter_block_and_tick_match_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        assert!(criteria_for_tick().contains(
+            &"minecraft:recipes/decorations/crafting_table#unlock_right_away".to_owned()
+        ));
+        let water = BlockRecord {
+            player: Uuid::new_v4(),
+            block: "minecraft:water",
+            props: &[],
+        };
+        assert!(
+            criteria_for_block(&water)
+                .contains(&"minecraft:recipes/transportation/oak_boat#in_water".to_owned())
+        );
     }
 
     #[test]

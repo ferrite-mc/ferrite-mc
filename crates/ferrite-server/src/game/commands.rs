@@ -904,6 +904,8 @@ pub struct Source {
     pub dimension: super::Dimension,
     /// Chunk source when the command runs inside a world (block tests, `/data block`).
     pub world: Option<Arc<super::anvil::AnvilChunkSource>>,
+    /// The server's admin lists and profile cache, when a data directory exists.
+    pub admin: Option<Arc<AdminLists>>,
     pub state: Arc<Mutex<GameState>>,
     pub actions: UnboundedSender<Action>,
     /// The command tree `/function` lines run against; `None` in tests that never call it.
@@ -2657,6 +2659,7 @@ mod tests {
             anchor: ferrite_command::EntityAnchor::Feet,
             dimension: crate::game::Dimension::Overworld,
             world: None,
+            admin: None,
             tree: None,
             function_depth: 0,
         }
@@ -2999,6 +3002,24 @@ mod tests {
         }
         let (result, _) = run("item replace entity @s hotbar.0 with minecraft:stone 99", 2);
         assert!(result.unwrap_err().to_string().contains("Can't give"));
+    }
+
+    #[test]
+    fn item_commands_keep_component_patches() {
+        let (result, actions) = run(
+            "item replace entity @s hotbar.0 with minecraft:potion[potion_contents={potion:\"minecraft:swiftness\"}]",
+            2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let Some(Action::Slots {
+            source: SlotSource::Stacks(stacks),
+            ..
+        }) = actions.first()
+        else {
+            panic!("expected slot stacks, got {actions:?}");
+        };
+        let id = ferrite_item::component_id("potion_contents").unwrap();
+        assert!(stacks[0].components.contains(id), "{stacks:?}");
     }
 
     #[test]
@@ -3869,6 +3890,7 @@ mod tests {
                 anchor: ferrite_command::EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 tree: None,
                 function_depth: 0,
             },
@@ -4241,6 +4263,7 @@ mod tests {
             anchor: EntityAnchor::Feet,
             dimension: crate::game::Dimension::Overworld,
             world: None,
+            admin: None,
             state: Arc::new(Mutex::new(GameState::default())),
             actions: tx,
             tree: None,
@@ -4312,6 +4335,7 @@ mod tests {
                 anchor: ferrite_command::EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 tree: None,
                 function_depth: 0,
             },

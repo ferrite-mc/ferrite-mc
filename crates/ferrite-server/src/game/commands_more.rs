@@ -5,7 +5,7 @@
 //! jar. Feedback strings come from the translations extracted from that jar
 //! (`reports/lang_en_us.json`), so no Mojang text is kept here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
 use ferrite_command::{
@@ -70,6 +70,7 @@ pub struct TickControl {
     steps: std::sync::atomic::AtomicU32,
     stepping: std::sync::atomic::AtomicBool,
     mspt_micro: std::sync::atomic::AtomicU64,
+    samples: std::sync::Mutex<VecDeque<u32>>,
     sprint: std::sync::Mutex<Sprint>,
 }
 
@@ -93,6 +94,7 @@ impl Default for TickControl {
             steps: AtomicU32::new(0),
             stepping: AtomicBool::new(false),
             mspt_micro: AtomicU64::new(0),
+            samples: std::sync::Mutex::new(VecDeque::with_capacity(100)),
             sprint: std::sync::Mutex::new(Sprint::default()),
         }
     }
@@ -228,10 +230,37 @@ impl TickControl {
             old * 0.95 + ms * 0.05
         };
         self.mspt_micro.store((next * 1000.0) as u64, Self::RELAXED);
+        let micros = (ms * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32;
+        let mut samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() == 100 {
+            samples.pop_front();
+        }
+        samples.push_back(micros);
     }
 
     pub fn mspt(&self) -> f64 {
         self.mspt_micro.load(Self::RELAXED) as f64 / 1000.0
+    }
+
+    /// `(p50, p95, p99)` of the last 100 region tick durations in milliseconds.
+    pub fn percentiles(&self) -> Option<(f64, f64, f64)> {
+        let mut samples: Vec<u32> = self
+            .samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_unstable();
+        let percentile = |fraction: f64| {
+            let rank = (fraction * samples.len() as f64).ceil() as usize;
+            let index = rank.saturating_sub(1).min(samples.len() - 1);
+            f64::from(samples[index]) / 1000.0
+        };
+        Some((percentile(0.50), percentile(0.95), percentile(0.99)))
     }
 }
 
@@ -954,6 +983,17 @@ fn tick_tree() -> NodeBuilder<Source> {
                     format!("{:.1}", 1000.0 / f64::from(target)),
                 ],
             )?;
+            if let Some((p50, p95, p99)) = control.percentiles() {
+                feedback(
+                    ctx,
+                    "commands.tick.query.percentiles",
+                    vec![
+                        format!("{p50:.1}"),
+                        format!("{p95:.1}"),
+                        format!("{p99:.1}"),
+                    ],
+                )?;
+            }
             Ok(target as i32)
         }))
         .then(
@@ -2217,6 +2257,46 @@ fn profile_text(name: &str, id: uuid::Uuid) -> String {
     format!("{{id:\"{id}\",name:\"{name}\"}}")
 }
 
+/// The cached or online name for a game profile.
+fn profile_name(source: &Source, id: uuid::Uuid) -> Option<String> {
+    let online = source
+        .state
+        .lock()
+        .unwrap()
+        .players
+        .iter()
+        .find(|player| player.uuid == id)
+        .map(|player| player.name.clone());
+    online.or_else(|| {
+        source
+            .admin
+            .as_ref()
+            .and_then(|admin| admin.usercache.name_for(id))
+    })
+}
+
+/// The cached or online profile for a name; the cached spelling wins for offline players.
+fn profile_by_name(source: &Source, name: &str) -> Option<(String, uuid::Uuid)> {
+    let players = source.state.lock().unwrap();
+    if let Some(player) = players
+        .players
+        .iter()
+        .find(|player| player.name.eq_ignore_ascii_case(name))
+    {
+        return Some((player.name.clone(), player.uuid));
+    }
+    drop(players);
+    let admin = source.admin.as_ref()?;
+    let id = admin.usercache.uuid_for(name)?;
+    Some((
+        admin
+            .usercache
+            .name_for(id)
+            .unwrap_or_else(|| name.to_owned()),
+        id,
+    ))
+}
+
 fn fetchprofile_tree() -> NodeBuilder<Source> {
     literal::<Source>("fetchprofile")
         .requires(gamemasters())
@@ -2227,16 +2307,7 @@ fn fetchprofile_tree() -> NodeBuilder<Source> {
                 let Some(id) = ids.first().copied() else {
                     return Err(failure("argument.entity.notfound.player", vec![]));
                 };
-                let name = ctx
-                    .source()
-                    .state
-                    .lock()
-                    .unwrap()
-                    .players
-                    .iter()
-                    .find(|player| player.uuid == id)
-                    .map(|player| player.name.clone())
-                    .unwrap_or_default();
+                let name = profile_name(ctx.source(), id).unwrap_or_default();
                 feedback(
                     ctx,
                     "commands.fetchprofile.entity.success",
@@ -2248,16 +2319,10 @@ fn fetchprofile_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("id").then(
             argument::<Source>("id", ArgumentType::opaque("minecraft:uuid")).executes(|ctx| {
                 let raw = ctx.string("id").unwrap_or_default().to_owned();
-                let found = raw.parse::<uuid::Uuid>().ok().and_then(|id| {
-                    ctx.source()
-                        .state
-                        .lock()
-                        .unwrap()
-                        .players
-                        .iter()
-                        .find(|player| player.uuid == id)
-                        .map(|player| (player.name.clone(), id))
-                });
+                let found = raw
+                    .parse::<uuid::Uuid>()
+                    .ok()
+                    .and_then(|id| profile_name(ctx.source(), id).map(|name| (name, id)));
                 match found {
                     Some((name, id)) => {
                         feedback(
@@ -2274,15 +2339,7 @@ fn fetchprofile_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("name").then(
             argument::<Source>("name", ArgumentType::string()).executes(|ctx| {
                 let name = ctx.string("name").unwrap_or_default().to_owned();
-                let found = ctx
-                    .source()
-                    .state
-                    .lock()
-                    .unwrap()
-                    .players
-                    .iter()
-                    .find(|player| player.name.eq_ignore_ascii_case(&name))
-                    .map(|player| (player.name.clone(), player.uuid));
+                let found = profile_by_name(ctx.source(), &name);
                 match found {
                     Some((exact, id)) => {
                         feedback(
@@ -2456,6 +2513,16 @@ mod tests {
         state: Arc<Mutex<GameState>>,
         uuid: Option<Uuid>,
     ) -> (Result<i32, CommandError>, Vec<Action>) {
+        run_with_admin(input, permission, state, uuid, None)
+    }
+
+    fn run_with_admin(
+        input: &str,
+        permission: u8,
+        state: Arc<Mutex<GameState>>,
+        uuid: Option<Uuid>,
+        admin: Option<Arc<ferrite_admin::AdminLists>>,
+    ) -> (Result<i32, CommandError>, Vec<Action>) {
         let tree = Arc::new(dispatcher());
         let (actions, mut received) = tokio::sync::mpsc::unbounded_channel();
         let source = Source {
@@ -2470,6 +2537,7 @@ mod tests {
             anchor: ferrite_command::EntityAnchor::Feet,
             dimension: crate::game::Dimension::Overworld,
             world: None,
+            admin,
             tree: Some(tree.clone()),
             function_depth: 0,
         };
@@ -2482,6 +2550,35 @@ mod tests {
 
     fn fresh() -> Arc<Mutex<GameState>> {
         Arc::new(Mutex::new(GameState::default()))
+    }
+
+    #[test]
+    fn fetchprofile_reads_the_offline_profile_cache() {
+        let dir = std::env::temp_dir().join(format!("ferrite-fetchprofile-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let admin = Arc::new(ferrite_admin::AdminLists::load(&dir).unwrap());
+        let id = Uuid::from_u128(77);
+        admin.usercache.cache("Offline", id);
+        let state = fresh();
+        let (result, actions) = run_with_admin(
+            "fetchprofile name Offline",
+            2,
+            state.clone(),
+            None,
+            Some(admin.clone()),
+        );
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(keys(&actions), ["commands.fetchprofile.name.success"]);
+        let (result, actions) = run_with_admin(
+            &format!("fetchprofile id {id}"),
+            2,
+            state,
+            None,
+            Some(admin),
+        );
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(keys(&actions), ["commands.fetchprofile.id.success"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn keys(actions: &[Action]) -> Vec<&'static str> {
@@ -3056,6 +3153,28 @@ mod tests {
                 "commands.tick.query.rate.running"
             ]
         );
+    }
+
+    #[test]
+    fn tick_query_reports_percentiles_once_samples_exist() {
+        let state = fresh();
+        let control = state.lock().unwrap().more.tick.clone();
+        for ms in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            control.record_mspt(ms);
+        }
+        let (_, actions) = run("tick query", 2, state, None);
+        assert_eq!(
+            keys(&actions),
+            [
+                "commands.tick.status.running",
+                "commands.tick.query.rate.running",
+                "commands.tick.query.percentiles"
+            ]
+        );
+        let Some(Action::Feedback(feedback)) = actions.last() else {
+            panic!("expected percentile feedback, got {actions:?}");
+        };
+        assert_eq!(feedback.args, ["3.0", "5.0", "5.0"]);
     }
 
     #[test]

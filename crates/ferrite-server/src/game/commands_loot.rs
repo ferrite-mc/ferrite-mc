@@ -1,23 +1,81 @@
 //! `/loot`: rolls a vanilla loot table and hands the result to players.
 //!
 //! Sources `loot`, `fish` and `mine` roll the extracted tables (`mine` reads the block at the
-//! position; the tool arguments only feed enchantment-free defaults, `mainhand`/`offhand` are
-//! treated as no tool). `kill` needs the target's entity type, which the selector does not carry
-//! yet, so it fails. Targets other than `give` (`insert`, `replace`, `spawn`) fail with a clear
-//! message: there is no item-entity spawn or container write path for commands yet.
+//! position). `mainhand`/`offhand` use the player's scanned held stack, including its
+//! enchantments; an explicit item argument is used as written. `kill` needs the target's entity
+//! type. Targets other than `give` (`insert`, `replace`, `spawn`) write through the shared slot
+//! and item-entity paths.
+
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
     argument, literal,
 };
+use ferrite_item::{Component, component_ids};
 use ferrite_loot::LootContext;
+use uuid::Uuid;
 
 use super::commands::{
     Action, Feedback, SlotMode, SlotSource, SlotTarget, Source, item_display, parse_item,
     resolved_targets, send,
 };
 
-fn block_context(ctx: &CommandContext<Source>) -> Result<LootContext, CommandError> {
+/// A held item's loot-relevant data, refreshed by the region inventory scan.
+#[derive(Debug, Clone, Default)]
+pub struct HeldTool {
+    pub item: String,
+    pub tool_enchantments: BTreeMap<String, i32>,
+    pub fortune: i32,
+    pub looting: i32,
+}
+
+impl HeldTool {
+    pub fn from_stack(stack: &ferrite_item::ItemStack) -> Option<Self> {
+        if stack.is_empty() {
+            return None;
+        }
+        let item = ferrite_item::item_name(stack.item)?.to_owned();
+        let mut tool_enchantments = BTreeMap::new();
+        let (mut fortune, mut looting) = (0, 0);
+        if let Some(Component::Enchantments(enchantments)) =
+            stack.components.get(component_ids::ENCHANTMENTS)
+        {
+            for (name, level) in &enchantments.levels {
+                tool_enchantments.insert(name.clone(), *level);
+            }
+            fortune = enchantments.level("minecraft:fortune").unwrap_or(0);
+            looting = enchantments.level("minecraft:looting").unwrap_or(0);
+        }
+        Some(Self {
+            item,
+            tool_enchantments,
+            fortune,
+            looting,
+        })
+    }
+
+    fn apply(&self, context: &mut LootContext) {
+        context.tool = Some(self.item.clone());
+        context.tool_enchantments = self.tool_enchantments.clone();
+        context.fortune = self.fortune;
+        context.looting = self.looting;
+    }
+}
+
+/// Mainhand/offhand tools per player, published by [`Command::ScanInventory`].
+pub static HELD_TOOLS: Mutex<BTreeMap<Uuid, [Option<HeldTool>; 2]>> = Mutex::new(BTreeMap::new());
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    None,
+    Mainhand,
+    Offhand,
+    Item,
+}
+
+fn block_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootContext, CommandError> {
     let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("pos") else {
         return Err(CommandError::failed("missing pos"));
     };
@@ -42,8 +100,24 @@ fn block_context(ctx: &CommandContext<Source>) -> Result<LootContext, CommandErr
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
     }
-    if let Some(tool) = ctx.string("tool") {
-        context.tool = Some(tool.split(['[', '{']).next().unwrap_or(tool).to_owned());
+    match tool {
+        Tool::Item => {
+            if let Some(tool) = ctx.string("tool") {
+                context.tool = Some(tool.split(['[', '{']).next().unwrap_or(tool).to_owned());
+            }
+        }
+        Tool::Mainhand | Tool::Offhand => {
+            if let Some(uuid) = source.uuid
+                && let Some(held) = HELD_TOOLS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&uuid)
+                    .and_then(|hands| hands[usize::from(tool == Tool::Offhand)].clone())
+            {
+                held.apply(&mut context);
+            }
+        }
+        Tool::None => {}
     }
     Ok(context)
 }
@@ -57,9 +131,19 @@ fn rolled(table: &str, context: &LootContext) -> Result<Vec<(String, i32)>, Comm
 #[derive(Clone, Copy)]
 enum From {
     Loot,
-    Fish,
-    Mine,
+    Fish(Tool),
+    Mine(Tool),
     Kill,
+}
+
+impl From {
+    fn with_tool(self, tool: Tool) -> Self {
+        match self {
+            Self::Fish(_) => Self::Fish(tool),
+            Self::Mine(_) => Self::Mine(tool),
+            other => other,
+        }
+    }
 }
 
 fn stacks(ctx: &CommandContext<Source>, from: From) -> Result<Vec<(String, i32)>, CommandError> {
@@ -68,12 +152,12 @@ fn stacks(ctx: &CommandContext<Source>, from: From) -> Result<Vec<(String, i32)>
             let table = ctx.string("loot_table").unwrap_or_default().to_owned();
             rolled(&table, &LootContext::default())
         }
-        From::Fish => {
+        From::Fish(tool) => {
             let table = ctx.string("loot_table").unwrap_or_default().to_owned();
-            rolled(&table, &block_context(ctx)?)
+            rolled(&table, &block_context(ctx, tool)?)
         }
-        From::Mine => {
-            let context = block_context(ctx)?;
+        From::Mine(tool) => {
+            let context = block_context(ctx, tool)?;
             let Some(block) = context.block.clone() else {
                 return Err(CommandError::failed(
                     Feedback::new("argument.pos.unloaded", vec![]).text,
@@ -222,9 +306,9 @@ fn sources(
     let pos = || argument::<Source>("pos", ArgumentType::BlockPos);
     let mine_tail = |from: From| {
         let f = run(from);
-        let main = run(from);
-        let off = run(from);
-        let item = run(from);
+        let main = run(from.with_tool(Tool::Mainhand));
+        let off = run(from.with_tool(Tool::Offhand));
+        let item = run(from.with_tool(Tool::Item));
         pos()
             .executes(move |ctx| f(ctx))
             .then(literal::<Source>("mainhand").executes(move |ctx| main(ctx)))
@@ -235,7 +319,7 @@ fn sources(
             )
     };
     vec![
-        literal::<Source>("fish").then(table().then(mine_tail(From::Fish))),
+        literal::<Source>("fish").then(table().then(mine_tail(From::Fish(Tool::None)))),
         literal::<Source>("kill").then(
             argument::<Source>("target", ArgumentType::entity()).executes({
                 let f = run(From::Kill);
@@ -246,7 +330,7 @@ fn sources(
             let f = run(From::Loot);
             move |ctx| f(ctx)
         })),
-        literal::<Source>("mine").then(mine_tail(From::Mine)),
+        literal::<Source>("mine").then(mine_tail(From::Mine(Tool::None))),
     ]
 }
 
@@ -296,4 +380,22 @@ fn loot_tree() -> NodeBuilder<Source> {
 
 pub fn register(tree: &mut CommandDispatcher<Source>) {
     tree.register(loot_tree());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_tools_carry_the_item_and_its_loot_context() {
+        assert!(HeldTool::from_stack(&ferrite_item::ItemStack::empty()).is_none());
+        let stone =
+            ferrite_item::ItemStack::new(ferrite_item::item_id("minecraft:stone").expect("stone"));
+        let held = HeldTool::from_stack(&stone).expect("held stone");
+        assert_eq!(held.item, "minecraft:stone");
+        let mut context = LootContext::default();
+        held.apply(&mut context);
+        assert_eq!(context.tool.as_deref(), Some("minecraft:stone"));
+        assert_eq!(context.fortune, 0);
+    }
 }

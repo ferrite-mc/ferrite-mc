@@ -133,6 +133,8 @@ fn template(key: &str) -> Option<&'static str> {
         "argument.item_modifier.unknown" => "Unknown item modifier '%s'",
         "commands.swing.success.single" => "Swung %s's arm",
         "commands.swing.success.multiple" => "Swung the arms of %s entities",
+        "commands.swing.failed.notliving" => "%s is not a living entity",
+        "commands.tick.query.percentiles" => "P50: %s ms, P95: %s ms, P99: %s ms",
         "commands.attribute.value.get.success" => "Value of attribute %s for %s is %s",
         "commands.attribute.base_value.get.success" => "Base value of attribute %s for %s is %s",
         "commands.attribute.base_value.set.success" => {

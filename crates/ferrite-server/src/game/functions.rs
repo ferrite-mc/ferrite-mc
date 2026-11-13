@@ -686,6 +686,7 @@ mod tests {
                 anchor: ferrite_command::EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 state: Arc::new(Mutex::new(state)),
                 actions,
                 tree: Some(Arc::clone(tree)),

@@ -935,6 +935,7 @@ impl super::command_block::Runner for BlockCommands<'_> {
             anchor: ferrite_command::EntityAnchor::Feet,
             dimension: self.dimension,
             world: Some(Arc::clone(self.source)),
+            admin: None,
             state: Arc::clone(self.state),
             actions,
             tree: Some(Arc::clone(&tree)),
@@ -4509,6 +4510,18 @@ impl Player {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(self.uuid, held);
+                    let mainhand = self.resolve_slot(-1).and_then(|slot| {
+                        super::commands_loot::HeldTool::from_stack(self.inventory.get(slot))
+                    });
+                    let offhand = self
+                        .resolve_slot(ferrite_inventory::OFFHAND as i16)
+                        .and_then(|slot| {
+                            super::commands_loot::HeldTool::from_stack(self.inventory.get(slot))
+                        });
+                    super::commands_loot::HELD_TOOLS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(self.uuid, [mainhand, offhand]);
                     if let Some(biome) = self.source.as_ref().and_then(|source| {
                         source.biome_name(
                             self.pos[0].floor() as i32,
@@ -4520,6 +4533,34 @@ impl Player {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .push((self.uuid, biome));
+                    }
+                    if let Some((name, props)) = self.source.as_ref().and_then(|source| {
+                        let (x, y, z) = (
+                            self.pos[0].floor() as i32,
+                            self.pos[1].floor() as i32,
+                            self.pos[2].floor() as i32,
+                        );
+                        source
+                            .block(x, y, z)
+                            .and_then(|state| u16::try_from(state).ok())
+                            .and_then(ferrite_data::blocks::state)
+                    }) {
+                        let changed = {
+                            let mut last = super::recipe_unlock::LAST_BLOCK
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            last.insert(self.uuid, (name, props)) != Some((name, props))
+                        };
+                        if changed {
+                            super::recipe_unlock::BLOCKS
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(super::recipe_unlock::BlockRecord {
+                                    player: self.uuid,
+                                    block: name,
+                                    props,
+                                });
+                        }
                     }
                     continue;
                 }
