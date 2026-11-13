@@ -2455,11 +2455,15 @@ impl Player {
         drop(positions);
         if placed {
             self.changed_blocks.push([target.x, target.y, target.z]);
-            if let Some((name, _)) = ferrite_data::blocks::state(state) {
+            if let Some((name, props)) = ferrite_data::blocks::state(state) {
                 super::recipe_unlock::PLACED
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((self.uuid, name));
+                    .push(super::recipe_unlock::BlockRecord {
+                        player: self.uuid,
+                        block: name,
+                        props,
+                    });
             }
             // Block entities are created with the block, so the menu, /data and the chunk save
             // all find the state they expect.
@@ -9803,6 +9807,12 @@ impl Region {
             }
         }
         let kind = p.survival.death_cause.unwrap_or(DamageKind::GenericKill);
+        // `Entity.awardKillScore` fires `entity_killed_player` for the entity that dealt the
+        // killing blow: here a mob's melee hit or an arrow. Explosions are not counted because
+        // the damage model does not say whether an entity caused them.
+        if matches!(kind, DamageKind::Mob | DamageKind::Arrow) {
+            super::recipe_unlock::push_event(p.uuid, super::recipe_unlock::Event::KilledByEntity);
+        }
         let message = kind.death_message(&p.name);
         let initial = ferrite_plugin::PlayerDeath {
             drops: initial_drops,

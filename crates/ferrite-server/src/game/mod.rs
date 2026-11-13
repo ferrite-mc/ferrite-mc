@@ -2046,6 +2046,8 @@ async fn run(
     };
     let mut scan_tick: u32 = 0;
     let mut last_held: HashMap<Uuid, std::collections::BTreeSet<String>> = HashMap::new();
+    // Where each player stood in the overworld when they entered the Nether (`nether_travel`).
+    let mut entered_nether: HashMap<Uuid, [f64; 3]> = HashMap::new();
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -2130,6 +2132,7 @@ async fn run(
                   Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let world=player.world_id;let chunk=player.chunk;let id=player.uuid;
                     let (arrived_pos, arrived_yaw, arrived_pitch) = (player.pos, player.yaw, player.pitch);
+                    let online_before = online.get(&id).map(|p| (p.dimension, p.pos));
                     worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
                     if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
@@ -2139,6 +2142,15 @@ async fn run(
                       if let Err(error) = plugins.update_player_location(id, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
                     }
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
+                    // `ServerPlayer.triggerDimensionChangeTriggers`: the overworld position where a
+                    // player went into the Nether is kept; coming back out measures the distance.
+                    if let Some(before) = online_before {
+                        if dimension == Dimension::Nether && before.0 != Dimension::Nether { entered_nether.insert(id, before.1); }
+                        else if dimension == Dimension::Overworld && before.0 == Dimension::Nether && let Some(entered) = entered_nether.get(&id) {
+                            recipe_unlock::push_event(id, recipe_unlock::Event::NetherTravel { delta: [arrived_pos[0] - entered[0], arrived_pos[1] - entered[1], arrived_pos[2] - entered[2]] });
+                        }
+                        if dimension != Dimension::Nether { entered_nether.remove(&id); }
+                    }
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
                   },
@@ -2230,10 +2242,15 @@ async fn run(
                          }
                      }
                      {
+                         let events = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::EVENTS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !events.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, event) in events { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_event(&event)); }
+                         }
                          let placed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::PLACED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !placed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, block) in placed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_placed(block)); }
+                             for record in placed { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_placed(&record)); }
                          }
                      }
                      {

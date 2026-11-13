@@ -187,6 +187,7 @@ fn use_bed(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
         }
     }
     player.sleeping = Some(foot);
+    super::recipe_unlock::push_event(player.uuid, super::recipe_unlock::Event::SleptInBed);
     crate::plugins::facts::set_sleeping(player.uuid, true);
     player.spawn = Some(foot);
     true
