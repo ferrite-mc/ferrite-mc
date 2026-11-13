@@ -60,12 +60,32 @@ packet ids to that failure message, so the next occurrence can be attributed. As
 unchanged; I did not add EOF to the accepted outcomes without evidence that it is a legitimate
 server close.
 
-### Not touched: `runtime_world_gap7...` and the plugin tests
+### `runtime_world_gap7...` (fixed in PR #10, `920111c`)
 
-gap7 passes locally (15.5 s) on this branch. The earlier `unloadWorld` refusal race was the
-coordinator select and is fixed in main (`biased;`, regression test
-`unload_right_after_the_client_sees_the_departure_is_not_refused`). I could not run the other
-Java plugin tests: the home volume is 98% full and the Gradle build needs it. They run in CI.
+CI runs 43299884934 (PR #9) and 43306163807 (PR #10) failed it with BrokenPipe on the bot's
+write. Reproduced locally in about 1 of 6 runs (test binary on 4 CPUs beside busy loops).
+Logging the writer's disconnect reason showed `Kicked for spamming`: `settle()` re-issued `/gap7`
+every 250 ms while a slow host applied the write, and the default command limit (burst 10, one
+more per second) kicked the bot. Retries are now spaced 1.1 s. With the kick gone 10 of 24
+contended runs failed later: the reopened world held a `minecraft:item` and no cow. The cow was
+spawned over empty space (the only block is the gold block), fell into the void and died in the
+ticks a slow host took between the spawn and unload steps; the item is its loot. The spawn step
+builds a walled floor. 24 of 24 contended runs pass. `ferrite-net` logs the reason of a
+delivered play disconnect at info.
+
+### `unload_right_after_the_client_sees_the_departure_is_not_refused` (Windows, one failure)
+
+PR #10 run 43306163807, windows: round 9 refused with "cannot unload a runtime world while
+players are inside it". Not reproduced on Linux (60 contended runs; the next two Windows runs
+passed). Code reading: the region queues the departure `Respawn` while the player updates, and
+only afterwards sends `Signal::ChangeDimension`; the coordinator's `player_worlds` changes when
+it handles that signal. A region thread starved between the two lets the client (and so the
+test or plugin) ask for the unload first, and `biased;` cannot order a signal that has not been
+sent yet. This mechanism is **inferred, not observed**. `World::unload_runtime_world` now keeps
+asking the coordinator for up to 500 ms (10 ms apart) while the answer is "players are inside";
+a player who stays is still refused, after the grace. Regression test
+`unload_waits_briefly_for_a_departing_player_and_still_refuses_one_who_stays` (fails with a zero
+grace: refusal after 78 µs; passes with it).
 
 ### Windows
 
@@ -122,6 +142,12 @@ this branch merged with main 3ec1678. CI's ubuntu job still used 1.99.1 when che
 - `cargo test -p ferrite-protocol -p ferrite-net -p ferrite-config -p ferrite-inventory -p ferrite-item`: all passed.
 - Pinned full lib suite, 4 CPUs + 2 spinners, three runs of the fix before the main merge:
   836 passed, 836 passed, 835 passed + the slow-reader failure above.
+
+## Status after the merges
+
+PR #10 merged as 0ac5cf6; PRs #7, #8, #9 are merged; v0.2.1 was published from c2c3ec5 by another
+actor and is an earlier snapshot, not completion of the expanded lanes. Lane-3 world-parity and
+the expanded handoffs were not on main when this was updated.
 
 ## Not done (blocked or pending)
 
