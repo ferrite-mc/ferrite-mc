@@ -773,30 +773,35 @@ pub(crate) fn sound_id(raw: &str) -> Result<i32, CommandError> {
 }
 
 fn sound_source_branch(name: &'static str, source: i32) -> NodeBuilder<Source> {
-    literal::<Source>(name).then(
-        argument("targets", ArgumentType::players())
-            .executes(move |ctx| play_sound(ctx, source, false))
-            .then(
-                argument("pos", ArgumentType::Vec3)
-                    .executes(move |ctx| play_sound(ctx, source, true))
-                    .then(
-                        argument("volume", ArgumentType::float())
-                            .executes(move |ctx| play_sound(ctx, source, true))
-                            .then(
-                                argument("pitch", ArgumentType::float())
-                                    .executes(move |ctx| play_sound(ctx, source, true))
-                                    .then(
-                                        argument("minVolume", ArgumentType::float())
-                                            .executes(move |ctx| play_sound(ctx, source, true)),
-                                    ),
-                            ),
-                    ),
-            ),
-    )
+    literal::<Source>(name)
+        .executes(move |ctx| play_sound(ctx, source, false))
+        .then(
+            argument("targets", ArgumentType::players())
+                .executes(move |ctx| play_sound(ctx, source, false))
+                .then(
+                    argument("pos", ArgumentType::Vec3)
+                        .executes(move |ctx| play_sound(ctx, source, true))
+                        .then(
+                            argument("volume", ArgumentType::float())
+                                .executes(move |ctx| play_sound(ctx, source, true))
+                                .then(
+                                    argument("pitch", ArgumentType::float())
+                                        .executes(move |ctx| play_sound(ctx, source, true))
+                                        .then(
+                                            argument("minVolume", ArgumentType::float())
+                                                .executes(move |ctx| play_sound(ctx, source, true)),
+                                        ),
+                                ),
+                        ),
+                ),
+        )
 }
 
 fn playsound_tree() -> NodeBuilder<Source> {
-    let mut sound = argument("sound", ArgumentType::ResourceLocation);
+    // Vanilla: `playsound <sound>` and `playsound <sound> <source>` play to the calling player
+    // at the command position (`getCallingPlayerAsCollection`).
+    let mut sound =
+        argument("sound", ArgumentType::ResourceLocation).executes(|ctx| play_sound(ctx, 0, false));
     for (name, id) in SOUND_SOURCES {
         sound = sound.then(sound_source_branch(name, id));
     }
@@ -811,7 +816,13 @@ fn play_sound(
     source: i32,
     positional: bool,
 ) -> Result<i32, CommandError> {
-    let targets = resolved_targets(ctx, "targets")?;
+    // Without a `<targets>` argument vanilla plays to the calling player only; a source that
+    // is not a player has nobody to play to and fails like an out-of-range sound.
+    let targets = if ctx.argument("targets").is_some() {
+        resolved_targets(ctx, "targets")?
+    } else {
+        ctx.source().uuid.into_iter().collect()
+    };
     let raw = ctx.string("sound").unwrap_or_default().to_owned();
     let id = sound_id(&raw)?;
     let position = if positional {
@@ -839,30 +850,94 @@ fn play_sound(
             ferrite_command::error::java_float(pitch)
         )));
     }
-    packets(
-        ctx,
-        targets.clone(),
-        PlayerPacket::Sound(SoundEffect {
-            sound: sound_holder(id),
-            source: ferrite_protocol::VarInt(source),
-            x: (position[0] * 8.0) as i32,
-            y: (position[1] * 8.0) as i32,
-            z: (position[2] * 8.0) as i32,
-            volume,
-            pitch,
-            seed: 0,
-        }),
-    )?;
-    if targets.len() == 1 {
-        let target = target_names(ctx, &targets).remove(0);
-        feedback(ctx, "commands.playsound.success.single", vec![raw, target])
+    let min_volume = ctx
+        .argument("minVolume")
+        .and_then(ArgumentValue::as_f32)
+        .unwrap_or(0.0);
+    if !(0.0..=1.0).contains(&min_volume) {
+        return Err(CommandError::failed(format!(
+            "Float must be between 0.0 and 1.0: found {}",
+            ferrite_command::error::java_float(min_volume)
+        )));
+    }
+    let positions: Vec<(Uuid, [f64; 3])> = {
+        let state = ctx.source().state.lock().unwrap();
+        targets
+            .iter()
+            .map(|uuid| {
+                let at = state
+                    .players
+                    .iter()
+                    .find(|p| p.uuid == *uuid)
+                    .map_or(position, |p| p.pos);
+                (*uuid, at)
+            })
+            .collect()
+    };
+    // Vanilla `PlaySoundCommand.playSound`: audible within 16 blocks (`volume * 16` when the
+    // volume is above 1); a farther player hears it at `minVolume`, two blocks away in the
+    // direction of the sound, or not at all when `minVolume` is 0.
+    let range = if volume > 1.0 {
+        f64::from(volume) * 16.0
+    } else {
+        16.0
+    };
+    let mut heard = Vec::new();
+    for (uuid, at) in positions {
+        let d = [
+            position[0] - at[0],
+            position[1] - at[1],
+            position[2] - at[2],
+        ];
+        let dist_sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        let (sound_pos, sound_volume) = if dist_sq > range * range {
+            if min_volume <= 0.0 {
+                continue;
+            }
+            let dist = dist_sq.sqrt();
+            (
+                [
+                    at[0] + d[0] / dist * 2.0,
+                    at[1] + d[1] / dist * 2.0,
+                    at[2] + d[2] / dist * 2.0,
+                ],
+                min_volume,
+            )
+        } else {
+            (position, volume)
+        };
+        packets(
+            ctx,
+            vec![uuid],
+            PlayerPacket::Sound(SoundEffect {
+                sound: sound_holder(id),
+                source: ferrite_protocol::VarInt(source),
+                x: (sound_pos[0] * 8.0) as i32,
+                y: (sound_pos[1] * 8.0) as i32,
+                z: (sound_pos[2] * 8.0) as i32,
+                volume: sound_volume,
+                pitch,
+                seed: 0,
+            }),
+        )?;
+        heard.push(uuid);
+    }
+    if heard.is_empty() {
+        return Err(CommandError::failed(
+            "The sound is too far away to be heard",
+        ));
+    }
+    if heard.len() == 1 {
+        let target = target_names(ctx, &heard).remove(0);
+        feedback(ctx, "commands.playsound.success.single", vec![raw, target])?;
     } else {
         feedback(
             ctx,
             "commands.playsound.success.multiple",
-            vec![raw, targets.len().to_string()],
-        )
+            vec![raw, heard.len().to_string()],
+        )?;
     }
+    Ok(heard.len() as i32)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -873,12 +948,10 @@ fn stopsound_tree() -> NodeBuilder<Source> {
     let mut targets = argument("targets", ArgumentType::players())
         .executes(|ctx| stop_sound(ctx, None, false))
         .then(
-            literal("*")
-                .executes(|ctx| stop_sound(ctx, None, false))
-                .then(
-                    argument("sound", ArgumentType::ResourceLocation)
-                        .executes(|ctx| stop_sound(ctx, None, true)),
-                ),
+            literal("*").then(
+                argument("sound", ArgumentType::ResourceLocation)
+                    .executes(|ctx| stop_sound(ctx, None, true)),
+            ),
         );
     for (name, source) in SOUND_SOURCES {
         let source = Some(source);
@@ -1641,6 +1714,60 @@ mod tests {
     }
 
     #[test]
+    fn playsound_without_targets_plays_to_the_calling_player() {
+        // `playsound <sound>` and `playsound <sound> <source>` are executable in vanilla and
+        // play to the calling player (commands.json: `sound` and each source literal).
+        let actions = success("playsound minecraft:entity.player.levelup");
+        match only_packet(&actions) {
+            PlayerPacket::Sound(packet) => assert_eq!(packet.source.0, 0),
+            other => panic!("expected sound, got {other:?}"),
+        }
+        assert_eq!(
+            only_feedback(&actions).key,
+            "commands.playsound.success.single"
+        );
+        let actions = success("playsound minecraft:entity.player.levelup ui");
+        match only_packet(&actions) {
+            PlayerPacket::Sound(packet) => assert_eq!(packet.source.0, 10),
+            other => panic!("expected sound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn playsound_range_and_min_volume_follow_vanilla() {
+        // A target more than 16 blocks away hears nothing without a minimum volume ...
+        let (result, actions) = run(
+            "playsound minecraft:entity.player.levelup master @s 0 200 0 1 1",
+            2,
+        );
+        assert!(
+            error_text(result.unwrap_err()).contains("too far away"),
+            "{actions:?}"
+        );
+        assert!(actions.is_empty());
+        // ... and hears it at `minVolume` two blocks from itself with one.
+        let actions =
+            success("playsound minecraft:entity.player.levelup master @s 0 200 0 1 1 0.5");
+        match only_packet(&actions) {
+            PlayerPacket::Sound(packet) => {
+                assert_eq!(packet.volume, 0.5);
+                assert!((527..=528).contains(&packet.y), "{}", packet.y);
+            }
+            other => panic!("expected sound, got {other:?}"),
+        }
+        // A volume above 1 widens the range to `volume * 16`.
+        success("playsound minecraft:entity.player.levelup master @s 0 200 0 10 1");
+        // Without a calling player (console) nobody hears the sound.
+        let tree = super::super::commands::dispatcher();
+        let (mut source, _received) = source(2);
+        source.uuid = None;
+        assert!(
+            tree.execute("playsound minecraft:entity.player.levelup", source)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn stopsound_sends_source_and_sound_filters() {
         let actions = success("stopsound @s music minecraft:music.game");
         match only_packet(&actions) {
@@ -1654,7 +1781,17 @@ mod tests {
             only_feedback(&actions).key,
             "commands.stopsound.success.source.sound"
         );
-        let actions = success("stopsound @s *");
+        // Vanilla: `stopsound <targets> *` alone is incomplete; `*` needs a sound.
+        assert!(run("stopsound @s *", 2).0.is_err());
+        let actions = success("stopsound @s * minecraft:music.game");
+        match only_packet(&actions) {
+            PlayerPacket::StopSound(packet) => {
+                assert!(packet.source.is_none());
+                assert_eq!(packet.sound.as_deref(), Some("minecraft:music.game"));
+            }
+            other => panic!("expected stop sound, got {other:?}"),
+        }
+        let actions = success("stopsound @s");
         match only_packet(&actions) {
             PlayerPacket::StopSound(packet) => {
                 assert!(packet.source.is_none());

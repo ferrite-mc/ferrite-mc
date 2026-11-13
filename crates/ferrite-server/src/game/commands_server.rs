@@ -531,61 +531,77 @@ fn clear_schedule(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
 // /trigger
 // ---------------------------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerMode {
+    /// `trigger <objective>`: adds one.
+    Simple,
+    Add,
+    Set,
+}
+
 fn trigger_tree() -> NodeBuilder<Source> {
+    // commands.json: `trigger <objective>` is executable and only `add|set <value>` take a
+    // value; there is no bare `trigger <objective> <value>`.
     literal::<Source>("trigger").then(
         argument("objective", ArgumentType::opaque("minecraft:objective"))
-            // Vanilla's direct form defaults to `add`.
+            .executes(|ctx| trigger_value(ctx, TriggerMode::Simple))
             .then(
-                argument("value", ArgumentType::integer()).executes(|ctx| trigger_value(ctx, true)),
+                literal("add").then(
+                    argument("value", ArgumentType::integer())
+                        .executes(|ctx| trigger_value(ctx, TriggerMode::Add)),
+                ),
             )
-            .then(literal("add").then(
-                argument("value", ArgumentType::integer()).executes(|ctx| trigger_value(ctx, true)),
-            ))
             .then(
                 literal("set").then(
                     argument("value", ArgumentType::integer())
-                        .executes(|ctx| trigger_value(ctx, false)),
+                        .executes(|ctx| trigger_value(ctx, TriggerMode::Set)),
                 ),
             ),
     )
 }
 
-fn trigger_value(ctx: &CommandContext<Source>, add: bool) -> Result<i32, CommandError> {
+fn trigger_value(ctx: &CommandContext<Source>, mode: TriggerMode) -> Result<i32, CommandError> {
     let source = ctx.source();
     let uuid = source.uuid.ok_or_else(player_only)?;
     let holder = source.name.clone().unwrap_or_default();
-    let objective = namespaced(
-        ctx.string("objective")
-            .ok_or_else(|| CommandError::failed("missing objective argument"))?,
-    );
-    let amount = ctx
-        .integer("value")
-        .ok_or_else(|| CommandError::failed("missing value argument"))?;
+    // Scoreboard objectives are plain names, not namespaced ids: `trigger foo` is objective `foo`
+    // (this used to look up `minecraft:foo` and never found an objective).
+    let objective = ctx
+        .string("objective")
+        .ok_or_else(|| CommandError::failed("missing objective argument"))?
+        .to_owned();
+    let amount = if mode == TriggerMode::Simple {
+        1
+    } else {
+        ctx.integer("value")
+            .ok_or_else(|| CommandError::failed("missing value argument"))?
+    };
     let mut state = source.state.lock().unwrap();
     let Some(entry) = state.objectives.get(&objective) else {
         return Err(CommandError::failed(format!(
-            "Objective {objective} not found"
+            "Unknown scoreboard objective '{objective}'"
         )));
     };
+    // `commands.trigger.failed.invalid` / `commands.trigger.failed.unprimed` in en_us.
     if !entry.criteria.ends_with("trigger") {
-        return Err(CommandError::failed(format!(
-            "Objective {objective} is not a trigger objective"
-        )));
+        return Err(CommandError::failed(
+            "You can only trigger objectives that are 'trigger' type",
+        ));
     }
     if !state
         .trigger_enabled
         .remove(&(objective.clone(), holder.clone()))
     {
-        return Err(CommandError::failed(format!(
-            "Trigger {objective} is not enabled"
-        )));
+        return Err(CommandError::failed(
+            "You cannot trigger this objective yet",
+        ));
     }
     let key = (holder, objective.clone());
     let current = *state.scores.get(&key).unwrap_or(&0);
-    let value = if add {
-        current.saturating_add(amount)
-    } else {
+    let value = if mode == TriggerMode::Set {
         amount
+    } else {
+        current.saturating_add(amount)
     };
     state.scores.insert(key, value);
     drop(state);
@@ -601,12 +617,19 @@ fn trigger_value(ctx: &CommandContext<Source>, add: bool) -> Result<i32, Command
             }),
         },
     )?;
-    let key = if add {
-        "commands.trigger.add.success"
-    } else {
-        "commands.trigger.set.success"
-    };
-    feedback(ctx, key, vec![objective, value.to_string()])
+    match mode {
+        TriggerMode::Simple => feedback(ctx, "commands.trigger.simple.success", vec![objective]),
+        TriggerMode::Add => feedback(
+            ctx,
+            "commands.trigger.add.success",
+            vec![objective, amount.to_string()],
+        ),
+        TriggerMode::Set => feedback(
+            ctx,
+            "commands.trigger.set.success",
+            vec![objective, value.to_string()],
+        ),
+    }
 }
 
 /// Adds every command family above to the server tree.

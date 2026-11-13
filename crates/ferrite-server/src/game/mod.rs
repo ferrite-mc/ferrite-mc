@@ -72,6 +72,8 @@ mod commands_meta;
 mod commands_more;
 mod commands_progress;
 mod commands_server;
+#[cfg(test)]
+mod commands_tree_parity;
 mod commands_world;
 mod container;
 mod crafting;

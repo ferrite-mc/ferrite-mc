@@ -1605,7 +1605,13 @@ fn swing_tree() -> NodeBuilder<Source> {
         send(
             ctx.source(),
             Action::Swing {
-                targets: entity(ctx, "targets")?,
+                // Bare `/swing` (executable in vanilla) swings the executing entity.
+                targets: entity(ctx, "targets").unwrap_or(
+                    ferrite_command::arguments::EntityTarget::Selector {
+                        kind: ferrite_command::arguments::SelectorKind::Myself,
+                        options: Vec::new(),
+                    },
+                ),
                 off_hand,
             },
         )
@@ -1628,6 +1634,7 @@ fn swing_tree() -> NodeBuilder<Source> {
     literal::<Source>("swing")
         .requires(gamemasters())
         .restricted(true)
+        .executes(|ctx| swing(ctx, false))
         .then(
             argument::<Source>("targets", ArgumentType::entity())
                 .executes(|ctx| swing(ctx, false))
@@ -3099,6 +3106,7 @@ mod tests {
     #[test]
     fn swing_picks_the_hand_and_validates_the_animation() {
         for (input, off) in [
+            ("swing", false),
             ("swing @s", false),
             ("swing @s mainhand", false),
             ("swing @s offhand", true),

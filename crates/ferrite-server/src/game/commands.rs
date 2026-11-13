@@ -3281,6 +3281,66 @@ mod tests {
     }
 
     #[test]
+    fn trigger_objective_alone_adds_one_and_the_bare_value_form_is_gone() {
+        let uuid = Uuid::from_u128(7);
+        let mut game = GameState::default();
+        game.join(uuid, "Alice".into(), 1, 20);
+        game.objectives.insert(
+            "t".into(),
+            Objective {
+                criteria: "trigger".into(),
+                display_name: "T".into(),
+                render_type: 0,
+            },
+        );
+        game.objectives.insert(
+            "plain".into(),
+            Objective {
+                criteria: "dummy".into(),
+                display_name: "P".into(),
+                render_type: 0,
+            },
+        );
+        let state = Arc::new(Mutex::new(game));
+        let go = |input: &str| run_with_state(input, 0, state.clone(), Some(uuid), Some("Alice"));
+        // Unprimed: vanilla's `commands.trigger.failed.unprimed`.
+        let error = go("trigger t").0.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot trigger this objective yet")
+        );
+        let prime = || {
+            state
+                .lock()
+                .unwrap()
+                .trigger_enabled
+                .insert(("t".into(), "Alice".into()))
+        };
+        prime();
+        let (result, actions) = go("trigger t");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            feedback_key(&actions),
+            Some("commands.trigger.simple.success")
+        );
+        assert_eq!(
+            state.lock().unwrap().scores[&("Alice".into(), "t".into())],
+            1
+        );
+        // `trigger <objective> <value>` does not exist in vanilla (commands.json).
+        prime();
+        assert!(go("trigger t 5").0.is_err());
+        assert_eq!(
+            state.lock().unwrap().scores[&("Alice".into(), "t".into())],
+            1
+        );
+        // A non-trigger objective: `commands.trigger.failed.invalid`.
+        let error = go("trigger plain").0.unwrap_err();
+        assert!(error.to_string().contains("'trigger' type"));
+    }
+
+    #[test]
     fn list_has_plain_and_uuid_forms_and_rejects_extra_arguments() {
         let (result, actions) = run("list", 0);
         assert!(result.is_ok(), "{result:?}");
