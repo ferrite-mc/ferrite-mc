@@ -7,7 +7,8 @@
 
 use super::commands::Source;
 use ferrite_command::{
-    ArgumentType, CommandContext, CommandDispatcher, CommandError, NodeBuilder, argument, literal,
+    ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
+    argument, literal,
 };
 use ferrite_nbt::{Compound, Tag, snbt};
 use std::collections::{BTreeMap, BTreeSet};
@@ -767,8 +768,115 @@ fn function_builder() -> NodeBuilder<Source> {
                         ArgumentType::opaque("minecraft:nbt_compound_tag"),
                     )
                     .executes(execute_with_arguments),
+                )
+                .then(
+                    literal::<Source>("with")
+                        .then(
+                            literal("storage").then(
+                                argument::<Source>("source", ArgumentType::ResourceLocation).then(
+                                    argument::<Source>(
+                                        "path",
+                                        ArgumentType::opaque("minecraft:nbt_path"),
+                                    )
+                                    .executes(|ctx| execute_with_data(ctx, WithSource::Storage)),
+                                ),
+                            ),
+                        )
+                        .then(
+                            literal("entity").then(
+                                argument::<Source>("source", ArgumentType::entity()).then(
+                                    argument::<Source>(
+                                        "path",
+                                        ArgumentType::opaque("minecraft:nbt_path"),
+                                    )
+                                    .executes(|ctx| execute_with_data(ctx, WithSource::Entity)),
+                                ),
+                            ),
+                        )
+                        .then(
+                            literal("block").then(
+                                argument::<Source>("source", ArgumentType::BlockPos).then(
+                                    argument::<Source>(
+                                        "path",
+                                        ArgumentType::opaque("minecraft:nbt_path"),
+                                    )
+                                    .executes(|ctx| execute_with_data(ctx, WithSource::Block)),
+                                ),
+                            ),
+                        ),
                 ),
         )
+}
+
+#[derive(Clone, Copy)]
+enum WithSource {
+    Storage,
+    Entity,
+    Block,
+}
+
+/// `function <name> with storage|entity|block <source> <path>`: the compound at the path is
+/// the macro argument set. Only players have entity data here (see COMMANDS-STATUS.md).
+fn execute_with_data(ctx: &CommandContext<Source>, kind: WithSource) -> Result<i32, CommandError> {
+    let path = super::nbt_path::NbtPath::parse(ctx.string("path").unwrap_or(""))
+        .map_err(CommandError::failed)?;
+    let source = ctx.source();
+    let root: Option<Tag> = match kind {
+        WithSource::Storage => {
+            let raw = ctx.string("source").unwrap_or_default();
+            let id = if raw.contains(':') {
+                raw.to_owned()
+            } else {
+                format!("minecraft:{raw}")
+            };
+            source.state.lock().unwrap().storage.get(&id).cloned()
+        }
+        WithSource::Entity => {
+            let Some(ArgumentValue::Entity(target)) = ctx.argument("source") else {
+                return Err(CommandError::failed("Missing entity source"));
+            };
+            let state = source.state.lock().unwrap();
+            let found = super::commands_exec::resolve(&state, target, source.uuid, source.origin)
+                .map_err(|error| CommandError::failed(error.to_string()))?;
+            let first = found
+                .first()
+                .ok_or_else(|| CommandError::failed("No entity was found"))?;
+            state
+                .players
+                .iter()
+                .find(|player| player.uuid == first.uuid)
+                .map(super::commands_data::player_tag)
+        }
+        WithSource::Block => {
+            let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("source") else {
+                return Err(CommandError::failed("Missing block position"));
+            };
+            let at = coords.resolve(source.origin, source.yaw, source.pitch);
+            let pos = [
+                at[0].floor() as i32,
+                at[1].floor() as i32,
+                at[2].floor() as i32,
+            ];
+            source
+                .world
+                .as_ref()
+                .and_then(|world| world.block_entity(pos[0], pos[1], pos[2]))
+                .map(|entity| Tag::Compound(entity.data))
+        }
+    };
+    let root = root.ok_or_else(|| CommandError::failed("That target has no data"))?;
+    let value = if path.is_root() {
+        Some(root)
+    } else {
+        path.get(&root)
+    };
+    // `commands.function.error.missing_argument`-style failures: the path must hold a compound.
+    match value {
+        Some(Tag::Compound(compound)) => run_command(source, name_arg(ctx)?, Some(&compound)),
+        _ => Err(CommandError::failed(
+            "Function arguments must be a compound tag",
+        )),
+    }
 }
 
 fn name_arg(ctx: &CommandContext<Source>) -> Result<&str, CommandError> {
@@ -1072,6 +1180,49 @@ mod tests {
         assert!(
             matches!(&actions[0], Action::Broadcast(feedback) if feedback.text.contains("before"))
         );
+    }
+
+    #[test]
+    fn function_with_storage_entity_and_missing_data() {
+        let functions = store(&[("test:greet", "$say hello $(who)")]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, mut received) = source(&tree, functions);
+        source.state.lock().unwrap().storage.insert(
+            "test:args".into(),
+            Tag::Compound(
+                snbt::parse("{outer:{who:\"Storage\"}}")
+                    .map(|tag| match tag {
+                        Tag::Compound(c) => c,
+                        _ => Compound::new(),
+                    })
+                    .unwrap(),
+            ),
+        );
+        // commands.json: `function <name> with storage <source> <path>`.
+        tree.execute(
+            "function test:greet with storage test:args outer",
+            source.clone(),
+        )
+        .unwrap();
+        assert!(broadcasts(&mut received)[0].contains("hello Storage"));
+        // A path that is not a compound, or a missing storage, fails.
+        assert!(
+            tree.execute(
+                "function test:greet with storage test:args outer.who",
+                source.clone()
+            )
+            .is_err()
+        );
+        assert!(
+            tree.execute(
+                "function test:greet with storage test:none {}",
+                source.clone()
+            )
+            .is_err()
+        );
+        // `with entity @s <path>` reads the player's data (a compound at the root).
+        let result = tree.execute("function test:greet with entity @s Brain", source.clone());
+        assert!(result.is_err(), "no such path in the player data");
     }
 
     fn broadcasts(received: &mut tokio::sync::mpsc::UnboundedReceiver<Action>) -> Vec<String> {
