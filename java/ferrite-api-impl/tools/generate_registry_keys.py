@@ -18,7 +18,7 @@ DATA_DRIVEN = ("trim_material", "trim_pattern", "wolf_variant", "wolf_sound_vari
 keys = {}
 ids = {}
 for name in ("item", "block", "menu", "mob_effect", "sound_event", "attribute", "entity_type", "fluid", "game_event", "worldgen/structure_type",
-             "villager_profession", "point_of_interest_type", "villager_type", "data_component_type", "particle_type", "potion"):
+             "villager_profession", "point_of_interest_type", "villager_type", "data_component_type", "particle_type", "potion", "game_rule"):
     entries = registries["minecraft:" + name]["entries"]
     keys[name] = set(entries)
     ids[name] = {key: entry["protocol_id"] for key, entry in entries.items()}

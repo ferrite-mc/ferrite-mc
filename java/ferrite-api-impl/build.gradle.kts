@@ -42,3 +42,22 @@ val generateRegistryKeys by tasks.registering(Exec::class) {
 }
 sourceSets.main { resources.srcDir(registryOutput) }
 tasks.processResources { dependsOn(generateRegistryKeys) }
+
+// Game-rule defaults are not in reports/registries.json: query the locally fetched official jar.
+val gameRuleOutput = layout.buildDirectory.dir("generated/gamerule-resources")
+val generateGameRules = tasks.register<Exec>("generateGameRules") {
+    val versionDir = rootProject.projectDir.resolve("../../vanilla/26.3")
+    inputs.file(rootProject.projectDir.resolve("../../tools/extract_gamerules.py"))
+    inputs.file(rootProject.projectDir.resolve("../../tools/extractor/GameRuleExtractor.java"))
+    inputs.file(versionDir.resolve("lib/server-26.3.jar"))
+    inputs.file(versionDir.resolve("generated/reports/registries.json"))
+    outputs.dir(gameRuleOutput)
+    commandLine("python", rootProject.projectDir.resolve("../../tools/extract_gamerules.py"), versionDir,
+        gameRuleOutput.get().file("ferrite/game-rules.json").asFile, "--verify")
+}
+sourceSets.main { resources.srcDir(gameRuleOutput); resources.exclude("**/gamerule-extractor-classes/**", "**/game-rules-reference.json") }
+tasks.processResources { dependsOn(generateGameRules) }
+tasks.test {
+    dependsOn(generateGameRules)
+    systemProperty("test.gamerule.reference", gameRuleOutput.get().file("ferrite/game-rules-reference.json").asFile.absolutePath)
+}

@@ -52,6 +52,8 @@ public final class Bootstrap {
      * players before {@code onEnable} runs. Pair it with {@link #enablePlugins}.
      */
     public static void startServer() {
+        // Initialize GameRule before plugins can access GameRules: Paper's legacy aliases are circular.
+        org.bukkit.GameRule.values();
         if (org.bukkit.Bukkit.getServer() != null) { server = (FerriteServer) org.bukkit.Bukkit.getServer(); Native.link(); return; }
         Native.link();
         if (!"false".equals(System.getProperty("ferrite.native"))) java.util.logging.Logger.getLogger("").addHandler(new java.util.logging.Handler() {
