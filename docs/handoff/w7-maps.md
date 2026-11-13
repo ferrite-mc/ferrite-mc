@@ -107,7 +107,7 @@ passes alone in 102 s), Java `FerriteMapIdTest` 3 and `FerriteMerchantMapTest` 4
   to a local id and three call-counting tests ignore the allocation call);
   stable clippy moved to 1.100 and flagged six index loops in `menu.rs` (rewritten as iterators);
   and a Windows run lost the connection in `runtime_world_gap7_create_edit_enter_leave_unload_reopen`,
-  which passed on re-run and was later traced, for the AI PR, to an unrelated change of mine rather
+  which passed in the next full run and, in the AI PR, was traced, for the AI PR, to an unrelated change of mine rather
   than to maps.
 * Performance: not measured for maps. `send_held_maps` clones two stacks and looks up the store
   each tick; no benchmark was run, so no speed-up is claimed.
