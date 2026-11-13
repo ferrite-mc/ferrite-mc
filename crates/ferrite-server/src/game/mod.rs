@@ -2497,6 +2497,9 @@ async fn run(
                   }},
                   // Vanilla `ServerPlaceRecipe`: only recipes in the player's recipe book can be placed.
                   GameMessage::Input{uuid,packet:ServerboundPlay::PlaceRecipe(ref place),..} if !command_state.lock().unwrap().more.recipes.get(&uuid).is_some_and(|owned| recipe_packets::display_is_unlocked(owned, place.display_id.0)) => {}
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeSeen{display}}=>{
+                      if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) { recipe_packets::mark_seen(uuid, display, settings.playerdata.as_deref()); }
+                  }
                   GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeBookSettings{book,open,filtering}}=>{
                       if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
                           let mut game = command_state.lock().unwrap();
