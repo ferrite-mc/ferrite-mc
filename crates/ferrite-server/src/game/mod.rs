@@ -4759,18 +4759,13 @@ impl CommandRuntime<'_> {
                 self.run_ride(&target, vehicle.as_ref());
                 false
             }
-            Action::DropItems { pos, stacks } => {
+            Action::DropItems { pos, stacks, table } => {
                 let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                 if self.worlds.owner(self.dimension, chunk).is_none() {
                     self.reply.key("argument.pos.unloaded", &[]);
                     return false;
                 }
-                let total: i32 = stacks.iter().map(|s| s.count).sum();
-                let first = stacks
-                    .first()
-                    .map(|s| commands::item_display(s.item))
-                    .unwrap_or_default();
-                let single = stacks.len() == 1;
+                let (key, args) = commands_loot::success_feedback(&stacks, table.as_deref());
                 self.worlds
                     .schedule_at_chunk(self.dimension, chunk, move |region| {
                         for stack in stacks {
@@ -4781,15 +4776,39 @@ impl CommandRuntime<'_> {
                             }
                         }
                     });
-                if single {
-                    self.reply.key(
-                        "commands.drop.success.single",
-                        &[&total.to_string(), &first],
-                    );
-                } else {
-                    self.reply
-                        .key("commands.drop.success.multiple", &[&total.to_string()]);
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
+                false
+            }
+            Action::LootGive {
+                targets,
+                stacks,
+                table,
+            } => {
+                for target in &targets {
+                    let Some((_, mailbox, _)) = self.mailboxes.get(target) else {
+                        continue;
+                    };
+                    for stack in &stacks {
+                        let components = stack
+                            .components
+                            .added()
+                            .filter_map(|(id, component)| Some((id, component.to_nbt().ok()?)))
+                            .collect();
+                        mailbox.lock().unwrap().push_back(Command::Give {
+                            target: *target,
+                            target_name: String::new(),
+                            item: stack.item,
+                            count: stack.count,
+                            item_name: String::new(),
+                            components,
+                            feedback: None,
+                        });
+                    }
                 }
+                let (key, args) = commands_loot::success_feedback(&stacks, table.as_deref());
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
                 false
             }
             Action::Swing { targets, off_hand } => {

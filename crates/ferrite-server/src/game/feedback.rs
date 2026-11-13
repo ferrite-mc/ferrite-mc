@@ -110,6 +110,13 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.waypoint.modify.style" => "Changed waypoint style of %s",
         "commands.ride.not_riding" => "%s is not riding any vehicle",
         "commands.drop.no_loot_table" => "Entity %s has no loot table",
+        // The 26.3 server jar throws these two keys; the shipped `lang_en_us.json` only has the
+        // old `commands.drop.no_loot_table` (see docs/COMMANDS-STATUS.md, /loot).
+        "commands.drop.no_loot_table.entity" => "Entity %s has no loot table",
+        "commands.drop.no_loot_table.block" => "Block %s has no loot table",
+        "commands.drop.no_held_items" => "Entity can't hold any items",
+        "commands.drop.success.single_with_table" => "Dropped %s %s from loot table %s",
+        "commands.drop.success.multiple_with_table" => "Dropped %s items from loot table %s",
         "commands.item.entity.set.success.single" => "Replaced a slot on %s with %s",
         "commands.item.entity.set.success.multiple" => "Replaced a slot on %s entities with %s",
         "slot.unknown" => "Unknown slot '%s'",

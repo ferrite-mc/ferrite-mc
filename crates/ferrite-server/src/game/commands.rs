@@ -714,10 +714,19 @@ pub enum Action {
         slots: String,
         source: SlotSource,
     },
-    /// `/loot spawn`: drops the stacks as item entities.
+    /// `/loot spawn`: drops the stacks as item entities. `table` is the loot table named in the
+    /// success message (`kill` and `mine` name theirs).
     DropItems {
         pos: [f64; 3],
         stacks: Vec<ferrite_item::ItemStack>,
+        table: Option<String>,
+    },
+    /// `/loot give`: hands the stacks to the players (the overflow drops at their feet) and
+    /// answers with vanilla's loot message instead of `/give`'s.
+    LootGive {
+        targets: Vec<Uuid>,
+        stacks: Vec<ferrite_item::ItemStack>,
+        table: Option<String>,
     },
     /// `/summon minecraft:end_crystal`: the crystal is not a mob, so it has its own action.
     SummonCrystal {

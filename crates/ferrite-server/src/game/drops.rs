@@ -22,6 +22,17 @@ fn tables() -> Option<&'static LootTables> {
 /// Rolls a loot table by id for `/loot`: `(namespaced item id, count)` stacks, or `None` when
 /// the table does not exist (or the vanilla data is missing).
 pub fn roll_table(id: &str, context: &LootContext) -> Option<Vec<(String, i32)>> {
+    Some(
+        roll_table_stacks(id, context)?
+            .into_iter()
+            .map(|stack| (stack.item, stack.count))
+            .collect(),
+    )
+}
+
+/// [`roll_table`] keeping the components loot functions attached (such as a shulker box's
+/// contents copied from the block entity in `context`).
+pub fn roll_table_stacks(id: &str, context: &LootContext) -> Option<Vec<ferrite_loot::LootStack>> {
     let id = if id.contains(':') {
         id.to_owned()
     } else {
@@ -32,7 +43,7 @@ pub fn roll_table(id: &str, context: &LootContext) -> Option<Vec<(String, i32)>>
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(1, |d| d.as_nanos() as u64);
     let mut rng = ferrite_entity::Rng::new(seed);
-    Some(table.roll(context, &mut LootRng(&mut rng)))
+    Some(table.roll_stacks(context, &mut LootRng(&mut rng)))
 }
 
 /// Loads the loot tables off the tick threads, so the first broken block does not stall its
