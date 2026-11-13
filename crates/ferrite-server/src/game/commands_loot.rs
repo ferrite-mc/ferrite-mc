@@ -26,6 +26,8 @@ use super::commands::{
 #[derive(Debug, Clone, Default)]
 pub struct HeldTool {
     pub item: String,
+    /// The item's custom name as plain text, for the `.item` death messages.
+    pub custom_name: Option<String>,
     pub tool_enchantments: BTreeMap<String, i32>,
     pub fortune: i32,
     pub looting: i32,
@@ -48,8 +50,14 @@ impl HeldTool {
             fortune = enchantments.level("minecraft:fortune").unwrap_or(0);
             looting = enchantments.level("minecraft:looting").unwrap_or(0);
         }
+        let custom_name = stack
+            .components
+            .get(component_ids::CUSTOM_NAME)
+            .and_then(|name| name.to_nbt().ok())
+            .and_then(|tag| super::damage_source::plain_text(&tag));
         Some(Self {
             item,
+            custom_name,
             tool_enchantments,
             fortune,
             looting,
@@ -66,6 +74,18 @@ impl HeldTool {
 
 /// Mainhand/offhand tools per player, published by [`Command::ScanInventory`].
 pub static HELD_TOOLS: Mutex<BTreeMap<Uuid, [Option<HeldTool>; 2]>> = Mutex::new(BTreeMap::new());
+
+/// The display name (`[Name]`) of the custom-named item a player holds in the main hand, which
+/// switches a death message to its `.item` variant.
+pub fn held_weapon_name(player: Uuid) -> Option<String> {
+    HELD_TOOLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&player)
+        .and_then(|hands| hands[0].as_ref())
+        .and_then(|held| held.custom_name.as_ref())
+        .map(|name| format!("[{name}]"))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {

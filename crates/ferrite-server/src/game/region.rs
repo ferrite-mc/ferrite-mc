@@ -338,6 +338,13 @@ pub enum Command {
     Kill,
     /// `/damage`: hurt the player on the owning region thread.
     Damage(DamageKind, f32),
+    /// `/damage` with a damage source: like `Damage`, but a fatal hit announces `death_message`
+    /// (built from the damage type and the attacker) instead of the cause's own text.
+    DamageFrom {
+        kind: DamageKind,
+        amount: f32,
+        death_message: String,
+    },
     /// A Paper `EntityScheduler` task for this player, run on the region that owns them.
     PluginEntityTask(ferrite_plugin::EntityTask),
     /// `/effect give`: apply a mob effect on the owning region thread.
@@ -3107,6 +3114,7 @@ impl Player {
         self.survival.health = 1.0;
         self.survival.dead = false;
         self.survival.death_cause = None;
+        self.survival.death_message = None;
         self.survival.death_processed = false;
         self.survival.absorption = 4.0;
         self.apply_effect(MobEffectInstance::new(Effect::Regeneration.id(), 900, 1));
@@ -4565,6 +4573,18 @@ impl Player {
                 }
                 Command::Damage(kind, amount) => {
                     self.hurt(kind, amount);
+                    continue;
+                }
+                Command::DamageFrom {
+                    kind,
+                    amount,
+                    death_message,
+                } => {
+                    self.survival.death_message = Some(death_message);
+                    self.hurt(kind, amount);
+                    if !self.survival.dead {
+                        self.survival.death_message = None;
+                    }
                     continue;
                 }
                 Command::Kill => {
@@ -9781,7 +9801,11 @@ impl Region {
             }
         }
         let kind = p.survival.death_cause.unwrap_or(DamageKind::GenericKill);
-        let message = kind.death_message(&p.name);
+        let message = p
+            .survival
+            .death_message
+            .take()
+            .unwrap_or_else(|| kind.death_message(&p.name));
         let initial = ferrite_plugin::PlayerDeath {
             drops: initial_drops,
             dropped_exp: initial_exp,
@@ -10454,6 +10478,7 @@ impl Region {
         amount: f32,
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
+        credit: Option<Uuid>,
     ) -> bool {
         let key = self.entities.keys().iter().copied().find(|key| {
             self.entities
@@ -10464,6 +10489,10 @@ impl Region {
             return false;
         };
         let source = origin.map(|p| ferrite_math::Vec3::new(p[0], p[1], p[2]));
+        // The causing player gets the kill (loot with `killed_by_player`, advancements).
+        if let Some(player) = credit {
+            mob::credit(&mut self.entities, key, player);
+        }
         if mob::hurt(&mut self.entities, key, amount, source).is_some() {
             if let Some(player) = aggro {
                 mob::retaliate(&mut self.entities, key, player);
@@ -12788,13 +12817,46 @@ mod tests {
         let uuid = record.data.uuid;
         region.add_entities(vec![record]);
         assert!(
-            !region.damage_entity(Uuid::from_u128(99), 1.0, None, None),
+            !region.damage_entity(Uuid::from_u128(99), 1.0, None, None, None),
             "unknown entity"
         );
         assert!(region.pending_hurts.is_empty());
-        assert!(region.damage_entity(uuid, 3.0, Some([5.5, 64.0, 0.5]), None));
+        assert!(region.damage_entity(uuid, 3.0, Some([5.5, 64.0, 0.5]), None, None));
         assert_eq!(region.pending_hurts, vec![uuid]);
     }
+    #[test]
+    fn command_damage_credits_the_causing_player_with_the_kill() {
+        let mut region = Region::default();
+        let record = mob::new_mob(
+            mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        region.add_entities(vec![record]);
+        let player = Uuid::from_u128(7);
+        assert!(region.damage_entity(uuid, 100.0, None, Some(player), Some(player)));
+        let key = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|key| region.entities.data(*key).is_some_and(|d| d.uuid == uuid))
+            .unwrap();
+        // The credit is what makes the death drop `killed_by_player` loot and feed advancements.
+        assert_eq!(
+            mob::state(&region.entities, key).unwrap().last_killer,
+            Some(player)
+        );
+        // `damage` without a causing player leaves any earlier credit alone.
+        let other = Uuid::from_u128(8);
+        assert!(region.damage_entity(uuid, 1.0, None, Some(other), None));
+        assert_eq!(
+            mob::state(&region.entities, key).unwrap().last_killer,
+            Some(player)
+        );
+    }
+
     #[test]
     fn chunk_updates_only_reach_the_matching_dimension() {
         let (overworld, mut overworld_rx) = OutboundSender::channel(1024);

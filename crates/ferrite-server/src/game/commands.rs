@@ -519,7 +519,7 @@ fn english(key: &str) -> &'static str {
 
 fn render(template: &str, args: &[String]) -> String {
     let mut out = String::with_capacity(template.len());
-    let mut args = args.iter();
+    let mut next = 0;
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '%' {
@@ -533,14 +533,43 @@ fn render(template: &str, args: &[String]) -> String {
             }
             Some('s') => {
                 chars.next();
-                if let Some(value) = args.next() {
+                if let Some(value) = args.get(next) {
                     out.push_str(value);
+                }
+                next += 1;
+            }
+            // Positional `%1$s`, as the death messages use.
+            Some(digit) if digit.is_ascii_digit() => {
+                let mut lookahead = chars.clone();
+                let mut number = String::new();
+                while let Some(d) = lookahead.peek().copied().filter(char::is_ascii_digit) {
+                    number.push(d);
+                    lookahead.next();
+                }
+                if lookahead.next() == Some('$') && lookahead.next() == Some('s') {
+                    if let Some(value) = number
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .and_then(|n| args.get(n))
+                    {
+                        out.push_str(value);
+                    }
+                    chars = lookahead;
+                } else {
+                    out.push('%');
                 }
             }
             _ => out.push('%'),
         }
     }
     out
+}
+
+/// The English text of a translation key (the loaded `lang_en_us.json`), with `%s` and `%1$s`
+/// arguments filled in; `None` when the table is not loaded or has no such key.
+pub(crate) fn translate_key(key: &str, args: &[String]) -> Option<String> {
+    translate(key).map(|template| render(template, args))
 }
 
 /// A parsed teleport destination. Locations are already resolved against the source.
@@ -676,8 +705,12 @@ pub enum Action {
         /// `at <location>`: where the damage comes from, for knockback.
         at: Option<[f64; 3]>,
         /// `by <entity>`: the attacker; mobs hit by a player turn on them and are knocked back
-        /// from them. (`from <cause>` only matters for death messages, which are not modelled.)
+        /// from them. (`from <cause>` is the causing entity, see `cause`.)
         by: Option<EntityTarget>,
+        /// `by <entity> from <cause>`: the entity that caused the damage through `by` (an arrow's
+        /// shooter). It gets the kill credit and is named in the death message; `by` alone is
+        /// both the direct and the causing entity.
+        cause: Option<EntityTarget>,
     },
     /// `/forceload`: chunks to start or stop holding in a dimension.
     ForceLoad {

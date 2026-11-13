@@ -75,6 +75,7 @@ mod commands_server;
 mod commands_world;
 mod container;
 mod crafting;
+mod damage_source;
 pub use crafting::match_for_plugin as match_crafting_for_plugin;
 mod dispenser;
 pub(crate) mod drops;
@@ -3924,6 +3925,7 @@ impl CommandRuntime<'_> {
         amount: f32,
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
+        credit: Option<Uuid>,
     ) {
         let from = self
             .state
@@ -3938,7 +3940,7 @@ impl CommandRuntime<'_> {
         if self.worlds.owner(self.dimension, chunk).is_some() {
             self.worlds
                 .schedule_at_chunk(self.dimension, chunk, move |region| {
-                    region.damage_entity(uuid, amount, origin, aggro);
+                    region.damage_entity(uuid, amount, origin, aggro, credit);
                 });
         }
     }
@@ -4401,6 +4403,7 @@ impl CommandRuntime<'_> {
                 damage_type,
                 at,
                 by,
+                cause,
             } => {
                 let targets = match self.selection(&targets) {
                     Ok(targets) => targets,
@@ -4409,37 +4412,103 @@ impl CommandRuntime<'_> {
                         return false;
                     }
                 };
-                // The attacker, when `by` names one entity, decides knockback and aggro.
-                let attacker = match by {
-                    Some(by) => self
-                        .selection(&by)
+                // `by` is the direct entity (knockback comes from it); `from` names the causing
+                // entity behind it, which defaults to `by` (`new DamageSource(type, by[, cause])`).
+                let direct = by.and_then(|by| {
+                    self.selection(&by)
                         .ok()
-                        .and_then(|found| found.into_iter().next()),
-                    None => None,
-                };
-                let origin = at.or_else(|| attacker.as_ref().map(|a| a.pos));
-                let aggro = attacker.as_ref().filter(|a| a.player).map(|a| a.uuid);
+                        .and_then(|found| found.into_iter().next())
+                });
+                let causing = cause
+                    .and_then(|cause| {
+                        self.selection(&cause)
+                            .ok()
+                            .and_then(|found| found.into_iter().next())
+                    })
+                    .or_else(|| direct.clone());
+                let origin = at.or_else(|| direct.as_ref().map(|a| a.pos));
+                // A causing player gets the kill credit and the mob's anger.
+                let credit = causing.as_ref().filter(|a| a.player).map(|a| a.uuid);
                 let kind = damage_kind(&damage_type);
+                let props = damage_source::props(&damage_type);
+                let party = |entity: &selectors::SelectedEntity| damage_source::Party {
+                    name: entity.name.clone(),
+                    living: entity.kind.is_none_or(|kind| {
+                        ferrite_data::entity_props::get(kind).category != "misc"
+                    }),
+                    player: entity.player,
+                    named_weapon: if entity.player {
+                        commands_loot::held_weapon_name(entity.uuid)
+                    } else {
+                        None
+                    },
+                };
+                let source = damage_source::Source::new(
+                    &damage_type,
+                    direct.as_ref().map(party),
+                    causing.as_ref().map(party),
+                );
+                let (difficulty, game_modes) = {
+                    let state = self.state.lock().unwrap();
+                    (
+                        state.difficulty,
+                        state
+                            .players
+                            .iter()
+                            .map(|p| (p.uuid, p.game_mode))
+                            .collect::<std::collections::HashMap<_, _>>(),
+                    )
+                };
+                let bypasses_invulnerability = ferrite_data::tags::contains(
+                    "damage_type",
+                    "bypasses_invulnerability",
+                    &damage_type,
+                );
                 let mut hurt = 0;
                 for target in &targets {
                     if target.player {
+                        // `Player.hurtServer`: creative and spectator players are invulnerable
+                        // except to `bypasses_invulnerability`, and the damage scales with the
+                        // difficulty when the type says so.
+                        let mode = game_modes.get(&target.uuid).copied().unwrap_or(0);
+                        if matches!(mode, 1 | 3) && !bypasses_invulnerability {
+                            continue;
+                        }
+                        let applied = match &props {
+                            Some(props) if source.scales_with_difficulty(props) => {
+                                damage_source::scale_for_difficulty(amount, difficulty)
+                            }
+                            _ => amount,
+                        };
+                        if applied <= 0.0 {
+                            continue;
+                        }
                         if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
-                            mailbox
-                                .lock()
-                                .unwrap()
-                                .push_back(Command::Damage(kind, amount));
+                            let killer = causing.as_ref().map(|a| a.name.as_str());
+                            let message = props.as_ref().map(|props| {
+                                damage_source::death_message(props, &target.name, &source, killer)
+                            });
+                            let command = match message {
+                                Some(death_message) => Command::DamageFrom {
+                                    kind,
+                                    amount: applied,
+                                    death_message,
+                                },
+                                None => Command::Damage(kind, applied),
+                            };
+                            mailbox.lock().unwrap().push_back(command);
                             hurt += 1;
                             self.reply.key(
                                 "commands.damage.success",
-                                &[&format!("{amount}"), &target.name],
+                                &[&ferrite_command::error::java_float(amount), &target.name],
                             );
                         }
                     } else {
-                        self.damage_entity(target.uuid, target.pos, amount, origin, aggro);
+                        self.damage_entity(target.uuid, target.pos, amount, origin, credit, credit);
                         hurt += 1;
                         self.reply.key(
                             "commands.damage.success",
-                            &[&format!("{amount}"), &target.name],
+                            &[&ferrite_command::error::java_float(amount), &target.name],
                         );
                     }
                 }

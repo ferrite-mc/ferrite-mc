@@ -1961,6 +1961,20 @@ fn damage_tree() -> NodeBuilder<Source> {
             Some(_) => Some(entity(ctx, "entity")?),
             None => None,
         };
+        let cause = match ctx.argument("cause") {
+            Some(_) => Some(entity(ctx, "cause")?),
+            None => None,
+        };
+        // An id that is not one of the data-driven damage types is rejected like any registry
+        // argument (only checkable when the vanilla data is on this machine).
+        if super::damage_source::data_available()
+            && super::damage_source::props(&damage_type).is_none()
+        {
+            return Err(failure(
+                "argument.resource.not_found",
+                vec![damage_type, "minecraft:damage_type".into()],
+            ));
+        }
         send(
             ctx.source(),
             Action::Damage {
@@ -1969,9 +1983,11 @@ fn damage_tree() -> NodeBuilder<Source> {
                 damage_type,
                 at,
                 by,
+                cause,
             },
         )?;
-        Ok(amount as i32)
+        // Vanilla's `/damage` result is 1 on success (it fails with "invulnerable" otherwise).
+        Ok(1)
     }
     let damage_type = || {
         argument::<Source>(
@@ -2891,6 +2907,33 @@ mod tests {
             &actions[0],
             Action::Damage { damage_type, .. } if damage_type == "minecraft:fall" || damage_type == "fall"
         ));
+        // `by` alone is both the direct and the causing entity; `from` names a different cause.
+        let (result, actions) = run("damage @s 4 arrow by @p", 2, fresh(), None);
+        assert_eq!(result.unwrap(), 1, "vanilla's /damage returns 1");
+        assert!(matches!(
+            &actions[0],
+            Action::Damage {
+                by: Some(_),
+                cause: None,
+                ..
+            }
+        ));
+        let (_, actions) = run("damage @s 4 arrow by @p from @s", 2, fresh(), None);
+        assert!(matches!(
+            &actions[0],
+            Action::Damage {
+                by: Some(_),
+                cause: Some(_),
+                ..
+            }
+        ));
+        if super::super::damage_source::data_available() {
+            let error = run("damage @s 4 minecraft:not_a_type", 2, fresh(), None)
+                .0
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not_a_type"), "{error}");
+        }
         assert!(run("damage @s -1", 2, fresh(), None).0.is_err());
         assert!(run("damage @s 4", 1, fresh(), None).0.is_err());
     }
