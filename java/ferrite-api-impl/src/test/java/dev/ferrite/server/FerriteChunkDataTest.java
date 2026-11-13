@@ -116,6 +116,15 @@ class FerriteChunkDataTest {
         assertEquals(-2, future.get().getZ());
     }
 
+    @Test void chunkRectangleAsyncRunsThePostCallbackOnceAndRejectsAnInvertedRange() {
+        var world = org.bukkit.Bukkit.getWorld("chunkdata");
+        int[] runs = {0};
+        world.getChunksAtAsync(-1, -1, 1, 2, true, () -> runs[0]++);
+        assertEquals(1, runs[0]);
+        assertThrows(IllegalArgumentException.class, () -> world.getChunksAtAsync(2, 0, 1, 0, false, () -> runs[0]++));
+        assertEquals(1, runs[0]);
+    }
+
     @Test void worldFlagsAreRememberedAndAutoSaveTellsTheHost() {
         var world = org.bukkit.Bukkit.getWorld("chunkdata");
         assertTrue(world.getPVP());

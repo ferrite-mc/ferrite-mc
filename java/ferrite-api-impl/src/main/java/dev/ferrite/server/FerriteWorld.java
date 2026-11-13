@@ -431,6 +431,15 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 done.complete(found);
                 return done;
             }
+            case "getChunksAtAsync" -> {
+                // Same contract as getChunkAtAsync: chunk handles are views, so every chunk of the rectangle
+                // (chunk coordinates, inclusive) is available at once and the callback runs right away.
+                int minX = (int) args[0], minZ = (int) args[1], maxX = (int) args[2], maxZ = (int) args[3];
+                if (minX > maxX || minZ > maxZ) throw new IllegalArgumentException("minimum chunk coordinate is greater than the maximum");
+                for (int cx = minX; cx <= maxX; cx++) for (int cz = minZ; cz <= maxZ; cz++) chunk(cx, cz);
+                ((Runnable) java.util.Objects.requireNonNull(args[5], "post")).run();
+                return null;
+            }
             case "isChunkLoaded" -> {
                 int cx = args[0] instanceof org.bukkit.Chunk c ? c.getX() : (int) args[0];
                 int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
