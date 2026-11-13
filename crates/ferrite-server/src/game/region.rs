@@ -294,6 +294,7 @@ pub enum Command {
         repair: i32,
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
+        book: Option<ferrite_plugin::BookFields>,
     },
     /// A plugin pointed the filled map in a slot at a saved map.
     ItemMapId {
@@ -484,6 +485,7 @@ pub(super) struct ItemMetaFields {
     pub repair: i32,
     pub flags: Vec<String>,
     pub custom_data: Option<ferrite_nbt::Compound>,
+    pub book: Option<ferrite_plugin::BookFields>,
 }
 
 /// Maps Bukkit item flags to the components hidden by `minecraft:tooltip_display`.
@@ -531,9 +533,12 @@ pub(super) fn with_meta(
         ids::REPAIR_COST,
         ids::TOOLTIP_DISPLAY,
         ids::CUSTOM_DATA,
+        ids::WRITABLE_BOOK_CONTENT,
+        ids::WRITTEN_BOOK_CONTENT,
     ] {
         stack.components.remove(id);
     }
+    let item = stack.name().map(str::to_owned);
     let mut put = |component: Component| {
         if let Some(id) = component.type_id() {
             stack.components.insert(id, component);
@@ -572,7 +577,54 @@ pub(super) fn with_meta(
     {
         put(Component::CustomData(data.clone()));
     }
+    // A book's pages belong to its own item only: book metadata sent for any other item has
+    // nothing to attach to and is left out rather than put on the wrong stack.
+    if let Some(book) = &meta.book
+        && let Some(content) = book_content(item.as_deref(), book)
+    {
+        put(content);
+    }
     stack
+}
+
+/// The book component for a `BookMeta`, when `item` is the matching book item.
+fn book_content(
+    item: Option<&str>,
+    book: &ferrite_plugin::BookFields,
+) -> Option<ferrite_item::Component> {
+    use ferrite_item::{Component, Filterable, WritableBookContent, WrittenBookContent};
+    let plain = |raw: String| Filterable {
+        raw,
+        filtered: None,
+    };
+    match (item, book.written) {
+        (Some("minecraft:written_book"), true) => {
+            Some(Component::WrittenBookContent(WrittenBookContent {
+                title: plain(book.title.clone().unwrap_or_default()),
+                author: book.author.clone().unwrap_or_default(),
+                generation: book.generation,
+                pages: book
+                    .pages
+                    .iter()
+                    .map(|page| {
+                        ferrite_text::Component::from_json(page)
+                            .ok()
+                            .map(|text| Filterable {
+                                raw: text,
+                                filtered: None,
+                            })
+                    })
+                    .collect::<Option<_>>()?,
+                resolved: false,
+            }))
+        }
+        (Some("minecraft:writable_book"), false) => {
+            Some(Component::WritableBookContent(WritableBookContent {
+                pages: book.pages.iter().cloned().map(plain).collect(),
+            }))
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn worn_stack(
@@ -4389,6 +4441,7 @@ impl Player {
                     repair,
                     flags,
                     custom_data,
+                    book,
                 } => {
                     self.set_item_meta(
                         slot,
@@ -4401,6 +4454,7 @@ impl Player {
                             repair,
                             flags,
                             custom_data,
+                            book,
                         },
                     );
                     continue;
@@ -13826,6 +13880,7 @@ mod worn_stack_tests {
                 data.insert("ferrite:level".into(), ferrite_nbt::Tag::Int(12));
                 data
             }),
+            book: None,
         };
         let stack = with_meta(ferrite_item::ItemStack::with_count(sword, 1), &meta);
         for id in [
@@ -13883,6 +13938,7 @@ mod worn_stack_tests {
             repair: 0,
             flags: vec![],
             custom_data: None,
+            book: None,
         };
         let cleared = with_meta(stack, &bare);
         assert!(
@@ -13900,6 +13956,124 @@ mod worn_stack_tests {
         ferrite_protocol::Encode::encode(&book, &mut wire);
         assert!(wire.windows(3).any(|w| w == b"one"));
         assert!(wire.windows(3).any(|w| w == b"two"));
+    }
+
+    fn book_meta(book: ferrite_plugin::BookFields) -> ItemMetaFields {
+        ItemMetaFields {
+            name: None,
+            lore: Vec::new(),
+            enchants: Vec::new(),
+            unbreakable: false,
+            model: None,
+            repair: 0,
+            flags: Vec::new(),
+            custom_data: None,
+            book: Some(book),
+        }
+    }
+
+    #[test]
+    fn plugin_book_metadata_becomes_typed_components_that_survive_save_and_wire() {
+        let signed = ferrite_plugin::BookFields {
+            written: true,
+            title: Some("Das Buch ✨".into()),
+            author: Some("Álvaro".into()),
+            generation: 2,
+            pages: vec![
+                r#"{"text":"Seite 1: Grüße 日本語 😀"}"#.into(),
+                r#"{"text":"zweite","color":"red"}"#.into(),
+            ],
+        };
+        let stack = with_meta(
+            ferrite_item::ItemStack::from_name("written_book").unwrap(),
+            &book_meta(signed),
+        );
+        let Some(ferrite_item::Component::WrittenBookContent(content)) = stack
+            .components
+            .get(ferrite_item::component_ids::WRITTEN_BOOK_CONTENT)
+        else {
+            panic!("a typed written book component");
+        };
+        assert_eq!(content.title.raw, "Das Buch ✨");
+        assert_eq!(content.author, "Álvaro");
+        assert_eq!(content.generation, 2);
+        assert_eq!(content.pages.len(), 2);
+        // Saved to the world and loaded again.
+        let saved = ferrite_item::ItemStack::from_nbt(&stack.to_nbt().unwrap()).unwrap();
+        assert_eq!(saved, stack);
+        // Sent to a client and read back.
+        let wire =
+            ferrite_item::ItemStack::decode_network(&stack.encode_network().unwrap()).unwrap();
+        assert_eq!(wire, stack);
+
+        let quill = ferrite_plugin::BookFields {
+            written: false,
+            title: None,
+            author: None,
+            generation: 0,
+            pages: vec!["§cred".into(), String::new(), "😀".into()],
+        };
+        let stack = with_meta(
+            ferrite_item::ItemStack::from_name("writable_book").unwrap(),
+            &book_meta(quill),
+        );
+        assert_eq!(
+            ferrite_item::ItemStack::from_nbt(&stack.to_nbt().unwrap()).unwrap(),
+            stack
+        );
+        let Some(ferrite_item::Component::WritableBookContent(content)) = stack
+            .components
+            .get(ferrite_item::component_ids::WRITABLE_BOOK_CONTENT)
+        else {
+            panic!("a typed writable book component");
+        };
+        assert_eq!(content.pages.len(), 3);
+        assert_eq!(content.pages[1].raw, "");
+    }
+
+    #[test]
+    fn book_metadata_on_another_item_is_left_off_and_replaces_older_pages() {
+        let signed = ferrite_plugin::BookFields {
+            written: true,
+            title: Some("T".into()),
+            author: Some("A".into()),
+            generation: 0,
+            pages: vec![r#"{"text":"p"}"#.into()],
+        };
+        // A book and quill cannot take a signed book's pages, and a stone takes none.
+        for item in ["writable_book", "stone"] {
+            let stack = with_meta(
+                ferrite_item::ItemStack::from_name(item).unwrap(),
+                &book_meta(signed.clone()),
+            );
+            assert!(
+                stack
+                    .components
+                    .get(ferrite_item::component_ids::WRITTEN_BOOK_CONTENT)
+                    .is_none()
+            );
+            assert!(
+                stack
+                    .components
+                    .get(ferrite_item::component_ids::WRITABLE_BOOK_CONTENT)
+                    .is_none()
+            );
+        }
+        // Writing metadata again replaces the pages instead of appending to them.
+        let first = with_meta(
+            ferrite_item::ItemStack::from_name("written_book").unwrap(),
+            &book_meta(signed.clone()),
+        );
+        let mut second = signed;
+        second.pages = vec![r#"{"text":"a"}"#.into(), r#"{"text":"b"}"#.into()];
+        let replaced = with_meta(first, &book_meta(second));
+        let Some(ferrite_item::Component::WrittenBookContent(content)) = replaced
+            .components
+            .get(ferrite_item::component_ids::WRITTEN_BOOK_CONTENT)
+        else {
+            panic!("a written book component");
+        };
+        assert_eq!(content.pages.len(), 2);
     }
 
     #[test]

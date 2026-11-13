@@ -127,6 +127,12 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
                 Some(pdc) if !pdc.is_empty() => Some(item_pdc(pdc)?),
                 _ => None,
             };
+            // The book field is optional; one that is present but unreadable refuses the whole
+            // call, so a half-written book is never applied.
+            let book = match fields.next() {
+                Some(book) if !book.is_empty() => Some(item_book(book)?),
+                _ => None,
+            };
             Some(PlayerCommand::ItemMeta {
                 player,
                 slot,
@@ -138,6 +144,7 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
                 repair,
                 flags,
                 custom_data,
+                book,
             })
         }
         "setItemMapId(int,int)" => Some(PlayerCommand::ItemMapId {
@@ -175,6 +182,77 @@ fn is_item_flag(flag: &str) -> bool {
             | "HIDE_STORED_ENCHANTS"
             | "HIDE_ADDITIONAL_TOOLTIP"
     )
+}
+
+/// The most pages a book holds, and the most characters a page of a book and quill holds
+/// (vanilla `WritableBookContent` / `WrittenBookContent` codecs).
+const BOOK_MAX_PAGES: usize = 100;
+const WRITABLE_PAGE_CHARS: usize = 1024;
+/// The longest title of a signed book, in UTF-16 units.
+const BOOK_TITLE_UNITS: usize = 32;
+
+/// Decodes the book field of `setItemMeta`: a JSON object
+/// `{"k":"B"|"W","t":title,"a":author,"g":generation,"p":[pages]}`. JSON keeps any text a page
+/// can hold apart from the field separators. Over-long books, unknown kinds and pages that are
+/// not text components are refused, never trimmed.
+fn item_book(json: &str) -> Option<ferrite_plugin::BookFields> {
+    use serde_json::Value;
+    let Value::Object(object) = serde_json::from_str(json).ok()? else {
+        return None;
+    };
+    let written = match object.get("k")?.as_str()? {
+        "B" => true,
+        "W" => false,
+        _ => return None,
+    };
+    let text = |key: &str| match object.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => Some(Some(text.clone())),
+        Some(_) => None,
+    };
+    let title = text("t")?;
+    let author = text("a")?;
+    let generation = i32::try_from(object.get("g")?.as_i64()?)
+        .ok()
+        .filter(|generation| (0..=3).contains(generation))?;
+    let pages: Vec<String> = object
+        .get("p")?
+        .as_array()?
+        .iter()
+        .map(|page| page.as_str().map(str::to_owned))
+        .collect::<Option<_>>()?;
+    if pages.len() > BOOK_MAX_PAGES {
+        return None;
+    }
+    if written {
+        if title
+            .as_ref()
+            .is_some_and(|title| title.encode_utf16().count() > BOOK_TITLE_UNITS)
+        {
+            return None;
+        }
+        if pages
+            .iter()
+            .any(|page| ferrite_text::Component::from_json(page).is_err())
+        {
+            return None;
+        }
+    } else if title.is_some()
+        || author.is_some()
+        || generation != 0
+        || pages
+            .iter()
+            .any(|page| page.chars().count() > WRITABLE_PAGE_CHARS)
+    {
+        return None;
+    }
+    Some(ferrite_plugin::BookFields {
+        written,
+        title,
+        author,
+        generation,
+        pages,
+    })
 }
 
 /// The deepest nesting of containers and lists the bridge accepts (the Java side refuses the
@@ -776,7 +854,114 @@ mod tests {
                     data.insert("ferrite:level".into(), ferrite_nbt::Tag::Int(12));
                     data
                 }),
+                book: None,
             })
+        );
+    }
+
+    fn meta_call(book: &str) -> HostCall {
+        HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "setItemMeta(int,String)".into(),
+            args: vec![
+                "2".into(),
+                ["", "", "", "0", "", "0", "", "", book].join("\u{1e}"),
+            ],
+        }
+    }
+
+    fn book_of(call: &HostCall) -> Option<Option<ferrite_plugin::BookFields>> {
+        match inventory_command(call)? {
+            PlayerCommand::ItemMeta { book, .. } => Some(book),
+            other => panic!("expected an item meta command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_written_book_arrives_with_unicode_pages_and_its_generation() {
+        let json = serde_json::json!({
+            "k": "B",
+            "t": "Das Buch ✨",
+            "a": "Álvaro",
+            "g": 2,
+            "p": [
+                r#"{"text":"Seite 1: Grüße 日本語 😀"}"#,
+                "{\"text\":\"a\\u001eb\\u001dc\"}",
+            ],
+        })
+        .to_string();
+        assert!(
+            !json.contains('\u{1e}') && !json.contains('\u{1d}'),
+            "JSON escapes the control characters that separate the fields"
+        );
+        let book = book_of(&meta_call(&json)).unwrap().expect("a book");
+        assert!(book.written);
+        assert_eq!(book.title.as_deref(), Some("Das Buch ✨"));
+        assert_eq!(book.author.as_deref(), Some("Álvaro"));
+        assert_eq!(book.generation, 2);
+        assert_eq!(book.pages.len(), 2);
+        assert!(book.pages[0].contains("日本語 😀"));
+        assert_eq!(
+            book.pages[1], r#"{"text":"a\u001eb\u001dc"}"#,
+            "the page arrives exactly as sent"
+        );
+        assert!(ferrite_text::Component::from_json(&book.pages[1]).is_ok());
+        // A call with no book field has no book.
+        assert_eq!(book_of(&meta_call("")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_book_and_quill_carries_plain_pages_only() {
+        let json = r#"{"k":"W","t":null,"a":null,"g":0,"p":["§cred page","second"]}"#;
+        let book = book_of(&meta_call(json)).unwrap().expect("a book");
+        assert!(!book.written);
+        assert_eq!(book.pages, ["§cred page", "second"]);
+    }
+
+    #[test]
+    fn malformed_or_over_long_books_refuse_the_whole_call() {
+        let pages = |n: usize| vec!["{\"text\":\"p\"}"; n];
+        let over = |len: usize| "x".repeat(len);
+        for bad in [
+            "not json".to_owned(),
+            "[]".to_owned(),
+            r#"{"k":"X","g":0,"p":[]}"#.to_owned(),
+            r#"{"k":"B","g":9,"p":[]}"#.to_owned(),
+            r#"{"k":"B","g":-1,"p":[]}"#.to_owned(),
+            r#"{"k":"B","g":0}"#.to_owned(),
+            r#"{"k":"B","g":0,"p":[1]}"#.to_owned(),
+            r#"{"k":"B","g":0,"p":["not a component {"]}"#.to_owned(),
+            serde_json::json!({"k":"B","g":0,"p":pages(101)}).to_string(),
+            serde_json::json!({"k":"B","t":over(33),"g":0,"p":[]}).to_string(),
+            serde_json::json!({"k":"W","g":0,"p":[over(1025)]}).to_string(),
+            // A book and quill has no title, author or generation.
+            r#"{"k":"W","t":"T","g":0,"p":[]}"#.to_owned(),
+            r#"{"k":"W","g":1,"p":[]}"#.to_owned(),
+        ] {
+            assert!(book_of(&meta_call(&bad)).is_none(), "{bad} must be refused");
+        }
+        // The limits themselves are allowed.
+        for good in [
+            serde_json::json!({"k":"B","t":over(32),"g":3,"p":pages(100)}).to_string(),
+            serde_json::json!({"k":"W","g":0,"p":vec![over(1024); 100]}).to_string(),
+            r#"{"k":"B","g":0,"p":[]}"#.to_owned(),
+        ] {
+            assert!(book_of(&meta_call(&good)).is_some(), "limit case refused");
+        }
+        // 32 UTF-16 units, not 32 chars: sixteen emoji are 32 units, seventeen are 34.
+        let emoji = |n: usize| "😀".repeat(n);
+        assert!(
+            book_of(&meta_call(
+                &serde_json::json!({"k":"B","t":emoji(16),"g":0,"p":[]}).to_string()
+            ))
+            .is_some()
+        );
+        assert!(
+            book_of(&meta_call(
+                &serde_json::json!({"k":"B","t":emoji(17),"g":0,"p":[]}).to_string()
+            ))
+            .is_none()
         );
     }
 

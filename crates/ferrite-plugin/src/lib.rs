@@ -233,6 +233,21 @@ pub struct PlayerLocation {
     pub yaw: f32,
     pub pitch: f32,
 }
+/// The book a plugin writes onto a writable or written book (Bukkit `BookMeta`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BookFields {
+    /// A signed book (`written_book`) rather than a book and quill (`writable_book`).
+    pub written: bool,
+    /// The title of a signed book.
+    pub title: Option<String>,
+    /// The author of a signed book.
+    pub author: Option<String>,
+    /// Copy generation: 0 original, 1 copy of the original, 2 copy of a copy, 3 tattered.
+    pub generation: i32,
+    /// One entry per page: text component JSON for a signed book, plain text for a writable one.
+    pub pages: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemSnapshot {
     pub material: String,
@@ -590,6 +605,7 @@ pub enum PlayerCommand {
         repair: i32,
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
+        book: Option<BookFields>,
     },
     /// Points the filled map in a slot at saved map `id` (Bukkit `MapMeta#setMapView`).
     ItemMapId {

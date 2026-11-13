@@ -45,15 +45,33 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
             var flags = new java.util.TreeSet<String>();
             for (var flag : worn.getItemFlags()) flags.add(flag.name());
             if (!flags.isEmpty()) fresh.addItemFlags(worn.getItemFlags().toArray(org.bukkit.inventory.ItemFlag[]::new));
+            // A book's title, author, generation and pages travel as one JSON field.
+            String book = null;
+            if (worn instanceof org.bukkit.inventory.meta.BookMeta wb && fresh instanceof org.bukkit.inventory.meta.BookMeta fb) {
+                boolean written = item.getType() == org.bukkit.Material.WRITTEN_BOOK;
+                var legacy = net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection();
+                var json = new com.google.gson.JsonObject();
+                json.addProperty("k", written ? "B" : "W");
+                if (written && wb.hasTitle()) { fb.title(wb.title()); json.addProperty("t", legacy.serialize(wb.title())); }
+                if (written && wb.hasAuthor()) { fb.author(wb.author()); json.addProperty("a", legacy.serialize(wb.author())); }
+                int generation = written && wb.hasGeneration() ? wb.getGeneration().ordinal() : 0;
+                if (generation > 0) fb.setGeneration(wb.getGeneration());
+                json.addProperty("g", generation);
+                var pages = new com.google.gson.JsonArray();
+                for (var page : wb.pages()) pages.add(written ? gson.serialize(page) : legacy.serialize(page));
+                fb.pages(wb.pages());
+                json.add("p", pages);
+                if (!wb.pages().isEmpty() || (written && (wb.hasTitle() || wb.hasAuthor() || generation > 0))) book = json.toString();
+            }
             var data = new FerriteDataContainer();
             worn.getPersistentDataContainer().copyTo(data, true);
             data.copyTo(fresh.getPersistentDataContainer(), true);
-            if (!fresh.equals(worn)) throw new UnsupportedOperationException("Ferrite: inventory metadata beyond name, lore, enchantments, unbreakable, model data, repair cost, item flags, persistent data and a map view is not implemented");
+            if (!fresh.equals(worn)) throw new UnsupportedOperationException("Ferrite: inventory metadata beyond name, lore, enchantments, unbreakable, model data, repair cost, item flags, persistent data, book content and a map view is not implemented");
             meta = String.join("\u001e", name,
                 lore == null ? "" : String.join("\u001d", lore.stream().map(gson::serialize).toList()),
                 String.join("\u001d", enchants), worn.isUnbreakable() ? "1" : "0", model == null ? "" : model.toString(), Integer.toString(repair),
-                String.join(",", flags), data.toSnbt());
-            if (name.isEmpty() && lore == null && enchants.isEmpty() && !worn.isUnbreakable() && model == null && repair == 0 && flags.isEmpty() && data.isEmpty()) meta = null;
+                String.join(",", flags), data.toSnbt(), book == null ? "" : book);
+            if (name.isEmpty() && lore == null && enchants.isEmpty() && !worn.isUnbreakable() && model == null && repair == 0 && flags.isEmpty() && data.isEmpty() && book == null) meta = null;
         }
         String material = item == null ? "" : item.getType().getKey().toString();
         int amount = item == null ? 0 : item.getAmount();
