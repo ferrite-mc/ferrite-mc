@@ -873,7 +873,8 @@ impl Player {
                 .in_world(match self.world_id {
                     super::WorldId::Runtime(id) => Some(id),
                     super::WorldId::Vanilla(_) => None,
-                }),
+                })
+                .riding(super::ride::vehicle_of(self.uuid)),
             )
         {
             tracing::error!(%error, "failed to save player data");

@@ -21,3 +21,9 @@ $env:JAVA_HOME = 'C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot'
 All 3 new API tests failed before the fix. Final focused **15 passed**, full Java **296 tests, 0 failures/errors/skips**, build/shadedJar passed. Inverting the default-method condition made the CUSTOM regression fail; restored and reran final checks. No dependencies, assets, test exclusions, suppression, Rust changes or host op changes. Diff/security/correctness review and git diff --check passed. Read-only existing vanilla junction reused. No biome mutation, terrain generation, world physics, datapack reload, live client or gameplay validation claim.
 
 Shared hunks: #19 helper's type map; customBiome fallback only; generator's new biome ID block. Preserve #13's distinct data-driven IDs and value-property helper, plus #16/#18 factories and remote-owned behavior. Queue stays in original w7-registry-api worktree.
+
+## Integration-only update after user scope stop
+
+No API scope was added. Merged updated #19 head `c30d6f0370fa50dbc329c068b9ed5e08a51dd216`, which contains main `d55af6bae6a99e95c8a9edbbb33e1bbad2dd280c` (#13/#16/#17), through a normal two-parent merge. Resolved the shared generator condition as `name in DATA_DRIVEN or name == "worldgen/biome"`, retaining all existing generated IDs and biome IDs together. The combined explicit/legacy/property/generic factory chain from #19 remains intact; incoming Rust changes are unchanged from main.
+
+Final integrated verification: **34 focused tests**, **315 full Java tests**, 0 failures/errors/skips; Java25 wrapper `test build`/shadedJar passed after the final code edit. Tests unchanged, diff/check/correctness review passed. The pushed merge head is the exact final SHA. #20 remains based on #19 for coordinator review/merge; no force push, self-merge or release changes.

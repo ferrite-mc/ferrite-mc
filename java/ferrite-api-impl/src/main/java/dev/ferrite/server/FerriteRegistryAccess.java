@@ -33,6 +33,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
     }
     static boolean contains(String registry, org.bukkit.NamespacedKey key) { return KEYS.getOrDefault(registry, java.util.Set.of()).contains(key.toString()); }
     @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) {
+        if (type == org.bukkit.GameRule.class) return cast(cached("game_rule", FerriteRegistryAccess::gameRuleRegistry));
         if (type == org.bukkit.block.BlockType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.BLOCK);
         if (type == org.bukkit.inventory.ItemType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.ITEM);
         if (type == org.bukkit.inventory.MenuType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.MENU);
@@ -53,6 +54,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         return unavailable(type.getName());
     }
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(io.papermc.paper.registry.RegistryKey<T> type) {
+        if (type.equals(io.papermc.paper.registry.RegistryKey.GAME_RULE)) return cast(cached("game_rule", FerriteRegistryAccess::gameRuleRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.MENU)) return cast(cached("menu", FerriteRegistryAccess::menuRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.BLOCK)) return cast(cached("block", FerriteRegistryAccess::blockRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.ITEM)) return cast(cached("item", FerriteRegistryAccess::itemRegistry));
@@ -370,9 +372,11 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
                 T existing = entries.get(key);
                 if (existing != null) return existing;
                 var k = key;
-                T value = factory != null ? factory.apply(key) : FerriteLegacyRegistryValues.supports(kind)
-                    ? FerriteLegacyRegistryValues.create(kind, key, type)
-                    : type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
+                T value;
+                if (factory != null) value = factory.apply(key);
+                else if (FerriteLegacyRegistryValues.supports(kind)) value = FerriteLegacyRegistryValues.create(kind, key, type);
+                else if (FerriteRegistryValueProperties.supports(kind)) value = FerriteRegistryValueProperties.create(kind, key, type);
+                else value = type.cast(java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> switch (method.getName()) {
                     case "getKey", "key" -> k;
                     case "name", "getName" -> k.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_');
                     case "translationKey", "getTranslationKey" -> kind + "." + k.getNamespace() + "." + k.getKey();
@@ -441,6 +445,23 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             default -> 0;
         };
     }
+    private static org.bukkit.Registry<org.bukkit.GameRule<?>> gameRuleRegistry() {
+        var definitions = FerriteGameRuleData.load(FerriteRegistryAccess.class.getResourceAsStream("/ferrite/game-rules.json"), KEYS.get("game_rule"));
+        return new KeyedRegistry<>("game_rule") {
+            private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.GameRule<?>> entries = new java.util.concurrent.ConcurrentHashMap<>();
+            @Override public org.bukkit.GameRule<?> get(org.bukkit.NamespacedKey key) {
+                java.util.Objects.requireNonNull(key, "key");
+                var definition = definitions.get(key);
+                if (definition == null) return null;
+                var existing = entries.get(key);
+                if (existing != null) return existing;
+                // GameRule's static aliases re-enter this registry; computeIfAbsent cannot support that.
+                var created = FerriteGameRule.create(definition);
+                var prior = entries.putIfAbsent(key, created);
+                return prior == null ? created : prior;
+            }
+        };
+    }
     private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> unavailable(String name) { return new UnavailableRegistry<>(name); }
     /**
      * A registry the generated vanilla reports cannot back. The Rust host has no registry call, so every read fails
@@ -453,7 +474,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             this.reason = name.contains("game_rule") || name.endsWith("GameRule")
                 ? "GameRule needs a value type and default that the generated reports do not contain"
                 : name.contains("memory_module_type") || name.endsWith("MemoryKey")
-                ? "MemoryKey has a private constructor and value types that the generated reports do not contain"
+                ? "MemoryKey exposes only a typed subset and has a private constructor; the full generated registry has no value types"
                 : "no generated vanilla data is mapped to it";
         }
         private UnsupportedOperationException no() { return new UnsupportedOperationException("Ferrite: registry " + name() + " is not available: " + reason); }
