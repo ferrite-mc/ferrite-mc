@@ -2083,8 +2083,62 @@ async fn run(
                  signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
                   Signal::Hold{world,chunk,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,world,chunk);},
                   Signal::HoldBatch{world,chunks,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,world,chunks);},
-                  Signal::CrossClone(clone)=>{let tell=|reply:&Option<OutboundSender>,text:&str|match reply{Some(tx)=>chat(tx,text),None=>tracing::info!("{text}")};let clone=*clone;match &clone.read{Err(error)=>tell(&clone.reply,error),Ok(_)=>{let target=Arc::clone(dimensions.source(clone.target_dimension));let tracking=tracking.clone();let signals=signal_tx.clone();let chunk=ChunkPos(clone.destination[0].div_euclid(16),clone.destination[2].div_euclid(16));worlds.schedule_at_chunk(clone.target_dimension,chunk,move|_region|{let Ok(read)=&clone.read else{return};match commands_world::apply_clone_write(read,clone.destination,&*target,&tracking){Ok(outcome)=>{if let Some(tx)=&clone.reply{chat(tx,&outcome.message)}else{tracing::info!("{}",outcome.message)}if clone.mover==commands_world::CloneMove::Move{let _=signals.send(Signal::CrossCloneClear(Box::new(clone.clone())));}}Err(error)=>tell(&clone.reply,&error)}});}}},
-                  Signal::CrossCloneClear(clone)=>{let clone=*clone;if let Ok(read)=&clone.read{let origin=Arc::clone(dimensions.source(clone.source_dimension));let tracking=tracking.clone();let chunk=ChunkPos(read.min[0].div_euclid(16),read.min[2].div_euclid(16));let read=read.clone();worlds.schedule_at_chunk(clone.source_dimension,chunk,move|_region|{let _=commands_world::apply_clone_clear(&read,&*origin,&tracking);});}},
+                  Signal::CrossClone(clone) => {
+                      let tell = |reply: &Option<OutboundSender>, text: &str| match reply {
+                          Some(tx) => chat(tx, text),
+                          None => tracing::info!("{text}"),
+                      };
+                      let clone = *clone;
+                      match &clone.read {
+                          Err(error) => tell(&clone.reply, error),
+                          Ok(_) => {
+                              let target = Arc::clone(dimensions.source(clone.target_dimension));
+                              let tracking = tracking.clone();
+                              let signals = signal_tx.clone();
+                              let chunk = ChunkPos(
+                                  clone.destination[0].div_euclid(16),
+                                  clone.destination[2].div_euclid(16),
+                              );
+                              worlds.schedule_at_chunk(clone.target_dimension, chunk, move |_region| {
+                                  let Ok(read) = &clone.read else { return };
+                                  match commands_world::apply_clone_write(
+                                      read,
+                                      clone.destination,
+                                      &*target,
+                                      &tracking,
+                                  ) {
+                                      Ok(outcome) => {
+                                          if let Some(tx) = &clone.reply {
+                                              chat(tx, &outcome.message);
+                                          } else {
+                                              tracing::info!("{}", outcome.message);
+                                          }
+                                          if clone.mover == commands_world::CloneMove::Move {
+                                              let _ = signals
+                                                  .send(Signal::CrossCloneClear(Box::new(clone.clone())));
+                                          }
+                                      }
+                                      Err(error) => tell(&clone.reply, &error),
+                                  }
+                              });
+                          }
+                      }
+                  },
+                  Signal::CrossCloneClear(clone) => {
+                      let clone = *clone;
+                      if let Ok(read) = &clone.read {
+                          let origin = Arc::clone(dimensions.source(clone.source_dimension));
+                          let tracking = tracking.clone();
+                          let chunk = ChunkPos(
+                              read.min[0].div_euclid(16),
+                              read.min[2].div_euclid(16),
+                          );
+                          let read = read.clone();
+                          worlds.schedule_at_chunk(clone.source_dimension, chunk, move |_region| {
+                              let _ = commands_world::apply_clone_clear(&read, &*origin, &tracking);
+                          });
+                      }
+                  },
                   Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
                   Signal::MobMelee{dimension,player,damage,from,attacker}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from,attacker});}},
                   Signal::MobKnockback{world_id,attacker,at,source}=>route_mob_knockback(&worlds,world_id,attacker,at,source),

@@ -20,9 +20,9 @@ every difference.
 | vanilla roots in `commands.json` | 94 |
 | vanilla roots registered | 94 |
 | non-vanilla roots (`tps`, `mspt`, `profile`) | 3 |
-| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 80 |
-| vanilla roots that still differ | 14 |
-| individual differences / allow-list entries covering them | 207 / 26 |
+| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 82 |
+| vanilla roots that still differ | 12 |
+| individual differences / allow-list entries covering them | 186 / 24 |
 
 Classes: **a** behaviour-equivalent layout, **b** behaviour gap (fixed, or listed as a blocker),
 **c** cosmetic or an extra-lenient extension, **x** a real gap with a blocker written down below,
@@ -39,7 +39,6 @@ root; what is left is:
 | team | a | colours are literals; vanilla has one colour argument |
 | gamerule | c | pre-26 camelCase names are accepted as aliases (unverified whether vanilla 26.3 rejects them) |
 | return | a | `return run` carries the root redirect |
-| compute, data | x | `data modify ... compute` and `/compute`'s provider parsers: the number providers are not parsed in the command tree (see Blockers) |
 | mspt, tps, profile | c | non-vanilla roots |
 | item (`target` vs `targets`), place (`template` executable, parsers), fillbiome (parser) | o | reported to the owning lane |
 
@@ -88,8 +87,10 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
     `game/entity_index.rs`, carries no relation data; `vehicle|passengers|controller` come from
     the ride table); `if items|slots entity` (entity inventories live in regions and cannot be
     read while a command runs); item predicates with components; `store ... entity` for
-    non-player entities; `if predicate` is always false (the command layer has no loot context
-    to evaluate datapack predicates in; `commands_late.rs` only knows `match_block`).
+    non-player entities. `if|unless predicate <id>` evaluates datapack (`data/<ns>/predicate`) and
+    vanilla predicates for `match_block`, `entity_properties` (type, location), `inverted`,
+    `all_of`, `any_of`; other condition types are false; an unknown id is an error. Test:
+    `datapack_predicates_decide_if_and_unless`.
   - A `return` run by one fork of `execute as @a run return ...` does not stop the other forks.
 - `/time` (`commands_time.rs`): `set <time>|<timemarker>`, `add`, `query time|gametime|
   <timeline> [repetition]`, `pause`, `resume`, `rate`, `of <clock>` for the `overworld` and
@@ -107,20 +108,23 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   accepts `/return` at the top level is unverified).
 - `/clone`: `[strict] [filtered <filter>|masked|replace] [force|move|normal]`, overlap check
   ("The source and destination areas cannot overlap" unless `force`), `move` clears the source,
-  block entities are copied. **Blocker:** `from <dim>`/`to <dim>` parse, but the command runs on
-  one `WorldBlocks`, so a cross-dimension clone fails (`commands_world.rs`, the clone executor).
+  block entities are copied. `from <dim>`/`to <dim>` work across dimensions: the source region reads
+  (`clone_read`), the destination region writes (`Signal::CrossClone`, `game/mod.rs`); `move`
+  clears the source afterwards (`Signal::CrossCloneClear`). Test:
+  `clone_between_dimensions_reads_one_world_and_writes_another`. Not verified with a real client.
   Unverified: whether vanilla counts only changed blocks.
 - `/fill` and `/setblock`: `strict` is accepted and behaves like `replace`; its real semantics
   are unverified.
 - `/data`: entity data covers players only (a non-player entity is a blocker: the snapshot does
-  not carry NBT). `data modify ... compute` is not implemented (blocker: the number providers
-  are not parsed in the command tree, see `/compute`). `data get` numeric rules follow
+  not carry NBT). `data modify ... compute block|entity|default float|integer <provider>` evaluates
+  the provider (id or inline SNBT) via `commands_late::provider_value`; test
+  `modify_compute_stores_the_provider_value`. `data get` numeric rules follow
   vanilla's `getData`/`getNumeric` as remembered; the `%.2f` scale rendering is unverified.
 - `/scoreboard`: `objectives modify displayautoupdate|numberformat` and `players display
-  name|numberformat` store their state (`MoreState`) and send vanilla's feedback. **Blocker:**
-  none of it reaches clients: `ferrite-protocol`'s `SetObjective`/`SetScore` (`packets/play.rs`,
-  near line 2594) writes `false` for the number-format field, so the wire encoding needs a
-  protocol-crate change (out of lane C's scope; reported to the coordinator).
+  name|numberformat` store their state (`MoreState`), send vanilla's feedback and resend
+  `SetObjective` (mode 2) / `SetScore` with the number format; `ferrite-protocol` encodes
+  `NumberFormat` (blank 0, styled 1, fixed 2, ids from `NumberFormatTypes.bootstrap`). Test
+  `number_formats_reach_the_wire`. Not verified with a real client.
 - `/jfr start|stop` (`commands_more.rs`, `jfr_tree`): Ferrite is not a JVM, so no recording can
   exist. `start` fails with `commands.jfr.start.failed`; `stop` fails with
   `commands.jfr.dump.failed` and says why. There is no success path. Faked: nothing. Not
@@ -131,12 +135,20 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   type `function`, function `minecraft:always_pass`, structure `minecraft:empty`, environment
   `minecraft:default`). An unknown id fails with `commands.test.error.non_existant_test`, a
   wildcard that matches nothing with `error.no_test_instances` (the split is inferred from the
-  lang keys). An instance that exists fails with an explicit "not implemented": running one
-  needs structure placement, a test-instance block entity and a per-tick runner, and
-  `minecraft:always_pass` is not even present as a function in the generated data (there is no
-  `function/` directory). `locate` reports started/finished with 0 structures (this server never
-  places any). Every other form, including `runfailed [onlyRequiredTests]`, reports
-  `commands.test.no_tests`. Datapack-provided instances are not read.
+  lang keys). Instances come from vanilla plus datapack `data/<ns>/test_instance/*.json`
+  (`FunctionStore`). Running one: `FunctionGameTestInstance.run` resolves `function` in the
+  `test_function` registry, whose only 26.3 entry is `minecraft:always_pass` (`BuiltinTestFunctions`;
+  it is a Java function, not an `.mcfunction`), so `minecraft:function` instances with that function
+  pass and any other function id fails ("Missing test function ..."); `minecraft:block_based`
+  instances fail saying they need the structure/test-block/redstone framework. `run` takes
+  `numberOfTimes` and `untilFailed`; `rotationSteps`/`testsPerRow` are accepted but nothing is
+  placed, so they do nothing. Output is `commands.test.run.running`, `summary`, and
+  `summary.all_required_passed|failed|optional_failed`; `runfailed [onlyRequiredTests]` repeats the
+  last run's failures; `clearall` reports `clear.error.no_tests` (no structure is ever placed);
+  `locate` reports 0 structures. Not implemented, still `commands.test.no_tests`: `create`,
+  `pos`, `runthis|runthat|runclosest|resetthat|resetthese|resetclosest|clearthat|clearthese|stop`
+  (they act on placed test blocks). Whether `verify`/`runmultiple` repeat like vanilla is
+  unverified (they run once). Test: `datapack_test_instances_run_and_runfailed_repeats_the_failures`.
 - `/swing` (bare form executes, rejects non-living entities with `failed.notliving`, animation
   and hand are validated), `/tick` (`query` includes the percentile line), `/attribute`
   (defaults come from the entity type via `attributes::limits_for`; an attribute the type does not
@@ -155,12 +167,10 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 
 | blocker | evidence |
 |---|---|
-| cross-dimension `clone` | single-world `WorldBlocks` in `commands_world.rs` |
-| `execute summon`, `on attacker|leasher|origin|owner|target`, `if items|slots entity`, `store ... entity` (non-player) | `Action::Summon` is async with no uuid; `CommandEntity` (`entity_index.rs`) has no relation/NBT/inventory |
-| `if predicate` | hard-wired to false in `commands_exec.rs`; only `match_block` exists in `commands_late.rs` |
-| scoreboard number formats on the wire | `ferrite-protocol/src/packets/play.rs` writes `false` for the format field |
-| `data modify ... compute` | no `context_int_provider` / `context_float_provider` parser in `ferrite-command` |
-| `/test` runner | no structure placement / test-instance block / tick runner; `always_pass`'s function is absent from `vanilla/26.3/generated/data/minecraft` |
+| `execute summon` | `Action::Summon` is async and returns no uuid, so the new entity cannot be the source of the rest of the chain |
+| `execute on attacker|leasher|origin|owner|target`, `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) carries uuid, kind, position, tags and name only: no relations, NBT or inventory; `vehicle|passengers|controller` work through `ride` |
+| `if predicate` (partial) | `match_block`, `entity_properties` (type, location), `inverted`, `all_of`, `any_of` are evaluated (`commands_late::condition`); every other condition type evaluates false; `ferrite-loot` exposes no public predicate evaluator (its `Condition::test` is `pub(crate)`) |
+| `/test` structure runner | no structure placement / test-instance block / tick runner: `block_based` instances and the block-targeting forms cannot run |
 | `/jfr` | no JVM |
 
 ## Deltas since 2026-11-04
