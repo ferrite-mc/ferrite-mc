@@ -1,7 +1,11 @@
 //! `/ride`: which entity sits on which. Riders follow their vehicle every tick (the world loop
 //! teleports them) and the client is told through `set_passengers`, so it plays the riding
-//! pose. Vehicle steering and per-entity seat offsets are not simulated: the rider is placed
-//! at the vehicle's position plus a fixed lift. A rider that sneaks gets off.
+//! pose. The rider sits on the vehicle's `passenger` attachment point minus its own `vehicle`
+//! point from the generated entity data ([`seat_offset`]). A vehicle between two regions keeps
+//! its riders for [`TRANSIT_GRACE_TICKS`]; a ride across dimensions ends, as in vanilla. A
+//! saddled tame horse with a player rider is steered by that rider's `move_vehicle` packets
+//! (`region.rs`, however the player got on); other vehicles (boats, minecarts, pigs, striders)
+//! have no steering input. A rider that sneaks gets off.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -87,7 +91,7 @@ pub fn set_controlled(vehicle: Uuid, controlled: bool) {
     }
 }
 
-fn is_controlled(vehicle: Uuid) -> bool {
+pub(super) fn is_controlled(vehicle: Uuid) -> bool {
     CONTROLLED
         .lock()
         .unwrap_or_else(|e| e.into_inner())

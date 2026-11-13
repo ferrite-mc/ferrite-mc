@@ -7690,6 +7690,23 @@ impl Region {
                 }
                 continue;
             };
+            // A saddled tame horse ridden by a player (also one put there with `/ride`) is
+            // steered by the rider's packets, not by its own AI or by the rider following it.
+            // A rider that is a mob of this region cannot steer.
+            let rider_is_mob = self
+                .entities
+                .keys()
+                .iter()
+                .any(|&k| self.entities.data(k).is_some_and(|d| d.uuid == rider));
+            if !rider_is_mob
+                && ferrite_entity::horse::is_steerable(&self.entities, key)
+                && !super::ride::is_controlled(horse)
+            {
+                super::ride::set_controlled(horse, true);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = true;
+                }
+            }
             let outcome = ferrite_entity::horse::tick_rider(
                 &mut self.entities,
                 key,
@@ -11867,6 +11884,39 @@ mod tests {
         assert!(mob::state(&region.entities, key).unwrap().loot_dropped);
         region.tick(&ctx);
         assert_eq!(dropped_gear(&region).len(), 2, "gear drops exactly once");
+    }
+
+    #[test]
+    fn a_horse_mounted_with_ride_is_steered_by_its_player_rider() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Horse);
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.health = 20.0;
+            state.saddled = true;
+            state.owner = Some(Uuid::from_u128(0x51d1));
+        }
+        let horse = region.entities.data(key).unwrap().uuid;
+        let rider = Uuid::from_u128(0x51d2);
+        assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::mount(rider, horse, false).unwrap();
+        region.tick(&tick_context());
+        assert!(
+            super::super::ride::is_controlled(horse),
+            "steered by the rider"
+        );
+        assert!(mob::state(&region.entities, key).unwrap().no_ai);
+        // Without a saddle the rider cannot steer it.
+        super::super::ride::dismount(rider);
+        super::super::ride::set_controlled(horse, false);
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.saddled = false;
+            state.no_ai = false;
+        }
+        super::super::ride::mount(rider, horse, false).unwrap();
+        region.tick(&tick_context());
+        assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::dismount(rider);
     }
 
     #[test]
