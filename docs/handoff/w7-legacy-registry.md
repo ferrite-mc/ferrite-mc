@@ -41,3 +41,9 @@ $env:JAVA_HOME = 'C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot'
 This PR and #13 both extend `identityRegistry` factory selection in FerriteRegistryAccess. **Retain both disjoint branches**: explicit factory, then FerriteLegacyRegistryValues for sound_event/villager_profession/villager_type, then #13's FerriteRegistryValueProperties for trim/song/art/cat/frog, then generic identity proxy. The supported-kind sets do not overlap. Also retain this PR's selected key-ordering hunk.
 
 #16's GAME_RULE and #18's DamageType factories are independent. Do not replace their registry dispatch or remote-owned attribute behavior. This PR edits no shared generator/build files. The durable workstream queue is maintained in the original w7-registry-api worktree.
+
+## Latest-main integration
+
+Merged `origin/main` `d55af6bae6a99e95c8a9edbbb33e1bbad2dd280c` (including #13/#16/#17) through a normal two-parent merge without force. Resolved the identityRegistry conflict with explicit factory / legacy helper / data-property helper / generic proxy branches, preserving both disjoint supported-kind sets and selected protocol-ID key ordering. Main's GameRule/bootstrap/build/resource changes remain intact. No incoming Rust changes were edited (`git diff origin/main -- crates` empty).
+
+After the final resolution, **31 focused tests and 312 full Java tests passed**, zero failures/errors/skips, Java25 wrapper `test build`/shadedJar passed. Test sources unchanged. Correctness and `git diff --check` passed; the PR's pushed merge head identifies the final integration SHA. #20 can merge this head to preserve its explicit dependency while acquiring current main.
