@@ -155,7 +155,13 @@ fn block_pos_of(ctx: &CommandContext<Source>) -> Result<[i32; 3], CommandError> 
 fn block_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootContext, CommandError> {
     let [x, y, z] = block_pos_of(ctx)?;
     let source = ctx.source();
-    let mut context = LootContext::default();
+    let mut context = LootContext {
+        origin: Some([f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5]),
+        host: Some(super::drops::ServerLootHost::with_world(
+            source.world.clone(),
+        )),
+        ..LootContext::default()
+    };
     if let Some((name, props)) = source
         .world
         .as_ref()
@@ -184,7 +190,16 @@ fn block_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootContext
 
 /// Vanilla `LootCommand.dropFishingLoot`: origin and tool only, no block.
 fn fishing_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootContext, CommandError> {
-    let mut context = LootContext::default();
+    let [x, y, z] = block_pos_of(ctx)?;
+    // The command sets no luck: vanilla `LootParams` defaults it to 0, so Luck of the Sea on the
+    // tool does not apply to `/loot fish`.
+    let mut context = LootContext {
+        origin: Some([f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5]),
+        host: Some(super::drops::ServerLootHost::with_world(
+            ctx.source().world.clone(),
+        )),
+        ..LootContext::default()
+    };
     tool_context(ctx, tool, &mut context)?;
     Ok(context)
 }
@@ -192,8 +207,16 @@ fn fishing_context(ctx: &CommandContext<Source>, tool: Tool) -> Result<LootConte
 /// Vanilla `LootCommand.dropKillLoot`: the command source is the attacker. A player source sets
 /// `LAST_DAMAGE_PLAYER` (so `killed_by_player` conditions pass) and its main-hand looting level
 /// feeds `enchanted_count_increase`/`apply_bonus`.
-fn kill_context(source: &Source) -> LootContext {
-    let mut context = LootContext::default();
+fn kill_context(source: &Source, entity_type: &str) -> LootContext {
+    let mut context = LootContext {
+        origin: Some(source.origin),
+        host: Some(super::drops::default_host()),
+        this_entity: Some(ferrite_loot::EntityFacts {
+            entity_type: entity_type.to_owned(),
+            ..Default::default()
+        }),
+        ..LootContext::default()
+    };
     let Some(uuid) = source.uuid else {
         return context;
     };
@@ -206,14 +229,25 @@ fn kill_context(source: &Source) -> LootContext {
         return context;
     }
     context.killed_by_player = true;
-    if let Some(held) = HELD_TOOLS
+    let held = HELD_TOOLS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&uuid)
-        .and_then(|hands| hands[0].clone())
-    {
+        .and_then(|hands| hands[0].clone());
+    if let Some(held) = &held {
         context.looting = held.looting;
     }
+    // Vanilla `dropKillLoot`: the command source is the attacker and the direct attacker.
+    let attacker = ferrite_loot::EntityFacts {
+        entity_type: "minecraft:player".to_owned(),
+        mainhand: held.map(|held| (held.item, held.tool_enchantments)),
+        ..Default::default()
+    };
+    context.damage_source = Some(ferrite_loot::DamageFacts {
+        damage_type: "minecraft:generic_kill".to_owned(),
+        source_entity: Some(attacker.clone()),
+        direct_entity: Some(attacker),
+    });
     context
 }
 
@@ -364,13 +398,14 @@ fn rolled(ctx: &CommandContext<Source>, from: From) -> Result<Rolled, CommandErr
             let Some(kind) = first.kind else {
                 return Err(no_table());
             };
+            let key = ferrite_data::entity_props::get(kind).key;
             let table = format!(
                 "minecraft:entities/{}",
-                ferrite_data::entity_props::get(kind)
-                    .key
-                    .trim_start_matches("minecraft:")
+                key.trim_start_matches("minecraft:")
             );
-            let stacks = roll_stacks(&table, &kill_context(source)).ok_or_else(no_table)?;
+            let entity_type = format!("minecraft:{}", key.trim_start_matches("minecraft:"));
+            let stacks =
+                roll_stacks(&table, &kill_context(source, &entity_type)).ok_or_else(no_table)?;
             Ok(Rolled {
                 stacks,
                 table: Some(table),
@@ -728,14 +763,14 @@ mod tests {
             .lock()
             .unwrap()
             .insert(player, [HeldTool::from_stack(&sword), None]);
-        let by_player = kill_context(&source(Some(player), state.clone()));
+        let by_player = kill_context(&source(Some(player), state.clone()), "minecraft:blaze");
         assert!(by_player.killed_by_player);
         assert_eq!(by_player.looting, 3);
         // The console, or an entity that is not a player, kills without credit.
-        let console = kill_context(&source(None, state.clone()));
+        let console = kill_context(&source(None, state.clone()), "minecraft:blaze");
         assert!(!console.killed_by_player);
         assert_eq!(console.looting, 0);
-        let mob = kill_context(&source(Some(Uuid::from_u128(12)), state));
+        let mob = kill_context(&source(Some(Uuid::from_u128(12)), state), "minecraft:blaze");
         assert!(!mob.killed_by_player);
     }
 
