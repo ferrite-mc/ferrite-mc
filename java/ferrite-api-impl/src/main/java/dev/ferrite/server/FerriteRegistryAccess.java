@@ -195,30 +195,10 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
         @Override public String toString() { return "MapDecorationType[" + key + "]"; }
     }
 
-    /** Vanilla damage types are data-driven; the registry identity is all plugins need here. */
+    static java.util.Set<String> damageTypeKeys() { return java.util.Set.copyOf(KEYS.get("damage_type")); }
+    /** Definitions decoded from canonical JSON by the locally installed official codec. */
     private static org.bukkit.Registry<org.bukkit.damage.DamageType> damageTypeRegistry() {
-        return new BaseRegistry<org.bukkit.damage.DamageType>("damage_type") {
-            private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.damage.DamageType> entries = new java.util.concurrent.ConcurrentHashMap<>();
-            @Override public org.bukkit.damage.DamageType get(org.bukkit.NamespacedKey key) {
-                if (!contains("damage_type", key)) return null;
-                return entries.computeIfAbsent(key, k -> (org.bukkit.damage.DamageType) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.damage.DamageType.class}, (proxy, method, args) -> switch (method.getName()) {
-                    case "getKey", "key" -> k;
-                    case "getTranslationKey", "translationKey" -> "death.attack." + k.getKey();
-                    case "getDamageScaling" -> org.bukkit.damage.DamageScaling.NEVER;
-                    case "getDamageEffect" -> org.bukkit.damage.DamageEffect.HURT;
-                    case "getDeathMessageType" -> org.bukkit.damage.DeathMessageType.DEFAULT;
-                    case "getExhaustion" -> 0.1f;
-                    case "hashCode" -> k.hashCode();
-                    case "equals" -> args[0] instanceof org.bukkit.damage.DamageType other && k.equals(other.getKey());
-                    case "toString" -> "DamageType[" + k + "]";
-                    default -> HostBridge.dispatch("DamageType", "", method, args);
-                }));
-            }
-            @Override public int size() { return KEYS.get("damage_type").size(); }
-            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { return KEYS.get("damage_type").stream().map(org.bukkit.NamespacedKey::fromString); }
-            @Override public java.util.stream.Stream<org.bukkit.damage.DamageType> stream() { return keyStream().map(this::get); }
-            @Override public java.util.Iterator<org.bukkit.damage.DamageType> iterator() { return stream().iterator(); }
-        };
+        return identityRegistry("damage_type", org.bukkit.damage.DamageType.class, FerriteDamageType::new);
     }
     @SuppressWarnings("unchecked") private static <T extends org.bukkit.Keyed> org.bukkit.Registry<T> menuRegistry() {
         return (org.bukkit.Registry<T>) new KeyedRegistry<org.bukkit.inventory.MenuType>("menu") {

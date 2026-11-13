@@ -42,3 +42,17 @@ val generateRegistryKeys by tasks.registering(Exec::class) {
 }
 sourceSets.main { resources.srcDir(registryOutput) }
 tasks.processResources { dependsOn(generateRegistryKeys) }
+
+val damageOutput = layout.buildDirectory.dir("generated/damage-resources")
+val generateDamageTypes = tasks.register<Exec>("generateDamageTypes") {
+    val versionDir = rootProject.projectDir.resolve("../../vanilla/26.3")
+    inputs.file(rootProject.projectDir.resolve("../../tools/extract_damage_types.py"))
+    inputs.file(rootProject.projectDir.resolve("../../tools/extractor/DamageTypeExtractor.java"))
+    inputs.file(versionDir.resolve("lib/server-26.3.jar"))
+    inputs.dir(versionDir.resolve("generated/data/minecraft/damage_type"))
+    outputs.dir(damageOutput)
+    commandLine("python", rootProject.projectDir.resolve("../../tools/extract_damage_types.py"), versionDir,
+        damageOutput.get().file("ferrite/damage-types.json").asFile)
+}
+sourceSets.main { resources.srcDir(damageOutput); resources.exclude("**/damage-extractor-classes/**") }
+tasks.processResources { dependsOn(generateDamageTypes) }
