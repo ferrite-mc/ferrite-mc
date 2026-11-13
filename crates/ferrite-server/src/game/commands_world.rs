@@ -817,7 +817,7 @@ fn fix_template_edges<W: WorldBlocks + ?Sized>(
     let Some(air) = ferrite_data::blocks::default_state("air") else {
         return;
     };
-    let mut remove_if_unsupported = |at: [i32; 3], changes: &mut Vec<Change>| {
+    let remove_if_unsupported = |at: [i32; 3], changes: &mut Vec<Change>| {
         let Some(state) = world
             .block(at[0], at[1], at[2])
             .and_then(|state| u16::try_from(state).ok())
