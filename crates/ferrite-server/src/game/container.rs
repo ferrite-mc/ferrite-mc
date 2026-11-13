@@ -418,6 +418,13 @@ impl Player {
             let len = chest.len();
             chest[2..].clone_from_slice(&super::equine_chest::load(*animal, len - 2));
         }
+        // `BrewingStandMenu.PotionSlot.onTake` -> `BREWED_POTION`: a potion leaving one of the
+        // three bottle slots.
+        let bottles: Vec<ItemStack> = if menu.kind() == ferrite_inventory::MenuKind::BrewingStand {
+            menu.container().iter().take(3).cloned().collect()
+        } else {
+            Vec::new()
+        };
         let mut clicker = Clicker::new(&mut self.inventory, infinite, crafter());
         if let Some(maps) = &maps {
             clicker = clicker.with_maps(maps);
@@ -434,6 +441,11 @@ impl Player {
         // Read the clicker out before touching `self.inventory` again: it holds the only
         // mutable borrow of the player inventory.
         let drops = clicker.drops;
+        let taken_potions = bottles
+            .iter()
+            .zip(menu.container())
+            .filter(|(before, after)| *before != *after && holds_potion(before))
+            .count();
         let xp = clicker.xp;
         let levels = clicker.levels;
         let crafted = clicker.crafted;
@@ -484,6 +496,15 @@ impl Player {
             }
         }
         self.menus.thrown.extend(drops);
+        for _ in 0..taken_potions {
+            super::recipe_unlock::push_plain(
+                self.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:brewed_potion",
+                    ..Default::default()
+                },
+            );
+        }
         if !crafted.is_empty() {
             let uuid = self.uuid;
             super::recipe_unlock::CRAFTED
@@ -536,6 +557,18 @@ impl Player {
         emit(self, out);
         if let Some(spent) = spent {
             self.spend_levels(spent);
+            // `EnchantmentMenu.clickMenuButton` -> `CriteriaTriggers.ENCHANTED_ITEM`.
+            if self.menus.open.as_ref().map(Menu::kind)
+                == Some(ferrite_inventory::MenuKind::Enchanting)
+            {
+                super::recipe_unlock::push_plain(
+                    self.uuid,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:enchanted_item",
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
 
@@ -1523,6 +1556,21 @@ impl Player {
         let Some(opened) = block_container::at(&source, [pos.x, pos.y, pos.z]) else {
             return false;
         };
+        // `RandomizableContainer.unpackLootTable`, then `PLAYER_GENERATES_CONTAINER_LOOT`.
+        for table in block_container::unpack_loot_tables(
+            &source,
+            &opened,
+            self.uuid.as_u128() as u64 ^ 0x9e37_79b9_7f4a_7c15,
+        ) {
+            super::recipe_unlock::push_plain(
+                self.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:player_generates_container_loot",
+                    table: Some(table),
+                    ..Default::default()
+                },
+            );
+        }
         let items = block_container::load(&source, &opened);
         let (rows, title) = (opened.rows, opened.title);
         let shulker = block_container::is_shulker_box(opened.block);
@@ -1611,6 +1659,15 @@ impl Player {
 /// The player's inventory as stored and restored by [`super::playerdata`].
 pub fn restore(saved: Option<&super::playerdata::Saved>) -> PlayerInventory {
     saved.map_or_else(PlayerInventory::new, super::playerdata::Saved::inventory)
+}
+
+/// Whether a stack carries a potion (`PotionContents.potion` is set), as `PotionSlot.onTake`
+/// requires before it triggers `brewed_potion`.
+fn holds_potion(stack: &ItemStack) -> bool {
+    matches!(
+        stack.effective_component(ferrite_item::component_ids::POTION_CONTENTS),
+        Some(ferrite_item::Component::PotionContents(contents)) if contents.potion.is_some()
+    )
 }
 
 #[cfg(test)]

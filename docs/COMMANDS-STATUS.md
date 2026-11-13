@@ -513,3 +513,19 @@ only for a saddled, tame, steerable horse with a player rider, however it was mo
 (`a_horse_mounted_with_ride_is_steered_by_its_player_rider`); boats, minecarts, pigs and striders are
 not steered (the play-input handler only handles sneak). Whether a hand-off shows a visible jump
 cannot be verified without a client.
+
+### Task Y follow-up (branch `lane/blocked-y`)
+
+Now evaluated, with tests in `recipe_unlock.rs` and the emitting module: used_totem, construct_beacon,
+brewed_potion, enchanted_item, villager_trade, fishing_rod_hooked, player_hurt_entity (arrow and
+trident only), levitation, channeled_lightning, player_generates_container_loot (chests and barrels
+with a `LootTable`; `LootTableSeed` and luck unused), tame_animal with cat/wolf variants (stored on
+the mob, not sent to clients), bred_animals parent/partner (frog, sniffer and turtle entities do not
+exist). `/compute` sees mob health through `minecraft:nbt` (vanilla has no health predicate).
+`/place template` without `strict` now removes blocks that cannot survive (support rules only; fence,
+wall and pane connections do not exist in this server).
+
+Still blocked, missing gameplay: filled_bucket (no fish/axolotl/tadpole entities), killed_by_arrow and
+shot_crossbow (no crossbow), summoned_entity (no golem or wither), player_interacted_with_entity,
+started_riding, villager cures, raids, spyglass, allay, piglin, strider, sculk, mace and spear
+triggers. Not verified with a real client.

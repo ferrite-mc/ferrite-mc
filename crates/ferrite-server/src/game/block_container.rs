@@ -314,6 +314,98 @@ fn save_items(items: &[ItemStack]) -> Tag {
     Tag::List(List::Compound(list))
 }
 
+/// Vanilla `RandomizableContainer.unpackLootTable`: a container whose block entity still has a
+/// `LootTable` is filled with that table's items, spread over its free slots, and loses the tag.
+/// Returns the tables that were unpacked, for `player_generates_container_loot`.
+///
+/// Not reproduced: `LootTableSeed` (the roll is always fresh) and the opener's luck and position
+/// in the loot context. A table this server does not know is left in place.
+pub fn unpack_loot_tables(source: &AnvilChunkSource, opened: &Opened, seed: u64) -> Vec<String> {
+    let mut unpacked = Vec::new();
+    for (index, &[x, y, z]) in opened.parts.iter().enumerate() {
+        let Some(Tag::String(table)) = source
+            .block_entity(x, y, z)
+            .and_then(|entity| entity.data.get("LootTable").cloned())
+        else {
+            continue;
+        };
+        let Ok(rolled) = super::commands_loot::roll_reward_table(&table) else {
+            continue;
+        };
+        let mut rng = ferrite_entity::Rng::new(seed.wrapping_add(index as u64));
+        let result = source.update_block_entity(x, y, z, |entity| {
+            let Some(entity) = entity else {
+                return (false, ());
+            };
+            let mut items = load_items_raw(Some(entity));
+            fill_free_slots(&mut items, rolled, &mut rng);
+            entity.data.insert("Items".into(), save_items(&items));
+            entity.data.shift_remove("LootTable");
+            entity.data.shift_remove("LootTableSeed");
+            (true, ())
+        });
+        match result {
+            Ok(()) => unpacked.push(table),
+            Err(error) => tracing::warn!(x, y, z, %error, "could not unpack a loot table"),
+        }
+    }
+    unpacked
+}
+
+/// Vanilla `RandomizableContainer.fillInventory` over the empty slots: the rolled stacks are
+/// split further while there are more free slots than stacks (`shuffleAndSplitItems`), shuffled,
+/// and laid out from a shuffled list of free slots. A stack that finds no slot is lost.
+fn fill_free_slots(items: &mut [ItemStack], rolled: Vec<ItemStack>, rng: &mut ferrite_entity::Rng) {
+    let mut free: Vec<usize> = (0..items.len()).filter(|&i| items[i].is_empty()).collect();
+    let mut list: Vec<ItemStack> = Vec::new();
+    let mut splittable: Vec<ItemStack> = Vec::new();
+    for stack in rolled.into_iter().filter(|stack| !stack.is_empty()) {
+        if stack.count > 1 {
+            splittable.push(stack);
+        } else {
+            list.push(stack);
+        }
+    }
+    let pick = |rng: &mut ferrite_entity::Rng, low: i32, high: i32| {
+        if high <= low {
+            low
+        } else {
+            low + rng.next_int(high - low + 1)
+        }
+    };
+    while free.len() > list.len() + splittable.len() && !splittable.is_empty() {
+        let at = usize::try_from(pick(rng, 0, splittable.len() as i32 - 1)).unwrap_or(0);
+        let mut stack = splittable.remove(at);
+        let half = pick(rng, 1, stack.count / 2);
+        let split = stack.copy_with_count(half);
+        stack.count -= half;
+        for part in [stack, split] {
+            if part.count > 1 && rng.next_int(2) == 1 {
+                splittable.push(part);
+            } else {
+                list.push(part);
+            }
+        }
+    }
+    list.append(&mut splittable);
+    shuffle(&mut list, rng);
+    shuffle(&mut free, rng);
+    for stack in list {
+        let Some(slot) = free.pop() else {
+            break;
+        };
+        items[slot] = stack;
+    }
+}
+
+/// Vanilla `Util.shuffle` (Fisher-Yates from the end).
+fn shuffle<T>(list: &mut [T], rng: &mut ferrite_entity::Rng) {
+    for i in (1..list.len()).rev() {
+        let j = usize::try_from(rng.next_int(i as i32 + 1)).unwrap_or(0);
+        list.swap(i, j);
+    }
+}
+
 /// The items of every part, top half first.
 pub fn load(source: &AnvilChunkSource, opened: &Opened) -> Vec<ItemStack> {
     opened
@@ -467,6 +559,91 @@ mod tests {
         assert!(source.block_entity(5, 70, 5).is_none());
         // Breaking any other block leaves block entities alone.
         assert!(take_contents(&source, [5, 70, 5], state("stone", &[])).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_loot_chest_fills_it_once_and_names_the_table() {
+        let source = loaded().await;
+        source.set_block(7, 70, 7, state("chest", &[])).unwrap();
+        let type_id = u32::try_from(
+            ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:chest").unwrap(),
+        )
+        .unwrap();
+        let mut data = Compound::new();
+        data.insert("id".into(), Tag::String("minecraft:chest".into()));
+        data.insert(
+            "LootTable".into(),
+            Tag::String("minecraft:chests/bastion_bridge".into()),
+        );
+        data.insert("LootTableSeed".into(), Tag::Long(5));
+        source
+            .update_block_entity(7, 70, 7, |entity| {
+                *entity = Some(BlockEntity { type_id, data });
+                (true, ())
+            })
+            .unwrap();
+        let opened = at(&source, [7, 70, 7]).unwrap();
+        let tables = unpack_loot_tables(&source, &opened, 42);
+        if tables.is_empty() {
+            // The vanilla loot tables are not extracted on this machine.
+            return;
+        }
+        assert_eq!(tables, ["minecraft:chests/bastion_bridge"]);
+        let items = load(&source, &opened);
+        assert!(
+            items.iter().any(|stack| !stack.is_empty()),
+            "loot was rolled"
+        );
+        let entity = source.block_entity(7, 70, 7).unwrap();
+        assert!(entity.data.get("LootTable").is_none());
+        assert!(entity.data.get("LootTableSeed").is_none());
+        // Opening it again does not roll a second time.
+        assert!(unpack_loot_tables(&source, &opened, 43).is_empty());
+        assert_eq!(load(&source, &opened), items);
+    }
+
+    #[test]
+    fn loot_is_split_and_spread_over_the_free_slots() {
+        let mut rng = ferrite_entity::Rng::new(9);
+        let mut items = vec![ItemStack::empty(); SIZE];
+        items[3] = ItemStack::from_name("stone").unwrap();
+        let rolled = vec![
+            ItemStack::from_name("iron_ingot")
+                .unwrap()
+                .copy_with_count(10),
+            ItemStack::from_name("gold_ingot")
+                .unwrap()
+                .copy_with_count(4),
+        ];
+        fill_free_slots(&mut items, rolled, &mut rng);
+        assert_eq!(
+            items[3].name(),
+            Some("minecraft:stone"),
+            "a taken slot stays"
+        );
+        let count = |name: &str| {
+            items
+                .iter()
+                .filter(|s| s.name() == Some(name))
+                .map(|s| s.count)
+                .sum::<i32>()
+        };
+        assert_eq!(count("minecraft:iron_ingot"), 10, "splitting loses nothing");
+        assert_eq!(count("minecraft:gold_ingot"), 4);
+        assert!(
+            items.iter().filter(|s| !s.is_empty()).count() > 3,
+            "27 free slots split the stacks into several"
+        );
+        // More stacks than free slots: the surplus is lost, not written over a taken slot.
+        let mut full = vec![ItemStack::from_name("stone").unwrap(); 2];
+        full[1] = ItemStack::empty();
+        fill_free_slots(
+            &mut full,
+            vec![ItemStack::from_name("dirt").unwrap(); 3],
+            &mut rng,
+        );
+        assert_eq!(full[0].name(), Some("minecraft:stone"));
+        assert_eq!(full[1].name(), Some("minecraft:dirt"));
     }
 
     /// A stack whose component only exists in the save format (no typed model, so no network

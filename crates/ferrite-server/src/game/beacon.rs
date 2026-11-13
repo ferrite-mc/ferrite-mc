@@ -213,6 +213,20 @@ pub fn valid_secondary(levels: i32, effect: i32) -> bool {
         })
 }
 
+/// Whether a player at `pos` is inside the box `BeaconBlockEntity.tick` searches when the beacon
+/// activates: the corner `(x, y, z)` to `(x, y - 4, z)` grown by (10, 5, 10), so the player's
+/// 0.6 x 1.8 box must overlap x and z within 10 and `y - 9 ..= y + 5`.
+pub fn near_activation(beacon: [i32; 3], pos: [f64; 3]) -> bool {
+    let (bx, by, bz) = (
+        f64::from(beacon[0]),
+        f64::from(beacon[1]),
+        f64::from(beacon[2]),
+    );
+    (bx - 10.3..=bx + 10.3).contains(&pos[0])
+        && (bz - 10.3..=bz + 10.3).contains(&pos[2])
+        && (by - 10.8..=by + 5.0).contains(&pos[1])
+}
+
 /// The radius inside which a beacon grants its effects.
 pub fn range(levels: i32) -> f64 {
     f64::from(levels.clamp(0, MAX_LEVELS)) * RANGE_PER_LEVEL
@@ -277,6 +291,21 @@ fn beacon_effect(effect: i32, duration: i32, amplifier: i32) -> MobEffectInstanc
 
 #[cfg(test)]
 mod tests {
+    use super::near_activation;
+
+    #[test]
+    fn the_activation_box_reaches_ten_blocks_around_and_below_the_beacon() {
+        let beacon = [100, 64, 100];
+        assert!(near_activation(beacon, [100.5, 65.0, 100.5]));
+        assert!(near_activation(beacon, [110.2, 65.0, 90.0]));
+        assert!(!near_activation(beacon, [110.4, 65.0, 100.5]));
+        // Down to 9 blocks under the base (the player's head reaches into the box), up to 5 above.
+        assert!(near_activation(beacon, [100.5, 54.0, 100.5]));
+        assert!(!near_activation(beacon, [100.5, 53.0, 100.5]));
+        assert!(near_activation(beacon, [100.5, 69.0, 100.5]));
+        assert!(!near_activation(beacon, [100.5, 69.1, 100.5]));
+    }
+
     use super::*;
 
     async fn loaded() -> std::sync::Arc<AnvilChunkSource> {
