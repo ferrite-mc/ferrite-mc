@@ -43,6 +43,12 @@ impl Number {
                 if min > max {
                     return Err(format!("{what} range has min above max"));
                 }
+                let span = (max - min).floor() + 1.0;
+                if !span.is_finite() || span > f64::from(i32::MAX) {
+                    return Err(format!(
+                        "{what} uniform range exceeds the supported sampler span"
+                    ));
+                }
                 Ok(Self::Uniform(min, max))
             }
             _ => Err(format!("{what} is missing")),
@@ -348,6 +354,28 @@ mod tests {
         ItemModifier::parse(json)
             .unwrap()
             .apply(stack, &mut ferrite_entity::Rng::new(7))
+    }
+
+    #[test]
+    fn uniform_modifier_rejects_ranges_that_overflow_the_sampler() {
+        for field in ["count", "damage"] {
+            let function = if field == "count" {
+                "set_count"
+            } else {
+                "set_damage"
+            };
+            for (min, max) in [(0.0, 2147483647.0), (-1e100, 1e100)] {
+                let definition = serde_json::json!({
+                    "function": function,
+                    (field): {"type": "uniform", "min": min, "max": max}
+                });
+                assert!(ItemModifier::parse(&definition.to_string()).is_err());
+            }
+        }
+        let widest = serde_json::json!({"type": "uniform", "min": 0, "max": 2147483646});
+        let provider = Number::parse(Some(&widest), "count").unwrap();
+        let sample = provider.eval(&mut ferrite_entity::Rng::new(7));
+        assert!((0.0..=2147483646.0).contains(&sample));
     }
 
     #[test]
