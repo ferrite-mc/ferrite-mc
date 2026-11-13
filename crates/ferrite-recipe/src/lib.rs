@@ -36,6 +36,8 @@ mod tags;
 use std::path::Path;
 
 pub use book::RecipeBook;
+pub use matching::match_crafting_in;
+pub use recipe::parse_recipe_json;
 pub use recipe::{
     CookingKind, CookingRecipe, CraftingShaped, CraftingShapeless, CraftingTransmute, Ingredient,
     IngredientEntry, ItemStack, MaterialCount, Recipe, RecipeKind, SmithingTransform, SmithingTrim,

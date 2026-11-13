@@ -23,26 +23,19 @@ impl RecipeBook {
         width: usize,
         height: usize,
     ) -> Option<&Recipe> {
-        if width == 0 || height == 0 || width > 3 || height > 3 {
-            return None;
-        }
-        let cells = width.checked_mul(height)?;
-        if grid.len() < cells {
-            return None;
-        }
+        self.match_crafting_where(grid, width, height, &|_| true)
+    }
 
-        let mut items = Vec::with_capacity(cells);
-        for y in 0..height {
-            for x in 0..width {
-                if let Some(item) = grid[y * width + x] {
-                    items.push(item);
-                }
-            }
-        }
-        if items.is_empty() {
-            return None;
-        }
-
+    /// [`RecipeBook::match_crafting`] limited to the recipes `allow` accepts, for a caller that
+    /// hides some of them (a plugin that removed a recipe).
+    pub fn match_crafting_where(
+        &self,
+        grid: &[Option<&str>],
+        width: usize,
+        height: usize,
+        allow: &dyn Fn(&Recipe) -> bool,
+    ) -> Option<&Recipe> {
+        let items = grid_items(grid, width, height)?;
         let mut candidates = Vec::new();
         for item in &items {
             if let Some(recipes) = self.crafting_candidates(item) {
@@ -54,15 +47,7 @@ impl RecipeBook {
 
         for index in candidates {
             let recipe = &self.recipes()[index];
-            let matched = match &recipe.kind {
-                RecipeKind::CraftingShaped(shaped) => {
-                    shaped.matches(grid, width, height, self.tags())
-                }
-                RecipeKind::CraftingShapeless(shapeless) => shapeless.matches(&items, self.tags()),
-                RecipeKind::CraftingTransmute(transmute) => transmute.matches(&items, self.tags()),
-                _ => false,
-            };
-            if matched {
+            if allow(recipe) && recipe_matches(recipe, grid, width, height, &items, self.tags()) {
                 return Some(recipe);
             }
         }
@@ -284,5 +269,150 @@ impl CraftingTransmute {
             }
         }
         false
+    }
+}
+
+/// The non-empty items of a grid, or `None` for an empty grid or a size vanilla has no table for.
+fn grid_items<'a>(grid: &[Option<&'a str>], width: usize, height: usize) -> Option<Vec<&'a str>> {
+    if width == 0 || height == 0 || width > 3 || height > 3 {
+        return None;
+    }
+    let cells = width.checked_mul(height)?;
+    if grid.len() < cells {
+        return None;
+    }
+    let mut items = Vec::with_capacity(cells);
+    for y in 0..height {
+        for x in 0..width {
+            if let Some(item) = grid[y * width + x] {
+                items.push(item);
+            }
+        }
+    }
+    (!items.is_empty()).then_some(items)
+}
+
+fn recipe_matches(
+    recipe: &Recipe,
+    grid: &[Option<&str>],
+    width: usize,
+    height: usize,
+    items: &[&str],
+    tags: &ItemTags,
+) -> bool {
+    match &recipe.kind {
+        RecipeKind::CraftingShaped(shaped) => shaped.matches(grid, width, height, tags),
+        RecipeKind::CraftingShapeless(shapeless) => shapeless.matches(items, tags),
+        RecipeKind::CraftingTransmute(transmute) => transmute.matches(items, tags),
+        _ => false,
+    }
+}
+
+/// Matches a crafting grid against a plain list of recipes, in order: the first match wins.
+/// Used for recipes added at runtime, which are not part of a loaded [`RecipeBook`].
+pub fn match_crafting_in<'a>(
+    recipes: &'a [Recipe],
+    tags: &ItemTags,
+    grid: &[Option<&str>],
+    width: usize,
+    height: usize,
+) -> Option<&'a Recipe> {
+    let items = grid_items(grid, width, height)?;
+    recipes
+        .iter()
+        .find(|recipe| recipe_matches(recipe, grid, width, height, &items, tags))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_recipe_json;
+
+    const SHAPED: &str = r#"{
+        "type": "minecraft:crafting_shaped",
+        "pattern": ["SS", "S "],
+        "key": {"S": "minecraft:stone"},
+        "result": {"id": "minecraft:diamond", "count": 2}
+    }"#;
+    const SHAPELESS: &str = r#"{
+        "type": "minecraft:crafting_shapeless",
+        "ingredients": ["minecraft:dirt", "minecraft:sand"],
+        "result": {"id": "minecraft:clay_ball", "count": 1}
+    }"#;
+
+    #[test]
+    fn runtime_recipes_match_in_order_and_in_mirrored_and_shifted_positions() {
+        let recipes = [
+            parse_recipe_json("plugin:corner", SHAPED).unwrap(),
+            parse_recipe_json("plugin:mix", SHAPELESS).unwrap(),
+        ];
+        let tags = ItemTags::default();
+        let stone = Some("minecraft:stone");
+        // The shaped pattern in a 3x3 grid, shifted down one row.
+        let grid = [None, None, None, stone, stone, None, stone, None, None];
+        assert_eq!(
+            match_crafting_in(&recipes, &tags, &grid, 3, 3).map(|r| r.id.as_str()),
+            Some("plugin:corner")
+        );
+        // Mirrored, as vanilla allows.
+        let mirrored = [stone, stone, None, stone];
+        assert_eq!(
+            match_crafting_in(&recipes, &tags, &mirrored, 2, 2).map(|r| r.id.as_str()),
+            Some("plugin:corner")
+        );
+        let mix = [Some("minecraft:sand"), None, Some("minecraft:dirt"), None];
+        assert_eq!(
+            match_crafting_in(&recipes, &tags, &mix, 2, 2).map(|r| r.id.as_str()),
+            Some("plugin:mix")
+        );
+        // An empty grid, an extra item and an unsupported grid size match nothing.
+        assert!(match_crafting_in(&recipes, &tags, &[None; 4], 2, 2).is_none());
+        let extra = [
+            Some("minecraft:sand"),
+            Some("minecraft:dirt"),
+            Some("minecraft:dirt"),
+            None,
+        ];
+        assert!(match_crafting_in(&recipes, &tags, &extra, 2, 2).is_none());
+        assert!(match_crafting_in(&recipes, &tags, &[stone; 16], 4, 4).is_none());
+    }
+
+    #[test]
+    fn an_ingredient_may_be_a_list_of_items_and_a_pattern_may_have_gaps() {
+        // The shape the Java API sends for a `MaterialChoice` of several materials.
+        let recipe = parse_recipe_json(
+            "plugin:either",
+            r#"{
+                "type": "minecraft:crafting_shaped",
+                "pattern": ["A B"],
+                "key": {"A": "minecraft:dirt", "B": ["minecraft:sand", "minecraft:gravel"]},
+                "result": {"id": "minecraft:clay_ball", "count": 1}
+            }"#,
+        )
+        .unwrap();
+        let recipes = [recipe];
+        let tags = ItemTags::default();
+        let dirt = Some("minecraft:dirt");
+        for second in ["minecraft:sand", "minecraft:gravel"] {
+            let grid = [dirt, None, Some(second)];
+            assert!(
+                match_crafting_in(&recipes, &tags, &grid, 3, 1).is_some(),
+                "{second}"
+            );
+        }
+        let grid = [dirt, None, Some("minecraft:stone")];
+        assert!(match_crafting_in(&recipes, &tags, &grid, 3, 1).is_none());
+        // The gap matters: dirt and sand side by side is a different shape.
+        let grid = [dirt, Some("minecraft:sand"), None];
+        assert!(match_crafting_in(&recipes, &tags, &grid, 3, 1).is_none());
+    }
+
+    #[test]
+    fn a_runtime_recipe_in_bad_json_or_of_an_unknown_shape_is_an_error() {
+        assert!(parse_recipe_json("plugin:bad", "{").is_err());
+        assert!(
+            parse_recipe_json("plugin:bad", r#"{"type":"minecraft:crafting_shaped"}"#).is_err()
+        );
+        assert!(parse_recipe_json("plugin:bad", "[]").is_err());
     }
 }

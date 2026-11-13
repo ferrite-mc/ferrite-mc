@@ -2,11 +2,45 @@
 
 use ferrite_plugin::{HOST_ITEM_SEPARATOR, HostCall};
 
+/// `Server#addRecipe`, `removeRecipe`, `clearRecipes` and `resetRecipes`: changes to the crafting
+/// recipes every menu uses. `addCraftingRecipe` answers `true`, `false` (the id is taken) or `!`
+/// followed by why the recipe cannot be added.
+fn recipe_changes(call: &HostCall) -> Option<String> {
+    match call.method.as_str() {
+        "addCraftingRecipe(String,String)" => {
+            let id = call.args.first()?;
+            Some(
+                match crate::game::add_plugin_recipe(id, call.args.get(1)?) {
+                    Ok(added) => added.to_string(),
+                    Err(why) => format!("!{why}"),
+                },
+            )
+        }
+        "removeCraftingRecipe(String)" => {
+            Some(crate::game::remove_recipe(call.args.first()?).to_string())
+        }
+        "clearCraftingRecipes()" => {
+            crate::game::clear_recipes();
+            Some(String::new())
+        }
+        "resetCraftingRecipes()" => {
+            crate::game::reset_recipes();
+            Some(String::new())
+        }
+        _ => None,
+    }
+}
+
 /// The reply to `craftMatrix(int,String)`: the recipe id, the result item key and its count joined
 /// by the item separator, or `None` when nothing matches or the grid is malformed.
 ///
 /// The grid is `width` columns wide; its items are Bukkit material names (`AIR` is empty).
 pub fn answer(call: &HostCall) -> Option<String> {
+    if call.owner == "Server"
+        && let Some(reply) = recipe_changes(call)
+    {
+        return Some(reply);
+    }
     if call.owner != "Server" || call.method != "craftMatrix(int,String)" {
         return None;
     }
@@ -70,5 +104,42 @@ mod tests {
         assert_eq!(answer(&call("4", &["AIR"; 16])), None);
         assert_eq!(answer(&call("2", &["AIR", "bad name", "AIR", "AIR"])), None);
         assert_eq!(answer(&call("2", &["DIRT", "AIR", "AIR", "AIR"])), None);
+    }
+
+    fn change(method: &str, args: &[&str]) -> HostCall {
+        HostCall {
+            owner: "Server".into(),
+            subject: "server".into(),
+            method: method.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn adding_and_removing_a_crafting_recipe_changes_what_the_grid_crafts() {
+        let json = r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:sand","minecraft:sand"],"result":{"id":"minecraft:emerald","count":2}}"#;
+        let grid = call("2", &["SAND", "SAND", "AIR", "AIR"]);
+        assert_eq!(answer(&grid), None);
+        let add = change(
+            "addCraftingRecipe(String,String)",
+            &["plugin:route_two_sand", json],
+        );
+        assert_eq!(answer(&add).as_deref(), Some("true"));
+        let reply = answer(&grid).expect("the plugin recipe crafts");
+        let parts: Vec<_> = reply.split(HOST_ITEM_SEPARATOR).collect();
+        assert_eq!(
+            (parts[0], parts[1], parts[2]),
+            ("plugin:route_two_sand", "minecraft:emerald", "2")
+        );
+        assert_eq!(answer(&add).as_deref(), Some("false"), "the id is taken");
+        let bad = change(
+            "addCraftingRecipe(String,String)",
+            &["plugin:route_bad", "{"],
+        );
+        assert!(answer(&bad).is_some_and(|reply| reply.starts_with('!')));
+        let remove = change("removeCraftingRecipe(String)", &["plugin:route_two_sand"]);
+        assert_eq!(answer(&remove).as_deref(), Some("true"));
+        assert_eq!(answer(&remove).as_deref(), Some("false"));
+        assert_eq!(answer(&grid), None);
     }
 }

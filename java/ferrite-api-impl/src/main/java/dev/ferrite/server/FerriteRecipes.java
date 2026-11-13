@@ -40,23 +40,83 @@ final class FerriteRecipes {
         var key = keyed.getKey();
         boolean vanilla = entries().stream().anyMatch(e -> e.key().equals(key)) && !removed.contains(key);
         if (vanilla || custom.containsKey(key)) return false;
+        // Shaped and shapeless recipes also go to the host, whose crafting menus then craft them. Other kinds
+        // (cooking, smithing, ...) are only listed here: the host cannot add them at runtime.
+        var json = craftingJson(recipe);
+        if (json != null) {
+            var reply = host("addCraftingRecipe(String,String)", key.toString(), json);
+            if (reply != null && reply.startsWith("!")) throw new IllegalArgumentException("Ferrite: recipe " + key + " cannot be added: " + reply.substring(1));
+            if ("false".equals(reply)) return false;
+        }
         custom.put(key, recipe);
         return true;
     }
 
+    /** The host's answer to a recipe call, or null when no host is attached (plain Java keeps the Bukkit view only). */
+    private static String host(String method, Object... args) {
+        try { return (String) HostBridge.call("Server", "server", method, String.class, args); }
+        catch (UnsupportedOperationException | IllegalStateException noHost) { return null; }
+    }
+
+    private static com.google.gson.JsonElement ingredient(org.bukkit.inventory.RecipeChoice choice) {
+        if (!(choice instanceof org.bukkit.inventory.RecipeChoice.MaterialChoice materials))
+            throw new UnsupportedOperationException("Ferrite: Server#addRecipe cannot add a " + choice.getClass().getSimpleName() + ": crafting menus match items by type and cannot compare item metadata");
+        var keys = new com.google.gson.JsonArray();
+        for (var material : materials.getChoices()) keys.add(material.getKey().toString());
+        return keys.size() == 1 ? keys.get(0) : keys;
+    }
+
+    /** A shaped or shapeless recipe as vanilla data pack JSON, or null for any other kind of recipe. */
+    static String craftingJson(org.bukkit.inventory.Recipe recipe) {
+        var json = new com.google.gson.JsonObject();
+        if (recipe instanceof org.bukkit.inventory.ShapedRecipe shaped) {
+            json.addProperty("type", "minecraft:crafting_shaped");
+            var choices = shaped.getChoiceMap();
+            var pattern = new com.google.gson.JsonArray();
+            for (var row : shaped.getShape()) {
+                var line = new StringBuilder();
+                for (char c : row.toCharArray()) line.append(choices.get(c) == null ? ' ' : c);
+                pattern.add(line.toString());
+            }
+            json.add("pattern", pattern);
+            var key = new com.google.gson.JsonObject();
+            for (var entry : choices.entrySet()) if (entry.getValue() != null) key.add(String.valueOf(entry.getKey()), ingredient(entry.getValue()));
+            json.add("key", key);
+        } else if (recipe instanceof org.bukkit.inventory.ShapelessRecipe shapeless) {
+            json.addProperty("type", "minecraft:crafting_shapeless");
+            var ingredients = new com.google.gson.JsonArray();
+            for (var choice : shapeless.getChoiceList()) ingredients.add(ingredient(choice));
+            json.add("ingredients", ingredients);
+        } else {
+            return null;
+        }
+        var result = recipe.getResult();
+        if (result.hasItemMeta())
+            throw new UnsupportedOperationException("Ferrite: Server#addRecipe cannot add a recipe whose result has item metadata (" + result.getType() + "): the crafting menus craft the item and count only");
+        var out = new com.google.gson.JsonObject();
+        out.addProperty("id", result.getType().getKey().toString());
+        out.addProperty("count", result.getAmount());
+        json.add("result", out);
+        return json.toString();
+    }
+
     static synchronized boolean remove(org.bukkit.NamespacedKey key) {
-        if (custom.remove(key) != null) return true;
-        return entries().stream().anyMatch(e -> e.key().equals(key)) && removed.add(key);
+        boolean removedOne = custom.remove(key) != null
+            || (entries().stream().anyMatch(e -> e.key().equals(key)) && removed.add(key));
+        if (removedOne) host("removeCraftingRecipe(String)", key.toString());
+        return removedOne;
     }
 
     static synchronized void clear() {
         custom.clear();
         for (var entry : entries()) removed.add(entry.key());
+        host("clearCraftingRecipes()");
     }
 
     static synchronized void reset() {
         custom.clear();
         removed.clear();
+        host("resetCraftingRecipes()");
     }
 
     static synchronized org.bukkit.inventory.Recipe get(org.bukkit.NamespacedKey key) {

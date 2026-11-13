@@ -1,7 +1,7 @@
 //! Crafting recipes for container menus, matched with `ferrite-recipe`.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,6 +15,56 @@ use ferrite_recipe::{CookingKind, RecipeBook, RecipeKind};
 /// fixed result in `ferrite-recipe` and craft nothing. No 26.3 crafting result carries a
 /// component patch, so a result is its item and count.
 struct RecipeCrafter(RecipeBook);
+
+/// Crafting recipes plugins changed at runtime (`Server#addRecipe`, `removeRecipe`,
+/// `clearRecipes`, `resetRecipes`), applied on top of the vanilla book.
+#[derive(Default)]
+struct PluginRecipes {
+    /// Added recipes, in the order they were added.
+    added: Vec<ferrite_recipe::Recipe>,
+    /// Ids of vanilla recipes that no longer craft.
+    removed: HashSet<String>,
+}
+
+fn plugin_recipes() -> &'static RwLock<PluginRecipes> {
+    static RECIPES: OnceLock<RwLock<PluginRecipes>> = OnceLock::new();
+    RECIPES.get_or_init(Default::default)
+}
+
+/// A matched crafting recipe: its id and its fixed result.
+struct Crafted {
+    id: String,
+    item: String,
+    count: u32,
+}
+
+impl RecipeCrafter {
+    /// The recipe a grid crafts: the first vanilla one a plugin has not removed, then the first
+    /// plugin one. Special recipes without a fixed result match nothing.
+    fn find(&self, names: &[Option<&str>], width: usize, height: usize) -> Option<Crafted> {
+        let plugin = plugin_recipes().read().unwrap();
+        let recipe = self
+            .0
+            .match_crafting_where(names, width, height, &|recipe| {
+                !plugin.removed.contains(&recipe.id)
+            })
+            .or_else(|| {
+                ferrite_recipe::match_crafting_in(
+                    &plugin.added,
+                    self.0.tags(),
+                    names,
+                    width,
+                    height,
+                )
+            })?;
+        let result = recipe.result()?;
+        Some(Crafted {
+            id: recipe.id.clone(),
+            item: result.item.clone(),
+            count: result.count,
+        })
+    }
+}
 
 impl RecipeCrafter {
     /// Vanilla `RecipeManager.getRecipeFor(RecipeType, input)` for one furnace family, with the
@@ -153,12 +203,10 @@ impl Crafter for RecipeCrafter {
             .iter()
             .map(|stack| if stack.is_empty() { None } else { stack.name() })
             .collect();
-        self.0
-            .match_crafting(&names, width, grid.len() / width)
-            .and_then(|recipe| recipe.result())
-            .and_then(|result| {
-                let count = i32::try_from(result.count).ok()?;
-                Some(ItemStack::from_name(&result.item)?.copy_with_count(count))
+        self.find(&names, width, grid.len() / width)
+            .and_then(|crafted| {
+                let count = i32::try_from(crafted.count).ok()?;
+                Some(ItemStack::from_name(&crafted.item)?.copy_with_count(count))
             })
             .unwrap_or_default()
     }
@@ -171,9 +219,8 @@ impl Crafter for RecipeCrafter {
             .iter()
             .map(|stack| if stack.is_empty() { None } else { stack.name() })
             .collect();
-        self.0
-            .match_crafting(&names, width, grid.len() / width)
-            .map(|recipe| recipe.id.clone())
+        self.find(&names, width, grid.len() / width)
+            .map(|crafted| crafted.id)
     }
 
     fn cook(&self, kind: FurnaceKind, input: &ItemStack) -> Option<CookingOutput> {
@@ -459,9 +506,71 @@ pub fn match_for_plugin(
     height: usize,
 ) -> Option<(String, String, u32)> {
     let book = BOOK.get_or_init(load).as_ref()?;
-    let recipe = book.0.match_crafting(names, width, height)?;
-    let result = recipe.result()?;
-    Some((recipe.id.clone(), result.item.clone(), result.count))
+    let crafted = book.find(names, width, height)?;
+    Some((crafted.id, crafted.item, crafted.count))
+}
+
+/// `Server#addRecipe`: a shaped or shapeless crafting recipe in vanilla data pack JSON. `Ok(false)`
+/// when the id is taken by a recipe that still crafts; `Err` for JSON that is not one of those
+/// two types (cooking, smithing and the other kinds are not added at runtime).
+pub fn add_plugin_recipe(id: &str, json: &str) -> Result<bool, String> {
+    let Some(book) = BOOK.get_or_init(load).as_ref() else {
+        return Err("crafting recipes are not loaded".into());
+    };
+    let recipe = ferrite_recipe::parse_recipe_json(id, json).map_err(|error| error.to_string())?;
+    if !matches!(
+        recipe.kind,
+        RecipeKind::CraftingShaped(_) | RecipeKind::CraftingShapeless(_)
+    ) {
+        return Err(format!(
+            "{} recipes cannot be added at runtime; only crafting_shaped and crafting_shapeless",
+            recipe.type_name()
+        ));
+    }
+    let mut plugin = plugin_recipes().write().unwrap();
+    let taken = plugin.added.iter().any(|known| known.id == id)
+        || (book.0.recipe(id).is_some() && !plugin.removed.contains(id));
+    if taken {
+        return Ok(false);
+    }
+    plugin.added.push(recipe);
+    Ok(true)
+}
+
+/// `Server#removeRecipe`: a plugin recipe disappears, a vanilla one stops crafting. `false` when
+/// nothing by that id crafts.
+pub fn remove_recipe(id: &str) -> bool {
+    let mut plugin = plugin_recipes().write().unwrap();
+    if let Some(index) = plugin.added.iter().position(|known| known.id == id) {
+        plugin.added.remove(index);
+        return true;
+    }
+    let vanilla = BOOK
+        .get_or_init(load)
+        .as_ref()
+        .is_some_and(|book| book.0.recipe(id).is_some());
+    vanilla && plugin.removed.insert(id.to_owned())
+}
+
+/// `Server#clearRecipes`: no crafting recipe is left, vanilla ones included.
+pub fn clear_recipes() {
+    if let Some(book) = BOOK.get_or_init(load).as_ref() {
+        clear_into(&mut plugin_recipes().write().unwrap(), &book.0);
+    }
+}
+
+fn clear_into(plugin: &mut PluginRecipes, book: &RecipeBook) {
+    plugin.added.clear();
+    plugin.removed = book
+        .recipes()
+        .iter()
+        .map(|recipe| recipe.id.clone())
+        .collect();
+}
+
+/// `Server#resetRecipes`: vanilla recipes only, as loaded.
+pub fn reset_recipes() {
+    *plugin_recipes().write().unwrap() = PluginRecipes::default();
 }
 
 /// The crafter every menu uses.
@@ -648,5 +757,98 @@ mod tests {
         grid[4] = empty();
         assert_eq!(crafter.craft(&grid, 3), stack("chest", 1));
         assert_eq!(crafter.craft(&[], 2), empty());
+    }
+
+    /// The plugin recipe tests share one process-wide overlay, so they run one at a time.
+    fn overlay_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    const DIAMOND_FROM_DIRT: &str = r#"{
+        "type": "minecraft:crafting_shapeless",
+        "ingredients": ["minecraft:dirt", "minecraft:dirt"],
+        "result": {"id": "minecraft:diamond", "count": 3}
+    }"#;
+
+    #[test]
+    fn a_plugin_recipe_crafts_until_it_is_removed() {
+        let _guard = overlay_lock();
+        let crafter = crafter();
+        let grid = [
+            stack("dirt", 1),
+            stack("dirt", 1),
+            ItemStack::empty(),
+            ItemStack::empty(),
+        ];
+        assert_eq!(crafter.craft(&grid, 2), ItemStack::empty(), "no recipe yet");
+        assert_eq!(
+            add_plugin_recipe("plugin:two_dirt", DIAMOND_FROM_DIRT),
+            Ok(true)
+        );
+        assert_eq!(crafter.craft(&grid, 2), stack("diamond", 3));
+        assert_eq!(
+            crafter.recipe_id(&grid, 2).as_deref(),
+            Some("plugin:two_dirt")
+        );
+        // The id is taken now, by a plugin recipe and by a vanilla one.
+        assert_eq!(
+            add_plugin_recipe("plugin:two_dirt", DIAMOND_FROM_DIRT),
+            Ok(false)
+        );
+        assert_eq!(
+            add_plugin_recipe("minecraft:lead", DIAMOND_FROM_DIRT),
+            Ok(false)
+        );
+        assert!(remove_recipe("plugin:two_dirt"));
+        assert!(!remove_recipe("plugin:two_dirt"), "already gone");
+        assert_eq!(crafter.craft(&grid, 2), ItemStack::empty());
+    }
+
+    #[test]
+    fn removing_a_vanilla_recipe_stops_it_and_a_reset_brings_it_back() {
+        let _guard = overlay_lock();
+        let crafter = crafter();
+        // A lead: four string and a slimeball (the 26.3 recipe's ingredients are read from the data).
+        let lead = crafter
+            .recipe_layout("minecraft:lead", 3)
+            .expect("the lead recipe exists");
+        let grid: Vec<ItemStack> = lead
+            .iter()
+            .map(|cell| match cell {
+                Some(options) => ItemStack::from_name(&options[0]).unwrap(),
+                None => ItemStack::empty(),
+            })
+            .collect();
+        assert_eq!(crafter.craft(&grid, 3).name(), Some("minecraft:lead"));
+        assert!(remove_recipe("minecraft:lead"));
+        assert_eq!(crafter.craft(&grid, 3), ItemStack::empty());
+        reset_recipes();
+        assert_eq!(crafter.craft(&grid, 3).name(), Some("minecraft:lead"));
+    }
+
+    #[test]
+    fn only_shaped_and_shapeless_recipes_are_added_and_bad_json_says_why() {
+        let _guard = overlay_lock();
+        let smelting = r#"{"type":"minecraft:smelting","ingredient":"minecraft:dirt","result":{"id":"minecraft:stone"},"experience":0.1,"cookingtime":200}"#;
+        let refused = add_plugin_recipe("plugin:smelt", smelting).unwrap_err();
+        assert!(refused.contains("crafting_shaped"), "{refused}");
+        assert!(add_plugin_recipe("plugin:broken", "{").is_err());
+    }
+
+    #[test]
+    fn clearing_hides_every_vanilla_recipe_and_the_plugin_ones() {
+        let book = BOOK
+            .get_or_init(load)
+            .as_ref()
+            .expect("the recipe book is loaded");
+        let mut plugin = PluginRecipes::default();
+        plugin
+            .added
+            .push(ferrite_recipe::parse_recipe_json("plugin:two_dirt", DIAMOND_FROM_DIRT).unwrap());
+        clear_into(&mut plugin, &book.0);
+        assert!(plugin.added.is_empty());
+        assert_eq!(plugin.removed.len(), book.0.len());
+        assert!(plugin.removed.contains("minecraft:lead"));
     }
 }
