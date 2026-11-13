@@ -33,11 +33,12 @@ pub struct MoreState {
     /// `/scoreboard objectives modify <o> numberformat` as `blank`, `fixed:<text>` or
     /// `styled:<style>`. Kept as state only: the `SetObjective` packet this protocol crate
     /// writes has no number-format field.
-    pub objective_number_format: BTreeMap<String, String>,
+    pub objective_number_format: BTreeMap<String, ferrite_protocol::packets::play::NumberFormat>,
     /// `/scoreboard players display name`: `(holder, objective)` -> component text.
     pub score_display_name: BTreeMap<(String, String), String>,
     /// `/scoreboard players display numberformat`, in the same encoding as above.
-    pub score_number_format: BTreeMap<(String, String), String>,
+    pub score_number_format:
+        BTreeMap<(String, String), ferrite_protocol::packets::play::NumberFormat>,
     /// Game time of each player's last action, for `/setidletimeout`.
     pub last_active: BTreeMap<uuid::Uuid, i64>,
     /// `/tick`: shared with the game loop and the region ticks.

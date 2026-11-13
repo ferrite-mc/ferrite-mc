@@ -12,11 +12,12 @@ use ferrite_command::{
     arguments::{EntityTarget, ScoreHolder},
     literal,
 };
+use ferrite_nbt::Tag;
 use ferrite_protocol::{
     VarInt,
     packets::play::{
-        BossBar, BossBarAction, PlayerTeam, ResetScore, SetDisplayObjective, SetObjective,
-        SetScore, TeamAction, TeamParams,
+        BossBar, BossBarAction, NumberFormat, NumberStyle, PlayerTeam, ResetScore,
+        SetDisplayObjective, SetObjective, SetScore, TeamAction, TeamParams,
     },
     types::PlainText,
 };
@@ -102,6 +103,14 @@ fn send_score(
     objective: &str,
     value: i32,
 ) -> Result<i32, CommandError> {
+    let (display_name, number_format) = {
+        let state = ctx.source().state.lock().unwrap();
+        let key = (holder.to_owned(), objective.to_owned());
+        (
+            state.more.score_display_name.get(&key).cloned(),
+            state.more.score_number_format.get(&key).cloned(),
+        )
+    };
     packets(
         ctx,
         Vec::new(),
@@ -109,7 +118,55 @@ fn send_score(
             entity: holder.to_owned(),
             objective: objective.to_owned(),
             value: VarInt(value),
-            display_name: None,
+            display_name: display_name.map(PlainText),
+            number_format,
+        }),
+    )
+}
+
+/// Re-sends each holder's score so clients see the new display name or number format. A holder
+/// without a score gets one at 0, like vanilla's `getOrCreatePlayerScore`.
+fn resend_scores(
+    ctx: &CommandContext<Source>,
+    holders: &[String],
+    objective: &str,
+) -> Result<(), CommandError> {
+    for holder in holders {
+        let value = *ctx
+            .source()
+            .state
+            .lock()
+            .unwrap()
+            .scores
+            .entry((holder.clone(), objective.to_owned()))
+            .or_insert(0);
+        send_score(ctx, holder, objective, value)?;
+    }
+    Ok(())
+}
+
+/// Sends the objective's current display name, render type and number format (update mode).
+fn resend_objective(ctx: &CommandContext<Source>, name: &str) -> Result<i32, CommandError> {
+    let (display, render, number_format) = {
+        let state = ctx.source().state.lock().unwrap();
+        let Some(objective) = state.objectives.get(name) else {
+            return Ok(0);
+        };
+        (
+            objective.display_name.clone(),
+            objective.render_type,
+            state.more.objective_number_format.get(name).cloned(),
+        )
+    };
+    packets(
+        ctx,
+        Vec::new(),
+        PlayerPacket::SetObjective(SetObjective {
+            name: name.to_owned(),
+            mode: 2,
+            display_name: Some(PlainText(display)),
+            render_type: Some(VarInt(render)),
+            number_format,
         }),
     )
 }
@@ -380,6 +437,7 @@ fn add_objective(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             mode: 0,
             display_name: Some(PlainText(display)),
             render_type: Some(VarInt(0)),
+            number_format: None,
         }),
     )?;
     feedback(
@@ -423,6 +481,7 @@ fn remove_objective(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             mode: 1,
             display_name: None,
             render_type: None,
+            number_format: None,
         }),
     )?;
     feedback(
@@ -435,15 +494,15 @@ fn remove_objective(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
 /// A number format: no node (clear), `blank`, `fixed <contents>` or `styled <style>`.
 fn number_format_nodes(
     base: ferrite_command::NodeBuilder<Source>,
-    run: fn(&CommandContext<Source>, Option<String>) -> Result<i32, CommandError>,
+    run: fn(&CommandContext<Source>, Option<NumberFormat>) -> Result<i32, CommandError>,
 ) -> ferrite_command::NodeBuilder<Source> {
     base.executes(move |ctx| run(ctx, None))
-        .then(literal("blank").executes(move |ctx| run(ctx, Some("blank".into()))))
+        .then(literal("blank").executes(move |ctx| run(ctx, Some(NumberFormat::Blank))))
         .then(
             literal("fixed").then(argument("contents", ArgumentType::Component).executes(
                 move |ctx| {
                     let text = component_text(ctx.string("contents").unwrap_or_default());
-                    run(ctx, Some(format!("fixed:{text}")))
+                    run(ctx, Some(NumberFormat::Fixed(PlainText(text))))
                 },
             )),
         )
@@ -451,13 +510,36 @@ fn number_format_nodes(
             argument("style", ArgumentType::opaque("minecraft:style")).executes(move |ctx| {
                 run(
                     ctx,
-                    Some(format!(
-                        "styled:{}",
-                        ctx.string("style").unwrap_or_default()
-                    )),
+                    Some(NumberFormat::Styled(parse_style(
+                        ctx.string("style").unwrap_or_default(),
+                    )?)),
                 )
             }),
         ))
+}
+
+/// A `minecraft:style` argument (`{color:"red",bold:true}` as SNBT or JSON) as a wire style.
+fn parse_style(text: &str) -> Result<NumberStyle, CommandError> {
+    let Tag::Compound(map) = ferrite_nbt::snbt::parse(text)
+        .map_err(|error| CommandError::failed(format!("Invalid style: {error}")))?
+    else {
+        return Err(CommandError::failed("Invalid style: expected an object"));
+    };
+    let flag = |name: &str| match map.get(name) {
+        Some(Tag::Byte(value)) => Some(*value != 0),
+        _ => None,
+    };
+    Ok(NumberStyle {
+        color: match map.get("color") {
+            Some(Tag::String(color)) => Some(color.clone()),
+            _ => None,
+        },
+        bold: flag("bold"),
+        italic: flag("italic"),
+        underlined: flag("underlined"),
+        strikethrough: flag("strikethrough"),
+        obfuscated: flag("obfuscated"),
+    })
 }
 
 fn set_auto_update(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
@@ -485,14 +567,14 @@ fn set_auto_update(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
 
 fn set_objective_number_format(
     ctx: &CommandContext<Source>,
-    format: Option<String>,
+    format: Option<NumberFormat>,
 ) -> Result<i32, CommandError> {
     let name = objective_name(ctx);
     let cleared = format.is_none();
     {
         let mut state = ctx.source().state.lock().unwrap();
         require_objective(&state, &name)?;
-        match format {
+        match format.clone() {
             Some(format) => state
                 .more
                 .objective_number_format
@@ -500,6 +582,7 @@ fn set_objective_number_format(
             None => state.more.objective_number_format.remove(&name),
         };
     }
+    resend_objective(ctx, &name)?;
     feedback(
         ctx,
         if cleared {
@@ -529,6 +612,7 @@ fn set_score_display_name(
             };
         }
     }
+    resend_scores(ctx, &holders, &objective)?;
     let (key, args) =
         score_display_feedback(DisplayKind::Name, text.as_deref(), &holders, &objective);
     feedback(ctx, key, args)
@@ -536,7 +620,7 @@ fn set_score_display_name(
 
 fn set_score_number_format(
     ctx: &CommandContext<Source>,
-    format: Option<String>,
+    format: Option<NumberFormat>,
 ) -> Result<i32, CommandError> {
     let objective = objective_name(ctx);
     let holders = holders(ctx, "targets")?;
@@ -551,9 +635,10 @@ fn set_score_number_format(
             };
         }
     }
+    resend_scores(ctx, &holders, &objective)?;
     let (key, args) = score_display_feedback(
         DisplayKind::NumberFormat,
-        format.as_deref(),
+        format.as_ref().map(|_| ""),
         &holders,
         &objective,
     );
@@ -616,25 +701,15 @@ fn score_display_feedback(
 fn set_objective_display(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let name = objective_name(ctx);
     let display = component_text(ctx.string("displayName").unwrap_or_default());
-    let existing = {
+    {
         let mut state = ctx.source().state.lock().unwrap();
         let objective = state
             .objectives
             .get_mut(&name)
             .ok_or_else(|| CommandError::failed(format!("Unknown objective '{name}'")))?;
         objective.display_name = display.clone();
-        objective.render_type
-    };
-    packets(
-        ctx,
-        Vec::new(),
-        PlayerPacket::SetObjective(SetObjective {
-            name: name.clone(),
-            mode: 2,
-            display_name: Some(PlainText(display.clone())),
-            render_type: Some(VarInt(existing)),
-        }),
-    )?;
+    }
+    resend_objective(ctx, &name)?;
     feedback(
         ctx,
         "commands.scoreboard.objectives.modify.displayname",
@@ -647,25 +722,15 @@ fn set_objective_render_type(
     render_type: i32,
 ) -> Result<i32, CommandError> {
     let name = objective_name(ctx);
-    let display = {
+    {
         let mut state = ctx.source().state.lock().unwrap();
         let objective = state
             .objectives
             .get_mut(&name)
             .ok_or_else(|| CommandError::failed(format!("Unknown objective '{name}'")))?;
         objective.render_type = render_type;
-        objective.display_name.clone()
-    };
-    packets(
-        ctx,
-        Vec::new(),
-        PlayerPacket::SetObjective(SetObjective {
-            name: name.clone(),
-            mode: 2,
-            display_name: Some(PlainText(display)),
-            render_type: Some(VarInt(render_type)),
-        }),
-    )?;
+    }
+    resend_objective(ctx, &name)?;
     feedback(
         ctx,
         "commands.scoreboard.objectives.modify.rendertype",
@@ -2631,7 +2696,7 @@ mod tests {
         );
         assert_eq!(
             source.state.lock().unwrap().more.objective_number_format["points"],
-            "blank"
+            NumberFormat::Blank
         );
         assert_eq!(
             run("scoreboard objectives modify points numberformat"),
@@ -2667,5 +2732,46 @@ mod tests {
                 .score_number_format
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn number_formats_reach_the_wire() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source(2);
+        let mut packets = |command: &str| {
+            execute(&tree, source.clone(), &mut received, command)
+                .into_iter()
+                .filter_map(|action| match action {
+                    Action::Packets { packet, .. } => Some(packet),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        packets("scoreboard objectives add points dummy");
+        let sent = packets("scoreboard objectives modify points numberformat fixed \"n/a\"");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetObjective(o) if o.mode == 2
+                && o.number_format == Some(NumberFormat::Fixed(PlainText("n/a".into()))))));
+        let sent = packets(
+            "scoreboard objectives modify points numberformat styled {color:\"red\",bold:true}",
+        );
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetObjective(o) if o.number_format == Some(NumberFormat::Styled(
+                NumberStyle { color: Some("red".into()), bold: Some(true), ..NumberStyle::default() })))));
+        let sent = packets("scoreboard players display numberformat Alice points blank");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.entity == "Alice" && s.number_format == Some(NumberFormat::Blank))));
+        let sent = packets("scoreboard players display name Alice points \"Boss\"");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.display_name == Some(PlainText("Boss".into()))
+                && s.number_format == Some(NumberFormat::Blank))));
+        // Clearing sends no format.
+        let sent = packets("scoreboard players display numberformat Alice points");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.number_format.is_none())));
+        // A plain score update keeps the stored display settings.
+        let sent = packets("scoreboard players set Alice points 5");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.display_name == Some(PlainText("Boss".into())))));
     }
 }

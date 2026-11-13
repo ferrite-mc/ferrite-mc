@@ -679,6 +679,7 @@ fn trigger_value(ctx: &CommandContext<Source>, mode: TriggerMode) -> Result<i32,
                 objective: objective.clone(),
                 value: VarInt(value),
                 display_name: None,
+                number_format: None,
             }),
         },
     )?;
