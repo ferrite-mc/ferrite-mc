@@ -425,88 +425,156 @@ fn passed(
     if result != unless {
         Ok(ctx.source().clone())
     } else {
-        Err(CommandError::failed("Test failed"))
+        Err(CommandError::failed(TEST_FAILED))
+    }
+}
+
+/// Message of the failed-test error; `gate` turns it into "no source continues".
+const TEST_FAILED: &str = "Test failed";
+
+/// Conditions fork like vanilla's: a failed test continues with no source, so `execute if ...
+/// run <command>` quietly does nothing (a function carries on to its next line), while ending
+/// the chain at the condition reports `Test failed`.
+trait Gate {
+    fn gate(
+        self,
+        execute: NodeId,
+        unless: bool,
+        test: impl Fn(&CommandContext<Source>, bool) -> Result<Source, CommandError>
+        + Copy
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self;
+}
+
+impl Gate for NodeBuilder<Source> {
+    fn gate(
+        self,
+        execute: NodeId,
+        unless: bool,
+        test: impl Fn(&CommandContext<Source>, bool) -> Result<Source, CommandError>
+        + Copy
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.fork(execute, move |ctx| match test(ctx, unless) {
+            Ok(source) => Ok(vec![source]),
+            Err(CommandError::Failed(message)) if message == TEST_FAILED => Ok(Vec::new()),
+            Err(error) => Err(error),
+        })
+        .executes(move |ctx| test(ctx, unless).map(|_| 1))
     }
 }
 
 fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
-    let block = literal::<Source>("block").then(
-        argument::<Source>("pos", ArgumentType::BlockPos).then(
-            argument::<Source>("block", ArgumentType::BlockState)
-                .redirect_with(execute, move |ctx| condition_block(ctx, unless)),
-        ),
-    );
+    let block =
+        literal::<Source>("block").then(argument::<Source>("pos", ArgumentType::BlockPos).then(
+            argument::<Source>("block", ArgumentType::BlockState).gate(
+                execute,
+                unless,
+                condition_block,
+            ),
+        ));
     let blocks = literal::<Source>("blocks").then(
         argument::<Source>("start", ArgumentType::BlockPos).then(
             argument::<Source>("end", ArgumentType::BlockPos).then(
                 argument::<Source>("destination", ArgumentType::BlockPos)
                     .then(
-                        literal::<Source>("all").redirect_with(execute, move |ctx| {
+                        literal::<Source>("all").gate(execute, unless, |ctx, unless| {
                             condition_blocks(ctx, unless, false)
                         }),
                     )
                     .then(
-                        literal::<Source>("masked")
-                            .redirect_with(execute, move |ctx| condition_blocks(ctx, unless, true)),
+                        literal::<Source>("masked").gate(execute, unless, |ctx, unless| {
+                            condition_blocks(ctx, unless, true)
+                        }),
                     ),
             ),
         ),
     );
     let entity = literal::<Source>("entity").then(
-        argument::<Source>("entities", ArgumentType::entities())
-            .redirect_with(execute, move |ctx| condition_entity(ctx, unless)),
+        argument::<Source>("entities", ArgumentType::entities()).gate(
+            execute,
+            unless,
+            condition_entity,
+        ),
     );
     let score = literal::<Source>("score").then(
         argument::<Source>("target", ArgumentType::ScoreHolder { multiple: false }).then(
-            argument::<Source>("targetObjective", ArgumentType::word()).then(
-                argument::<Source>("operation", ArgumentType::opaque("minecraft:operation")).then(
-                    argument::<Source>("source", ArgumentType::ScoreHolder { multiple: false })
+            argument::<Source>("targetObjective", ArgumentType::word())
+                .then(literal::<Source>("matches").then(
+                    argument::<Source>("range", ArgumentType::opaque("minecraft:int_range")).gate(
+                        execute,
+                        unless,
+                        condition_score_matches,
+                    ),
+                ))
+                .then(
+                    argument::<Source>("operation", ArgumentType::opaque("minecraft:operation"))
                         .then(
-                            argument::<Source>("sourceObjective", ArgumentType::word())
-                                .redirect_with(execute, move |ctx| condition_score(ctx, unless)),
+                            argument::<Source>(
+                                "source",
+                                ArgumentType::ScoreHolder { multiple: false },
+                            )
+                            .then(
+                                argument::<Source>("sourceObjective", ArgumentType::word()).gate(
+                                    execute,
+                                    unless,
+                                    condition_score,
+                                ),
+                            ),
                         ),
                 ),
-            ),
         ),
     );
     let predicate = literal::<Source>("predicate").then(
-        argument::<Source>("predicate", ArgumentType::ResourceLocation)
-            .redirect_with(execute, move |ctx| condition_predicate(ctx, unless)),
-    );
-    let data_block = literal::<Source>("data").then(
-        literal::<Source>("block").then(
-            argument::<Source>("pos", ArgumentType::BlockPos).then(
-                argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
-                    .redirect_with(execute, move |ctx| {
-                        condition_data(ctx, unless, DataKind::Block)
-                    }),
-            ),
+        argument::<Source>("predicate", ArgumentType::ResourceLocation).gate(
+            execute,
+            unless,
+            condition_predicate,
         ),
     );
-    let data_entity = literal::<Source>("data").then(
-        literal::<Source>("entity").then(
-            argument::<Source>("target", ArgumentType::entities()).then(
-                argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
-                    .redirect_with(execute, move |ctx| {
-                        condition_data(ctx, unless, DataKind::Entity)
-                    }),
+    let data_block = literal::<Source>("data").then(literal::<Source>("block").then(
+        argument::<Source>("pos", ArgumentType::BlockPos).then(
+            argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")).gate(
+                execute,
+                unless,
+                |ctx, unless| condition_data(ctx, unless, DataKind::Block),
             ),
         ),
-    );
-    let data_storage = literal::<Source>("data").then(
-        literal::<Source>("storage").then(
-            argument::<Source>("source", ArgumentType::word()).then(
-                argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
-                    .redirect_with(execute, move |ctx| {
-                        condition_data(ctx, unless, DataKind::Storage)
-                    }),
+    ));
+    let data_entity = literal::<Source>("data").then(literal::<Source>("entity").then(
+        argument::<Source>("target", ArgumentType::entities()).then(
+            argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")).gate(
+                execute,
+                unless,
+                |ctx, unless| condition_data(ctx, unless, DataKind::Entity),
             ),
+        ),
+    ));
+    let data_storage = literal::<Source>("data").then(literal::<Source>("storage").then(
+        argument::<Source>("source", ArgumentType::ResourceLocation).then(
+            argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")).gate(
+                execute,
+                unless,
+                |ctx, unless| condition_data(ctx, unless, DataKind::Storage),
+            ),
+        ),
+    ));
+    let dimension = literal::<Source>("dimension").then(
+        argument::<Source>("dimension", ArgumentType::Dimension).gate(
+            execute,
+            unless,
+            condition_dimension,
         ),
     );
     vec![
         block,
         blocks,
         entity,
+        dimension,
         score,
         predicate,
         data_block,
@@ -576,25 +644,23 @@ fn condition_entity(ctx: &CommandContext<Source>, unless: bool) -> Result<Source
     passed(ctx, unless, resolve_in(ctx, "entities").is_ok())
 }
 
-fn score_holder_name(ctx: &CommandContext<Source>, name: &str) -> String {
-    match ctx.argument(name) {
-        Some(ArgumentValue::ScoreHolder(ferrite_command::arguments::ScoreHolder::All)) => {
-            "*".to_owned()
-        }
-        Some(ArgumentValue::ScoreHolder(ferrite_command::arguments::ScoreHolder::Target(
-            EntityTarget::Name(name),
-        ))) => name.clone(),
-        Some(ArgumentValue::ScoreHolder(ferrite_command::arguments::ScoreHolder::Target(
-            EntityTarget::Uuid(uuid),
-        ))) => uuid.clone(),
-        _ => String::new(),
+/// The single score holder `name` resolves to: a literal name, or the one player a selector
+/// picks (vanilla `ScoreHolderArgument.getName`).
+fn score_holder(ctx: &CommandContext<Source>, name: &str) -> Result<String, CommandError> {
+    let mut found = super::commands_meta::holders(ctx, name)?;
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(CommandError::failed("No score holder was found")),
+        _ => Err(CommandError::failed(
+            "Only one score holder is allowed, but the provided selector allows more than one",
+        )),
     }
 }
 
 fn condition_score(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
-    let holder = score_holder_name(ctx, "target");
+    let holder = score_holder(ctx, "target")?;
     let objective = ctx.string("targetObjective").unwrap_or_default().to_owned();
-    let source_holder = score_holder_name(ctx, "source");
+    let source_holder = score_holder(ctx, "source")?;
     let source_objective = ctx.string("sourceObjective").unwrap_or_default().to_owned();
     let operation = ctx.string("operation").unwrap_or("=");
     let state = ctx.source().state.lock().unwrap();
@@ -615,6 +681,44 @@ fn condition_score(ctx: &CommandContext<Source>, unless: bool) -> Result<Source,
         _ => false,
     };
     passed(ctx, unless, result)
+}
+
+/// `if score <holder> <objective> matches <range>`: an unset score never matches.
+fn condition_score_matches(
+    ctx: &CommandContext<Source>,
+    unless: bool,
+) -> Result<Source, CommandError> {
+    let holder = score_holder(ctx, "target")?;
+    let objective = ctx.string("targetObjective").unwrap_or_default().to_owned();
+    let raw = ctx.string("range").unwrap_or_default();
+    // The argument parser has already rejected malformed and swapped ranges.
+    let (min, max) = super::selectors::range_i32(raw)
+        .ok_or_else(|| CommandError::failed(format!("Invalid range '{raw}'")))?;
+    let score = ctx
+        .source()
+        .state
+        .lock()
+        .unwrap()
+        .scores
+        .get(&(holder, objective))
+        .copied();
+    passed(
+        ctx,
+        unless,
+        score.is_some_and(|value| (min..=max).contains(&value)),
+    )
+}
+
+fn condition_dimension(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
+    let wanted = ctx.string("dimension").unwrap_or_default();
+    if !DIMENSIONS.contains(&wanted) {
+        return Err(CommandError::failed(format!("No such dimension: {wanted}")));
+    }
+    passed(
+        ctx,
+        unless,
+        super::Dimension::from_key(wanted) == Some(ctx.source().dimension),
+    )
 }
 
 fn condition_predicate(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
@@ -692,12 +796,40 @@ fn store_targets(execute: NodeId, success: bool) -> Vec<NodeBuilder<Source>> {
         ),
     );
     let storage = literal::<Source>("storage").then(
-        argument::<Source>("source", ArgumentType::word()).then(
+        argument::<Source>("source", ArgumentType::ResourceLocation).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
                 .then(store_type(execute, StoreKind::Storage, success)),
         ),
     );
-    vec![block, entity, storage]
+    let score = literal::<Source>("score").then(
+        argument::<Source>("targets", ArgumentType::ScoreHolder { multiple: true }).then(
+            argument::<Source>("objective", ArgumentType::word())
+                .redirect_with(execute, |ctx| {
+                    super::commands_meta::check_objective(
+                        ctx,
+                        ctx.string("objective").unwrap_or_default(),
+                    )?;
+                    Ok(ctx.source().clone())
+                })
+                .stores(move |ctx, result| {
+                    let value = if success {
+                        i32::from(result != 0)
+                    } else {
+                        result
+                    };
+                    write_score(ctx, value)
+                }),
+        ),
+    );
+    vec![block, entity, storage, score]
+}
+
+fn write_score(ctx: &CommandContext<Source>, value: i32) -> Result<(), CommandError> {
+    let objective = ctx.string("objective").unwrap_or_default().to_owned();
+    for holder in super::commands_meta::holders(ctx, "targets")? {
+        super::commands_meta::write_score(ctx, &holder, &objective, value)?;
+    }
+    Ok(())
 }
 
 /// `storage <path> <type> <scale>`: the scale node forwards to `execute` and records the
@@ -917,25 +1049,43 @@ mod tests {
             source.clone(),
         )
         .unwrap();
-        let error = tree
-            .execute(
-                "execute if score Alice points > Alice points run data merge storage c {bad:1}",
-                source.clone(),
+        // A failed condition in front of `run` forks to nothing: the command does not run and
+        // nothing is reported (a function carries on to its next line).
+        for failing in [
+            "execute if score Alice points > Alice points run data merge storage c {bad:1}",
+            "execute if entity @e[name=Nobody] run data merge storage c {bad:1}",
+            "execute if predicate minecraft:none run data merge storage c {bad:1}",
+        ] {
+            assert_eq!(
+                tree.execute(failing, source.clone()).unwrap(),
+                0,
+                "{failing}"
+            );
+        }
+        assert!(
+            !snbt::format(
+                source
+                    .state
+                    .lock()
+                    .unwrap()
+                    .storage
+                    .get("minecraft:c")
+                    .unwrap()
             )
-            .unwrap_err();
-        assert_eq!(error.to_string(), "Test failed");
-        let error = tree
-            .execute(
-                "execute if entity @e[name=Nobody] run data merge storage c {bad:1}",
-                source.clone(),
+            .contains("bad"),
+            "a failed condition must not run the command"
+        );
+        // Ending the chain at the condition reports the result of the test instead.
+        assert_eq!(
+            tree.execute(
+                "execute if score Alice points = Alice points",
+                source.clone()
             )
-            .unwrap_err();
-        assert_eq!(error.to_string(), "Test failed");
+            .unwrap(),
+            1
+        );
         let error = tree
-            .execute(
-                "execute if predicate minecraft:none run data merge storage c {bad:1}",
-                source,
-            )
+            .execute("execute if score Alice points > Alice points", source)
             .unwrap_err();
         assert_eq!(error.to_string(), "Test failed");
     }
@@ -970,6 +1120,195 @@ mod tests {
                 source,
             )
             .is_err()
+        );
+    }
+
+    fn with_objective(source: &Source) {
+        source.state.lock().unwrap().objectives.insert(
+            "points".into(),
+            super::super::commands::Objective {
+                criteria: "dummy".into(),
+                display_name: "points".into(),
+                render_type: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn namespaced_storage_ids_work_in_store_and_data_conditions() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        tree.execute(
+            "execute store result storage pack:res value int 1 run data merge storage t {a:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            snbt::format(
+                source
+                    .state
+                    .lock()
+                    .unwrap()
+                    .storage
+                    .get("pack:res")
+                    .unwrap()
+            ),
+            "{value:1}"
+        );
+        tree.execute(
+            "execute if data storage pack:res value run data merge storage t {b:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            tree.execute(
+                "execute unless data storage pack:res value run data merge storage t {c:1}",
+                source.clone(),
+            )
+            .unwrap(),
+            0
+        );
+        assert!(
+            !snbt::format(
+                source
+                    .state
+                    .lock()
+                    .unwrap()
+                    .storage
+                    .get("minecraft:t")
+                    .unwrap()
+            )
+            .contains("c:1"),
+            "a failed unless must not run the command"
+        );
+    }
+
+    #[test]
+    fn score_matches_tests_ranges_for_names_and_selectors() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source();
+        with_objective(&source);
+        source
+            .state
+            .lock()
+            .unwrap()
+            .scores
+            .insert(("Alice".into(), "points".into()), 5);
+        let run = |command: &str| tree.execute(command, source.clone());
+        for ok in [
+            "execute if score Alice points matches 5 run say ok",
+            "execute if score Alice points matches 3..7 run say ok",
+            "execute if score Alice points matches ..5 run say ok",
+            "execute if score @s points matches 5.. run say ok",
+            "execute unless score Alice points matches 6.. run say ok",
+            "execute unless score Bob points matches 0.. run say ok",
+        ] {
+            run(ok).unwrap_or_else(|error| panic!("{ok}: {error}"));
+        }
+        let said = |received: &mut tokio::sync::mpsc::UnboundedReceiver<Action>| {
+            std::iter::from_fn(|| received.try_recv().ok())
+                .filter(|action| matches!(action, Action::Broadcast(_)))
+                .count()
+        };
+        assert_eq!(said(&mut received), 6, "every passing form ran its command");
+        for failing in [
+            "execute if score Alice points matches 6.. run say ok",
+            "execute if score Alice points matches ..4 run say ok",
+            "execute if score Bob points matches 0.. run say ok",
+            "execute unless score @s points matches 5 run say ok",
+        ] {
+            assert_eq!(run(failing).unwrap(), 0, "{failing}");
+        }
+        assert_eq!(said(&mut received), 0, "a failed test runs nothing");
+        // Ending the chain at the test reports it.
+        assert_eq!(
+            run("execute if score Alice points matches 6..")
+                .unwrap_err()
+                .to_string(),
+            "Test failed"
+        );
+        assert_eq!(run("execute if score Alice points matches 5").unwrap(), 1);
+        assert!(run("execute if score Alice points matches 7..3 run say x").is_err());
+        assert!(run("execute if score Alice points matches abc run say x").is_err());
+    }
+
+    #[test]
+    fn score_comparisons_accept_selector_holders() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        with_objective(&source);
+        source
+            .state
+            .lock()
+            .unwrap()
+            .scores
+            .insert(("Alice".into(), "points".into()), 5);
+        tree.execute(
+            "execute if score @s points = Alice points run say ok",
+            source,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn store_can_write_a_score() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        with_objective(&source);
+        tree.execute(
+            "execute store result score Alice points run data merge storage t {a:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            source.state.lock().unwrap().scores[&("Alice".to_owned(), "points".to_owned())],
+            1
+        );
+        tree.execute(
+            "execute store success score @s points run data merge storage t {b:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            source.state.lock().unwrap().scores[&("Alice".to_owned(), "points".to_owned())],
+            1
+        );
+        let error = tree
+            .execute(
+                "execute store result score Alice nope run data merge storage t {a:1}",
+                source,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("nope"), "{error}");
+    }
+
+    #[test]
+    fn dimension_condition_compares_the_source_dimension() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        tree.execute(
+            "execute if dimension minecraft:overworld run say ok",
+            source.clone(),
+        )
+        .unwrap();
+        tree.execute(
+            "execute unless dimension minecraft:the_nether run say ok",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            tree.execute(
+                "execute if dimension minecraft:the_end run say ok",
+                source.clone()
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            tree.execute("execute if dimension minecraft:the_end", source)
+                .unwrap_err()
+                .to_string(),
+            "Test failed"
         );
     }
 

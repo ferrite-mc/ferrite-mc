@@ -440,18 +440,72 @@ pub fn run(
         .ok_or_else(|| CommandError::failed("functions need a running command dispatcher"))?;
     let mut nested = source.clone();
     nested.function_depth = depth;
+    let _frame = Frame::enter();
     let mut result = 0;
     for line in lines {
-        let line = line.trim_start();
-        if line == "return" {
-            return Err(CommandError::failed("return needs a value"));
+        result = match tree.execute(line.trim_start(), nested.clone()) {
+            Ok(value) => value,
+            // Vanilla tells the source why a line failed and carries on with the next one.
+            Err(CommandError::Failed(message)) => {
+                super::commands::send(
+                    source,
+                    super::commands::Action::Feedback(super::commands::Feedback {
+                        key: "commands.function.line_failed",
+                        args: vec![line.trim_start().to_owned(), message.clone()],
+                        text: message,
+                    }),
+                )?;
+                0
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(returned) = Frame::returned() {
+            return Ok(returned);
         }
-        if let Some(value) = line.strip_prefix("return ") {
-            return evaluate_return(tree, &nested, value.trim());
-        }
-        result = tree.execute(line, nested.clone())?;
     }
     Ok(result)
+}
+
+thread_local! {
+    /// One slot per function currently running on this thread: `Some` once a `return` ran in
+    /// it. Functions run synchronously inside `tree.execute`, so a `return` reached through
+    /// `execute ... run return` still finds the frame of the function that contains it.
+    static FRAMES: std::cell::RefCell<Vec<Option<i32>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A running function's return slot; popped when the function ends, however it ends.
+struct Frame;
+
+impl Frame {
+    fn enter() -> Self {
+        FRAMES.with(|frames| frames.borrow_mut().push(None));
+        Self
+    }
+
+    /// The value the innermost function returned, if it has.
+    fn returned() -> Option<i32> {
+        FRAMES.with(|frames| frames.borrow().last().copied().flatten())
+    }
+
+    /// Records the innermost function's return value (the first `return` wins); `false` when
+    /// no function is running.
+    fn set_return(value: i32) -> bool {
+        FRAMES.with(|frames| match frames.borrow_mut().last_mut() {
+            Some(slot) => {
+                slot.get_or_insert(value);
+                true
+            }
+            None => false,
+        })
+    }
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        FRAMES.with(|frames| {
+            frames.borrow_mut().pop();
+        });
+    }
 }
 
 /// `/debug function`: runs the function line by line and writes each command and its result to
@@ -506,18 +560,6 @@ fn trace_into(source: &Source, raw: &str, dir: &Path) -> Result<(usize, String),
         )));
     }
     Ok((count, file.to_string_lossy().replace('\\', "/")))
-}
-
-fn evaluate_return(
-    tree: &CommandDispatcher<Source>,
-    source: &Source,
-    rest: &str,
-) -> Result<i32, CommandError> {
-    if let Some(command) = rest.strip_prefix("run ") {
-        return tree.execute(command, source.clone());
-    }
-    rest.parse::<i32>()
-        .map_err(|_| CommandError::failed(format!("'{rest}' is not a valid integer")))
 }
 
 /// Adds `/function` and `/return` to the server tree.
@@ -578,13 +620,42 @@ fn return_builder() -> NodeBuilder<Source> {
     literal::<Source>("return")
         .requires(|source| source.permission >= 2)
         .restricted(true)
-        .then(argument::<Source>("value", ArgumentType::integer()).executes(not_in_function))
+        .then(
+            argument::<Source>("value", ArgumentType::integer()).executes(|ctx| {
+                let value = ctx.integer("value").unwrap_or(0);
+                return_value(value, value)
+            }),
+        )
+        .then(literal("fail").executes(|_| return_value(0, 0)))
         .then(literal("run").then(
-            argument::<Source>("command", ArgumentType::greedy_string()).executes(not_in_function),
+            argument::<Source>("command", ArgumentType::greedy_string()).executes(|ctx| {
+                let command = ctx.string("command").unwrap_or_default();
+                let Some(tree) = ctx.source().tree.clone() else {
+                    return Err(CommandError::failed(
+                        "functions need a running command dispatcher",
+                    ));
+                };
+                // The function returns what the command returned; a command that fails (as
+                // opposed to one that does not parse) makes it return fail.
+                match tree.execute(command, ctx.source().clone()) {
+                    Ok(result) => return_value(result, result),
+                    Err(CommandError::Syntax(error)) => Err(CommandError::Syntax(error)),
+                    Err(_) => return_value(0, 0),
+                }
+            }),
         ))
 }
 
-fn not_in_function(_: &CommandContext<Source>) -> Result<i32, CommandError> {
+/// Ends the running function with `returned`; the command itself reports `result`.
+fn return_value(returned: i32, result: i32) -> Result<i32, CommandError> {
+    if Frame::set_return(returned) {
+        Ok(result)
+    } else {
+        not_in_function_error()
+    }
+}
+
+fn not_in_function_error() -> Result<i32, CommandError> {
     Err(CommandError::failed(super::feedback::render(
         "commands.function.return.not_in_function",
         &[],
@@ -728,6 +799,112 @@ mod tests {
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert!(
             matches!(&actions[0], Action::Broadcast(feedback) if feedback.text.contains("before"))
+        );
+    }
+
+    fn broadcasts(received: &mut tokio::sync::mpsc::UnboundedReceiver<Action>) -> Vec<String> {
+        std::iter::from_fn(|| received.try_recv().ok())
+            .filter_map(|action| match action {
+                Action::Broadcast(feedback) => Some(feedback.text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn set_points(source: &Source, value: i32) {
+        let mut state = source.state.lock().unwrap();
+        state.objectives.insert(
+            "points".into(),
+            crate::game::commands::Objective {
+                criteria: "dummy".into(),
+                display_name: "points".into(),
+                render_type: 0,
+            },
+        );
+        state
+            .scores
+            .insert(("Alice".into(), "points".into()), value);
+    }
+
+    #[test]
+    fn a_conditional_return_inside_execute_stops_the_function() {
+        let functions = store(&[(
+            "test:gate",
+            "say a\nexecute if score Alice points matches 5 run return 9\nsay b",
+        )]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, mut received) = source(&tree, functions);
+        set_points(&source, 5);
+        assert_eq!(
+            tree.execute("function test:gate", source.clone()).unwrap(),
+            9
+        );
+        assert_eq!(broadcasts(&mut received).len(), 1, "say b must not run");
+        set_points(&source, 4);
+        let _ = tree.execute("function test:gate", source);
+        assert_eq!(broadcasts(&mut received).len(), 2, "both say lines run");
+    }
+
+    #[test]
+    fn return_fail_and_return_run_end_only_their_own_function() {
+        let functions = store(&[
+            ("test:fail", "say a\nreturn fail\nsay b"),
+            ("test:run", "return run say x\nsay after"),
+            ("test:inner", "return 3\nsay hidden"),
+            ("test:outer", "function test:inner\nsay outer"),
+        ]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, mut received) = source(&tree, functions);
+        assert_eq!(
+            tree.execute("function test:fail", source.clone()).unwrap(),
+            0
+        );
+        assert_eq!(broadcasts(&mut received).len(), 1);
+        assert_eq!(
+            tree.execute("function test:run", source.clone()).unwrap(),
+            1
+        );
+        assert_eq!(
+            broadcasts(&mut received).len(),
+            1,
+            "only the returned command"
+        );
+        tree.execute("function test:outer", source).unwrap();
+        let said = broadcasts(&mut received);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("outer"), "{said:?}");
+    }
+
+    #[test]
+    fn return_outside_a_function_still_fails() {
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, _received) = source(&tree, FunctionStore::default());
+        assert!(tree.execute("return 1", source.clone()).is_err());
+        assert!(tree.execute("return fail", source).is_err());
+    }
+
+    #[test]
+    fn a_failing_command_is_reported_and_the_function_carries_on() {
+        // The second merge changes nothing, which fails; vanilla reports it and runs the rest.
+        let functions = store(&[(
+            "test:carry",
+            "data merge storage t {a:1}\ndata merge storage t {a:1}\nsay after",
+        )]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, mut received) = source(&tree, functions);
+        tree.execute("function test:carry", source).unwrap();
+        let actions: Vec<Action> = std::iter::from_fn(|| received.try_recv().ok()).collect();
+        assert!(
+            actions.iter().any(
+                |action| matches!(action, Action::Feedback(f) if f.text.contains("Nothing changed"))
+            ),
+            "the failure is reported to the source: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::Broadcast(f) if f.text.contains("after"))),
+            "the line after the failure still runs: {actions:?}"
         );
     }
 

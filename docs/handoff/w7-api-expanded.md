@@ -24,6 +24,24 @@ itself, so only the behaviors below were judged.
 | `/ride` engine | lane 2 | not audited here |
 | `execute`, `return`, `function`, data-pack loading beyond item modifiers; the other 20 shape-differing roots | unverified in this lane: not re-audited behaviorally | left as listed in `COMMANDS-STATUS.md` |
 
+### Follow-up branch `w7-exec-gaps` (execute, function, return)
+
+Probed the live dispatcher with ~40 `execute`/`return`/`function` forms, then fixed what failed,
+test first:
+
+| Defect | Fix | Test |
+|---|---|---|
+| `execute store ... storage ns:id` and `if data storage ns:id` never parsed a namespaced id | storage ids use the resource-location argument | `namespaced_storage_ids_work_in_store_and_data_conditions` |
+| `if score` ignored selector holders and had no `matches` | selector holders via the scoreboard resolver; `matches <range>` | `score_matches_tests_ranges_for_names_and_selectors`, `score_comparisons_accept_selector_holders` |
+| `store result|success score` missing | added, unknown objective rejected before the command runs | `store_can_write_a_score` |
+| `if dimension` missing | added | `dimension_condition_compares_the_source_dimension` |
+| a false condition before `run` raised `Test failed`, which aborted functions | conditions fork like vanilla | `conditions_gate_the_run` (assertions changed from the error to result 0 and "command did not run"), `a_conditional_return_inside_execute_stops_the_function` |
+| `execute ... run return N` rejected; `return fail` missing | per-function return frames | `return_fail_and_return_run_end_only_their_own_function`, `return_outside_a_function_still_fails` |
+| a failing command aborted the whole function | reported to the source, function continues | `a_failing_command_is_reported_and_the_function_carries_on` |
+| `int_range` accepted any token | validated at parse time (`argument.range.*`) | `ferrite-command` `int_range_arguments_validate_at_parse_time` |
+
+The remaining unimplemented `execute` forms are listed in `COMMANDS-STATUS.md`.
+
 ## Entity metadata and attributes (Part C)
 
 - Server: `/attribute` now takes the default and presence of an attribute from the target's entity
