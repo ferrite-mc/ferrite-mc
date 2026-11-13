@@ -2255,15 +2255,15 @@ async fn run(
                      };
                      for step in ride_steps {
                          match step {
-                             ride::Step::Move { rider, rider_is_player, rider_pos, rider_rot, to } => {
+                             ride::Step::Move { rider, rider_is_player, rider_pos, rider_rot, dimension, to } => {
                                  if rider_is_player {
                                      if let Some((_, mailbox, _)) = mailboxes.get(&rider) {
                                          mailbox.lock().unwrap().push_back(Command::Teleport { pos: to, yaw: None, pitch: None });
                                      }
                                  } else {
                                      let chunk = ChunkPos((rider_pos[0].floor() as i32) >> 4, (rider_pos[2].floor() as i32) >> 4);
-                                     if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                                         worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.teleport_entity(rider, to, rider_rot.0, rider_rot.1); });
+                                     if worlds.owner(dimension, chunk).is_some() {
+                                         worlds.schedule_at_chunk(dimension, chunk, move |region| { region.teleport_entity(rider, to, rider_rot.0, rider_rot.1); });
                                      }
                                  }
                              }

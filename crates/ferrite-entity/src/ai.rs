@@ -48,6 +48,8 @@ pub const SKELETON_RANGE: f64 = 16.0;
 pub const SKELETON_ARROW_DAMAGE: f32 = 2.0;
 /// Ticks between skeleton shots.
 pub const SKELETON_COOLDOWN: u16 = 40;
+/// `RangedBowAttackGoal` shoots every 20 ticks on Hard, every 40 otherwise.
+pub const SKELETON_COOLDOWN_HARD: u16 = 20;
 /// Ticks between melee hits.
 pub const MELEE_COOLDOWN: u16 = 20;
 /// How often a hostile mob recomputes its path.
@@ -335,6 +337,20 @@ fn caravan_speed(depth: usize) -> f64 {
     (CARAVAN_SPEED - ahead * CARAVAN_SPEED_PER_LINK).max(CARAVAN_MIN_SPEED)
 }
 
+/// Light level at which `getLightLevelDependentMagicValue` reaches 0.5 (overworld ambient 0).
+const SPIDER_BRIGHT_LIGHT: u8 = 12;
+
+fn spider_sees_bright_light(blocks: &impl BlockGetter, pos: Vec3, kind: MobKind) -> bool {
+    let eye = pos.y + f64::from(kind.props().eye_height);
+    blocks
+        .brightness(
+            pos.x.floor() as i32,
+            eye.floor() as i32,
+            pos.z.floor() as i32,
+        )
+        .is_some_and(|level| level >= SPIDER_BRIGHT_LIGHT)
+}
+
 /// A player as the goals see it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Target {
@@ -535,25 +551,41 @@ pub fn tick_with_owner_attacks_and_holders(
         store,
         blocks,
         players,
-        &std::collections::HashSet::new(),
+        &MobRules::default(),
         owner_attacks,
         holders,
         rng,
     )
 }
 
-/// [`tick_with_owner_attacks_and_holders`] where `untargetable` players (creative and
+/// World rules the mob goals read.
+#[derive(Debug, Default)]
+pub struct MobRules {
+    /// Creative and spectator players: seen by every goal except hostile target selection.
+    pub untargetable: std::collections::HashSet<Uuid>,
+    /// Hard difficulty (skeletons shoot twice as often).
+    pub hard: bool,
+}
+
+/// [`tick_with_owner_attacks_and_holders`] where `hard` is the Hard difficulty (skeletons shoot
+/// twice as often) and `untargetable` players (creative and
 /// spectator) are still seen by every other goal (look at, follow, tempt, owner, despawn
 /// range) but are never picked as a hostile mob's target.
 pub fn tick_full(
     store: &mut EntityStore,
     blocks: &impl BlockGetter,
     players: &[Target],
-    untargetable: &std::collections::HashSet<Uuid>,
+    rules: &MobRules,
     owner_attacks: &[(Uuid, crate::EntityKey)],
     holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
+    let MobRules { untargetable, hard } = rules;
+    let bow_cooldown = if *hard {
+        SKELETON_COOLDOWN_HARD
+    } else {
+        SKELETON_COOLDOWN
+    };
     let mut events = Vec::new();
     let hostile_targets: std::borrow::Cow<'_, [Target]> = if untargetable.is_empty() {
         std::borrow::Cow::Borrowed(players)
@@ -621,11 +653,20 @@ pub fn tick_full(
             let (current, calm) =
                 mob::state(store, key).map_or((None, false), |s| (s.target, s.anger == 0));
             // An enderman stays neutral until something angers it.
-            let target = if kind == MobKind::Enderman && calm {
+            let mut target = if kind == MobKind::Enderman && calm {
                 None
             } else {
                 select_target(&hostile_targets, current, start, kind.follow_range()).copied()
             };
+            // Vanilla spiders are neutral in bright light (`getLightLevelDependentMagicValue`
+            // >= 0.5, i.e. light level 12 or more at the eyes): `SpiderTargetGoal` picks no new
+            // target, and `SpiderAttackGoal` drops the current one with a 1 in 100 chance a tick.
+            if kind == MobKind::Spider && spider_sees_bright_light(blocks, start, kind) {
+                target = match target {
+                    Some(t) if Some(t.uuid) == current && rng.next_int(100) != 0 => Some(t),
+                    _ => None,
+                };
+            }
             {
                 let Some(state) = mob::state_mut(store, key) else {
                     continue;
@@ -703,7 +744,7 @@ pub fn tick_full(
                                     damage: SKELETON_ARROW_DAMAGE,
                                 });
                                 if let Some(state) = mob::state_mut(store, key) {
-                                    state.bow_timer = SKELETON_COOLDOWN;
+                                    state.bow_timer = bow_cooldown;
                                 }
                             }
                         }
@@ -1364,7 +1405,10 @@ mod tests {
             &mut Rng::new(1),
         ));
         let creative = target(0.5, 0.5);
-        let hidden: std::collections::HashSet<Uuid> = [creative.uuid].into();
+        let hidden = MobRules {
+            untargetable: [creative.uuid].into(),
+            hard: false,
+        };
         let mut rng = Rng::new(2);
         let mut hits = 0;
         for _ in 0..200 {
@@ -1377,7 +1421,7 @@ mod tests {
         assert_eq!(hits, 0, "a creative player is never attacked");
         assert_eq!(mob::state(&store, zombie).unwrap().target, None);
         // Control: the same setup without the exclusion does attack.
-        let none = std::collections::HashSet::new();
+        let none = MobRules::default();
         let attacked = (0..200).any(|_| {
             tick_full(&mut store, &world, &[creative], &none, &[], &[], &mut rng)
                 .iter()
@@ -1917,6 +1961,100 @@ mod tests {
             }
         }
         assert_eq!(arrows, 1, "one arrow every cooldown");
+    }
+
+    #[test]
+    fn a_skeleton_shoots_twice_as_often_on_hard() {
+        let world = TestWorld::flat(64);
+        let shots = |hard: bool| {
+            let mut store = EntityStore::default();
+            store.insert(new_mob(
+                MobKind::Skeleton,
+                Vec3::new(8.5, 64.0, 0.5),
+                &mut Rng::new(3),
+            ));
+            let mut rng = Rng::new(4);
+            let rules = MobRules {
+                untargetable: Default::default(),
+                hard,
+            };
+            let player = target(0.5, 0.5);
+            let mut ticks = Vec::new();
+            for tick in 0..100 {
+                let events = tick_full(&mut store, &world, &[player], &rules, &[], &[], &mut rng);
+                if events.iter().any(|e| matches!(e, MobEvent::Arrow { .. })) {
+                    ticks.push(tick);
+                }
+            }
+            ticks
+        };
+        let (normal, hard) = (shots(false), shots(true));
+        assert!(normal.len() >= 2 && hard.len() >= 4, "{normal:?} {hard:?}");
+        assert!(normal.windows(2).all(|w| w[1] - w[0] == 40), "{normal:?}");
+        assert!(hard.windows(2).all(|w| w[1] - w[0] == 20), "{hard:?}");
+    }
+
+    /// A flat world with one light level everywhere.
+    struct Lit<'a> {
+        world: &'a TestWorld,
+        level: Option<u8>,
+    }
+
+    impl BlockGetter for Lit<'_> {
+        fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+            self.world.block_state(x, y, z)
+        }
+
+        fn brightness(&self, _x: i32, _y: i32, _z: i32) -> Option<u8> {
+            self.level
+        }
+    }
+
+    #[test]
+    fn a_spider_is_neutral_in_bright_light_and_hostile_in_the_dark() {
+        let flat = TestWorld::flat(64);
+        let hunted = |level: Option<u8>, start_with_target: bool| {
+            let world = Lit {
+                world: &flat,
+                level,
+            };
+            let mut store = EntityStore::default();
+            let spider = store.insert(new_mob(
+                MobKind::Spider,
+                Vec3::new(8.5, 64.0, 0.5),
+                &mut Rng::new(3),
+            ));
+            let player = target(0.5, 0.5);
+            if start_with_target {
+                mob::state_mut(&mut store, spider).unwrap().target = Some(player.uuid);
+            }
+            let mut rng = Rng::new(4);
+            let mut targeted = 0;
+            for _ in 0..400 {
+                tick_with(&mut store, &world, &[player], &mut rng);
+                if mob::state(&store, spider).unwrap().target.is_some() {
+                    targeted += 1;
+                }
+            }
+            targeted
+        };
+        assert!(hunted(Some(0), false) > 300, "dark: hunts");
+        assert!(hunted(None, false) > 300, "unknown light counts as dark");
+        assert!(
+            hunted(Some(11), false) > 300,
+            "light 11 is still dark enough"
+        );
+        assert_eq!(
+            hunted(Some(12), false),
+            0,
+            "light 12 never acquires a target"
+        );
+        let kept = hunted(Some(15), true);
+        assert!(
+            kept < 300,
+            "a bright spider gives up its target eventually: {kept}"
+        );
+        assert!(kept > 0, "but not on the first tick");
     }
 
     #[test]
