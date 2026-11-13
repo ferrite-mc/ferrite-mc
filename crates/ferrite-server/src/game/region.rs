@@ -5537,9 +5537,11 @@ impl Region {
                 ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             );
         }
-        let untargetable = super::targeting::untargetable();
-        // Vanilla `Difficulty.HARD` is 3.
-        let hard = ctx.state.lock().unwrap().difficulty == 3;
+        let rules = ai::MobRules {
+            untargetable: super::targeting::untargetable(),
+            // Vanilla `Difficulty.HARD` is 3.
+            hard: ctx.state.lock().unwrap().difficulty == 3,
+        };
         let targets: Vec<_> = players
             .iter()
             .map(|(&uuid, &pos)| ai::Target { uuid, pos })
@@ -5562,8 +5564,7 @@ impl Region {
             &mut self.entities,
             blocks,
             &targets,
-            &untargetable,
-            hard,
+            &rules,
             owner_attacks,
             &holder_positions,
             &mut self.rng,

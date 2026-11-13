@@ -537,12 +537,20 @@ pub fn tick_with_owner_attacks_and_holders(
         store,
         blocks,
         players,
-        &std::collections::HashSet::new(),
-        false,
+        &MobRules::default(),
         owner_attacks,
         holders,
         rng,
     )
+}
+
+/// World rules the mob goals read.
+#[derive(Debug, Default)]
+pub struct MobRules {
+    /// Creative and spectator players: seen by every goal except hostile target selection.
+    pub untargetable: std::collections::HashSet<Uuid>,
+    /// Hard difficulty (skeletons shoot twice as often).
+    pub hard: bool,
 }
 
 /// [`tick_with_owner_attacks_and_holders`] where `hard` is the Hard difficulty (skeletons shoot
@@ -553,13 +561,13 @@ pub fn tick_full(
     store: &mut EntityStore,
     blocks: &impl BlockGetter,
     players: &[Target],
-    untargetable: &std::collections::HashSet<Uuid>,
-    hard: bool,
+    rules: &MobRules,
     owner_attacks: &[(Uuid, crate::EntityKey)],
     holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
-    let bow_cooldown = if hard {
+    let MobRules { untargetable, hard } = rules;
+    let bow_cooldown = if *hard {
         SKELETON_COOLDOWN_HARD
     } else {
         SKELETON_COOLDOWN
@@ -1374,20 +1382,14 @@ mod tests {
             &mut Rng::new(1),
         ));
         let creative = target(0.5, 0.5);
-        let hidden: std::collections::HashSet<Uuid> = [creative.uuid].into();
+        let hidden = MobRules {
+            untargetable: [creative.uuid].into(),
+            hard: false,
+        };
         let mut rng = Rng::new(2);
         let mut hits = 0;
         for _ in 0..200 {
-            for event in tick_full(
-                &mut store,
-                &world,
-                &[creative],
-                &hidden,
-                false,
-                &[],
-                &[],
-                &mut rng,
-            ) {
+            for event in tick_full(&mut store, &world, &[creative], &hidden, &[], &[], &mut rng) {
                 if matches!(event, MobEvent::Melee { .. }) {
                     hits += 1;
                 }
@@ -1396,20 +1398,11 @@ mod tests {
         assert_eq!(hits, 0, "a creative player is never attacked");
         assert_eq!(mob::state(&store, zombie).unwrap().target, None);
         // Control: the same setup without the exclusion does attack.
-        let none = std::collections::HashSet::new();
+        let none = MobRules::default();
         let attacked = (0..200).any(|_| {
-            tick_full(
-                &mut store,
-                &world,
-                &[creative],
-                &none,
-                false,
-                &[],
-                &[],
-                &mut rng,
-            )
-            .iter()
-            .any(|event| matches!(event, MobEvent::Melee { .. }))
+            tick_full(&mut store, &world, &[creative], &none, &[], &[], &mut rng)
+                .iter()
+                .any(|event| matches!(event, MobEvent::Melee { .. }))
         });
         assert!(attacked, "without the exclusion the zombie attacks");
     }
@@ -1958,20 +1951,14 @@ mod tests {
                 &mut Rng::new(3),
             ));
             let mut rng = Rng::new(4);
-            let none = std::collections::HashSet::new();
+            let rules = MobRules {
+                untargetable: Default::default(),
+                hard,
+            };
             let player = target(0.5, 0.5);
             let mut ticks = Vec::new();
             for tick in 0..100 {
-                let events = tick_full(
-                    &mut store,
-                    &world,
-                    &[player],
-                    &none,
-                    hard,
-                    &[],
-                    &[],
-                    &mut rng,
-                );
+                let events = tick_full(&mut store, &world, &[player], &rules, &[], &[], &mut rng);
                 if events.iter().any(|e| matches!(e, MobEvent::Arrow { .. })) {
                     ticks.push(tick);
                 }
