@@ -1,7 +1,7 @@
 # W7 lane 2 — persistent maps and the cartography table
 
 Branch `w7-maps`, based on origin/main `236f0e2abae1a9ecc2da11008d2d224aa73a0611` (PR #6).
-Head, PR and merge SHA are recorded in "Delivery" at the end once known.
+PR, head and merge SHA are recorded in "Delivery" at the end.
 
 ## Architecture
 
@@ -92,4 +92,35 @@ file is an error, is left untouched, and the cartography table offers no result 
 
 ## Test evidence
 
-See "Delivery" (filled at merge).
+Local, before the PR: `cargo fmt`, clippy `-D warnings`, `ferrite-item` 43, `ferrite-inventory` 71,
+`ferrite-server` lib 867 (one full-run failure of
+`game::integration::four_crystals_respawn_the_dragon_through_the_full_sequence` under host load; it
+passes alone in 102 s), Java `FerriteMapIdTest` 3 and `FerriteMerchantMapTest` 4.
+
+## Delivery
+
+* PR: https://github.com/ferrite-mc/ferrite-mc/pull/8, squash-merged as `3ec1678` (head `1a53087`).
+* Required checks on that exact head: `test (ubuntu-latest)` and `test (windows-latest)` passed
+  (run 43292870142). CI on the merged commit finished successfully.
+* Three CI problems were found and fixed on the way, none by skipping tests:
+  the Java host stub answered `allocateMap` with an empty string (`FerriteMapView` now falls back
+  to a local id and three call-counting tests ignore the allocation call);
+  stable clippy moved to 1.100 and flagged six index loops in `menu.rs` (rewritten as iterators);
+  and a Windows run lost the connection in `runtime_world_gap7_create_edit_enter_leave_unload_reopen`,
+  which passed in the next full run and, in the AI PR, was traced, for the AI PR, to an unrelated change of mine rather
+  than to maps.
+* Performance (follow-up branch `w7-ai-matrix`): `Player::send_held_maps` runs for both held
+  stacks of every player on every tick. It cloned each stack and read the id through
+  `ItemStack::effective_component`, which for an item without an explicit `map_id` decodes that
+  item's whole default-component table from NBT. `map_id` now reads the stack's own patch by
+  reference (no item has a default `map_id`; pinned by `no_item_has_a_default_map_id`).
+  Measured with `cargo test --release -p ferrite-item map_id_read_cost -- --ignored --nocapture`
+  (three runs, same host, 200 000 calls each):
+
+  | stack | before | after |
+  |---|---|---|
+  | plain item (e.g. diamond sword) | 10.1-10.3 us | 0.7 ns |
+  | filled map | 72-77 ns | 2.3-2.8 ns |
+
+  This is a micro-benchmark of the id read only, not an end-to-end tick measurement; the 800-bot
+  A/B belongs to lane 4.
