@@ -82,12 +82,13 @@ impl Player {
     /// sending `ClientboundMapItemData`). A map is sent when first held and again whenever its
     /// saved data was replaced. Banner and player markers are not sent yet.
     pub(super) fn send_held_maps(&mut self) {
+        // Read the ids by reference: this runs every tick for every player, and cloning the
+        // stacks (components included) just to look at one component allocated for nothing.
         let held = [
-            self.inventory.get(self.inventory.selected_slot()).clone(),
-            self.inventory.get(ferrite_inventory::OFFHAND).clone(),
+            map_id(self.inventory.get(self.inventory.selected_slot())),
+            map_id(self.inventory.get(ferrite_inventory::OFFHAND)),
         ];
-        for stack in held {
-            let Some(id) = map_id(&stack) else { continue };
+        for id in held.into_iter().flatten() {
             let Some(access) = self.map_access() else {
                 return;
             };

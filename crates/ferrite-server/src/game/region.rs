@@ -954,6 +954,11 @@ impl ferrite_entity::falling::FallingWorld for FallingAdapter<'_> {
 }
 
 impl BlockGetter for TickBlocks<'_> {
+    fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        self.source?;
+        Some(SpawnEnv::light(self, x, y, z))
+    }
+
     fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
         let source = self.source?;
         *self
@@ -3903,6 +3908,8 @@ impl Player {
                 Command::Leave => {
                     trader.commit(self);
                     self.save_on_exit();
+                    // After the save, which records the vehicle the player was riding.
+                    super::ride::forget(self.uuid);
                     return false;
                 }
                 Command::SetMode(mode) => {
@@ -5537,7 +5544,11 @@ impl Region {
                 ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             );
         }
-        let untargetable = super::targeting::untargetable();
+        let rules = ai::MobRules {
+            untargetable: super::targeting::untargetable(),
+            // Vanilla `Difficulty.HARD` is 3.
+            hard: ctx.state.lock().unwrap().difficulty == 3,
+        };
         let targets: Vec<_> = players
             .iter()
             .map(|(&uuid, &pos)| ai::Target { uuid, pos })
@@ -5560,7 +5571,7 @@ impl Region {
             &mut self.entities,
             blocks,
             &targets,
-            &untargetable,
+            &rules,
             owner_attacks,
             &holder_positions,
             &mut self.rng,
@@ -9724,6 +9735,8 @@ impl Region {
             );
             tracing::info!(player = %p.name, dropped, "player died; experience orbs dropped");
         }
+        // `ServerPlayer.die` stops riding: the world loop detaches the corpse on its next plan.
+        super::ride::request_dismount(p.uuid);
         send(
             p,
             &PlayerCombatKill {

@@ -9,6 +9,12 @@ use ferrite_math::{AABB, EPSILON, Vec3, collide_with_step};
 /// block, so entities never fall into unloaded terrain.
 pub trait BlockGetter {
     fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16>;
+
+    /// The light level at a block (vanilla `getMaxLocalRawBrightness`, 0..=15), when the world
+    /// has light data. `None` means unknown, which light-dependent goals treat as dark.
+    fn brightness(&self, _x: i32, _y: i32, _z: i32) -> Option<u8> {
+        None
+    }
 }
 
 fn state_props(state: Option<u16>) -> Option<&'static block_props::BlockProps> {

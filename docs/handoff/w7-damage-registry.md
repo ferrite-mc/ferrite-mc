@@ -55,3 +55,9 @@ The build invokes `python tools/extract_damage_types.py vanilla/26.3 <ignored-ou
 4. New lane-only helpers/extractor/tests and this handoff. No root manifests, Rust generator logic or remote-lane files edited.
 
 Queue owner remains `w7-registry-api/docs/handoff/local-plugin-api-queue.md`; next independent verified gap is built-in Sound/Villager OldEnum behavior.
+
+## Registry integration update
+
+Merged latest `origin/main` `d55af6bae6a99e95c8a9edbbb33e1bbad2dd280c` (including #13/#16/#17) with a normal two-parent merge, without force or self-merging the PR. Resolved build.gradle's shared append hunk by preserving both full generation tasks, resource roots, exclusions and the GameRule test-reference property. Reviewed auto-merged RegistryAccess/InternalBridge: both property helpers/factories and the legacy GameRule bridge remain. All incoming Rust changes are byte-for-byte main (`git diff origin/main -- crates` empty).
+
+Final integrated verification: **31 focused registry tests**, then **312 full Java tests, 0 failures/errors/skips**, Java25 wrapper `test build` including shadedJar passed. Both artifacts contain game-rules.json and damage-types.json and exclude this lane's extractor classes/logs/reference output. Diff/check/correctness review passed; tests unchanged. New CI runs on the pushed merge head; old independent head had passed both platforms. See PR head for the exact integration merge SHA.

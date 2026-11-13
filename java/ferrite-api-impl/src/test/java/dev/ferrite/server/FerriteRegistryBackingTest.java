@@ -161,10 +161,9 @@ class FerriteRegistryBackingTest {
 
     @Test void registriesWithoutGeneratedValueDataFailExplicitly() {
         var gameRules = registry(RegistryKey.GAME_RULE);
-        var gameRuleError = assertThrows(UnsupportedOperationException.class, gameRules::size);
-        assertTrue(gameRuleError.getMessage().contains("minecraft:game_rule") && gameRuleError.getMessage().contains("value type"),
-                gameRuleError.getMessage());
-        assertThrows(UnsupportedOperationException.class, () -> gameRules.get(NamespacedKey.minecraft("advance_time")));
+        assertEquals(59, gameRules.size());
+        assertNotNull(gameRules.get(NamespacedKey.minecraft("advance_time")));
+        assertNull(gameRules.get(NamespacedKey.minecraft("unknown_rule")));
         var memory = registry(RegistryKey.MEMORY_MODULE_TYPE);
         var memoryError = assertThrows(UnsupportedOperationException.class, memory::keyStream);
         assertTrue(memoryError.getMessage().contains("minecraft:memory_module_type") && memoryError.getMessage().contains("private constructor"),

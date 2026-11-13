@@ -12,8 +12,47 @@ use uuid::Uuid;
 
 use super::commands::{GameState, OnlinePlayer};
 
-/// How far above the vehicle's position a rider is placed.
-const SEAT_LIFT: f64 = 0.6;
+/// Plan ticks a rider or vehicle may be missing from the shared snapshot before the ride ends.
+/// A vehicle that crosses a region border is removed from its old region's store and published
+/// by the new one a tick or two later, which must not be mistaken for the vehicle being gone.
+const TRANSIT_GRACE_TICKS: u8 = 10;
+
+/// Where the rider goes when the generated entity data has no attachment points at all (an old
+/// extraction): a fixed lift above the vehicle, the placement used before attachments.
+const FALLBACK_LIFT: f64 = 0.6;
+
+/// One named single-point attachment (`passenger`, `vehicle`, ...) of an entity type from the
+/// generated vanilla data, `[0, 0, 0]` when the type has none.
+fn attachment(kind: &str, name: &str) -> Option<[f64; 3]> {
+    let props = ferrite_data::entity_props::by_name(kind)?;
+    props
+        .attachments
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, p)| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
+}
+
+/// Where a rider of type `rider` sits relative to the origin of a `vehicle` facing `yaw`.
+///
+/// Vanilla `Entity.positionRider`: the vehicle's `PASSENGER` attachment point, turned by the
+/// vehicle's yaw (`EntityAttachments.transformPoint`: `yRot(-yaw * pi/180)`), minus the rider's own
+/// `VEHICLE` attachment point. Scale (babies) and the horse rearing offset
+/// (`AbstractHorse.getPassengerAttachmentPoint` with `standAnim` 0) are not applied.
+pub fn seat_offset(vehicle: &str, yaw: f32, rider: &str) -> [f64; 3] {
+    let (Some(seat), Some(hold)) = (
+        attachment(vehicle, "passenger"),
+        attachment(rider, "vehicle"),
+    ) else {
+        return [0.0, FALLBACK_LIFT, 0.0];
+    };
+    let angle = -f64::from(yaw) * f64::from(0.017_453_292_f32);
+    let (sin, cos) = angle.sin_cos();
+    [
+        seat[0] * cos + seat[2] * sin - hold[0],
+        seat[1] - hold[1],
+        seat[2] * cos - seat[0] * sin - hold[2],
+    ]
+}
 
 /// One seated rider: the vehicle and the order the rider got on in (vanilla keeps passengers in
 /// the order they were added, and the first one steers).
@@ -21,6 +60,8 @@ const SEAT_LIFT: f64 = 0.6;
 struct Seat {
     vehicle: Uuid,
     order: u64,
+    /// Consecutive plan ticks the rider or the vehicle was missing from the snapshot.
+    absent: u8,
 }
 
 static RIDES: Mutex<BTreeMap<Uuid, Seat>> = Mutex::new(BTreeMap::new());
@@ -124,8 +165,37 @@ pub fn mount_in(
         return Err(MountError::Full);
     }
     let order = NEXT_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    rides.insert(rider, Seat { vehicle, order });
+    rides.insert(
+        rider,
+        Seat {
+            vehicle,
+            order,
+            absent: 0,
+        },
+    );
     Ok(())
+}
+
+/// Seats `rider` on `vehicle` again after a reload. The saved pair was valid when it was written,
+/// so capacity is not rechecked; a rider that already rides something is left alone. If the
+/// vehicle is not loaded yet the transit grace in [`plan`] waits for it.
+pub fn restore(rider: Uuid, vehicle: Uuid) {
+    if rider == vehicle {
+        return;
+    }
+    let mut rides = rides();
+    if rides.contains_key(&rider) {
+        return;
+    }
+    let order = NEXT_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    rides.insert(
+        rider,
+        Seat {
+            vehicle,
+            order,
+            absent: 0,
+        },
+    );
 }
 
 /// Takes `rider` off whatever it rides; the vehicle it left.
@@ -253,6 +323,8 @@ pub enum Step {
         rider_is_player: bool,
         rider_pos: [f64; 3],
         rider_rot: (f32, f32),
+        /// The dimension both rider and vehicle are in.
+        dimension: super::Dimension,
         to: [f64; 3],
     },
     /// The rider got off (or the vehicle vanished): resend the vehicle's passenger list.
@@ -275,6 +347,22 @@ pub fn network_id(
         .get(&uuid)
         .map(|p| p.entity)
         .or_else(|| state.entities.lock().ok()?.get(uuid).map(|e| e.network_id))
+}
+
+/// The entity type id (`minecraft:horse`, `minecraft:player`) of a published rider or vehicle.
+fn kind_key(state: &GameState, uuid: Uuid) -> Option<&'static str> {
+    if state.players.iter().any(|p| p.uuid == uuid) {
+        return Some("minecraft:player");
+    }
+    state.entities.lock().ok()?.get(uuid).map(|e| e.type_name())
+}
+
+/// The dimension a player or region entity is published in.
+fn dimension_of(state: &GameState, uuid: Uuid) -> Option<super::Dimension> {
+    if let Some(player) = state.players.iter().find(|p| p.uuid == uuid) {
+        return Some(player.dimension);
+    }
+    state.entities.lock().ok()?.get(uuid).map(|e| e.dimension)
 }
 
 fn position(state: &GameState, uuid: Uuid) -> Option<([f64; 3], bool, (f32, f32))> {
@@ -325,6 +413,7 @@ pub fn plan(state: &GameState) -> Vec<Step> {
                 rider_is_player: true,
                 rider_pos: viewer_pos,
                 rider_rot: rot,
+                dimension: dimension_of(state, viewer).unwrap_or(super::Dimension::Overworld),
                 to: target_pos,
             });
         }
@@ -352,21 +441,47 @@ pub fn plan(state: &GameState) -> Vec<Step> {
     snapshot = order.into_iter().map(|(_, r, v)| (r, v)).collect();
     let mut placed: HashMap<Uuid, [f64; 3]> = HashMap::new();
     for (rider, vehicle) in snapshot {
-        let Some((rider_pos, rider_is_player, rider_rot)) = position(state, rider) else {
+        let (
+            Some((rider_pos, rider_is_player, rider_rot)),
+            Some((live_vehicle_pos, _, vehicle_rot)),
+        ) = (position(state, rider), position(state, vehicle))
+        else {
+            // Missing from the snapshot: gone, or only between two regions. Wait out the grace.
+            let mut rides = rides();
+            let expired = rides.get_mut(&rider).is_some_and(|seat| {
+                seat.absent = seat.absent.saturating_add(1);
+                seat.absent > TRANSIT_GRACE_TICKS
+            });
+            if expired {
+                rides.remove(&rider);
+                steps.push(Step::Detach { vehicle });
+            }
+            continue;
+        };
+        if let Some(seat) = rides().get_mut(&rider) {
+            seat.absent = 0;
+        }
+        // Vanilla ends a ride when either side changes dimension; coordinates of another world
+        // are meaningless here.
+        if dimension_of(state, rider) != dimension_of(state, vehicle) {
             rides().remove(&rider);
             steps.push(Step::Detach { vehicle });
             continue;
-        };
-        let Some((live_vehicle_pos, _, _)) = position(state, vehicle) else {
-            rides().remove(&rider);
-            steps.push(Step::Detach { vehicle });
-            continue;
-        };
+        }
         if is_controlled(vehicle) {
             continue;
         }
         let vehicle_pos = placed.get(&vehicle).copied().unwrap_or(live_vehicle_pos);
-        let to = [vehicle_pos[0], vehicle_pos[1] + SEAT_LIFT, vehicle_pos[2]];
+        let seat = seat_offset(
+            kind_key(state, vehicle).unwrap_or(""),
+            vehicle_rot.0,
+            kind_key(state, rider).unwrap_or(""),
+        );
+        let to = [
+            vehicle_pos[0] + seat[0],
+            vehicle_pos[1] + seat[1],
+            vehicle_pos[2] + seat[2],
+        ];
         placed.insert(rider, to);
         let moved = (0..3).any(|i| (rider_pos[i] - to[i]).abs() > 0.01);
         if moved {
@@ -375,6 +490,7 @@ pub fn plan(state: &GameState) -> Vec<Step> {
                 rider_is_player,
                 rider_pos,
                 rider_rot,
+                dimension: dimension_of(state, rider).unwrap_or(super::Dimension::Overworld),
                 to,
             });
         }
@@ -419,6 +535,18 @@ mod tests {
     }
 
     use super::*;
+
+    fn pig_kind() -> u16 {
+        ferrite_data::entity_props::by_name("minecraft:pig")
+            .expect("the vanilla data knows the pig")
+            .id
+    }
+
+    /// Pig on pig: the pig's PASSENGER point (0.86875 in the 26.3 data) minus the zero
+    /// VEHICLE point of the rider, which is what the test entities are.
+    fn lift() -> f64 {
+        f64::from(0.86875_f32)
+    }
 
     /// The ride table is global, so the tests take turns with the world loop's plans.
     #[test]
@@ -521,8 +649,8 @@ mod tests {
         mount(top, middle, false).unwrap();
         // The base moved; both riders are still where the base used to be.
         let state = state_with(&[
-            (top, 1, [0.5, 64.0 + SEAT_LIFT * 2.0, 0.5]),
-            (middle, 2, [0.5, 64.0 + SEAT_LIFT, 0.5]),
+            (top, 1, [0.5, 64.0 + lift() * 2.0, 0.5]),
+            (middle, 2, [0.5, 64.0 + lift(), 0.5]),
             (base, 3, [10.5, 64.0, 0.5]),
         ]);
         let steps = plan(&state);
@@ -532,10 +660,10 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(target(middle), Some([10.5, 64.0 + SEAT_LIFT, 0.5]));
+        assert_eq!(target(middle), Some([10.5, 64.0 + lift(), 0.5]));
         assert_eq!(
             target(top),
-            Some([10.5, 64.0 + SEAT_LIFT + SEAT_LIFT, 0.5]),
+            Some([10.5, 64.0 + lift() + lift(), 0.5]),
             "the top rider sits on the middle rider's new seat, not its old one"
         );
         dismount(top);
@@ -588,7 +716,7 @@ mod tests {
                 index.insert(super::super::entity_index::CommandEntity {
                     uuid,
                     network_id,
-                    kind: 0,
+                    kind: pig_kind(),
                     pos,
                     yaw: 0.0,
                     pitch: 0.0,
@@ -602,12 +730,133 @@ mod tests {
     }
 
     #[test]
+    fn seats_follow_the_vanilla_attachment_points() {
+        // Values read from the 26.3 data (`PASSENGER` of the vehicle, `VEHICLE` of the rider).
+        let at = |vehicle, yaw, rider| seat_offset(vehicle, yaw, rider);
+        let near = |a: [f64; 3], b: [f64; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-6);
+        // A player (vehicle point y 0.6) on a horse (passenger y 1.44375).
+        assert!(near(
+            at("minecraft:horse", 0.0, "minecraft:player"),
+            [0.0, 1.44375 - 0.6, 0.0]
+        ));
+        assert!(near(
+            at("minecraft:donkey", 0.0, "minecraft:player"),
+            [0.0, 1.1125 - 0.6, 0.0]
+        ));
+        assert!(near(
+            at("minecraft:mule", 0.0, "minecraft:player"),
+            [0.0, 1.2125 - 0.6, 0.0]
+        ));
+        // A zombie rider hangs 0.7 below its seat.
+        assert!(near(
+            at("minecraft:horse", 0.0, "minecraft:zombie"),
+            [0.0, 1.44375 - 0.7, 0.0]
+        ));
+        // A llama's seat is 0.3 behind its centre and turns with its yaw: yaw 0 faces +z, so
+        // behind is -z; at yaw 90 (facing -x) behind is +x.
+        assert!(near(
+            at("minecraft:llama", 0.0, "minecraft:player"),
+            [0.0, 1.37 - 0.6, -0.3]
+        ));
+        assert!(near(
+            at("minecraft:llama", 90.0, "minecraft:player"),
+            [0.3, 1.37 - 0.6, 0.0]
+        ));
+        assert!(near(
+            at("minecraft:trader_llama", 180.0, "minecraft:player"),
+            [0.0, 1.37 - 0.6, 0.3]
+        ));
+    }
+
+    #[test]
+    fn a_vehicle_in_transit_between_regions_keeps_its_rider_for_a_short_grace() {
+        let _turn = test_turn();
+        let (rider, vehicle) = (Uuid::from_u128(1021), Uuid::from_u128(1022));
+        mount(rider, vehicle, false).unwrap();
+        // The vehicle crossed a region border: its old region stopped publishing it and the new
+        // one has not yet, so for a tick or two only the rider is in the snapshot.
+        let only_rider = state_with(&[(rider, 1, [0.5, 64.0, 0.5])]);
+        for _ in 0..TRANSIT_GRACE_TICKS {
+            assert_eq!(plan(&only_rider), vec![], "no detach while in transit");
+            assert_eq!(vehicle_of(rider), Some(vehicle));
+        }
+        // The destination region publishes it: the ride carries on and the counter resets.
+        let both = state_with(&[(rider, 1, [0.5, 64.0, 0.5]), (vehicle, 2, [9.5, 64.0, 0.5])]);
+        assert!(matches!(plan(&both).as_slice(), [Step::Move { .. }]));
+        for _ in 0..TRANSIT_GRACE_TICKS {
+            assert_eq!(plan(&only_rider), vec![]);
+        }
+        assert_eq!(
+            vehicle_of(rider),
+            Some(vehicle),
+            "the earlier absence was forgiven"
+        );
+        // A vehicle that never comes back ends the ride once the grace is used up.
+        assert_eq!(plan(&only_rider), vec![Step::Detach { vehicle }]);
+        assert_eq!(vehicle_of(rider), None);
+    }
+
+    #[test]
+    fn changing_dimension_ends_the_ride_instead_of_moving_the_rider_across_worlds() {
+        let _turn = test_turn();
+        let (rider, vehicle) = (Uuid::from_u128(1001), Uuid::from_u128(1002));
+        mount(rider, vehicle, false).unwrap();
+        let state = state_with(&[
+            (rider, 1, [0.5, 64.0, 0.5]),
+            (vehicle, 2, [100.5, 64.0, 0.5]),
+        ]);
+        {
+            // The vehicle is published by a Nether region.
+            let mut index = state.entities.lock().unwrap();
+            let mut moved = index.get(vehicle).unwrap().clone();
+            moved.dimension = super::super::Dimension::Nether;
+            index.insert(moved);
+        }
+        let steps = plan(&state);
+        assert_eq!(
+            steps,
+            vec![Step::Detach { vehicle }],
+            "no Move to coordinates in another dimension"
+        );
+        assert_eq!(vehicle_of(rider), None, "the ride ended");
+    }
+
+    #[test]
+    fn a_rider_in_the_nether_is_moved_in_the_nether() {
+        let _turn = test_turn();
+        let (rider, vehicle) = (Uuid::from_u128(1011), Uuid::from_u128(1012));
+        mount(rider, vehicle, false).unwrap();
+        let state = state_with(&[(rider, 1, [0.5, 64.0, 0.5]), (vehicle, 2, [9.5, 64.0, 0.5])]);
+        {
+            let mut index = state.entities.lock().unwrap();
+            for uuid in [rider, vehicle] {
+                let mut moved = index.get(uuid).unwrap().clone();
+                moved.dimension = super::super::Dimension::Nether;
+                index.insert(moved);
+            }
+        }
+        let steps = plan(&state);
+        assert!(
+            matches!(
+                steps.as_slice(),
+                [Step::Move {
+                    dimension: super::super::Dimension::Nether,
+                    ..
+                }]
+            ),
+            "{steps:?}"
+        );
+        forget(rider);
+        forget(vehicle);
+    }
+
+    #[test]
     fn a_teleported_vehicle_carries_its_rider_without_orphaning_it() {
         let _turn = test_turn();
         let (rider, vehicle) = (Uuid::from_u128(921), Uuid::from_u128(922));
         mount(rider, vehicle, false).unwrap();
         let state = state_with(&[
-            (rider, 1, [0.5, 64.0 + SEAT_LIFT, 0.5]),
+            (rider, 1, [0.5, 64.0 + lift(), 0.5]),
             (vehicle, 2, [0.5, 64.0, 0.5]),
         ]);
         assert!(plan(&state).is_empty(), "already in the seat");
@@ -620,7 +869,7 @@ mod tests {
             .insert(super::super::entity_index::CommandEntity {
                 uuid: vehicle,
                 network_id: 2,
-                kind: 0,
+                kind: pig_kind(),
                 pos: [300.5, 70.0, -40.5],
                 yaw: 0.0,
                 pitch: 0.0,
@@ -634,9 +883,10 @@ mod tests {
             [Step::Move {
                 rider,
                 rider_is_player: false,
-                rider_pos: [0.5, 64.0 + SEAT_LIFT, 0.5],
+                rider_pos: [0.5, 64.0 + lift(), 0.5],
                 rider_rot: (0.0, 0.0),
-                to: [300.5, 70.0 + SEAT_LIFT, -40.5],
+                dimension: super::super::Dimension::Overworld,
+                to: [300.5, 70.0 + lift(), -40.5],
             }]
         );
         assert_eq!(vehicle_of(rider), Some(vehicle));
@@ -659,7 +909,8 @@ mod tests {
                 rider_is_player: false,
                 rider_pos: [2.5, 64.0, 0.5],
                 rider_rot: (0.0, 0.0),
-                to: [0.5, 64.0 + SEAT_LIFT, 0.5],
+                dimension: super::super::Dimension::Overworld,
+                to: [0.5, 64.0 + lift(), 0.5],
             }]
         );
         assert_eq!(passengers_of(vehicle), vec![rider]);
@@ -672,8 +923,12 @@ mod tests {
         let _turn = test_turn();
         let (rider, vehicle) = (Uuid::from_u128(941), Uuid::from_u128(942));
         mount(rider, vehicle, false).unwrap();
-        // The vehicle was killed or removed from the command snapshot.
+        // The vehicle was killed or removed from the command snapshot and never comes back; the
+        // ride ends once the transit grace (a vehicle between two regions) has run out.
         let state = state_with(&[(rider, 1, [0.5, 64.6, 0.5])]);
+        for _ in 0..TRANSIT_GRACE_TICKS {
+            assert_eq!(plan(&state), []);
+        }
         assert_eq!(plan(&state), [Step::Detach { vehicle }]);
         assert_eq!(vehicle_of(rider), None);
         assert!(passengers_of(vehicle).is_empty());
