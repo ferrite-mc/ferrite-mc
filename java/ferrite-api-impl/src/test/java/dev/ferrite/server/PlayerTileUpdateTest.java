@@ -116,15 +116,35 @@ class PlayerTileUpdateTest {
     }
 
     private static com.destroystokyo.paper.profile.PlayerProfile profile(String name, java.util.UUID id, boolean textures) {
+        return profile(name, id, textures ? "abc" : null);
+    }
+
+    private static com.destroystokyo.paper.profile.PlayerProfile profile(String name, java.util.UUID id, String texture) {
         return (com.destroystokyo.paper.profile.PlayerProfile) Proxy.newProxyInstance(PlayerTileUpdateTest.class.getClassLoader(), new Class<?>[]{com.destroystokyo.paper.profile.PlayerProfile.class}, (self, method, args) -> switch (method.getName()) {
             case "getName" -> name;
             case "getUniqueId" -> id;
-            case "getProperties" -> textures ? java.util.Set.of(new com.destroystokyo.paper.profile.ProfileProperty("textures", "abc")) : java.util.Set.<com.destroystokyo.paper.profile.ProfileProperty>of();
+            case "getProperties" -> texture != null ? java.util.Set.of(new com.destroystokyo.paper.profile.ProfileProperty("textures", texture)) : java.util.Set.<com.destroystokyo.paper.profile.ProfileProperty>of();
             case "toString" -> "Profile";
             case "hashCode" -> 1;
             case "equals" -> self == args[0];
             default -> throw new UnsupportedOperationException(method.getName());
         });
+    }
+
+    @Test void dispensersDroppersHoppersBrewingStandsAndCraftersSendTheirItems() {
+        record Case(Class<? extends org.bukkit.block.Container> api, Material type, String entity, int size) {}
+        for (var c : List.of(
+                new Case(org.bukkit.block.Dispenser.class, Material.DISPENSER, "minecraft:dispenser", 9),
+                new Case(org.bukkit.block.Dropper.class, Material.DROPPER, "minecraft:dropper", 9),
+                new Case(org.bukkit.block.Hopper.class, Material.HOPPER, "minecraft:hopper", 5),
+                new Case(org.bukkit.block.BrewingStand.class, Material.BREWING_STAND, "minecraft:brewing_stand", 5),
+                new Case(org.bukkit.block.Crafter.class, Material.CRAFTER, "minecraft:crafter", 9))) {
+            calls.clear();
+            var container = tile(c.api(), c.type(), inventory(9, java.util.Map.of(c.size() - 1, new ItemStack(Material.STONE, 3))), java.util.Map.of());
+            player.sendBlockUpdate(at(), container);
+            assertEquals(c.entity(), calls.get(0)[4], c.type().name());
+            assertEquals("item," + (c.size() - 1) + ",minecraft:stone,3", calls.get(0)[5], c.type().name());
+        }
     }
 
     @Test void aBannerSendsItsPatternLayers() {
@@ -137,7 +157,7 @@ class PlayerTileUpdateTest {
         assertArrayEquals(new String[]{"pattern,minecraft:stripe_top,red", "pattern,minecraft:cross,light_blue"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
     }
 
-    @Test void aSkullSendsItsProfileNameAndUuidAndRefusesTexturesAndSounds() {
+    @Test void aSkullSendsItsProfileTexturesAndRefusesSoundsAndUnsafeProperties() {
         var id = java.util.UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5");
         var plain = new java.util.HashMap<String, Object>();
         plain.put("getPlayerProfile", profile("Notch", id, false));
@@ -155,8 +175,13 @@ class PlayerTileUpdateTest {
         var textured = new java.util.HashMap<String, Object>();
         textured.put("getPlayerProfile", profile("Notch", id, true));
         textured.put("getNoteBlockSound", null);
-        var error = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, textured)));
-        assertTrue(error.getMessage().contains("textures"), error.getMessage());
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, textured));
+        assertArrayEquals(new String[]{"profile,Notch," + id, "property,textures,abc,"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+        calls.clear();
+        var unsafe = new java.util.HashMap<String, Object>();
+        unsafe.put("getPlayerProfile", profile("Notch", id, "a,b"));
+        unsafe.put("getNoteBlockSound", null);
+        assertThrows(IllegalArgumentException.class, () -> player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, unsafe)));
         var sound = new java.util.HashMap<String, Object>();
         sound.put("getPlayerProfile", null);
         sound.put("getNoteBlockSound", org.bukkit.NamespacedKey.minecraft("entity.pig.ambient"));

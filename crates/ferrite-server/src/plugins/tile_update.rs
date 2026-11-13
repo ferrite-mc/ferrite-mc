@@ -99,6 +99,12 @@ fn player_name_ok(name: &str) -> bool {
     name.chars().count() <= 16 && name.chars().all(|c| c > ' ' && c < '\u{7f}')
 }
 
+/// `ResolvableProfile` properties: at most 16, a value up to 32767 characters and a signature up
+/// to 1024 (`ExtraCodecs.PROPERTY`/`Property.MAX_SIGNATURE_LENGTH`).
+const MAX_PROPERTIES: usize = 16;
+const MAX_PROPERTY_VALUE: usize = 32767;
+const MAX_PROPERTY_SIGNATURE: usize = 1024;
+
 /// The most a vanilla stack holds; the client rejects larger counts.
 const MAX_COUNT: i32 = 99;
 
@@ -117,6 +123,7 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
     };
     let mut patterns: Vec<(String, String)> = Vec::new();
     let mut profile = None;
+    let mut properties: Vec<(String, String, Option<String>)> = Vec::new();
     let mut items: Vec<(u8, String, i32)> = Vec::new();
     let mut timers = None;
     for entry in entries.split(separator).filter(|e| !e.is_empty()) {
@@ -171,6 +178,23 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
                 };
                 profile = Some(((!name.is_empty()).then(|| name.to_owned()), id));
             }
+            "property" if skull && properties.len() < MAX_PROPERTIES => {
+                let name = parts.next()?;
+                let value = parts.next()?;
+                let signature = parts.next()?;
+                if parts.next().is_some()
+                    || name.is_empty()
+                    || value.chars().count() > MAX_PROPERTY_VALUE
+                    || signature.chars().count() > MAX_PROPERTY_SIGNATURE
+                {
+                    return None;
+                }
+                properties.push((
+                    name.to_owned(),
+                    value.to_owned(),
+                    (!signature.is_empty()).then(|| signature.to_owned()),
+                ));
+            }
             "furnace" if furnace && timers.is_none() => {
                 let mut value =
                     || -> Option<i16> { parts.next()?.parse().ok().filter(|v| *v >= 0) };
@@ -190,6 +214,7 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
         furnace: timers,
         patterns,
         profile,
+        properties,
     })
 }
 
@@ -200,6 +225,7 @@ pub fn nbt(
     furnace: Option<[i16; 4]>,
     patterns: &[(String, String)],
     profile: Option<(Option<String>, Option<[i32; 4]>)>,
+    properties: &[(String, String, Option<String>)],
 ) -> Compound {
     let mut data = Compound::new();
     if entity == "minecraft:banner" {
@@ -216,12 +242,29 @@ pub fn nbt(
     }
     if entity == "minecraft:skull" {
         let mut tag = Compound::new();
-        if let Some((name, id)) = profile {
-            if let Some(name) = name {
-                tag.insert("name".into(), Tag::String(name));
+        if profile.is_some() || !properties.is_empty() {
+            if let Some((name, id)) = profile {
+                if let Some(name) = name {
+                    tag.insert("name".into(), Tag::String(name));
+                }
+                if let Some(id) = id {
+                    tag.insert("id".into(), Tag::IntArray(id.to_vec()));
+                }
             }
-            if let Some(id) = id {
-                tag.insert("id".into(), Tag::IntArray(id.to_vec()));
+            if !properties.is_empty() {
+                let list = properties
+                    .iter()
+                    .map(|(name, value, signature)| {
+                        let mut property = Compound::new();
+                        property.insert("name".into(), Tag::String(name.clone()));
+                        property.insert("value".into(), Tag::String(value.clone()));
+                        if let Some(signature) = signature {
+                            property.insert("signature".into(), Tag::String(signature.clone()));
+                        }
+                        property
+                    })
+                    .collect();
+                tag.insert("properties".into(), Tag::List(List::Compound(list)));
             }
             data.insert("profile".into(), Tag::Compound(tag));
         }
@@ -381,7 +424,7 @@ mod tests {
             );
         }
         assert_eq!(
-            nbt("minecraft:chest", &[], None, &[], None).get("Items"),
+            nbt("minecraft:chest", &[], None, &[], None, &[]).get("Items"),
             Some(&Tag::List(List::Compound(Vec::new())))
         );
     }
@@ -400,7 +443,7 @@ mod tests {
         let sent = BlockEntityData {
             location: 0x1234,
             block_type: VarInt(type_id),
-            nbt: nbt("minecraft:blast_furnace", &items, furnace, &[], None),
+            nbt: nbt("minecraft:blast_furnace", &items, furnace, &[], None, &[]),
         };
         let mut bytes = Vec::new();
         sent.encode(&mut bytes);
@@ -427,6 +470,7 @@ mod tests {
             furnace,
             patterns,
             profile,
+            properties,
             ..
         }) = packet([0, 70, 0], entity, &join(entries), SEP)
         else {
@@ -436,7 +480,7 @@ mod tests {
         let sent = BlockEntityData {
             location: 1,
             block_type: VarInt(type_id),
-            nbt: nbt(entity, &items, furnace, &patterns, profile),
+            nbt: nbt(entity, &items, furnace, &patterns, profile, &properties),
         };
         let mut bytes = Vec::new();
         sent.encode(&mut bytes);
@@ -506,5 +550,51 @@ mod tests {
             (profile.get("name").is_some(), profile.get("id")),
             (true, None)
         );
+    }
+
+    #[test]
+    fn a_skull_carries_its_texture_properties_with_and_without_a_signature() {
+        let data = round_trip(
+            "minecraft:skull",
+            &[
+                "profile,Notch,",
+                "property,textures,eyJ0ZXh0dXJlcyI6e319,c2ln",
+                "property,extra,dmFsdWU=,",
+            ],
+        );
+        let Some(Tag::Compound(profile)) = data.get("profile") else {
+            panic!("profile compound");
+        };
+        assert_eq!(profile.get("name"), Some(&Tag::String("Notch".into())));
+        let Some(Tag::List(List::Compound(properties))) = profile.get("properties") else {
+            panic!("properties list");
+        };
+        assert_eq!(properties.len(), 2);
+        assert_eq!(
+            properties[0].get("value"),
+            Some(&Tag::String("eyJ0ZXh0dXJlcyI6e319".into()))
+        );
+        assert_eq!(
+            properties[0].get("signature"),
+            Some(&Tag::String("c2ln".into()))
+        );
+        assert_eq!(properties[1].get("signature"), None);
+        // Textures alone are a profile too, and only a skull may have them.
+        let bare = round_trip("minecraft:skull", &["property,textures,dmFsdWU=,"]);
+        assert!(matches!(bare.get("profile"), Some(Tag::Compound(p)) if p.get("name").is_none()));
+        let bad = |entity: &str, entries: &[&str]| packet([0, 0, 0], entity, &join(entries), SEP);
+        assert_eq!(
+            bad("minecraft:banner", &["property,textures,dmFsdWU=,"]),
+            None
+        );
+        assert_eq!(bad("minecraft:skull", &["property,,dmFsdWU=,"]), None);
+        assert_eq!(
+            bad("minecraft:skull", &["property,textures,dmFsdWU=,sig,extra"]),
+            None
+        );
+        let long = format!("property,textures,{},", "x".repeat(32768));
+        assert_eq!(bad("minecraft:skull", &[&long]), None);
+        let long_sig = format!("property,textures,v,{}", "s".repeat(1025));
+        assert_eq!(bad("minecraft:skull", &[&long_sig]), None);
     }
 }

@@ -498,6 +498,8 @@ pub enum PluginPacket {
         patterns: Vec<(String, String)>,
         /// Skull profile `(name, uuid as four ints)`; either part may be absent.
         profile: Option<(Option<String>, Option<[i32; 4]>)>,
+        /// Skull profile properties `(name, value, signature)`, e.g. the `textures` property.
+        properties: Vec<(String, String, Option<String>)>,
     },
     /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
     Equipment {

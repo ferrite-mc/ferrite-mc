@@ -442,15 +442,21 @@ public abstract class PlayerMisc extends PlayerStubs {
             // SkullBlockEntity saves `profile`, `note_block_sound` and `custom_name`; only the profile's name and
             // uuid are modelled. Textures (profile properties) and a note block sound are refused, not dropped.
             if (skull.getNoteBlockSound() != null)
-                throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") cannot carry a note block sound; the host snapshot encodes the profile name and uuid only");
+                throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") cannot carry a note block sound; the host snapshot encodes the profile name, uuid and properties only");
             var entries = new java.util.ArrayList<String>();
             var profile = skull.getPlayerProfile();
             if (profile != null) {
-                if (!profile.getProperties().isEmpty())
-                    throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") cannot carry profile properties (textures); the host snapshot encodes the profile name and uuid only");
                 var name = profile.getName();
                 var id = profile.getUniqueId();
-                entries.add("profile," + (name == null ? "" : name) + "," + (id == null ? "" : id));
+                if (name != null || id != null) entries.add("profile," + (name == null ? "" : name) + "," + (id == null ? "" : id));
+                for (var property : profile.getProperties()) {
+                    // Textures are base64, which holds neither the entry separator nor a comma; refuse anything else.
+                    String signature = property.getSignature() == null ? "" : property.getSignature();
+                    for (var field : new String[] {property.getName(), property.getValue(), signature})
+                        if (field.indexOf(',') >= 0 || field.indexOf(HostBridge.ITEM) >= 0)
+                            throw new IllegalArgumentException("Ferrite: Player#sendBlockUpdate(" + type + ") cannot carry a profile property containing a comma or a separator control character");
+                    entries.add("property," + property.getName() + "," + property.getValue() + "," + signature);
+                }
             }
             HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, "minecraft:skull", entries);
             return;

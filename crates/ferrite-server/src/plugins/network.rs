@@ -742,6 +742,7 @@ mod tests {
                 furnace: None,
                 patterns: Vec::new(),
                 profile: None,
+                properties: Vec::new(),
             }
         );
         let refused = |entity: &str| {
