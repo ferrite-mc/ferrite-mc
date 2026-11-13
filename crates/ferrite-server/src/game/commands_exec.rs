@@ -702,10 +702,21 @@ fn condition_dimension(ctx: &CommandContext<Source>, unless: bool) -> Result<Sou
 }
 
 fn condition_predicate(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
-    let _ = ctx.string("predicate");
-    // No predicate registry is wired into the server yet, so every predicate evaluates false,
-    // exactly like a datapack with no predicates loaded.
-    passed(ctx, unless, false)
+    let id = ctx.string("predicate").unwrap_or_default().to_owned();
+    let store = ctx.source().state.lock().unwrap().functions.clone();
+    let context = super::commands_late::default_context(ctx)?;
+    // Vanilla resolves the predicate while parsing, so an unknown id is an error, not "false".
+    let Some(result) = super::commands_late::evaluate_predicate(&store, &id, &context) else {
+        return Err(CommandError::failed(format!(
+            "Unknown predicate: {}",
+            if id.contains(':') {
+                id
+            } else {
+                format!("minecraft:{id}")
+            }
+        )));
+    };
+    passed(ctx, unless, result)
 }
 
 #[derive(Clone, Copy)]
@@ -1009,6 +1020,44 @@ mod tests {
             snbt::format(state.storage.get("minecraft:t").unwrap()),
             "{list:[\"a\"],at:1}"
         );
+    }
+
+    #[test]
+    fn datapack_predicates_decide_if_and_unless() {
+        let dir = std::env::temp_dir().join(format!("ferrite-pred-{}", uuid::Uuid::new_v4()));
+        let predicates = dir.join("datapacks/p/data/demo/predicate");
+        std::fs::create_dir_all(&predicates).unwrap();
+        std::fs::write(
+            predicates.join("is_player.json"),
+            r#"{"condition":"minecraft:entity_properties","entity":"this","predicate":{"type":"minecraft:player"}}"#,
+        )
+        .unwrap();
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        source.state.lock().unwrap().functions =
+            Arc::new(crate::game::functions::FunctionStore::load(Some(&dir)));
+        // The console has no executing entity, so a
+        // `this` predicate is false and `unless` passes.
+        tree.execute(
+            "execute unless predicate demo:is_player run data merge storage pr {unless:1}",
+            source.clone(),
+        )
+        .unwrap();
+        tree.execute(
+            "execute if predicate demo:is_player run data merge storage pr {bad:1}",
+            source.clone(),
+        )
+        .unwrap();
+        let error = tree
+            .execute(
+                "execute if predicate demo:missing run data merge storage pr {bad:1}",
+                source.clone(),
+            )
+            .map(|_| ());
+        let state = source.state.lock().unwrap();
+        let stored = snbt::format(state.storage.get("minecraft:pr").unwrap());
+        assert_eq!(stored, "{unless:1}", "{error:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

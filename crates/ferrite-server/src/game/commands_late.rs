@@ -128,12 +128,32 @@ fn blocks_match(blocks: &Value, name: &str) -> bool {
     }
 }
 
+/// Evaluates the predicate `id` for `/execute if|unless predicate`. Datapack predicates win over
+/// the extracted vanilla ones; `None` means no pack and no vanilla data defines it.
+/// Condition types outside the supported set (`match_block`, `entity_properties`, `inverted`,
+/// `all_of`, `any_of`) evaluate false, like a context that lacks the data they need.
+pub(super) fn evaluate_predicate(
+    store: &super::functions::FunctionStore,
+    id: &str,
+    ctx: &Context,
+) -> Option<bool> {
+    let id = namespaced(id);
+    let value = store
+        .predicate(&id)
+        .cloned()
+        .or_else(|| data_file("predicate", &id))?;
+    Some(condition(&value, ctx, 0))
+}
+
 fn condition(value: &Value, ctx: &Context, depth: u8) -> bool {
     if depth > 16 {
         return false;
     }
     if let Some(id) = value.as_str() {
         return data_file("predicate", id).is_some_and(|v| condition(&v, ctx, depth + 1));
+    }
+    if let Some(list) = value.as_array() {
+        return list.iter().all(|t| condition(t, ctx, depth + 1));
     }
     match value["type"].as_str() {
         Some("minecraft:match_block") => {
