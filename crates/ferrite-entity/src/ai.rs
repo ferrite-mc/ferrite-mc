@@ -48,6 +48,8 @@ pub const SKELETON_RANGE: f64 = 16.0;
 pub const SKELETON_ARROW_DAMAGE: f32 = 2.0;
 /// Ticks between skeleton shots.
 pub const SKELETON_COOLDOWN: u16 = 40;
+/// `RangedBowAttackGoal` shoots every 20 ticks on Hard, every 40 otherwise.
+pub const SKELETON_COOLDOWN_HARD: u16 = 20;
 /// Ticks between melee hits.
 pub const MELEE_COOLDOWN: u16 = 20;
 /// How often a hostile mob recomputes its path.
@@ -536,13 +538,15 @@ pub fn tick_with_owner_attacks_and_holders(
         blocks,
         players,
         &std::collections::HashSet::new(),
+        false,
         owner_attacks,
         holders,
         rng,
     )
 }
 
-/// [`tick_with_owner_attacks_and_holders`] where `untargetable` players (creative and
+/// [`tick_with_owner_attacks_and_holders`] where `hard` is the Hard difficulty (skeletons shoot
+/// twice as often) and `untargetable` players (creative and
 /// spectator) are still seen by every other goal (look at, follow, tempt, owner, despawn
 /// range) but are never picked as a hostile mob's target.
 pub fn tick_full(
@@ -550,10 +554,16 @@ pub fn tick_full(
     blocks: &impl BlockGetter,
     players: &[Target],
     untargetable: &std::collections::HashSet<Uuid>,
+    hard: bool,
     owner_attacks: &[(Uuid, crate::EntityKey)],
     holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
+    let bow_cooldown = if hard {
+        SKELETON_COOLDOWN_HARD
+    } else {
+        SKELETON_COOLDOWN
+    };
     let mut events = Vec::new();
     let hostile_targets: std::borrow::Cow<'_, [Target]> = if untargetable.is_empty() {
         std::borrow::Cow::Borrowed(players)
@@ -703,7 +713,7 @@ pub fn tick_full(
                                     damage: SKELETON_ARROW_DAMAGE,
                                 });
                                 if let Some(state) = mob::state_mut(store, key) {
-                                    state.bow_timer = SKELETON_COOLDOWN;
+                                    state.bow_timer = bow_cooldown;
                                 }
                             }
                         }
@@ -1368,7 +1378,16 @@ mod tests {
         let mut rng = Rng::new(2);
         let mut hits = 0;
         for _ in 0..200 {
-            for event in tick_full(&mut store, &world, &[creative], &hidden, &[], &[], &mut rng) {
+            for event in tick_full(
+                &mut store,
+                &world,
+                &[creative],
+                &hidden,
+                false,
+                &[],
+                &[],
+                &mut rng,
+            ) {
                 if matches!(event, MobEvent::Melee { .. }) {
                     hits += 1;
                 }
@@ -1379,9 +1398,18 @@ mod tests {
         // Control: the same setup without the exclusion does attack.
         let none = std::collections::HashSet::new();
         let attacked = (0..200).any(|_| {
-            tick_full(&mut store, &world, &[creative], &none, &[], &[], &mut rng)
-                .iter()
-                .any(|event| matches!(event, MobEvent::Melee { .. }))
+            tick_full(
+                &mut store,
+                &world,
+                &[creative],
+                &none,
+                false,
+                &[],
+                &[],
+                &mut rng,
+            )
+            .iter()
+            .any(|event| matches!(event, MobEvent::Melee { .. }))
         });
         assert!(attacked, "without the exclusion the zombie attacks");
     }
@@ -1917,6 +1945,43 @@ mod tests {
             }
         }
         assert_eq!(arrows, 1, "one arrow every cooldown");
+    }
+
+    #[test]
+    fn a_skeleton_shoots_twice_as_often_on_hard() {
+        let world = TestWorld::flat(64);
+        let shots = |hard: bool| {
+            let mut store = EntityStore::default();
+            store.insert(new_mob(
+                MobKind::Skeleton,
+                Vec3::new(8.5, 64.0, 0.5),
+                &mut Rng::new(3),
+            ));
+            let mut rng = Rng::new(4);
+            let none = std::collections::HashSet::new();
+            let player = target(0.5, 0.5);
+            let mut ticks = Vec::new();
+            for tick in 0..100 {
+                let events = tick_full(
+                    &mut store,
+                    &world,
+                    &[player],
+                    &none,
+                    hard,
+                    &[],
+                    &[],
+                    &mut rng,
+                );
+                if events.iter().any(|e| matches!(e, MobEvent::Arrow { .. })) {
+                    ticks.push(tick);
+                }
+            }
+            ticks
+        };
+        let (normal, hard) = (shots(false), shots(true));
+        assert!(normal.len() >= 2 && hard.len() >= 4, "{normal:?} {hard:?}");
+        assert!(normal.windows(2).all(|w| w[1] - w[0] == 40), "{normal:?}");
+        assert!(hard.windows(2).all(|w| w[1] - w[0] == 20), "{hard:?}");
     }
 
     #[test]

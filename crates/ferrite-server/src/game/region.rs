@@ -5538,6 +5538,8 @@ impl Region {
             );
         }
         let untargetable = super::targeting::untargetable();
+        // Vanilla `Difficulty.HARD` is 3.
+        let hard = ctx.state.lock().unwrap().difficulty == 3;
         let targets: Vec<_> = players
             .iter()
             .map(|(&uuid, &pos)| ai::Target { uuid, pos })
@@ -5561,6 +5563,7 @@ impl Region {
             blocks,
             &targets,
             &untargetable,
+            hard,
             owner_attacks,
             &holder_positions,
             &mut self.rng,
