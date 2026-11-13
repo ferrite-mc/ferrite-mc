@@ -75,3 +75,17 @@ tasks.test {
     dependsOn(generateGameRules)
     systemProperty("test.gamerule.reference", gameRuleOutput.get().file("ferrite/game-rules-reference.json").asFile.absolutePath)
 }
+
+val poiOutput = layout.buildDirectory.dir("generated/poi-resources")
+val generatePoiTypes = tasks.register<Exec>("generatePoiTypes") {
+    val versionDir = rootProject.projectDir.resolve("../../vanilla/26.3")
+    inputs.file(rootProject.projectDir.resolve("../../tools/extract_poi_types.py"))
+    inputs.file(rootProject.projectDir.resolve("../../tools/extractor/PoiTypeExtractor.java"))
+    inputs.file(versionDir.resolve("lib/server-26.3.jar"))
+    inputs.file(versionDir.resolve("generated/reports/registries.json"))
+    outputs.dir(poiOutput)
+    commandLine("python", rootProject.projectDir.resolve("../../tools/extract_poi_types.py"), versionDir,
+        poiOutput.get().file("ferrite/poi-types.json").asFile)
+}
+sourceSets.main { resources.srcDir(poiOutput); resources.exclude("**/poi-extractor-classes/**") }
+tasks.processResources { dependsOn(generatePoiTypes) }
