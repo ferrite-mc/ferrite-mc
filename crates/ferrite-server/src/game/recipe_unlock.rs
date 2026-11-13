@@ -48,7 +48,8 @@ pub enum Criterion {
     /// came back out.
     NetherTravel(DistanceCheck),
     /// A trigger this server cannot evaluate (or one whose conditions are richer than the
-    /// supported shape); the payload is the trigger id.
+    /// supported shape); the payload is the trigger id, read by [`coverage`].
+    #[cfg_attr(not(test), allow(dead_code))]
     Other(String),
 }
 
@@ -811,6 +812,7 @@ pub fn unlocked(rule: &Rule, held: &BTreeSet<String>, owned: &BTreeSet<String>) 
 /// Per trigger id: how many criteria of the extracted advancements this server evaluates and how
 /// many it leaves as [`Criterion::Other`], over `recipes/**` (`recipes = true`) or everything
 /// else. Used by the status document and its test.
+#[cfg(test)]
 pub fn coverage(recipes: bool) -> BTreeMap<String, (usize, usize)> {
     let mut table: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for rule in rules() {
@@ -833,6 +835,7 @@ pub fn coverage(recipes: bool) -> BTreeMap<String, (usize, usize)> {
     table
 }
 
+#[cfg(test)]
 fn trigger_of(criterion: &Criterion) -> &'static str {
     match criterion {
         Criterion::Holds(_) => "minecraft:inventory_changed",
@@ -955,21 +958,29 @@ pub fn reward_experience(advancement: &str) -> i32 {
         .map_or(0, |r| r.experience)
 }
 
-/// Loot tables an advancement rolls for the player when completed.
-pub fn reward_loot(advancement: &str) -> Vec<String> {
-    rules()
+/// The console commands that hand a rule's loot and function rewards to `player`: each loot
+/// table through `/loot give` (so the loot code of the server decides the context) and the
+/// function as the player at their position. The vanilla 26.3 advancements carry neither
+/// reward; data packs do.
+pub fn rule_reward_commands(rule: &Rule, player: &str) -> Vec<String> {
+    let mut out: Vec<String> = rule
+        .loot
         .iter()
-        .find(|r| r.id == advancement)
-        .map(|r| r.loot.clone())
-        .unwrap_or_default()
+        .map(|table| format!("loot give {player} loot {table}"))
+        .collect();
+    if let Some(function) = &rule.function {
+        out.push(format!("execute as {player} at @s run function {function}"));
+    }
+    out
 }
 
-/// The function an advancement runs as the player when completed.
-pub fn reward_function(advancement: &str) -> Option<String> {
+/// [`rule_reward_commands`] for the advancement with this id.
+pub fn reward_commands(advancement: &str, player: &str) -> Vec<String> {
     rules()
         .iter()
         .find(|r| r.id == advancement)
-        .and_then(|r| r.function.clone())
+        .map(|rule| rule_reward_commands(rule, player))
+        .unwrap_or_default()
 }
 
 /// Advancement criteria (`<advancement>#<criterion>`) that holding `held` completes, for every
@@ -1360,6 +1371,20 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn loot_and_function_rewards_become_console_commands() {
+        assert_eq!(
+            rule_reward_commands(&rule(), "Steve"),
+            [
+                "loot give Steve loot t:chests/gift",
+                "execute as Steve at @s run function t:celebrate"
+            ]
+        );
+        let bare = parse_rule("t:bare", &serde_json::json!({"criteria": {}})).unwrap();
+        assert!(rule_reward_commands(&bare, "Steve").is_empty());
+        assert!(reward_commands("minecraft:nope/none", "Steve").is_empty());
     }
 
     #[test]

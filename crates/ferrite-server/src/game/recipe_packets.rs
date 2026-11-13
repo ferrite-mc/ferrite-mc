@@ -142,6 +142,7 @@ fn packet(id: i32, body: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
 }
 
 /// `recipe_book_add`: `entries` are (recipe, notify) pairs; `replace` drops what the client had.
+#[cfg(test)]
 pub fn add_packet(book: &Book, entries: &[(&str, bool)], replace: bool) -> Vec<u8> {
     let entries: Vec<(&str, bool, bool)> = entries.iter().map(|(id, n)| (*id, *n, false)).collect();
     add_packet_highlighted(book, &entries, replace)
