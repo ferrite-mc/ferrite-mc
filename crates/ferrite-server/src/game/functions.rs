@@ -562,7 +562,7 @@ fn namespaced(raw: &str) -> String {
 
 fn unknown(name: &str) -> CommandError {
     CommandError::failed(super::feedback::render(
-        "commands.function.unknown",
+        "arguments.function.unknown",
         &[name],
     ))
 }
@@ -940,9 +940,11 @@ fn return_value(returned: i32, result: i32) -> Result<i32, CommandError> {
     }
 }
 
+/// Not a vanilla message: `lang_en_us.json` has no key for `/return` outside a function, and
+/// whether vanilla 26.3 accepts it there is unverified (see docs/COMMANDS-STATUS.md).
 fn not_in_function_error() -> Result<i32, CommandError> {
     Err(CommandError::failed(super::feedback::render(
-        "commands.function.return.not_in_function",
+        "ferrite.function.return.not_in_function",
         &[],
     )))
 }

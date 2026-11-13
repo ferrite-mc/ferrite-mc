@@ -726,6 +726,7 @@ mod tests {
             &BlockData::Get {
                 pos,
                 path: "Command".into(),
+                scale: None,
             },
         )
         .unwrap();

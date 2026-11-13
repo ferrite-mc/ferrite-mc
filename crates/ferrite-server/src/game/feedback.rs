@@ -7,6 +7,12 @@
 /// The vanilla `en_us` format string for a key.
 fn template(key: &str) -> Option<&'static str> {
     Some(match key {
+        "commands.data.get.invalid" => "Can't get %s; only numeric tags are allowed",
+        "commands.data.modify.expected_list" => "Expected a list: got %s",
+        "commands.data.modify.expected_object" => "Expected an object: got %s",
+        "commands.data.modify.expected_value" => "Expected a value: got %s",
+        "commands.data.modify.invalid_index" => "Invalid list index: %s",
+        "commands.data.modify.invalid_substring" => "Invalid substring indices: %s to %s",
         "commands.datapack.create.already_exists" => "Pack with name '%s' already exists",
         "commands.datapack.create.invalid_name" => "Invalid characters in new pack name '%s'",
         "commands.datapack.create.io_failure" => "Can't create pack with name '%s'. Check logs",
@@ -471,8 +477,9 @@ fn template(key: &str) -> Option<&'static str> {
         }
         "commands.team.option.suffix.success" => "Team suffix set to %s",
         "commands.team.remove.success" => "Removed team %s",
-        "commands.function.unknown" => "Unknown function %s",
-        "commands.function.return.not_in_function" => {
+        "arguments.function.unknown" => "Unknown function %s",
+        // Not vanilla: the lang file has no message for `/return` outside a function.
+        "ferrite.function.return.not_in_function" => {
             "This command can only be run from inside a function"
         }
         _ => return None,
@@ -502,6 +509,54 @@ pub fn render(key: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `render` prints the raw key for a key without a template, so every key a command passes
+    /// to `feedback::render(...)` must have one, and it must be vanilla's 26.3 string.
+    #[test]
+    fn every_rendered_key_has_the_vanilla_template() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Ok(lang) = std::fs::read_to_string(
+            root.join("../../vanilla/26.3/generated/reports/lang_en_us.json"),
+        ) else {
+            return;
+        };
+        let lang: serde_json::Value = serde_json::from_str(&lang).unwrap();
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(root.join("src/game")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find("render(") {
+                rest = &rest[at + 7..];
+                let after = rest.trim_start();
+                let Some(quoted) = after.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = quoted.find('"') else {
+                    continue;
+                };
+                let key = &quoted[..end];
+                if !(key.starts_with("commands.") || key.starts_with("arguments."))
+                    || key.contains(' ')
+                {
+                    continue;
+                }
+                match (template(key), lang.get(key).and_then(|v| v.as_str())) {
+                    (Some(ours), Some(vanilla)) if ours == vanilla => {}
+                    (None, _) => missing.push(format!("{key}: no template")),
+                    (Some(ours), vanilla) => {
+                        missing.push(format!("{key}: ours {ours:?} vanilla {vanilla:?}"))
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
 
     #[test]
     fn renders_vanilla_feedback() {

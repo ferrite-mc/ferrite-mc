@@ -27,6 +27,8 @@ pub enum BlockData {
     Get {
         pos: [i32; 3],
         path: String,
+        /// `Some` for the `<scale>` form, which needs a numeric tag.
+        scale: Option<f64>,
     },
     Merge {
         pos: [i32; 3],
@@ -112,7 +114,11 @@ pub fn apply_player_tag(player: &mut PlayerEntry, tag: &Tag) {
 }
 
 fn position(ctx: &CommandContext<Source>) -> Result<[i32; 3], CommandError> {
-    match ctx.argument("pos") {
+    block_position(ctx, "target")
+}
+
+fn block_position(ctx: &CommandContext<Source>, name: &str) -> Result<[i32; 3], CommandError> {
+    match ctx.argument(name) {
         Some(ferrite_command::ArgumentValue::BlockPos(coords)) => {
             let source = ctx.source();
             let pos = coords.resolve(source.origin, source.yaw, source.pitch);
@@ -253,8 +259,8 @@ fn target_name(target: Target) -> &'static str {
 fn target_node(target: Target) -> ferrite_command::NodeBuilder<Source> {
     match target {
         Target::Entity => argument::<Source>("target", ArgumentType::entities()),
-        Target::Block => argument::<Source>("pos", ArgumentType::BlockPos),
-        Target::Storage => argument::<Source>("target", ArgumentType::word()),
+        Target::Block => argument::<Source>("target", ArgumentType::BlockPos),
+        Target::Storage => argument::<Source>("target", ArgumentType::ResourceLocation),
     }
 }
 
@@ -267,7 +273,12 @@ fn get_branch(target: Target) -> ferrite_command::NodeBuilder<Source> {
         literal::<Source>(target_name(target)).then(
             target_node(target)
                 .executes(move |ctx| get(ctx, target))
-                .then(path_node().executes(move |ctx| get(ctx, target))),
+                .then(
+                    path_node().executes(move |ctx| get(ctx, target)).then(
+                        argument::<Source>("scale", ArgumentType::double())
+                            .executes(move |ctx| get(ctx, target)),
+                    ),
+                ),
         ),
     )
 }
@@ -285,80 +296,122 @@ fn merge_branch(target: Target) -> ferrite_command::NodeBuilder<Source> {
 
 fn modify_branch(target: Target) -> ferrite_command::NodeBuilder<Source> {
     literal::<Source>("modify").then(
-        literal::<Source>(target_name(target))
-            .then(target_node(target).then(path_node().also(operations(target)))),
+        literal::<Source>(target_name(target)).then(
+            target_node(target).then(
+                argument::<Source>("targetPath", ArgumentType::opaque("minecraft:nbt_path"))
+                    .also(operations(target)),
+            ),
+        ),
     )
+}
+
+type MakeOp = fn(&CommandContext<Source>, Tag) -> ModifyOp;
+
+fn insert_index(ctx: &CommandContext<Source>) -> usize {
+    ctx.integer("index").unwrap_or(0) as usize
 }
 
 /// The mutation kinds, as siblings under the path node.
 fn operations(target: Target) -> Vec<ferrite_command::NodeBuilder<Source>> {
-    let mut out = vec![
-        literal::<Source>("set")
-            .then(literal::<Source>("value").then(
-                argument::<Source>("value", ArgumentType::opaque("minecraft:nbt_tag")).executes(
-                    move |ctx| modify(ctx, target, |_| Ok(ModifyOp::Set(nbt_arg(ctx, "value")?))),
-                ),
-            ))
-            .then(literal::<Source>("from").then(from_node(target, ModifyOp::Set))),
+    fn value_node(target: Target, make: MakeOp) -> ferrite_command::NodeBuilder<Source> {
+        literal::<Source>("value").then(
+            argument::<Source>("value", ArgumentType::opaque("minecraft:nbt_tag")).executes(
+                move |ctx| modify(ctx, target, move |_| Ok(make(ctx, nbt_arg(ctx, "value")?))),
+            ),
+        )
+    }
+    let mut out = Vec::new();
+    let plain: [(&str, MakeOp); 3] = [
+        ("merge", |_, tag| ModifyOp::Merge(tag)),
+        ("append", |_, tag| ModifyOp::Append(tag)),
+        ("prepend", |_, tag| ModifyOp::Prepend(tag)),
     ];
-    for (name, make) in [
-        ("merge", ModifyOp::Merge as fn(Tag) -> ModifyOp),
-        ("append", ModifyOp::Append),
-        ("prepend", ModifyOp::Prepend),
-    ] {
+    out.push(
+        literal::<Source>("set")
+            .then(value_node(target, |_, tag| ModifyOp::Set(tag)))
+            .then(from_node(target, |_, tag| ModifyOp::Set(tag)))
+            .then(string_node(target, |_, tag| ModifyOp::Set(tag))),
+    );
+    for (name, make) in plain {
         out.push(
             literal::<Source>(name)
-                .then(
-                    literal::<Source>("value").then(
-                        argument::<Source>("value", ArgumentType::opaque("minecraft:nbt_tag"))
-                            .executes(move |ctx| {
-                                modify(ctx, target, move |_| Ok(make(nbt_arg(ctx, "value")?)))
-                            }),
-                    ),
-                )
-                .then(literal::<Source>("from").then(from_node(target, make))),
+                .then(value_node(target, make))
+                .then(from_node(target, make))
+                .then(string_node(target, make)),
         );
     }
-    out.push(literal::<Source>("insert").then(
-        argument::<Source>("index", ArgumentType::integer_range(0, i32::MAX)).then(
-            literal::<Source>("value").then(
-                argument::<Source>("value", ArgumentType::opaque("minecraft:nbt_tag")).executes(
-                    move |ctx| {
-                        let index = ctx.integer("index").unwrap_or(0) as usize;
-                        modify(ctx, target, move |_| {
-                            Ok(ModifyOp::Insert(index, nbt_arg(ctx, "value")?))
-                        })
-                    },
-                ),
-            ),
+    let insert: MakeOp = |ctx, tag| ModifyOp::Insert(insert_index(ctx), tag);
+    out.push(
+        literal::<Source>("insert").then(
+            argument::<Source>("index", ArgumentType::integer_range(0, i32::MAX))
+                .then(value_node(target, insert))
+                .then(from_node(target, insert))
+                .then(string_node(target, insert)),
         ),
-    ));
+    );
     out
 }
 
-/// `from entity|storage <source> [path]`, resolving the source value immediately.
-fn from_node(target: Target, make: fn(Tag) -> ModifyOp) -> ferrite_command::NodeBuilder<Source> {
-    let entity = literal::<Source>("entity").then(
-        argument::<Source>("source", ArgumentType::entities())
-            .executes(move |ctx| modify_from(ctx, target, make, SourceKind::Entity))
-            .then(
-                argument::<Source>("sourcePath", ArgumentType::opaque("minecraft:nbt_path"))
-                    .executes(move |ctx| modify_from(ctx, target, make, SourceKind::Entity)),
+/// `from block|entity|storage <source> [sourcePath]`, resolving the source value immediately.
+fn from_node(target: Target, make: MakeOp) -> ferrite_command::NodeBuilder<Source> {
+    let mut from = literal::<Source>("from");
+    for (name, kind, ty) in [
+        ("block", SourceKind::Block, ArgumentType::BlockPos),
+        ("entity", SourceKind::Entity, ArgumentType::entity()),
+        (
+            "storage",
+            SourceKind::Storage,
+            ArgumentType::ResourceLocation,
+        ),
+    ] {
+        let run = move |ctx: &CommandContext<Source>| modify_from(ctx, target, make, kind, None);
+        from = from.then(
+            literal::<Source>(name).then(
+                argument::<Source>("source", ty).executes(run).then(
+                    argument::<Source>("sourcePath", ArgumentType::opaque("minecraft:nbt_path"))
+                        .executes(run),
+                ),
             ),
-    );
-    let storage = literal::<Source>("storage").then(
-        argument::<Source>("source", ArgumentType::word())
-            .executes(move |ctx| modify_from(ctx, target, make, SourceKind::Storage))
-            .then(
-                argument::<Source>("sourcePath", ArgumentType::opaque("minecraft:nbt_path"))
-                    .executes(move |ctx| modify_from(ctx, target, make, SourceKind::Storage)),
+        );
+    }
+    from
+}
+
+/// `string block|entity|storage <source> [sourcePath [start [end]]]`: a substring of the
+/// source's string value.
+fn string_node(target: Target, make: MakeOp) -> ferrite_command::NodeBuilder<Source> {
+    let mut string = literal::<Source>("string");
+    for kind in [SourceKind::Block, SourceKind::Entity, SourceKind::Storage] {
+        let (name, ty) = match kind {
+            SourceKind::Block => ("block", ArgumentType::BlockPos),
+            SourceKind::Entity => ("entity", ArgumentType::entity()),
+            SourceKind::Storage => ("storage", ArgumentType::ResourceLocation),
+        };
+        let run =
+            move |ctx: &CommandContext<Source>| modify_from(ctx, target, make, kind, Some(()));
+        string = string.then(
+            literal::<Source>(name).then(
+                argument::<Source>("source", ty).executes(run).then(
+                    argument::<Source>("sourcePath", ArgumentType::opaque("minecraft:nbt_path"))
+                        .executes(run)
+                        .then(
+                            argument::<Source>("start", ArgumentType::integer())
+                                .executes(run)
+                                .then(
+                                    argument::<Source>("end", ArgumentType::integer())
+                                        .executes(run),
+                                ),
+                        ),
+                ),
             ),
-    );
-    entity.also([storage])
+        );
+    }
+    string
 }
 
 #[derive(Clone, Copy)]
 enum SourceKind {
+    Block,
     Entity,
     Storage,
 }
@@ -370,7 +423,80 @@ fn remove_branch(target: Target) -> ferrite_command::NodeBuilder<Source> {
     )
 }
 
+/// The feedback and result of `/data get`: the value's size or number (`getData`), or with a
+/// scale, the number times the scale floored (`getNumeric`). `args(Some(scale))` builds the
+/// arguments of the scaled message, `args(None)` the prefix of the query message.
+fn get_feedback(
+    value: &Tag,
+    path: &NbtPath,
+    scale: Option<f64>,
+    scaled_key: &'static str,
+    query_key: &'static str,
+    args: impl Fn(Option<String>) -> Vec<String>,
+) -> Result<(Feedback, i32), CommandError> {
+    let number = match value {
+        Tag::Byte(v) => Some(f64::from(*v)),
+        Tag::Short(v) => Some(f64::from(*v)),
+        Tag::Int(v) => Some(f64::from(*v)),
+        Tag::Long(v) => Some(*v as f64),
+        Tag::Float(v) => Some(f64::from(*v)),
+        Tag::Double(v) => Some(*v),
+        _ => None,
+    };
+    if let Some(scale) = scale {
+        let Some(number) = number else {
+            return Err(CommandError::failed(super::feedback::render(
+                "commands.data.get.invalid",
+                &[path.text()],
+            )));
+        };
+        let result = (number * scale).floor() as i32;
+        let mut arguments = args(Some(format!("{scale:.2}")));
+        arguments.push(result.to_string());
+        return Ok((Feedback::new(scaled_key, arguments), result));
+    }
+    let result = match (number, value) {
+        (Some(number), _) => number.floor() as i32,
+        (None, Tag::String(text)) => text.chars().count() as i32,
+        (None, Tag::Compound(map)) => map.len() as i32,
+        (None, other) => list_len(other).ok_or_else(|| {
+            CommandError::failed(super::feedback::render(
+                "commands.data.get.unknown",
+                &[path.text()],
+            ))
+        })? as i32,
+    };
+    let mut arguments = args(None);
+    arguments.push(snbt::format(value));
+    Ok((Feedback::new(query_key, arguments), result))
+}
+
+fn list_len(tag: &Tag) -> Option<usize> {
+    match tag {
+        Tag::List(list) => Some(match list {
+            List::End => 0,
+            List::Byte(v) => v.len(),
+            List::Short(v) => v.len(),
+            List::Int(v) => v.len(),
+            List::Long(v) => v.len(),
+            List::Float(v) => v.len(),
+            List::Double(v) => v.len(),
+            List::ByteArray(v) => v.len(),
+            List::String(v) => v.len(),
+            List::List(v) => v.len(),
+            List::Compound(v) => v.len(),
+            List::IntArray(v) => v.len(),
+            List::LongArray(v) => v.len(),
+        }),
+        Tag::ByteArray(v) => Some(v.len()),
+        Tag::IntArray(v) => Some(v.len()),
+        Tag::LongArray(v) => Some(v.len()),
+        _ => None,
+    }
+}
+
 fn get(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandError> {
+    let scale = ctx.argument("scale").and_then(|value| value.as_f64());
     let path = path_arg(ctx, "path").unwrap_or_else(|_| NbtPath::parse("").unwrap());
     match target {
         Target::Storage => {
@@ -384,13 +510,20 @@ fn get(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandError
             } else {
                 path.get(root).ok_or_else(|| missing(&path))?
             };
-            send(
-                ctx.source(),
-                Action::Feedback(Feedback::new(
-                    "commands.data.storage.query",
-                    vec![id, snbt::format(&value)],
-                )),
-            )
+            let (feedback, result) = get_feedback(
+                &value,
+                &path,
+                scale,
+                "commands.data.storage.get",
+                "commands.data.storage.query",
+                |scaled| match scaled {
+                    Some(scale) => vec![path.text().to_owned(), id.clone(), scale],
+                    None => vec![id.clone()],
+                },
+            )?;
+            drop(state);
+            send(ctx.source(), Action::Feedback(feedback))?;
+            Ok(result)
         }
         Target::Entity => {
             let uuid = target_players(ctx, "target")?;
@@ -399,13 +532,21 @@ fn get(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandError
                 return Err(CommandError::failed("No player was found"));
             };
             let value = resolve_path(&player_tag(player), &path)?;
-            send(
-                ctx.source(),
-                Action::Feedback(Feedback::new(
-                    "commands.data.entity.query",
-                    vec![player.name.clone(), snbt::format(&value)],
-                )),
-            )
+            let name = player.name.clone();
+            let (feedback, result) = get_feedback(
+                &value,
+                &path,
+                scale,
+                "commands.data.entity.get",
+                "commands.data.entity.query",
+                |scaled| match scaled {
+                    Some(scale) => vec![path.text().to_owned(), name.clone(), scale],
+                    None => vec![name.clone()],
+                },
+            )?;
+            drop(state);
+            send(ctx.source(), Action::Feedback(feedback))?;
+            Ok(result)
         }
         Target::Block => {
             let pos = position(ctx)?;
@@ -414,6 +555,7 @@ fn get(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandError
                 Action::Data(BlockData::Get {
                     pos,
                     path: path.text().to_owned(),
+                    scale,
                 }),
             )
         }
@@ -488,7 +630,7 @@ fn modify(
     make: impl Fn(&CommandContext<Source>) -> Result<ModifyOp, CommandError>,
 ) -> Result<i32, CommandError> {
     let op = make(ctx)?;
-    let path = path_arg(ctx, "path")?;
+    let path = path_arg(ctx, "targetPath")?;
     match target {
         Target::Storage => {
             let id = storage_name(ctx)?;
@@ -544,11 +686,35 @@ fn apply_op(root: &mut Tag, path: &NbtPath, op: &ModifyOp) -> Result<(), Command
 fn modify_from(
     ctx: &CommandContext<Source>,
     target: Target,
-    make: fn(Tag) -> ModifyOp,
+    make: MakeOp,
     kind: SourceKind,
+    string: Option<()>,
 ) -> Result<i32, CommandError> {
-    let value = read_source(ctx, kind)?;
-    modify(ctx, target, move |_| Ok(make(value.clone())))
+    let mut value = read_source(ctx, kind)?;
+    if string.is_some() {
+        value = substring(ctx, &value)?;
+    }
+    modify(ctx, target, move |_| Ok(make(ctx, value.clone())))
+}
+
+/// `string`: the source value as text (SNBT for non-strings), cut to `[start, end)`.
+fn substring(ctx: &CommandContext<Source>, value: &Tag) -> Result<Tag, CommandError> {
+    let text = match value {
+        Tag::String(text) => text.clone(),
+        other => snbt::format(other),
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let start = ctx.integer("start").unwrap_or(0);
+    let end = ctx.integer("end").unwrap_or(chars.len() as i32);
+    if start < 0 || end < start || end as usize > chars.len() {
+        return Err(CommandError::failed(super::feedback::render(
+            "commands.data.modify.invalid_substring",
+            &[&start.to_string(), &end.to_string()],
+        )));
+    }
+    Ok(Tag::String(
+        chars[start as usize..end as usize].iter().collect(),
+    ))
 }
 
 fn read_source(ctx: &CommandContext<Source>, kind: SourceKind) -> Result<Tag, CommandError> {
@@ -561,6 +727,16 @@ fn read_source(ctx: &CommandContext<Source>, kind: SourceKind) -> Result<Tag, Co
                 return Err(missing(&path));
             };
             resolve_path(root, &path)
+        }
+        SourceKind::Block => {
+            let pos = block_position(ctx, "source")?;
+            let Some(world) = &ctx.source().world else {
+                return Err(CommandError::failed("World storage is unavailable"));
+            };
+            let entity = world
+                .block_entity(pos[0], pos[1], pos[2])
+                .ok_or_else(|| CommandError::failed("The target block is not a block entity"))?;
+            resolve_path(&Tag::Compound(entity.data), &path)
         }
         SourceKind::Entity => {
             let uuid = target_players(ctx, "source")?;
@@ -636,25 +812,27 @@ pub fn apply_block(
     let mut root = Tag::Compound(entity.data.clone());
     let coords = vec![pos[0].to_string(), pos[1].to_string(), pos[2].to_string()];
     match command {
-        BlockData::Get { path, .. } => {
+        BlockData::Get { path, scale, .. } => {
             let path = NbtPath::parse(path)?;
             let value = resolve_path(&root, &path).map_err(|error| error.to_string())?;
-            Ok(if path.is_root() {
-                Feedback::new(
-                    "commands.data.block.query",
-                    vec![coords.join(", "), snbt::format(&value)],
-                )
-            } else {
-                Feedback::new(
-                    "commands.data.block.get",
-                    vec![
-                        path.text().to_owned(),
-                        coords.join(", "),
-                        "1.0".into(),
-                        snbt::format(&value),
-                    ],
-                )
-            })
+            let (feedback, _) = get_feedback(
+                &value,
+                &path,
+                *scale,
+                "commands.data.block.get",
+                "commands.data.block.query",
+                |scaled| {
+                    let mut out = match scaled {
+                        Some(_) => vec![path.text().to_owned()],
+                        None => Vec::new(),
+                    };
+                    out.extend(coords.iter().cloned());
+                    out.extend(scaled);
+                    out
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(feedback)
         }
         BlockData::Merge { data, .. } => {
             let path = NbtPath::parse("")?;
@@ -824,5 +1002,67 @@ mod tests {
         ));
         let error = tree.execute("data get block 1 2", source).unwrap_err();
         assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn get_scales_numbers_and_sizes_other_values() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source();
+        tree.execute(
+            "data merge storage demo {n:2.5d,s:\"hello\",l:[1,2,3],c:{a:1,b:2}}",
+            source.clone(),
+        )
+        .unwrap();
+        let get = |command: &str| tree.execute(command, source.clone());
+        // `getNumeric`: floor(value * scale).
+        assert_eq!(get("data get storage demo n 2").unwrap(), 5);
+        assert_eq!(get("data get storage demo n 1.9").unwrap(), 4);
+        assert_eq!(get("data get storage demo n -1").unwrap(), -3);
+        // `getData`: numbers floor, strings and lists and compounds give their size.
+        assert_eq!(get("data get storage demo n").unwrap(), 2);
+        assert_eq!(get("data get storage demo s").unwrap(), 5);
+        assert_eq!(get("data get storage demo l").unwrap(), 3);
+        assert_eq!(get("data get storage demo c").unwrap(), 2);
+        let error = get("data get storage demo s 2").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Can't get s; only numeric tags are allowed"
+        );
+        let texts: Vec<String> = std::iter::from_fn(|| received.try_recv().ok())
+            .filter_map(|action| match action {
+                Action::Feedback(feedback) => Some(feedback.text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.contains(&"n in storage minecraft:demo after scale factor of 2.00 is 5".into()),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn modify_from_storage_and_string_substrings() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        let run = |command: &str| tree.execute(command, source.clone());
+        run("data merge storage src {text:\"abcdef\",l:[1,2]}").unwrap();
+        // `from storage` used to sit under the entity literal and could not be reached.
+        run("data modify storage dst copy set from storage src text").unwrap();
+        run("data modify storage dst list set from storage src l").unwrap();
+        run("data modify storage dst sub set string storage src text 1 4").unwrap();
+        run("data modify storage dst tail set string storage src text 3").unwrap();
+        run("data modify storage dst whole set string storage src text").unwrap();
+        let state = source.state.lock().unwrap();
+        assert_eq!(
+            snbt::format(state.storage.get("minecraft:dst").unwrap()),
+            "{copy:\"abcdef\",list:[1,2],sub:\"bcd\",tail:\"def\",whole:\"abcdef\"}"
+        );
+        drop(state);
+        let error = run("data modify storage dst bad set string storage src text 4 2").unwrap_err();
+        assert_eq!(error.to_string(), "Invalid substring indices: 4 to 2");
+        let error =
+            run("data modify storage dst bad set string storage src text 0 99").unwrap_err();
+        assert_eq!(error.to_string(), "Invalid substring indices: 0 to 99");
+        run("data modify storage dst list insert 0 from storage src text").unwrap();
     }
 }
