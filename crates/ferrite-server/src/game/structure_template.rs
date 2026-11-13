@@ -2,8 +2,9 @@
 //! their own server jar (`tools/fetch_vanilla.py`), applies rotation, mirror and integrity, and
 //! yields the block states to write relative to the placement position.
 //!
-//! Block entity data and template entities are not placed (chests come out empty); jigsaw
-//! blocks become their `final_state`; `structure_void` and `structure_block` are skipped.
+//! Block entity data and template entities are placed (the latter through
+//! [`Template::place_entities`], spawned by the world loop); jigsaw blocks become their
+//! `final_state`; `structure_void` and `structure_block` are skipped.
 
 use std::path::{Path, PathBuf};
 
@@ -59,12 +60,20 @@ impl Mirror {
     }
 }
 
+/// An entity of a template: its position relative to the placement origin and its saved NBT.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateEntity {
+    pub pos: [f64; 3],
+    pub nbt: Compound,
+}
+
 /// A parsed template: its palette as global state ids (`None` for unknown blocks).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Template {
     pub size: [i32; 3],
     palette: Vec<Option<u16>>,
     blocks: Vec<([i32; 3], usize, Option<Compound>)>,
+    entities: Vec<TemplateEntity>,
 }
 
 fn data_dir() -> Option<PathBuf> {
@@ -174,10 +183,25 @@ impl Template {
             };
             blocks.push((pos, index, nbt));
         }
+        let mut entities = Vec::new();
+        for entity in compounds(root.get("entities")) {
+            let (Some(Tag::List(List::Double(pos))), Some(Tag::Compound(nbt))) =
+                (entity.get("pos"), entity.get("nbt"))
+            else {
+                continue;
+            };
+            if pos.len() == 3 && nbt.get("id").is_some() {
+                entities.push(TemplateEntity {
+                    pos: [pos[0], pos[1], pos[2]],
+                    nbt: nbt.clone(),
+                });
+            }
+        }
         Some(Self {
             size: [*size.first()?, *size.get(1)?, *size.get(2)?],
             palette,
             blocks,
+            entities,
         })
     }
 
@@ -268,6 +292,78 @@ impl Template {
             }
         }
         (out, entities)
+    }
+}
+
+/// Vanilla `Mth.wrapDegrees`.
+fn wrap_degrees(angle: f32) -> f32 {
+    let wrapped = angle % 360.0;
+    if wrapped >= 180.0 {
+        wrapped - 360.0
+    } else if wrapped < -180.0 {
+        wrapped + 360.0
+    } else {
+        wrapped
+    }
+}
+
+impl Template {
+    /// The entities after mirror and rotation, positions relative to the placement origin.
+    ///
+    /// `StructureTemplate.transform(Vec3, ...)` with the pivot at the origin: a mirror flips
+    /// `z`/`x` to `1 - z`/`1 - x`, a quarter turn clockwise maps `(x, z)` to `(1 - z, x)`, a half
+    /// turn to `(1 - x, 1 - z)` and a quarter turn counter-clockwise to `(z, 1 - x)`. The yaw is
+    /// `Entity.rotate(rotation) + (Entity.mirror(mirror) - yaw)` (`+90/+180/+270`; `-yaw` for a
+    /// front-back mirror, `180 - yaw` for a left-right one). `UUID` is dropped so the world
+    /// gives each spawned entity a new one. Integrity does not thin entities. The `Facing` of
+    /// hanging entities (item frames, paintings) is not turned.
+    pub fn place_entities(&self, rotation: Rotation, mirror: Mirror) -> Vec<TemplateEntity> {
+        self.entities
+            .iter()
+            .map(|entity| {
+                let [mut x, y, mut z] = entity.pos;
+                match mirror {
+                    Mirror::None => {}
+                    Mirror::LeftRight => z = 1.0 - z,
+                    Mirror::FrontBack => x = 1.0 - x,
+                }
+                let (x, z) = match rotation {
+                    Rotation::None => (x, z),
+                    Rotation::Clockwise90 => (1.0 - z, x),
+                    Rotation::Clockwise180 => (1.0 - x, 1.0 - z),
+                    Rotation::CounterClockwise90 => (z, 1.0 - x),
+                };
+                let mut nbt = entity.nbt.clone();
+                nbt.shift_remove("UUID");
+                let (yaw, pitch) = match nbt.get("Rotation") {
+                    Some(Tag::List(List::Float(angles))) if angles.len() == 2 => {
+                        (angles[0], angles[1])
+                    }
+                    _ => (0.0, 0.0),
+                };
+                let wrapped = wrap_degrees(yaw);
+                let turned = wrapped
+                    + match rotation {
+                        Rotation::None => 0.0,
+                        Rotation::Clockwise90 => 90.0,
+                        Rotation::Clockwise180 => 180.0,
+                        Rotation::CounterClockwise90 => 270.0,
+                    };
+                let mirrored = match mirror {
+                    Mirror::None => wrapped,
+                    Mirror::FrontBack => -wrapped,
+                    Mirror::LeftRight => 180.0 - wrapped,
+                };
+                nbt.insert(
+                    "Rotation".into(),
+                    Tag::List(List::Float(vec![turned + (mirrored - yaw), pitch])),
+                );
+                TemplateEntity {
+                    pos: [x, y, z],
+                    nbt,
+                }
+            })
+            .collect()
     }
 }
 
@@ -445,6 +541,90 @@ mod tests {
         assert_eq!(entities, vec![([0, 0, 1], chest)]);
         let (_, none) = template.place_with_entities(Rotation::None, Mirror::None, 0.0, 1);
         assert!(none.is_empty());
+    }
+
+    fn entity_template() -> Template {
+        let mut palette = Compound::new();
+        palette.insert("id".into(), Tag::String("minecraft:stone".into()));
+        let mut block = Compound::new();
+        block.insert("pos".into(), Tag::List(List::Int(vec![0, 0, 0])));
+        block.insert("state".into(), Tag::Int(0));
+        let mut nbt = Compound::new();
+        nbt.insert("id".into(), Tag::String("minecraft:pig".into()));
+        nbt.insert("UUID".into(), Tag::IntArray(vec![1, 2, 3, 4]));
+        nbt.insert("Rotation".into(), Tag::List(List::Float(vec![10.0, 5.0])));
+        let mut entity = Compound::new();
+        entity.insert("pos".into(), Tag::List(List::Double(vec![0.25, 1.0, 0.75])));
+        entity.insert("blockPos".into(), Tag::List(List::Int(vec![0, 1, 0])));
+        entity.insert("nbt".into(), Tag::Compound(nbt));
+        let mut root = Compound::new();
+        root.insert("size".into(), Tag::List(List::Int(vec![1, 2, 1])));
+        root.insert("palette".into(), Tag::List(List::Compound(vec![palette])));
+        root.insert("blocks".into(), Tag::List(List::Compound(vec![block])));
+        root.insert("entities".into(), Tag::List(List::Compound(vec![entity])));
+        Template::from_nbt(&root).unwrap()
+    }
+
+    fn yaw_of(entity: &TemplateEntity) -> f32 {
+        match entity.nbt.get("Rotation") {
+            Some(Tag::List(List::Float(angles))) => angles[0],
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_entities_are_parsed_and_lose_their_uuid() {
+        let template = entity_template();
+        let placed = template.place_entities(Rotation::None, Mirror::None);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].pos, [0.25, 1.0, 0.75]);
+        assert!(placed[0].nbt.get("UUID").is_none());
+        assert_eq!(yaw_of(&placed[0]), 10.0);
+    }
+
+    #[test]
+    fn template_entities_follow_vanillas_vec3_transform() {
+        let template = entity_template();
+        let at = |rotation, mirror| {
+            let placed = template.place_entities(rotation, mirror);
+            (placed[0].pos, yaw_of(&placed[0]))
+        };
+        // (x, z) = (0.25, 0.75): clockwise turn gives (1 - z, x), counter-clockwise (z, 1 - x).
+        assert_eq!(
+            at(Rotation::Clockwise90, Mirror::None),
+            ([0.25, 1.0, 0.25], 100.0)
+        );
+        assert_eq!(
+            at(Rotation::Clockwise180, Mirror::None),
+            ([0.75, 1.0, 0.25], 190.0)
+        );
+        assert_eq!(
+            at(Rotation::CounterClockwise90, Mirror::None),
+            ([0.75, 1.0, 0.75], 280.0)
+        );
+        // Mirrors flip one axis around the block and mirror the yaw.
+        assert_eq!(
+            at(Rotation::None, Mirror::LeftRight),
+            ([0.25, 1.0, 0.25], 170.0)
+        );
+        assert_eq!(
+            at(Rotation::None, Mirror::FrontBack),
+            ([0.75, 1.0, 0.75], -10.0)
+        );
+    }
+
+    #[test]
+    fn real_templates_with_entities_keep_them() {
+        if !available() {
+            return;
+        }
+        // igloo/bottom holds two villagers in the 26.3 data.
+        let igloo = Template::load("minecraft:igloo/bottom").expect("igloo/bottom");
+        let placed = igloo.place_entities(Rotation::None, Mirror::None);
+        assert_eq!(placed.len(), 2);
+        assert!(placed.iter().all(|e| e.nbt.get("id").is_some()));
+        let top = Template::load("minecraft:igloo/top").expect("igloo/top");
+        assert!(top.place_entities(Rotation::None, Mirror::None).is_empty());
     }
 
     #[test]

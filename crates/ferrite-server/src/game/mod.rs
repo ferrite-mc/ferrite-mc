@@ -9,6 +9,7 @@ pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
 mod targeting;
+mod variants;
 mod waypoints;
 pub use anvil::{AnvilChunkSource, read_spawn as load_spawn, write_spawn};
 #[cfg(test)]
@@ -63,7 +64,9 @@ pub use dimension::{
 mod commands_data;
 #[cfg(test)]
 pub(crate) use commands_data::{BlockData, apply_block};
+mod block_tags;
 mod commands_exec;
+mod commands_exec_more;
 mod commands_extras;
 mod commands_item;
 mod commands_late;
@@ -72,9 +75,13 @@ mod commands_meta;
 mod commands_more;
 mod commands_progress;
 mod commands_server;
+mod commands_time;
+#[cfg(test)]
+mod commands_tree_parity;
 mod commands_world;
 mod container;
 mod crafting;
+mod damage_source;
 pub use crafting::match_for_plugin as match_crafting_for_plugin;
 mod dispenser;
 pub(crate) mod drops;
@@ -746,7 +753,8 @@ mod tests {
         let (outbound, mut rx) = OutboundSender::channel(1 << 20);
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, Mailbox::default(), outbound));
-        route_plugin_command(command, &mailboxes, &mut HashMap::new(), &|_| None);
+        let state = Arc::new(Mutex::new(commands::GameState::default()));
+        route_plugin_command(command, &mailboxes, &mut HashMap::new(), &|_| None, &state);
         std::iter::from_fn(|| rx.try_recv()).collect()
     }
 
@@ -786,6 +794,7 @@ mod tests {
         let (outbound, _rx) = OutboundSender::channel(1 << 20);
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, mailbox.clone(), outbound));
+        let state = Arc::new(Mutex::new(commands::GameState::default()));
         for target in [Uuid::from_u128(8), player] {
             route_plugin_command(
                 ferrite_plugin::PlayerCommand::VisualExperience {
@@ -796,12 +805,38 @@ mod tests {
                 &mailboxes,
                 &mut HashMap::new(),
                 &|_| None,
+                &state,
             );
         }
         let commands: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
         assert!(
             matches!(commands.as_slice(), [Command::PluginVisualExperience { progress, level: Some(12) }] if *progress == 0.75)
         );
+    }
+
+    #[test]
+    fn plugin_gamemode_updates_locator_spectators() {
+        let player = Uuid::from_u128(7);
+        let (outbound, _rx) = OutboundSender::channel(1 << 20);
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(player, (1, Mailbox::default(), outbound));
+        let state = Arc::new(Mutex::new(commands::GameState::default()));
+        for (mode, spectator) in [
+            (ferrite_plugin::GameMode::Spectator, true),
+            (ferrite_plugin::GameMode::Survival, false),
+        ] {
+            route_plugin_command(
+                ferrite_plugin::PlayerCommand::SetGameMode { player, mode },
+                &mailboxes,
+                &mut HashMap::new(),
+                &|_| None,
+                &state,
+            );
+            assert_eq!(
+                state.lock().unwrap().more.spectators.contains(&player),
+                spectator
+            );
+        }
     }
 
     #[test]
@@ -1964,14 +1999,15 @@ async fn run(
         let mut locator = waypoints::Locator::default();
         offload::Latest::spawn(
             "ferrite-locator",
-            move |(online, styles, spectators, ranges): (
+            move |(online, styles, spectators, ranges, extra): (
                 HashMap<Uuid, commands::OnlinePlayer>,
                 _,
                 _,
                 _,
+                Vec<waypoints::Extra>,
             )| {
                 locator.ranges = ranges;
-                for (receiver, bytes) in locator.sync(&online, &styles, &spectators) {
+                for (receiver, bytes) in locator.sync(&online, &styles, &spectators, &extra) {
                     if let Some(player) = online.get(&receiver) {
                         let _ = player.outbound.send(Outbound::Packet(bytes.into()));
                     }
@@ -2018,6 +2054,8 @@ async fn run(
     };
     let mut scan_tick: u32 = 0;
     let mut last_held: HashMap<Uuid, std::collections::BTreeSet<String>> = HashMap::new();
+    // Where each player stood in the overworld when they entered the Nether (`nether_travel`).
+    let mut entered_nether: HashMap<Uuid, [f64; 3]> = HashMap::new();
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -2046,6 +2084,62 @@ async fn run(
                  signal=signals.recv()=>{let Some(signal)=signal else {break};let _timer=CoordinatorTimer::new(1); match signal {
                   Signal::Hold{world,chunk,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,[chunk]);}else{release_hold(&worlds,&mut holds,&signal_tx,world,chunk);},
                   Signal::HoldBatch{world,chunks,add}=>if add{add_holds(&worlds,&mut holds,world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog),world,chunks);}else{release_holds(&worlds,&mut holds,&signal_tx,world,chunks);},
+                  Signal::CrossClone(clone) => {
+                      let tell = |reply: &Option<OutboundSender>, text: &str| match reply {
+                          Some(tx) => chat(tx, text),
+                          None => tracing::info!("{text}"),
+                      };
+                      let clone = *clone;
+                      match &clone.read {
+                          Err(error) => tell(&clone.reply, error),
+                          Ok(_) => {
+                              let target = Arc::clone(dimensions.source(clone.target_dimension));
+                              let tracking = tracking.clone();
+                              let signals = signal_tx.clone();
+                              let chunk = ChunkPos(
+                                  clone.destination[0].div_euclid(16),
+                                  clone.destination[2].div_euclid(16),
+                              );
+                              worlds.schedule_at_chunk(clone.target_dimension, chunk, move |_region| {
+                                  let Ok(read) = &clone.read else { return };
+                                  match commands_world::apply_clone_write(
+                                      read,
+                                      clone.destination,
+                                      &*target,
+                                      &tracking,
+                                  ) {
+                                      Ok(outcome) => {
+                                          if let Some(tx) = &clone.reply {
+                                              chat(tx, &outcome.message);
+                                          } else {
+                                              tracing::info!("{}", outcome.message);
+                                          }
+                                          if clone.mover == commands_world::CloneMove::Move {
+                                              let _ = signals
+                                                  .send(Signal::CrossCloneClear(Box::new(clone.clone())));
+                                          }
+                                      }
+                                      Err(error) => tell(&clone.reply, &error),
+                                  }
+                              });
+                          }
+                      }
+                  },
+                  Signal::CrossCloneClear(clone) => {
+                      let clone = *clone;
+                      if let Ok(read) = &clone.read {
+                          let origin = Arc::clone(dimensions.source(clone.source_dimension));
+                          let tracking = tracking.clone();
+                          let chunk = ChunkPos(
+                              read.min[0].div_euclid(16),
+                              read.min[2].div_euclid(16),
+                          );
+                          let read = read.clone();
+                          worlds.schedule_at_chunk(clone.source_dimension, chunk, move |_region| {
+                              let _ = commands_world::apply_clone_clear(&read, &*origin, &tracking);
+                          });
+                      }
+                  },
                   Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
                   Signal::MobMelee{dimension,player,damage,from,attacker}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from,attacker});}},
                   Signal::MobKnockback{world_id,attacker,at,source}=>route_mob_knockback(&worlds,world_id,attacker,at,source),
@@ -2102,6 +2196,7 @@ async fn run(
                   Signal::ChangeDimension{player}=>{
                     let dimension=player.dimension;let world=player.world_id;let chunk=player.chunk;let id=player.uuid;
                     let (arrived_pos, arrived_yaw, arrived_pitch) = (player.pos, player.yaw, player.pitch);
+                    let online_before = online.get(&id).map(|p| (p.dimension, p.pos));
                     worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
                     if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
@@ -2111,6 +2206,15 @@ async fn run(
                       if let Err(error) = plugins.update_player_location(id, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
                     }
                     command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
+                    // `ServerPlayer.triggerDimensionChangeTriggers`: the overworld position where a
+                    // player went into the Nether is kept; coming back out measures the distance.
+                    if let Some(before) = online_before {
+                        if dimension == Dimension::Nether && before.0 != Dimension::Nether { entered_nether.insert(id, before.1); }
+                        else if dimension == Dimension::Overworld && before.0 == Dimension::Nether && let Some(entered) = entered_nether.get(&id) {
+                            recipe_unlock::push_event(id, recipe_unlock::Event::NetherTravel { delta: [arrived_pos[0] - entered[0], arrived_pos[1] - entered[1], arrived_pos[2] - entered[2]] });
+                        }
+                        if dimension != Dimension::Nether { entered_nether.remove(&id); }
+                    }
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
                   },
@@ -2147,7 +2251,8 @@ async fn run(
                          let _t = CoordinatorTimer::new(4);
                          let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          let (styles, spectators, ranges) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone(), online.keys().map(|uuid| (*uuid, waypoints::player_ranges(&game.more.attributes, *uuid, hidden.contains(uuid)))).collect::<HashMap<_, _>>()) };
-                         locator.submit((online.clone(), styles, spectators, ranges));
+                         let extra = { let game = command_state.lock().unwrap(); let index = game.entities.lock().unwrap(); waypoints::non_player_transmitters(&game.more.attributes, &index, |uuid| online.contains_key(uuid)) };
+                         locator.submit((online.clone(), styles, spectators, ranges, extra));
                      }
         laps.lap("locator");
                      {
@@ -2160,8 +2265,7 @@ async fn run(
                              if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
                              let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
                              // Loot and function rewards run as console commands aimed at the player.
-                             for table in recipe_unlock::reward_loot(&id) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command: format!("loot give {name} loot {table}"), complete }); }
-                             if let Some(function) = recipe_unlock::reward_function(&id) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command: format!("execute as {name} at @s run function {function}"), complete }); }
+                             for command in recipe_unlock::reward_commands(&id, &name) { let (complete, _unused) = oneshot::channel(); let _ = event_tx.send(GameMessage::Console { command, complete }); }
                              if let Some(text) = advancement_packets::announcement(&name, &id) { for player in online.values() { chat(&player.outbound, &text); } }
                          }
                      }
@@ -2184,7 +2288,7 @@ async fn run(
                          let tamed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::TAMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !tamed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for who in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed()); }
+                             for (who, kind, variant) in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed(kind, variant)); }
                          }
                      }
                      {
@@ -2202,10 +2306,15 @@ async fn run(
                          }
                      }
                      {
+                         let events = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::EVENTS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !events.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for (who, event) in events { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_event(&event)); }
+                         }
                          let placed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::PLACED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !placed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, block) in placed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_placed(block)); }
+                             for record in placed { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_placed(&record)); }
                          }
                      }
                      {
@@ -2213,6 +2322,13 @@ async fn run(
                          if !biomes.is_empty() {
                              let mut game = command_state.lock().unwrap();
                              for (who, biome) in biomes { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_biome(&biome)); }
+                         }
+                     }
+                     {
+                         let blocks = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::BLOCKS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
+                         if !blocks.is_empty() {
+                             let mut game = command_state.lock().unwrap();
+                             for record in blocks { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_block(&record)); }
                          }
                      }
                      {
@@ -2229,11 +2345,19 @@ async fn run(
                          for (_, mailbox, _) in mailboxes.values() { mailbox.lock().unwrap().push_back(Command::ScanInventory); }
                          let held = recipe_unlock::HELD.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          let mut game = command_state.lock().unwrap();
+                         let tick_criteria = recipe_unlock::criteria_for_tick();
+                         let effects = recipe_unlock::EFFECTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          for uuid in online.keys() {
                              if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
                                  last_held.insert(*uuid, items.clone());
                                  recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
                                  game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
+                             }
+                             if let Some(active) = effects.get(uuid).filter(|active| !active.is_empty()) {
+                                 game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for_effects(active));
+                             }
+                             if !tick_criteria.is_empty() {
+                                 game.more.advancements.entry(*uuid).or_default().extend(tick_criteria.iter().cloned());
                              }
                          }
                      }
@@ -2396,7 +2520,7 @@ async fn run(
                    let entity=ferrite_entity::allocate_id();
                    emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
                    let (actions, _) = mpsc::unbounded_channel();
-                   if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
+                   if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
                        let mut packet = Vec::new(); VarInt(16).encode(&mut packet); packet.extend(tree.body); let _ = outbound.send(Outbound::Packet(packet.into()));
                    }
                    emit(&outbound, &SetHeldSlot { slot: VarInt(start_inventory.selected_slot() as i32) });
@@ -2458,6 +2582,9 @@ async fn run(
                   }},
                   // Vanilla `ServerPlaceRecipe`: only recipes in the player's recipe book can be placed.
                   GameMessage::Input{uuid,packet:ServerboundPlay::PlaceRecipe(ref place),..} if !command_state.lock().unwrap().more.recipes.get(&uuid).is_some_and(|owned| recipe_packets::display_is_unlocked(owned, place.display_id.0)) => {}
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeSeen{display}}=>{
+                      if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) { recipe_packets::mark_seen(uuid, display, settings.playerdata.as_deref()); }
+                  }
                   GameMessage::Input{session,uuid,packet:ServerboundPlay::RecipeBookSettings{book,open,filtering}}=>{
                       if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {
                           let mut game = command_state.lock().unwrap();
@@ -2485,7 +2612,7 @@ async fn run(
                       let (actions, mut received) = mpsc::unbounded_channel();
                       let (origin, yaw, pitch) = online.get(&uuid).map_or(([0.0; 3], 0.0, 0.0), |player| (player.pos, player.yaw, player.pitch));
                       let name = command_state.lock().unwrap().players.iter().find(|p| p.uuid == uuid).map(|p| p.name.clone());
-                      let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                       if let Err(error) = command_tree.execute(command.trim_start_matches('/'), command_source) { emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(error.to_string()), overlay:false }); }
                       let source_name = online.get(&uuid).map_or_else(|| "Server".to_owned(), |player| player.name.clone());
                       let runtime_dimension = online.get(&uuid).map_or(Dimension::Overworld, |p| p.dimension);
@@ -2508,6 +2635,7 @@ async fn run(
                           stop: &stop_tx,
                           signals: &signal_tx,
                           worlds: &worlds,
+                          dimensions: &dimensions,
                           dimension: runtime_dimension,
                           tracking: &tracking,
                       };
@@ -2617,7 +2745,7 @@ async fn run(
                   },
                   GameMessage::Console{command,complete}=>{
                       let (actions, mut received) = mpsc::unbounded_channel();
-                      let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                       let result = command_tree.execute(command.trim().trim_start_matches('/'), command_source).map_err(|e| e.to_string());
                       let mut stop = false;
                       let mut runtime = CommandRuntime {
@@ -2639,6 +2767,7 @@ async fn run(
                           stop: &stop_tx,
                           signals: &signal_tx,
                           worlds: &worlds,
+                          dimensions: &dimensions,
                           dimension: Dimension::Overworld,
                           tracking: &tracking,
                       };
@@ -2743,7 +2872,7 @@ async fn run(
                             if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
                                 let (actions, _) = mpsc::unbounded_channel();
                                 let permission = *permissions.get(&player).unwrap_or(&0);
-                                let source_for = commands::Source { permission, origin: op.pos, yaw: op.yaw, pitch: op.pitch, uuid: Some(player), name: Some(op.name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: op.dimension, world: source.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                                let source_for = commands::Source { permission, origin: op.pos, yaw: op.yaw, pitch: op.pitch, uuid: Some(player), name: Some(op.name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: op.dimension, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                                 if let Ok(tree) = command_tree.serialize_commands(&source_for, registry) {
                                     let mut packet = Vec::new();
                                     VarInt(16).encode(&mut packet);
@@ -2814,7 +2943,7 @@ async fn run(
                          Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
                             worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                         }
-                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog)),
+                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog), &command_state),
                          // The plugin host dropped its sender (no plugins loaded): stop polling.
                          None => plugin_commands = None,
                      }
@@ -2856,6 +2985,7 @@ fn route_plugin_command(
     mailboxes: &HashMap<Uuid, (u64, Mailbox, OutboundSender)>,
     permissions: &mut HashMap<Uuid, u8>,
     travel: &dyn Fn(Uuid) -> Option<TravelTarget>,
+    state: &Arc<Mutex<commands::GameState>>,
 ) {
     use ferrite_plugin::PlayerCommand;
     match command {
@@ -3007,6 +3137,11 @@ fn route_plugin_command(
                 ferrite_plugin::GameMode::Adventure => 2,
                 ferrite_plugin::GameMode::Spectator => 3,
             };
+            if mode == 3 {
+                state.lock().unwrap().more.spectators.insert(player);
+            } else {
+                state.lock().unwrap().more.spectators.remove(&player);
+            }
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::SetMode(mode));
             }
@@ -3646,6 +3781,7 @@ struct CommandRuntime<'a> {
     stop: &'a tokio::sync::watch::Sender<bool>,
     signals: &'a mpsc::UnboundedSender<Signal>,
     worlds: &'a Worlds,
+    dimensions: &'a Arc<DimensionRegistry>,
     /// The dimension the command source acts in.
     dimension: Dimension,
     tracking: &'a region::Tracking,
@@ -3879,6 +4015,7 @@ impl CommandRuntime<'_> {
         amount: f32,
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
+        credit: Option<Uuid>,
     ) {
         let from = self
             .state
@@ -3893,7 +4030,7 @@ impl CommandRuntime<'_> {
         if self.worlds.owner(self.dimension, chunk).is_some() {
             self.worlds
                 .schedule_at_chunk(self.dimension, chunk, move |region| {
-                    region.damage_entity(uuid, amount, origin, aggro);
+                    region.damage_entity(uuid, amount, origin, aggro, credit);
                 });
         }
     }
@@ -3925,6 +4062,10 @@ impl CommandRuntime<'_> {
         op: commands::AttributeOp,
     ) {
         use commands::AttributeOp;
+        if targets.is_empty() {
+            self.reply.key("argument.entity.notfound.entity", &[]);
+            return;
+        }
         let [target] = targets else {
             self.reply.key("argument.entity.toomany", &[]);
             return;
@@ -4031,6 +4172,79 @@ impl CommandRuntime<'_> {
         }
     }
 
+    /// `/clone ... from <dimension>` / `to <dimension>` with two different dimensions: the read
+    /// runs on the region owning the source corner in the source dimension, then hands the
+    /// snapshot to the loop (`Signal::CrossClone`), which writes it on the destination
+    /// dimension's region. Returns whether the command was a cross-dimension clone.
+    fn cross_dimension_clone(
+        &self,
+        command: &commands_world::WorldCommand,
+        origin: &commands_world::Origin,
+    ) -> bool {
+        let commands_world::WorldCommand::Clone {
+            begin,
+            end,
+            destination,
+            mode,
+            options,
+        } = command
+        else {
+            return false;
+        };
+        let named = |name: &Option<String>| match name {
+            Some(key) => Dimension::from_key(key).ok_or_else(|| key.clone()),
+            None => Ok(self.dimension),
+        };
+        let (source_dimension, target_dimension) = match (
+            named(&options.source_dimension),
+            named(&options.target_dimension),
+        ) {
+            (Ok(source), Ok(target)) => (source, target),
+            (Err(key), _) | (_, Err(key)) => {
+                self.reply.text(&format!("Unknown dimension '{key}'"));
+                return true;
+            }
+        };
+        if source_dimension == self.dimension && target_dimension == self.dimension {
+            return false;
+        }
+        let (begin, end, destination) = (
+            commands_world::resolve(begin, origin),
+            commands_world::resolve(end, origin),
+            commands_world::resolve(destination, origin),
+        );
+        let source_chunk = ChunkPos(
+            begin[0].min(end[0]).div_euclid(16),
+            begin[2].min(end[2]).div_euclid(16),
+        );
+        let target_chunk = ChunkPos(destination[0].div_euclid(16), destination[2].div_euclid(16));
+        if self.worlds.owner(source_dimension, source_chunk).is_none()
+            || self.worlds.owner(target_dimension, target_chunk).is_none()
+        {
+            self.reply.text("Chunk not loaded");
+            return true;
+        }
+        let source = Arc::clone(self.dimensions.source(source_dimension));
+        let (mode, options) = (*mode, options.clone());
+        let signals = self.signals.clone();
+        let reply = self.reply.outbound.cloned();
+        self.worlds
+            .schedule_at_chunk(source_dimension, source_chunk, move |_region| {
+                let read = commands_world::clone_read(begin, end, mode, &options, &*source);
+                let _ = signals.send(region::Signal::CrossClone(Box::new(
+                    commands_world::CrossClone {
+                        read,
+                        destination,
+                        source_dimension,
+                        target_dimension,
+                        mover: options.mover,
+                        reply,
+                    },
+                )));
+            });
+        true
+    }
+
     fn teleport_feedback(
         &self,
         targets: &[selectors::SelectedEntity],
@@ -4094,14 +4308,30 @@ impl CommandRuntime<'_> {
                     yaw: 0.0,
                     pitch: 0.0,
                 };
+                if self.cross_dimension_clone(&command, &origin) {
+                    return false;
+                }
                 let chunk = commands_world::command_chunk(&command, &origin);
                 if self.worlds.owner(self.dimension, chunk).is_some() {
                     if let Some(source) = self.source.clone() {
                         let tracking = Arc::clone(self.tracking);
+                        // `/place template` entities spawn in the region that owns the chunk
+                        // each one stands in, after the blocks are written.
+                        let spawns = commands_world::template_spawns(&command, &origin);
                         self.worlds
                             .schedule_at_chunk(self.dimension, chunk, move |_region| {
                                 commands_world::apply_world(&command, &origin, &*source, &tracking);
                             });
+                        for (at, record) in spawns {
+                            let at =
+                                ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+                            if self.worlds.owner(self.dimension, at).is_some() {
+                                self.worlds
+                                    .schedule_at_chunk(self.dimension, at, move |region| {
+                                        region.add_entities(vec![record]);
+                                    });
+                            }
+                        }
                     }
                 } else if let Some(source) = self.source
                     && let Err(error) = commands_world::execute(&command, &origin, &**source)
@@ -4129,41 +4359,19 @@ impl CommandRuntime<'_> {
                 }
                 false
             }
-            Action::DatapackList => {
+            Action::DatapackList(kind) => {
                 let world = self.source.as_ref().and_then(|source| source.path());
-                let packs = functions::datapack_names(world);
-                if packs.is_empty() {
-                    self.reply.key("commands.datapack.list.enabled.none", &[]);
-                    return false;
-                }
-                let disabled = world.map(functions::read_disabled).unwrap_or_default();
-                let enabled: Vec<&str> = packs
-                    .iter()
-                    .filter(|pack| !disabled.contains(*pack))
-                    .map(String::as_str)
-                    .collect();
-                if enabled.is_empty() {
-                    self.reply.key("commands.datapack.list.enabled.none", &[]);
-                } else {
-                    self.reply.key(
-                        "commands.datapack.list.enabled.success",
-                        &[&enabled.len().to_string(), &enabled.join(", ")],
-                    );
-                }
-                let available: Vec<&str> = packs
-                    .iter()
-                    .filter(|pack| disabled.contains(*pack))
-                    .map(String::as_str)
-                    .collect();
-                if !available.is_empty() {
-                    self.reply.key(
-                        "commands.datapack.list.available.success",
-                        &[&available.len().to_string(), &available.join(", ")],
-                    );
+                for (key, args) in functions::datapack_list(world, kind) {
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    self.reply.key(key, &args);
                 }
                 false
             }
-            Action::DatapackSet { pack, enable } => {
+            Action::DatapackSet {
+                pack,
+                enable,
+                placement,
+            } => {
                 let Some(world) = self
                     .source
                     .as_ref()
@@ -4173,45 +4381,24 @@ impl CommandRuntime<'_> {
                     self.reply.key("commands.datapack.unknown", &[&pack]);
                     return false;
                 };
-                let packs = functions::datapack_names(Some(&world));
-                if !packs.contains(&pack) {
-                    self.reply.key("commands.datapack.unknown", &[&pack]);
-                    return false;
-                }
-                let mut disabled = functions::read_disabled(&world);
-                let already = !disabled.contains(&pack);
-                if enable == already {
-                    self.reply.key(
-                        if enable {
-                            "commands.datapack.enable.failed"
-                        } else {
-                            "commands.datapack.disable.failed"
-                        },
-                        &[&pack],
-                    );
-                    return false;
-                }
-                if enable {
-                    disabled.remove(&pack);
-                } else {
-                    disabled.insert(pack.clone());
-                }
-                if let Err(error) = functions::write_disabled(&world, &disabled) {
-                    self.reply
-                        .key("commands.reload.failure", &[&error.to_string()]);
-                    return false;
-                }
-                match functions::reload(Some(&world), self.state) {
-                    Ok(()) => self.reply.key(
-                        if enable {
-                            "commands.datapack.enable.success"
-                        } else {
-                            "commands.datapack.disable.success"
-                        },
-                        &[&pack],
-                    ),
-                    Err(error) => self.reply.key("commands.reload.failure", &[&error]),
-                }
+                let (key, args) = match functions::datapack_set(&world, &pack, enable, &placement) {
+                    Ok(done) => match functions::reload(Some(&world), self.state) {
+                        Ok(()) => done,
+                        Err(error) => ("commands.reload.failure", vec![error]),
+                    },
+                    Err(failed) => failed,
+                };
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
+                false
+            }
+            Action::DatapackCreate { id, description } => {
+                let (key, args) = match self.source.as_ref().and_then(|source| source.path()) {
+                    Some(world) => functions::datapack_create(world, &id, &description),
+                    None => ("commands.datapack.create.io_failure", vec![id]),
+                };
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
                 false
             }
             // Plugin commands run in the dispatch loops, which own the plugin hooks.
@@ -4352,6 +4539,7 @@ impl CommandRuntime<'_> {
                 damage_type,
                 at,
                 by,
+                cause,
             } => {
                 let targets = match self.selection(&targets) {
                     Ok(targets) => targets,
@@ -4360,37 +4548,123 @@ impl CommandRuntime<'_> {
                         return false;
                     }
                 };
-                // The attacker, when `by` names one entity, decides knockback and aggro.
-                let attacker = match by {
-                    Some(by) => self
-                        .selection(&by)
+                // `by` is the direct entity (knockback comes from it); `from` names the causing
+                // entity behind it, which defaults to `by` (`new DamageSource(type, by[, cause])`).
+                let direct = by.and_then(|by| {
+                    self.selection(&by)
                         .ok()
-                        .and_then(|found| found.into_iter().next()),
-                    None => None,
-                };
-                let origin = at.or_else(|| attacker.as_ref().map(|a| a.pos));
-                let aggro = attacker.as_ref().filter(|a| a.player).map(|a| a.uuid);
+                        .and_then(|found| found.into_iter().next())
+                });
+                let causing = cause
+                    .and_then(|cause| {
+                        self.selection(&cause)
+                            .ok()
+                            .and_then(|found| found.into_iter().next())
+                    })
+                    .or_else(|| direct.clone());
+                let origin = at.or_else(|| direct.as_ref().map(|a| a.pos));
+                // A causing player gets the kill credit and the mob's anger.
+                let credit = causing.as_ref().filter(|a| a.player).map(|a| a.uuid);
                 let kind = damage_kind(&damage_type);
+                let props = damage_source::props(&damage_type);
+                let party = |entity: &selectors::SelectedEntity| damage_source::Party {
+                    name: entity.name.clone(),
+                    living: entity.kind.is_none_or(|kind| {
+                        ferrite_data::entity_props::get(kind).category != "misc"
+                    }),
+                    player: entity.player,
+                    named_weapon: if entity.player {
+                        commands_loot::held_weapon_name(entity.uuid)
+                    } else {
+                        None
+                    },
+                };
+                let source = damage_source::Source::new(
+                    &damage_type,
+                    direct.as_ref().map(party),
+                    causing.as_ref().map(party),
+                );
+                let (difficulty, game_modes) = {
+                    let state = self.state.lock().unwrap();
+                    (
+                        state.difficulty,
+                        state
+                            .players
+                            .iter()
+                            .map(|p| (p.uuid, p.game_mode))
+                            .collect::<std::collections::HashMap<_, _>>(),
+                    )
+                };
+                let bypasses_invulnerability = ferrite_data::tags::contains(
+                    "damage_type",
+                    "bypasses_invulnerability",
+                    &damage_type,
+                );
                 let mut hurt = 0;
                 for target in &targets {
                     if target.player {
+                        // `Player.hurtServer`: creative and spectator players are invulnerable
+                        // except to `bypasses_invulnerability`, and the damage scales with the
+                        // difficulty when the type says so.
+                        let mode = game_modes.get(&target.uuid).copied().unwrap_or(0);
+                        if matches!(mode, 1 | 3) && !bypasses_invulnerability {
+                            continue;
+                        }
+                        let applied = match &props {
+                            Some(props) if source.scales_with_difficulty(props) => {
+                                damage_source::scale_for_difficulty(amount, difficulty)
+                            }
+                            _ => amount,
+                        };
+                        if applied <= 0.0 {
+                            continue;
+                        }
                         if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
-                            mailbox
-                                .lock()
-                                .unwrap()
-                                .push_back(Command::Damage(kind, amount));
+                            let killer = causing.as_ref().map(|a| a.name.as_str());
+                            let block = self
+                                .dimensions
+                                .source(target.dimension)
+                                .block(
+                                    target.pos[0].floor() as i32,
+                                    target.pos[1].floor() as i32,
+                                    target.pos[2].floor() as i32,
+                                )
+                                .and_then(|state| u16::try_from(state).ok())
+                                .and_then(ferrite_data::blocks::state)
+                                .map(|(name, _)| name);
+                            let source =
+                                source
+                                    .clone()
+                                    .with_fall(damage_source::FallInfo::from_snapshot(
+                                        crate::plugins::facts::fall_distance(target.uuid)
+                                            .unwrap_or(0.0),
+                                        applied,
+                                        block,
+                                    ));
+                            let message = props.as_ref().map(|props| {
+                                damage_source::death_message(props, &target.name, &source, killer)
+                            });
+                            let command = match message {
+                                Some(death_message) => Command::DamageFrom {
+                                    kind,
+                                    amount: applied,
+                                    death_message,
+                                },
+                                None => Command::Damage(kind, applied),
+                            };
+                            mailbox.lock().unwrap().push_back(command);
                             hurt += 1;
                             self.reply.key(
                                 "commands.damage.success",
-                                &[&format!("{amount}"), &target.name],
+                                &[&ferrite_command::error::java_float(amount), &target.name],
                             );
                         }
                     } else {
-                        self.damage_entity(target.uuid, target.pos, amount, origin, aggro);
+                        self.damage_entity(target.uuid, target.pos, amount, origin, credit, credit);
                         hurt += 1;
                         self.reply.key(
                             "commands.damage.success",
-                            &[&format!("{amount}"), &target.name],
+                            &[&ferrite_command::error::java_float(amount), &target.name],
                         );
                     }
                 }
@@ -4585,7 +4859,7 @@ impl CommandRuntime<'_> {
                         target.pos,
                         yaw,
                         pitch,
-                        self.dimension,
+                        target.dimension,
                     );
                 }
                 if let Some(first) = targets.first() {
@@ -4710,18 +4984,13 @@ impl CommandRuntime<'_> {
                 self.run_ride(&target, vehicle.as_ref());
                 false
             }
-            Action::DropItems { pos, stacks } => {
+            Action::DropItems { pos, stacks, table } => {
                 let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                 if self.worlds.owner(self.dimension, chunk).is_none() {
                     self.reply.key("argument.pos.unloaded", &[]);
                     return false;
                 }
-                let total: i32 = stacks.iter().map(|s| s.count).sum();
-                let first = stacks
-                    .first()
-                    .map(|s| commands::item_display(s.item))
-                    .unwrap_or_default();
-                let single = stacks.len() == 1;
+                let (key, args) = commands_loot::success_feedback(&stacks, table.as_deref());
                 self.worlds
                     .schedule_at_chunk(self.dimension, chunk, move |region| {
                         for stack in stacks {
@@ -4732,15 +5001,41 @@ impl CommandRuntime<'_> {
                             }
                         }
                     });
-                if single {
-                    self.reply.key(
-                        "commands.drop.success.single",
-                        &[&total.to_string(), &first],
-                    );
-                } else {
-                    self.reply
-                        .key("commands.drop.success.multiple", &[&total.to_string()]);
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
+                false
+            }
+            Action::LootGive {
+                targets,
+                stacks,
+                table,
+            } => {
+                let mut tracked = Vec::new();
+                for target in &targets {
+                    let Some((_, mailbox, _)) = self.mailboxes.get(target) else {
+                        continue;
+                    };
+                    tracked.extend(stacks.iter().cloned());
+                    for stack in &stacks {
+                        let components = stack
+                            .components
+                            .added()
+                            .filter_map(|(id, component)| Some((id, component.to_nbt().ok()?)))
+                            .collect();
+                        mailbox.lock().unwrap().push_back(Command::Give {
+                            target: *target,
+                            target_name: String::new(),
+                            item: stack.item,
+                            count: stack.count,
+                            item_name: String::new(),
+                            components,
+                            feedback: None,
+                        });
+                    }
                 }
+                let (key, args) = commands_loot::success_feedback(&tracked, table.as_deref());
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                self.reply.key(key, &args);
                 false
             }
             Action::Swing { targets, off_hand } => {
@@ -4751,6 +5046,16 @@ impl CommandRuntime<'_> {
                         return false;
                     }
                 };
+                if let Some(target) = targets.iter().find(|target| {
+                    !target.player
+                        && target.kind.is_some_and(|kind| {
+                            ferrite_data::entity_props::get(kind).attributes.is_empty()
+                        })
+                }) {
+                    self.reply
+                        .key("commands.swing.failed.notliving", &[&target.name]);
+                    return false;
+                }
                 let action = if off_hand { 3 } else { 0 };
                 for target in &targets {
                     if target.player {
@@ -5259,6 +5564,7 @@ impl CommandRuntime<'_> {
                 effect,
                 amplifier,
                 duration,
+                hide_particles,
             } => {
                 // The client packet keeps command order; the region owns the ticking store.
                 for target in targets {
@@ -5270,8 +5576,9 @@ impl CommandRuntime<'_> {
                                 effect: VarInt(effect),
                                 amplifier: VarInt(amplifier),
                                 duration: VarInt(duration),
-                                // ambient | show particles | show icon, like a normal potion effect.
-                                flags: 0b110,
+                                // ambient | show particles | show icon, like a normal potion
+                                // effect; `hideParticles` clears the particle bit.
+                                flags: if hide_particles { 0b100 } else { 0b110 },
                             }));
                     }
                     if let Some((_, mailbox, _)) = self.mailboxes.get(&target) {

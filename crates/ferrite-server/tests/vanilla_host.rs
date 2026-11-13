@@ -407,3 +407,135 @@ fn places_features_and_structures_through_the_host() {
     );
     assert!(missing.is_err());
 }
+
+/// The calls `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt` and
+/// `getStructures` make reach the jar's own biome source and structure manager through
+/// `plugins::worldgen::world_query`, with the same arguments the Java side sends.
+#[test]
+fn plugin_world_queries_are_answered_by_the_real_jar() {
+    use ferrite_plugin::HostCall;
+    use ferrite_server::plugins::worldgen::world_query;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let defaults = HostSettings::standard(&root);
+    if std::env::var("FERRITE_TEST_ACCEPT_EULA").as_deref() != Ok("true")
+        || !defaults.server_jar.exists()
+        || !defaults.host_jar.exists()
+    {
+        eprintln!(
+            "skipping plugin world query test: jar, host or FERRITE_TEST_ACCEPT_EULA missing"
+        );
+        return;
+    }
+    let Ok(registry) = RuntimeRegistry::load(root.join("vanilla/26.3/generated")) else {
+        return;
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let eula = scratch.path().join("eula.txt");
+    std::fs::write(&eula, "eula=true\n").unwrap();
+    let settings = HostSettings {
+        work_dir: scratch.path().join("worldgen"),
+        eula,
+        heap_mb: 1024,
+        threads: 2,
+        seed: "12345".into(),
+        ..defaults
+    };
+    let generator = VanillaGenerator::spawn(&settings, Arc::new(registry)).unwrap();
+    let call = |method: &str, args: &[&str]| HostCall {
+        owner: "World".into(),
+        subject: ferrite_plugin::default_world_id().to_string(),
+        method: method.into(),
+        args: args.iter().map(|a| (*a).to_owned()).collect(),
+    };
+    let ask = |method: &str, args: &[&str]| world_query(&generator, &call(method, args));
+
+    // locateNearestBiome: the reply is "x y z"; it must agree with the jar's biome source there.
+    let found = ask(
+        "locateBiome(String,int,int,int)",
+        &["minecraft:desert", "4096", "0", "0"],
+    )
+    .expect("the host answers biome searches");
+    assert!(
+        !found.is_empty(),
+        "seed 12345 has a desert within 4096 blocks"
+    );
+    let coordinates: Vec<i32> = found.split(' ').map(|part| part.parse().unwrap()).collect();
+    assert_eq!(coordinates.len(), 3, "{found}");
+    assert_eq!(
+        generator
+            .biome_at(
+                Dimension::Overworld,
+                coordinates[0],
+                coordinates[1],
+                coordinates[2]
+            )
+            .unwrap(),
+        "minecraft:desert",
+        "the located position is in a desert"
+    );
+    // Nothing within a one-block radius of a far-away point is an empty reply, not an error.
+    assert_eq!(
+        ask(
+            "locateBiome(String,int,int,int)",
+            &["minecraft:mushroom_fields", "1", "5000", "5000"]
+        ),
+        Some(String::new())
+    );
+    // locateNearestStructure and hasStructureAt agree: the structure start is inside its structure.
+    let start = ask(
+        "locateStructure(String,int,int,int)",
+        &[
+            "minecraft:desert_pyramid",
+            "4096",
+            &coordinates[0].to_string(),
+            &coordinates[2].to_string(),
+        ],
+    )
+    .expect("the host answers structure searches");
+    eprintln!("nearest desert pyramid: {start:?}");
+    if !start.is_empty() {
+        let at: Vec<i32> = start.split(' ').map(|part| part.parse().unwrap()).collect();
+        let starts = ask(
+            "getStructureStarts(int,int)",
+            &[
+                &at[0].div_euclid(16).to_string(),
+                &at[2].div_euclid(16).to_string(),
+            ],
+        )
+        .expect("the host answers structure start queries");
+        eprintln!("structure starts at the located chunk: {starts:?}");
+        assert!(
+            starts.contains("minecraft:desert_pyramid"),
+            "the located chunk reports the pyramid start: {starts:?}"
+        );
+        // `hasStructureAt` is true at the middle of that start's bounding box (its first line).
+        let b: Vec<i32> = starts
+            .lines()
+            .next()
+            .unwrap()
+            .split(' ')
+            .skip(1)
+            .map(|part| part.parse().unwrap())
+            .collect();
+        let (x, y, z) = ((b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2);
+        assert_eq!(
+            ask(
+                "hasStructureAt(String,int,int,int)",
+                &[
+                    "minecraft:desert_pyramid",
+                    &x.to_string(),
+                    &y.to_string(),
+                    &z.to_string()
+                ]
+            ),
+            Some("true".into()),
+            "inside the pyramid's box at {x},{y},{z}"
+        );
+    }
+    // A structure id that does not exist is "searched, not found" or an unanswered call, never a position.
+    let none = ask(
+        "hasStructureAt(String,int,int,int)",
+        &["minecraft:not_a_structure", "0", "64", "0"],
+    );
+    assert!(matches!(none.as_deref(), None | Some("false")), "{none:?}");
+}

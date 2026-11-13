@@ -110,15 +110,15 @@ fn moving_piston_replay(
         .collect()
 }
 
-/// How `/item` writes stacks into a player's slots.
+/// How `/item` writes stacks into a player's slots (see `slot_ops::distribute`).
 #[derive(Debug, Clone)]
 pub enum SlotFill {
-    /// A single stack goes to every slot; several go to the slots pairwise.
+    /// `replace`/`modify`: slot `i` takes `stacks[i]`; slots past the end are left alone.
     Set(Vec<ferrite_item::ItemStack>),
-    /// Like `Set`, but slots without a matching stack are cleared when several are given.
+    /// `override`: like `Set`, but slots past the end of the list are cleared.
     Override(Vec<ferrite_item::ItemStack>),
-    /// Like `Set`, but only slots that are empty change.
-    FillEmpty(Vec<ferrite_item::ItemStack>),
+    /// `fill`: the stacks are cycled over every slot.
+    Cycle(Vec<ferrite_item::ItemStack>),
 }
 
 pub enum Command {
@@ -338,6 +338,13 @@ pub enum Command {
     Kill,
     /// `/damage`: hurt the player on the owning region thread.
     Damage(DamageKind, f32),
+    /// `/damage` with a damage source: like `Damage`, but a fatal hit announces `death_message`
+    /// (built from the damage type and the attacker) instead of the cause's own text.
+    DamageFrom {
+        kind: DamageKind,
+        amount: f32,
+        death_message: String,
+    },
     /// A Paper `EntityScheduler` task for this player, run on the region that owns them.
     PluginEntityTask(ferrite_plugin::EntityTask),
     /// `/effect give`: apply a mob effect on the owning region thread.
@@ -655,6 +662,10 @@ pub(super) fn broadcast_tracked_chunk(
     }
 }
 pub enum Signal {
+    /// A `/clone` between dimensions whose source half has run (see `CrossClone`).
+    CrossClone(Box<super::commands_world::CrossClone>),
+    /// The `move` half of a cross-dimension clone, after the destination was written.
+    CrossCloneClear(Box<super::commands_world::CrossClone>),
     Transfer {
         to: ChunkPos,
         player: Box<Player>,
@@ -935,6 +946,7 @@ impl super::command_block::Runner for BlockCommands<'_> {
             anchor: ferrite_command::EntityAnchor::Feet,
             dimension: self.dimension,
             world: Some(Arc::clone(self.source)),
+            admin: None,
             state: Arc::clone(self.state),
             actions,
             tree: Some(Arc::clone(&tree)),
@@ -1620,10 +1632,25 @@ impl TraderSync<'_> {
         }
         let xp = player.take_trader_xp();
         let sold = merge_trader_trades(self.entities, player.uuid, trader, &trades);
+        push_trades(player.uuid, player.pos[1], sold);
         if sold > 0 || xp > 0 {
             add_trader_xp(self.entities, trader, xp);
             self.refresh(player);
         }
+    }
+}
+
+/// `AbstractVillager.notifyTrade` -> `CriteriaTriggers.TRADE`, once per sale merged.
+fn push_trades(player: Uuid, y: f64, sold: i32) {
+    for _ in 0..sold {
+        super::recipe_unlock::push_plain(
+            player,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:villager_trade",
+                player_y: y,
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -2454,11 +2481,15 @@ impl Player {
         drop(positions);
         if placed {
             self.changed_blocks.push([target.x, target.y, target.z]);
-            if let Some((name, _)) = ferrite_data::blocks::state(state) {
+            if let Some((name, props)) = ferrite_data::blocks::state(state) {
                 super::recipe_unlock::PLACED
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push((self.uuid, name));
+                    .push(super::recipe_unlock::BlockRecord {
+                        player: self.uuid,
+                        block: name,
+                        props,
+                    });
             }
             // Block entities are created with the block, so the menu, /data and the chunk save
             // all find the state they expect.
@@ -2596,33 +2627,15 @@ impl Player {
 
     fn fill_slots(&mut self, slots: &[i16], fill: SlotFill) {
         let slots: Vec<usize> = slots.iter().filter_map(|s| self.resolve_slot(*s)).collect();
-        for (index, slot) in slots.iter().enumerate() {
-            let pick = |stacks: &[ferrite_item::ItemStack]| match stacks.len() {
-                0 => None,
-                1 => stacks.first().cloned(),
-                _ => stacks.get(index).cloned(),
-            };
-            match &fill {
-                SlotFill::Set(stacks) => {
-                    if let Some(stack) = pick(stacks) {
-                        self.put_slot(*slot, stack);
-                    }
-                }
-                SlotFill::Override(stacks) => {
-                    let stack = if stacks.len() > 1 {
-                        stacks.get(index).cloned()
-                    } else {
-                        pick(stacks)
-                    };
-                    self.put_slot(*slot, stack.unwrap_or_else(ferrite_item::ItemStack::empty));
-                }
-                SlotFill::FillEmpty(stacks) => {
-                    if self.inventory.get(*slot).is_empty()
-                        && let Some(stack) = pick(stacks)
-                    {
-                        self.put_slot(*slot, stack);
-                    }
-                }
+        let (mode, stacks) = match fill {
+            SlotFill::Set(stacks) => (super::commands::SlotMode::Replace, stacks),
+            SlotFill::Override(stacks) => (super::commands::SlotMode::Override, stacks),
+            SlotFill::Cycle(stacks) => (super::commands::SlotMode::Fill, stacks),
+        };
+        let assigned = super::slot_ops::distribute(mode, &stacks, slots.len());
+        for (slot, stack) in slots.iter().zip(assigned) {
+            if let Some(stack) = stack {
+                self.put_slot(*slot, stack);
             }
         }
         self.sync_containers();
@@ -3121,9 +3134,18 @@ impl Player {
         if !matches!(self.gamemode, 1 | 3) {
             self.inventory.remove(slot, 1);
         }
+        super::recipe_unlock::push_plain(
+            self.uuid,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:used_totem",
+                item: Some("minecraft:totem_of_undying".into()),
+                ..Default::default()
+            },
+        );
         self.survival.health = 1.0;
         self.survival.dead = false;
         self.survival.death_cause = None;
+        self.survival.death_message = None;
         self.survival.death_processed = false;
         self.survival.absorption = 4.0;
         self.apply_effect(MobEffectInstance::new(Effect::Regeneration.id(), 900, 1));
@@ -4491,11 +4513,15 @@ impl Player {
                         })
                         .collect();
                     {
-                        let hidden = ferrite_item::item_name(
-                            self.inventory.get(ferrite_inventory::HEAD).item,
-                        )
-                        .is_some_and(|name| super::waypoints::HIDING_HEAD_ITEMS.contains(&name))
-                            && !self.inventory.get(ferrite_inventory::HEAD).is_empty();
+                        let head = self.inventory.get(ferrite_inventory::HEAD);
+                        let hidden = super::waypoints::hides(
+                            (!head.is_empty())
+                                .then(|| ferrite_item::item_name(head.item))
+                                .flatten(),
+                            self.sneaking,
+                            self.effects
+                                .has(ferrite_entity::effect::Effect::Invisibility),
+                        );
                         let mut set = super::waypoints::HEAD_HIDDEN
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
@@ -4505,10 +4531,63 @@ impl Player {
                             set.remove(&self.uuid);
                         }
                     }
+                    {
+                        // `LevitationTrigger`: how far the player has risen since the effect began.
+                        let mut starts = super::recipe_unlock::LEVITATION_START
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if self.effects.has(ferrite_entity::effect::Effect::Levitation) {
+                            let start = *starts.entry(self.uuid).or_insert(self.pos);
+                            super::recipe_unlock::push_plain(
+                                self.uuid,
+                                super::recipe_unlock::PlainEvent {
+                                    trigger: "minecraft:levitation",
+                                    delta: [
+                                        self.pos[0] - start[0],
+                                        self.pos[1] - start[1],
+                                        self.pos[2] - start[2],
+                                    ],
+                                    ..Default::default()
+                                },
+                            );
+                        } else {
+                            starts.remove(&self.uuid);
+                        }
+                    }
+                    super::recipe_unlock::EFFECTS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(
+                            self.uuid,
+                            self.effects
+                                .iter()
+                                .map(|instance| super::recipe_unlock::EffectFact {
+                                    name: format!(
+                                        "minecraft:{}",
+                                        ferrite_entity::effect::Effect::from_id(instance.effect)
+                                            .name()
+                                    ),
+                                    amplifier: instance.amplifier,
+                                    duration: instance.duration,
+                                })
+                                .collect(),
+                        );
                     super::recipe_unlock::HELD
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(self.uuid, held);
+                    let mainhand = self.resolve_slot(-1).and_then(|slot| {
+                        super::commands_loot::HeldTool::from_stack(self.inventory.get(slot))
+                    });
+                    let offhand = self
+                        .resolve_slot(ferrite_inventory::OFFHAND as i16)
+                        .and_then(|slot| {
+                            super::commands_loot::HeldTool::from_stack(self.inventory.get(slot))
+                        });
+                    super::commands_loot::HELD_TOOLS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(self.uuid, [mainhand, offhand]);
                     if let Some(biome) = self.source.as_ref().and_then(|source| {
                         source.biome_name(
                             self.pos[0].floor() as i32,
@@ -4520,6 +4599,34 @@ impl Player {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .push((self.uuid, biome));
+                    }
+                    if let Some((name, props)) = self.source.as_ref().and_then(|source| {
+                        let (x, y, z) = (
+                            self.pos[0].floor() as i32,
+                            self.pos[1].floor() as i32,
+                            self.pos[2].floor() as i32,
+                        );
+                        source
+                            .block(x, y, z)
+                            .and_then(|state| u16::try_from(state).ok())
+                            .and_then(ferrite_data::blocks::state)
+                    }) {
+                        let changed = {
+                            let mut last = super::recipe_unlock::LAST_BLOCK
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            last.insert(self.uuid, (name, props)) != Some((name, props))
+                        };
+                        if changed {
+                            super::recipe_unlock::BLOCKS
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(super::recipe_unlock::BlockRecord {
+                                    player: self.uuid,
+                                    block: name,
+                                    props,
+                                });
+                        }
                     }
                     continue;
                 }
@@ -4542,6 +4649,18 @@ impl Player {
                 }
                 Command::Damage(kind, amount) => {
                     self.hurt(kind, amount);
+                    continue;
+                }
+                Command::DamageFrom {
+                    kind,
+                    amount,
+                    death_message,
+                } => {
+                    self.survival.death_message = Some(death_message);
+                    self.hurt(kind, amount);
+                    if !self.survival.dead {
+                        self.survival.death_message = None;
+                    }
                     continue;
                 }
                 Command::Kill => {
@@ -5798,10 +5917,11 @@ impl Region {
                     self.entities.pos(key)?,
                     mob.age < 0,
                     mob.last_killer,
+                    mob.fire > 0,
                 ))
             })
             .collect();
-        for (key, kind, pos, baby, killer) in dead {
+        for (key, kind, pos, baby, killer, burning) in dead {
             if let Some(killer) = killer {
                 super::recipe_unlock::KILLS
                     .lock()
@@ -5851,7 +5971,7 @@ impl Region {
             let drops = if baby {
                 Vec::new()
             } else {
-                super::drops::mob_drops(kind, &mut self.rng)
+                super::drops::mob_drops_by(kind, &mut self.rng, killer, burning)
             };
             for stack in drops
                 .into_iter()
@@ -6610,7 +6730,10 @@ impl Region {
             })
             .collect();
         for (player, trader, trades, xp) in open {
-            merge_trader_trades(&mut self.entities, player, trader, &trades);
+            let sold = merge_trader_trades(&mut self.entities, player, trader, &trades);
+            if let Some(at) = self.players.get(&player) {
+                push_trades(player, at.pos[1], sold);
+            }
             add_trader_xp(&mut self.entities, trader, xp);
         }
     }
@@ -6950,6 +7073,44 @@ impl Region {
 
     /// Right-clicks on entities: food puts an adult animal in love or speeds a baby up
     /// (vanilla `Animal.mobInteract`); the item is used up outside creative mode.
+    /// The variant of a cat or wolf, picked from the biome it stands in the first time it is
+    /// needed (vanilla picks it when the animal spawns; this server has no spawn-time hook for
+    /// every spawn path). Returns its registry id.
+    fn settle_variant(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+    ) -> Option<&'static str> {
+        let (kind, variant) = {
+            let state = ferrite_entity::mob::state(&self.entities, key)?;
+            (state.kind, state.variant)
+        };
+        ferrite_entity::variant::names(kind)?;
+        let index = match variant {
+            Some(index) => index,
+            None => {
+                let at = self.entities.pos(key)?;
+                let biome = ctx.source.as_ref().and_then(|source| {
+                    source.biome_name(
+                        at.x.floor() as i32,
+                        at.y.floor() as i32,
+                        at.z.floor() as i32,
+                    )
+                });
+                let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
+                let index = super::variants::select(
+                    kind,
+                    biome.as_deref(),
+                    super::variants::moon_brightness(day_time),
+                    &mut self.rng,
+                )?;
+                ferrite_entity::mob::state_mut(&mut self.entities, key)?.variant = Some(index);
+                index
+            }
+        };
+        ferrite_entity::variant::name(kind, index)
+    }
+
     fn resolve_uses(&mut self, ctx: &TickContext) {
         let uuids: Vec<Uuid> = self.players.keys().copied().collect();
         for uuid in uuids {
@@ -7019,10 +7180,13 @@ impl Region {
                         self.broadcast_status(ctx, key, status);
                     }
                     if used == ferrite_entity::tame::Used::Tamed {
+                        let variant = self.settle_variant(ctx, key);
+                        let kind = ferrite_entity::mob::state(&self.entities, key)
+                            .map_or("", |state| state.kind.name());
                         super::recipe_unlock::TAMED
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .push(uuid);
+                            .push((uuid, kind, variant));
                     }
                     if used != ferrite_entity::tame::Used::Consumed
                         && used != ferrite_entity::tame::Used::Tamed
@@ -7623,6 +7787,23 @@ impl Region {
                 }
                 continue;
             };
+            // A saddled tame horse ridden by a player (also one put there with `/ride`) is
+            // steered by the rider's packets, not by its own AI or by the rider following it.
+            // A rider that is a mob of this region cannot steer.
+            let rider_is_mob = self
+                .entities
+                .keys()
+                .iter()
+                .any(|&k| self.entities.data(k).is_some_and(|d| d.uuid == rider));
+            if !rider_is_mob
+                && ferrite_entity::horse::is_steerable(&self.entities, key)
+                && !super::ride::is_controlled(horse)
+            {
+                super::ride::set_controlled(horse, true);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = true;
+                }
+            }
             let outcome = ferrite_entity::horse::tick_rider(
                 &mut self.entities,
                 key,
@@ -8175,7 +8356,7 @@ impl Region {
         if !thunder {
             return;
         }
-        for at in hits {
+        for (at, thrower) in hits {
             let near = self.entities.query_vec(ferrite_math::AABB::new(
                 at.x - 3.0,
                 at.y - 3.0,
@@ -8184,10 +8365,25 @@ impl Region {
                 at.y + 3.0,
                 at.z + 3.0,
             ));
+            let mut victims = Vec::new();
             for key in near {
                 if mob::is_mob(&self.entities, key) {
                     mob::hurt(&mut self.entities, key, 5.0, None);
+                    if let Some(state) = mob::state(&self.entities, key) {
+                        victims.push(state.kind.name().to_owned());
+                    }
                 }
+            }
+            // `LightningBolt.tick` -> `CHANNELED_LIGHTNING` for the player who channeled it.
+            if let Some(thrower) = thrower {
+                super::recipe_unlock::push_plain(
+                    thrower,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:channeled_lightning",
+                        victims,
+                        ..Default::default()
+                    },
+                );
             }
             static NEXT: std::sync::atomic::AtomicI32 =
                 std::sync::atomic::AtomicI32::new(1_800_000_000);
@@ -8283,6 +8479,21 @@ impl Region {
             }
         }
         self.strike_channeled(ctx);
+        for (owner, kind) in
+            std::mem::take(&mut *arrow::HURT.lock().unwrap_or_else(|e| e.into_inner()))
+        {
+            // `ServerPlayer.awardHit`-style `PLAYER_HURT_ENTITY`: the projectile is the damage's
+            // direct entity, and every arrow and trident is a `#minecraft:is_projectile` source.
+            super::recipe_unlock::push_plain(
+                owner,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:player_hurt_entity",
+                    direct: Some(format!("minecraft:{kind}")),
+                    projectile: true,
+                    ..Default::default()
+                },
+            );
+        }
         let shot: Vec<_> =
             std::mem::take(&mut *arrow::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
         super::recipe_unlock::KILLS
@@ -9631,6 +9842,19 @@ impl Region {
         };
         if let bobber::Reel::Caught { .. } = outcome {
             for stack in super::drops::fishing_catch(&rod, &mut self.rng) {
+                // `FishingHook.retrieve` -> `FISHING_ROD_HOOKED`: the `item` predicate is tried
+                // against each caught stack.
+                super::recipe_unlock::push_plain(
+                    p.uuid,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:fishing_rod_hooked",
+                        item: u16::try_from(stack.item_id)
+                            .ok()
+                            .and_then(ferrite_item::item_name)
+                            .map(str::to_owned),
+                        ..Default::default()
+                    },
+                );
                 let vel = bobber::catch_velocity(at, eye);
                 self.entities
                     .insert(item::new_item(at, vel, stack, &mut self.rng));
@@ -9758,7 +9982,17 @@ impl Region {
             }
         }
         let kind = p.survival.death_cause.unwrap_or(DamageKind::GenericKill);
-        let message = kind.death_message(&p.name);
+        // `Entity.awardKillScore` fires `entity_killed_player` for the entity that dealt the
+        // killing blow: here a mob's melee hit or an arrow. Explosions are not counted because
+        // the damage model does not say whether an entity caused them.
+        if matches!(kind, DamageKind::Mob | DamageKind::Arrow) {
+            super::recipe_unlock::push_event(p.uuid, super::recipe_unlock::Event::KilledByEntity);
+        }
+        let message = p
+            .survival
+            .death_message
+            .take()
+            .unwrap_or_else(|| kind.death_message(&p.name));
         let initial = ferrite_plugin::PlayerDeath {
             drops: initial_drops,
             dropped_exp: initial_exp,
@@ -10255,8 +10489,25 @@ impl Region {
             let mut data = super::beacon::load(source, pos);
             let levels = super::beacon::scan_levels(source, pos);
             if data.levels != levels {
+                let was_active = data.levels > 0;
                 data.levels = levels;
                 super::beacon::store(source, pos, &data);
+                if !was_active && levels > 0 {
+                    // `BeaconBlockEntity.tick`: on activation every player within the box
+                    // `(x, y - 4, z)` grown by (10, 5, 10) gets `construct_beacon`.
+                    for player in self.players.values() {
+                        if super::beacon::near_activation(pos, player.pos) {
+                            super::recipe_unlock::push_plain(
+                                player.uuid,
+                                super::recipe_unlock::PlainEvent {
+                                    trigger: "minecraft:construct_beacon",
+                                    level: Some(levels),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                }
             }
             if levels <= 0 {
                 continue;
@@ -10431,6 +10682,7 @@ impl Region {
         amount: f32,
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
+        credit: Option<Uuid>,
     ) -> bool {
         let key = self.entities.keys().iter().copied().find(|key| {
             self.entities
@@ -10441,6 +10693,10 @@ impl Region {
             return false;
         };
         let source = origin.map(|p| ferrite_math::Vec3::new(p[0], p[1], p[2]));
+        // The causing player gets the kill (loot with `killed_by_player`, advancements).
+        if let Some(player) = credit {
+            mob::credit(&mut self.entities, key, player);
+        }
         if mob::hurt(&mut self.entities, key, amount, source).is_some() {
             if let Some(player) = aggro {
                 mob::retaliate(&mut self.entities, key, player);
@@ -11797,6 +12053,39 @@ mod tests {
     }
 
     #[test]
+    fn a_horse_mounted_with_ride_is_steered_by_its_player_rider() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = dead_equine(&mut region, MobKind::Horse);
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.health = 20.0;
+            state.saddled = true;
+            state.owner = Some(Uuid::from_u128(0x51d1));
+        }
+        let horse = region.entities.data(key).unwrap().uuid;
+        let rider = Uuid::from_u128(0x51d2);
+        assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::mount(rider, horse, false).unwrap();
+        region.tick(&tick_context());
+        assert!(
+            super::super::ride::is_controlled(horse),
+            "steered by the rider"
+        );
+        assert!(mob::state(&region.entities, key).unwrap().no_ai);
+        // Without a saddle the rider cannot steer it.
+        super::super::ride::dismount(rider);
+        super::super::ride::set_controlled(horse, false);
+        if let Some(state) = mob::state_mut(&mut region.entities, key) {
+            state.saddled = false;
+            state.no_ai = false;
+        }
+        super::super::ride::mount(rider, horse, false).unwrap();
+        region.tick(&tick_context());
+        assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::dismount(rider);
+    }
+
+    #[test]
     fn a_snapshot_spawns_a_mob_with_its_nbt_at_the_requested_spot() {
         let mut source = Region::default();
         let original = mob::new_mob(
@@ -12765,13 +13054,46 @@ mod tests {
         let uuid = record.data.uuid;
         region.add_entities(vec![record]);
         assert!(
-            !region.damage_entity(Uuid::from_u128(99), 1.0, None, None),
+            !region.damage_entity(Uuid::from_u128(99), 1.0, None, None, None),
             "unknown entity"
         );
         assert!(region.pending_hurts.is_empty());
-        assert!(region.damage_entity(uuid, 3.0, Some([5.5, 64.0, 0.5]), None));
+        assert!(region.damage_entity(uuid, 3.0, Some([5.5, 64.0, 0.5]), None, None));
         assert_eq!(region.pending_hurts, vec![uuid]);
     }
+    #[test]
+    fn command_damage_credits_the_causing_player_with_the_kill() {
+        let mut region = Region::default();
+        let record = mob::new_mob(
+            mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(1),
+        );
+        let uuid = record.data.uuid;
+        region.add_entities(vec![record]);
+        let player = Uuid::from_u128(7);
+        assert!(region.damage_entity(uuid, 100.0, None, Some(player), Some(player)));
+        let key = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|key| region.entities.data(*key).is_some_and(|d| d.uuid == uuid))
+            .unwrap();
+        // The credit is what makes the death drop `killed_by_player` loot and feed advancements.
+        assert_eq!(
+            mob::state(&region.entities, key).unwrap().last_killer,
+            Some(player)
+        );
+        // `damage` without a causing player leaves any earlier credit alone.
+        let other = Uuid::from_u128(8);
+        assert!(region.damage_entity(uuid, 1.0, None, Some(other), None));
+        assert_eq!(
+            mob::state(&region.entities, key).unwrap().last_killer,
+            Some(player)
+        );
+    }
+
     #[test]
     fn chunk_updates_only_reach_the_matching_dimension() {
         let (overworld, mut overworld_rx) = OutboundSender::channel(1024);
@@ -13072,6 +13394,7 @@ mod tests {
                 dimension,
                 tags: Default::default(),
                 custom_name: None,
+                health: None,
             });
     }
 

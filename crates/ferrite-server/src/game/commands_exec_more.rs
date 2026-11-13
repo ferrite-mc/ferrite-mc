@@ -1,0 +1,810 @@
+//! The `/execute` branches beyond the basic modifiers: `if|unless biome|loaded|function|
+//! stopwatch|items|slots`, `positioned over`, `on`, `summon` and `store ... bossbar`.
+//!
+//! What these cannot do on this server is listed in `docs/COMMANDS-STATUS.md`: `on` needs
+//! relationship data the entity snapshot does not carry (only `vehicle`, `passengers` and
+//! `controller` come from the ride table), `summon` cannot hand the new entity to the rest of
+//! the chain, and `items|slots entity` cannot read an inventory owned by a region.
+
+use ferrite_command::arguments::{EntityTarget, RegistryParser};
+use ferrite_command::{
+    ArgumentType, ArgumentValue, CommandContext, CommandError, NodeBuilder, NodeId, argument,
+    literal,
+};
+use ferrite_world::HeightmapKind;
+
+use super::commands::{Source, send};
+use super::commands_exec::{Gate, passed};
+
+fn block_position(ctx: &CommandContext<Source>, name: &str) -> Result<[i32; 3], CommandError> {
+    match ctx.argument(name) {
+        Some(ArgumentValue::BlockPos(coords)) => {
+            let source = ctx.source();
+            let at = coords.resolve(source.origin, source.yaw, source.pitch);
+            Ok([
+                at[0].floor() as i32,
+                at[1].floor() as i32,
+                at[2].floor() as i32,
+            ])
+        }
+        _ => Err(CommandError::failed(format!("Missing position '{name}'"))),
+    }
+}
+
+fn normalized(id: &str) -> String {
+    if id.contains(':') {
+        id.to_owned()
+    } else {
+        format!("minecraft:{id}")
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Conditions.
+// ---------------------------------------------------------------------------------------------
+
+pub(super) fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
+    let biome = literal::<Source>("biome").then(
+        argument::<Source>("pos", ArgumentType::BlockPos).then(
+            argument::<Source>(
+                "biome",
+                ArgumentType::Registry {
+                    parser: RegistryParser::ResourceOrTag,
+                    registry: "minecraft:worldgen/biome".into(),
+                },
+            )
+            .gate(execute, unless, condition_biome),
+        ),
+    );
+    let loaded = literal::<Source>("loaded").then(
+        argument::<Source>("pos", ArgumentType::BlockPos).gate(execute, unless, condition_loaded),
+    );
+    let function = literal::<Source>("function").then(
+        argument::<Source>("name", ArgumentType::opaque("minecraft:function")).gate(
+            execute,
+            unless,
+            condition_function,
+        ),
+    );
+    let stopwatch = literal::<Source>("stopwatch").then(
+        argument::<Source>("id", ArgumentType::ResourceLocation).then(
+            argument::<Source>("range", ArgumentType::opaque("minecraft:float_range")).gate(
+                execute,
+                unless,
+                condition_stopwatch,
+            ),
+        ),
+    );
+    let slot_source = || ArgumentType::opaque("minecraft:slot_source");
+    let items = literal::<Source>("items")
+        .then(
+            literal::<Source>("block").then(
+                argument::<Source>("source", ArgumentType::BlockPos).then(
+                    argument::<Source>("slots", slot_source()).then(
+                        argument::<Source>(
+                            "item_predicate",
+                            ArgumentType::opaque("minecraft:item_predicate"),
+                        )
+                        .gate(execute, unless, |ctx, unless| {
+                            condition_container(ctx, unless, true)
+                        }),
+                    ),
+                ),
+            ),
+        )
+        .then(
+            literal::<Source>("entity").then(
+                argument::<Source>("source", ArgumentType::entities()).then(
+                    argument::<Source>("slots", slot_source()).then(
+                        argument::<Source>(
+                            "item_predicate",
+                            ArgumentType::opaque("minecraft:item_predicate"),
+                        )
+                        .gate(execute, unless, condition_entity_inventory),
+                    ),
+                ),
+            ),
+        );
+    let slots = literal::<Source>("slots")
+        .then(literal::<Source>("block").then(
+            argument::<Source>("source", ArgumentType::BlockPos).then(
+                argument::<Source>("slots", slot_source()).gate(execute, unless, |ctx, unless| {
+                    condition_container(ctx, unless, false)
+                }),
+            ),
+        ))
+        .then(literal::<Source>("entity").then(
+            argument::<Source>("source", ArgumentType::entities()).then(
+                argument::<Source>("slots", slot_source()).gate(
+                    execute,
+                    unless,
+                    condition_entity_inventory,
+                ),
+            ),
+        ));
+    vec![biome, loaded, function, stopwatch, items, slots]
+}
+
+fn condition_biome(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
+    let Some(world) = &ctx.source().world else {
+        return passed(ctx, unless, false);
+    };
+    let pos = block_position(ctx, "pos")?;
+    let Some(actual) = world.biome_name(pos[0], pos[1], pos[2]) else {
+        return passed(ctx, unless, false);
+    };
+    let matches = match ctx.argument("biome") {
+        Some(ArgumentValue::Resource { tag: true, id }) => {
+            super::commands_server::biome_tag_members(id, 0).contains(&actual)
+        }
+        Some(ArgumentValue::Resource { tag: false, id }) => normalized(id) == actual,
+        _ => match ctx.string("biome") {
+            Some(raw) if raw.starts_with('#') => {
+                super::commands_server::biome_tag_members(raw, 0).contains(&actual)
+            }
+            Some(raw) => normalized(raw) == actual,
+            None => return Err(CommandError::failed("Missing biome")),
+        },
+    };
+    passed(ctx, unless, matches)
+}
+
+fn condition_loaded(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
+    let pos = block_position(ctx, "pos")?;
+    let loaded = ctx
+        .source()
+        .world
+        .as_ref()
+        .is_some_and(|world| world.block(pos[0], pos[1], pos[2]).is_some());
+    passed(ctx, unless, loaded)
+}
+
+/// `if function <name>`: runs the function (or tag) for the current source; the test passes
+/// when it returns a non-zero value, and a function that fails does not pass.
+fn condition_function(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
+    let name = ctx
+        .string("name")
+        .ok_or_else(|| CommandError::failed("Missing function name"))?;
+    let result = super::functions::run_command(ctx.source(), name, None);
+    match result {
+        Ok(value) => passed(ctx, unless, value != 0),
+        Err(CommandError::Failed(_)) => passed(ctx, unless, false),
+        Err(other) => Err(other),
+    }
+}
+
+/// `a..b`, `..b`, `a..` or `a` as an inclusive range of seconds.
+fn float_range(raw: &str) -> Option<(f64, f64)> {
+    let (min, max) = match raw.split_once("..") {
+        Some((min, max)) => (min, max),
+        None => (raw, raw),
+    };
+    let parse = |text: &str, default: f64| {
+        if text.is_empty() {
+            Some(default)
+        } else {
+            text.parse::<f64>().ok()
+        }
+    };
+    let (min, max) = (parse(min, f64::NEG_INFINITY)?, parse(max, f64::INFINITY)?);
+    (min <= max).then_some((min, max))
+}
+
+fn condition_stopwatch(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
+    let id = normalized(ctx.string("id").unwrap_or_default());
+    let raw = ctx.string("range").unwrap_or_default();
+    let (min, max) =
+        float_range(raw).ok_or_else(|| CommandError::failed(format!("Invalid range '{raw}'")))?;
+    let elapsed = {
+        let state = ctx.source().state.lock().unwrap();
+        let Some(start) = state.more.stopwatches.get(&id).copied() else {
+            return Err(CommandError::failed(format!(
+                "Stopwatch '{id}' does not exist"
+            )));
+        };
+        (state.game_time - start) as f64 / 20.0
+    };
+    passed(ctx, unless, (min..=max).contains(&elapsed))
+}
+
+/// An item predicate without component conditions: `*`, an item id or an `#item_tag`.
+fn item_matches(raw: &str, item: u16) -> Result<bool, CommandError> {
+    let raw = raw.trim();
+    if raw.contains('[') || raw.contains('{') {
+        return Err(CommandError::failed(
+            "Item predicates with component conditions are not supported",
+        ));
+    }
+    let name = normalized(ferrite_item::item_name(item).unwrap_or_default());
+    if raw == "*" {
+        return Ok(true);
+    }
+    if let Some(tag) = raw.strip_prefix('#') {
+        let members = super::block_tags::members_of("item", tag).ok_or_else(|| {
+            CommandError::failed(format!("Unknown item tag '{}'", normalized(tag)))
+        })?;
+        return Ok(members.contains(&name));
+    }
+    Ok(normalized(raw) == name)
+}
+
+/// `if items|slots block <pos> <slots> [<item_predicate>]` on a block container: the slots
+/// that exist (and hold a matching stack, for `items`); the test passes when there is one.
+fn condition_container(
+    ctx: &CommandContext<Source>,
+    unless: bool,
+    with_items: bool,
+) -> Result<Source, CommandError> {
+    let Some(world) = &ctx.source().world else {
+        return passed(ctx, unless, false);
+    };
+    let pos = block_position(ctx, "source")?;
+    let name = world
+        .block(pos[0], pos[1], pos[2])
+        .and_then(|state| u16::try_from(state).ok())
+        .and_then(ferrite_data::blocks::state)
+        .map(|(name, _)| normalized(name));
+    let Some(size) = name
+        .as_deref()
+        .and_then(super::block_container::inventory_slots)
+    else {
+        return passed(ctx, unless, false);
+    };
+    let slots = super::slot_ops::block_slots(ctx.string("slots").unwrap_or_default(), size)
+        .map_err(|bad| CommandError::failed(format!("Unknown slot '{bad}'")))?;
+    let contents = super::block_container::load_slots(world, pos, size);
+    let mut count = 0;
+    for slot in slots {
+        let stack = &contents[slot];
+        let counts = !with_items
+            || (!stack.is_empty()
+                && item_matches(ctx.string("item_predicate").unwrap_or("*"), stack.item)?);
+        if counts {
+            count += 1;
+        }
+    }
+    passed(ctx, unless, count > 0)
+}
+
+fn condition_entity_inventory(
+    _ctx: &CommandContext<Source>,
+    _unless: bool,
+) -> Result<Source, CommandError> {
+    Err(CommandError::failed(
+        "execute if items|slots entity is not supported: entity inventories are owned by region threads and cannot be read while a command runs",
+    ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Modifiers.
+// ---------------------------------------------------------------------------------------------
+
+fn heightmap(name: &str) -> Option<HeightmapKind> {
+    Some(match name {
+        "world_surface" => HeightmapKind::WorldSurface,
+        "ocean_floor" => HeightmapKind::OceanFloor,
+        "motion_blocking" => HeightmapKind::MotionBlocking,
+        "motion_blocking_no_leaves" => HeightmapKind::MotionBlockingNoLeaves,
+        _ => return None,
+    })
+}
+
+/// `positioned over <heightmap>`: the y of the first free block above the highest block the
+/// heightmap counts at the source's x and z.
+pub(super) fn positioned_over(execute: NodeId) -> NodeBuilder<Source> {
+    literal::<Source>("over").then(
+        argument::<Source>("heightmap", ArgumentType::opaque("minecraft:heightmap")).redirect_with(
+            execute,
+            |ctx| {
+                let raw = ctx.string("heightmap").unwrap_or_default();
+                let kind = heightmap(raw)
+                    .ok_or_else(|| CommandError::failed(format!("Unknown heightmap '{raw}'")))?;
+                let mut source = ctx.source().clone();
+                let world = source
+                    .world
+                    .as_ref()
+                    .ok_or_else(|| CommandError::failed("That position is not loaded"))?;
+                let x = source.origin[0].floor() as i32;
+                let z = source.origin[2].floor() as i32;
+                let top = world
+                    .heightmap_y(x, z, kind)
+                    .ok_or_else(|| CommandError::failed("That position is not loaded"))?;
+                source.origin[1] = f64::from(top + 1);
+                Ok(source)
+            },
+        ),
+    )
+}
+
+/// `on <relation>`: the entity (or entities) related to the executing entity. `vehicle`,
+/// `passengers` and `controller` come from the server's ride table; the other relations need
+/// data the entity snapshot does not hold and fail with a clear message.
+pub(super) fn on_branch(execute: NodeId) -> NodeBuilder<Source> {
+    let mut on = literal::<Source>("on");
+    for relation in ["controller", "passengers", "vehicle"] {
+        on = on.then(
+            literal::<Source>(relation).fork(execute, move |ctx| relation_sources(ctx, relation)),
+        );
+    }
+    // A fork swallows its errors (like vanilla), so the relations this server cannot answer are
+    // plain redirects: the failure reaches the caller instead of silently matching nothing.
+    for relation in ["attacker", "leasher", "origin", "owner", "target"] {
+        on = on.then(
+            literal::<Source>(relation).redirect_with(execute, move |ctx| {
+                relation_sources(ctx, relation).map(|_| ctx.source().clone())
+            }),
+        );
+    }
+    on
+}
+
+fn relation_sources(
+    ctx: &CommandContext<Source>,
+    relation: &str,
+) -> Result<Vec<Source>, CommandError> {
+    let source = ctx.source();
+    let Some(me) = source.uuid else {
+        return Ok(Vec::new());
+    };
+    let related = match relation {
+        "vehicle" => super::ride::vehicle_of(me).into_iter().collect::<Vec<_>>(),
+        "passengers" => super::ride::passengers_of(me),
+        "controller" => super::ride::passengers_of(me).into_iter().take(1).collect(),
+        other => {
+            return Err(CommandError::failed(format!(
+                "execute on {other} is not supported: the entity snapshot has no {other} data"
+            )));
+        }
+    };
+    let state = source.state.lock().unwrap();
+    let mut out = Vec::new();
+    for uuid in related {
+        let found = super::commands_exec::resolve_optional(
+            &state,
+            &EntityTarget::Uuid(uuid.to_string()),
+            source.uuid,
+            source.origin,
+        )?;
+        out.extend(found.iter().map(|entity| {
+            let mut next = source.clone();
+            next.uuid = Some(entity.uuid);
+            next.name = Some(entity.name.clone());
+            next
+        }));
+    }
+    Ok(out)
+}
+
+/// `summon <entity>`: spawning is scheduled onto the region that owns the chunk, so the new
+/// entity does not exist yet when the rest of the chain runs. It fails instead of running the
+/// chain as the wrong entity.
+pub(super) fn summon_branch(execute: NodeId) -> NodeBuilder<Source> {
+    literal::<Source>("summon").then(
+        argument::<Source>("entity", ArgumentType::ResourceLocation).redirect_with(
+            execute,
+            |_ctx| {
+                Err(CommandError::failed(
+                    "execute summon is not supported: the summoned entity is created asynchronously by its region and cannot be the source of the rest of the chain",
+                ))
+            },
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// store ... bossbar
+// ---------------------------------------------------------------------------------------------
+
+/// `store result|success bossbar <id> value|max`.
+pub(super) fn store_bossbar(execute: NodeId, success: bool) -> NodeBuilder<Source> {
+    let leaf = move |name: &'static str, max: bool| {
+        literal::<Source>(name)
+            .redirect_with(execute, |ctx| Ok(ctx.source().clone()))
+            .stores(move |ctx, result| {
+                let value = if success {
+                    i32::from(result != 0)
+                } else {
+                    result
+                };
+                write_bossbar(ctx, max, value)
+            })
+    };
+    literal::<Source>("bossbar").then(
+        argument::<Source>("id", ArgumentType::ResourceLocation)
+            .then(leaf("max", true))
+            .then(leaf("value", false)),
+    )
+}
+
+fn write_bossbar(ctx: &CommandContext<Source>, max: bool, value: i32) -> Result<(), CommandError> {
+    use super::commands_extras::PlayerPacket;
+    use ferrite_protocol::packets::play::{BossBar, BossBarAction};
+    let id = normalized(ctx.string("id").unwrap_or_default());
+    let (uuid, progress) = {
+        let mut state = ctx.source().state.lock().unwrap();
+        let bar = state
+            .bossbars
+            .get_mut(&id)
+            .ok_or_else(|| CommandError::failed(format!("No bossbar exists with the ID '{id}'")))?;
+        if max {
+            bar.max = value.max(1);
+        } else {
+            bar.value = value;
+        }
+        bar.progress = (bar.value as f32 / bar.max as f32).clamp(0.0, 1.0);
+        (bar.uuid, bar.progress)
+    };
+    send(
+        ctx.source(),
+        super::commands::Action::Packets {
+            targets: Vec::new(),
+            packet: PlayerPacket::BossBar(BossBar {
+                uuid,
+                action: BossBarAction::UpdateProgress(progress),
+            }),
+        },
+    )
+    .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::commands::GameState;
+    use super::*;
+    use crate::game::entity_index::CommandEntity;
+    use ferrite_command::EntityAnchor;
+    use ferrite_nbt::snbt;
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    fn source() -> Source {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        std::mem::forget(rx);
+        let state = Arc::new(Mutex::new(GameState::new(0, 0, 20)));
+        state
+            .lock()
+            .unwrap()
+            .join(Uuid::nil(), "Alice".into(), 0, 20);
+        Source {
+            permission: 2,
+            origin: [10.0, 64.0, 10.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            uuid: Some(Uuid::nil()),
+            name: Some("Alice".into()),
+            anchor: EntityAnchor::Feet,
+            dimension: crate::game::Dimension::Overworld,
+            world: None,
+            admin: None,
+            tree: None,
+            function_depth: 0,
+            state,
+            actions: tx,
+        }
+    }
+
+    fn storage(source: &Source, key: &str) -> String {
+        snbt::format(source.state.lock().unwrap().storage.get(key).unwrap())
+    }
+
+    #[test]
+    fn float_ranges_parse_like_vanilla_ranges() {
+        assert_eq!(float_range("1.5"), Some((1.5, 1.5)));
+        assert_eq!(float_range("1..2"), Some((1.0, 2.0)));
+        assert_eq!(float_range("..2"), Some((f64::NEG_INFINITY, 2.0)));
+        assert_eq!(float_range("3.."), Some((3.0, f64::INFINITY)));
+        assert_eq!(float_range("3..1"), None);
+        assert_eq!(float_range("x"), None);
+    }
+
+    #[test]
+    fn stopwatch_condition_uses_elapsed_seconds() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        let missing = tree
+            .execute("execute if stopwatch sw 0..", source.clone())
+            .unwrap_err();
+        assert!(missing.to_string().contains("does not exist"), "{missing}");
+        {
+            let mut state = source.state.lock().unwrap();
+            state.game_time = 100;
+            state.more.stopwatches.insert("minecraft:sw".into(), 20);
+        }
+        // 80 ticks = 4 seconds.
+        tree.execute(
+            "execute if stopwatch sw 3..5 run data merge storage t {in:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            tree.execute(
+                "execute if stopwatch sw 5.. run data merge storage t {bad:1}",
+                source.clone()
+            )
+            .unwrap(),
+            0
+        );
+        tree.execute(
+            "execute unless stopwatch sw 5.. run data merge storage t {un:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(storage(&source, "minecraft:t"), "{in:1,un:1}");
+    }
+
+    #[test]
+    fn loaded_biome_and_container_conditions_need_a_world() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        for command in [
+            "execute if loaded 0 64 0 run say x",
+            "execute if biome 0 64 0 minecraft:plains run say x",
+            "execute if items block 0 64 0 container.* * run say x",
+            "execute if slots block 0 64 0 container.* run say x",
+        ] {
+            assert_eq!(
+                tree.execute(command, source.clone()).unwrap(),
+                0,
+                "{command}"
+            );
+        }
+        for command in [
+            "execute unless loaded 0 64 0 run data merge storage t {a:1}",
+            "execute unless biome 0 64 0 #minecraft:is_forest run data merge storage t {b:1}",
+        ] {
+            tree.execute(command, source.clone()).unwrap();
+        }
+        assert_eq!(storage(&source, "minecraft:t"), "{a:1,b:1}");
+    }
+
+    #[test]
+    fn entity_inventory_conditions_fail_honestly() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        for command in [
+            "execute if items entity @s weapon.mainhand *",
+            "execute if slots entity @s weapon.mainhand",
+        ] {
+            let error = tree.execute(command, source.clone()).unwrap_err();
+            assert!(error.to_string().contains("not supported"), "{error}");
+        }
+    }
+
+    #[test]
+    fn function_condition_passes_on_a_nonzero_result() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        // An unknown function never passes.
+        assert_eq!(
+            tree.execute(
+                "execute if function pack:nope run data merge storage t {bad:1}",
+                source.clone()
+            )
+            .unwrap(),
+            0
+        );
+        tree.execute(
+            "execute unless function pack:nope run data merge storage t {ok:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(storage(&source, "minecraft:t"), "{ok:1}");
+    }
+
+    #[test]
+    fn on_relations_follow_rides_and_refuse_the_unknown() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        // Alice rides nothing and carries nobody: the branch forks to no sources.
+        for relation in ["vehicle", "passengers", "controller"] {
+            assert_eq!(
+                tree.execute(
+                    &format!("execute on {relation} run data merge storage t {{bad:1}}"),
+                    source.clone()
+                )
+                .unwrap(),
+                0,
+                "{relation}"
+            );
+        }
+        for relation in ["attacker", "leasher", "origin", "owner", "target"] {
+            let error = tree
+                .execute(&format!("execute on {relation} run say x"), source.clone())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("not supported"),
+                "{relation}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn summon_branch_fails_instead_of_running_as_the_wrong_entity() {
+        let tree = super::super::commands::dispatcher();
+        let error = tree
+            .execute("execute summon minecraft:pig run say x", source())
+            .unwrap_err();
+        assert!(error.to_string().contains("not supported"), "{error}");
+    }
+
+    #[test]
+    fn positioned_over_needs_a_loaded_world_and_a_known_heightmap() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        let error = tree
+            .execute(
+                "execute positioned over world_surface run say x",
+                source.clone(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("not loaded"), "{error}");
+        assert!(heightmap("motion_blocking_no_leaves").is_some());
+        assert!(heightmap("nope").is_none());
+    }
+
+    #[test]
+    fn store_into_a_bossbar_updates_value_and_max() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        source.state.lock().unwrap().bossbars.insert(
+            "minecraft:bar".into(),
+            super::super::commands::BossBarState {
+                uuid: Uuid::from_u128(7),
+                name: "bar".into(),
+                progress: 0.0,
+                value: 0,
+                max: 100,
+                color: 0,
+                overlay: 0,
+                visible: true,
+                players: Default::default(),
+            },
+        );
+        tree.execute(
+            "execute store result bossbar minecraft:bar max run data merge storage t {a:1}",
+            source.clone(),
+        )
+        .unwrap();
+        {
+            let state = source.state.lock().unwrap();
+            let bar = &state.bossbars["minecraft:bar"];
+            assert_eq!(bar.max, 1);
+        }
+        let error = tree
+            .execute(
+                "execute store result bossbar minecraft:gone value run data merge storage t {b:1}",
+                source.clone(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("No bossbar"), "{error}");
+    }
+
+    #[test]
+    fn selectors_in_execute_see_non_player_entities() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        source
+            .state
+            .lock()
+            .unwrap()
+            .entities
+            .lock()
+            .unwrap()
+            .insert(CommandEntity {
+                uuid: Uuid::from_u128(9),
+                network_id: 9,
+                kind: 0,
+                pos: [1.0, 2.0, 3.0],
+                yaw: 0.0,
+                pitch: 0.0,
+                dimension: crate::game::Dimension::Overworld,
+                tags: ["boss".to_owned()].into_iter().collect(),
+                custom_name: None,
+                health: None,
+            });
+        tree.execute(
+            "execute as @e[tag=boss] at @s run data merge storage t {seen:1}",
+            source.clone(),
+        )
+        .unwrap();
+        assert_eq!(storage(&source, "minecraft:t"), "{seen:1}");
+        assert_eq!(
+            tree.execute(
+                "execute as @e[tag=nobody] run data merge storage t {bad:1}",
+                source.clone()
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    async fn world_source() -> Source {
+        let mut source = source();
+        let world = crate::game::anvil::AnvilChunkSource::new_memory();
+        while world.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let state = |name: &str| u32::from(ferrite_data::blocks::default_state(name).unwrap());
+        for x in 0..3 {
+            world
+                .set_block(x, 200, 0, state("minecraft:stone"))
+                .unwrap();
+        }
+        world
+            .set_block(5, 200, 0, state("minecraft:oak_stairs"))
+            .unwrap();
+        source.world = Some(world);
+        source
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_conditions_use_wildcards_tags_and_the_source_for_masked() {
+        let tree = super::super::commands::dispatcher();
+        let source = world_source().await;
+        let hit = |command: &str| tree.execute(command, source.clone()).unwrap();
+        assert_eq!(hit("execute if block 0 200 0 minecraft:stone run say x"), 1);
+        assert_eq!(
+            hit("execute if block 5 200 0 minecraft:oak_stairs run say x"),
+            1
+        );
+        // Unlisted properties are wildcards, so a bare stairs id matches any facing; a listed
+        // property must agree.
+        assert_eq!(
+            hit("execute if block 5 200 0 minecraft:oak_stairs[half=top] run say x"),
+            0
+        );
+        assert_eq!(
+            hit("execute if block 5 200 0 #minecraft:stairs run say x"),
+            1
+        );
+        assert_eq!(
+            hit("execute if block 0 200 0 #minecraft:stairs run say x"),
+            0
+        );
+        assert_eq!(
+            hit("execute unless block 0 200 0 minecraft:dirt run say x"),
+            1
+        );
+        // masked: the source (0..2) is stone, compared with the same stone at 1..3 would fail
+        // at 3 (air), but air in the SOURCE is skipped.
+        assert_eq!(
+            hit("execute if blocks 0 200 0 2 200 0 0 200 0 masked run say x"),
+            1
+        );
+        // Source air (x=3,4) is skipped even though the destination holds stone.
+        assert_eq!(
+            hit("execute if blocks 3 200 0 4 200 0 0 200 0 masked run say x"),
+            1
+        );
+        assert_eq!(
+            hit("execute if blocks 3 200 0 4 200 0 0 200 0 all run say x"),
+            0
+        );
+        assert_eq!(hit("execute if loaded 0 200 0 run say x"), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn positioned_over_uses_the_heightmap() {
+        let tree = super::super::commands::dispatcher();
+        let mut source = world_source().await;
+        source.origin = [1.5, 250.0, 0.5];
+        // The stone at y=64 is the highest block, so the position is the block above it: one
+        // below that is the stone.
+        assert_eq!(
+            tree.execute(
+                "execute positioned over world_surface if block ~ ~-1 ~ minecraft:stone run say x",
+                source.clone()
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tree.execute(
+                "execute positioned over world_surface if block ~ ~ ~ minecraft:stone run say x",
+                source
+            )
+            .unwrap(),
+            0
+        );
+    }
+}

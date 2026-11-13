@@ -2513,6 +2513,119 @@ impl Packet for StopSound {
     const BOUND: Bound = Bound::Clientbound;
 }
 
+/// The style of a styled number format: the `Style` fields a `minecraft:style` argument can
+/// set, written as a nameless network NBT compound (`Style.Serializer.TRUSTED_STREAM_CODEC`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NumberStyle {
+    /// A colour name (`red`) or `#rrggbb`.
+    pub color: Option<String>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underlined: Option<bool>,
+    pub strikethrough: Option<bool>,
+    pub obfuscated: Option<bool>,
+}
+
+impl NumberStyle {
+    fn flags(&self) -> [(&'static str, Option<bool>); 5] {
+        [
+            ("bold", self.bold),
+            ("italic", self.italic),
+            ("underlined", self.underlined),
+            ("strikethrough", self.strikethrough),
+            ("obfuscated", self.obfuscated),
+        ]
+    }
+}
+
+/// `NumberFormatTypes.STREAM_CODEC`: the registry id (`blank` 0, `styled` 1, `fixed` 2, from
+/// `registries.json` `minecraft:number_format_type`) followed by the type's own data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumberFormat {
+    Blank,
+    Styled(NumberStyle),
+    Fixed(PlainText),
+}
+
+fn encode_nbt_name(name: &str, out: &mut Vec<u8>) {
+    (name.len() as u16).encode(out);
+    out.extend_from_slice(name.as_bytes());
+}
+
+impl Encode for NumberFormat {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Blank => VarInt(0).encode(out),
+            Self::Styled(style) => {
+                VarInt(1).encode(out);
+                10u8.encode(out);
+                if let Some(color) = &style.color {
+                    8u8.encode(out);
+                    encode_nbt_name("color", out);
+                    (color.len() as u16).encode(out);
+                    out.extend_from_slice(color.as_bytes());
+                }
+                for (name, value) in style.flags() {
+                    if let Some(value) = value {
+                        1u8.encode(out);
+                        encode_nbt_name(name, out);
+                        u8::from(value).encode(out);
+                    }
+                }
+                0u8.encode(out);
+            }
+            Self::Fixed(text) => {
+                VarInt(2).encode(out);
+                text.encode(out);
+            }
+        }
+    }
+}
+
+impl Decode for NumberFormat {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        match VarInt::decode(buf)?.0 {
+            0 => Ok(Self::Blank),
+            1 => {
+                if u8::decode(buf)? != 10 {
+                    return Err(DecodeError::Invalid("expected NBT compound"));
+                }
+                let mut style = NumberStyle::default();
+                loop {
+                    let tag = u8::decode(buf)?;
+                    if tag == 0 {
+                        break;
+                    }
+                    let n = u16::decode(buf)? as usize;
+                    let name = String::from_utf8_lossy(crate::codec::take(buf, n)?).into_owned();
+                    match (tag, name.as_str()) {
+                        (8, "color") => {
+                            let n = u16::decode(buf)? as usize;
+                            style.color =
+                                Some(String::from_utf8_lossy(crate::codec::take(buf, n)?).into());
+                        }
+                        (1, flag) => {
+                            let value = u8::decode(buf)? != 0;
+                            match flag {
+                                "bold" => style.bold = Some(value),
+                                "italic" => style.italic = Some(value),
+                                "underlined" => style.underlined = Some(value),
+                                "strikethrough" => style.strikethrough = Some(value),
+                                "obfuscated" => style.obfuscated = Some(value),
+                                _ => return Err(DecodeError::Invalid("unknown style flag")),
+                            }
+                        }
+                        _ => return Err(DecodeError::Invalid("unsupported style field")),
+                    }
+                }
+                Ok(Self::Styled(style))
+            }
+            2 => Ok(Self::Fixed(PlainText::decode(buf)?)),
+            _ => Err(DecodeError::Invalid("unknown number format type")),
+        }
+    }
+}
+
 /// `minecraft:set_objective`: add (0), remove (1) or change (2). Add and change carry the
 /// display component, render type and an optional number format; Ferrite always writes the
 /// "no number format" marker.
@@ -2522,6 +2635,7 @@ pub struct SetObjective {
     pub mode: u8,
     pub display_name: Option<PlainText>,
     pub render_type: Option<VarInt>,
+    pub number_format: Option<NumberFormat>,
 }
 
 impl Encode for SetObjective {
@@ -2534,13 +2648,11 @@ impl Encode for SetObjective {
                 .unwrap_or_else(|| PlainText(String::new()))
                 .encode(out);
             self.render_type.unwrap_or(VarInt(0)).encode(out);
-            false.encode(out);
+            self.number_format.encode(out);
         }
     }
 }
 
-/// Decode refuses an objective number format. `set_objective` is clientbound only and Ferrite
-/// never writes a number format, so the flag is always false on the wire it produces.
 impl Decode for SetObjective {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let name = String::decode(buf)?;
@@ -2551,20 +2663,18 @@ impl Decode for SetObjective {
                 mode,
                 display_name: None,
                 render_type: None,
+                number_format: None,
             });
         }
         let display_name = Some(PlainText::decode(buf)?);
         let render_type = Some(VarInt::decode(buf)?);
-        if bool::decode(buf)? {
-            return Err(DecodeError::Invalid(
-                "objective number format is never written by Ferrite",
-            ));
-        }
+        let number_format = Option::<NumberFormat>::decode(buf)?;
         Ok(Self {
             name,
             mode,
             display_name,
             render_type,
+            number_format,
         })
     }
 }
@@ -2576,13 +2686,14 @@ impl Packet for SetObjective {
 }
 
 /// `minecraft:set_score`: the owner, objective and value, with optional display name and number
-/// format (never written by Ferrite).
+/// format .
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetScore {
     pub entity: String,
     pub objective: String,
     pub value: VarInt,
     pub display_name: Option<PlainText>,
+    pub number_format: Option<NumberFormat>,
 }
 
 impl Encode for SetScore {
@@ -2591,28 +2702,23 @@ impl Encode for SetScore {
         self.objective.encode(out);
         self.value.encode(out);
         self.display_name.encode(out);
-        false.encode(out);
+        self.number_format.encode(out);
     }
 }
 
-/// Decode refuses a score number format. `set_score` is clientbound only and Ferrite never
-/// writes a number format.
 impl Decode for SetScore {
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
         let entity = String::decode(buf)?;
         let objective = String::decode(buf)?;
         let value = VarInt::decode(buf)?;
         let display_name = Option::<PlainText>::decode(buf)?;
-        if bool::decode(buf)? {
-            return Err(DecodeError::Invalid(
-                "score number format is never written by Ferrite",
-            ));
-        }
+        let number_format = Option::<NumberFormat>::decode(buf)?;
         Ok(Self {
             entity,
             objective,
             value,
             display_name,
+            number_format,
         })
     }
 }
@@ -3067,19 +3173,63 @@ mod command_feedback_tests {
             mode: 0,
             display_name: Some(PlainText("Objective".into())),
             render_type: Some(VarInt(0)),
+            number_format: None,
         });
         rt(SetObjective {
             name: "objective".into(),
             mode: 1,
             display_name: None,
             render_type: None,
+            number_format: None,
         });
         rt(SetScore {
             entity: "Alice".into(),
             objective: "objective".into(),
             value: VarInt(5),
             display_name: None,
+            number_format: None,
         });
+        // Number formats: ids from registries.json (blank 0, styled 1, fixed 2).
+        for format in [
+            NumberFormat::Blank,
+            NumberFormat::Fixed(PlainText("n/a".into())),
+            NumberFormat::Styled(NumberStyle {
+                color: Some("red".into()),
+                bold: Some(true),
+                italic: Some(false),
+                ..NumberStyle::default()
+            }),
+            NumberFormat::Styled(NumberStyle::default()),
+        ] {
+            rt(SetObjective {
+                name: "o".into(),
+                mode: 0,
+                display_name: Some(PlainText("O".into())),
+                render_type: Some(VarInt(1)),
+                number_format: Some(format.clone()),
+            });
+            rt(SetScore {
+                entity: "e".into(),
+                objective: "o".into(),
+                value: VarInt(3),
+                display_name: None,
+                number_format: Some(format),
+            });
+        }
+        let mut blank = Vec::new();
+        NumberFormat::Blank.encode(&mut blank);
+        assert_eq!(blank, [0]);
+        let mut fixed = Vec::new();
+        NumberFormat::Fixed(PlainText("x".into())).encode(&mut fixed);
+        assert_eq!(fixed, [2, 8, 0, 1, b'x']);
+        let mut styled = Vec::new();
+        NumberFormat::Styled(NumberStyle {
+            bold: Some(true),
+            ..NumberStyle::default()
+        })
+        .encode(&mut styled);
+        assert_eq!(styled[..2], [1, 10]);
+        assert_eq!(styled.last(), Some(&0));
         rt(ResetScore {
             entity: "Alice".into(),
             objective: None,
@@ -3242,30 +3392,26 @@ mod refusal_tests {
     }
 
     #[test]
-    fn objective_refuses_number_format() {
+    fn objective_refuses_an_unknown_number_format() {
         let mut b = Vec::new();
         String::from("o").encode(&mut b);
         0u8.encode(&mut b);
         PlainText(String::new()).encode(&mut b);
         VarInt(0).encode(&mut b);
         true.encode(&mut b);
-        assert_eq!(
-            refusal::<SetObjective>(&b),
-            "objective number format is never written by Ferrite"
-        );
+        VarInt(9).encode(&mut b);
+        assert_eq!(refusal::<SetObjective>(&b), "unknown number format type");
     }
 
     #[test]
-    fn score_refuses_number_format() {
+    fn score_refuses_an_unknown_number_format() {
         let mut b = Vec::new();
         String::from("e").encode(&mut b);
         String::from("o").encode(&mut b);
         VarInt(1).encode(&mut b);
         Option::<PlainText>::None.encode(&mut b);
         true.encode(&mut b);
-        assert_eq!(
-            refusal::<SetScore>(&b),
-            "score number format is never written by Ferrite"
-        );
+        VarInt(9).encode(&mut b);
+        assert_eq!(refusal::<SetScore>(&b), "unknown number format type");
     }
 }

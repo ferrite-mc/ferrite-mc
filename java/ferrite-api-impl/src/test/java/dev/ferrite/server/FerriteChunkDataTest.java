@@ -54,10 +54,12 @@ class FerriteChunkDataTest {
         assertEquals(21, chunk.getHeight(HeightMap.WORLD_SURFACE, 1, 1));
     }
 
-    @Test void biomesDefaultToPlainsAndAreRangeChecked() {
+    @Test void biomesAreRefusedInsteadOfInventedAndAreRangeChecked() {
         var chunk = data();
-        assertEquals(org.bukkit.block.Biome.PLAINS, chunk.getBiome(1, 20, 1));
-        assertEquals(org.bukkit.block.Biome.PLAINS, chunk.getBiome(1, 1000, 1));
+        var refused = assertThrows(UnsupportedOperationException.class, () -> chunk.getBiome(1, 20, 1));
+        assertTrue(refused.getMessage().contains("ChunkSnapshot#getBiome"), refused.getMessage());
+        assertThrows(IndexOutOfBoundsException.class, () -> chunk.getBiome(1, 1000, 1));
+        assertThrows(IndexOutOfBoundsException.class, () -> chunk.getBiome(16, 20, 1));
     }
 
     @Test void emptySnapshotIsAllAirAndRangeChecked() {

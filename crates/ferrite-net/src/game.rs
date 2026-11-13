@@ -68,6 +68,11 @@ pub enum ServerboundPlay {
         open: bool,
         filtering: bool,
     },
+    /// Vanilla `ServerboundRecipeBookSeenRecipePacket` (id 48): the player looked at the recipe
+    /// with this display id, which ends its "new" highlight.
+    RecipeSeen {
+        display: i32,
+    },
 }
 /// `(id, name, spawn, seed)` of the opened world; the seed is the effective one, which for an
 /// existing world is the seed stored on disk rather than the requested one.
@@ -297,6 +302,9 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
             open: bool::decode(&mut b)?,
             filtering: bool::decode(&mut b)?,
         }),
+        48 => Some(ServerboundPlay::RecipeSeen {
+            display: VarInt::decode(&mut b)?.0,
+        }),
         7 => Some(ServerboundPlay::ChatCommand(
             ServerboundChatCommand::decode(&mut b)?,
         )),
@@ -377,6 +385,17 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
 #[cfg(test)]
 mod recipe_book_tests {
     use super::*;
+    #[test]
+    fn seen_recipe_decodes_the_display_id() {
+        // Display id 300 is the VarInt `ac 02`.
+        let packet = decode_play(&[48, 0xac, 0x02]).unwrap().unwrap();
+        assert!(matches!(
+            packet,
+            ServerboundPlay::RecipeSeen { display: 300 }
+        ));
+        assert!(decode_play(&[48]).is_err());
+    }
+
     #[test]
     fn change_settings_decodes() {
         let packet = decode_play(&[47, 2, 1, 0]).unwrap().unwrap();

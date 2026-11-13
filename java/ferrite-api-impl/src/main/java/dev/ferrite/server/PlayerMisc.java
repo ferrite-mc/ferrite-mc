@@ -378,7 +378,7 @@ public abstract class PlayerMisc extends PlayerStubs {
     /**
      * A tile snapshot shown to this player only (never a world change). Signs and the block entity families the host
      * models (chest, trapped chest, barrel, shulker boxes, furnace, blast furnace, smoker) are sent; any other
-     * {@code TileState} (banner, skull, ...) has no host model and is refused instead of being sent with invented NBT.
+     * {@code TileState} (beacon, ...) has no host model and is refused instead of being sent with invented NBT.
      */
     @Override public void sendBlockUpdate(org.bukkit.Location loc, org.bukkit.block.TileState tileState) {
         Objects.requireNonNull(loc, "loc");
@@ -392,6 +392,30 @@ public abstract class PlayerMisc extends PlayerStubs {
             return;
         }
         var type = tileState.getType();
+        if (tileState instanceof org.bukkit.block.Banner banner) {
+            var entries = new java.util.ArrayList<String>();
+            for (var layer : banner.getPatterns())
+                entries.add("pattern," + layer.getPattern().getKey() + "," + layer.getColor().name().toLowerCase(java.util.Locale.ROOT));
+            HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, "minecraft:banner", entries);
+            return;
+        }
+        if (tileState instanceof org.bukkit.block.Skull skull) {
+            // SkullBlockEntity saves `profile`, `note_block_sound` and `custom_name`; only the profile's name and
+            // uuid are modelled. Textures (profile properties) and a note block sound are refused, not dropped.
+            if (skull.getNoteBlockSound() != null)
+                throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") cannot carry a note block sound; the host snapshot encodes the profile name and uuid only");
+            var entries = new java.util.ArrayList<String>();
+            var profile = skull.getPlayerProfile();
+            if (profile != null) {
+                if (!profile.getProperties().isEmpty())
+                    throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") cannot carry profile properties (textures); the host snapshot encodes the profile name and uuid only");
+                var name = profile.getName();
+                var id = profile.getUniqueId();
+                entries.add("profile," + (name == null ? "" : name) + "," + (id == null ? "" : id));
+            }
+            HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, "minecraft:skull", entries);
+            return;
+        }
         String entity = switch (type) {
             case CHEST -> "minecraft:chest";
             case TRAPPED_CHEST -> "minecraft:trapped_chest";
@@ -402,7 +426,7 @@ public abstract class PlayerMisc extends PlayerStubs {
             default -> type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
         };
         if (entity == null || !(tileState instanceof org.bukkit.block.Container container))
-            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, chests, barrels, shulker boxes and furnaces as tile entities, and has no banner, skull or other block entity model to encode");
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, banners, skulls, chests, barrels, shulker boxes and furnaces as tile entities, and has no other block entity model to encode");
         var snapshot = container.getSnapshotInventory();
         var entries = new java.util.ArrayList<String>();
         for (int slot = 0; slot < snapshot.getSize(); slot++) {

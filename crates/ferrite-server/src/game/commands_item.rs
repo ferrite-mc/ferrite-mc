@@ -77,7 +77,7 @@ fn run_with(
 
 /// The stack `with <item>[components] <count>` describes: the count is checked against the item's
 /// stack size and each component is parsed exactly as `/give` parses it.
-fn stack_for(raw: &str, count: i32) -> Result<ItemStack, CommandError> {
+pub(super) fn stack_for(raw: &str, count: i32) -> Result<ItemStack, CommandError> {
     let item = parse_item(raw)?;
     let components = parse_item_components(raw)?;
     let max = ferrite_item::item_defaults(item).map_or(64, |defaults| defaults.max_stack_size);
@@ -394,11 +394,22 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
             name: label,
             blocks: std::sync::Arc::new(blocks),
             entities: std::sync::Arc::new(entities),
+            spawns: std::sync::Arc::default(),
+            // Features, structures and jigsaws are placed by their own generators, which do not
+            // run the template's edge fix-up.
+            strict: true,
         }),
     )
 }
 
 /// `/place template <id> <pos> [rotation] [mirror] [integrity] [seed] [strict]`.
+///
+/// `strict` sets `StructurePlaceSettings.knownShape`, which in `StructureTemplate.placeInWorld`
+/// only gates the neighbour shape updates at the template's edge (`updateShapeAtEdge`) and per
+/// placed block (`Block.updateFromNeighbourShapes`). A strict placement writes the blocks as
+/// stored. A non-strict one runs [`commands_world::fix_template_edges`], which reproduces the
+/// support rules (a block that cannot survive becomes air) but not the connection rules (fence,
+/// wall and pane connections, stairs shapes), because this server has none.
 fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let id = ctx.string("template").unwrap_or_default().to_owned();
     let Some(template) = Template::load(&id) else {
@@ -439,6 +450,9 @@ fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             name: id,
             blocks: std::sync::Arc::new(blocks),
             entities: std::sync::Arc::new(entities),
+            spawns: std::sync::Arc::new(template.place_entities(rotation, mirror)),
+            // The last word of the command, `strict`, is a literal that follows the seed.
+            strict: ctx.input().split_whitespace().last() == Some("strict"),
         }),
     )
 }

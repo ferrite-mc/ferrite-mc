@@ -5,7 +5,7 @@
 //! jar. Feedback strings come from the translations extracted from that jar
 //! (`reports/lang_en_us.json`), so no Mojang text is kept here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
 use ferrite_command::{
@@ -22,12 +22,25 @@ use super::commands_extras::PlayerPacket;
 /// State owned by these commands, kept inside [`super::commands::GameState`].
 #[derive(Debug, Clone, Default)]
 pub struct MoreState {
+    /// Ids of the test instances that failed in the last `/test run`, for `/test runfailed`.
+    pub failed_tests: Vec<String>,
     /// `/random` sequences: id -> generator state.
     pub sequences: BTreeMap<String, u64>,
     /// `/setidletimeout`: minutes before an idle player is kicked; 0 disables it.
     pub idle_timeout_minutes: i32,
     /// `/stopwatch`: id -> game time it was (re)started at.
     pub stopwatches: BTreeMap<String, i64>,
+    /// `/scoreboard objectives modify <o> displayautoupdate`: objectives with it enabled.
+    pub objective_auto_update: std::collections::BTreeSet<String>,
+    /// `/scoreboard objectives modify <o> numberformat` as `blank`, `fixed:<text>` or
+    /// `styled:<style>`. Kept as state only: the `SetObjective` packet this protocol crate
+    /// writes has no number-format field.
+    pub objective_number_format: BTreeMap<String, ferrite_protocol::packets::play::NumberFormat>,
+    /// `/scoreboard players display name`: `(holder, objective)` -> component text.
+    pub score_display_name: BTreeMap<(String, String), String>,
+    /// `/scoreboard players display numberformat`, in the same encoding as above.
+    pub score_number_format:
+        BTreeMap<(String, String), ferrite_protocol::packets::play::NumberFormat>,
     /// Game time of each player's last action, for `/setidletimeout`.
     pub last_active: BTreeMap<uuid::Uuid, i64>,
     /// `/tick`: shared with the game loop and the region ticks.
@@ -70,6 +83,7 @@ pub struct TickControl {
     steps: std::sync::atomic::AtomicU32,
     stepping: std::sync::atomic::AtomicBool,
     mspt_micro: std::sync::atomic::AtomicU64,
+    samples: std::sync::Mutex<VecDeque<u32>>,
     sprint: std::sync::Mutex<Sprint>,
 }
 
@@ -93,6 +107,7 @@ impl Default for TickControl {
             steps: AtomicU32::new(0),
             stepping: AtomicBool::new(false),
             mspt_micro: AtomicU64::new(0),
+            samples: std::sync::Mutex::new(VecDeque::with_capacity(100)),
             sprint: std::sync::Mutex::new(Sprint::default()),
         }
     }
@@ -228,10 +243,37 @@ impl TickControl {
             old * 0.95 + ms * 0.05
         };
         self.mspt_micro.store((next * 1000.0) as u64, Self::RELAXED);
+        let micros = (ms * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32;
+        let mut samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() == 100 {
+            samples.pop_front();
+        }
+        samples.push_back(micros);
     }
 
     pub fn mspt(&self) -> f64 {
         self.mspt_micro.load(Self::RELAXED) as f64 / 1000.0
+    }
+
+    /// `(p50, p95, p99)` of the last 100 region tick durations in milliseconds.
+    pub fn percentiles(&self) -> Option<(f64, f64, f64)> {
+        let mut samples: Vec<u32> = self
+            .samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_unstable();
+        let percentile = |fraction: f64| {
+            let rank = (fraction * samples.len() as f64).ceil() as usize;
+            let index = rank.saturating_sub(1).min(samples.len() - 1);
+            f64::from(samples[index]) / 1000.0
+        };
+        Some((percentile(0.50), percentile(0.95), percentile(0.99)))
     }
 }
 
@@ -954,6 +996,17 @@ fn tick_tree() -> NodeBuilder<Source> {
                     format!("{:.1}", 1000.0 / f64::from(target)),
                 ],
             )?;
+            if let Some((p50, p95, p99)) = control.percentiles() {
+                feedback(
+                    ctx,
+                    "commands.tick.query.percentiles",
+                    vec![
+                        format!("{p50:.1}"),
+                        format!("{p95:.1}"),
+                        format!("{p99:.1}"),
+                    ],
+                )?;
+            }
             Ok(target as i32)
         }))
         .then(
@@ -1565,7 +1618,13 @@ fn swing_tree() -> NodeBuilder<Source> {
         send(
             ctx.source(),
             Action::Swing {
-                targets: entity(ctx, "targets")?,
+                // Bare `/swing` (executable in vanilla) swings the executing entity.
+                targets: entity(ctx, "targets").unwrap_or(
+                    ferrite_command::arguments::EntityTarget::Selector {
+                        kind: ferrite_command::arguments::SelectorKind::Myself,
+                        options: Vec::new(),
+                    },
+                ),
                 off_hand,
             },
         )
@@ -1588,6 +1647,7 @@ fn swing_tree() -> NodeBuilder<Source> {
     literal::<Source>("swing")
         .requires(gamemasters())
         .restricted(true)
+        .executes(|ctx| swing(ctx, false))
         .then(
             argument::<Source>("targets", ArgumentType::entity())
                 .executes(|ctx| swing(ctx, false))
@@ -1921,6 +1981,20 @@ fn damage_tree() -> NodeBuilder<Source> {
             Some(_) => Some(entity(ctx, "entity")?),
             None => None,
         };
+        let cause = match ctx.argument("cause") {
+            Some(_) => Some(entity(ctx, "cause")?),
+            None => None,
+        };
+        // An id that is not one of the data-driven damage types is rejected like any registry
+        // argument (only checkable when the vanilla data is on this machine).
+        if super::damage_source::data_available()
+            && super::damage_source::props(&damage_type).is_none()
+        {
+            return Err(failure(
+                "argument.resource.not_found",
+                vec![damage_type, "minecraft:damage_type".into()],
+            ));
+        }
         send(
             ctx.source(),
             Action::Damage {
@@ -1929,9 +2003,11 @@ fn damage_tree() -> NodeBuilder<Source> {
                 damage_type,
                 at,
                 by,
+                cause,
             },
         )?;
-        Ok(amount as i32)
+        // Vanilla's `/damage` result is 1 on success (it fails with "invulnerable" otherwise).
+        Ok(1)
     }
     let damage_type = || {
         argument::<Source>(
@@ -2077,8 +2153,11 @@ fn perf_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("stop").executes(|ctx| profiling_run(ctx, false, true)))
 }
 
-/// Ferrite is not a JVM process, so there is no flight recorder to start; the failure messages
-/// are vanilla's.
+/// `/jfr start|stop`. Vanilla drives the JVM Flight Recorder; Ferrite is not a JVM process, so
+/// no recording can exist. Both subcommands fail with vanilla's failure messages and never
+/// report success: `start` cannot start anything, and `stop` has nothing to dump. Whether
+/// vanilla separates "already running" from "not running" is unverified (no lang key says
+/// so), so no such state is modelled.
 fn jfr_tree() -> NodeBuilder<Source> {
     literal::<Source>("jfr")
         .requires(owners())
@@ -2090,7 +2169,7 @@ fn jfr_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("stop").executes(|_| {
             Err(failure(
                 "commands.jfr.dump.failed",
-                vec!["Ferrite does not run on the JVM".to_owned()],
+                vec!["Ferrite does not run on the JVM; there is no recording to dump".to_owned()],
             ))
         }))
 }
@@ -2144,9 +2223,9 @@ fn test_tree() -> NodeBuilder<Source> {
     let with_run = |node: NodeBuilder<Source>| node.executes(no_tests);
     root = root
         .then(with_optional_args(
-            with_run(literal::<Source>("clearall")),
+            literal::<Source>("clearall").executes(test_clearall),
             vec![int("radius")],
-            no_tests,
+            test_clearall,
         ))
         .then(
             literal::<Source>("create").then(
@@ -2164,7 +2243,7 @@ fn test_tree() -> NodeBuilder<Source> {
                     ),
             ),
         )
-        .then(literal::<Source>("locate").then(selector().executes(no_tests)))
+        .then(literal::<Source>("locate").then(selector().executes(test_locate)))
         .then(with_optional_args(
             with_run(literal::<Source>("pos")),
             vec![("var", ArgumentType::string())],
@@ -2185,36 +2264,336 @@ fn test_tree() -> NodeBuilder<Source> {
             vec![int("numberOfTimes"), flag("untilFailed")],
             no_tests,
         ))
-        .then(literal::<Source>("verify").then(selector().executes(no_tests)))
+        .then(literal::<Source>("verify").then(selector().executes(test_run)))
         .then(literal::<Source>("runmultiple").then(with_optional_args(
-            selector().executes(no_tests),
+            selector().executes(test_run),
             vec![int("amount")],
-            no_tests,
+            test_run,
         )))
         .then(literal::<Source>("run").then(with_optional_args(
-            selector().executes(no_tests),
+            selector().executes(test_run),
             vec![
                 int("numberOfTimes"),
                 flag("untilFailed"),
                 int("rotationSteps"),
                 int("testsPerRow"),
             ],
-            no_tests,
+            test_run,
         )));
-    root.then(with_optional_args(
-        with_run(literal::<Source>("runfailed")),
+    let repeat = || {
         vec![
             int("numberOfTimes"),
             flag("untilFailed"),
             int("rotationSteps"),
             int("testsPerRow"),
-        ],
-        no_tests,
-    ))
+        ]
+    };
+    root.then(
+        with_optional_args(
+            literal::<Source>("runfailed").executes(test_runfailed),
+            repeat(),
+            test_runfailed,
+        )
+        .then(with_optional_args(
+            argument::<Source>("onlyRequiredTests", ArgumentType::Bool).executes(test_runfailed),
+            repeat(),
+            test_runfailed,
+        )),
+    )
+}
+
+/// The vanilla test instances (`data/minecraft/test_instance`, extracted locally) by id.
+fn vanilla_test_instances() -> std::collections::BTreeMap<String, serde_json::Value> {
+    let relative = "vanilla/26.3/generated/data/minecraft/test_instance";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut found = std::collections::BTreeMap::new();
+    for dir in [std::path::PathBuf::from(relative), root.join(relative)] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(value) = serde_json::from_str(&text)
+            {
+                found.insert(format!("minecraft:{stem}"), value);
+            }
+        }
+        if !found.is_empty() {
+            break;
+        }
+    }
+    found
+}
+
+/// Vanilla instances overlaid with the datapack ones (a datapack wins on the same id).
+fn test_instances(source: &Source) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut all = vanilla_test_instances();
+    let state = source.state.lock().unwrap();
+    all.extend(
+        state
+            .functions
+            .test_instances()
+            .iter()
+            .map(|(id, value)| (id.clone(), value.clone())),
+    );
+    all
+}
+
+#[cfg(test)]
+fn test_instance_ids() -> Vec<String> {
+    vanilla_test_instances().into_keys().collect()
+}
+
+/// `*` matches any run of characters; a selector without a namespace means `minecraft:`.
+fn selector_matches(pattern: &str, id: &str) -> bool {
+    let pattern = if pattern.contains(':') {
+        pattern.to_owned()
+    } else {
+        format!("minecraft:{pattern}")
+    };
+    fn glob(pattern: &[u8], text: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some((b'*', rest)) => (0..=text.len()).any(|skip| glob(rest, &text[skip..])),
+            Some((c, rest)) => text.first() == Some(c) && glob(rest, &text[1..]),
+        }
+    }
+    glob(pattern.as_bytes(), id.as_bytes())
+}
+
+/// The test instances a `<tests>` selector names. An exact id that does not exist is
+/// `commands.test.error.non_existant_test`; a wildcard that matches nothing is
+/// `commands.test.error.no_test_instances` (the choice between the two is inferred from the
+/// lang keys, not verified against vanilla's source).
+fn selected_tests(ctx: &CommandContext<Source>) -> Result<Vec<String>, CommandError> {
+    let pattern = ctx.string("tests").unwrap_or_default().to_owned();
+    let matches: Vec<String> = test_instances(ctx.source())
+        .into_keys()
+        .filter(|id| selector_matches(&pattern, id))
+        .collect();
+    if matches.is_empty() {
+        return Err(if pattern.contains('*') {
+            failure("commands.test.error.no_test_instances", vec![])
+        } else {
+            failure("commands.test.error.non_existant_test", vec![pattern])
+        });
+    }
+    Ok(matches)
+}
+
+/// `/test locate`: scans the loaded world for test structures. This server never places test
+/// structures, so the scan finds none.
+fn test_locate(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    selected_tests(ctx)?;
+    super::commands::send(
+        ctx.source(),
+        Action::Feedback(Feedback::new("commands.test.locate.started", vec![])),
+    )?;
+    super::commands::send(
+        ctx.source(),
+        Action::Feedback(Feedback::new("commands.test.locate.done", vec!["0".into()])),
+    )?;
+    Ok(0)
+}
+
+/// How one test instance ended.
+enum TestOutcome {
+    Passed,
+    Failed(String),
+}
+
+/// Runs one instance without placing a structure. Vanilla's `minecraft:function` instance
+/// (`FunctionGameTestInstance.run`) looks its `function` up in the `test_function` registry, whose
+/// only entry in 26.3 is `minecraft:always_pass` (`BuiltinTestFunctions`), which succeeds at
+/// once. Any other function id fails like vanilla's missing-registry-entry exception, and
+/// `minecraft:block_based` instances need the structure, test-block and redstone framework, so
+/// they fail with a message saying so instead of reporting a result.
+fn run_test_instance(instance: &serde_json::Value) -> TestOutcome {
+    let max_ticks = instance["max_ticks"].as_i64().unwrap_or(0);
+    let setup_ticks = instance["setup_ticks"].as_i64().unwrap_or(0);
+    match instance["type"].as_str() {
+        Some("minecraft:function") => {
+            let function = instance["function"].as_str().unwrap_or("");
+            if function == "minecraft:always_pass" {
+                if setup_ticks > max_ticks && max_ticks > 0 {
+                    return TestOutcome::Failed(
+                        Feedback::new("test.error.timeout.no_result", vec![max_ticks.to_string()])
+                            .text,
+                    );
+                }
+                TestOutcome::Passed
+            } else {
+                TestOutcome::Failed(format!("Missing test function {function}"))
+            }
+        }
+        other => TestOutcome::Failed(format!(
+            "Test instance type {} is not supported: it needs the structure, test-block and redstone framework",
+            other.unwrap_or("<missing>")
+        )),
+    }
+}
+
+/// Runs `tests` `times` times (stopping at the first failure when `until_failed`), reports the
+/// vanilla summary lines and remembers the failures for `/test runfailed`. Nothing is placed in
+/// the world, so `rotationSteps` and `testsPerRow` have nothing to lay out.
+fn run_tests(
+    ctx: &CommandContext<Source>,
+    tests: Vec<String>,
+    times: i32,
+    until_failed: bool,
+) -> Result<i32, CommandError> {
+    let instances = test_instances(ctx.source());
+    let total = i32::try_from(tests.len())
+        .unwrap_or(i32::MAX)
+        .saturating_mul(times.max(1));
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback::new(
+            "commands.test.run.running",
+            vec![total.to_string()],
+        )),
+    )?;
+    let (mut run, mut required_failed, mut optional_failed) = (0, 0, 0);
+    let mut failed_ids = Vec::new();
+    'rounds: for _ in 0..times.max(1) {
+        for id in &tests {
+            let Some(instance) = instances.get(id) else {
+                continue;
+            };
+            run += 1;
+            if let TestOutcome::Failed(reason) = run_test_instance(instance) {
+                tracing::info!(test = %id, %reason, "test instance failed");
+                if instance["required"].as_bool().unwrap_or(true) {
+                    required_failed += 1;
+                } else {
+                    optional_failed += 1;
+                }
+                if !failed_ids.contains(id) {
+                    failed_ids.push(id.clone());
+                }
+                if until_failed {
+                    break 'rounds;
+                }
+            }
+        }
+    }
+    ctx.source().state.lock().unwrap().more.failed_tests = failed_ids;
+    let summary = |key: &'static str, args: Vec<String>| {
+        send(ctx.source(), Action::Feedback(Feedback::new(key, args)))
+    };
+    summary("commands.test.summary", vec![run.to_string()])?;
+    if required_failed == 0 {
+        summary("commands.test.summary.all_required_passed", vec![])?;
+    } else {
+        summary(
+            "commands.test.summary.failed",
+            vec![required_failed.to_string()],
+        )?;
+    }
+    if optional_failed > 0 {
+        summary(
+            "commands.test.summary.optional_failed",
+            vec![optional_failed.to_string()],
+        )?;
+    }
+    Ok(run)
+}
+
+fn repeat_options(ctx: &CommandContext<Source>) -> (i32, bool) {
+    let until_failed = matches!(
+        ctx.argument("untilFailed"),
+        Some(ferrite_command::ArgumentValue::Bool(true))
+    );
+    (
+        ctx.integer("numberOfTimes").unwrap_or(1).max(1),
+        until_failed,
+    )
+}
+
+/// `/test run|runmultiple|verify <tests>`.
+fn test_run(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let tests = selected_tests(ctx)?;
+    let (times, until_failed) = repeat_options(ctx);
+    run_tests(ctx, tests, times, until_failed)
+}
+
+/// `/test runfailed [numberOfTimes] [untilFailed] ...`: the failures of the last run.
+fn test_runfailed(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let failed = ctx.source().state.lock().unwrap().more.failed_tests.clone();
+    if failed.is_empty() {
+        return Err(failure("commands.test.no_tests", vec![]));
+    }
+    let only_required = matches!(
+        ctx.argument("onlyRequiredTests"),
+        Some(ferrite_command::ArgumentValue::Bool(true))
+    );
+    let instances = test_instances(ctx.source());
+    let tests: Vec<String> = failed
+        .into_iter()
+        .filter(|id| {
+            !only_required
+                || instances
+                    .get(id)
+                    .is_none_or(|i| i["required"].as_bool().unwrap_or(true))
+        })
+        .collect();
+    if tests.is_empty() {
+        return Err(failure("commands.test.no_tests", vec![]));
+    }
+    let (times, until_failed) = repeat_options(ctx);
+    run_tests(ctx, tests, times, until_failed)
+}
+
+/// `/test clearall`: this server never places test structures, so there is nothing to clear.
+fn test_clearall(_: &CommandContext<Source>) -> Result<i32, CommandError> {
+    Err(failure("commands.test.clear.error.no_tests", vec![]))
 }
 
 fn profile_text(name: &str, id: uuid::Uuid) -> String {
     format!("{{id:\"{id}\",name:\"{name}\"}}")
+}
+
+/// The cached or online name for a game profile.
+fn profile_name(source: &Source, id: uuid::Uuid) -> Option<String> {
+    let online = source
+        .state
+        .lock()
+        .unwrap()
+        .players
+        .iter()
+        .find(|player| player.uuid == id)
+        .map(|player| player.name.clone());
+    online.or_else(|| {
+        source
+            .admin
+            .as_ref()
+            .and_then(|admin| admin.usercache.name_for(id))
+    })
+}
+
+/// The cached or online profile for a name; the cached spelling wins for offline players.
+fn profile_by_name(source: &Source, name: &str) -> Option<(String, uuid::Uuid)> {
+    let players = source.state.lock().unwrap();
+    if let Some(player) = players
+        .players
+        .iter()
+        .find(|player| player.name.eq_ignore_ascii_case(name))
+    {
+        return Some((player.name.clone(), player.uuid));
+    }
+    drop(players);
+    let admin = source.admin.as_ref()?;
+    let id = admin.usercache.uuid_for(name)?;
+    Some((
+        admin
+            .usercache
+            .name_for(id)
+            .unwrap_or_else(|| name.to_owned()),
+        id,
+    ))
 }
 
 fn fetchprofile_tree() -> NodeBuilder<Source> {
@@ -2227,16 +2606,7 @@ fn fetchprofile_tree() -> NodeBuilder<Source> {
                 let Some(id) = ids.first().copied() else {
                     return Err(failure("argument.entity.notfound.player", vec![]));
                 };
-                let name = ctx
-                    .source()
-                    .state
-                    .lock()
-                    .unwrap()
-                    .players
-                    .iter()
-                    .find(|player| player.uuid == id)
-                    .map(|player| player.name.clone())
-                    .unwrap_or_default();
+                let name = profile_name(ctx.source(), id).unwrap_or_default();
                 feedback(
                     ctx,
                     "commands.fetchprofile.entity.success",
@@ -2248,16 +2618,10 @@ fn fetchprofile_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("id").then(
             argument::<Source>("id", ArgumentType::opaque("minecraft:uuid")).executes(|ctx| {
                 let raw = ctx.string("id").unwrap_or_default().to_owned();
-                let found = raw.parse::<uuid::Uuid>().ok().and_then(|id| {
-                    ctx.source()
-                        .state
-                        .lock()
-                        .unwrap()
-                        .players
-                        .iter()
-                        .find(|player| player.uuid == id)
-                        .map(|player| (player.name.clone(), id))
-                });
+                let found = raw
+                    .parse::<uuid::Uuid>()
+                    .ok()
+                    .and_then(|id| profile_name(ctx.source(), id).map(|name| (name, id)));
                 match found {
                     Some((name, id)) => {
                         feedback(
@@ -2274,15 +2638,7 @@ fn fetchprofile_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("name").then(
             argument::<Source>("name", ArgumentType::string()).executes(|ctx| {
                 let name = ctx.string("name").unwrap_or_default().to_owned();
-                let found = ctx
-                    .source()
-                    .state
-                    .lock()
-                    .unwrap()
-                    .players
-                    .iter()
-                    .find(|player| player.name.eq_ignore_ascii_case(&name))
-                    .map(|player| (player.name.clone(), player.uuid));
+                let found = profile_by_name(ctx.source(), &name);
                 match found {
                     Some((exact, id)) => {
                         feedback(
@@ -2456,6 +2812,16 @@ mod tests {
         state: Arc<Mutex<GameState>>,
         uuid: Option<Uuid>,
     ) -> (Result<i32, CommandError>, Vec<Action>) {
+        run_with_admin(input, permission, state, uuid, None)
+    }
+
+    fn run_with_admin(
+        input: &str,
+        permission: u8,
+        state: Arc<Mutex<GameState>>,
+        uuid: Option<Uuid>,
+        admin: Option<Arc<ferrite_admin::AdminLists>>,
+    ) -> (Result<i32, CommandError>, Vec<Action>) {
         let tree = Arc::new(dispatcher());
         let (actions, mut received) = tokio::sync::mpsc::unbounded_channel();
         let source = Source {
@@ -2470,6 +2836,7 @@ mod tests {
             anchor: ferrite_command::EntityAnchor::Feet,
             dimension: crate::game::Dimension::Overworld,
             world: None,
+            admin,
             tree: Some(tree.clone()),
             function_depth: 0,
         };
@@ -2482,6 +2849,35 @@ mod tests {
 
     fn fresh() -> Arc<Mutex<GameState>> {
         Arc::new(Mutex::new(GameState::default()))
+    }
+
+    #[test]
+    fn fetchprofile_reads_the_offline_profile_cache() {
+        let dir = std::env::temp_dir().join(format!("ferrite-fetchprofile-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let admin = Arc::new(ferrite_admin::AdminLists::load(&dir).unwrap());
+        let id = Uuid::from_u128(77);
+        admin.usercache.cache("Offline", id);
+        let state = fresh();
+        let (result, actions) = run_with_admin(
+            "fetchprofile name Offline",
+            2,
+            state.clone(),
+            None,
+            Some(admin.clone()),
+        );
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(keys(&actions), ["commands.fetchprofile.name.success"]);
+        let (result, actions) = run_with_admin(
+            &format!("fetchprofile id {id}"),
+            2,
+            state,
+            None,
+            Some(admin),
+        );
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(keys(&actions), ["commands.fetchprofile.id.success"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn keys(actions: &[Action]) -> Vec<&'static str> {
@@ -2794,6 +3190,33 @@ mod tests {
             &actions[0],
             Action::Damage { damage_type, .. } if damage_type == "minecraft:fall" || damage_type == "fall"
         ));
+        // `by` alone is both the direct and the causing entity; `from` names a different cause.
+        let (result, actions) = run("damage @s 4 arrow by @p", 2, fresh(), None);
+        assert_eq!(result.unwrap(), 1, "vanilla's /damage returns 1");
+        assert!(matches!(
+            &actions[0],
+            Action::Damage {
+                by: Some(_),
+                cause: None,
+                ..
+            }
+        ));
+        let (_, actions) = run("damage @s 4 arrow by @p from @s", 2, fresh(), None);
+        assert!(matches!(
+            &actions[0],
+            Action::Damage {
+                by: Some(_),
+                cause: Some(_),
+                ..
+            }
+        ));
+        if super::super::damage_source::data_available() {
+            let error = run("damage @s 4 minecraft:not_a_type", 2, fresh(), None)
+                .0
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not_a_type"), "{error}");
+        }
         assert!(run("damage @s -1", 2, fresh(), None).0.is_err());
         assert!(run("damage @s 4", 1, fresh(), None).0.is_err());
     }
@@ -2841,6 +3264,149 @@ mod tests {
         );
         run("perf stop", 4, state.clone(), None).0.unwrap();
         assert!(run("jfr start", 4, state, None).0.is_err());
+    }
+
+    #[test]
+    fn test_selectors_resolve_against_the_vanilla_instances() {
+        if test_instance_ids().is_empty() {
+            return; // no extracted vanilla data
+        }
+        assert_eq!(test_instance_ids(), vec!["minecraft:always_pass"]);
+        assert!(selector_matches("always_pass", "minecraft:always_pass"));
+        assert!(selector_matches("minecraft:*", "minecraft:always_pass"));
+        assert!(selector_matches("*pass", "minecraft:always_pass"));
+        assert!(!selector_matches("other:*", "minecraft:always_pass"));
+        let error = run("test run nope", 2, fresh(), None).0.unwrap_err();
+        assert_eq!(error.to_string(), "Test nope could not be found");
+        let error = run("test run other:*", 2, fresh(), None).0.unwrap_err();
+        assert_eq!(error.to_string(), "Found no test instances");
+        // `always_pass` is the one built-in test function (BuiltinTestFunctions), so it passes.
+        let (result, actions) = run("test run minecraft:always_pass", 2, fresh(), None);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(
+            feedback_texts(&actions),
+            vec![
+                "Running 1 test(s)...",
+                "Game Test complete! 1 test(s) were run",
+                "All required tests passed :)"
+            ]
+        );
+        assert_eq!(
+            run("test clearall", 2, fresh(), None)
+                .0
+                .unwrap_err()
+                .to_string(),
+            "Could not find any tests to clear"
+        );
+        assert_eq!(
+            run("test runfailed", 2, fresh(), None)
+                .0
+                .unwrap_err()
+                .to_string(),
+            "No tests to run"
+        );
+        let (result, actions) = run("test locate minecraft:*", 2, fresh(), None);
+        assert_eq!(result.unwrap(), 0);
+        let texts: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Feedback(f) => Some(f.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Started locating test structures. This might take a while...",
+                "Finished locating: found 0 structure(s)"
+            ]
+        );
+        assert!(
+            run("test runfailed true 2 false", 2, fresh(), None)
+                .0
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn jfr_never_reports_a_recording() {
+        for (input, text) in [
+            ("jfr start", "Failed to start JFR profiling"),
+            (
+                "jfr stop",
+                "Failed to dump JFR recording: Ferrite does not run on the JVM; there is no recording to dump",
+            ),
+        ] {
+            let (result, actions) = run(input, 4, fresh(), None);
+            assert_eq!(result.unwrap_err().to_string(), text);
+            assert!(actions.is_empty(), "{input}: no success feedback");
+        }
+    }
+
+    fn feedback_texts(actions: &[Action]) -> Vec<&str> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Feedback(f) => Some(f.text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn datapack_test_instances_run_and_runfailed_repeats_the_failures() {
+        let dir = std::env::temp_dir().join(format!("ferrite-tests-{}", Uuid::new_v4()));
+        let instances = dir.join("datapacks/t/data/demo/test_instance");
+        std::fs::create_dir_all(&instances).unwrap();
+        let base = |function: &str, required: bool| {
+            format!(
+                r#"{{"type":"minecraft:function","environment":"minecraft:default","function":"{function}","max_ticks":1,"required":{required},"setup_ticks":1,"structure":"minecraft:empty"}}"#
+            )
+        };
+        std::fs::write(
+            instances.join("ok.json"),
+            base("minecraft:always_pass", true),
+        )
+        .unwrap();
+        std::fs::write(instances.join("bad.json"), base("demo:missing", true)).unwrap();
+        std::fs::write(instances.join("soft.json"), base("demo:missing", false)).unwrap();
+        std::fs::write(
+            instances.join("blocks.json"),
+            r#"{"type":"minecraft:block_based","environment":"minecraft:default","max_ticks":1,"setup_ticks":0,"structure":"minecraft:empty"}"#,
+        )
+        .unwrap();
+        let state = fresh();
+        state.lock().unwrap().functions =
+            Arc::new(crate::game::functions::FunctionStore::load(Some(&dir)));
+        let (result, actions) = run("test run demo:ok", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(
+            feedback_texts(&actions).last(),
+            Some(&"All required tests passed :)")
+        );
+        let (result, actions) = run("test run demo:*", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 4);
+        assert_eq!(
+            feedback_texts(&actions),
+            vec![
+                "Running 4 test(s)...",
+                "Game Test complete! 4 test(s) were run",
+                "2 required test(s) failed :(",
+                "1 optional test(s) failed"
+            ]
+        );
+        // `runfailed` repeats the three failures; with `true` only the required two.
+        let (result, actions) = run("test runfailed", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(feedback_texts(&actions)[0], "Running 3 test(s)...");
+        let (result, _) = run("test runfailed true", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 2);
+        // `untilFailed` stops at the first failure of a repeated run.
+        let (result, _) = run("test run demo:ok 5 true", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 5);
+        let (result, _) = run("test run demo:bad 5 true", 2, state.clone(), None);
+        assert_eq!(result.unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3002,6 +3568,7 @@ mod tests {
     #[test]
     fn swing_picks_the_hand_and_validates_the_animation() {
         for (input, off) in [
+            ("swing", false),
             ("swing @s", false),
             ("swing @s mainhand", false),
             ("swing @s offhand", true),
@@ -3056,6 +3623,28 @@ mod tests {
                 "commands.tick.query.rate.running"
             ]
         );
+    }
+
+    #[test]
+    fn tick_query_reports_percentiles_once_samples_exist() {
+        let state = fresh();
+        let control = state.lock().unwrap().more.tick.clone();
+        for ms in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            control.record_mspt(ms);
+        }
+        let (_, actions) = run("tick query", 2, state, None);
+        assert_eq!(
+            keys(&actions),
+            [
+                "commands.tick.status.running",
+                "commands.tick.query.rate.running",
+                "commands.tick.query.percentiles"
+            ]
+        );
+        let Some(Action::Feedback(feedback)) = actions.last() else {
+            panic!("expected percentile feedback, got {actions:?}");
+        };
+        assert_eq!(feedback.args, ["3.0", "5.0", "5.0"]);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use super::commands::{Action, Source, send};
 use super::commands_data::{BlockData, ModifyOp, apply_player_tag, namespaced, player_tag};
 use super::nbt_path::NbtPath;
-use ferrite_command::arguments::{EntityTarget, SelectorKind};
+use ferrite_command::arguments::EntityTarget;
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, EntityAnchor,
     NodeBuilder, NodeId, argument, literal,
@@ -17,7 +17,7 @@ use ferrite_command::{
 use ferrite_nbt::Tag;
 use uuid::Uuid;
 
-/// A player resolved from an entity argument, with the state `execute` needs.
+/// An entity resolved from an entity argument, with the state `execute` needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityView {
     pub uuid: Uuid,
@@ -25,120 +25,54 @@ pub struct EntityView {
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    pub dimension: super::Dimension,
+    /// Whether this is an online player (the rest come from the region entity snapshot).
+    pub player: bool,
 }
 
-/// Resolves an entity argument against the online players (the only entities with a
-/// command-visible position today).
+/// Resolves an entity argument with the full selector engine: online players and the entities
+/// the regions published, with every selector option (`tag`, `scores`, `distance`, `team`, ...).
+/// An argument that selects nothing is an error, like vanilla's `EntityArgument.getEntities`.
 pub fn resolve(
     state: &super::commands::GameState,
     target: &EntityTarget,
     source: Option<Uuid>,
     origin: [f64; 3],
 ) -> Result<Vec<EntityView>, CommandError> {
-    use super::commands::PlayerEntry;
-    let view = |player: &PlayerEntry| EntityView {
-        uuid: player.uuid,
-        name: player.name.clone(),
-        pos: player.pos,
-        yaw: player.yaw,
-        pitch: player.pitch,
-    };
-    let mut entities: Vec<EntityView> = match target {
-        EntityTarget::Name(name) => state
-            .players
-            .iter()
-            .filter(|player| player.name.eq_ignore_ascii_case(name))
-            .map(view)
-            .collect(),
-        EntityTarget::Uuid(raw) => Uuid::parse_str(raw)
-            .ok()
-            .map(|uuid| {
-                state
-                    .players
-                    .iter()
-                    .filter(|player| player.uuid == uuid)
-                    .map(view)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        EntityTarget::Selector { kind, .. } => match kind {
-            SelectorKind::Myself => state
-                .players
-                .iter()
-                .filter(|player| Some(player.uuid) == source)
-                .map(view)
-                .collect(),
-            SelectorKind::AllPlayers | SelectorKind::AllEntities => {
-                state.players.iter().map(view).collect()
-            }
-            SelectorKind::NearestPlayer | SelectorKind::NearestEntity => state
-                .players
-                .iter()
-                .min_by(|a, b| distance(a.pos, origin).total_cmp(&distance(b.pos, origin)))
-                .map(view)
-                .into_iter()
-                .collect(),
-            SelectorKind::RandomPlayer => {
-                let mut players: Vec<&PlayerEntry> = state.players.iter().collect();
-                players.sort_by(|a, b| a.name.cmp(&b.name));
-                if players.is_empty() {
-                    Vec::new()
-                } else {
-                    let index = (Uuid::new_v4().as_u128() % players.len() as u128) as usize;
-                    vec![view(players[index])]
-                }
-            }
-        },
-    };
-    entities.sort_by(|a, b| a.name.cmp(&b.name));
-    entities.dedup_by_key(|entity| entity.uuid);
-    if let EntityTarget::Selector { options, .. } = target {
-        for option in options {
-            match option.key.as_str() {
-                "name" => {
-                    let wanted = option.value.trim_matches('"');
-                    entities.retain(|entity| entity.name == wanted);
-                }
-                "type" => {
-                    if option.value.trim_start_matches("minecraft:") != "player" {
-                        entities.clear();
-                    }
-                }
-                "limit" => {
-                    if let Ok(limit) = option.value.parse::<usize>() {
-                        entities.truncate(limit);
-                    }
-                }
-                "sort" => match option.value.as_str() {
-                    "nearest" => entities.sort_by(|a, b| {
-                        distance(a.pos, origin).total_cmp(&distance(b.pos, origin))
-                    }),
-                    "furthest" => entities.sort_by(|a, b| {
-                        distance(b.pos, origin).total_cmp(&distance(a.pos, origin))
-                    }),
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-    }
-    if entities.is_empty() {
-        let key = if matches!(target, EntityTarget::Selector { .. }) {
-            "argument.entity.notfound.entity"
-        } else {
-            "argument.entity.notfound.player"
-        };
-        return Err(CommandError::failed(super::feedback::render(key, &[])));
-    }
-    Ok(entities)
+    let selected = super::selectors::resolve_selection(state, target, source, origin)?;
+    Ok(selected
+        .into_iter()
+        .map(|entity| EntityView {
+            uuid: entity.uuid,
+            name: entity.name,
+            pos: entity.pos,
+            yaw: entity.yaw,
+            pitch: entity.pitch,
+            dimension: entity.dimension,
+            player: entity.player,
+        })
+        .collect())
 }
 
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a.iter()
-        .zip(b)
-        .map(|(a, b)| (a - b) * (a - b))
-        .sum::<f64>()
-        .sqrt()
+/// Like [`resolve`], but an argument that selects nothing gives no entities: vanilla's
+/// `EntityArgument.getOptionalEntities`, used by `as`, `at`, `positioned as`, `rotated as`,
+/// `facing entity` and `if entity`, so `execute as @e[type=zombie] run ...` quietly does nothing.
+pub fn resolve_optional(
+    state: &super::commands::GameState,
+    target: &EntityTarget,
+    source: Option<Uuid>,
+    origin: [f64; 3],
+) -> Result<Vec<EntityView>, CommandError> {
+    match resolve(state, target, source, origin) {
+        Err(CommandError::Syntax(error))
+            if error
+                .translation_key()
+                .starts_with("argument.entity.notfound") =>
+        {
+            Ok(Vec::new())
+        }
+        other => other,
+    }
 }
 
 fn resolve_in(ctx: &CommandContext<Source>, name: &str) -> Result<Vec<EntityView>, CommandError> {
@@ -149,6 +83,20 @@ fn resolve_in(ctx: &CommandContext<Source>, name: &str) -> Result<Vec<EntityView
     let source = ctx.source();
     let state = source.state.lock().unwrap();
     resolve(&state, &target, source.uuid, source.origin)
+}
+
+/// [`resolve_in`] for the forking modifiers: nothing selected means no source continues.
+fn resolve_in_optional(
+    ctx: &CommandContext<Source>,
+    name: &str,
+) -> Result<Vec<EntityView>, CommandError> {
+    let target = match ctx.argument(name) {
+        Some(ArgumentValue::Entity(target)) => target.clone(),
+        _ => return Err(CommandError::failed("Missing entity target")),
+    };
+    let source = ctx.source();
+    let state = source.state.lock().unwrap();
+    resolve_optional(&state, &target, source.uuid, source.origin)
 }
 
 fn coordinates(ctx: &CommandContext<Source>, name: &str) -> Result<[f64; 3], CommandError> {
@@ -200,6 +148,8 @@ fn with_entity(source: &Source, entity: &EntityView) -> Source {
 
 fn with_at(source: &Source, entity: &EntityView) -> Source {
     let mut next = with_entity(source, entity);
+    // `at` moves into the entity's level too, not just to its position.
+    next.dimension = entity.dimension;
     next.origin = entity.pos;
     next.yaw = entity.yaw;
     next.pitch = entity.pitch;
@@ -214,6 +164,8 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
             .restricted(true),
     );
     for branch in [
+        super::commands_exec_more::on_branch(execute),
+        super::commands_exec_more::summon_branch(execute),
         literal::<Source>("run").redirect(root),
         as_branch(execute),
         at_branch(execute),
@@ -233,6 +185,13 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
             tree.add_child(node, condition);
         }
     }
+    let positioned = tree
+        .find_node(&["execute", "positioned"])
+        .expect("positioned node");
+    tree.add_child(
+        positioned,
+        super::commands_exec_more::positioned_over(execute),
+    );
     tree.add_child(execute, literal::<Source>("store"));
     let store = tree.find_node(&["execute", "store"]).expect("store node");
     for (mode, success) in [("result", false), ("success", true)] {
@@ -249,7 +208,7 @@ pub fn register(tree: &mut CommandDispatcher<Source>) {
 fn as_branch(execute: NodeId) -> NodeBuilder<Source> {
     literal::<Source>("as").then(
         argument::<Source>("targets", ArgumentType::entities()).fork(execute, |ctx| {
-            Ok(resolve_in(ctx, "targets")?
+            Ok(resolve_in_optional(ctx, "targets")?
                 .iter()
                 .map(|entity| with_entity(ctx.source(), entity))
                 .collect())
@@ -260,7 +219,7 @@ fn as_branch(execute: NodeId) -> NodeBuilder<Source> {
 fn at_branch(execute: NodeId) -> NodeBuilder<Source> {
     literal::<Source>("at").then(
         argument::<Source>("targets", ArgumentType::entities()).fork(execute, |ctx| {
-            Ok(resolve_in(ctx, "targets")?
+            Ok(resolve_in_optional(ctx, "targets")?
                 .iter()
                 .map(|entity| with_at(ctx.source(), entity))
                 .collect())
@@ -279,12 +238,12 @@ fn positioned_branch(execute: NodeId) -> NodeBuilder<Source> {
         )
         .then(literal::<Source>("as").then(
             argument::<Source>("targets", ArgumentType::entities()).fork(execute, |ctx| {
-                let origin = ctx.source().origin;
-                Ok(resolve_in(ctx, "targets")?
+                // `positioned as` takes the whole position of the entity, y included.
+                Ok(resolve_in_optional(ctx, "targets")?
                     .into_iter()
                     .map(|entity| {
                         let mut source = with_entity(ctx.source(), &entity);
-                        source.origin = [entity.pos[0], origin[1], entity.pos[2]];
+                        source.origin = entity.pos;
                         source
                     })
                     .collect())
@@ -295,8 +254,8 @@ fn positioned_branch(execute: NodeId) -> NodeBuilder<Source> {
 fn rotated_branch(execute: NodeId) -> NodeBuilder<Source> {
     literal::<Source>("rotated")
         .then(
-            argument::<Source>("rotation", ArgumentType::Rotation).redirect_with(execute, |ctx| {
-                let rotation = match ctx.argument("rotation") {
+            argument::<Source>("rot", ArgumentType::Rotation).redirect_with(execute, |ctx| {
+                let rotation = match ctx.argument("rot") {
                     Some(ArgumentValue::Rotation(rotation)) => *rotation,
                     _ => return Err(CommandError::failed("Missing rotation")),
                 };
@@ -313,7 +272,7 @@ fn rotated_branch(execute: NodeId) -> NodeBuilder<Source> {
         )
         .then(literal::<Source>("as").then(
             argument::<Source>("targets", ArgumentType::entities()).fork(execute, |ctx| {
-                Ok(resolve_in(ctx, "targets")?
+                Ok(resolve_in_optional(ctx, "targets")?
                     .into_iter()
                     .map(|entity| {
                         let mut source = with_entity(ctx.source(), &entity);
@@ -344,18 +303,20 @@ fn facing_branch(execute: NodeId) -> NodeBuilder<Source> {
         )
         .then(literal::<Source>("entity").then(
             argument::<Source>("targets", ArgumentType::entities()).then(
-                argument::<Source>("facingAnchor", ArgumentType::EntityAnchor).redirect_with(
-                    execute,
-                    |ctx| {
-                        let anchor = ctx
-                            .argument("facingAnchor")
-                            .and_then(ArgumentValue::as_entity_anchor)
-                            .unwrap_or(EntityAnchor::Feet);
-                        let mut target = resolve_in(ctx, "targets")?[0].pos;
-                        target[1] += anchor.offset();
-                        look_at(ctx, target)
-                    },
-                ),
+                argument::<Source>("anchor", ArgumentType::EntityAnchor).fork(execute, |ctx| {
+                    let anchor = ctx
+                        .argument("anchor")
+                        .and_then(ArgumentValue::as_entity_anchor)
+                        .unwrap_or(EntityAnchor::Feet);
+                    resolve_in_optional(ctx, "targets")?
+                        .into_iter()
+                        .map(|entity| {
+                            let mut target = entity.pos;
+                            target[1] += anchor.offset();
+                            look_at(ctx, target)
+                        })
+                        .collect()
+                }),
             ),
         ))
 }
@@ -417,7 +378,7 @@ fn in_branch(execute: NodeId) -> NodeBuilder<Source> {
     )
 }
 
-fn passed(
+pub(super) fn passed(
     ctx: &CommandContext<Source>,
     unless: bool,
     result: bool,
@@ -435,7 +396,7 @@ const TEST_FAILED: &str = "Test failed";
 /// Conditions fork like vanilla's: a failed test continues with no source, so `execute if ...
 /// run <command>` quietly does nothing (a function carries on to its next line), while ending
 /// the chain at the condition reports `Test failed`.
-trait Gate {
+pub(super) trait Gate {
     fn gate(
         self,
         execute: NodeId,
@@ -471,7 +432,7 @@ impl Gate for NodeBuilder<Source> {
 fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
     let block =
         literal::<Source>("block").then(argument::<Source>("pos", ArgumentType::BlockPos).then(
-            argument::<Source>("block", ArgumentType::BlockState).gate(
+            argument::<Source>("block", ArgumentType::BlockPredicate).gate(
                 execute,
                 unless,
                 condition_block,
@@ -537,7 +498,7 @@ fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
         ),
     );
     let data_block = literal::<Source>("data").then(literal::<Source>("block").then(
-        argument::<Source>("pos", ArgumentType::BlockPos).then(
+        argument::<Source>("source", ArgumentType::BlockPos).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")).gate(
                 execute,
                 unless,
@@ -546,7 +507,7 @@ fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
         ),
     ));
     let data_entity = literal::<Source>("data").then(literal::<Source>("entity").then(
-        argument::<Source>("target", ArgumentType::entities()).then(
+        argument::<Source>("source", ArgumentType::entities()).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")).gate(
                 execute,
                 unless,
@@ -570,7 +531,7 @@ fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
             condition_dimension,
         ),
     );
-    vec![
+    let mut all = vec![
         block,
         blocks,
         entity,
@@ -580,7 +541,9 @@ fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
         data_block,
         data_entity,
         data_storage,
-    ]
+    ];
+    all.extend(super::commands_exec_more::conditions(execute, unless));
+    all
 }
 
 fn condition_block(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
@@ -588,11 +551,23 @@ fn condition_block(ctx: &CommandContext<Source>, unless: bool) -> Result<Source,
         return passed(ctx, unless, false);
     };
     let pos = block_pos(ctx, "pos")?;
-    let wanted = match ctx.argument("block") {
-        Some(ArgumentValue::BlockState(value)) => super::commands_world::resolve_block(value)?,
-        _ => return Err(CommandError::failed("Missing block")),
+    let Some(ArgumentValue::BlockState(value)) = ctx.argument("block") else {
+        return Err(CommandError::failed("Missing block"));
     };
-    let matches = world.block(pos[0], pos[1], pos[2]) == Some(u32::from(wanted));
+    let filter = super::commands_world::resolve_filter(value)?;
+    let mut matches = world
+        .block(pos[0], pos[1], pos[2])
+        .is_some_and(|state| filter.matches(state));
+    if matches && let Some(text) = &value.nbt {
+        let expected = ferrite_nbt::snbt::parse(text)
+            .map_err(|error| CommandError::failed(error.to_string()))?;
+        matches = world
+            .block_entity(pos[0], pos[1], pos[2])
+            .map(|entity| entity.data)
+            .is_some_and(|actual| {
+                super::selectors::nbt_matches(&expected, &ferrite_nbt::Tag::Compound(actual))
+            });
+    }
     passed(ctx, unless, matches)
 }
 
@@ -628,7 +603,8 @@ fn condition_blocks(
                     destination[1] + y - start[1],
                     destination[2] + z - start[2],
                 );
-                if masked && target_block.is_none() {
+                // `masked` skips the positions whose SOURCE block is air.
+                if masked && source_block.is_none_or(super::commands_world::is_air) {
                     continue;
                 }
                 if source_block != target_block {
@@ -641,7 +617,11 @@ fn condition_blocks(
 }
 
 fn condition_entity(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
-    passed(ctx, unless, resolve_in(ctx, "entities").is_ok())
+    passed(
+        ctx,
+        unless,
+        !resolve_in_optional(ctx, "entities")?.is_empty(),
+    )
 }
 
 /// The single score holder `name` resolves to: a literal name, or the one player a selector
@@ -722,10 +702,21 @@ fn condition_dimension(ctx: &CommandContext<Source>, unless: bool) -> Result<Sou
 }
 
 fn condition_predicate(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
-    let _ = ctx.string("predicate");
-    // No predicate registry is wired into the server yet, so every predicate evaluates false,
-    // exactly like a datapack with no predicates loaded.
-    passed(ctx, unless, false)
+    let id = ctx.string("predicate").unwrap_or_default().to_owned();
+    let store = ctx.source().state.lock().unwrap().functions.clone();
+    let context = super::commands_late::default_context(ctx)?;
+    // Vanilla resolves the predicate while parsing, so an unknown id is an error, not "false".
+    let Some(result) = super::commands_late::evaluate_predicate(&store, &id, &context) else {
+        return Err(CommandError::failed(format!(
+            "Unknown predicate: {}",
+            if id.contains(':') {
+                id
+            } else {
+                format!("minecraft:{id}")
+            }
+        )));
+    };
+    passed(ctx, unless, result)
 }
 
 #[derive(Clone, Copy)]
@@ -751,7 +742,7 @@ fn condition_data(
                 .is_some_and(|root| path.is_root() || path.get(root).is_some())
         }
         DataKind::Entity => {
-            let target = match ctx.argument("target") {
+            let target = match ctx.argument("source") {
                 Some(ArgumentValue::Entity(target)) => target.clone(),
                 _ => return Err(CommandError::failed("Missing entity target")),
             };
@@ -772,7 +763,7 @@ fn condition_data(
             let Some(world) = &ctx.source().world else {
                 return passed(ctx, unless, false);
             };
-            let pos = block_pos(ctx, "pos")?;
+            let pos = block_pos(ctx, "source")?;
             world
                 .block_entity(pos[0], pos[1], pos[2])
                 .map(|entity| Tag::Compound(entity.data))
@@ -784,7 +775,7 @@ fn condition_data(
 
 fn store_targets(execute: NodeId, success: bool) -> Vec<NodeBuilder<Source>> {
     let block = literal::<Source>("block").then(
-        argument::<Source>("pos", ArgumentType::BlockPos).then(
+        argument::<Source>("target", ArgumentType::BlockPos).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
                 .then(store_type(execute, StoreKind::Block, success)),
         ),
@@ -796,7 +787,7 @@ fn store_targets(execute: NodeId, success: bool) -> Vec<NodeBuilder<Source>> {
         ),
     );
     let storage = literal::<Source>("storage").then(
-        argument::<Source>("source", ArgumentType::ResourceLocation).then(
+        argument::<Source>("target", ArgumentType::ResourceLocation).then(
             argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
                 .then(store_type(execute, StoreKind::Storage, success)),
         ),
@@ -821,7 +812,13 @@ fn store_targets(execute: NodeId, success: bool) -> Vec<NodeBuilder<Source>> {
                 }),
         ),
     );
-    vec![block, entity, storage, score]
+    vec![
+        block,
+        entity,
+        storage,
+        score,
+        super::commands_exec_more::store_bossbar(execute, success),
+    ]
 }
 
 fn write_score(ctx: &CommandContext<Source>, value: i32) -> Result<(), CommandError> {
@@ -887,7 +884,7 @@ fn write_store(
     let value = store_value(ctx, ty, success, result);
     match kind {
         StoreKind::Block => {
-            let pos = block_pos(ctx, "pos")?;
+            let pos = block_pos(ctx, "target")?;
             send(
                 ctx.source(),
                 Action::Data(BlockData::Modify {
@@ -913,7 +910,7 @@ fn write_store(
             apply_player_tag(&mut state.players[index], &root);
         }
         StoreKind::Storage => {
-            let id = namespaced(ctx.string("source").unwrap_or(""));
+            let id = namespaced(ctx.string("target").unwrap_or(""));
             let mut state = ctx.source().state.lock().unwrap();
             let root = state
                 .storage
@@ -950,6 +947,7 @@ mod tests {
                 anchor: EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 tree: None,
                 function_depth: 0,
                 state,
@@ -1022,6 +1020,44 @@ mod tests {
             snbt::format(state.storage.get("minecraft:t").unwrap()),
             "{list:[\"a\"],at:1}"
         );
+    }
+
+    #[test]
+    fn datapack_predicates_decide_if_and_unless() {
+        let dir = std::env::temp_dir().join(format!("ferrite-pred-{}", uuid::Uuid::new_v4()));
+        let predicates = dir.join("datapacks/p/data/demo/predicate");
+        std::fs::create_dir_all(&predicates).unwrap();
+        std::fs::write(
+            predicates.join("is_player.json"),
+            r#"{"condition":"minecraft:entity_properties","entity":"this","predicate":{"type":"minecraft:player"}}"#,
+        )
+        .unwrap();
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        source.state.lock().unwrap().functions =
+            Arc::new(crate::game::functions::FunctionStore::load(Some(&dir)));
+        // The console has no executing entity, so a
+        // `this` predicate is false and `unless` passes.
+        tree.execute(
+            "execute unless predicate demo:is_player run data merge storage pr {unless:1}",
+            source.clone(),
+        )
+        .unwrap();
+        tree.execute(
+            "execute if predicate demo:is_player run data merge storage pr {bad:1}",
+            source.clone(),
+        )
+        .unwrap();
+        let error = tree
+            .execute(
+                "execute if predicate demo:missing run data merge storage pr {bad:1}",
+                source.clone(),
+            )
+            .map(|_| ());
+        let state = source.state.lock().unwrap();
+        let stored = snbt::format(state.storage.get("minecraft:pr").unwrap());
+        assert_eq!(stored, "{unless:1}", "{error:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -7,6 +7,61 @@
 /// The vanilla `en_us` format string for a key.
 fn template(key: &str) -> Option<&'static str> {
     Some(match key {
+        "commands.data.get.invalid" => "Can't get %s; only numeric tags are allowed",
+        "commands.data.modify.expected_list" => "Expected a list: got %s",
+        "commands.data.modify.expected_object" => "Expected an object: got %s",
+        "commands.data.modify.expected_value" => "Expected a value: got %s",
+        "commands.data.modify.invalid_index" => "Invalid list index: %s",
+        "commands.data.modify.invalid_substring" => "Invalid substring indices: %s to %s",
+        "commands.scoreboard.objectives.modify.displayAutoUpdate.disable" => {
+            "Disabled display auto-update for objective %s"
+        }
+        "commands.scoreboard.objectives.modify.displayAutoUpdate.enable" => {
+            "Enabled display auto-update for objective %s"
+        }
+        "commands.scoreboard.objectives.modify.objectiveFormat.clear" => {
+            "Cleared default number format of objective %s"
+        }
+        "commands.scoreboard.objectives.modify.objectiveFormat.set" => {
+            "Changed default number format of objective %s"
+        }
+        "commands.scoreboard.players.display.name.clear.success.multiple" => {
+            "Cleared display name for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.name.clear.success.single" => {
+            "Cleared display name for %s in %s"
+        }
+        "commands.scoreboard.players.display.name.set.success.multiple" => {
+            "Changed display name to %s for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.name.set.success.single" => {
+            "Changed display name to %s for %s in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.clear.success.multiple" => {
+            "Cleared number format for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.clear.success.single" => {
+            "Cleared number format for %s in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.set.success.multiple" => {
+            "Changed number format for %s entities in %s"
+        }
+        "commands.scoreboard.players.display.numberFormat.set.success.single" => {
+            "Changed number format for %s in %s"
+        }
+        "commands.datapack.create.already_exists" => "Pack with name '%s' already exists",
+        "commands.datapack.create.invalid_name" => "Invalid characters in new pack name '%s'",
+        "commands.datapack.create.io_failure" => "Can't create pack with name '%s'. Check logs",
+        "commands.datapack.create.success" => "Created new empty pack with name '%s'",
+        "commands.datapack.disable.failed" => "Pack '%s' is not enabled!",
+        "commands.datapack.enable.failed" => "Pack '%s' is already enabled!",
+        "commands.datapack.list.available.none" => "There are no more data packs available",
+        "commands.datapack.list.available.success" => "There are %s data pack(s) available: %s",
+        "commands.datapack.list.enabled.none" => "There are no data packs enabled",
+        "commands.datapack.list.enabled.success" => "There are %s data pack(s) enabled: %s",
+        "commands.datapack.modify.disable" => "Disabling data pack %s",
+        "commands.datapack.modify.enable" => "Enabling data pack %s",
+        "commands.datapack.unknown" => "Unknown data pack '%s'",
         "commands.rotate.success" => "Rotated %s",
         "commands.fillbiome.success.count" => {
             "%s biome entries set between %s, %s, %s and %s, %s, %s"
@@ -110,6 +165,13 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.waypoint.modify.style" => "Changed waypoint style of %s",
         "commands.ride.not_riding" => "%s is not riding any vehicle",
         "commands.drop.no_loot_table" => "Entity %s has no loot table",
+        // The 26.3 server jar throws these two keys; the shipped `lang_en_us.json` only has the
+        // old `commands.drop.no_loot_table` (see docs/COMMANDS-STATUS.md, /loot).
+        "commands.drop.no_loot_table.entity" => "Entity %s has no loot table",
+        "commands.drop.no_loot_table.block" => "Block %s has no loot table",
+        "commands.drop.no_held_items" => "Entity can't hold any items",
+        "commands.drop.success.single_with_table" => "Dropped %s %s from loot table %s",
+        "commands.drop.success.multiple_with_table" => "Dropped %s items from loot table %s",
         "commands.item.entity.set.success.single" => "Replaced a slot on %s with %s",
         "commands.item.entity.set.success.multiple" => "Replaced a slot on %s entities with %s",
         "slot.unknown" => "Unknown slot '%s'",
@@ -117,6 +179,8 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.item.target.not_a_container" => "Target position %s, %s, %s is not a container",
         "commands.item.source.no_such_slot" => "The source does not have slot %s",
         "commands.item.target.no_such_slot" => "The target does not have slot %s",
+        "commands.item.target.no_such_slot.unnamed" => "The target does not have slot %s",
+        "commands.item.source.no_such_slot.unnamed" => "The source does not have slot %s",
         "commands.item.target.no_changes" => "No targets accepted item into slot %s",
         "commands.item.block.set.success" => "Replaced a slot at %s, %s, %s with %s",
 
@@ -133,6 +197,8 @@ fn template(key: &str) -> Option<&'static str> {
         "argument.item_modifier.unknown" => "Unknown item modifier '%s'",
         "commands.swing.success.single" => "Swung %s's arm",
         "commands.swing.success.multiple" => "Swung the arms of %s entities",
+        "commands.swing.failed.notliving" => "%s is not a living entity",
+        "commands.tick.query.percentiles" => "P50: %s ms, P95: %s ms, P99: %s ms",
         "commands.attribute.value.get.success" => "Value of attribute %s for %s is %s",
         "commands.attribute.base_value.get.success" => "Base value of attribute %s for %s is %s",
         "commands.attribute.base_value.set.success" => {
@@ -456,8 +522,9 @@ fn template(key: &str) -> Option<&'static str> {
         }
         "commands.team.option.suffix.success" => "Team suffix set to %s",
         "commands.team.remove.success" => "Removed team %s",
-        "commands.function.unknown" => "Unknown function %s",
-        "commands.function.return.not_in_function" => {
+        "arguments.function.unknown" => "Unknown function %s",
+        // Not vanilla: the lang file has no message for `/return` outside a function.
+        "ferrite.function.return.not_in_function" => {
             "This command can only be run from inside a function"
         }
         _ => return None,
@@ -487,6 +554,54 @@ pub fn render(key: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `render` prints the raw key for a key without a template, so every key a command passes
+    /// to `feedback::render(...)` must have one, and it must be vanilla's 26.3 string.
+    #[test]
+    fn every_rendered_key_has_the_vanilla_template() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Ok(lang) = std::fs::read_to_string(
+            root.join("../../vanilla/26.3/generated/reports/lang_en_us.json"),
+        ) else {
+            return;
+        };
+        let lang: serde_json::Value = serde_json::from_str(&lang).unwrap();
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(root.join("src/game")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find("render(") {
+                rest = &rest[at + 7..];
+                let after = rest.trim_start();
+                let Some(quoted) = after.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = quoted.find('"') else {
+                    continue;
+                };
+                let key = &quoted[..end];
+                if !(key.starts_with("commands.") || key.starts_with("arguments."))
+                    || key.contains(' ')
+                {
+                    continue;
+                }
+                match (template(key), lang.get(key).and_then(|v| v.as_str())) {
+                    (Some(ours), Some(vanilla)) if ours == vanilla => {}
+                    (None, _) => missing.push(format!("{key}: no template")),
+                    (Some(ours), vanilla) => {
+                        missing.push(format!("{key}: ours {ours:?} vanilla {vanilla:?}"))
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
 
     #[test]
     fn renders_vanilla_feedback() {

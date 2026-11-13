@@ -12,11 +12,12 @@ use ferrite_command::{
     arguments::{EntityTarget, ScoreHolder},
     literal,
 };
+use ferrite_nbt::Tag;
 use ferrite_protocol::{
     VarInt,
     packets::play::{
-        BossBar, BossBarAction, PlayerTeam, ResetScore, SetDisplayObjective, SetObjective,
-        SetScore, TeamAction, TeamParams,
+        BossBar, BossBarAction, NumberFormat, NumberStyle, PlayerTeam, ResetScore,
+        SetDisplayObjective, SetObjective, SetScore, TeamAction, TeamParams,
     },
     types::PlainText,
 };
@@ -102,6 +103,14 @@ fn send_score(
     objective: &str,
     value: i32,
 ) -> Result<i32, CommandError> {
+    let (display_name, number_format) = {
+        let state = ctx.source().state.lock().unwrap();
+        let key = (holder.to_owned(), objective.to_owned());
+        (
+            state.more.score_display_name.get(&key).cloned(),
+            state.more.score_number_format.get(&key).cloned(),
+        )
+    };
     packets(
         ctx,
         Vec::new(),
@@ -109,7 +118,55 @@ fn send_score(
             entity: holder.to_owned(),
             objective: objective.to_owned(),
             value: VarInt(value),
-            display_name: None,
+            display_name: display_name.map(PlainText),
+            number_format,
+        }),
+    )
+}
+
+/// Re-sends each holder's score so clients see the new display name or number format. A holder
+/// without a score gets one at 0, like vanilla's `getOrCreatePlayerScore`.
+fn resend_scores(
+    ctx: &CommandContext<Source>,
+    holders: &[String],
+    objective: &str,
+) -> Result<(), CommandError> {
+    for holder in holders {
+        let value = *ctx
+            .source()
+            .state
+            .lock()
+            .unwrap()
+            .scores
+            .entry((holder.clone(), objective.to_owned()))
+            .or_insert(0);
+        send_score(ctx, holder, objective, value)?;
+    }
+    Ok(())
+}
+
+/// Sends the objective's current display name, render type and number format (update mode).
+fn resend_objective(ctx: &CommandContext<Source>, name: &str) -> Result<i32, CommandError> {
+    let (display, render, number_format) = {
+        let state = ctx.source().state.lock().unwrap();
+        let Some(objective) = state.objectives.get(name) else {
+            return Ok(0);
+        };
+        (
+            objective.display_name.clone(),
+            objective.render_type,
+            state.more.objective_number_format.get(name).cloned(),
+        )
+    };
+    packets(
+        ctx,
+        Vec::new(),
+        PlayerPacket::SetObjective(SetObjective {
+            name: name.to_owned(),
+            mode: 2,
+            display_name: Some(PlainText(display)),
+            render_type: Some(VarInt(render)),
+            number_format,
         }),
     )
 }
@@ -187,6 +244,13 @@ fn scoreboard_tree() -> NodeBuilder<Source> {
                                         .executes(set_objective_display),
                                 ),
                             )
+                            .then(literal("displayautoupdate").then(
+                                argument("value", ArgumentType::bool()).executes(set_auto_update),
+                            ))
+                            .then(number_format_nodes(
+                                literal("numberformat"),
+                                set_objective_number_format,
+                            ))
                             .then(
                                 literal("rendertype")
                                     .then(
@@ -219,6 +283,36 @@ fn scoreboard_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal("players")
+                .then(
+                    literal("display")
+                        .then(
+                            literal("name").then(
+                                argument("targets", ArgumentType::ScoreHolder { multiple: true })
+                                    .then(
+                                        argument(
+                                            "objective",
+                                            ArgumentType::opaque("minecraft:objective"),
+                                        )
+                                        .executes(|ctx| set_score_display_name(ctx, false))
+                                        .then(
+                                            argument("name", ArgumentType::Component)
+                                                .executes(|ctx| set_score_display_name(ctx, true)),
+                                        ),
+                                    ),
+                            ),
+                        )
+                        .then(literal("numberformat").then(
+                            argument("targets", ArgumentType::ScoreHolder { multiple: true }).then(
+                                number_format_nodes(
+                                    argument(
+                                        "objective",
+                                        ArgumentType::opaque("minecraft:objective"),
+                                    ),
+                                    set_score_number_format,
+                                ),
+                            ),
+                        )),
+                )
                 .then(
                     literal("add").then(
                         argument("targets", ArgumentType::ScoreHolder { multiple: true }).then(
@@ -343,6 +437,7 @@ fn add_objective(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             mode: 0,
             display_name: Some(PlainText(display)),
             render_type: Some(VarInt(0)),
+            number_format: None,
         }),
     )?;
     feedback(
@@ -386,6 +481,7 @@ fn remove_objective(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
             mode: 1,
             display_name: None,
             render_type: None,
+            number_format: None,
         }),
     )?;
     feedback(
@@ -395,28 +491,225 @@ fn remove_objective(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     )
 }
 
+/// A number format: no node (clear), `blank`, `fixed <contents>` or `styled <style>`.
+fn number_format_nodes(
+    base: ferrite_command::NodeBuilder<Source>,
+    run: fn(&CommandContext<Source>, Option<NumberFormat>) -> Result<i32, CommandError>,
+) -> ferrite_command::NodeBuilder<Source> {
+    base.executes(move |ctx| run(ctx, None))
+        .then(literal("blank").executes(move |ctx| run(ctx, Some(NumberFormat::Blank))))
+        .then(
+            literal("fixed").then(argument("contents", ArgumentType::Component).executes(
+                move |ctx| {
+                    let text = component_text(ctx.string("contents").unwrap_or_default());
+                    run(ctx, Some(NumberFormat::Fixed(PlainText(text))))
+                },
+            )),
+        )
+        .then(literal("styled").then(
+            argument("style", ArgumentType::opaque("minecraft:style")).executes(move |ctx| {
+                run(
+                    ctx,
+                    Some(NumberFormat::Styled(parse_style(
+                        ctx.string("style").unwrap_or_default(),
+                    )?)),
+                )
+            }),
+        ))
+}
+
+/// A `minecraft:style` argument (`{color:"red",bold:true}` as SNBT or JSON) as a wire style.
+fn parse_style(text: &str) -> Result<NumberStyle, CommandError> {
+    let Tag::Compound(map) = ferrite_nbt::snbt::parse(text)
+        .map_err(|error| CommandError::failed(format!("Invalid style: {error}")))?
+    else {
+        return Err(CommandError::failed("Invalid style: expected an object"));
+    };
+    let flag = |name: &str| match map.get(name) {
+        Some(Tag::Byte(value)) => Some(*value != 0),
+        _ => None,
+    };
+    Ok(NumberStyle {
+        color: match map.get("color") {
+            Some(Tag::String(color)) => Some(color.clone()),
+            _ => None,
+        },
+        bold: flag("bold"),
+        italic: flag("italic"),
+        underlined: flag("underlined"),
+        strikethrough: flag("strikethrough"),
+        obfuscated: flag("obfuscated"),
+    })
+}
+
+fn set_auto_update(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let name = objective_name(ctx);
+    let enabled = matches!(ctx.argument("value"), Some(ArgumentValue::Bool(true)));
+    {
+        let mut state = ctx.source().state.lock().unwrap();
+        require_objective(&state, &name)?;
+        if enabled {
+            state.more.objective_auto_update.insert(name.clone());
+        } else {
+            state.more.objective_auto_update.remove(&name);
+        }
+    }
+    feedback(
+        ctx,
+        if enabled {
+            "commands.scoreboard.objectives.modify.displayAutoUpdate.enable"
+        } else {
+            "commands.scoreboard.objectives.modify.displayAutoUpdate.disable"
+        },
+        vec![name],
+    )
+}
+
+fn set_objective_number_format(
+    ctx: &CommandContext<Source>,
+    format: Option<NumberFormat>,
+) -> Result<i32, CommandError> {
+    let name = objective_name(ctx);
+    let cleared = format.is_none();
+    {
+        let mut state = ctx.source().state.lock().unwrap();
+        require_objective(&state, &name)?;
+        match format.clone() {
+            Some(format) => state
+                .more
+                .objective_number_format
+                .insert(name.clone(), format),
+            None => state.more.objective_number_format.remove(&name),
+        };
+    }
+    resend_objective(ctx, &name)?;
+    feedback(
+        ctx,
+        if cleared {
+            "commands.scoreboard.objectives.modify.objectiveFormat.clear"
+        } else {
+            "commands.scoreboard.objectives.modify.objectiveFormat.set"
+        },
+        vec![name],
+    )
+}
+
+fn set_score_display_name(
+    ctx: &CommandContext<Source>,
+    with_name: bool,
+) -> Result<i32, CommandError> {
+    let objective = objective_name(ctx);
+    let holders = holders(ctx, "targets")?;
+    let text = with_name.then(|| component_text(ctx.string("name").unwrap_or_default()));
+    {
+        let mut state = ctx.source().state.lock().unwrap();
+        require_objective(&state, &objective)?;
+        for holder in &holders {
+            let key = (holder.clone(), objective.clone());
+            match &text {
+                Some(text) => state.more.score_display_name.insert(key, text.clone()),
+                None => state.more.score_display_name.remove(&key),
+            };
+        }
+    }
+    resend_scores(ctx, &holders, &objective)?;
+    let (key, args) =
+        score_display_feedback(DisplayKind::Name, text.as_deref(), &holders, &objective);
+    feedback(ctx, key, args)
+}
+
+fn set_score_number_format(
+    ctx: &CommandContext<Source>,
+    format: Option<NumberFormat>,
+) -> Result<i32, CommandError> {
+    let objective = objective_name(ctx);
+    let holders = holders(ctx, "targets")?;
+    {
+        let mut state = ctx.source().state.lock().unwrap();
+        require_objective(&state, &objective)?;
+        for holder in &holders {
+            let key = (holder.clone(), objective.clone());
+            match &format {
+                Some(format) => state.more.score_number_format.insert(key, format.clone()),
+                None => state.more.score_number_format.remove(&key),
+            };
+        }
+    }
+    resend_scores(ctx, &holders, &objective)?;
+    let (key, args) = score_display_feedback(
+        DisplayKind::NumberFormat,
+        format.as_ref().map(|_| ""),
+        &holders,
+        &objective,
+    );
+    feedback(ctx, key, args)
+}
+
+#[derive(Clone, Copy)]
+enum DisplayKind {
+    Name,
+    NumberFormat,
+}
+
+/// The `commands.scoreboard.players.display.*` key and arguments: `value` is the new name or
+/// format, and `None` means the setting was cleared.
+fn score_display_feedback(
+    kind: DisplayKind,
+    value: Option<&str>,
+    holders: &[String],
+    objective: &str,
+) -> (&'static str, Vec<String>) {
+    let multiple = holders.len() != 1;
+    let shown = if multiple {
+        holders.len().to_string()
+    } else {
+        holders[0].clone()
+    };
+    let key = match (kind, value.is_some(), multiple) {
+        (DisplayKind::Name, true, false) => {
+            "commands.scoreboard.players.display.name.set.success.single"
+        }
+        (DisplayKind::Name, true, true) => {
+            "commands.scoreboard.players.display.name.set.success.multiple"
+        }
+        (DisplayKind::Name, false, false) => {
+            "commands.scoreboard.players.display.name.clear.success.single"
+        }
+        (DisplayKind::Name, false, true) => {
+            "commands.scoreboard.players.display.name.clear.success.multiple"
+        }
+        (DisplayKind::NumberFormat, true, false) => {
+            "commands.scoreboard.players.display.numberFormat.set.success.single"
+        }
+        (DisplayKind::NumberFormat, true, true) => {
+            "commands.scoreboard.players.display.numberFormat.set.success.multiple"
+        }
+        (DisplayKind::NumberFormat, false, false) => {
+            "commands.scoreboard.players.display.numberFormat.clear.success.single"
+        }
+        (DisplayKind::NumberFormat, false, true) => {
+            "commands.scoreboard.players.display.numberFormat.clear.success.multiple"
+        }
+    };
+    let args = match (kind, value) {
+        (DisplayKind::Name, Some(text)) => vec![text.to_owned(), shown, objective.to_owned()],
+        _ => vec![shown, objective.to_owned()],
+    };
+    (key, args)
+}
+
 fn set_objective_display(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let name = objective_name(ctx);
     let display = component_text(ctx.string("displayName").unwrap_or_default());
-    let existing = {
+    {
         let mut state = ctx.source().state.lock().unwrap();
         let objective = state
             .objectives
             .get_mut(&name)
             .ok_or_else(|| CommandError::failed(format!("Unknown objective '{name}'")))?;
         objective.display_name = display.clone();
-        objective.render_type
-    };
-    packets(
-        ctx,
-        Vec::new(),
-        PlayerPacket::SetObjective(SetObjective {
-            name: name.clone(),
-            mode: 2,
-            display_name: Some(PlainText(display.clone())),
-            render_type: Some(VarInt(existing)),
-        }),
-    )?;
+    }
+    resend_objective(ctx, &name)?;
     feedback(
         ctx,
         "commands.scoreboard.objectives.modify.displayname",
@@ -429,25 +722,15 @@ fn set_objective_render_type(
     render_type: i32,
 ) -> Result<i32, CommandError> {
     let name = objective_name(ctx);
-    let display = {
+    {
         let mut state = ctx.source().state.lock().unwrap();
         let objective = state
             .objectives
             .get_mut(&name)
             .ok_or_else(|| CommandError::failed(format!("Unknown objective '{name}'")))?;
         objective.render_type = render_type;
-        objective.display_name.clone()
-    };
-    packets(
-        ctx,
-        Vec::new(),
-        PlayerPacket::SetObjective(SetObjective {
-            name: name.clone(),
-            mode: 2,
-            display_name: Some(PlainText(display)),
-            render_type: Some(VarInt(render_type)),
-        }),
-    )?;
+    }
+    resend_objective(ctx, &name)?;
     feedback(
         ctx,
         "commands.scoreboard.objectives.modify.rendertype",
@@ -1583,10 +1866,13 @@ fn team_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal("join").then(
-                argument("team", ArgumentType::opaque("minecraft:team")).then(
-                    argument("members", ArgumentType::ScoreHolder { multiple: true })
-                        .executes(join_team),
-                ),
+                argument("team", ArgumentType::opaque("minecraft:team"))
+                    // `/team join <team>` joins the executing entity.
+                    .executes(join_team)
+                    .then(
+                        argument("members", ArgumentType::ScoreHolder { multiple: true })
+                            .executes(join_team),
+                    ),
             ),
         )
         .then(literal("leave").then(
@@ -1644,9 +1930,21 @@ fn team_tree() -> NodeBuilder<Source> {
                             }),
                         ),
                     )
-                    .then(literal("nametagVisibility").then(nametag_visibility_literals()))
-                    .then(literal("collisionRule").then(collision_literals()))
-                    .then(literal("deathMessageVisibility").then(death_visibility_literals())),
+                    .then(rule_literal(
+                        "nametagVisibility",
+                        &VISIBILITY,
+                        TeamModify::NametagVisibility,
+                    ))
+                    .then(rule_literal(
+                        "collisionRule",
+                        &COLLISION,
+                        TeamModify::CollisionRule,
+                    ))
+                    .then(rule_literal(
+                        "deathMessageVisibility",
+                        &VISIBILITY,
+                        TeamModify::DeathMessageVisibility,
+                    )),
             ),
         )
         .then(
@@ -1656,57 +1954,25 @@ fn team_tree() -> NodeBuilder<Source> {
         )
 }
 
-fn nametag_visibility_literals() -> NodeBuilder<Source> {
-    literal::<Source>("always")
-        .executes(|ctx| team_modify(ctx, TeamModify::NametagVisibility("always")))
-        .then(
-            literal::<Source>("hideForOtherTeams").executes(|ctx| {
-                team_modify(ctx, TeamModify::NametagVisibility("hideForOtherTeams"))
-            }),
-        )
-        .then(
-            literal::<Source>("hideForOwnTeam")
-                .executes(|ctx| team_modify(ctx, TeamModify::NametagVisibility("hideForOwnTeam"))),
-        )
-        .then(
-            literal::<Source>("never")
-                .executes(|ctx| team_modify(ctx, TeamModify::NametagVisibility("never"))),
-        )
+/// One literal per accepted value under `nametagVisibility`, `deathMessageVisibility` or
+/// `collisionRule`: siblings, as in commands.json (they used to be nested under the first one,
+/// which made every value but the first unreachable).
+fn rule_literal(
+    name: &'static str,
+    values: &[&'static str],
+    make: fn(&'static str) -> TeamModify,
+) -> NodeBuilder<Source> {
+    let mut node = literal::<Source>(name);
+    for value in values {
+        let value: &'static str = value;
+        node =
+            node.then(literal::<Source>(value).executes(move |ctx| team_modify(ctx, make(value))));
+    }
+    node
 }
 
-fn death_visibility_literals() -> NodeBuilder<Source> {
-    literal::<Source>("always")
-        .executes(|ctx| team_modify(ctx, TeamModify::DeathMessageVisibility("always")))
-        .then(literal::<Source>("hideForOtherTeams").executes(|ctx| {
-            team_modify(ctx, TeamModify::DeathMessageVisibility("hideForOtherTeams"))
-        }))
-        .then(
-            literal::<Source>("hideForOwnTeam").executes(|ctx| {
-                team_modify(ctx, TeamModify::DeathMessageVisibility("hideForOwnTeam"))
-            }),
-        )
-        .then(
-            literal::<Source>("never")
-                .executes(|ctx| team_modify(ctx, TeamModify::DeathMessageVisibility("never"))),
-        )
-}
-
-fn collision_literals() -> NodeBuilder<Source> {
-    literal::<Source>("always")
-        .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("always")))
-        .then(
-            literal::<Source>("never")
-                .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("never"))),
-        )
-        .then(
-            literal::<Source>("pushOtherTeams")
-                .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("pushOtherTeams"))),
-        )
-        .then(
-            literal::<Source>("pushOwnTeam")
-                .executes(|ctx| team_modify(ctx, TeamModify::CollisionRule("pushOwnTeam"))),
-        )
-}
+const VISIBILITY: [&str; 4] = ["always", "hideForOtherTeams", "hideForOwnTeam", "never"];
+const COLLISION: [&str; 4] = ["always", "never", "pushOtherTeams", "pushOwnTeam"];
 
 #[derive(Debug, Clone, Copy)]
 enum TeamModify {
@@ -1883,7 +2149,16 @@ fn member_names(ctx: &CommandContext<Source>, members: &BTreeSet<Uuid>) -> Vec<S
 }
 
 fn member_uuids(ctx: &CommandContext<Source>) -> Result<Vec<(Uuid, String)>, CommandError> {
-    let names = holders(ctx, "members")?;
+    let names = if ctx.argument("members").is_some() {
+        holders(ctx, "members")?
+    } else {
+        vec![
+            ctx.source()
+                .name
+                .clone()
+                .ok_or_else(super::commands::player_only)?,
+        ]
+    };
     let state = ctx.source().state.lock().unwrap();
     Ok(names
         .into_iter()
@@ -2157,6 +2432,7 @@ mod tests {
                 anchor: ferrite_command::EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 tree: None,
                 function_depth: 0,
             },
@@ -2346,5 +2622,156 @@ mod tests {
         assert!(error.to_string().contains("already exists"));
         let error = tree.execute("team join missing @s", source).unwrap_err();
         assert!(error.to_string().contains("Unknown team"));
+    }
+
+    #[test]
+    fn team_options_accept_every_value_and_join_defaults_to_self() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source(2);
+        execute(&tree, source.clone(), &mut received, "team add red");
+        // Regression: the 2nd..4th value of each option used to be nested under the first
+        // literal (`nametagVisibility always never`), so `... never` did not parse.
+        for input in [
+            "team modify red nametagVisibility always",
+            "team modify red nametagVisibility hideForOtherTeams",
+            "team modify red nametagVisibility hideForOwnTeam",
+            "team modify red nametagVisibility never",
+            "team modify red deathMessageVisibility never",
+            "team modify red deathMessageVisibility hideForOwnTeam",
+            "team modify red collisionRule never",
+            "team modify red collisionRule pushOtherTeams",
+            "team modify red collisionRule pushOwnTeam",
+        ] {
+            execute(&tree, source.clone(), &mut received, input);
+        }
+        assert_eq!(
+            source.state.lock().unwrap().teams["red"].collision_rule,
+            "pushOwnTeam"
+        );
+        assert!(
+            tree.execute(
+                "team modify red nametagVisibility always never",
+                source.clone()
+            )
+            .is_err(),
+            "the nested forms are gone"
+        );
+        // `team join <team>` joins the executing entity.
+        let actions = execute(&tree, source.clone(), &mut received, "team join red");
+        assert_eq!(feedback_text(&actions), vec!["Added Alice to team red"]);
+    }
+
+    #[test]
+    fn scoreboard_display_settings_are_stored_and_reported() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source(2);
+        let mut run = |command: &str| {
+            let actions = execute(&tree, source.clone(), &mut received, command);
+            feedback_text(&actions)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        run("scoreboard objectives add points dummy");
+        assert_eq!(
+            run("scoreboard objectives modify points displayautoupdate true"),
+            vec!["Enabled display auto-update for objective points"]
+        );
+        assert!(
+            source
+                .state
+                .lock()
+                .unwrap()
+                .more
+                .objective_auto_update
+                .contains("points")
+        );
+        assert_eq!(
+            run("scoreboard objectives modify points displayautoupdate false"),
+            vec!["Disabled display auto-update for objective points"]
+        );
+        assert_eq!(
+            run("scoreboard objectives modify points numberformat blank"),
+            vec!["Changed default number format of objective points"]
+        );
+        assert_eq!(
+            source.state.lock().unwrap().more.objective_number_format["points"],
+            NumberFormat::Blank
+        );
+        assert_eq!(
+            run("scoreboard objectives modify points numberformat"),
+            vec!["Cleared default number format of objective points"]
+        );
+        assert_eq!(
+            run("scoreboard players display name Alice points \"Boss\""),
+            vec!["Changed display name to Boss for Alice in points"]
+        );
+        assert_eq!(
+            source.state.lock().unwrap().more.score_display_name
+                [&("Alice".to_owned(), "points".to_owned())],
+            "Boss"
+        );
+        assert_eq!(
+            run("scoreboard players display name Alice points"),
+            vec!["Cleared display name for Alice in points"]
+        );
+        assert_eq!(
+            run("scoreboard players display numberformat Alice points fixed \"x\""),
+            vec!["Changed number format for Alice in points"]
+        );
+        assert_eq!(
+            run("scoreboard players display numberformat Alice points"),
+            vec!["Cleared number format for Alice in points"]
+        );
+        assert!(
+            source
+                .state
+                .lock()
+                .unwrap()
+                .more
+                .score_number_format
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn number_formats_reach_the_wire() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source(2);
+        let mut packets = |command: &str| {
+            execute(&tree, source.clone(), &mut received, command)
+                .into_iter()
+                .filter_map(|action| match action {
+                    Action::Packets { packet, .. } => Some(packet),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        packets("scoreboard objectives add points dummy");
+        let sent = packets("scoreboard objectives modify points numberformat fixed \"n/a\"");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetObjective(o) if o.mode == 2
+                && o.number_format == Some(NumberFormat::Fixed(PlainText("n/a".into()))))));
+        let sent = packets(
+            "scoreboard objectives modify points numberformat styled {color:\"red\",bold:true}",
+        );
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetObjective(o) if o.number_format == Some(NumberFormat::Styled(
+                NumberStyle { color: Some("red".into()), bold: Some(true), ..NumberStyle::default() })))));
+        let sent = packets("scoreboard players display numberformat Alice points blank");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.entity == "Alice" && s.number_format == Some(NumberFormat::Blank))));
+        let sent = packets("scoreboard players display name Alice points \"Boss\"");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.display_name == Some(PlainText("Boss".into()))
+                && s.number_format == Some(NumberFormat::Blank))));
+        // Clearing sends no format.
+        let sent = packets("scoreboard players display numberformat Alice points");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.number_format.is_none())));
+        // A plain score update keeps the stored display settings.
+        let sent = packets("scoreboard players set Alice points 5");
+        assert!(sent.iter().any(|p| matches!(p,
+            PlayerPacket::SetScore(s) if s.display_name == Some(PlainText("Boss".into())))));
     }
 }

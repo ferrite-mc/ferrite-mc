@@ -19,8 +19,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-/// The overworld clock's registry name, used by `/time` feedback.
-pub const OVERWORLD_CLOCK: &str = "minecraft:overworld";
 const SERVER_NAME: &str = "Server";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +139,12 @@ pub struct GameState {
     pub difficulty: i32,
     /// Ticks of the overworld clock (`/time set` and `/time add`).
     pub clock_time: i64,
+    /// `/time pause` and `/time rate` on the overworld clock.
+    pub clock_paused: bool,
+    pub clock_rate: f32,
+    clock_frac: f64,
+    /// The End clock (`minecraft:the_end`), see `commands_time`.
+    pub end_clock: super::commands_time::ClockState,
     /// Total world ticks (`/time query gametime`).
     pub game_time: i64,
     pub weather: Weather,
@@ -197,6 +201,10 @@ impl GameState {
             default_gamemode,
             difficulty: 2,
             clock_time: 0,
+            clock_paused: false,
+            clock_rate: 1.0,
+            clock_frac: 0.0,
+            end_clock: super::commands_time::ClockState::default(),
             game_time: 0,
             weather: Weather::Clear,
             rain_duration: 0,
@@ -401,7 +409,13 @@ impl GameState {
             }
         }
         if advance_time {
-            self.clock_time += 1;
+            if !self.clock_paused {
+                self.clock_frac += f64::from(self.clock_rate);
+                let whole = self.clock_frac.floor();
+                self.clock_time = self.clock_time.saturating_add(whole as i64);
+                self.clock_frac -= whole;
+            }
+            self.end_clock.advance();
         }
         let now = self.game_time;
         let mut due = Vec::new();
@@ -462,6 +476,14 @@ pub fn load_lang(reports: &std::path::Path) {
 }
 
 fn translate(key: &str) -> Option<&'static str> {
+    #[cfg(test)]
+    if LANG.get().is_none() {
+        // Unit tests see the same vanilla strings the server installs at startup.
+        load_lang(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vanilla/26.3/generated/reports"),
+        );
+    }
     LANG.get()?.get(key).map(String::as_str)
 }
 
@@ -519,7 +541,7 @@ fn english(key: &str) -> &'static str {
 
 fn render(template: &str, args: &[String]) -> String {
     let mut out = String::with_capacity(template.len());
-    let mut args = args.iter();
+    let mut next = 0;
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '%' {
@@ -533,14 +555,43 @@ fn render(template: &str, args: &[String]) -> String {
             }
             Some('s') => {
                 chars.next();
-                if let Some(value) = args.next() {
+                if let Some(value) = args.get(next) {
                     out.push_str(value);
+                }
+                next += 1;
+            }
+            // Positional `%1$s`, as the death messages use.
+            Some(digit) if digit.is_ascii_digit() => {
+                let mut lookahead = chars.clone();
+                let mut number = String::new();
+                while let Some(d) = lookahead.peek().copied().filter(char::is_ascii_digit) {
+                    number.push(d);
+                    lookahead.next();
+                }
+                if lookahead.next() == Some('$') && lookahead.next() == Some('s') {
+                    if let Some(value) = number
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .and_then(|n| args.get(n))
+                    {
+                        out.push_str(value);
+                    }
+                    chars = lookahead;
+                } else {
+                    out.push('%');
                 }
             }
             _ => out.push('%'),
         }
     }
     out
+}
+
+/// The English text of a translation key (the loaded `lang_en_us.json`), with `%s` and `%1$s`
+/// arguments filled in; `None` when the table is not loaded or has no such key.
+pub(crate) fn translate_key(key: &str, args: &[String]) -> Option<String> {
+    translate(key).map(|template| render(template, args))
 }
 
 /// A parsed teleport destination. Locations are already resolved against the source.
@@ -619,11 +670,11 @@ pub enum RotateTo {
 /// How `/item` and `/loot` write into slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotMode {
-    /// A single stack goes to every slot; several go to the slots pairwise.
+    /// Slot `i` takes the `i`th stack; slots past the end of the list are left alone.
     Replace,
-    /// Only empty slots change.
+    /// The stacks are cycled over every selected slot, empty or not (vanilla's `cycle` provider).
     Fill,
-    /// Like replace, but slots left without a stack are cleared when several are given.
+    /// Like replace, but slots past the end of the list are cleared.
     Override,
     /// Adds stacks to a container, merging with what is there (`/loot insert`).
     Insert,
@@ -638,6 +689,14 @@ pub enum SlotTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotSource {
     Stacks(Vec<ferrite_item::ItemStack>),
+    /// Rolled loot for `/loot insert|replace`, answered with vanilla's `commands.drop.*`
+    /// messages. `count` is the `<count>` argument of `replace` (vanilla defaults it to the
+    /// number of stacks).
+    Loot {
+        stacks: Vec<ferrite_item::ItemStack>,
+        table: Option<String>,
+        count: Option<i32>,
+    },
     FromBlock {
         pos: [i32; 3],
         slots: String,
@@ -676,8 +735,12 @@ pub enum Action {
         /// `at <location>`: where the damage comes from, for knockback.
         at: Option<[f64; 3]>,
         /// `by <entity>`: the attacker; mobs hit by a player turn on them and are knocked back
-        /// from them. (`from <cause>` only matters for death messages, which are not modelled.)
+        /// from them. (`from <cause>` is the causing entity, see `cause`.)
         by: Option<EntityTarget>,
+        /// `by <entity> from <cause>`: the entity that caused the damage through `by` (an arrow's
+        /// shooter). It gets the kill credit and is named in the death message; `by` alone is
+        /// both the direct and the causing entity.
+        cause: Option<EntityTarget>,
     },
     /// `/forceload`: chunks to start or stop holding in a dimension.
     ForceLoad {
@@ -714,10 +777,19 @@ pub enum Action {
         slots: String,
         source: SlotSource,
     },
-    /// `/loot spawn`: drops the stacks as item entities.
+    /// `/loot spawn`: drops the stacks as item entities. `table` is the loot table named in the
+    /// success message (`kill` and `mine` name theirs).
     DropItems {
         pos: [f64; 3],
         stacks: Vec<ferrite_item::ItemStack>,
+        table: Option<String>,
+    },
+    /// `/loot give`: hands the stacks to the players (the overflow drops at their feet) and
+    /// answers with vanilla's loot message instead of `/give`'s.
+    LootGive {
+        targets: Vec<Uuid>,
+        stacks: Vec<ferrite_item::ItemStack>,
+        table: Option<String>,
     },
     /// `/summon minecraft:end_crystal`: the crystal is not a mob, so it has its own action.
     SummonCrystal {
@@ -863,6 +935,8 @@ pub enum Action {
         effect: i32,
         amplifier: i32,
         duration: i32,
+        /// `hideParticles` of `/effect give`.
+        hide_particles: bool,
     },
     /// `/effect clear`: remove one mob effect from the target players.
     RemoveEffect {
@@ -879,12 +953,18 @@ pub enum Action {
     Data(super::commands_data::BlockData),
     /// `/reload`: rebuild the datapack function store from disk.
     Reload,
-    /// `/datapack list`: report enabled and disabled packs.
-    DatapackList,
+    /// `/datapack list [available|enabled]`: report enabled and disabled packs.
+    DatapackList(super::commands_server::DatapackListKind),
     /// `/datapack enable|disable`: persist the choice and reload functions.
     DatapackSet {
         pack: String,
         enable: bool,
+        placement: super::commands_server::PackPlacement,
+    },
+    /// `/datapack create <id> <description>`: write an empty pack folder.
+    DatapackCreate {
+        id: String,
+        description: String,
     },
 }
 
@@ -904,6 +984,8 @@ pub struct Source {
     pub dimension: super::Dimension,
     /// Chunk source when the command runs inside a world (block tests, `/data block`).
     pub world: Option<Arc<super::anvil::AnvilChunkSource>>,
+    /// The server's admin lists and profile cache, when a data directory exists.
+    pub admin: Option<Arc<AdminLists>>,
     pub state: Arc<Mutex<GameState>>,
     pub actions: UnboundedSender<Action>,
     /// The command tree `/function` lines run against; `None` in tests that never call it.
@@ -1162,11 +1244,11 @@ fn location_branch(targets: bool) -> ferrite_command::NodeBuilder<Source> {
         return builder;
     }
     builder
+        // commands.json: `<targets> <location> <rotation>` takes the rotation directly, there
+        // is no `rotation` keyword.
         .then(
-            literal("rotation").then(
-                argument("rotation", ArgumentType::Rotation)
-                    .executes(|ctx| send(ctx.source(), location_rotation(ctx, true)?)),
-            ),
+            argument("rotation", ArgumentType::Rotation)
+                .executes(|ctx| send(ctx.source(), location_rotation(ctx, true)?)),
         )
         .then(
             literal("facing")
@@ -1686,76 +1768,6 @@ fn set_difficulty(ctx: &CommandContext<Source>, value: i32) -> Result<i32, Comma
         )),
     )?;
     Ok(0)
-}
-
-fn time_set(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let ticks = ctx
-        .integer("time")
-        .ok_or_else(|| CommandError::failed("missing time"))?;
-    let source = ctx.source();
-    {
-        let mut state = source.state.lock().unwrap();
-        if state.clock_time == i64::from(ticks) {
-            return Err(syntax_error(
-                "commands.time.set.already_at_time",
-                vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-                format!("Clock {OVERWORLD_CLOCK} is already set to {ticks} tick(s)"),
-            ));
-        }
-        state.clock_time = i64::from(ticks);
-    }
-    emit(source, Action::TimeSet(ticks))?;
-    emit(
-        source,
-        Action::Feedback(Feedback::new(
-            "commands.time.set.absolute",
-            vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-        )),
-    )?;
-    Ok(ticks)
-}
-
-fn time_add(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    let delta = ctx
-        .integer("time")
-        .ok_or_else(|| CommandError::failed("missing time"))?;
-    let source = ctx.source();
-    let total = {
-        let mut state = source.state.lock().unwrap();
-        state.clock_time = state.clock_time.saturating_add(i64::from(delta));
-        state.clock_time
-    };
-    emit(source, Action::TimeAdd(delta))?;
-    emit(
-        source,
-        Action::Feedback(Feedback::new(
-            "commands.time.set.absolute",
-            vec![OVERWORLD_CLOCK.into(), total.to_string()],
-        )),
-    )?;
-    Ok(total as i32)
-}
-
-fn time_query(ctx: &CommandContext<Source>, game_time: bool) -> Result<i32, CommandError> {
-    let source = ctx.source();
-    let ticks = {
-        let state = source.state.lock().unwrap();
-        if game_time {
-            state.game_time
-        } else {
-            state.clock_time
-        }
-    };
-    let feedback = if game_time {
-        Feedback::new("commands.time.query.gametime", vec![ticks.to_string()])
-    } else {
-        Feedback::new(
-            "commands.time.query.absolute",
-            vec![OVERWORLD_CLOCK.into(), ticks.to_string()],
-        )
-    };
-    emit(source, Action::Feedback(feedback))?;
-    Ok(ticks as i32)
 }
 
 fn set_weather(ctx: &CommandContext<Source>, kind: Weather) -> Result<i32, CommandError> {
@@ -2291,24 +2303,7 @@ pub fn dispatcher() -> CommandDispatcher<Source> {
             .then(literal("normal").executes(|ctx| set_difficulty(ctx, 2)))
             .then(literal("hard").executes(|ctx| set_difficulty(ctx, 3))),
     );
-    tree.register(
-        literal::<Source>("time")
-            .requires(|source| source.permission >= 2)
-            .then(
-                literal("set")
-                    .then(argument("time", ArgumentType::Time { min: 0 }).executes(time_set)),
-            )
-            .then(
-                literal("add").then(
-                    argument("time", ArgumentType::Time { min: i32::MIN }).executes(time_add),
-                ),
-            )
-            .then(
-                literal("query")
-                    .then(literal("time").executes(|ctx| time_query(ctx, false)))
-                    .then(literal("gametime").executes(|ctx| time_query(ctx, true))),
-            ),
-    );
+    super::commands_time::register(&mut tree);
     tree.register(
         literal::<Source>("weather")
             .requires(|source| source.permission >= 2)
@@ -2657,6 +2652,7 @@ mod tests {
             anchor: ferrite_command::EntityAnchor::Feet,
             dimension: crate::game::Dimension::Overworld,
             world: None,
+            admin: None,
             tree: None,
             function_depth: 0,
         }
@@ -2740,8 +2736,13 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            data.join("broken.json"),
+            data.join("enchanted.json"),
             r#"{"function":"minecraft:enchant_randomly"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            data.join("broken.json"),
+            r#"{"function":"minecraft:not_a_function"}"#,
         )
         .unwrap();
         let mut game = GameState::default();
@@ -2759,6 +2760,7 @@ mod tests {
         for line in [
             "item modify entity @s hotbar.0 test:five",
             "item modify block 0 64 0 container.0 test:nested/fancy",
+            "item modify entity @s hotbar.0 test:enchanted",
             r#"item modify entity @s weapon.mainhand {"function":"set_count","count":3}"#,
         ] {
             let (result, actions) = run(line, 2);
@@ -2795,7 +2797,7 @@ mod tests {
             ),
             (
                 "item modify entity @s hotbar.0 test:broken",
-                "enchant_randomly",
+                "not_a_function",
             ),
             (
                 "item modify entity @s hotbar.0 {\"function\":\"nope\"}",
@@ -2803,7 +2805,7 @@ mod tests {
             ),
             (
                 "item replace entity @s hotbar.1 from entity @s hotbar.0 test:broken",
-                "enchant_randomly",
+                "not_a_function",
             ),
         ] {
             let (result, actions) = run(line, 2);
@@ -3002,6 +3004,24 @@ mod tests {
     }
 
     #[test]
+    fn item_commands_keep_component_patches() {
+        let (result, actions) = run(
+            "item replace entity @s hotbar.0 with minecraft:potion[potion_contents={potion:\"minecraft:swiftness\"}]",
+            2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let Some(Action::Slots {
+            source: SlotSource::Stacks(stacks),
+            ..
+        }) = actions.first()
+        else {
+            panic!("expected slot stacks, got {actions:?}");
+        };
+        let id = ferrite_item::component_id("potion_contents").unwrap();
+        assert!(stacks[0].components.contains(id), "{stacks:?}");
+    }
+
+    #[test]
     fn place_needs_the_worldgen_host_for_features() {
         denied("place feature minecraft:oak");
         let error = run("place feature minecraft:oak 0 64 0", 2)
@@ -3035,18 +3055,58 @@ mod tests {
             actions.first(),
             Some(Action::World(crate::game::commands_world::WorldCommand::Template { blocks, .. })) if !blocks.is_empty()
         ));
+        // The two villagers of the igloo basement travel with the command and are not thinned
+        // by the integrity roll.
+        let (result, actions) = run(
+            "place template minecraft:igloo/bottom 0 64 0 none none 0.0",
+            2,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(matches!(
+            actions.first(),
+            Some(Action::World(crate::game::commands_world::WorldCommand::Template { spawns, .. })) if spawns.len() == 2
+        ));
     }
 
     #[test]
     fn reload_and_datapack_commands_produce_actions() {
         assert_eq!(only("reload", 4), Action::Reload);
         denied("reload");
-        assert_eq!(only("datapack list", 4), Action::DatapackList);
+        use super::super::commands_server::{DatapackListKind, PackPlacement};
+        assert_eq!(
+            only("datapack list", 4),
+            Action::DatapackList(DatapackListKind::Both)
+        );
+        assert_eq!(
+            only("datapack list available", 4),
+            Action::DatapackList(DatapackListKind::Available)
+        );
+        assert_eq!(
+            only("datapack list enabled", 4),
+            Action::DatapackList(DatapackListKind::Enabled)
+        );
         assert_eq!(
             only("datapack enable pack", 4),
             Action::DatapackSet {
                 pack: "pack".into(),
                 enable: true,
+                placement: PackPlacement::Last,
+            }
+        );
+        assert_eq!(
+            only("datapack enable pack first", 4),
+            Action::DatapackSet {
+                pack: "pack".into(),
+                enable: true,
+                placement: PackPlacement::First,
+            }
+        );
+        assert_eq!(
+            only("datapack enable pack after other", 4),
+            Action::DatapackSet {
+                pack: "pack".into(),
+                enable: true,
+                placement: PackPlacement::After("other".into()),
             }
         );
         assert_eq!(
@@ -3054,8 +3114,13 @@ mod tests {
             Action::DatapackSet {
                 pack: "pack".into(),
                 enable: false,
+                placement: PackPlacement::Last,
             }
         );
+        assert!(matches!(
+            only("datapack create mine {\"text\":\"hi\"}", 4),
+            Action::DatapackCreate { id, .. } if id == "mine"
+        ));
         denied("datapack list");
         assert!(run("datapack enable", 4).0.is_err());
     }
@@ -3260,6 +3325,66 @@ mod tests {
     }
 
     #[test]
+    fn trigger_objective_alone_adds_one_and_the_bare_value_form_is_gone() {
+        let uuid = Uuid::from_u128(7);
+        let mut game = GameState::default();
+        game.join(uuid, "Alice".into(), 1, 20);
+        game.objectives.insert(
+            "t".into(),
+            Objective {
+                criteria: "trigger".into(),
+                display_name: "T".into(),
+                render_type: 0,
+            },
+        );
+        game.objectives.insert(
+            "plain".into(),
+            Objective {
+                criteria: "dummy".into(),
+                display_name: "P".into(),
+                render_type: 0,
+            },
+        );
+        let state = Arc::new(Mutex::new(game));
+        let go = |input: &str| run_with_state(input, 0, state.clone(), Some(uuid), Some("Alice"));
+        // Unprimed: vanilla's `commands.trigger.failed.unprimed`.
+        let error = go("trigger t").0.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot trigger this objective yet")
+        );
+        let prime = || {
+            state
+                .lock()
+                .unwrap()
+                .trigger_enabled
+                .insert(("t".into(), "Alice".into()))
+        };
+        prime();
+        let (result, actions) = go("trigger t");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            feedback_key(&actions),
+            Some("commands.trigger.simple.success")
+        );
+        assert_eq!(
+            state.lock().unwrap().scores[&("Alice".into(), "t".into())],
+            1
+        );
+        // `trigger <objective> <value>` does not exist in vanilla (commands.json).
+        prime();
+        assert!(go("trigger t 5").0.is_err());
+        assert_eq!(
+            state.lock().unwrap().scores[&("Alice".into(), "t".into())],
+            1
+        );
+        // A non-trigger objective: `commands.trigger.failed.invalid`.
+        let error = go("trigger plain").0.unwrap_err();
+        assert!(error.to_string().contains("'trigger' type"));
+    }
+
+    #[test]
     fn list_has_plain_and_uuid_forms_and_rejects_extra_arguments() {
         let (result, actions) = run("list", 0);
         assert!(result.is_ok(), "{result:?}");
@@ -3338,7 +3463,7 @@ mod tests {
             }
         );
         assert_eq!(
-            only("tp @s 10 70 20 rotation ~90 ~-10", 2),
+            only("tp @s 10 70 20 ~90 ~-10", 2),
             Action::Teleport {
                 targets: self_target(),
                 dimension: crate::game::Dimension::Overworld,
@@ -3349,6 +3474,8 @@ mod tests {
                 },
             }
         );
+        // Regression: the old `rotation` keyword is not part of the 26.3 tree.
+        assert!(run("tp @s 10 70 20 rotation ~90 ~-10", 2).0.is_err());
         assert_eq!(
             only("tp Alice", 2),
             Action::Teleport {
@@ -3869,6 +3996,7 @@ mod tests {
                 anchor: ferrite_command::EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 tree: None,
                 function_depth: 0,
             },
@@ -4001,8 +4129,10 @@ mod tests {
         );
 
         let (console, _) = player_source(2, None, state);
+        // `-1` is not a tick count, but it is a valid resource location, so in the 26.3 tree
+        // (`set` has both `<time>` and `<timemarker>`) it parses as a time marker.
         let error = tree.execute("time set -1", console).unwrap_err();
-        assert_eq!(error_key(error), "argument.time.tick_count_too_low");
+        assert_eq!(error_key(error), "commands.time.no_time_marker_found");
     }
 
     #[test]
@@ -4241,6 +4371,7 @@ mod tests {
             anchor: EntityAnchor::Feet,
             dimension: crate::game::Dimension::Overworld,
             world: None,
+            admin: None,
             state: Arc::new(Mutex::new(GameState::default())),
             actions: tx,
             tree: None,
@@ -4312,6 +4443,7 @@ mod tests {
                 anchor: ferrite_command::EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 tree: None,
                 function_depth: 0,
             },

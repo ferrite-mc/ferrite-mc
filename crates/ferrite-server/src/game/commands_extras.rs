@@ -353,10 +353,15 @@ fn effect_tree() -> NodeBuilder<Source> {
             literal("give").then(
                 argument("targets", ArgumentType::entities()).then(
                     argument("effect", effect())
+                        .executes(effect_give_default)
                         .then(
                             literal("infinite").executes(effect_give_infinite).then(
                                 argument("amplifier", ArgumentType::integer_range(0, 255))
-                                    .executes(effect_give_infinite_amplifier),
+                                    .executes(effect_give_infinite)
+                                    .then(
+                                        argument("hideParticles", ArgumentType::Bool)
+                                            .executes(effect_give_infinite),
+                                    ),
                             ),
                         )
                         .then(
@@ -364,7 +369,11 @@ fn effect_tree() -> NodeBuilder<Source> {
                                 .executes(effect_give_seconds)
                                 .then(
                                     argument("amplifier", ArgumentType::integer_range(0, 255))
-                                        .executes(effect_give_seconds_amplifier),
+                                        .executes(effect_give_seconds)
+                                        .then(
+                                            argument("hideParticles", ArgumentType::Bool)
+                                                .executes(effect_give_seconds),
+                                        ),
                                 ),
                         ),
                 ),
@@ -384,21 +393,35 @@ fn effect_clear_specific(ctx: &CommandContext<Source>) -> Result<i32, CommandErr
     effect_clear(ctx, true)
 }
 
-fn effect_give_infinite(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    effect_give(ctx, -1)
+/// The instantaneous effects: their `seconds` are not converted to ticks.
+fn is_instant(effect: i32) -> bool {
+    ["instant_health", "instant_damage", "saturation"]
+        .iter()
+        .any(|name| {
+            ferrite_data::registries::id("minecraft:mob_effect", &format!("minecraft:{name}"))
+                == Some(effect)
+        })
 }
 
-fn effect_give_infinite_amplifier(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+/// `/effect give <targets> <effect>`: vanilla's default is 30 seconds (600 ticks), or a single
+/// tick for an instantaneous effect.
+fn effect_give_default(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let duration = if is_instant(effect_id(ctx)?) { 1 } else { 600 };
+    effect_give(ctx, duration)
+}
+
+fn effect_give_infinite(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     effect_give(ctx, -1)
 }
 
 fn effect_give_seconds(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let seconds = ctx.integer("seconds").unwrap_or(0);
-    effect_give(ctx, seconds.saturating_mul(20))
-}
-
-fn effect_give_seconds_amplifier(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    effect_give_seconds(ctx)
+    let duration = if is_instant(effect_id(ctx)?) {
+        seconds
+    } else {
+        seconds.saturating_mul(20)
+    };
+    effect_give(ctx, duration)
 }
 
 fn effect_give(ctx: &CommandContext<Source>, duration: i32) -> Result<i32, CommandError> {
@@ -428,6 +451,10 @@ fn effect_give(ctx: &CommandContext<Source>, duration: i32) -> Result<i32, Comma
             effect,
             amplifier,
             duration,
+            hide_particles: matches!(
+                ctx.argument("hideParticles"),
+                Some(ArgumentValue::Bool(true))
+            ),
         },
     )?;
     let effect = effect_display(effect);
@@ -773,30 +800,35 @@ pub(crate) fn sound_id(raw: &str) -> Result<i32, CommandError> {
 }
 
 fn sound_source_branch(name: &'static str, source: i32) -> NodeBuilder<Source> {
-    literal::<Source>(name).then(
-        argument("targets", ArgumentType::players())
-            .executes(move |ctx| play_sound(ctx, source, false))
-            .then(
-                argument("pos", ArgumentType::Vec3)
-                    .executes(move |ctx| play_sound(ctx, source, true))
-                    .then(
-                        argument("volume", ArgumentType::float())
-                            .executes(move |ctx| play_sound(ctx, source, true))
-                            .then(
-                                argument("pitch", ArgumentType::float())
-                                    .executes(move |ctx| play_sound(ctx, source, true))
-                                    .then(
-                                        argument("minVolume", ArgumentType::float())
-                                            .executes(move |ctx| play_sound(ctx, source, true)),
-                                    ),
-                            ),
-                    ),
-            ),
-    )
+    literal::<Source>(name)
+        .executes(move |ctx| play_sound(ctx, source, false))
+        .then(
+            argument("targets", ArgumentType::players())
+                .executes(move |ctx| play_sound(ctx, source, false))
+                .then(
+                    argument("pos", ArgumentType::Vec3)
+                        .executes(move |ctx| play_sound(ctx, source, true))
+                        .then(
+                            argument("volume", ArgumentType::float())
+                                .executes(move |ctx| play_sound(ctx, source, true))
+                                .then(
+                                    argument("pitch", ArgumentType::float())
+                                        .executes(move |ctx| play_sound(ctx, source, true))
+                                        .then(
+                                            argument("minVolume", ArgumentType::float())
+                                                .executes(move |ctx| play_sound(ctx, source, true)),
+                                        ),
+                                ),
+                        ),
+                ),
+        )
 }
 
 fn playsound_tree() -> NodeBuilder<Source> {
-    let mut sound = argument("sound", ArgumentType::ResourceLocation);
+    // Vanilla: `playsound <sound>` and `playsound <sound> <source>` play to the calling player
+    // at the command position (`getCallingPlayerAsCollection`).
+    let mut sound =
+        argument("sound", ArgumentType::ResourceLocation).executes(|ctx| play_sound(ctx, 0, false));
     for (name, id) in SOUND_SOURCES {
         sound = sound.then(sound_source_branch(name, id));
     }
@@ -811,7 +843,13 @@ fn play_sound(
     source: i32,
     positional: bool,
 ) -> Result<i32, CommandError> {
-    let targets = resolved_targets(ctx, "targets")?;
+    // Without a `<targets>` argument vanilla plays to the calling player only; a source that
+    // is not a player has nobody to play to and fails like an out-of-range sound.
+    let targets = if ctx.argument("targets").is_some() {
+        resolved_targets(ctx, "targets")?
+    } else {
+        ctx.source().uuid.into_iter().collect()
+    };
     let raw = ctx.string("sound").unwrap_or_default().to_owned();
     let id = sound_id(&raw)?;
     let position = if positional {
@@ -839,30 +877,94 @@ fn play_sound(
             ferrite_command::error::java_float(pitch)
         )));
     }
-    packets(
-        ctx,
-        targets.clone(),
-        PlayerPacket::Sound(SoundEffect {
-            sound: sound_holder(id),
-            source: ferrite_protocol::VarInt(source),
-            x: (position[0] * 8.0) as i32,
-            y: (position[1] * 8.0) as i32,
-            z: (position[2] * 8.0) as i32,
-            volume,
-            pitch,
-            seed: 0,
-        }),
-    )?;
-    if targets.len() == 1 {
-        let target = target_names(ctx, &targets).remove(0);
-        feedback(ctx, "commands.playsound.success.single", vec![raw, target])
+    let min_volume = ctx
+        .argument("minVolume")
+        .and_then(ArgumentValue::as_f32)
+        .unwrap_or(0.0);
+    if !(0.0..=1.0).contains(&min_volume) {
+        return Err(CommandError::failed(format!(
+            "Float must be between 0.0 and 1.0: found {}",
+            ferrite_command::error::java_float(min_volume)
+        )));
+    }
+    let positions: Vec<(Uuid, [f64; 3])> = {
+        let state = ctx.source().state.lock().unwrap();
+        targets
+            .iter()
+            .map(|uuid| {
+                let at = state
+                    .players
+                    .iter()
+                    .find(|p| p.uuid == *uuid)
+                    .map_or(position, |p| p.pos);
+                (*uuid, at)
+            })
+            .collect()
+    };
+    // Vanilla `PlaySoundCommand.playSound`: audible within 16 blocks (`volume * 16` when the
+    // volume is above 1); a farther player hears it at `minVolume`, two blocks away in the
+    // direction of the sound, or not at all when `minVolume` is 0.
+    let range = if volume > 1.0 {
+        f64::from(volume) * 16.0
+    } else {
+        16.0
+    };
+    let mut heard = Vec::new();
+    for (uuid, at) in positions {
+        let d = [
+            position[0] - at[0],
+            position[1] - at[1],
+            position[2] - at[2],
+        ];
+        let dist_sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        let (sound_pos, sound_volume) = if dist_sq > range * range {
+            if min_volume <= 0.0 {
+                continue;
+            }
+            let dist = dist_sq.sqrt();
+            (
+                [
+                    at[0] + d[0] / dist * 2.0,
+                    at[1] + d[1] / dist * 2.0,
+                    at[2] + d[2] / dist * 2.0,
+                ],
+                min_volume,
+            )
+        } else {
+            (position, volume)
+        };
+        packets(
+            ctx,
+            vec![uuid],
+            PlayerPacket::Sound(SoundEffect {
+                sound: sound_holder(id),
+                source: ferrite_protocol::VarInt(source),
+                x: (sound_pos[0] * 8.0) as i32,
+                y: (sound_pos[1] * 8.0) as i32,
+                z: (sound_pos[2] * 8.0) as i32,
+                volume: sound_volume,
+                pitch,
+                seed: 0,
+            }),
+        )?;
+        heard.push(uuid);
+    }
+    if heard.is_empty() {
+        return Err(CommandError::failed(
+            "The sound is too far away to be heard",
+        ));
+    }
+    if heard.len() == 1 {
+        let target = target_names(ctx, &heard).remove(0);
+        feedback(ctx, "commands.playsound.success.single", vec![raw, target])?;
     } else {
         feedback(
             ctx,
             "commands.playsound.success.multiple",
-            vec![raw, targets.len().to_string()],
-        )
+            vec![raw, heard.len().to_string()],
+        )?;
     }
+    Ok(heard.len() as i32)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -873,12 +975,10 @@ fn stopsound_tree() -> NodeBuilder<Source> {
     let mut targets = argument("targets", ArgumentType::players())
         .executes(|ctx| stop_sound(ctx, None, false))
         .then(
-            literal("*")
-                .executes(|ctx| stop_sound(ctx, None, false))
-                .then(
-                    argument("sound", ArgumentType::ResourceLocation)
-                        .executes(|ctx| stop_sound(ctx, None, true)),
-                ),
+            literal("*").then(
+                argument("sound", ArgumentType::ResourceLocation)
+                    .executes(|ctx| stop_sound(ctx, None, true)),
+            ),
         );
     for (name, source) in SOUND_SOURCES {
         let source = Some(source);
@@ -949,20 +1049,38 @@ fn stop_sound(
 // ---------------------------------------------------------------------------------------------
 
 fn particle_tree() -> NodeBuilder<Source> {
+    // `[force|normal [<viewers>]]` after the count, per commands.json.
+    let mode = |name: &'static str, force: bool| {
+        literal::<Source>(name)
+            .executes(move |ctx| particle(ctx, true, true, true, force))
+            .then(
+                argument("viewers", ArgumentType::players())
+                    .executes(move |ctx| particle(ctx, true, true, true, force)),
+            )
+    };
     literal::<Source>("particle")
         .requires(gamemasters())
         .restricted(true)
         .then(
             argument("name", ArgumentType::opaque("minecraft:particle"))
-                .executes(|ctx| particle(ctx, false, false, false))
+                .executes(|ctx| particle(ctx, false, false, false, false))
                 .then(
                     argument("pos", ArgumentType::Vec3)
-                        .executes(|ctx| particle(ctx, true, false, false))
+                        .executes(|ctx| particle(ctx, true, false, false, false))
                         .then(
                             argument("delta", ArgumentType::Vec3).then(
-                                argument("speed", ArgumentType::float()).then(
+                                argument(
+                                    "speed",
+                                    ArgumentType::Float {
+                                        min: 0.0,
+                                        max: f32::MAX,
+                                    },
+                                )
+                                .then(
                                     argument("count", ArgumentType::integer_range(0, i32::MAX))
-                                        .executes(|ctx| particle(ctx, true, true, true)),
+                                        .executes(|ctx| particle(ctx, true, true, true, false))
+                                        .then(mode("force", true))
+                                        .then(mode("normal", false)),
                                 ),
                             ),
                         ),
@@ -970,11 +1088,14 @@ fn particle_tree() -> NodeBuilder<Source> {
         )
 }
 
+/// `force` shows the particle up to 512 blocks away, `normal` up to 32 (vanilla
+/// `ServerLevel.sendParticles`); only players in the command's dimension see it.
 fn particle(
     ctx: &CommandContext<Source>,
     positional: bool,
     has_delta: bool,
     full: bool,
+    force: bool,
 ) -> Result<i32, CommandError> {
     let raw = ctx.string("name").unwrap_or_default().to_owned();
     let particle = registry_id("minecraft:particle_type", &raw)?;
@@ -992,24 +1113,46 @@ fn particle(
         .argument("speed")
         .and_then(ArgumentValue::as_f32)
         .unwrap_or(0.0);
-    if speed < 0.0 {
-        return Err(CommandError::failed(format!(
-            "Float must not be less than 0.0: found {}",
-            ferrite_command::error::java_float(speed)
-        )));
-    }
     let count = if full {
         ctx.integer("count").unwrap_or(1)
     } else {
         1
     };
+    let candidates: Vec<Uuid> = if ctx.argument("viewers").is_some() {
+        resolved_targets(ctx, "viewers")?
+    } else {
+        let state = ctx.source().state.lock().unwrap();
+        state.players.iter().map(|p| p.uuid).collect()
+    };
+    let range = if force { 512.0_f64 } else { 32.0_f64 };
+    let viewers: Vec<Uuid> = {
+        let state = ctx.source().state.lock().unwrap();
+        candidates
+            .into_iter()
+            .filter(|uuid| {
+                state.players.iter().any(|p| {
+                    p.uuid == *uuid
+                        && p.dimension == ctx.source().dimension
+                        && (0..3)
+                            .map(|i| (p.pos[i].floor() + 0.5 - position[i]).powi(2))
+                            .sum::<f64>()
+                            < range * range
+                })
+            })
+            .collect()
+    };
+    if viewers.is_empty() {
+        return Err(CommandError::failed(
+            "The particle was not visible for anybody",
+        ));
+    }
     packets(
         ctx,
-        Vec::new(),
+        viewers,
         PlayerPacket::Particles(LevelParticles {
             particle: ferrite_protocol::VarInt(particle),
-            long_distance: false,
-            always_show: true,
+            long_distance: force,
+            always_show: force,
             x: position[0],
             y: position[1],
             z: position[2],
@@ -1458,6 +1601,7 @@ mod tests {
                 anchor: ferrite_command::EntityAnchor::Feet,
                 dimension: crate::game::Dimension::Overworld,
                 world: None,
+                admin: None,
                 tree: None,
                 function_depth: 0,
             },
@@ -1527,6 +1671,7 @@ mod tests {
                 effect,
                 amplifier: 1,
                 duration: 100,
+                hide_particles: false,
                 ..
             } if *effect == speed
         )));
@@ -1549,6 +1694,51 @@ mod tests {
         assert!(error_text(error).contains("not_an_effect"));
         assert!(run("effect clear @s speed", 2).0.is_err());
         denied("effect give @s speed 5");
+    }
+
+    #[test]
+    fn effect_give_defaults_instant_and_hide_particles() {
+        let speed =
+            ferrite_data::registries::id("minecraft:mob_effect", "minecraft:speed").unwrap();
+        let heal = ferrite_data::registries::id("minecraft:mob_effect", "minecraft:instant_health")
+            .unwrap();
+        let given = |input: &str| -> (i32, i32, i32, bool) {
+            let actions = success(input);
+            actions
+                .iter()
+                .find_map(|a| match a {
+                    Action::Effect {
+                        effect,
+                        amplifier,
+                        duration,
+                        hide_particles,
+                        ..
+                    } => Some((*effect, *amplifier, *duration, *hide_particles)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{input}: {actions:?}"))
+        };
+        // commands.json: `effect give <targets> <effect>` is executable; vanilla's default is
+        // 30 seconds, and an instantaneous effect lasts one tick.
+        assert_eq!(given("effect give @s speed"), (speed, 0, 600, false));
+        assert_eq!(given("effect give @s instant_health"), (heal, 0, 1, false));
+        // Seconds of an instantaneous effect are not multiplied by 20.
+        assert_eq!(
+            given("effect give @s instant_health 3 1"),
+            (heal, 1, 3, false)
+        );
+        assert_eq!(
+            given("effect give @s speed 10 2 true"),
+            (speed, 2, 200, true)
+        );
+        assert_eq!(
+            given("effect give @s speed infinite 1 true"),
+            (speed, 1, -1, true)
+        );
+        assert_eq!(
+            given("effect give @s speed 10 0 false"),
+            (speed, 0, 200, false)
+        );
     }
 
     #[test]
@@ -1640,6 +1830,60 @@ mod tests {
     }
 
     #[test]
+    fn playsound_without_targets_plays_to_the_calling_player() {
+        // `playsound <sound>` and `playsound <sound> <source>` are executable in vanilla and
+        // play to the calling player (commands.json: `sound` and each source literal).
+        let actions = success("playsound minecraft:entity.player.levelup");
+        match only_packet(&actions) {
+            PlayerPacket::Sound(packet) => assert_eq!(packet.source.0, 0),
+            other => panic!("expected sound, got {other:?}"),
+        }
+        assert_eq!(
+            only_feedback(&actions).key,
+            "commands.playsound.success.single"
+        );
+        let actions = success("playsound minecraft:entity.player.levelup ui");
+        match only_packet(&actions) {
+            PlayerPacket::Sound(packet) => assert_eq!(packet.source.0, 10),
+            other => panic!("expected sound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn playsound_range_and_min_volume_follow_vanilla() {
+        // A target more than 16 blocks away hears nothing without a minimum volume ...
+        let (result, actions) = run(
+            "playsound minecraft:entity.player.levelup master @s 0 200 0 1 1",
+            2,
+        );
+        assert!(
+            error_text(result.unwrap_err()).contains("too far away"),
+            "{actions:?}"
+        );
+        assert!(actions.is_empty());
+        // ... and hears it at `minVolume` two blocks from itself with one.
+        let actions =
+            success("playsound minecraft:entity.player.levelup master @s 0 200 0 1 1 0.5");
+        match only_packet(&actions) {
+            PlayerPacket::Sound(packet) => {
+                assert_eq!(packet.volume, 0.5);
+                assert!((527..=528).contains(&packet.y), "{}", packet.y);
+            }
+            other => panic!("expected sound, got {other:?}"),
+        }
+        // A volume above 1 widens the range to `volume * 16`.
+        success("playsound minecraft:entity.player.levelup master @s 0 200 0 10 1");
+        // Without a calling player (console) nobody hears the sound.
+        let tree = super::super::commands::dispatcher();
+        let (mut source, _received) = source(2);
+        source.uuid = None;
+        assert!(
+            tree.execute("playsound minecraft:entity.player.levelup", source)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn stopsound_sends_source_and_sound_filters() {
         let actions = success("stopsound @s music minecraft:music.game");
         match only_packet(&actions) {
@@ -1653,7 +1897,17 @@ mod tests {
             only_feedback(&actions).key,
             "commands.stopsound.success.source.sound"
         );
-        let actions = success("stopsound @s *");
+        // Vanilla: `stopsound <targets> *` alone is incomplete; `*` needs a sound.
+        assert!(run("stopsound @s *", 2).0.is_err());
+        let actions = success("stopsound @s * minecraft:music.game");
+        match only_packet(&actions) {
+            PlayerPacket::StopSound(packet) => {
+                assert!(packet.source.is_none());
+                assert_eq!(packet.sound.as_deref(), Some("minecraft:music.game"));
+            }
+            other => panic!("expected stop sound, got {other:?}"),
+        }
+        let actions = success("stopsound @s");
         match only_packet(&actions) {
             PlayerPacket::StopSound(packet) => {
                 assert!(packet.source.is_none());
@@ -1679,6 +1933,35 @@ mod tests {
         let error = run("particle not_a_particle", 2).0.unwrap_err();
         assert!(error_text(error).contains("not_a_particle"));
         denied("particle minecraft:flame");
+    }
+
+    #[test]
+    fn particle_force_normal_viewers_and_range() {
+        // commands.json: `... <count> [force|normal [<viewers>]]`.
+        let actions = success("particle minecraft:flame 1 64 1 0 0 0 0 5 force @s");
+        match only_packet(&actions) {
+            PlayerPacket::Particles(packet) => {
+                assert!(packet.always_show && packet.long_distance, "force");
+            }
+            other => panic!("expected particles, got {other:?}"),
+        }
+        let actions = success("particle minecraft:flame 1 64 1 0 0 0 0 5 normal");
+        match only_packet(&actions) {
+            PlayerPacket::Particles(packet) => {
+                assert!(!packet.always_show && !packet.long_distance, "normal");
+            }
+            other => panic!("expected particles, got {other:?}"),
+        }
+        // 100 blocks away: not visible with `normal` (32), visible with `force` (512).
+        let far = run("particle minecraft:flame 100 64 0 0 0 0 0 5 normal", 2).0;
+        assert!(error_text(far.unwrap_err()).contains("not visible for anybody"));
+        success("particle minecraft:flame 100 64 0 0 0 0 0 5 force");
+        assert!(
+            run("particle minecraft:flame 1 64 1 0 0 0 -1 5", 2)
+                .0
+                .is_err(),
+            "speed min 0"
+        );
     }
 
     #[test]

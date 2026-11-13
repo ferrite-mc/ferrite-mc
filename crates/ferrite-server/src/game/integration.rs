@@ -795,7 +795,7 @@ async fn operator_teleport_command_moves_player() {
     // Vec3 centers absolute integer x/z on the block center, like vanilla.
     assert_eq!([p.x, p.y, p.z], [10.5, 70.0, 20.5]);
 
-    bot.raw(7, "tp @s ~ ~5 ~ rotation 90 10").await;
+    bot.raw(7, "tp @s ~ ~5 ~ 90 10").await;
     let body = bot.until(73).await;
     let p = PositionSync::decode(&mut body.as_slice()).unwrap();
     assert_eq!([p.x, p.y, p.z], [10.5, 75.0, 20.5]);
@@ -6810,4 +6810,65 @@ async fn a_fishing_rod_casts_a_bobber_and_a_second_use_reels_it_in_with_bot() {
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clone_between_dimensions_reads_one_world_and_writes_another() {
+    let world = World::start();
+    let overworld = world
+        .dimensions()
+        .source(super::Dimension::Overworld)
+        .clone();
+    let nether = world.dimensions().source(super::Dimension::Nether).clone();
+    for command in [
+        "forceload add 0 0",
+        "execute in minecraft:the_nether run forceload add 0 0",
+    ] {
+        world.console_command(command.into()).await.unwrap();
+    }
+    let wait = async {
+        while overworld.get(0, 0, 0).is_none() || nether.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+        .await
+        .expect("both dimensions load their chunk");
+    let stone = u32::from(ferrite_data::blocks::default_state("minecraft:stone").unwrap());
+    let gold = u32::from(ferrite_data::blocks::default_state("minecraft:gold_block").unwrap());
+    overworld.set_block(1, 200, 0, stone).unwrap();
+    overworld.set_block(2, 200, 0, gold).unwrap();
+    world
+        .console_command("clone 1 200 0 2 200 0 to minecraft:the_nether 4 200 0".into())
+        .await
+        .unwrap();
+    let done = async {
+        while nether.block(5, 200, 0) != Some(gold) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), done)
+        .await
+        .expect("the overworld blocks arrive in the nether");
+    assert_eq!(nether.block(4, 200, 0), Some(stone));
+    // The source is untouched by a normal clone, the other dimension never saw the blocks.
+    assert_eq!(overworld.block(2, 200, 0), Some(gold));
+    assert_ne!(overworld.block(5, 200, 0), Some(gold));
+    // `move` clears the source once the destination is written.
+    world
+        .console_command(
+            "clone 1 200 0 2 200 0 to minecraft:the_nether 8 200 0 replace move".into(),
+        )
+        .await
+        .unwrap();
+    let cleared = async {
+        while overworld.block(2, 200, 0) == Some(gold) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), cleared)
+        .await
+        .expect("move clears the overworld source");
+    assert_eq!(nether.block(9, 200, 0), Some(gold));
+    world.shutdown().await.unwrap();
 }

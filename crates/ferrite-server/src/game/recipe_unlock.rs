@@ -1,7 +1,8 @@
 //! Unlocks recipes from play, like the `recipes/**` advancements do: a recipe comes into the
-//! book once the player holds an item its advancement asks for (`inventory_changed`), or already
-//! has the recipe (`recipe_unlocked`). Counts, components and the other triggers (`enter_block`,
-//! `tick`) are not evaluated. The rules are read from the extracted advancement data.
+//! book once the player holds an item its advancement asks for (`inventory_changed`), already
+//! has the recipe (`recipe_unlocked`), enters a matching block (`enter_block`) or ticks
+//! (`tick`). Counts and components are not evaluated. The rules are read from the extracted
+//! advancement data.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,14 +18,18 @@ pub enum Criterion {
     /// Every entry must match a held item; an entry is `(names, is_tag)` alternatives.
     Holds(Vec<Vec<String>>),
     Recipe(String),
+    /// `enter_block` with a block predicate.
+    InBlock(BlockMatch),
+    /// `tick` with no conditions; it fires for every player.
+    Ticks,
     /// `player_killed_entity` with nothing but a plain entity type to match.
     Kills(String),
     /// `consume_item` of one item id, or any item (`*`).
     Consumes(String),
     /// `changed_dimension` into one dimension (no `from`).
     EntersDimension(String),
-    /// `placed_block` of exactly one block id.
-    Places(String),
+    /// `placed_block` of a block id, list or `#tag`, optionally with block state properties.
+    Places(BlockMatch),
     /// `location` with nothing but one plain biome id to match.
     InBiome(String),
     /// `recipe_crafted` of one recipe id with no ingredient condition.
@@ -33,9 +38,34 @@ pub enum Criterion {
     Breeds(String),
     /// `tame_animal` with no conditions.
     Tames,
+    /// `bred_animals` of two parents of one entity type (frog, sniffer and turtle ask for their
+    /// parents, because their babies are other entities). Ferrite's offspring always has its
+    /// parents' type, so the parents' type is the baby's.
+    BredParents(String),
+    /// `tame_animal` of a cat or wolf with one variant (`minecraft:cat/variant` and the like).
+    TamesVariant {
+        component: String,
+        variant: String,
+    },
     /// `item_used_on_block` with a block, optional state, tool, biome and smoke condition.
     UsedOnBlock(UsedOnBlock),
-    Other,
+    /// `slept_in_bed` with no conditions.
+    Sleeps,
+    /// `entity_killed_player` with no conditions: an entity killed the player.
+    KilledByEntity,
+    /// `effects_changed` with an `effects` map only: every listed effect must be active (with its
+    /// amplifier and duration ranges, when given).
+    HasEffects(Vec<(String, Range, Range)>),
+    /// `nether_travel`: the distance between where the player entered the Nether and where they
+    /// came back out.
+    NetherTravel(DistanceCheck),
+    /// A trigger whose conditions are a few plain predicates (an item, an entity type, a loot
+    /// table, a level, the player's height, the damage's direct entity).
+    Plain(Box<Plain>),
+    /// A trigger this server cannot evaluate (or one whose conditions are richer than the
+    /// supported shape); the payload is the trigger id, read by [`coverage`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    Other(String),
 }
 
 /// The conditions of an `item_used_on_block` criterion this server can check.
@@ -69,6 +99,43 @@ pub struct UsedRecord {
 
 /// Uses of items on blocks since the last drain.
 pub static USED_ON_BLOCK: Mutex<Vec<UsedRecord>> = Mutex::new(Vec::new());
+
+/// The block predicate of an `enter_block` criterion.
+#[derive(Debug, Clone, Default)]
+pub struct BlockMatch {
+    /// Block ids or `#tags`; empty matches no block.
+    pub blocks: Vec<String>,
+    /// Block state properties that must match.
+    pub state: Vec<(String, String)>,
+}
+
+impl BlockMatch {
+    fn matches(&self, block: &str, props: &[(&str, &str)]) -> bool {
+        !self.blocks.is_empty()
+            && id_matches(&self.blocks, "block", block)
+            && self.state.iter().all(|(key, value)| {
+                props
+                    .iter()
+                    .any(|(k, v)| *k == key.as_str() && *v == value.as_str())
+            })
+    }
+}
+
+/// One block a player entered, for [`criteria_for_block`].
+#[derive(Debug, Clone)]
+pub struct BlockRecord {
+    pub player: Uuid,
+    pub block: &'static str,
+    pub props: &'static [(&'static str, &'static str)],
+}
+
+/// Blocks players entered since the last drain.
+pub static BLOCKS: Mutex<Vec<BlockRecord>> = Mutex::new(Vec::new());
+
+type BlockSnapshot = (&'static str, &'static [(&'static str, &'static str)]);
+
+/// Last block each player stood in, so entering is reported once and leaving re-arms it.
+pub static LAST_BLOCK: Mutex<BTreeMap<Uuid, BlockSnapshot>> = Mutex::new(BTreeMap::new());
 
 fn id_matches(list: &[String], kind: &str, id: &str) -> bool {
     let short = |s: &str| {
@@ -240,16 +307,61 @@ fn consumed_item(conditions: &serde_json::Value) -> Option<String> {
     (!name.starts_with('#')).then(|| name.to_owned())
 }
 
-/// The block a `placed_block` criterion asks for, when that is all it asks for.
-fn placed_block(conditions: &serde_json::Value) -> Option<String> {
+/// The block predicate of an `enter_block` criterion, when that is all it asks for.
+fn entered_block(conditions: &serde_json::Value) -> Option<BlockMatch> {
+    let object = conditions.as_object()?;
+    // 26.3 puts `blocks`/`state` directly in the conditions; accept the older nested
+    // `block` object too.
+    let block = match object.get("block") {
+        Some(serde_json::Value::Object(_)) => {
+            if object.len() != 1 {
+                return None;
+            }
+            object.get("block")?.as_object()?
+        }
+        _ => object,
+    };
+    if block.len() > 2 {
+        return None;
+    }
+    let blocks = alternatives(block.get("blocks")?);
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut state = Vec::new();
+    if let Some(wanted) = block.get("state").and_then(|value| value.as_object()) {
+        for (key, value) in wanted {
+            state.push((key.clone(), value.as_str()?.to_owned()));
+        }
+    }
+    Some(BlockMatch { blocks, state })
+}
+
+/// The block a `placed_block` criterion asks for (an id, a list, a `#tag`, with optional state
+/// properties), when that is all it asks for.
+fn placed_block(conditions: &serde_json::Value) -> Option<BlockMatch> {
     let object = conditions.as_object()?;
     let location = object.get("location")?.as_object()?;
-    if object.len() != 1 || location.len() != 2 || location.get("type")? != "minecraft:match_block"
+    if object.len() != 1 || location.get("type")? != "minecraft:match_block" {
+        return None;
+    }
+    if location
+        .keys()
+        .any(|k| !matches!(k.as_str(), "type" | "blocks" | "state"))
     {
         return None;
     }
-    let name = location.get("blocks")?.as_str()?;
-    (!name.starts_with('#')).then(|| name.to_owned())
+    let blocks = alternatives(location.get("blocks")?);
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut state = Vec::new();
+    if let Some(wanted) = location.get("state") {
+        for (key, value) in wanted.as_object()? {
+            state.push((key.clone(), value.as_str()?.to_owned()));
+        }
+    }
+    Some(BlockMatch { blocks, state })
 }
 
 /// The child a `bred_animals` criterion asks for (`*` for any), when that is all it asks for.
@@ -267,6 +379,33 @@ fn bred_child(conditions: &serde_json::Value) -> Option<String> {
     }
     let name = predicate.get("minecraft:entity_type")?.as_str()?;
     (!name.starts_with('#')).then(|| name.to_owned())
+}
+
+/// The `(component, variant)` a `tame_animal` criterion asks for, when that is all it asks for.
+fn tamed_variant(conditions: &serde_json::Value) -> Option<(String, String)> {
+    let object = conditions.as_object()?;
+    let entity = object.get("entity")?;
+    let predicate = entity["predicate"].as_object()?;
+    if object.len() != 1 || entity["type"] != "minecraft:entity_properties" || predicate.len() != 1
+    {
+        return None;
+    }
+    let components = predicate.get("minecraft:components")?.as_object()?;
+    let [(component, variant)] = components.iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    Some((component.clone(), variant.as_str()?.to_owned()))
+}
+
+/// The entity type of both parents of a `bred_animals` criterion that asks for nothing else.
+fn bred_parents(conditions: &serde_json::Value) -> Option<String> {
+    let object = conditions.as_object()?;
+    if object.len() != 2 {
+        return None;
+    }
+    let parent = kill_type(&serde_json::json!({"entity": object.get("parent")?}))?;
+    let partner = kill_type(&serde_json::json!({"entity": object.get("partner")?}))?;
+    (parent == partner).then_some(parent)
 }
 
 /// The biome a `location` criterion asks for, when that is all it asks for.
@@ -328,15 +467,447 @@ pub fn criteria_for_biome(biome: &str) -> Vec<String> {
     out
 }
 
-/// Blocks players placed since the last drain, `(player, block id)`.
-pub static PLACED: Mutex<Vec<(Uuid, &'static str)>> = Mutex::new(Vec::new());
-
-/// Advancement criteria completed by placing a block.
-pub fn criteria_for_placed(block: &str) -> Vec<String> {
+/// Advancement criteria completed by entering a block.
+pub fn criteria_for_block(record: &BlockRecord) -> Vec<String> {
     let mut out = Vec::new();
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
-            if matches!(criterion, Criterion::Places(wanted) if wanted == block) {
+            if let Criterion::InBlock(wanted) = criterion
+                && wanted.matches(record.block, record.props)
+            {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// Advancement criteria completed by the unconditioned `tick` trigger.
+pub fn criteria_for_tick() -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Ticks) {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// Blocks players placed since the last drain (the state they were placed with).
+pub static PLACED: Mutex<Vec<BlockRecord>> = Mutex::new(Vec::new());
+
+/// Advancement criteria completed by placing a block.
+pub fn criteria_for_placed(record: &BlockRecord) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            if matches!(criterion, Criterion::Places(wanted) if wanted.matches(record.block, record.props))
+            {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// A numeric range of a `distance` predicate (`min` and `max` are inclusive).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Range {
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+}
+
+impl Range {
+    fn contains(&self, value: f64) -> bool {
+        self.min.is_none_or(|min| value >= min) && self.max.is_none_or(|max| value <= max)
+    }
+}
+
+/// The `distance` predicate of a trigger: ranges over the offset between two positions.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DistanceCheck {
+    pub x: Option<Range>,
+    pub y: Option<Range>,
+    pub z: Option<Range>,
+    /// Distance in the horizontal plane.
+    pub horizontal: Option<Range>,
+    /// Three-dimensional distance.
+    pub absolute: Option<Range>,
+}
+
+impl DistanceCheck {
+    /// Vanilla `DistancePredicate.matches` for an offset `delta` between two positions.
+    pub fn matches(&self, delta: [f64; 3]) -> bool {
+        let horizontal = delta[0].hypot(delta[2]);
+        let absolute = (horizontal * horizontal + delta[1] * delta[1]).sqrt();
+        [
+            (&self.x, delta[0].abs()),
+            (&self.y, delta[1].abs()),
+            (&self.z, delta[2].abs()),
+            (&self.horizontal, horizontal),
+            (&self.absolute, absolute),
+        ]
+        .iter()
+        .all(|(range, value)| range.as_ref().is_none_or(|r| r.contains(*value)))
+    }
+}
+
+fn range_of(value: &serde_json::Value) -> Option<Range> {
+    match value {
+        serde_json::Value::Number(exact) => {
+            let exact = exact.as_f64()?;
+            Some(Range {
+                min: Some(exact),
+                max: Some(exact),
+            })
+        }
+        serde_json::Value::Object(bounds) => Some(Range {
+            min: bounds.get("min").and_then(serde_json::Value::as_f64),
+            max: bounds.get("max").and_then(serde_json::Value::as_f64),
+        }),
+        _ => None,
+    }
+}
+
+/// One active effect of a player, as the region threads report it on every inventory scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectFact {
+    /// `minecraft:speed`
+    pub name: String,
+    pub amplifier: i32,
+    pub duration: i32,
+}
+
+/// Active effects of each player, refreshed on `Command::ScanInventory`.
+pub static EFFECTS: Mutex<BTreeMap<Uuid, Vec<EffectFact>>> = Mutex::new(BTreeMap::new());
+
+/// Advancement criteria completed by having these effects active at once.
+pub fn criteria_for_effects(active: &[EffectFact]) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            let Criterion::HasEffects(wanted) = criterion else {
+                continue;
+            };
+            let all = effects_hold(wanted, active);
+            if all {
+                out.push(format!("{}#{name}", rule.id));
+            }
+        }
+    }
+    out
+}
+
+/// Whether every wanted `(effect, amplifier range, duration range)` is active.
+fn effects_hold(wanted: &[(String, Range, Range)], active: &[EffectFact]) -> bool {
+    !wanted.is_empty()
+        && wanted.iter().all(|(effect, amplifier, duration)| {
+            active.iter().any(|fact| {
+                fact.name == *effect
+                    && amplifier.contains(f64::from(fact.amplifier))
+                    && duration.contains(f64::from(fact.duration))
+            })
+        })
+}
+
+/// The `effects` map of an `effects_changed` criterion, when that is all it asks for.
+fn effects_map(conditions: &serde_json::Value) -> Option<Vec<(String, Range, Range)>> {
+    let object = conditions.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (name, wanted) in object.get("effects")?.as_object()? {
+        let wanted = wanted.as_object()?;
+        let mut amplifier = Range::default();
+        let mut duration = Range::default();
+        for (key, value) in wanted {
+            match key.as_str() {
+                "amplifier" => amplifier = range_of(value)?,
+                "duration" => duration = range_of(value)?,
+                _ => return None,
+            }
+        }
+        out.push((name.clone(), amplifier, duration));
+    }
+    Some(out)
+}
+
+/// `{"distance": {...}}` of `nether_travel`; anything besides the distance makes it unsupported.
+fn travel_distance(conditions: &serde_json::Value) -> Option<DistanceCheck> {
+    let object = conditions.as_object()?;
+    if object
+        .keys()
+        .any(|key| key != "distance" && key != "player")
+    {
+        return None;
+    }
+    if object.get("player").is_some_and(|player| !player.is_null()) {
+        return None;
+    }
+    let mut out = DistanceCheck::default();
+    for (axis, range) in object.get("distance")?.as_object()? {
+        let range = Some(range_of(range)?);
+        match axis.as_str() {
+            "x" => out.x = range,
+            "y" => out.y = range,
+            "z" => out.z = range,
+            "horizontal" => out.horizontal = range,
+            "absolute" => out.absolute = range,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A play event with no data beyond who it happened to, for the triggers that need none.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// The player went to bed (`slept_in_bed`).
+    SleptInBed,
+    /// An entity (a mob or a shooter) killed the player (`entity_killed_player`).
+    KilledByEntity,
+    /// The player came back from the Nether; `delta` is where they stand now minus where they
+    /// entered the Nether, in the overworld (`nether_travel`).
+    NetherTravel { delta: [f64; 3] },
+    /// One of the [`PLAIN_TRIGGERS`] fired.
+    Plain(PlainEvent),
+}
+
+/// The triggers [`Plain`] criteria cover. Each one has an emission site in the world loop.
+pub const PLAIN_TRIGGERS: &[&str] = &[
+    "minecraft:used_totem",
+    "minecraft:brewed_potion",
+    "minecraft:construct_beacon",
+    "minecraft:enchanted_item",
+    "minecraft:villager_trade",
+    "minecraft:fishing_rod_hooked",
+    "minecraft:player_hurt_entity",
+    "minecraft:levitation",
+    "minecraft:player_generates_container_loot",
+    "minecraft:channeled_lightning",
+];
+
+/// The plain predicates of one criterion; an empty list or `None` matches anything.
+#[derive(Debug, Clone, Default)]
+pub struct Plain {
+    pub trigger: String,
+    /// Item ids or `#tags` of the item the trigger names.
+    pub items: Vec<String>,
+    /// Entity type ids or `#tags` of the entity the trigger names.
+    pub entities: Vec<String>,
+    pub table: Option<String>,
+    pub level: Option<Range>,
+    /// The height the player must stand at.
+    pub player_y: Option<Range>,
+    /// Entity types of the damage's direct entity (`player_hurt_entity`).
+    pub direct: Vec<String>,
+    /// The damage must be a projectile (`#minecraft:is_projectile`).
+    pub projectile: bool,
+    /// The offset the player moved (`levitation`).
+    pub distance: Option<DistanceCheck>,
+    /// Entity types, one list per victim a criterion names; each must match a different victim
+    /// (`channeled_lightning`).
+    pub victims: Vec<Vec<String>>,
+}
+
+/// What happened, for a [`Plain`] criterion to match.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlainEvent {
+    pub trigger: &'static str,
+    pub item: Option<String>,
+    pub entity: Option<String>,
+    pub table: Option<String>,
+    pub level: Option<i32>,
+    pub player_y: f64,
+    pub direct: Option<String>,
+    pub projectile: bool,
+    /// Where the player is now minus where the effect began (`levitation`).
+    pub delta: [f64; 3],
+    /// The entity types of everything a lightning bolt hit (`channeled_lightning`).
+    pub victims: Vec<String>,
+}
+
+impl Plain {
+    fn matches(&self, event: &PlainEvent) -> bool {
+        let named = |wanted: &[String], kind: &str, got: &Option<String>| {
+            wanted.is_empty()
+                || got
+                    .as_deref()
+                    .is_some_and(|id| id_matches(wanted, kind, id))
+        };
+        self.trigger == event.trigger
+            && named(&self.items, "item", &event.item)
+            && named(&self.entities, "entity_type", &event.entity)
+            && named(&self.direct, "entity_type", &event.direct)
+            && self
+                .table
+                .as_ref()
+                .is_none_or(|wanted| event.table.as_ref().is_some_and(|got| got == wanted))
+            && self.level.as_ref().is_none_or(|range| {
+                event
+                    .level
+                    .is_some_and(|level| range.contains(f64::from(level)))
+            })
+            && self
+                .player_y
+                .as_ref()
+                .is_none_or(|range| range.contains(event.player_y))
+            && (!self.projectile || event.projectile)
+            && self
+                .distance
+                .as_ref()
+                .is_none_or(|distance| distance.matches(event.delta))
+            && self.victims_hit(&event.victims)
+    }
+
+    /// Every wanted victim is matched by a different entity the bolt hit.
+    fn victims_hit(&self, hit: &[String]) -> bool {
+        fn assign(wanted: &[Vec<String>], hit: &[String], used: &mut Vec<bool>) -> bool {
+            let Some((first, rest)) = wanted.split_first() else {
+                return true;
+            };
+            for (index, entity) in hit.iter().enumerate() {
+                if !used[index] && id_matches(first, "entity_type", entity) {
+                    used[index] = true;
+                    if assign(rest, hit, used) {
+                        return true;
+                    }
+                    used[index] = false;
+                }
+            }
+            false
+        }
+        assign(&self.victims, hit, &mut vec![false; hit.len()])
+    }
+}
+
+/// Reads an entity predicate that asks for nothing but an entity type (a plain id, a list or a
+/// `#tag`).
+fn entity_types(entity: &serde_json::Value) -> Option<Vec<String>> {
+    let predicate = entity["predicate"].as_object()?;
+    if entity["type"] != "minecraft:entity_properties"
+        || entity["entity"] != "this"
+        || predicate.len() != 1
+    {
+        return None;
+    }
+    let list = alternatives(predicate.get("minecraft:entity_type")?);
+    (!list.is_empty()).then_some(list)
+}
+
+/// Reads the conditions of a [`PLAIN_TRIGGERS`] criterion, or `None` when it asks for more than
+/// a [`Plain`] checks.
+fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
+    let mut out = Plain {
+        trigger: trigger.to_owned(),
+        ..Plain::default()
+    };
+    let Some(object) = conditions.as_object() else {
+        return conditions.is_null().then_some(out);
+    };
+    for (key, value) in object {
+        match key.as_str() {
+            "item" => {
+                let item = value.as_object()?;
+                if item.len() != 1 {
+                    return None;
+                }
+                out.items = alternatives(item.get("items")?);
+            }
+            "entity" => out.entities = entity_types(value)?,
+            "loot_tables" => out.table = Some(value.as_str()?.to_owned()),
+            "level" => out.level = Some(range_of(value)?),
+            "player" => {
+                let location = value["predicate"].as_object()?;
+                if value["type"] != "minecraft:entity_properties"
+                    || value["entity"] != "this"
+                    || location.len() != 1
+                {
+                    return None;
+                }
+                let position = location.get("minecraft:location")?["position"].as_object()?;
+                if position.len() != 1 {
+                    return None;
+                }
+                out.player_y = Some(range_of(position.get("y")?)?);
+            }
+            "distance" => {
+                out.distance = Some(travel_distance(&serde_json::json!({"distance": value}))?);
+            }
+            "victims" => {
+                for victim in value.as_array()? {
+                    out.victims.push(entity_types(victim)?);
+                }
+            }
+            "damage" => {
+                let kind = value.as_object()?.get("type")?.as_object()?;
+                if value.as_object()?.len() != 1 {
+                    return None;
+                }
+                for (key, value) in kind {
+                    match key.as_str() {
+                        "direct_entity" => {
+                            let direct = value.as_object()?;
+                            if direct.len() != 1 {
+                                return None;
+                            }
+                            out.direct = alternatives(direct.get("minecraft:entity_type")?);
+                        }
+                        "tags" => {
+                            let tags = value.as_array()?;
+                            let [tag] = tags.as_slice() else { return None };
+                            if tag["id"] != "#minecraft:is_projectile" || tag["expected"] != true {
+                                return None;
+                            }
+                            out.projectile = true;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Where each player's levitation began, so `levitation` can tell how far they have risen.
+pub static LEVITATION_START: Mutex<BTreeMap<Uuid, [f64; 3]>> = Mutex::new(BTreeMap::new());
+
+/// Queues a [`PlainEvent`] for the world loop.
+pub fn push_plain(player: Uuid, event: PlainEvent) {
+    push_event(player, Event::Plain(event));
+}
+
+/// Events since the last drain, `(player, event)`.
+pub static EVENTS: Mutex<Vec<(Uuid, Event)>> = Mutex::new(Vec::new());
+
+/// Queues an event for the world loop to turn into advancement criteria.
+pub fn push_event(player: Uuid, event: Event) {
+    EVENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((player, event));
+}
+
+/// Advancement criteria (`<advancement>#<criterion>`) an event completes.
+pub fn criteria_for_event(event: &Event) -> Vec<String> {
+    let mut out = Vec::new();
+    for rule in rules() {
+        for (name, criterion) in &rule.criteria {
+            let hit = match (criterion, event) {
+                (Criterion::Sleeps, Event::SleptInBed) => true,
+                (Criterion::KilledByEntity, Event::KilledByEntity) => true,
+                (Criterion::NetherTravel(wanted), Event::NetherTravel { delta }) => {
+                    wanted.matches(*delta)
+                }
+                (Criterion::Plain(wanted), Event::Plain(happened)) => wanted.matches(happened),
+                _ => false,
+            };
+            if hit {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -352,7 +923,9 @@ pub fn criteria_for_bred(child: &str) -> Vec<String> {
     let mut out = Vec::new();
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
-            if matches!(criterion, Criterion::Breeds(wanted) if wanted == "*" || wanted == child) {
+            if matches!(criterion, Criterion::Breeds(wanted) if wanted == "*" || wanted == child)
+                || matches!(criterion, Criterion::BredParents(wanted) if wanted == child)
+            {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -360,15 +933,28 @@ pub fn criteria_for_bred(child: &str) -> Vec<String> {
     out
 }
 
-/// Players who tamed an animal since the last drain.
-pub static TAMED: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
+/// Players who tamed an animal since the last drain: the player, the animal's entity type id and
+/// its cat or wolf variant.
+pub static TAMED: Mutex<Vec<(Uuid, &'static str, Option<&'static str>)>> = Mutex::new(Vec::new());
 
-/// Advancement criteria completed by taming an animal.
-pub fn criteria_for_tamed() -> Vec<String> {
+/// Advancement criteria completed by taming an `entity` (its type id) with this `variant`.
+pub fn criteria_for_tamed(entity: &str, variant: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
     for rule in rules() {
         for (name, criterion) in &rule.criteria {
-            if matches!(criterion, Criterion::Tames) {
+            let hit = match criterion {
+                Criterion::Tames => true,
+                Criterion::TamesVariant {
+                    component,
+                    variant: wanted,
+                } => {
+                    let kind = ferrite_entity::mob::MobKind::from_name(entity);
+                    kind.and_then(ferrite_entity::variant::component) == Some(component.as_str())
+                        && variant == Some(wanted.as_str())
+                }
+                _ => false,
+            };
+            if hit {
                 out.push(format!("{}#{name}", rule.id));
             }
         }
@@ -441,6 +1027,7 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
     let function = json["rewards"]["function"].as_str().map(str::to_owned);
     let mut criteria = BTreeMap::new();
     for (name, c) in json["criteria"].as_object()? {
+        let trigger = c["trigger"].as_str().unwrap_or_default().to_owned();
         let kind = match c["trigger"].as_str() {
             Some("minecraft:inventory_changed") => Criterion::Holds(
                 c["conditions"]["items"]
@@ -448,12 +1035,19 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                     .map(|a| a.iter().map(|e| alternatives(&e["items"])).collect())
                     .unwrap_or_default(),
             ),
+            Some("minecraft:enter_block") => entered_block(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::InBlock),
+            Some("minecraft:tick")
+                if c["conditions"].is_null()
+                    || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
+            {
+                Criterion::Ticks
+            }
             Some("minecraft:recipe_unlocked") => {
                 Criterion::Recipe(c["conditions"]["recipes"].as_str()?.to_owned())
             }
-            Some("minecraft:placed_block") => {
-                placed_block(&c["conditions"]).map_or(Criterion::Other, Criterion::Places)
-            }
+            Some("minecraft:placed_block") => placed_block(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Places),
             Some("minecraft:changed_dimension") => {
                 let conditions = c["conditions"].as_object();
                 match conditions
@@ -461,34 +1055,56 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
                     .and_then(|o| o.get("to")?.as_str())
                 {
                     Some(to) => Criterion::EntersDimension(to.to_owned()),
-                    None => Criterion::Other,
+                    None => Criterion::Other(trigger.clone()),
                 }
             }
-            Some("minecraft:recipe_crafted") => {
-                crafted_recipe(&c["conditions"]).map_or(Criterion::Other, Criterion::Crafts)
-            }
-            Some("minecraft:location") => {
-                location_biome(&c["conditions"]).map_or(Criterion::Other, Criterion::InBiome)
-            }
+            Some("minecraft:recipe_crafted") => crafted_recipe(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Crafts),
+            Some("minecraft:location") => location_biome(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::InBiome),
             Some("minecraft:tame_animal")
                 if c["conditions"].is_null()
                     || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
             {
                 Criterion::Tames
             }
-            Some("minecraft:item_used_on_block") => {
-                used_on_block(&c["conditions"]).map_or(Criterion::Other, Criterion::UsedOnBlock)
+            Some("minecraft:tame_animal") => tamed_variant(&c["conditions"]).map_or_else(
+                || Criterion::Other(trigger.clone()),
+                |(component, variant)| Criterion::TamesVariant { component, variant },
+            ),
+            Some("minecraft:item_used_on_block") => used_on_block(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::UsedOnBlock),
+            Some("minecraft:slept_in_bed")
+                if c["conditions"].is_null()
+                    || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
+            {
+                Criterion::Sleeps
             }
-            Some("minecraft:bred_animals") => {
-                bred_child(&c["conditions"]).map_or(Criterion::Other, Criterion::Breeds)
+            Some("minecraft:entity_killed_player")
+                if c["conditions"].is_null()
+                    || c["conditions"].as_object().is_some_and(|o| o.is_empty()) =>
+            {
+                Criterion::KilledByEntity
             }
-            Some("minecraft:consume_item") => {
-                consumed_item(&c["conditions"]).map_or(Criterion::Other, Criterion::Consumes)
-            }
-            Some("minecraft:player_killed_entity") => {
-                kill_type(&c["conditions"]).map_or(Criterion::Other, Criterion::Kills)
-            }
-            _ => Criterion::Other,
+            Some("minecraft:effects_changed") => effects_map(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::HasEffects),
+            Some("minecraft:nether_travel") => travel_distance(&c["conditions"]).map_or_else(
+                || Criterion::Other(trigger.clone()),
+                Criterion::NetherTravel,
+            ),
+            Some("minecraft:bred_animals") => bred_child(&c["conditions"])
+                .map(Criterion::Breeds)
+                .or_else(|| bred_parents(&c["conditions"]).map(Criterion::BredParents))
+                .unwrap_or_else(|| Criterion::Other(trigger.clone())),
+            Some("minecraft:consume_item") => consumed_item(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Consumes),
+            Some("minecraft:player_killed_entity") => kill_type(&c["conditions"])
+                .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Kills),
+            Some(id) if PLAIN_TRIGGERS.contains(&id) => plain(id, &c["conditions"]).map_or_else(
+                || Criterion::Other(trigger.clone()),
+                |plain| Criterion::Plain(Box::new(plain)),
+            ),
+            _ => Criterion::Other(trigger.clone()),
         };
         criteria.insert(name.clone(), kind);
     }
@@ -533,6 +1149,61 @@ pub fn unlocked(rule: &Rule, held: &BTreeSet<String>, owned: &BTreeSet<String>) 
         _ => false,
     };
     !rule.requirements.is_empty() && rule.requirements.iter().all(|g| g.iter().any(met))
+}
+
+/// Per trigger id: how many criteria of the extracted advancements this server evaluates and how
+/// many it leaves as [`Criterion::Other`], over `recipes/**` (`recipes = true`) or everything
+/// else. Used by the status document and its test.
+#[cfg(test)]
+pub fn coverage(recipes: bool) -> BTreeMap<String, (usize, usize)> {
+    let mut table: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for rule in rules() {
+        if rule.id.starts_with("minecraft:recipes/") != recipes {
+            continue;
+        }
+        for criterion in rule.criteria.values() {
+            let (name, done) = match criterion {
+                Criterion::Other(trigger) => (trigger.clone(), false),
+                other => (trigger_of(other).to_owned(), true),
+            };
+            let entry = table.entry(name).or_default();
+            if done {
+                entry.0 += 1;
+            } else {
+                entry.1 += 1;
+            }
+        }
+    }
+    table
+}
+
+#[cfg(test)]
+fn trigger_of(criterion: &Criterion) -> &'static str {
+    match criterion {
+        Criterion::Holds(_) => "minecraft:inventory_changed",
+        Criterion::Recipe(_) => "minecraft:recipe_unlocked",
+        Criterion::InBlock(_) => "minecraft:enter_block",
+        Criterion::Ticks => "minecraft:tick",
+        Criterion::Kills(_) => "minecraft:player_killed_entity",
+        Criterion::Consumes(_) => "minecraft:consume_item",
+        Criterion::EntersDimension(_) => "minecraft:changed_dimension",
+        Criterion::Places(_) => "minecraft:placed_block",
+        Criterion::InBiome(_) => "minecraft:location",
+        Criterion::Crafts(_) => "minecraft:recipe_crafted",
+        Criterion::Breeds(_) | Criterion::BredParents(_) => "minecraft:bred_animals",
+        Criterion::Tames | Criterion::TamesVariant { .. } => "minecraft:tame_animal",
+        Criterion::UsedOnBlock(_) => "minecraft:item_used_on_block",
+        Criterion::Sleeps => "minecraft:slept_in_bed",
+        Criterion::KilledByEntity => "minecraft:entity_killed_player",
+        Criterion::NetherTravel(_) => "minecraft:nether_travel",
+        Criterion::HasEffects(_) => "minecraft:effects_changed",
+        Criterion::Plain(plain) => PLAIN_TRIGGERS
+            .iter()
+            .find(|id| **id == plain.trigger)
+            .copied()
+            .unwrap_or(""),
+        Criterion::Other(_) => "",
+    }
 }
 
 /// Reads the advancement rules now, off the caller's thread. The first `criteria_for_*` call
@@ -635,21 +1306,29 @@ pub fn reward_experience(advancement: &str) -> i32 {
         .map_or(0, |r| r.experience)
 }
 
-/// Loot tables an advancement rolls for the player when completed.
-pub fn reward_loot(advancement: &str) -> Vec<String> {
-    rules()
+/// The console commands that hand a rule's loot and function rewards to `player`: each loot
+/// table through `/loot give` (so the loot code of the server decides the context) and the
+/// function as the player at their position. The vanilla 26.3 advancements carry neither
+/// reward; data packs do.
+pub fn rule_reward_commands(rule: &Rule, player: &str) -> Vec<String> {
+    let mut out: Vec<String> = rule
+        .loot
         .iter()
-        .find(|r| r.id == advancement)
-        .map(|r| r.loot.clone())
-        .unwrap_or_default()
+        .map(|table| format!("loot give {player} loot {table}"))
+        .collect();
+    if let Some(function) = &rule.function {
+        out.push(format!("execute as {player} at @s run function {function}"));
+    }
+    out
 }
 
-/// The function an advancement runs as the player when completed.
-pub fn reward_function(advancement: &str) -> Option<String> {
+/// [`rule_reward_commands`] for the advancement with this id.
+pub fn reward_commands(advancement: &str, player: &str) -> Vec<String> {
     rules()
         .iter()
         .find(|r| r.id == advancement)
-        .and_then(|r| r.function.clone())
+        .map(|rule| rule_reward_commands(rule, player))
+        .unwrap_or_default()
 }
 
 /// Advancement criteria (`<advancement>#<criterion>`) that holding `held` completes, for every
@@ -691,6 +1370,75 @@ mod tests {
                 "loot": ["t:chests/gift"], "function": "t:celebrate"}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn coverage_table_for_the_extracted_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        for recipes in [false, true] {
+            println!(
+                "== {}",
+                if recipes {
+                    "recipes/**"
+                } else {
+                    "other advancements"
+                }
+            );
+            for (trigger, (done, other)) in coverage(recipes) {
+                println!("{trigger}\t{done}\t{other}");
+            }
+        }
+        // Every recipe advancement trigger is evaluated; the one criterion left is the
+        // `impossible` trigger, which vanilla never completes either.
+        let recipes = coverage(true);
+        let open: Vec<_> = recipes
+            .iter()
+            .filter(|(_, (_, other))| *other > 0)
+            .map(|(trigger, counts)| (trigger.as_str(), *counts))
+            .collect();
+        assert_eq!(open, [("minecraft:impossible", (0, 1))], "{recipes:?}");
+    }
+
+    #[test]
+    fn enter_block_and_tick_criteria_parse() {
+        let rule = parse_rule(
+            "t:water",
+            &serde_json::json!({
+                "criteria": {
+                    "in_water": {"trigger": "minecraft:enter_block",
+                        "conditions": {"block": {"blocks": "minecraft:water"}}},
+                    "every_tick": {"trigger": "minecraft:tick"}
+                }
+            }),
+        )
+        .unwrap();
+        let Criterion::InBlock(block) = &rule.criteria["in_water"] else {
+            panic!("{:?}", rule.criteria["in_water"]);
+        };
+        assert_eq!(block.blocks, ["minecraft:water"]);
+        assert!(block.matches("minecraft:water", &[("level", "0")]));
+        assert!(matches!(rule.criteria["every_tick"], Criterion::Ticks));
+    }
+
+    #[test]
+    fn enter_block_and_tick_match_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        assert!(criteria_for_tick().contains(
+            &"minecraft:recipes/decorations/crafting_table#unlock_right_away".to_owned()
+        ));
+        let water = BlockRecord {
+            player: Uuid::new_v4(),
+            block: "minecraft:water",
+            props: &[],
+        };
+        assert!(
+            criteria_for_block(&water)
+                .contains(&"minecraft:recipes/transportation/oak_boat#in_water".to_owned())
+        );
     }
 
     #[test]
@@ -830,13 +1578,457 @@ mod tests {
     }
 
     #[test]
-    fn placed_block_criteria_match_one_plain_block() {
+    fn placed_block_criteria_match_blocks_tags_and_states() {
         let one = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "minecraft:beetroots"}});
-        assert_eq!(placed_block(&one).as_deref(), Some("minecraft:beetroots"));
+        let wanted = placed_block(&one).expect("plain block");
+        assert!(wanted.matches("minecraft:beetroots", &[("age", "0")]));
+        assert!(!wanted.matches("minecraft:wheat", &[]));
         let tag = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "#minecraft:beds"}});
-        assert_eq!(placed_block(&tag), None);
-        let with_state = serde_json::json!({"location": {"type": "minecraft:match_block", "blocks": "minecraft:x", "state": {}}});
-        assert_eq!(placed_block(&with_state), None);
+        let beds = placed_block(&tag).expect("tag");
+        if ferrite_data::tags::contains("block", "beds", "red_bed") {
+            assert!(beds.matches("minecraft:red_bed", &[]));
+        }
+        assert!(!beds.matches("minecraft:stone", &[]));
+        let with_state = serde_json::json!({"location": {"type": "minecraft:match_block",
+            "blocks": "minecraft:creaking_heart", "state": {"creaking_heart_state": "awake"}}});
+        let awake = placed_block(&with_state).expect("state");
+        assert!(awake.matches(
+            "minecraft:creaking_heart",
+            &[("creaking_heart_state", "awake")]
+        ));
+        assert!(!awake.matches(
+            "minecraft:creaking_heart",
+            &[("creaking_heart_state", "dormant")]
+        ));
+        assert!(!awake.matches("minecraft:creaking_heart", &[]));
+        // Offsets, `all_of` and the like are left alone.
+        let complex = serde_json::json!({"location": {"type": "minecraft:any_of", "terms": []}});
+        assert!(placed_block(&complex).is_none());
+        let offset = serde_json::json!({"location": {"type": "minecraft:match_block",
+            "blocks": "minecraft:stone", "offsetY": -1}});
+        assert!(placed_block(&offset).is_none());
+    }
+
+    #[test]
+    fn placing_a_block_with_a_state_completes_the_vanilla_criterion() {
+        if rules().is_empty() {
+            return;
+        }
+        let record = |props: &'static [(&'static str, &'static str)]| BlockRecord {
+            player: Uuid::nil(),
+            block: "minecraft:creaking_heart",
+            props,
+        };
+        let awake = criteria_for_placed(&record(&[("creaking_heart_state", "awake")]));
+        assert!(awake.contains(
+            &"minecraft:adventure/heart_transplanter#place_creaking_heart_awake".to_owned()
+        ));
+        assert!(!awake.contains(
+            &"minecraft:adventure/heart_transplanter#place_creaking_heart_dormant".to_owned()
+        ));
+    }
+
+    #[test]
+    fn event_criteria_parse_and_match() {
+        let json = |trigger: &str, conditions: serde_json::Value| serde_json::json!({"criteria": {"c": {"trigger": trigger, "conditions": conditions}}});
+        let slept = parse_rule(
+            "a",
+            &json("minecraft:slept_in_bed", serde_json::Value::Null),
+        )
+        .unwrap();
+        assert!(matches!(slept.criteria["c"], Criterion::Sleeps));
+        let killed = parse_rule(
+            "a",
+            &json("minecraft:entity_killed_player", serde_json::Value::Null),
+        )
+        .unwrap();
+        assert!(matches!(killed.criteria["c"], Criterion::KilledByEntity));
+        let travel = parse_rule(
+            "a",
+            &json(
+                "minecraft:nether_travel",
+                serde_json::json!({"distance": {"horizontal": {"min": 7000.0}}}),
+            ),
+        )
+        .unwrap();
+        let Criterion::NetherTravel(check) = &travel.criteria["c"] else {
+            panic!("{:?}", travel.criteria["c"]);
+        };
+        assert!(check.matches([7000.0, 100.0, 0.0]));
+        assert!(
+            check.matches([-5000.0, 0.0, -5000.0]),
+            "horizontal is the planar distance"
+        );
+        assert!(!check.matches([6999.0, 0.0, 0.0]));
+        assert!(
+            !check.matches([0.0, 9000.0, 0.0]),
+            "height is not horizontal"
+        );
+        let exact = DistanceCheck {
+            y: Some(Range {
+                min: Some(2.0),
+                max: Some(4.0),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            exact.matches([0.0, -3.0, 0.0]),
+            "x, y and z compare absolute offsets"
+        );
+        assert!(!exact.matches([0.0, 5.0, 0.0]));
+        // A conditioned player predicate is not guessed at.
+        let other = parse_rule(
+            "a",
+            &json(
+                "minecraft:nether_travel",
+                serde_json::json!({"player": {}, "distance": {"x": {"min": 1}}}),
+            ),
+        )
+        .unwrap();
+        assert!(matches!(other.criteria["c"], Criterion::Other(_)));
+        let conditioned = parse_rule(
+            "a",
+            &json("minecraft:slept_in_bed", serde_json::json!({"player": []})),
+        )
+        .unwrap();
+        assert!(matches!(conditioned.criteria["c"], Criterion::Other(_)));
+    }
+
+    #[test]
+    fn effects_changed_needs_every_listed_effect_with_its_ranges() {
+        let json = serde_json::json!({"criteria": {"all": {"trigger": "minecraft:effects_changed",
+            "conditions": {"effects": {"minecraft:speed": {}, "minecraft:haste": {"amplifier": {"min": 1}}}}}}});
+        let rule = parse_rule("t:effects", &json).unwrap();
+        let Criterion::HasEffects(wanted) = &rule.criteria["all"] else {
+            panic!("{:?}", rule.criteria["all"]);
+        };
+        assert_eq!(wanted.len(), 2);
+        let fact = |name: &str, amplifier| EffectFact {
+            name: name.to_owned(),
+            amplifier,
+            duration: 100,
+        };
+        let holds = |active: &[EffectFact]| effects_hold(wanted, active);
+        assert!(holds(&[
+            fact("minecraft:speed", 0),
+            fact("minecraft:haste", 1)
+        ]));
+        assert!(
+            !holds(&[fact("minecraft:speed", 0), fact("minecraft:haste", 0)]),
+            "amplifier too low"
+        );
+        assert!(!holds(&[fact("minecraft:speed", 0)]), "haste missing");
+        // A `source` condition is not guessed at.
+        let sourced = parse_rule(
+            "t:x",
+            &serde_json::json!({"criteria": {"c": {"trigger": "minecraft:effects_changed",
+            "conditions": {"source": {}}}}}),
+        )
+        .unwrap();
+        assert!(matches!(sourced.criteria["c"], Criterion::Other(_)));
+    }
+
+    #[test]
+    fn having_every_potion_effect_completes_how_did_we_get_here_style_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        // nether/all_potions asks for 17 effects at once.
+        let wanted: Vec<EffectFact> = rules()
+            .iter()
+            .find(|r| r.id == "minecraft:nether/all_potions")
+            .and_then(|r| match r.criteria.get("all_effects") {
+                Some(Criterion::HasEffects(list)) => Some(list.clone()),
+                _ => None,
+            })
+            .expect("all_potions is evaluated")
+            .into_iter()
+            .map(|(name, _, _)| EffectFact {
+                name,
+                amplifier: 0,
+                duration: 600,
+            })
+            .collect();
+        assert_eq!(wanted.len(), 17);
+        assert!(
+            criteria_for_effects(&wanted)
+                .contains(&"minecraft:nether/all_potions#all_effects".to_owned())
+        );
+        assert!(
+            criteria_for_effects(&wanted[1..])
+                .iter()
+                .all(|c| !c.starts_with("minecraft:nether/all_potions"))
+        );
+    }
+
+    #[test]
+    fn events_complete_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        assert!(
+            criteria_for_event(&Event::SleptInBed)
+                .contains(&"minecraft:adventure/sleep_in_bed#slept_in_bed".to_owned())
+        );
+        assert!(
+            criteria_for_event(&Event::KilledByEntity)
+                .contains(&"minecraft:adventure/root#killed_by_something".to_owned())
+        );
+        assert!(
+            criteria_for_event(&Event::NetherTravel {
+                delta: [7000.0, 0.0, 0.0]
+            })
+            .contains(&"minecraft:nether/fast_travel#travelled".to_owned())
+        );
+        assert!(
+            criteria_for_event(&Event::NetherTravel {
+                delta: [100.0, 0.0, 0.0]
+            })
+            .is_empty()
+        );
+    }
+
+    fn plain(trigger: &'static str) -> PlainEvent {
+        PlainEvent {
+            trigger,
+            ..PlainEvent::default()
+        }
+    }
+
+    fn fired(event: PlainEvent) -> Vec<String> {
+        criteria_for_event(&Event::Plain(event))
+    }
+
+    #[test]
+    fn plain_triggers_complete_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let totem = fired(PlainEvent {
+            item: Some("minecraft:totem_of_undying".into()),
+            ..plain("minecraft:used_totem")
+        });
+        assert!(has(
+            &totem,
+            "minecraft:adventure/totem_of_undying#used_totem"
+        ));
+        assert!(fired(plain("minecraft:used_totem")).is_empty());
+        assert!(has(
+            &fired(plain("minecraft:brewed_potion")),
+            "minecraft:nether/brew_potion#potion"
+        ));
+        assert!(has(
+            &fired(plain("minecraft:enchanted_item")),
+            "minecraft:story/enchant_item#enchanted_item"
+        ));
+        let beacon = |level| {
+            fired(PlainEvent {
+                level: Some(level),
+                ..plain("minecraft:construct_beacon")
+            })
+        };
+        assert!(has(&beacon(1), "minecraft:nether/create_beacon#beacon"));
+        assert!(!has(
+            &beacon(1),
+            "minecraft:nether/create_full_beacon#beacon"
+        ));
+        assert!(has(
+            &beacon(4),
+            "minecraft:nether/create_full_beacon#beacon"
+        ));
+        let trade = |y| {
+            fired(PlainEvent {
+                player_y: y,
+                ..plain("minecraft:villager_trade")
+            })
+        };
+        assert!(has(&trade(64.0), "minecraft:adventure/trade#traded"));
+        let height = "minecraft:adventure/trade_at_world_height#trade_at_world_height";
+        assert!(!has(&trade(64.0), height));
+        assert!(has(&trade(319.0), height));
+        let caught = |item: &str| {
+            fired(PlainEvent {
+                item: Some(item.into()),
+                ..plain("minecraft:fishing_rod_hooked")
+            })
+        };
+        assert!(has(
+            &caught("minecraft:cod"),
+            "minecraft:husbandry/fishy_business#cod"
+        ));
+        assert!(!has(
+            &caught("minecraft:cod"),
+            "minecraft:husbandry/fishy_business#salmon"
+        ));
+        assert!(caught("minecraft:stick").is_empty());
+        let hurt = |direct: &str, projectile| {
+            fired(PlainEvent {
+                direct: Some(direct.into()),
+                projectile,
+                ..plain("minecraft:player_hurt_entity")
+            })
+        };
+        let arrow = "minecraft:adventure/shoot_arrow#shot_arrow";
+        assert!(has(&hurt("minecraft:arrow", true), arrow));
+        assert!(has(&hurt("minecraft:spectral_arrow", true), arrow));
+        assert!(!has(&hurt("minecraft:trident", true), arrow));
+        assert!(has(
+            &hurt("minecraft:trident", true),
+            "minecraft:adventure/throw_trident#shot_trident"
+        ));
+        // A melee hit has no projectile as its direct entity.
+        assert!(hurt("minecraft:player", false).is_empty());
+    }
+
+    #[test]
+    fn levitation_and_channeled_lightning_check_distance_and_victims() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let rose = |height: f64| {
+            fired(PlainEvent {
+                delta: [0.0, height, 0.0],
+                ..plain("minecraft:levitation")
+            })
+        };
+        assert!(!has(&rose(49.9), "minecraft:end/levitate#levitated"));
+        assert!(has(&rose(50.0), "minecraft:end/levitate#levitated"));
+        let struck = |victims: &[&str]| {
+            fired(PlainEvent {
+                victims: victims.iter().map(|v| (*v).to_owned()).collect(),
+                ..plain("minecraft:channeled_lightning")
+            })
+        };
+        let villager = "minecraft:adventure/very_very_frightening#struck_villager";
+        assert!(has(
+            &struck(&["minecraft:cow", "minecraft:villager"]),
+            villager
+        ));
+        assert!(!has(&struck(&["minecraft:cow"]), villager));
+        assert!(!has(&struck(&[]), villager));
+    }
+
+    #[test]
+    fn generating_container_loot_completes_the_bastion_advancement_per_table() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let loot = |table: &str| {
+            fired(PlainEvent {
+                table: Some(table.to_owned()),
+                ..plain("minecraft:player_generates_container_loot")
+            })
+        };
+        let bridge = loot("minecraft:chests/bastion_bridge");
+        assert!(has(
+            &bridge,
+            "minecraft:nether/loot_bastion#loot_bastion_bridge"
+        ));
+        assert!(!has(
+            &bridge,
+            "minecraft:nether/loot_bastion#loot_bastion_treasure"
+        ));
+        assert!(loot("minecraft:chests/simple_dungeon").is_empty());
+    }
+
+    #[test]
+    fn plain_conditions_the_server_cannot_check_stay_unevaluated() {
+        let counted = serde_json::json!({"item": {"items": "minecraft:cod", "count": 2}});
+        assert!(super::plain("minecraft:fishing_rod_hooked", &counted).is_none());
+        let rod = serde_json::json!({"rod": {"items": "minecraft:fishing_rod"}});
+        assert!(super::plain("minecraft:fishing_rod_hooked", &rod).is_none());
+        let blocked = serde_json::json!({
+            "damage": {"blocked": true, "type": {"tags": [{"expected": true, "id": "#minecraft:is_projectile"}]}}
+        });
+        assert!(super::plain("minecraft:player_hurt_entity", &blocked).is_none());
+    }
+
+    #[test]
+    fn taming_a_cat_or_wolf_completes_the_criterion_of_its_variant() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let calico = criteria_for_tamed("minecraft:cat", Some("minecraft:calico"));
+        assert!(has(
+            &calico,
+            "minecraft:husbandry/complete_catalogue#minecraft:calico"
+        ));
+        assert!(!has(
+            &calico,
+            "minecraft:husbandry/complete_catalogue#minecraft:tabby"
+        ));
+        assert!(!has(
+            &calico,
+            "minecraft:husbandry/whole_pack#minecraft:ashen"
+        ));
+        let ashen = criteria_for_tamed("minecraft:wolf", Some("minecraft:ashen"));
+        assert!(has(
+            &ashen,
+            "minecraft:husbandry/whole_pack#minecraft:ashen"
+        ));
+        assert!(!has(
+            &ashen,
+            "minecraft:husbandry/whole_pack#minecraft:black"
+        ));
+        // The same variant name on the other kind does not count: `black` is both a cat and a wolf.
+        let black_cat = criteria_for_tamed("minecraft:cat", Some("minecraft:black"));
+        assert!(has(
+            &black_cat,
+            "minecraft:husbandry/complete_catalogue#minecraft:black"
+        ));
+        assert!(!has(
+            &black_cat,
+            "minecraft:husbandry/whole_pack#minecraft:black"
+        ));
+        // Without a known variant only the plain `tame_an_animal` criterion fires.
+        let plain = criteria_for_tamed("minecraft:cat", None);
+        assert!(has(
+            &plain,
+            "minecraft:husbandry/tame_an_animal#tamed_animal"
+        ));
+        assert!(!plain.iter().any(|c| c.contains("complete_catalogue")));
+    }
+
+    #[test]
+    fn breeding_counts_for_parent_criteria_of_frogs_sniffers_and_turtles() {
+        if rules().is_empty() {
+            return;
+        }
+        let bred = criteria_for_bred("minecraft:turtle");
+        assert!(
+            bred.iter()
+                .any(|c| c == "minecraft:husbandry/bred_all_animals#minecraft:turtle")
+        );
+        assert!(!bred.iter().any(|c| c.ends_with("#minecraft:sniffer")));
+        // A child criterion still works the same way.
+        assert!(
+            criteria_for_bred("minecraft:cow")
+                .iter()
+                .any(|c| c == "minecraft:husbandry/bred_all_animals#minecraft:cow")
+        );
+        let mismatched = serde_json::json!({
+            "parent": {"type": "minecraft:entity_properties", "entity": "this", "predicate": {"minecraft:entity_type": "minecraft:frog"}},
+            "partner": {"type": "minecraft:entity_properties", "entity": "this", "predicate": {"minecraft:entity_type": "minecraft:toad"}}
+        });
+        assert!(super::bred_parents(&mismatched).is_none());
+    }
+
+    #[test]
+    fn loot_and_function_rewards_become_console_commands() {
+        assert_eq!(
+            rule_reward_commands(&rule(), "Steve"),
+            [
+                "loot give Steve loot t:chests/gift",
+                "execute as Steve at @s run function t:celebrate"
+            ]
+        );
+        let bare = parse_rule("t:bare", &serde_json::json!({"criteria": {}})).unwrap();
+        assert!(rule_reward_commands(&bare, "Steve").is_empty());
+        assert!(reward_commands("minecraft:nope/none", "Steve").is_empty());
     }
 
     #[test]
@@ -874,7 +2066,7 @@ mod tests {
             "ingredients": [{"items": "minecraft:brick"}]})),
         )
         .unwrap();
-        assert!(matches!(rule.criteria["c"], Criterion::Other));
+        assert!(matches!(rule.criteria["c"], Criterion::Other(_)));
     }
 
     #[test]

@@ -37,7 +37,28 @@ impl Drop for Process {
 fn build_jars(repo: &Path, java_home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let project = repo.join("java").join("ferrite-api-impl");
     if std::env::var_os("FERRITE_JAVA_PREBUILT").is_none() {
-        let output = Command::new("./gradlew")
+        // Same launcher choice as `plugin_lifecycle.rs`: `gradlew.bat` through cmd on Windows,
+        // `./gradlew` elsewhere, or the system `gradle` when `FERRITE_USE_SYSTEM_GRADLE` is set.
+        let use_system_gradle = std::env::var_os("FERRITE_USE_SYSTEM_GRADLE").is_some();
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args([
+                "/C",
+                if use_system_gradle {
+                    "gradle"
+                } else {
+                    ".\\gradlew.bat"
+                },
+            ]);
+            command
+        } else {
+            Command::new(if use_system_gradle {
+                "gradle"
+            } else {
+                "./gradlew"
+            })
+        };
+        let output = command
             .args([
                 "--console=plain",
                 ":test-plugin:jar",

@@ -122,7 +122,7 @@ fn fillbiome_tree() -> NodeBuilder<Source> {
 }
 
 /// The biome ids a `#tag` of `data/minecraft/tags/worldgen/biome` expands to.
-fn biome_tag_members(tag: &str, depth: u8) -> Vec<String> {
+pub(super) fn biome_tag_members(tag: &str, depth: u8) -> Vec<String> {
     let name = tag.trim_start_matches('#');
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
     if depth > 8 || name.contains("..") {
@@ -338,24 +338,88 @@ fn reload_tree() -> NodeBuilder<Source> {
         .executes(|ctx| send(ctx.source(), Action::Reload))
 }
 
+/// Which packs `/datapack list` reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatapackListKind {
+    Both,
+    Available,
+    Enabled,
+}
+
+/// Where `/datapack enable` puts the pack in the load order (the last pack wins).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackPlacement {
+    /// No position given: vanilla puts a pack on top, i.e. last.
+    Last,
+    First,
+    Before(String),
+    After(String),
+}
+
 fn datapack_tree() -> NodeBuilder<Source> {
+    let pack = || argument("name", ArgumentType::string());
+    let enable = |placement: PackPlacement| {
+        move |ctx: &CommandContext<Source>| datapack_set(ctx, true, placement.clone())
+    };
     literal::<Source>("datapack")
         .requires(owners())
         .restricted(true)
-        .then(literal("list").executes(|ctx| send(ctx.source(), Action::DatapackList)))
+        .then(
+            literal("list")
+                .executes(|ctx| send(ctx.source(), Action::DatapackList(DatapackListKind::Both)))
+                .then(literal("available").executes(|ctx| {
+                    send(
+                        ctx.source(),
+                        Action::DatapackList(DatapackListKind::Available),
+                    )
+                }))
+                .then(literal("enabled").executes(|ctx| {
+                    send(
+                        ctx.source(),
+                        Action::DatapackList(DatapackListKind::Enabled),
+                    )
+                })),
+        )
         .then(
             literal("enable").then(
-                argument("name", ArgumentType::word()).executes(|ctx| datapack_set(ctx, true)),
+                pack()
+                    .executes(enable(PackPlacement::Last))
+                    .then(literal("first").executes(enable(PackPlacement::First)))
+                    .then(literal("last").executes(enable(PackPlacement::Last)))
+                    .then(literal("before").then(
+                        argument("existing", ArgumentType::string()).executes(|ctx| {
+                            let other = ctx.string("existing").unwrap_or_default().to_owned();
+                            datapack_set(ctx, true, PackPlacement::Before(other))
+                        }),
+                    ))
+                    .then(literal("after").then(
+                        argument("existing", ArgumentType::string()).executes(|ctx| {
+                            let other = ctx.string("existing").unwrap_or_default().to_owned();
+                            datapack_set(ctx, true, PackPlacement::After(other))
+                        }),
+                    )),
             ),
         )
         .then(
-            literal("disable").then(
-                argument("name", ArgumentType::word()).executes(|ctx| datapack_set(ctx, false)),
-            ),
+            literal("disable")
+                .then(pack().executes(|ctx| datapack_set(ctx, false, PackPlacement::Last))),
+        )
+        .then(
+            literal("create").then(argument("id", ArgumentType::string()).then(
+                argument("description", ArgumentType::Component).executes(|ctx| {
+                    let id = ctx.string("id").unwrap_or_default().to_owned();
+                    let description = ctx.string("description").unwrap_or_default().to_owned();
+                    send(ctx.source(), Action::DatapackCreate { id, description })
+                }),
+            )),
         )
 }
 
-fn datapack_set(ctx: &CommandContext<Source>, enable: bool) -> Result<i32, CommandError> {
+fn datapack_set(
+    ctx: &CommandContext<Source>,
+    enable: bool,
+    placement: PackPlacement,
+) -> Result<i32, CommandError> {
     let pack = ctx
         .string("name")
         .ok_or_else(|| CommandError::failed("missing data pack name"))?;
@@ -364,6 +428,7 @@ fn datapack_set(ctx: &CommandContext<Source>, enable: bool) -> Result<i32, Comma
         Action::DatapackSet {
             pack: pack.to_owned(),
             enable,
+            placement,
         },
     )
 }
@@ -531,61 +596,77 @@ fn clear_schedule(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
 // /trigger
 // ---------------------------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerMode {
+    /// `trigger <objective>`: adds one.
+    Simple,
+    Add,
+    Set,
+}
+
 fn trigger_tree() -> NodeBuilder<Source> {
+    // commands.json: `trigger <objective>` is executable and only `add|set <value>` take a
+    // value; there is no bare `trigger <objective> <value>`.
     literal::<Source>("trigger").then(
         argument("objective", ArgumentType::opaque("minecraft:objective"))
-            // Vanilla's direct form defaults to `add`.
+            .executes(|ctx| trigger_value(ctx, TriggerMode::Simple))
             .then(
-                argument("value", ArgumentType::integer()).executes(|ctx| trigger_value(ctx, true)),
+                literal("add").then(
+                    argument("value", ArgumentType::integer())
+                        .executes(|ctx| trigger_value(ctx, TriggerMode::Add)),
+                ),
             )
-            .then(literal("add").then(
-                argument("value", ArgumentType::integer()).executes(|ctx| trigger_value(ctx, true)),
-            ))
             .then(
                 literal("set").then(
                     argument("value", ArgumentType::integer())
-                        .executes(|ctx| trigger_value(ctx, false)),
+                        .executes(|ctx| trigger_value(ctx, TriggerMode::Set)),
                 ),
             ),
     )
 }
 
-fn trigger_value(ctx: &CommandContext<Source>, add: bool) -> Result<i32, CommandError> {
+fn trigger_value(ctx: &CommandContext<Source>, mode: TriggerMode) -> Result<i32, CommandError> {
     let source = ctx.source();
     let uuid = source.uuid.ok_or_else(player_only)?;
     let holder = source.name.clone().unwrap_or_default();
-    let objective = namespaced(
-        ctx.string("objective")
-            .ok_or_else(|| CommandError::failed("missing objective argument"))?,
-    );
-    let amount = ctx
-        .integer("value")
-        .ok_or_else(|| CommandError::failed("missing value argument"))?;
+    // Scoreboard objectives are plain names, not namespaced ids: `trigger foo` is objective `foo`
+    // (this used to look up `minecraft:foo` and never found an objective).
+    let objective = ctx
+        .string("objective")
+        .ok_or_else(|| CommandError::failed("missing objective argument"))?
+        .to_owned();
+    let amount = if mode == TriggerMode::Simple {
+        1
+    } else {
+        ctx.integer("value")
+            .ok_or_else(|| CommandError::failed("missing value argument"))?
+    };
     let mut state = source.state.lock().unwrap();
     let Some(entry) = state.objectives.get(&objective) else {
         return Err(CommandError::failed(format!(
-            "Objective {objective} not found"
+            "Unknown scoreboard objective '{objective}'"
         )));
     };
+    // `commands.trigger.failed.invalid` / `commands.trigger.failed.unprimed` in en_us.
     if !entry.criteria.ends_with("trigger") {
-        return Err(CommandError::failed(format!(
-            "Objective {objective} is not a trigger objective"
-        )));
+        return Err(CommandError::failed(
+            "You can only trigger objectives that are 'trigger' type",
+        ));
     }
     if !state
         .trigger_enabled
         .remove(&(objective.clone(), holder.clone()))
     {
-        return Err(CommandError::failed(format!(
-            "Trigger {objective} is not enabled"
-        )));
+        return Err(CommandError::failed(
+            "You cannot trigger this objective yet",
+        ));
     }
     let key = (holder, objective.clone());
     let current = *state.scores.get(&key).unwrap_or(&0);
-    let value = if add {
-        current.saturating_add(amount)
-    } else {
+    let value = if mode == TriggerMode::Set {
         amount
+    } else {
+        current.saturating_add(amount)
     };
     state.scores.insert(key, value);
     drop(state);
@@ -598,15 +679,23 @@ fn trigger_value(ctx: &CommandContext<Source>, add: bool) -> Result<i32, Command
                 objective: objective.clone(),
                 value: VarInt(value),
                 display_name: None,
+                number_format: None,
             }),
         },
     )?;
-    let key = if add {
-        "commands.trigger.add.success"
-    } else {
-        "commands.trigger.set.success"
-    };
-    feedback(ctx, key, vec![objective, value.to_string()])
+    match mode {
+        TriggerMode::Simple => feedback(ctx, "commands.trigger.simple.success", vec![objective]),
+        TriggerMode::Add => feedback(
+            ctx,
+            "commands.trigger.add.success",
+            vec![objective, amount.to_string()],
+        ),
+        TriggerMode::Set => feedback(
+            ctx,
+            "commands.trigger.set.success",
+            vec![objective, value.to_string()],
+        ),
+    }
 }
 
 /// Adds every command family above to the server tree.

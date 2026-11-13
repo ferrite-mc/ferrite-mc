@@ -109,6 +109,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getX" -> x; case "getZ" -> z; case "getWorld" -> proxy;
             case "isLoaded" -> chunkLoaded(x, z);
             case "getBlock" -> block(new Pos((x << 4) + (int) args[0], (int) args[1], (z << 4) + (int) args[2]));
+            case "getChunkSnapshot" -> {
+                var world = (org.bukkit.World) proxy;
+                var key = world.getKey();
+                // Bukkit's three flags control optional snapshot data; the host-backed
+                // snapshot currently exposes biome data and has no separate height-map copy.
+                yield new FerriteChunkSnapshot(
+                    x, z, name, id.toString(),
+                    net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()),
+                    world.getMinHeight(), world.getMaxHeight(),
+                    hostLong("getFullTime()", time), (boolean) args[1]
+                );
+            }
             case "hashCode" -> java.util.Objects.hash(id, x, z);
             case "equals" -> self == args[0];
             case "toString" -> "Chunk[" + id + ":" + x + "," + z + "]";
