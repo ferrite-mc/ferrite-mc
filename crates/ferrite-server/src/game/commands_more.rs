@@ -2134,8 +2134,11 @@ fn perf_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("stop").executes(|ctx| profiling_run(ctx, false, true)))
 }
 
-/// Ferrite is not a JVM process, so there is no flight recorder to start; the failure messages
-/// are vanilla's.
+/// `/jfr start|stop`. Vanilla drives the JVM Flight Recorder; Ferrite is not a JVM process, so
+/// no recording can exist. Both subcommands fail with vanilla's failure messages and never
+/// report success: `start` cannot start anything, and `stop` has nothing to dump. Whether
+/// vanilla separates "already running" from "not running" is unverified (no lang key says
+/// so), so no such state is modelled.
 fn jfr_tree() -> NodeBuilder<Source> {
     literal::<Source>("jfr")
         .requires(owners())
@@ -2147,7 +2150,7 @@ fn jfr_tree() -> NodeBuilder<Source> {
         .then(literal::<Source>("stop").executes(|_| {
             Err(failure(
                 "commands.jfr.dump.failed",
-                vec!["Ferrite does not run on the JVM".to_owned()],
+                vec!["Ferrite does not run on the JVM; there is no recording to dump".to_owned()],
             ))
         }))
 }
@@ -2221,7 +2224,7 @@ fn test_tree() -> NodeBuilder<Source> {
                     ),
             ),
         )
-        .then(literal::<Source>("locate").then(selector().executes(no_tests)))
+        .then(literal::<Source>("locate").then(selector().executes(test_locate)))
         .then(with_optional_args(
             with_run(literal::<Source>("pos")),
             vec![("var", ArgumentType::string())],
@@ -2242,32 +2245,128 @@ fn test_tree() -> NodeBuilder<Source> {
             vec![int("numberOfTimes"), flag("untilFailed")],
             no_tests,
         ))
-        .then(literal::<Source>("verify").then(selector().executes(no_tests)))
+        .then(literal::<Source>("verify").then(selector().executes(test_run)))
         .then(literal::<Source>("runmultiple").then(with_optional_args(
-            selector().executes(no_tests),
+            selector().executes(test_run),
             vec![int("amount")],
-            no_tests,
+            test_run,
         )))
         .then(literal::<Source>("run").then(with_optional_args(
-            selector().executes(no_tests),
+            selector().executes(test_run),
             vec![
                 int("numberOfTimes"),
                 flag("untilFailed"),
                 int("rotationSteps"),
                 int("testsPerRow"),
             ],
-            no_tests,
+            test_run,
         )));
-    root.then(with_optional_args(
-        with_run(literal::<Source>("runfailed")),
+    let repeat = || {
         vec![
             int("numberOfTimes"),
             flag("untilFailed"),
             int("rotationSteps"),
             int("testsPerRow"),
-        ],
-        no_tests,
-    ))
+        ]
+    };
+    root.then(
+        with_optional_args(with_run(literal::<Source>("runfailed")), repeat(), no_tests).then(
+            with_optional_args(
+                argument::<Source>("onlyRequiredTests", ArgumentType::Bool).executes(no_tests),
+                repeat(),
+                no_tests,
+            ),
+        ),
+    )
+}
+
+/// The ids of the test instances in vanilla's `data/minecraft/test_instance`. Datapack-provided
+/// instances are not read.
+fn test_instance_ids() -> Vec<String> {
+    let relative = "vanilla/26.3/generated/data/minecraft/test_instance";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut ids = Vec::new();
+    for dir in [std::path::PathBuf::from(relative), root.join(relative)] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                ids.push(format!("minecraft:{stem}"));
+            }
+        }
+        if !ids.is_empty() {
+            break;
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// `*` matches any run of characters; a selector without a namespace means `minecraft:`.
+fn selector_matches(pattern: &str, id: &str) -> bool {
+    let pattern = if pattern.contains(':') {
+        pattern.to_owned()
+    } else {
+        format!("minecraft:{pattern}")
+    };
+    fn glob(pattern: &[u8], text: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some((b'*', rest)) => (0..=text.len()).any(|skip| glob(rest, &text[skip..])),
+            Some((c, rest)) => text.first() == Some(c) && glob(rest, &text[1..]),
+        }
+    }
+    glob(pattern.as_bytes(), id.as_bytes())
+}
+
+/// The test instances a `<tests>` selector names. An exact id that does not exist is
+/// `commands.test.error.non_existant_test`; a wildcard that matches nothing is
+/// `commands.test.error.no_test_instances` (the choice between the two is inferred from the
+/// lang keys, not verified against vanilla's source).
+fn selected_tests(ctx: &CommandContext<Source>) -> Result<Vec<String>, CommandError> {
+    let pattern = ctx.string("tests").unwrap_or_default().to_owned();
+    let matches: Vec<String> = test_instance_ids()
+        .into_iter()
+        .filter(|id| selector_matches(&pattern, id))
+        .collect();
+    if matches.is_empty() {
+        return Err(if pattern.contains('*') {
+            failure("commands.test.error.no_test_instances", vec![])
+        } else {
+            failure("commands.test.error.non_existant_test", vec![pattern])
+        });
+    }
+    Ok(matches)
+}
+
+/// `/test locate`: scans the loaded world for test structures. This server never places test
+/// structures, so the scan finds none.
+fn test_locate(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    selected_tests(ctx)?;
+    super::commands::send(
+        ctx.source(),
+        Action::Feedback(Feedback::new("commands.test.locate.started", vec![])),
+    )?;
+    super::commands::send(
+        ctx.source(),
+        Action::Feedback(Feedback::new("commands.test.locate.done", vec!["0".into()])),
+    )?;
+    Ok(0)
+}
+
+/// `/test run|runmultiple|verify`: running an instance needs the test framework (placing the
+/// instance's structure, a test-instance block entity and a per-tick runner), which this
+/// server does not have, so a selected instance fails instead of reporting a result.
+fn test_run(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let tests = selected_tests(ctx)?;
+    Err(CommandError::failed(format!(
+        "Cannot run {}: the game test framework (structure placement, test-instance blocks and the tick runner) is not implemented",
+        tests.join(", ")
+    )))
 }
 
 fn profile_text(name: &str, id: uuid::Uuid) -> String {
@@ -2955,6 +3054,63 @@ mod tests {
         );
         run("perf stop", 4, state.clone(), None).0.unwrap();
         assert!(run("jfr start", 4, state, None).0.is_err());
+    }
+
+    #[test]
+    fn test_selectors_resolve_against_the_vanilla_instances() {
+        if test_instance_ids().is_empty() {
+            return; // no extracted vanilla data
+        }
+        assert_eq!(test_instance_ids(), vec!["minecraft:always_pass"]);
+        assert!(selector_matches("always_pass", "minecraft:always_pass"));
+        assert!(selector_matches("minecraft:*", "minecraft:always_pass"));
+        assert!(selector_matches("*pass", "minecraft:always_pass"));
+        assert!(!selector_matches("other:*", "minecraft:always_pass"));
+        let error = run("test run nope", 2, fresh(), None).0.unwrap_err();
+        assert_eq!(error.to_string(), "Test nope could not be found");
+        let error = run("test run other:*", 2, fresh(), None).0.unwrap_err();
+        assert_eq!(error.to_string(), "Found no test instances");
+        // An instance that exists cannot be run here, and says so instead of passing.
+        let error = run("test run minecraft:always_pass", 2, fresh(), None)
+            .0
+            .unwrap_err();
+        assert!(error.to_string().contains("not implemented"), "{error}");
+        let (result, actions) = run("test locate minecraft:*", 2, fresh(), None);
+        assert_eq!(result.unwrap(), 0);
+        let texts: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Feedback(f) => Some(f.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Started locating test structures. This might take a while...",
+                "Finished locating: found 0 structure(s)"
+            ]
+        );
+        assert!(
+            run("test runfailed true 2 false", 2, fresh(), None)
+                .0
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn jfr_never_reports_a_recording() {
+        for (input, text) in [
+            ("jfr start", "Failed to start JFR profiling"),
+            (
+                "jfr stop",
+                "Failed to dump JFR recording: Ferrite does not run on the JVM; there is no recording to dump",
+            ),
+        ] {
+            let (result, actions) = run(input, 4, fresh(), None);
+            assert_eq!(result.unwrap_err().to_string(), text);
+            assert!(actions.is_empty(), "{input}: no success feedback");
+        }
     }
 
     #[test]

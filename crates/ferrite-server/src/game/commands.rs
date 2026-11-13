@@ -476,6 +476,14 @@ pub fn load_lang(reports: &std::path::Path) {
 }
 
 fn translate(key: &str) -> Option<&'static str> {
+    #[cfg(test)]
+    if LANG.get().is_none() {
+        // Unit tests see the same vanilla strings the server installs at startup.
+        load_lang(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vanilla/26.3/generated/reports"),
+        );
+    }
     LANG.get()?.get(key).map(String::as_str)
 }
 
