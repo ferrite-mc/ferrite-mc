@@ -37,11 +37,18 @@ recount does not give a single "implemented" figure.
 
 Partial behaviour confirmed in source today:
 
-- `/jfr`: both forms always fail (`commands_more.rs`, `jfr_tree`, line 2082).
-- `/test`: every form answers `commands.test.no_tests` (`commands_more.rs`, `no_tests` line 2122,
-  `test_tree` line 2126).
-- `/item`: item components in `item[...]` are ignored, and the `modify` forms are not backed by
-  modifiers (`commands_item.rs`, header comment, line 5).
+- `/jfr`: both forms always fail with vanilla's own failure keys (`commands_more.rs`, `jfr_tree`);
+  Ferrite is not a JVM process, so there is nothing to record. Use `/perf`, `/tps`, `/mspt` and
+  `/profile` for native diagnostics. This is deliberate, not a gap to fill.
+- `/test`: every form answers `commands.test.no_tests` (`commands_more.rs`, `no_tests`,
+  `test_tree`). Vanilla 26.3 ships one test instance (`always_pass`, type `function`, structure
+  `minecraft:empty`). Running tests needs a test-instance runner (batching, a test environment,
+  structure placement in a test area and the `block_based` test blocks), none of which exists.
+- `/item`: `item[...]` components are applied (same parser as `/give`), and `modify` plus
+  `<modifier>` run data-pack item modifiers from `data/<ns>/item_modifier/**/*.json` (see the
+  `/item` entry below for the supported functions).
+- `/attribute`: defaults come from the target's entity type (`attributes::limits_for`); an
+  attribute the type does not carry (and every non-living type) fails `failed.no_attribute`.
 - `/damage`: `from <cause>` only matters for death messages, which are not modelled
   (`commands.rs`, line 665).
 
@@ -57,7 +64,10 @@ documented as partial, the other 71 not known to be partial but not behaviour-te
   `location` (one biome), `recipe_crafted`, `bred_animals`, `tame_animal` and
   `item_used_on_block` are now evaluated. The "Not done" list in `/advancement` below (melee kills,
   eating/drinking, entering a dimension, placing a plain block) is out of date. Experience and
-  recipe rewards and the chat announcement are given. Loot-table and function rewards are not.
+  recipe rewards and the chat announcement are given. Loot-table and function rewards are run
+  as `loot give <player> loot <table>` and `execute as <player> at @s run function <fn>`
+  (`game/mod.rs`, `recipe_unlock::reward_loot`/`reward_function`; parsing is unit-tested, the
+  console wiring is not covered by an end-to-end test).
 - `/waypoint`: spectators do not transmit on the locator bar.
 - `/attribute`: `max_health` feeds the player's survival state.
 - `/debug function` traces to `debug/commands-<time>.txt`; `/dialog show` accepts an inline
@@ -91,7 +101,7 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `tools/extractor/AdvancementExtractor.java`, framing checked against the vanilla packet bytes), so
   tabs and toasts work. Completion by holding items, the chat announcement, recipe rewards and
   experience rewards work. Not done: melee kills of a plain entity type (e.g. Monster Hunter) , eating/drinking a plain item (e.g. A Balanced Diet) , entering a dimension (e.g. The End) and placing a plain block (match_block only) complete advancements, but sweep, arrow, fire and explosion kills and every other trigger (travel, location, consume, ...) do not;
-  loot-table and function rewards are not given.
+  loot-table and function rewards are given (see the note above).
 - `/recipe`: give/take with the extracted recipe ids; recipes also unlock from play (`recipe_unlock.rs`: every
   second the held item names are scanned and matched against the `recipes/**` advancements'
   `inventory_changed` items/tags and `recipe_unlocked`, ignoring counts and components). Unlocked recipes are saved per player
@@ -119,8 +129,13 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
   `hotbar.N`, `inventory.N`, `armor.*`, `weapon.mainhand|offhand|*`, `*` wildcards) with `with`
   or `from block|entity`. Several source stacks map pairwise onto the slots; `fill` only touches
   empty slots; `override` clears slots left without a stack (these fill/override semantics are
-  inferred, not checked against vanilla). Item components are ignored. No item modifiers ship in
-  the vanilla data, so `modify` and any `<modifier>` fail with `argument.item_modifier.unknown`.
+  inferred, not checked against vanilla). Item components in the item argument are applied.
+  `modify` and `from ... <modifier>` run data-pack item modifiers (`game/item_modifier.rs`):
+  `set_count`, `limit_count`, `set_damage`, `set_components`, `set_name`, `set_lore`
+  (`replace_all`), `set_enchantments`, `sequence` and constant `random_chance` conditions; an
+  inline JSON modifier or `ns:path` works. Other functions or conditions make the modifier fail
+  to load with a message naming them, and an unknown id gives `argument.item_modifier.unknown`.
+  Only slots the modifier actually changed are written and counted.
   Non-player entities have no inventory here, so only players are written. Feedback texts are
   from memory.
 - `/ride <target> mount <vehicle>|dismount`: rides live in a server-side table; the client gets
