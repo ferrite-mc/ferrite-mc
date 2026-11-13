@@ -12,7 +12,8 @@ final class FerriteLegacyRegistryValues {
     private static final Map<String, Class<? extends Keyed>> TYPES = Map.of(
             "sound_event", org.bukkit.Sound.class,
             "villager_profession", org.bukkit.entity.Villager.Profession.class,
-            "villager_type", org.bukkit.entity.Villager.Type.class);
+            "villager_type", org.bukkit.entity.Villager.Type.class,
+            "worldgen/biome", org.bukkit.block.Biome.class);
     static boolean supports(String kind) { return TYPES.containsKey(kind); }
 
     private static int id(String kind, NamespacedKey key) {
