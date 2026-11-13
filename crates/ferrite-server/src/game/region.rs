@@ -662,6 +662,10 @@ pub(super) fn broadcast_tracked_chunk(
     }
 }
 pub enum Signal {
+    /// A `/clone` between dimensions whose source half has run (see `CrossClone`).
+    CrossClone(Box<super::commands_world::CrossClone>),
+    /// The `move` half of a cross-dimension clone, after the destination was written.
+    CrossCloneClear(Box<super::commands_world::CrossClone>),
     Transfer {
         to: ChunkPos,
         player: Box<Player>,
