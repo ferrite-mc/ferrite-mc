@@ -1992,14 +1992,15 @@ async fn run(
         let mut locator = waypoints::Locator::default();
         offload::Latest::spawn(
             "ferrite-locator",
-            move |(online, styles, spectators, ranges): (
+            move |(online, styles, spectators, ranges, extra): (
                 HashMap<Uuid, commands::OnlinePlayer>,
                 _,
                 _,
                 _,
+                Vec<waypoints::Extra>,
             )| {
                 locator.ranges = ranges;
-                for (receiver, bytes) in locator.sync(&online, &styles, &spectators) {
+                for (receiver, bytes) in locator.sync(&online, &styles, &spectators, &extra) {
                     if let Some(player) = online.get(&receiver) {
                         let _ = player.outbound.send(Outbound::Packet(bytes.into()));
                     }
@@ -2187,7 +2188,8 @@ async fn run(
                          let _t = CoordinatorTimer::new(4);
                          let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
                          let (styles, spectators, ranges) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone(), online.keys().map(|uuid| (*uuid, waypoints::player_ranges(&game.more.attributes, *uuid, hidden.contains(uuid)))).collect::<HashMap<_, _>>()) };
-                         locator.submit((online.clone(), styles, spectators, ranges));
+                         let extra = { let game = command_state.lock().unwrap(); let index = game.entities.lock().unwrap(); waypoints::non_player_transmitters(&game.more.attributes, &index, |uuid| online.contains_key(uuid)) };
+                         locator.submit((online.clone(), styles, spectators, ranges, extra));
                      }
         laps.lap("locator");
                      {
