@@ -23,6 +23,9 @@ pub struct Saved {
     /// The End credits were already seen, so a first trip home does not replay them.
     #[serde(default)]
     pub seen_credits: bool,
+    /// Vanilla `XpSeed`: the enchanting table's offers stay put until the player enchants.
+    #[serde(default)]
+    pub enchant_seed: Option<i32>,
     /// The dimension the player logged out in, as a dimension key. Older saves default to
     /// the overworld.
     #[serde(default = "default_dimension")]
@@ -115,6 +118,7 @@ impl Saved {
             pitch,
             gamemode,
             seen_credits,
+            enchant_seed: None,
             dimension: dimension.key().to_owned(),
             world: None,
             vehicle: None,
@@ -128,6 +132,13 @@ impl Saved {
     #[must_use]
     pub fn in_world(mut self, world: Option<Uuid>) -> Self {
         self.world = world;
+        self
+    }
+
+    /// Records the player's enchantment seed.
+    #[must_use]
+    pub fn with_enchant_seed(mut self, seed: i32) -> Self {
+        self.enchant_seed = Some(seed);
         self
     }
 
@@ -228,6 +239,28 @@ mod tests {
             .duration_since(first)
             .unwrap_or_default();
         assert!(age < std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn enchant_seed_round_trips_and_older_saves_have_none() {
+        let dir = temp_dir("enchant-seed");
+        let uuid = Uuid::from_u128(11);
+        let base = Saved::capture(
+            [0.0, 64.0, 0.0],
+            0.0,
+            0.0,
+            0,
+            crate::game::Dimension::Overworld,
+            false,
+            &PlayerInventory::new(),
+        );
+        save_to(&dir, &uuid, &base.clone().with_enchant_seed(-12345)).unwrap();
+        assert_eq!(load_from(&dir, &uuid).unwrap().enchant_seed, Some(-12345));
+        let mut json: serde_json::Value = serde_json::to_value(&base).unwrap();
+        json.as_object_mut().unwrap().remove("enchant_seed");
+        let older: Saved = serde_json::from_value(json).unwrap();
+        assert_eq!(older.enchant_seed, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
