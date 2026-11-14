@@ -777,7 +777,8 @@ pub enum Signal {
     /// Redstone blocks on the other side of a region boundary need a re-evaluation.
     RedstoneChange {
         dimension: super::Dimension,
-        positions: Vec<[i32; 3]>,
+        /// `(block to re-evaluate, block that changed)`.
+        positions: Vec<super::redstone::Wake>,
     },
     FinishRelease {
         world: super::WorldId,
@@ -5663,9 +5664,10 @@ impl Region {
         source: &super::anvil::AnvilChunkSource,
         tracking: &Tracking,
         pos: [i32; 3],
+        origin: [i32; 3],
     ) {
         let mut world = super::fluid::RegionFluidWorld::new(source, &self.held_chunks, tracking);
-        self.redstone.foreign_changed(&mut world, pos);
+        self.redstone.foreign_changed(&mut world, pos, origin);
     }
     /// Creates a mob at an absolute position (`/summon`).
     pub fn summon(&mut self, kind: MobKind, pos: [f64; 3], no_ai: bool) -> bool {
@@ -9609,6 +9611,14 @@ impl Region {
                 .collect();
             self.redstone.set_occupants(occupants);
         }
+        if !self.entities.keys().is_empty() || self.redstone.has_frames() {
+            self.redstone
+                .set_item_frames(&item_frame_outputs(&self.entities));
+        }
+        if self.redstone.has_chests() || self.players.values().any(|p| p.menus.open_at.is_some()) {
+            self.redstone
+                .set_chest_viewers(&trapped_chest_viewers(self.players.values().map(|p| &p.menus)));
+        }
         self.redstone.tick(&mut world, &[]);
         let actions = self.redstone.take_piston_actions(&world);
         let mut piston_changes = Vec::new();
@@ -10368,6 +10378,27 @@ impl Region {
         }
         for slot in std::mem::take(&mut p.menus.fishing) {
             self.use_fishing_rod(p, slot);
+        }
+        for (at, amount) in std::mem::take(&mut p.menus.orbs) {
+            // `ExperienceOrb.award(level, Vec3.atCenterOf(pos), amount)` then
+            // `levelEvent(1042, pos, 0)` (the grindstone's use sound).
+            let center = ferrite_math::Vec3::new(
+                f64::from(at[0]) + 0.5,
+                f64::from(at[1]) + 0.5,
+                f64::from(at[2]) + 0.5,
+            );
+            for orb in experience::award(center, amount) {
+                self.entities.insert(orb);
+            }
+            send(
+                p,
+                &LevelEvent {
+                    event: 1042,
+                    location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+                    data: 0,
+                    global: false,
+                },
+            );
         }
         for stack in p.menus.thrown.drain(..) {
             let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
@@ -15026,6 +15057,69 @@ mod worn_stack_tests {
     }
 }
 
+/// Item-frame strengths for comparators: `(block, facing, ItemFrame.getAnalogOutput)`. A frame
+/// is a plain entity here (no placement logic yet), so its facing is the spawn data value.
+pub(crate) fn item_frame_outputs(
+    entities: &ferrite_entity::EntityStore,
+) -> Vec<([i32; 3], ferrite_math::Direction, u8)> {
+    use ferrite_protocol::packets::play::MetaValue;
+    let kinds: Vec<u16> = ["minecraft:item_frame", "minecraft:glow_item_frame"]
+        .iter()
+        .filter_map(|name| ferrite_data::entity_props::by_name(name).map(|props| props.id))
+        .collect();
+    let mut out = Vec::new();
+    for &key in entities.keys() {
+        let (Some(at), Some(data)) = (entities.pos(key), entities.data(key)) else {
+            continue;
+        };
+        if !kinds.contains(&data.kind) {
+            continue;
+        }
+        let Some(&facing) = usize::try_from(data.spawn_data)
+            .ok()
+            .and_then(|index| ferrite_math::Direction::ALL.get(index))
+        else {
+            continue;
+        };
+        // `ItemFrame.getAnalogOutput`: nothing inside is 0, else rotation % 8 + 1.
+        let strength = match data.metadata.get(8) {
+            Some(MetaValue::ItemStack(stack)) if stack.count > 0 => {
+                let rotation = match data.metadata.get(9) {
+                    Some(MetaValue::Int(value)) => *value,
+                    _ => 0,
+                };
+                (rotation.rem_euclid(8) + 1) as u8
+            }
+            _ => 0,
+        };
+        out.push((
+            [at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32],
+            facing,
+            strength,
+        ));
+    }
+    out
+}
+
+/// How many players have each trapped chest open (`ContainerOpenersCounter`); both halves of
+/// a double chest count the viewer, as vanilla counts them on either half's block entity.
+pub(crate) fn trapped_chest_viewers<'a>(
+    menus: impl Iterator<Item = &'a super::container::Containers>,
+) -> std::collections::HashMap<[i32; 3], u8> {
+    let mut out = std::collections::HashMap::new();
+    for menu in menus {
+        if let Some(super::container::OpenAt::Inventory(opened)) = &menu.open_at
+            && opened.block == "minecraft:trapped_chest"
+        {
+            for &part in &opened.parts {
+                let count = out.entry(part).or_insert(0u8);
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod event_policy_tests {
     use super::*;
@@ -15401,5 +15495,81 @@ mod event_policy_tests {
             after.is_ok(),
             "command blocks must see the tree published after startup: {after:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod redstone_inputs_tests {
+    use super::*;
+    use ferrite_protocol::packets::play::{ItemStack as WireStack, MetaValue};
+
+    fn frame(store: &mut ferrite_entity::EntityStore, at: [f64; 3], spawn_data: i32, rotation: i32, filled: bool) {
+        let kind = ferrite_data::entity_props::by_name("minecraft:item_frame")
+            .unwrap()
+            .id;
+        let mut data = ferrite_entity::EntityData::new(
+            ferrite_entity::allocate_id(),
+            uuid::Uuid::new_v4(),
+            kind,
+            0.5,
+            0.5,
+        );
+        data.spawn_data = spawn_data;
+        data.metadata.define(
+            8,
+            MetaValue::ItemStack(WireStack {
+                count: i32::from(filled),
+                item_id: 1,
+            }),
+        );
+        data.metadata.define(9, MetaValue::Int(rotation));
+        store.insert(ferrite_entity::EntityRecord {
+            pos: ferrite_math::Vec3::new(at[0], at[1], at[2]),
+            vel: ferrite_math::Vec3::ZERO,
+            flags: Default::default(),
+            data,
+        });
+    }
+
+    /// `ItemFrame.getAnalogOutput`: empty is 0, otherwise `rotation % 8 + 1`.
+    #[test]
+    fn item_frames_output_rotation_plus_one_and_zero_when_empty() {
+        let mut store = ferrite_entity::EntityStore::new(2);
+        frame(&mut store, [0.5, 64.5, 0.5], 4, 3, true);
+        frame(&mut store, [4.5, 64.5, 0.5], 5, 11, true);
+        frame(&mut store, [8.5, 64.5, 0.5], 2, 5, false);
+        let mut outputs = item_frame_outputs(&store);
+        outputs.sort_by_key(|(pos, _, _)| pos[0]);
+        assert_eq!(
+            outputs,
+            vec![
+                ([0, 64, 0], ferrite_math::Direction::West, 4),
+                ([4, 64, 0], ferrite_math::Direction::East, 4),
+                ([8, 64, 0], ferrite_math::Direction::North, 0),
+            ]
+        );
+    }
+
+    /// `ContainerOpenersCounter`: every viewer counts once on each half of a double chest, and
+    /// only trapped chests report.
+    #[test]
+    fn trapped_chest_viewers_count_each_open_menu_on_both_halves() {
+        use super::super::block_container::Opened;
+        use super::super::container::{Containers, OpenAt};
+        let open = |block: &'static str| {
+            let mut menus = Containers::default();
+            menus.open_at = Some(OpenAt::Inventory(Opened {
+                parts: vec![[0, 64, 0], [1, 64, 0]],
+                block,
+                rows: 6,
+                title: "container.chestDouble",
+            }));
+            menus
+        };
+        let viewers = [open("minecraft:trapped_chest"), open("minecraft:trapped_chest"), open("minecraft:chest")];
+        let counts = trapped_chest_viewers(viewers.iter());
+        assert_eq!(counts[&[0, 64, 0]], 2);
+        assert_eq!(counts[&[1, 64, 0]], 2);
+        assert_eq!(counts.len(), 2);
     }
 }

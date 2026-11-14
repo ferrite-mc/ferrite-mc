@@ -491,8 +491,12 @@ pub struct Clicker<'a> {
     pub crafter: &'a dyn Crafter,
     /// Stacks the player drops (vanilla `player.drop`), in order.
     pub drops: Vec<ItemStack>,
-    /// Experience points the click awards (furnace output, later grindstone).
+    /// Experience points the click awards straight to the player (furnace output, villager
+    /// trades).
     pub xp: f32,
+    /// Experience the click spawns as orbs at the block the menu belongs to
+    /// (`ExperienceOrb.award` in `GrindstoneMenu$4.onTake`); nothing when the menu has no block.
+    pub block_xp: i32,
     /// Experience levels the click spends (anvil cost).
     pub levels: i32,
     /// Ids of the recipes the click crafted, once per result taken.
@@ -513,6 +517,7 @@ impl<'a> Clicker<'a> {
             crafter,
             drops: Vec::new(),
             xp: 0.0,
+            block_xp: 0,
             levels: 0,
             crafted: Vec::new(),
             maps: &NoMaps,
@@ -2268,7 +2273,7 @@ impl Menu {
                     let total = self.station_xp as i32;
                     if total > 0 {
                         let half = (total + 1) / 2;
-                        p.xp += (half + p.crafter.random_below(half)) as f32;
+                        p.block_xp += half + p.crafter.random_below(half);
                     }
                     self.station_xp = 0.0;
                 }

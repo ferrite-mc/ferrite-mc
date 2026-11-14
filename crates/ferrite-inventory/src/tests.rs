@@ -344,7 +344,7 @@ fn grindstone_experience_is_half_the_minimum_costs_rounded_up() {
     assert!(!result.is_empty());
     let mut p = Clicker::new(&mut f.inv, false, &StationCrafter);
     f.menu.clicked(&mut p, 2, 0, Pickup);
-    assert_eq!(p.xp, 7.0, "ceil((12 + 1) / 2) with the deterministic test roll of 0");
+    assert_eq!(p.block_xp, 7, "ceil((12 + 1) / 2) with the deterministic test roll of 0");
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn stonecutter_grindstone_enchanting_smithing_and_loom_work() {
     );
     let mut p = Clicker::new(&mut f.inv, false, &StationCrafter);
     f.menu.clicked(&mut p, 2, 0, Pickup);
-    assert!(p.xp >= 2.0);
+    assert!(p.block_xp >= 2 && p.xp == 0.0);
     assert_eq!(f.slot(0), empty());
 
     // Enchanting: a table decides the buttons; a click costs `choice + 1` lapis and levels.
