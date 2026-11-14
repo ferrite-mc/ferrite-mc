@@ -1146,6 +1146,7 @@ pub fn clone_read(
                         entity: world.block_entity_at([x, y, z]),
                     });
                 }
+                note(block.at, u32::from(air()), &mut changes);
             }
         }
     }
