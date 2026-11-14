@@ -339,6 +339,19 @@ pub trait Crafter {
         false
     }
 
+    /// What the grindstone needs of `enchantment` at `level`: `Enchantment.getMinCost(level)`
+    /// and whether it is in `#minecraft:curse`. `None` for an unknown enchantment, which the
+    /// grindstone treats as a non-curse worth nothing.
+    fn grindstone_enchantment(&self, _enchantment: &str, _level: i32) -> Option<(i32, bool)> {
+        None
+    }
+
+    /// A random integer in `0..bound` (vanilla `level.getRandom().nextInt(bound)`). The default
+    /// is deterministic so menu tests do not depend on chance.
+    fn random_below(&self, _bound: i32) -> i32 {
+        0
+    }
+
     /// The id of the recipe `craft` matches for this grid, for the `recipe_crafted` trigger.
     fn recipe_id(&self, _grid: &[ItemStack], _width: usize) -> Option<String> {
         None
@@ -561,6 +574,8 @@ enum Rule {
     Plain,
     /// A shulker box slot: anything but a shulker box (vanilla `ShulkerBoxSlot`).
     NoShulkerBox,
+    /// A grindstone input: damageable or enchanted (vanilla `GrindstoneMenu` input slots).
+    Grindable,
     /// A mount's saddle slot.
     MountSaddle {
         llama: bool,
@@ -737,7 +752,10 @@ pub struct Menu {
     infinite_materials: bool,
     /// Vanilla `StonecutterMenu.recipes` and `selectedRecipeIndex`.
     stonecutting: Vec<ItemStack>,
-    stonecutting_index: usize,
+    /// `StonecutterMenu.selectedRecipeIndex`: `-1` until a recipe button is clicked.
+    stonecutting_index: i32,
+    /// `StonecutterMenu.input`: the input as of the last recipe-list rebuild.
+    stonecutting_input: ItemStack,
     /// Vanilla `LoomMenu.selectedPattern` (the pattern list itself is not modelled yet).
     loom_pattern: usize,
     /// Vanilla `MerchantMenu.trades`: the villager's offers, owned by the menu while it is open.
@@ -840,7 +858,8 @@ impl Menu {
                 ..Default::default()
             },
             stonecutting: Vec::new(),
-            stonecutting_index: 0,
+            stonecutting_index: -1,
+            stonecutting_input: ItemStack::empty(),
             loom_pattern: 0,
             trades: Vec::new(),
             trade: 0,
@@ -1015,11 +1034,11 @@ impl Menu {
         let mut slots = vec![
             SlotDef {
                 store: Store::Container(0),
-                rule: Rule::Plain,
+                rule: Rule::Grindable,
             },
             SlotDef {
                 store: Store::Container(1),
-                rule: Rule::Plain,
+                rule: Rule::Grindable,
             },
             SlotDef {
                 store: Store::Result,
@@ -1390,7 +1409,7 @@ impl Menu {
                     self.data.resize(1, 0);
                     self.remote_data.resize(1, i32::MIN);
                 }
-                self.data[0] = self.stonecutting_index as i32;
+                self.data[0] = self.stonecutting_index;
             }
             MenuKind::Loom => {
                 if self.data.is_empty() {
@@ -1432,19 +1451,22 @@ impl Menu {
     fn refresh_station_result(&mut self, crafter: &dyn Crafter, maps: &dyn MapAccess) {
         match self.kind {
             MenuKind::Anvil => self.update_anvil(crafter),
-            MenuKind::Grindstone => self.update_grindstone(),
+            MenuKind::Grindstone => self.update_grindstone(crafter),
             MenuKind::Stonecutter => {
-                self.stonecutting = if self.container[0].is_empty() {
-                    Vec::new()
-                } else {
-                    crafter.stonecutting(&self.container[0])
-                };
-                if self.stonecutting_index >= self.stonecutting.len() {
-                    self.stonecutting_index = 0;
+                // `StonecutterMenu.slotsChanged`: only a different input item rebuilds the
+                // recipe list, and that clears the selection until a button is clicked.
+                if !self.container[0].is_same_item(&self.stonecutting_input) {
+                    self.stonecutting_input = self.container[0].clone();
+                    self.stonecutting_index = -1;
+                    self.stonecutting = if self.container[0].is_empty() {
+                        Vec::new()
+                    } else {
+                        crafter.stonecutting(&self.container[0])
+                    };
                 }
-                self.result = self
-                    .stonecutting
-                    .get(self.stonecutting_index)
+                self.result = usize::try_from(self.stonecutting_index)
+                    .ok()
+                    .and_then(|index| self.stonecutting.get(index))
                     .cloned()
                     .unwrap_or_default();
                 self.sync_data();
@@ -1462,45 +1484,20 @@ impl Menu {
         }
     }
 
-    fn update_grindstone(&mut self) {
+    /// Vanilla `GrindstoneMenu.createResult`/`computeResult`. `station_xp` keeps the sum of the
+    /// inputs' enchantment minimum costs; taking the result turns it into the experience.
+    fn update_grindstone(&mut self, crafter: &dyn Crafter) {
         let left = self.container[0].clone();
         let right = self.container[1].clone();
-        self.result = ItemStack::empty();
         self.station_xp = 0.0;
-        if left.is_empty() && right.is_empty() {
-            self.sync_data();
-            return;
+        self.result = grindstone_result(&left, &right, crafter);
+        if !self.result.is_empty() {
+            let cost: i32 = [&left, &right]
+                .into_iter()
+                .map(|stack| grindstone_experience_cost(stack, crafter))
+                .sum();
+            self.station_xp = cost as f32;
         }
-        if !left.is_empty() && !right.is_empty() && !left.is_same_item(&right) {
-            self.sync_data();
-            return;
-        }
-        let mut out = if left.is_empty() {
-            right.clone()
-        } else {
-            left.clone()
-        };
-        let mut xp = 0.0;
-        for stack in [&left, &right] {
-            if stack.effective_component(ids::ENCHANTMENTS).is_some()
-                || stack
-                    .effective_component(ids::STORED_ENCHANTMENTS)
-                    .is_some()
-            {
-                xp += 2.0;
-            }
-        }
-        out.components.remove(ids::ENCHANTMENTS);
-        out.components.remove(ids::STORED_ENCHANTMENTS);
-        if !left.is_empty() && !right.is_empty() && left.is_damageable() {
-            let max = left.max_damage().unwrap_or(0);
-            let total = ((max - left.damage()) + (max - right.damage())).min(max);
-            out.components
-                .insert(ids::DAMAGE, Component::Damage(max - total));
-        }
-        out.count = 1;
-        self.station_xp = xp;
-        self.result = out;
         self.sync_data();
     }
 
@@ -2080,6 +2077,7 @@ impl Menu {
         match self.slots[slot].rule {
             Rule::Plain => true,
             Rule::NoShulkerBox => !is_shulker_box(stack),
+            Rule::Grindable => stack.is_damageable() || has_any_enchantments(stack),
             Rule::Armor(name) => equipment_slot(stack) == name,
             Rule::Result | Rule::Output => false,
             Rule::MountSaddle { llama } => !llama && stack.name() == Some("minecraft:saddle"),
@@ -2265,7 +2263,13 @@ impl Menu {
                         *cell = normalize(left);
                     }
                     self.result = ItemStack::empty();
-                    p.xp += self.station_xp;
+                    // `GrindstoneMenu.getExperienceAmount`: half the minimum costs, rounded up,
+                    // plus a random amount below that.
+                    let total = self.station_xp as i32;
+                    if total > 0 {
+                        let half = (total + 1) / 2;
+                        p.xp += (half + p.crafter.random_below(half)) as f32;
+                    }
                     self.station_xp = 0.0;
                 }
                 MenuKind::Stonecutter => {
@@ -3065,9 +3069,13 @@ impl Menu {
         match self.kind {
             MenuKind::Enchanting => self.enchant(button, next_seed),
             MenuKind::Stonecutter => {
-                if button >= 0 && (button as usize) < self.stonecutting.len() {
-                    self.stonecutting_index = button as usize;
-                    self.result = self.stonecutting[self.stonecutting_index].clone();
+                // `clickMenuButton`: the selected button again does nothing; a valid one picks it.
+                if button != self.stonecutting_index
+                    && button >= 0
+                    && (button as usize) < self.stonecutting.len()
+                {
+                    self.stonecutting_index = button;
+                    self.result = self.stonecutting[button as usize].clone();
                     self.sync_data();
                 }
                 None
@@ -3171,6 +3179,135 @@ fn merge_enchantments(
         cost += weight * new_level;
     }
     (merged, cost, applied, refused)
+}
+
+/// `EnchantmentHelper.hasAnyEnchantments`: applied or stored enchantments on any item.
+fn has_any_enchantments(stack: &ItemStack) -> bool {
+    [ids::ENCHANTMENTS, ids::STORED_ENCHANTMENTS]
+        .into_iter()
+        .any(|id| {
+            matches!(
+                stack.effective_component(id),
+                Some(Component::Enchantments(e) | Component::StoredEnchantments(e)) if !e.is_empty()
+            )
+        })
+}
+
+/// `GrindstoneMenu.removeNonCursesFrom`: drops every enchantment that is not a curse, turns an
+/// emptied enchanted book back into a book and sets the repair cost the curses left behind.
+fn remove_non_curses(mut stack: ItemStack, crafter: &dyn Crafter) -> ItemStack {
+    let stored = stack.name() == Some("minecraft:enchanted_book");
+    let id = if stored {
+        ids::STORED_ENCHANTMENTS
+    } else {
+        ids::ENCHANTMENTS
+    };
+    let current = match stack.effective_component(id) {
+        Some(Component::Enchantments(e) | Component::StoredEnchantments(e)) => e,
+        _ => Enchantments::new(),
+    };
+    let mut curses = Enchantments::new();
+    for (name, &level) in &current.levels {
+        if crafter
+            .grindstone_enchantment(name, level)
+            .is_some_and(|(_, curse)| curse)
+        {
+            curses.set(name.clone(), level);
+        }
+    }
+    let remaining = curses.levels.len();
+    if curses.is_empty() {
+        stack.components.remove(id);
+        if stored && let Some(book) = ferrite_item::item_id("minecraft:book") {
+            stack.item = book;
+        }
+    } else {
+        stack.components.insert(
+            id,
+            if stored {
+                Component::StoredEnchantments(curses)
+            } else {
+                Component::Enchantments(curses)
+            },
+        );
+    }
+    // `AnvilMenu.calculateIncreasedRepairCost`: `cost * 2 + 1`, once per remaining curse.
+    let mut cost = 0;
+    for _ in 0..remaining {
+        cost = cost * 2 + 1;
+    }
+    stack
+        .components
+        .insert(ids::REPAIR_COST, Component::RepairCost(cost));
+    stack
+}
+
+/// `GrindstoneMenu.computeResult`.
+fn grindstone_result(left: &ItemStack, right: &ItemStack, crafter: &dyn Crafter) -> ItemStack {
+    if left.is_empty() && right.is_empty() || left.count > 1 || right.count > 1 {
+        return ItemStack::empty();
+    }
+    if left.is_empty() || right.is_empty() {
+        let single = if left.is_empty() { right } else { left };
+        if !has_any_enchantments(single) {
+            return ItemStack::empty();
+        }
+        return remove_non_curses(single.clone(), crafter);
+    }
+    // `mergeItems`: two stacks of one item.
+    if !left.is_same_item(right) {
+        return ItemStack::empty();
+    }
+    let max = left.max_damage().unwrap_or(0).max(right.max_damage().unwrap_or(0));
+    let remaining = (max - left.damage()) + (max - right.damage()) + max * 5 / 100;
+    let mut count = 1;
+    if !left.is_damageable() {
+        if left.max_stack_size() < 2 || left != right {
+            return ItemStack::empty();
+        }
+        count = 2;
+    }
+    let mut out = left.copy_with_count(count);
+    if left.is_damageable() {
+        out.components.insert(ids::MAX_DAMAGE, Component::MaxDamage(max));
+        out.components
+            .insert(ids::DAMAGE, Component::Damage((max - remaining).max(0)));
+    }
+    // `mergeEnchantsFrom`: the second stack's enchantments upgrade the first's.
+    let stored = out.name() == Some("minecraft:enchanted_book");
+    let id = if stored {
+        ids::STORED_ENCHANTMENTS
+    } else {
+        ids::ENCHANTMENTS
+    };
+    let mut merged = crafting_enchantments(&out);
+    for (name, &level) in &crafting_enchantments(right).levels {
+        let keep = merged.level(name).unwrap_or(0).max(level);
+        merged.set(name.clone(), keep);
+    }
+    if !merged.is_empty() {
+        out.components.insert(
+            id,
+            if stored {
+                Component::StoredEnchantments(merged)
+            } else {
+                Component::Enchantments(merged)
+            },
+        );
+    }
+    remove_non_curses(out, crafter)
+}
+
+/// `GrindstoneMenu$4.getExperienceFromItem`: the minimum enchanting cost of every non-curse
+/// enchantment on the stack.
+fn grindstone_experience_cost(stack: &ItemStack, crafter: &dyn Crafter) -> i32 {
+    crafting_enchantments(stack)
+        .levels
+        .iter()
+        .filter_map(|(name, &level)| crafter.grindstone_enchantment(name, level))
+        .filter(|&(_, curse)| !curse)
+        .map(|(cost, _)| cost)
+        .sum()
 }
 
 fn repair_cost(stack: &ItemStack) -> i32 {

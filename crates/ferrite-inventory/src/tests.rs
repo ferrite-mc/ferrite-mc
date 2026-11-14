@@ -252,6 +252,115 @@ impl Crafter for StationCrafter {
         self.smithing(template, base, addition)
             .map(|_| "minecraft:test_smithing".to_owned())
     }
+
+    /// Sharpness (`min_cost` 1 + 11 per level above the first) and the two curses.
+    fn grindstone_enchantment(&self, enchantment: &str, level: i32) -> Option<(i32, bool)> {
+        match enchantment {
+            "minecraft:sharpness" => Some((1 + (level - 1) * 11, false)),
+            "minecraft:binding_curse" | "minecraft:vanishing_curse" => Some((25, true)),
+            _ => None,
+        }
+    }
+}
+
+fn grind_item(name: &str, enchantments: &[(&str, i32)]) -> ItemStack {
+    let mut stack = item(name, 1);
+    let mut levels = Enchantments::new();
+    for (enchantment, level) in enchantments {
+        levels.set(*enchantment, *level);
+    }
+    if name == "enchanted_book" {
+        stack.components.insert(
+            component_ids::STORED_ENCHANTMENTS,
+            Component::StoredEnchantments(levels),
+        );
+    } else {
+        stack
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(levels));
+    }
+    stack
+}
+
+fn grind(left: ItemStack, right: ItemStack) -> (Fixture, ItemStack) {
+    let mut f = Fixture::new(Menu::grindstone(4));
+    f.menu.set_slot(&mut f.inv, &StationCrafter, 0, left);
+    f.menu.set_slot(&mut f.inv, &StationCrafter, 1, right);
+    let result = f.slot(2);
+    (f, result)
+}
+
+#[test]
+fn a_grindstone_follows_vanilla_compute_result() {
+    // `GrindstoneMenu.computeResult`: a lone unenchanted sword grinds into nothing.
+    assert_eq!(grind(item("iron_sword", 1), empty()).1, empty());
+    // Two swords of the same item merge with the 5% bonus: 250 - ((250 - 100) + (250 - 100) +
+    // 12) leaves 0 damage... and a bigger wear stays: (250 - 240) * 2 + 12 = 32 left of 250.
+    let worn = |damage: i32| {
+        let mut sword = item("iron_sword", 1);
+        sword
+            .components
+            .insert(component_ids::DAMAGE, Component::Damage(damage));
+        sword
+    };
+    let (_, merged) = grind(worn(240), worn(240));
+    assert_eq!(merged.damage(), 250 - (10 + 10 + 12));
+    assert_eq!(merged.count, 1);
+    // Different items, or a stack of two, produce nothing.
+    assert_eq!(grind(item("iron_sword", 1), item("diamond_sword", 1)).1, empty());
+    assert_eq!(grind(grind_item("iron_sword", &[("minecraft:sharpness", 1)]).copy_with_count(2), empty()).1, empty());
+    // Curses survive and set the repair cost they leave behind.
+    let (_, cursed) = grind(
+        grind_item(
+            "iron_sword",
+            &[("minecraft:sharpness", 3), ("minecraft:binding_curse", 1)],
+        ),
+        empty(),
+    );
+    let Some(Component::Enchantments(left)) = cursed.effective_component(component_ids::ENCHANTMENTS)
+    else {
+        panic!("the curse stays on the sword");
+    };
+    assert_eq!(left.levels.keys().collect::<Vec<_>>(), ["minecraft:binding_curse"]);
+    assert_eq!(
+        cursed.effective_component(component_ids::REPAIR_COST),
+        Some(Component::RepairCost(1))
+    );
+    // An enchanted book without curses turns back into a book.
+    let (_, book) = grind(grind_item("enchanted_book", &[("minecraft:sharpness", 2)]), empty());
+    assert_eq!(book.name(), Some("minecraft:book"));
+}
+
+#[test]
+fn grindstone_experience_is_half_the_minimum_costs_rounded_up() {
+    // Sharpness II costs 1 + 11 = 12 and sharpness I costs 1; the curse is worth nothing.
+    let (mut f, result) = grind(
+        grind_item(
+            "iron_sword",
+            &[("minecraft:sharpness", 2), ("minecraft:binding_curse", 1)],
+        ),
+        grind_item("iron_sword", &[("minecraft:sharpness", 1)]),
+    );
+    assert!(!result.is_empty());
+    let mut p = Clicker::new(&mut f.inv, false, &StationCrafter);
+    f.menu.clicked(&mut p, 2, 0, Pickup);
+    assert_eq!(p.xp, 7.0, "ceil((12 + 1) / 2) with the deterministic test roll of 0");
+}
+
+#[test]
+fn grindstone_slots_take_only_damageable_or_enchanted_items() {
+    let mut f = Fixture::new(Menu::grindstone(4));
+    // Hotbar slot 0 is menu slot 30 (after the two inputs, the result and 27 inventory slots).
+    f.set(30, item("dirt", 1));
+    f.set(31, item("iron_sword", 1));
+    f.click(30, 0, Pickup);
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0), empty(), "dirt cannot be ground");
+    assert_eq!(f.carried(), item("dirt", 1), "and stays on the cursor");
+    f.click(31, 0, Pickup);
+    assert_eq!(f.carried(), item("iron_sword", 1));
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0), item("iron_sword", 1), "a damageable sword can");
 }
 
 #[test]
@@ -260,6 +369,11 @@ fn stonecutter_grindstone_enchanting_smithing_and_loom_work() {
     f.menu
         .set_slot(&mut f.inv, &StationCrafter, 0, item("stone", 3));
     assert_eq!(f.menu.kind(), crate::MenuKind::Stonecutter);
+    // `StonecutterMenu.setupRecipeList` clears the selection: no result until a button.
+    assert_eq!(f.slot(1), empty());
+    assert_eq!(f.menu.data_value(0), -1);
+    f.menu.button_click(0, 0);
+    assert_eq!(f.menu.data_value(0), 0);
     assert_eq!(f.slot(1), item("stone_slab", 2));
     let mut p = Clicker::new(&mut f.inv, false, &StationCrafter);
     f.menu.clicked(&mut p, 1, 0, Pickup);
