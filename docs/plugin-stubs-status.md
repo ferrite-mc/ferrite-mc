@@ -1,7 +1,20 @@
 # 플러그인 API 스텁 현황 (세션 기록)
 
-> **2026-11-14:** 가장 최근 상세 기록은 바로 아래 2026-11-14 claude-api(Lane B4) 절이다. 레인 병합 뒤에는
+> **2026-11-14:** 가장 최근 상세 기록은 바로 아래 2026-11-14 claude-api-2 절이다. 레인 병합 뒤에는
 > 현재 소스와 대조해야 하며, 요약은 `README.md`와 `docs/BACKLOG.md`를 따른다.
+
+## 2026-11-14 — claude-api-2 (Lane B, 4단계): 카탈로그 재생성과 `World#getFluidData`
+
+- **카탈로그 재생성.** `./gradlew test --no-daemon --console=plain`(`java/ferrite-api-impl`, JUnit 446개 통과)로 다시 만들었다.
+  `player-missing` 90줄, `server-missing` 4줄, `world-missing` 58줄. 이름이 호스트/Java에 있는지로 분류하면 Player 0, Server 0,
+  World 2(`getBlockState(int,int,int)`, `vanillaBiomeProvider()`)만 정말 열려 있다. 이전의 "Player 12 / World 14"는 낡은 수치이며
+  `plugin-api-stubs.md`의 2026-11-14 분류 절이 대체한다. 이름 단위 분류라 인자 조합별 완전성은 검증하지 않았다.
+- **구현: `World#getFluidData`.** 블록의 바닐라 상태 문자열에서 유체 종류·원천 여부·양·낙하 여부를 만든다(`FerriteFluidData`).
+  흐름 방향/높이는 이웃 블록이 필요해 `UnsupportedOperationException`. JUnit `FerriteFluidDataTest`(6개). `Block#getState`가
+  호스트에 없어 `World#getBlockState`는 고치지 않고 열린 채로 둔다.
+- **한계로 확정(코드 변경 없음, 테스트 존재).** POI `IS_OCCUPIED`는 티켓을 잡는 AI가 없어 빈 결과(`PlayerExtrasTest`);
+  `GeneratedStructure#getPieces`와 `locateNearestBiome` 임의 간격은 정밀한 거부(`WorldSearchTest`). EULA 게이트 월드젠 테스트는
+  실행하지 않았다. 실제 클라이언트로 확인한 것은 없다.
 
 ## 2026-11-14 — claude-api (Lane B4): 플러그인 한계 점검
 
@@ -77,7 +90,7 @@ CMI가 동작한다고 말할 수 없다.
   실제 JVM 호스트 테스트가 확인한다.
 - **월드젠 질의:** `vanilla_host.rs::plugin_world_queries_are_answered_by_the_real_jar`가 실제 26.3 jar로 바이옴 위치, 구조물 위치,
   구조물 시작, `hasStructureAt`를 확인한다(`FERRITE_TEST_ACCEPT_EULA=true`, `tools/build_worldgen_host.py` 필요).
-- **스텁 카탈로그:** `docs/plugin-api-stubs.md`의 새 분류 절을 따른다(Player 12, World 14가 정말 열려 있음).
+- **스텁 카탈로그:** `docs/plugin-api-stubs.md`의 2026-11-14 분류 절을 따른다(Player 0, World 2가 정말 열려 있음; 이전 12/14는 낡은 수치).
 - **호환 증명:** `/typical patterns`가 PDC, 인벤토리 GUI, 스코어보드, 타이틀, 액션바, 사운드, 설정, 권한, 체력을 실제 JVM 호스트와
   봇 클라이언트로 돌리고, 던진 호출이 하나라도 있으면 테스트가 실패한다. 이번 실행에서는 모두 통과했다. 여전히 던지는 호출:
   `Chunk#getChunkSnapshot(boolean,boolean,boolean)` ("not implemented"; `World#getEmptyChunkSnapshot`은 동작).

@@ -68,6 +68,11 @@ pub struct EntityIndex {
     /// of an arrow or trident, the thrower of an item, the owner of a fishing bobber. Kept beside
     /// `entries` so `CommandEntity` literals elsewhere stay unchanged.
     origins: BTreeMap<Uuid, Uuid>,
+    /// Item slots the owning region published for an entity (`/execute if items|slots entity`):
+    /// the vanilla slot name and the item id of a stack of one. Only what `ferrite-entity`
+    /// actually models is published (the horse armour in `armor.body`); an absent slot is empty
+    /// or unmodelled, never guessed.
+    slots: BTreeMap<Uuid, Vec<(&'static str, u16)>>,
 }
 
 impl EntityIndex {
@@ -84,9 +89,26 @@ impl EntityIndex {
         self.origins.insert(entity, origin);
     }
 
+    /// Records one published item slot of `entity`.
+    pub fn set_slot(&mut self, entity: Uuid, slot: &'static str, item: u16) {
+        self.slots.entry(entity).or_default().push((slot, item));
+    }
+
+    /// The item slots published for `uuid` as `(slot name, item id)`.
+    pub fn slots_of(&self, uuid: Uuid) -> &[(&'static str, u16)] {
+        self.slots.get(&uuid).map_or(&[], Vec::as_slice)
+    }
+
     /// The entity that created `uuid`, when the region published one.
     pub fn origin_of(&self, uuid: Uuid) -> Option<Uuid> {
         self.origins.get(&uuid).copied()
+    }
+
+    /// Withdraws one entry (a provisional `execute summon` entry whose spawn was refused).
+    pub fn forget(&mut self, uuid: Uuid) {
+        self.entries.remove(&uuid);
+        self.origins.remove(&uuid);
+        self.slots.remove(&uuid);
     }
 
     /// Adds or replaces one snapshot entry (used by tests and by `sync`).
@@ -109,6 +131,7 @@ impl EntityIndex {
         for uuid in owned.iter() {
             self.entries.remove(uuid);
             self.origins.remove(uuid);
+            self.slots.remove(uuid);
         }
         owned.clear();
         for key in store.keys() {
@@ -151,6 +174,9 @@ impl EntityIndex {
                 .or_else(|| data.bobber.as_ref().map(|bobber| bobber.owner));
             if let Some(origin) = origin {
                 self.set_origin(data.uuid, origin);
+            }
+            if let Some(mob) = data.mob.as_ref().filter(|mob| mob.armor != 0) {
+                self.set_slot(data.uuid, "armor.body", mob.armor);
             }
             owned.insert(entity.uuid);
             self.insert(entity);
@@ -284,6 +310,43 @@ mod tests {
             index.origin_of(arrow_uuid),
             None,
             "forgotten with the entity"
+        );
+    }
+
+    #[test]
+    fn sync_publishes_the_horse_armour_slot_and_forgets_it() {
+        use ferrite_entity::mob::{MobKind, new_mob};
+        let iron = ferrite_item::item_id("minecraft:iron_horse_armor").expect("item");
+        let mut store = EntityStore::default();
+        let horse = store.insert(new_mob(
+            MobKind::Horse,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(3),
+        ));
+        let bare = store.insert(new_mob(
+            MobKind::Pig,
+            Vec3::new(4.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(3),
+        ));
+        ferrite_entity::mob::state_mut(&mut store, horse)
+            .unwrap()
+            .armor = iron;
+        let (horse_id, bare_id) = (
+            store.data(horse).unwrap().uuid,
+            store.data(bare).unwrap().uuid,
+        );
+        let mut index = EntityIndex::default();
+        let mut owned = HashSet::new();
+        index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
+        assert_eq!(index.slots_of(horse_id), &[("armor.body", iron)]);
+        assert!(index.slots_of(bare_id).is_empty());
+        ferrite_entity::mob::state_mut(&mut store, horse)
+            .unwrap()
+            .armor = 0;
+        index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
+        assert!(
+            index.slots_of(horse_id).is_empty(),
+            "removed armour is forgotten"
         );
     }
 }

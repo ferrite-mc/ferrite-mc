@@ -917,6 +917,16 @@ pub enum Action {
         /// `{NoAI:1b}` in the optional data tag: the mob gets no goals.
         no_ai: bool,
     },
+    /// `execute summon <entity>`: phase two of the hand-off. The command thread already gave the
+    /// entity `uuid` and published a provisional snapshot entry; the game loop schedules the
+    /// spawn onto the owning region, which creates the entity with that uuid, or withdraws the
+    /// provisional entry when the chunk is not loaded.
+    SummonChain {
+        kind: MobKind,
+        pos: [f64; 3],
+        uuid: Uuid,
+        dimension: super::Dimension,
+    },
     ProfileStart,
     ProfileStop,
     Plugin {
