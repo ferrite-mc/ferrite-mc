@@ -216,16 +216,24 @@ impl RuntimeWorldCatalog {
             Err(error) => return Err(error.into()),
         };
         anyhow::ensure!(!self.by_id.contains_key(&id), "world id already loaded");
-        // An existing world keeps the seed it was created with; a `level.dat` written before
-        // seeds were stored belongs to a world that could only have been created with seed 0.
-        let (spawn, seed) = if world_root.join("level.dat").exists() {
+        // An existing world keeps the seed and dimension it was created with; a `level.dat`
+        // written before seeds were stored belongs to a world that could only have been created
+        // with seed 0, and one written before dimensions were stored reopens in the requested
+        // dimension (the previous Ferrite behaviour).
+        let (spawn, seed, dimension) = if world_root.join("level.dat").exists() {
             (
                 super::anvil::read_spawn(&world_root)?,
                 super::anvil::read_seed(&world_root)?.unwrap_or(0),
+                super::anvil::read_dimension(&world_root)?.unwrap_or(dimension),
             )
         } else {
-            super::anvil::write_spawn_and_seed(&world_root, initial_spawn, requested_seed)?;
-            (initial_spawn, requested_seed)
+            super::anvil::write_spawn_seed_and_dimension(
+                &world_root,
+                initial_spawn,
+                requested_seed,
+                dimension,
+            )?;
+            (initial_spawn, requested_seed, dimension)
         };
         self.create_for_dimension(
             id,
@@ -281,9 +289,12 @@ impl Dimension {
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|dimension| dimension.key() == key)
+        match key {
+            "minecraft:overworld" | "NORMAL" => Some(Self::Overworld),
+            "minecraft:the_nether" | "NETHER" => Some(Self::Nether),
+            "minecraft:the_end" | "THE_END" => Some(Self::End),
+            _ => None,
+        }
     }
 
     /// The synchronized `minecraft:dimension_type` registry id. `ferrite-net` builds that
@@ -533,12 +544,13 @@ mod tests {
                 registry.clone(),
                 None,
                 RuntimeWorldRequest {
-                    dimension: Dimension::Overworld,
+                    dimension: Dimension::Nether,
                     spawn: [3, 70, -4],
                     seed: 0,
                 },
             )
             .unwrap();
+        assert_eq!(first.dimension, Dimension::Nether);
         let id = first.id;
         assert_eq!(
             std::fs::read(directory.path().join("extra/uid.dat")).unwrap(),
@@ -560,6 +572,11 @@ mod tests {
             .unwrap();
         assert_eq!(reopened.id, id);
         assert_eq!(reopened.spawn, [3, 70, -4]);
+        assert_eq!(
+            reopened.dimension,
+            Dimension::Nether,
+            "a reopened world keeps the dimension stored in its level.dat"
+        );
     }
 
     #[tokio::test]
@@ -731,6 +748,10 @@ mod tests {
             Dimension::from_key("minecraft:the_nether"),
             Some(Dimension::Nether)
         );
+        // Bukkit's WorldCreator sends Environment#name(), not the dimension key.
+        assert_eq!(Dimension::from_key("NORMAL"), Some(Dimension::Overworld));
+        assert_eq!(Dimension::from_key("NETHER"), Some(Dimension::Nether));
+        assert_eq!(Dimension::from_key("THE_END"), Some(Dimension::End));
         assert_eq!(Dimension::from_key("the_end"), None);
         assert_eq!(
             Dimension::Nether.region_dir(),

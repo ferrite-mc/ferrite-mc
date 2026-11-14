@@ -1049,7 +1049,11 @@ class PlayerExtrasTest {
             assertEquals(9, all.get(1).location().getBlockX());
             assertTrue(world.locateAllPoiInRange(origin, type -> type.getKey().getKey().equals("meeting"), 2).stream().allMatch(hit -> hit.location().getBlockX() == 3));
             assertNull(world.locateNearestPoi(new org.bukkit.Location(world, 100, 64, 100), meeting, 4));
-            assertThrows(UnsupportedOperationException.class, () -> world.locateNearestPoi(origin, meeting, 16, io.papermc.paper.entity.poi.PoiType.Occupancy.HAS_SPACE));
+            // Nothing claims POI tickets in Ferrite yet: every meeting place has space and no
+            // point of interest is occupied.
+            assertEquals(3, world.locateNearestPoi(origin, meeting, 16, io.papermc.paper.entity.poi.PoiType.Occupancy.HAS_SPACE).getBlockX());
+            assertNull(world.locateNearestPoi(origin, meeting, 16, io.papermc.paper.entity.poi.PoiType.Occupancy.IS_OCCUPIED));
+            assertTrue(world.locateAllPoiInRange(origin, type -> type.getKey().getKey().equals("meeting"), 16, io.papermc.paper.entity.poi.PoiType.Occupancy.IS_OCCUPIED).isEmpty());
         } finally { HostBridge.transport = null; }
     }
 

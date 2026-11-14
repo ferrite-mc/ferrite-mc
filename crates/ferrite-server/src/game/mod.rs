@@ -1465,7 +1465,7 @@ impl World {
         dimension: Dimension,
         spawn: [i32; 3],
         seed: i64,
-    ) -> anyhow::Result<(Uuid, String, [i32; 3], i64)> {
+    ) -> anyhow::Result<(Uuid, String, [i32; 3], i64, String)> {
         let (complete, done) = oneshot::channel();
         self.sender
             .send(GameMessage::CreateRuntimeWorld {
@@ -2697,7 +2697,7 @@ async fn run(
                     // The region forgets the rides after saving the player; with no region to ask, do it now.
                     if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Leave);} else { ride::forget(uuid); }},
                   GameMessage::CreateRuntimeWorld{name,dimension,spawn,seed,complete}=>{
-                      let result = (|| -> Result<(Uuid, String, [i32; 3], i64), String> {
+                      let result = (|| -> Result<(Uuid, String, [i32; 3], i64, String), String> {
                           let dimension = Dimension::from_key(&dimension).ok_or_else(|| format!("unknown world dimension {dimension}"))?;
                           let root = world_path.ok_or_else(|| "runtime worlds require a persistent world directory".to_owned())?;
                           let overworld = dimensions.source(Dimension::Overworld);
@@ -2724,7 +2724,13 @@ async fn run(
                               let saved = entity_save::saved_chunks(&storage).into_iter().map(|(x, z)| ChunkPos(x, z));
                               add_holds(&worlds, &mut holds, Some(storage), WorldId::Runtime(id), saved);
                           }
-                          Ok((id, descriptor.name, descriptor.spawn, descriptor.seed))
+                          Ok((
+                              id,
+                              descriptor.name,
+                              descriptor.spawn,
+                              descriptor.seed,
+                              descriptor.dimension.key().to_owned(),
+                          ))
                       })();
                       let _ = complete.send(result);
                   },

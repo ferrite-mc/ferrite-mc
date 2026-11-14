@@ -61,15 +61,17 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 - 지도 커서 스타일 캡션(`styled`/`numeric` 모드 0·1·2), `CraftMagicNumbers`(`getMaterial`, `getKey`, `getDefaultBlockData`, `isLegacy`, `fromLegacy`).
 - `Player#loadData`/`saveData`의 인벤토리·선택 슬롯·게임 모드 적용(체력·허기·경험치는 되돌리지 않음), 기본 월드 엔티티 스냅샷과 `CapturedStructure`/`getStructures`.
 - `NmsEntityHandle`: 위치·속도·회전·상태·승객/차량 등을 Bukkit 호출을 거쳐 읽고 쓴다(리전 소유권을 우회하지 않음).
+- Worldgen/World API: POI 검색이 기본·네더·엔드·런타임 월드에서 로드된 청크의 실제 블록 상태를 본다(점유 상태 포함). 구조물 시작·`hasStructureAt`·`locateNearestStructure`의 `Structure`/`StructureType`/deprecated overload, `locateNearestBiome`, `setBiome`(오버월드·네더·엔드), 서버 전역 게임룰, 런타임 월드 환경 저장을 구현했다.
 
 **이전 기록과 달라진 점**
 
 - 이전 문서가 미지원으로 적었던 `Player#launchProjectile(Trident)`, 지도 커서 스타일 캡션, 마법부여대의 자리표시자 구현은 지금 구현되어 있다.
+- 이전 문서가 미지원으로 적었던 POI `Occupancy`, `StructureType`/deprecated `locateNearestStructure` overload, 비기본 차원의 바이옴·게임룰·로드된 청크 조회는 지금 구현되어 있다.
 
 **한계와 남은 것 (지시서 §10.3)**
 
 - `Player`: 폭죽 전용 핸들 메서드, 폭죽 색·모양 표시, 붙은 폭죽 가속의 근사, `getConnection`의 일부 메서드, `postEffects`로 바꾼 상태의 반영 한계.
-- `World`: POI 검색은 로드된 청크를 스캔하는 근사이고 블록 속성 구분에 호스트 정보가 필요하다. `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API에 없다.
+- `World`: POI 검색은 POI 저장소 대신 로드된 청크의 블록 상태를 스캔한다(네더·엔드·런타임 월드 포함). POI 티켓을 점유하는 AI가 없어 `IS_OCCUPIED`는 항상 빈 결과이고 `HAS_SPACE`는 해당 타입 중 공간이 있는 POI만 돌려준다. `locateNearestBiome`은 호스트의 y=64·8블록 간격 근사를 쓰고 `horizontalInterval`/`verticalInterval` 인자는 반영하지 않는다. 구조물 조각(`getPieces`)은 비어 있다. `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API에 없다.
 - `sendBlockUpdate`: 침대는 26.3에 블록 엔티티가 없어 거부한다. 목록 밖 대상은 `UnsupportedOperationException`.
 - 레시피: 조리·대장간·석재 절단 레시피의 런타임 추가가 없다. 결과 아이템 메타, `ExactChoice`, 클라이언트 레시피북 표시도 없다.
 - NMS 메뉴: 호퍼·발사기·화로·양조기·신호기·교탁·상인·크래프터는 의도적 거부(이유와 대체 API는 지시서 §10.3).
@@ -100,8 +102,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 - `RegistryAccess`의 `GameRule`·`MemoryKey` 값 객체 중 생성 데이터에 타입·기본값이 없는 항목.
 - NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` 일부)와
   Paper 전체 생명주기 API(§2, §7). 전체 목록과 진행 상태는 지시서 §10.3을 본다.
-- 런타임 월드 생성기의 커스텀 `WorldCreator#generator`, `generateStructures(false)`,
-  `WorldType`/환경의 일부 값. 현재 `NORMAL`, `NETHER`, `THE_END`만 허용한다(§4 작업 대상).
+- 런타임 월드 생성: `NORMAL`, `NETHER`, `THE_END` 환경과 seed를 `level.dat`의 `Data.FerriteDimension`/`Data.WorldGenSettings.seed`에 저장하고 재오픈한다. 커스텀 `WorldCreator#generator`, `generateStructures(false)`, `WorldType`(NORMAL 외), `biomeProvider`, `CUSTOM` 환경은 명시적 `UnsupportedOperationException`으로 거부한다(호스트 월드젠이 커스텀 생성기·구조물 생성 토글·바이옴 소스를 바꾸는 훅을 노출하지 않는다).
 
 상세한 메서드별 소유자·근거·테스트는 [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md),
 [`docs/plugin-stubs-status.md`](docs/plugin-stubs-status.md), [`docs/plugin-api-audit.md`](docs/plugin-api-audit.md)에

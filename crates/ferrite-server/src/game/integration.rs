@@ -6353,7 +6353,7 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
     let cow = cow.unwrap();
 
     // Cross-region/cross-world travel: into a runtime world sharing the overworld's rules.
-    let (runtime, _, _, _) = world
+    let (runtime, _, _, _, _) = world
         .create_runtime_world("travel", super::Dimension::Overworld, [0, 65, 0], 0)
         .await
         .unwrap();
@@ -6474,7 +6474,7 @@ async fn unload_waits_briefly_for_a_departing_player_and_still_refuses_one_who_s
         yaw: 0.0,
         pitch: 0.0,
     };
-    let (runtime, _, _, _) = world
+    let (runtime, _, _, _, _) = world
         .create_runtime_world("stay", super::Dimension::Overworld, [0, 65, 0], 0)
         .await
         .unwrap();
@@ -6568,7 +6568,7 @@ async fn unload_right_after_the_client_sees_the_departure_is_not_refused() {
         pitch: 0.0,
     };
     for round in 0..12 {
-        let (runtime, _, _, _) = world
+        let (runtime, _, _, _, _) = world
             .create_runtime_world(
                 &format!("leave{round}"),
                 super::Dimension::Overworld,
@@ -6645,7 +6645,7 @@ async fn player_rejoins_the_runtime_world_they_left_in() {
     ));
     let mut bot = Bot::join(addr, "Homebody").await;
     let player = ferrite_net::offline_uuid("Homebody");
-    let (runtime, _, _, _) = world
+    let (runtime, _, _, _, _) = world
         .create_runtime_world("homebody", super::Dimension::Overworld, [0, 65, 0], 0)
         .await
         .unwrap();

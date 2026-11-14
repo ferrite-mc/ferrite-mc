@@ -64,6 +64,24 @@ class WorldSearchTest {
         assertEquals(List.of("locateStructure(String,int,int,int)", "hasStructureAt(String,int,int,int)"), sent);
     }
 
+    @Test void structureTypeSearchesGroupTheRegistryStructuresOfThatType() {
+        HostBridge.transport = (owner, subject, method, args) -> method.startsWith("locateStructure") ? "12 64 -7" : null;
+        var found = world.locateNearestStructure(new Location(world, 0, 64, 0),
+            org.bukkit.generator.structure.StructureType.JIGSAW, 50, false);
+        assertNotNull(found);
+        assertEquals(org.bukkit.generator.structure.StructureType.JIGSAW, found.getStructure().getStructureType());
+        assertEquals(12, found.getLocation().getBlockX());
+        assertEquals(-7, found.getLocation().getBlockZ());
+    }
+
+    @Test void theDeprecatedStructureTypeOverloadReturnsALocation() {
+        HostBridge.transport = (owner, subject, method, args) -> method.startsWith("locateStructure") ? "9 64 3" : null;
+        var at = world.locateNearestStructure(new Location(world, 0, 64, 0), org.bukkit.StructureType.VILLAGE, 50, false);
+        assertNotNull(at);
+        assertEquals(9, at.getBlockX());
+        assertEquals(3, at.getBlockZ());
+    }
+
     @Test void chunkStructuresComeFromTheHostStartList() {
         HostBridge.transport = (owner, subject, method, args) -> {
             sent.add(method + "|" + args);

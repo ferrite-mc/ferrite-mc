@@ -109,7 +109,7 @@ CMI가 동작한다고 말할 수 없다.
   지원하지 않는 엔티티 종류는 generic 프록시를 만들지 않고 `UnsupportedOperationException`으로 실패한다.
 - 클라이언트가 가진 청크: `Player#isChunkSent`, `getSentChunks`는 실제로 보낸/버린 청크를 따라간다.
 - 광선 추적: `World#rayTraceBlocks`/`rayTraceEntities`/`rayTrace`는 칸 단위로 따라가 정확한 적중 위치·면을 준다. 고체 블록은 꽉 찬 정육면체로 본다(반블록·계단 모양은 모델링하지 않음). 엔티티는 접속한 플레이어만 대상이다. `Player#collidesAt`/`wouldCollideUsing`도 같은 방식이다.
-- 바이옴: `World#setBiome`은 `/fillbiome`으로 연결되고(4×4×4 칸 단위, 기본 월드만), `getComputedBiome`은 `getBiome`과 같다.
+- 바이옴: `World#setBiome`은 `/fillbiome`으로 연결되고(4×4×4 칸 단위, 오버월드·네더·엔드), `getComputedBiome`은 `getBiome`과 같다. 런타임 월드는 콘솔 대상이 없어 거부한다.
 - `World#sendGameEvent`는 받아서 아무 일도 하지 않는다(스컬크 센서 같은 청취자가 게임에 없다).
 - 고친 기존 버그: `Material#getMaxDurability`가 `ClassCastException`을 던졌고, `PlayerInventory#getItem/setItem(EquipmentSlot, …)`가 지원되지 않았다.
 - 번개: `strikeLightning`/`strikeLightningEffect`는 번개 엔티티와 천둥 소리를 주변 오버월드 플레이어에게만 보낸다(불·피해 없음, 실제 클라이언트로 미확인).
@@ -144,8 +144,8 @@ CMI가 동작한다고 말할 수 없다.
 - **마지막에 붙인 것:** 큰 화염구(직선 비행, 닿는 곳에서 불 붙는 위력 1 폭발), `findLightningRod/Target`(불러온 열의 맨 위 블록만 보고 128칸 안에서 가장 가까운 피뢰침을 찾는다), `sendBlockUpdate`는 표지판·상자·통·셜커 상자·화로류(그 밖의 타일 상태는 `UnsupportedOperationException`).
 - **아이템 메타:** `PlayerInventory.setItem` 등이 이름·로어·인챈트·불괴·커스텀 모델 데이터·수리 비용·내구도를 실제 슬롯 컴포넌트로 보낸다(`setItemMeta`). 아이템 PDC는 `BYTE`·`SHORT`·`INTEGER`·`LONG`·`FLOAT`·`DOUBLE`·`BOOLEAN`·`STRING`·`BYTE_ARRAY`·`INTEGER_ARRAY`·`LONG_ARRAY`를 키와 타입을 보존해 `minecraft:custom_data`로 보내고, `serializeToBytes`/`readFromBytes`도 지원한다. 아이템 플래그는 `minecraft:tooltip_display`로 보내며 `HIDE_ADDITIONAL_TOOLTIP`은 26.3에 개별 컴포넌트가 없어 전체 툴팁 숨김으로 근사한다. 컨테이너/리스트 PDC 타입과 책 같은 나머지 메타는 조용히 버리지 않고 `UnsupportedOperationException`. 실제 클라이언트 렌더링은 미검증.
 - **월드젠 쪽:** `World#getStructures(x,z[,Structure])` 구현됨(호스트 op 10 `structure starts` → `getStructureStarts(int,int)` → `GeneratedStructure`, 조각(`getPieces`)은 비어 있음). `createExplorerMap`(Server 3개)은 가장 가까운 구조물을 호스트로 찾아 그 중심의 `MapView`가 달린 FILLED_MAP을 돌려준다(못 찾으면 null). 지형 렌더링과 마커 커서는 없고, 맵 연결(`MapMeta`)은 Java 쪽 메타에만 있어 Rust 아이템(material+amount)로는 전달되지 않는다.
-  (구현됨, vanilla 월드젠 호스트 필요: `World#locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE`.
-  호스트가 없으면 "not implemented"를 던진다. 호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능.)
+  `World#locateNearestBiome`, `locateNearestStructure`(Structure/StructureType/deprecated), `hasStructureAt`, `Registry.STRUCTURE`는 vanilla 월드젠 호스트에 연결됐고 차원 경계를 따른다. 구조물 시작은 기본·네더·엔드·런타임 월드에서 동작한다. `locateNearestBiome`은 호스트가 y=64·8블록 간격으로 찾고 interval 인자는 무시한다. 호스트가 없으면 "not implemented"를 던진다(호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능).
+  POI 검색은 로드된 청크의 실제 블록 상태를 스캔하며 기본·네더·엔드·런타임 월드의 로드된 청크 목록을 쓴다. POI 저장 형식(`poi/r.x.z.mca`의 `Sections`/`Records`/`free_tickets`, `PoiSection$Packed`의 `Valid`/`Records`)은 확인했지만 Ferrite가 POI 파일을 쓰지 않아 저장소를 읽지 않는다. `IS_OCCUPIED`는 티켓을 잡는 AI가 없어 빈 결과, `HAS_SPACE`는 같은 타입 중 공간이 있는 POI만 반환한다. 블록 속성은 호스트의 전체 상태 문자열로 구분한다(침대 머리/발 포함).
 - **청크:** `unloadChunk`는 서버가 홀더 없는 청크를 스스로 내리므로 "이미 내려가 있으면 true, 플레이어·스폰이 잡고 있으면 false"로 답한다(강제 언로드는 없음).
   `isChunkGenerated` = 로드됨 또는 리전 파일에 저장됨(오버월드만). `loadChunk`는 월드 뷰로 블록 하나를 읽어 생성을 유도한다.
 - 위 API는 호출하면 `UnsupportedOperationException("Ferrite: not implemented: ...")`이 난다.

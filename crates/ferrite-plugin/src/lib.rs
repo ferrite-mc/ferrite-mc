@@ -38,7 +38,8 @@ pub const PLAYER_COMMAND_PREPROCESS_EVENT: &str =
 pub const INVENTORY_CLICK_EVENT: &str = "org.bukkit.event.inventory.InventoryClickEvent";
 pub const INVENTORY_DRAG_EVENT: &str = "org.bukkit.event.inventory.InventoryDragEvent";
 pub const INVENTORY_CLOSE_EVENT: &str = "org.bukkit.event.inventory.InventoryCloseEvent";
-pub const RESOURCE_PACK_STATUS_EVENT: &str = "org.bukkit.event.player.PlayerResourcePackStatusEvent";
+pub const RESOURCE_PACK_STATUS_EVENT: &str =
+    "org.bukkit.event.player.PlayerResourcePackStatusEvent";
 pub const PLAYER_DEATH_EVENT: &str = "org.bukkit.event.entity.PlayerDeathEvent";
 pub const PLAYER_RESPAWN_EVENT: &str = "org.bukkit.event.player.PlayerRespawnEvent";
 pub const ENTITY_DAMAGE_EVENT: &str = "org.bukkit.event.entity.EntityDamageEvent";
@@ -205,6 +206,10 @@ pub trait WorldView: Send + Sync {
     /// Loads chunk `(x, z)` of a runtime world, generating it when it does not exist
     /// (`World#loadChunk`). `Some(true)` once it is readable; `None` for an unknown world.
     fn load_chunk(&self, _world: uuid::Uuid, _x: i32, _z: i32) -> Option<bool> {
+        None
+    }
+    /// The chunks resident right now (`World#getLoadedChunks`). `None` for an unknown world.
+    fn loaded_chunks(&self, _world: uuid::Uuid) -> Option<Vec<(i32, i32)>> {
         None
     }
     /// The block entities inside the box `min..=max` of the loaded chunks, each as its position

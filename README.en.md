@@ -50,8 +50,14 @@ the report distinguishes real host paths from deliberate rejection paths. Item-l
 **Remaining gaps** (directive §10.3)
 
 - Firework-specific handle methods, firework color/shape display, approximate firework acceleration.
-- POI search scans loaded chunks; `getWorldPath` is default-world only; `getFluidData`, `spawnAt`,
+- POI search scans loaded chunks in every dimension. With no AI that claims POI tickets,
+  `IS_OCCUPIED` is always empty and `HAS_SPACE` filters by type. `locateNearestBiome` uses the
+  host's fixed y=64 and 8-block-step approximation and ignores the interval arguments; structure
+  pieces (`getPieces`) are empty. `getWorldPath` is default-world only; `getFluidData`, `spawnAt`,
   and `vanillaBiomeProvider` are absent from the compiled Paper API.
+- Runtime worlds accept `NORMAL`, `NETHER`, and `THE_END`, and persist the environment and seed
+  in `level.dat` across unload/reopen. Custom `WorldCreator#generator`, `generateStructures(false)`,
+  non-`NORMAL` `WorldType`, `biomeProvider`, and `CUSTOM` are rejected explicitly.
 - Cooking, smithing, and stonecutting recipes cannot be added at runtime; no result metadata,
   `ExactChoice`, or client recipe-book display.
 - Some NMS menus are deliberately refused (hopper, dispenser, furnace, brewing stand, and others).
@@ -63,6 +69,9 @@ the report distinguishes real host paths from deliberate rejection paths. Item-l
 **Implemented and covered by tests**
 
 - Runtime `Server#createWorld`/`unloadWorld`, persistence, unload/reopen, and player rejoin.
+- Worldgen: POI search in all dimensions, structure starts and `StructureType`/deprecated
+  `locateNearestStructure` overloads, `setBiome` in the Nether and End, server-wide game rules,
+  and runtime-world environment persistence.
 - `Player#breakBlock`, player-permission `Player#chat("/command")`, `Player#performCommand`,
   slot-break/hurt/pickup animations.
 - 41 registry views, `PotionEffectType`, `playEffect`, and all six player equipment slots.

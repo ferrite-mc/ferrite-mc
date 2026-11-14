@@ -21,13 +21,35 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final WorldEntities entities = new WorldEntities();
     // Remembered for the plugin; no server rule reads these (players cannot hurt each other yet, hardcore needs a respawn rule).
     private volatile boolean hardcore, pvp = true, autoSave = true;
-    private FerriteWorld(FerriteServer server, java.util.UUID id, String name, long time, Pos spawn) { this.server = server; this.id = id; this.name = name; this.time = time; this.spawn = spawn; }
+    /** The dimension this handle was opened in; the name suffix is only the bootstrap default. */
+    private volatile org.bukkit.World.Environment environment;
+    private FerriteWorld(FerriteServer server, java.util.UUID id, String name, long time, org.bukkit.World.Environment environment, Pos spawn) { this.server = server; this.id = id; this.name = name; this.time = time; this.environment = java.util.Objects.requireNonNull(environment, "environment"); this.spawn = spawn; }
     static org.bukkit.World create(FerriteServer server, java.util.UUID id, String name, long time, int x, int y, int z) {
-        var world = new FerriteWorld(server, id, name, time, new Pos(x, y, z));
+        return create(server, id, name, time, environmentOf(name), x, y, z);
+    }
+    static org.bukkit.World create(FerriteServer server, java.util.UUID id, String name, long time, org.bukkit.World.Environment environment, int x, int y, int z) {
+        var world = new FerriteWorld(server, id, name, time, environment, new Pos(x, y, z));
         world.proxy = (org.bukkit.World) java.lang.reflect.Proxy.newProxyInstance(FerriteWorld.class.getClassLoader(), new Class<?>[]{org.bukkit.World.class}, world);
         return world.proxy;
     }
+    /** The environment a world opened without an explicit one stands for: the Nether and End are suffixed. */
+    static org.bukkit.World.Environment environmentOf(String name) {
+        if (name.endsWith("_nether")) return org.bukkit.World.Environment.NETHER;
+        if (name.endsWith("_the_end")) return org.bukkit.World.Environment.THE_END;
+        return org.bukkit.World.Environment.NORMAL;
+    }
+    /** The `minecraft:*` dimension key a host reply or `level.dat` records. */
+    static org.bukkit.World.Environment environmentOfKey(String key) {
+        return switch (key) {
+            case "minecraft:the_nether" -> org.bukkit.World.Environment.NETHER;
+            case "minecraft:the_end" -> org.bukkit.World.Environment.THE_END;
+            default -> org.bukkit.World.Environment.NORMAL;
+        };
+    }
     static void setSeed(org.bukkit.World world, long seed) { ((FerriteWorld) java.lang.reflect.Proxy.getInvocationHandler(java.util.Objects.requireNonNull(world))).seed = seed; }
+    static void setEnvironment(org.bukkit.World world, org.bukkit.World.Environment environment) {
+        ((FerriteWorld) java.lang.reflect.Proxy.getInvocationHandler(java.util.Objects.requireNonNull(world))).environment = java.util.Objects.requireNonNull(environment, "environment");
+    }
     static void setHeight(org.bukkit.World world, int x, int z, int y) { ((FerriteWorld) java.lang.reflect.Proxy.getInvocationHandler(java.util.Objects.requireNonNull(world))).heights.put(new Column(x, z), y); }
     static void setSnapshot(org.bukkit.World world, int x, int y, int z, String material) {
         var type = org.bukkit.Material.matchMaterial(material);
@@ -213,17 +235,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         implements io.papermc.paper.entity.poi.PoiSearchResult {}
 
     /**
-     * Points of interest around a location, nearest first. Ferrite has no POI storage, so this scans the loaded chunks
-     * within the radius for blocks that belong to a requested type. Occupancy (villager tickets) is not tracked: only
-     * {@code ANY} is answered.
+     * Points of interest around a location, nearest first. Ferrite has no `PoiManager` storage to query, so this scans
+     * the loaded chunks within the radius. The scan matches the full block state the host reports (a bed's head half is
+     * a POI, its foot half is not), not just the block name. Occupancy is the live state: nothing in Ferrite claims POI
+     * tickets yet, so `HAS_SPACE` is every type that accepts occupants and `IS_OCCUPIED` is empty.
      */
     @SuppressWarnings("unchecked")
     private java.util.List<PoiHit> poiSearch(Object[] args, boolean nearestOnly) {
         var origin = (org.bukkit.Location) args[0];
         int radius = (int) args[2];
         if (radius < 0) throw new IllegalArgumentException("radius must be >= 0");
-        if (args.length > 3 && args[3] != io.papermc.paper.entity.poi.PoiType.Occupancy.ANY)
-            throw new UnsupportedOperationException("Ferrite: POI occupancy is not tracked; only Occupancy.ANY is supported");
+        var occupancy = args.length > 3 ? (io.papermc.paper.entity.poi.PoiType.Occupancy) args[3] : io.papermc.paper.entity.poi.PoiType.Occupancy.ANY;
+        if (occupancy == io.papermc.paper.entity.poi.PoiType.Occupancy.IS_OCCUPIED) return java.util.List.of();
         java.util.List<FerritePoiType> types = new java.util.ArrayList<>();
         if (args[1] instanceof FerritePoiType one) types.add(one);
         else if (args[1] instanceof java.util.function.Predicate<?> filter) {
@@ -232,6 +255,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 if (((java.util.function.Predicate<io.papermc.paper.entity.poi.PoiType>) filter).test(type)) types.add(type);
             }
         } else throw new IllegalArgumentException("Unsupported PoiType " + args[1]);
+        if (occupancy == io.papermc.paper.entity.poi.PoiType.Occupancy.HAS_SPACE) types.removeIf(type -> !type.hasOccupants());
         var names = new java.util.HashSet<String>();
         for (var type : types) names.addAll(type.blockNames());
         var hits = new java.util.ArrayList<PoiHit>();
@@ -263,7 +287,10 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                         }
                     }
         }
-        hits.sort(java.util.Comparator.comparingDouble(hit -> hit.location().distanceSquared(origin)));
+        hits.sort(java.util.Comparator.comparingDouble((PoiHit hit) -> hit.location().distanceSquared(origin))
+            .thenComparingInt(hit -> hit.location().getBlockX())
+            .thenComparingInt(hit -> hit.location().getBlockY())
+            .thenComparingInt(hit -> hit.location().getBlockZ()));
         return nearestOnly && hits.size() > 1 ? new java.util.ArrayList<>(hits.subList(0, 1)) : hits;
     }
 
@@ -702,11 +729,9 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     }
     private final org.bukkit.persistence.PersistentDataContainer data = new FerriteDataContainer();
 
-    /** The vanilla dimension a world name stands for: the Nether and End are suffixed, everything else is the overworld. */
+    /** The dimension this handle was opened in (the host reports the stored one for runtime worlds). */
     private org.bukkit.World.Environment environment() {
-        if (name.endsWith("_nether")) return org.bukkit.World.Environment.NETHER;
-        if (name.endsWith("_the_end")) return org.bukkit.World.Environment.THE_END;
-        return org.bukkit.World.Environment.NORMAL;
+        return environment;
     }
 
     private int minHeight() { return environment() == org.bukkit.World.Environment.NORMAL ? -64 : 0; }
@@ -985,9 +1010,46 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         }
         if (!(args[0] instanceof org.bukkit.Location origin)) return NONE;
         if (name.equals("locateNearestStructure")) {
-            if (args.length != 4 || !(args[1] instanceof org.bukkit.generator.structure.Structure structure)) return NONE;
-            var at = search(true, structure.getKey().toString(), (int) args[2], origin);
-            return at == null ? null : new FoundStructure(structure, at);
+            if (args.length != 4) return NONE;
+            int radius = (int) args[2];
+            if (args[1] instanceof org.bukkit.generator.structure.Structure structure) {
+                var at = search(true, structure.getKey().toString(), radius, origin);
+                return at == null ? null : new FoundStructure(structure, at);
+            }
+            // `StructureType` groups several registry structures (all jigsaw villages, all ocean
+            // ruins); search each and keep the nearest, like vanilla's `findNearestMapStructure`
+            // over a holder set.
+            if (args[1] instanceof org.bukkit.generator.structure.StructureType type) {
+                org.bukkit.generator.structure.Structure bestStructure = null;
+                org.bukkit.Location bestAt = null;
+                for (var candidate : org.bukkit.Registry.STRUCTURE) {
+                    org.bukkit.generator.structure.StructureType candidateType;
+                    try { candidateType = candidate.getStructureType(); }
+                    // A structure whose type is missing from the generated data cannot match any
+                    // requested type; asking that structure for its type directly still fails.
+                    catch (UnsupportedOperationException missingType) { continue; }
+                    if (!type.equals(candidateType)) continue;
+                    var at = search(true, candidate.getKey().toString(), radius, origin);
+                    if (at != null && (bestAt == null || at.distanceSquared(origin) < bestAt.distanceSquared(origin))) {
+                        bestStructure = candidate;
+                        bestAt = at;
+                    }
+                }
+                return bestAt == null ? null : new FoundStructure(bestStructure, bestAt);
+            }
+            // The deprecated org.bukkit.StructureType overload returns a plain Location and
+            // matches by the legacy name prefix (`village` covers `village_plains`, ...).
+            if (args[1] instanceof org.bukkit.StructureType type) {
+                org.bukkit.Location best = null;
+                for (var candidate : org.bukkit.Registry.STRUCTURE) {
+                    var path = candidate.getKey().getKey();
+                    if (!path.equals(type.getName()) && !path.startsWith(type.getName() + "_")) continue;
+                    var at = search(true, candidate.getKey().toString(), radius, origin);
+                    if (at != null && (best == null || at.distanceSquared(origin) < best.distanceSquared(origin))) best = at;
+                }
+                return best;
+            }
+            return NONE;
         }
         // Biomes: (Location, int radius, Biome...) | (Location, int, int, int, Biome...) | (Location, Biome, int[, int]).
         int radius;
