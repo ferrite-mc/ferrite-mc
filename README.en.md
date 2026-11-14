@@ -14,12 +14,12 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 
 | Area | Details |
 |---|---|
-| ✅ Working (bot-verified) | Login, encryption, signed chat, server list, region multithreading, world IO/lighting and default world saving (`world/`), blocks/items, inventory/crafting/recipe book/containers, survival/combat/mobs (biome-based natural spawning, breeding, wolf taming), spawn eggs, mob/item tracking, villager trading, wandering trader spawn rules, lifetime while trading, and llama caravan lifecycle (server regression tests), block interactions such as jukeboxes, waxing, and lodestones plus their advancements, redstone/hoppers/command blocks, brewing/beacons, the Nether and portals, fluids/fire, most commands (`/give`, `/tick`, `/forceload`, `/place`, `/damage`, etc.; see [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
+| ✅ Working (bot-verified) | Login, encryption, signed chat, server list, region multithreading, world IO/lighting and default world saving (`world/`), blocks/items, inventory/crafting/recipe book/containers, survival/combat/mobs (biome-based natural spawning, breeding, wolf taming, daylight burning and zombie door breaking, enderman stare anger/water damage, charged creepers, sheep shearing/grass eating, spider climbing/leaps/skeleton jockeys), spawn eggs, mob/item tracking, villager trading, wandering trader spawn rules, lifetime while trading, and llama caravan lifecycle (server regression tests), block interactions such as jukeboxes, waxing, and lodestones plus their advancements, redstone/hoppers/command blocks, brewing/beacons, the Nether and portals, fluids/fire, most commands (`/give`, `/tick`, `/forceload`, `/place`, `/damage`, etc.; see [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
 | 🟡 Partial | Pistons (moving blocks and entity movement plus the client overlay; animation is unverified with a real client, [`docs/pistons.md`](docs/pistons.md)), End combat (below, [`docs/end-dimension.md`](docs/end-dimension.md)) |
 | 🔧 In progress | Plugin compatibility (part of the Paper/Bukkit API and part of NMS; unsupported calls fail explicitly) |
 | ⛔ Not yet | Real-client verification |
 
-**The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is timing verification against the 26.3 jar, gateway teleport gating, the outer-island search radius, and real-client visuals.
+**The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and breath approximations (speed, collision exits, cloud shape), the gateway's 16-block outer-island search versus vanilla's 5, and real-client visuals.
 
 The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls surface as `UnsupportedOperationException("Ferrite: not implemented: …")` or an explicit `NoSuchMethodError`. Large plugins such as EssentialsX and plugins that depend on NMS do not work across all paths yet.
 
@@ -173,7 +173,7 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 
 ## To do
 
-- Remaining game/plugin work: dragon perched timings/gateway cooldown/outer-island radius,
+- Remaining game/plugin work: dragon charge/breath approximations and the outer-island search radius,
   non-player entity NBT boundaries for the default/Nether/End worlds, remaining tile states,
   `ChunkData#getBiome`/`Chunk#getChunkSnapshot`/`WorldCreator` options, and broader
   Paper/Bukkit/NMS compatibility.
