@@ -50,6 +50,15 @@ class NmsWorldHandleTest {
         assertEquals(org.bukkit.Material.DIRT, b.getBlockState(new BlockPos(5, 70, 6)).getBukkitMaterial());
         assertEquals(org.bukkit.Material.DIRT, b.getBlockState(5, 70, 6).getBukkitMaterial());
 
+        var snapshot = first.getBlockState(5, 70, 6);
+        assertEquals(org.bukkit.Material.STONE, snapshot.getType());
+        assertTrue(snapshot.getBlockData().getAsString().contains("stone"));
+        assertEquals(5, snapshot.getX());
+        assertSame(first, snapshot.getWorld());
+        assertEquals(org.bukkit.Material.STONE, first.getBlockAt(5, 70, 6).getState().getType());
+        var missing = assertThrows(UnsupportedOperationException.class, () -> first.getBlockState(200, 70, 200));
+        assertTrue(missing.getMessage().contains("no block data"), missing.getMessage());
+
         var chunk = b.getChunk(0, 0);
         assertEquals(0, chunk.getPosX());
         assertEquals(org.bukkit.Material.DIRT, chunk.getBlockState(5, 70, 6).getBukkitMaterial());

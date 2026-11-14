@@ -14266,9 +14266,29 @@ mod tests {
         assert_eq!(source.block(2, 64, 2), Some(0));
         let carried = mob::state(&region.entities, key).unwrap().carried;
         assert_eq!(carried, Some(u16::try_from(grass).unwrap()));
+        assert_eq!(
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(ferrite_entity::enderman::CARRIED_BLOCK_INDEX),
+            Some(&MetaValue::OptionalBlockState(carried)),
+            "the take event updates the synched carried block"
+        );
         region.place_enderman_block(&ctx, key, [3, 64, 2], carried.unwrap());
         assert_eq!(source.block(3, 64, 2), Some(grass));
         assert_eq!(mob::state(&region.entities, key).unwrap().carried, None);
+        assert_eq!(
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(ferrite_entity::enderman::CARRIED_BLOCK_INDEX),
+            Some(&MetaValue::OptionalBlockState(None)),
+            "the place event clears the synched carried block"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

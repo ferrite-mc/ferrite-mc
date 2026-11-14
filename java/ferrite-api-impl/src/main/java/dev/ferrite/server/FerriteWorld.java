@@ -116,6 +116,18 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "setType" -> { setType(pos, java.util.Objects.requireNonNull((org.bukkit.Material) args[0])); yield null; }
             case "getBlockData" -> FerriteBlockData.create(stateAt(pos));
             case "setBlockData" -> { setState(pos, (org.bukkit.block.data.BlockData) args[0]); yield null; }
+            case "getState" -> {
+                // A locally published snapshot has no tile data; a native read asks the generated
+                // block table whether the block owns a block entity and refuses that case.
+                if (blocks.containsKey(pos)) yield blockState(pos);
+                String hostState;
+                try { hostState = Native.blockType(id.toString(), pos.x(), pos.y(), pos.z()); }
+                catch (RuntimeException ignored) { hostState = null; }
+                if (hostState == null) throw new UnsupportedOperationException("Ferrite: no block data at " + pos);
+                var reply = (String) HostBridge.call("World", id, "hasBlockEntity(int,int,int)", String.class, pos.x(), pos.y(), pos.z());
+                if (Boolean.parseBoolean(reply)) throw new UnsupportedOperationException("Ferrite: Block#getState at " + pos + " is a tile block; TileState snapshots are not modelled");
+                yield blockState(pos);
+            }
             case "isEmpty" -> typeAt(pos).isAir();
             case "isLiquid" -> { var type = typeAt(pos); yield type == org.bukkit.Material.WATER || type == org.bukkit.Material.LAVA; }
             case "getRelative" -> relative(pos, (org.bukkit.block.BlockFace) args[0]);
@@ -123,6 +135,24 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "equals" -> self == args[0];
             case "toString" -> "Block[" + id + ":" + pos + "]";
             default -> HostBridge.dispatch("Block", "", method, args);
+        });
+    }
+    /** A read-only Bukkit block-state view; tile states keep refusing because the host has no NBT. */
+    private org.bukkit.block.BlockState blockState(Pos pos) {
+        return (org.bukkit.block.BlockState) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.block.BlockState.class}, (self, method, args) -> switch (method.getName()) {
+            case "getBlock" -> block(pos);
+            case "getWorld" -> proxy;
+            case "getX" -> pos.x(); case "getY" -> pos.y(); case "getZ" -> pos.z();
+            case "getLocation" -> location(pos);
+            case "getChunk" -> chunk(pos.x() >> 4, pos.z() >> 4);
+            case "getType" -> typeAt(pos);
+            case "getBlockData" -> FerriteBlockData.create(stateAt(pos));
+            case "isPlaced" -> true;
+            case "hashCode" -> java.util.Objects.hash(id, pos, "blockstate");
+            case "equals" -> self == args[0];
+            case "toString" -> "BlockState[" + id + ":" + pos + "=" + stateAt(pos) + "]";
+            case "update" -> throw new UnsupportedOperationException("Ferrite: BlockState#update is not implemented for a read-only snapshot; use Block#setBlockData");
+            default -> throw new UnsupportedOperationException("Ferrite: BlockState#" + method.getName() + " is not implemented for a read-only snapshot");
         });
     }
     private boolean chunkLoaded(int x, int z) { return (boolean) HostBridge.call("World", id, "isChunkLoaded(int,int)", Boolean.class, x, z); }
@@ -654,6 +684,11 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 return chunks.toArray(new org.bukkit.Chunk[0]);
             }
             case "getType" -> { if (args.length == 3) return typeAt(new Pos((int) args[0], (int) args[1], (int) args[2])); }
+            case "getBlockState" -> {
+                if (args.length == 3) return block(new Pos((int) args[0], (int) args[1], (int) args[2])).getState();
+                if (args.length == 1 && args[0] instanceof org.bukkit.Location at)
+                    return block(new Pos(at.getBlockX(), at.getBlockY(), at.getBlockZ())).getState();
+            }
             case "getBlockData" -> { if (args.length == 3) return FerriteBlockData.create(stateAt(new Pos((int) args[0], (int) args[1], (int) args[2]))); }
             case "setBlockData" -> {
                 if (args.length == 4) { setState(new Pos((int) args[0], (int) args[1], (int) args[2]), (org.bukkit.block.data.BlockData) args[3]); return null; }

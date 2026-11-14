@@ -73,6 +73,69 @@ pub struct EntityIndex {
     /// actually models is published (the horse armour in `armor.body`); an absent slot is empty
     /// or unmodelled, never guessed.
     slots: BTreeMap<Uuid, Vec<(&'static str, u16)>>,
+    /// Player inventories read through each player's mailbox for the command being run
+    /// (`publish_player_slots`): `(slot index as `slot_ops::player_slots` numbers it, item id)`
+    /// for every non-empty slot. A player with no entry has not been read for this command.
+    player_slots: BTreeMap<Uuid, Vec<(i16, u16)>>,
+}
+
+/// Every player slot index `slot_ops::player_slots` can name: the selected hotbar slot (`-1`),
+/// the 36 container slots, four armour slots and the offhand.
+const PLAYER_SLOTS: std::ops::RangeInclusive<i16> = -1..=40;
+
+/// How long a command waits for the owning regions to answer inventory reads.
+pub const PLAYER_SLOT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether `command` can ask about inventories (`if|unless items|slots entity`), so the caller
+/// only pays for the mailbox round trip when it is needed.
+pub fn reads_entity_slots(command: &str) -> bool {
+    (command.contains("items") || command.contains("slots")) && command.contains("entity")
+}
+
+/// Reads the inventory of every given player through their mailbox and publishes it into
+/// `index`, replacing the previous reading. The owning region answers from its own state; nothing
+/// here touches another region's live data. A player who does not answer within `wait` stays
+/// unpublished, which the command reports instead of guessing.
+pub fn publish_player_slots<'a>(
+    index: &std::sync::Mutex<EntityIndex>,
+    mailboxes: impl IntoIterator<Item = (Uuid, &'a super::region::Mailbox)>,
+    wait: std::time::Duration,
+) {
+    let slots: Vec<i16> = PLAYER_SLOTS.collect();
+    let mut pending = Vec::new();
+    for (uuid, mailbox) in mailboxes {
+        let (reply, received) = std::sync::mpsc::channel();
+        mailbox.lock().unwrap_or_else(|e| e.into_inner()).push_back(
+            super::region::Command::ReadSlots {
+                slots: slots.clone(),
+                reply,
+            },
+        );
+        pending.push((uuid, received));
+    }
+    let deadline = std::time::Instant::now() + wait;
+    let mut read = Vec::new();
+    for (uuid, received) in pending {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let Ok(stacks) = received.recv_timeout(left) else {
+            continue;
+        };
+        // The region drops slots it cannot resolve; a short answer cannot be aligned with the
+        // request, so it is not published.
+        if stacks.len() != slots.len() {
+            continue;
+        }
+        let held = slots
+            .iter()
+            .zip(&stacks)
+            .filter(|(_, stack)| !stack.is_empty())
+            .map(|(slot, stack)| (*slot, stack.item))
+            .collect();
+        read.push((uuid, held));
+    }
+    let mut index = index.lock().unwrap_or_else(|e| e.into_inner());
+    index.player_slots.clear();
+    index.player_slots.extend(read);
 }
 
 impl EntityIndex {
@@ -97,6 +160,24 @@ impl EntityIndex {
     /// The item slots published for `uuid` as `(slot name, item id)`.
     pub fn slots_of(&self, uuid: Uuid) -> &[(&'static str, u16)] {
         self.slots.get(&uuid).map_or(&[], Vec::as_slice)
+    }
+
+    /// The non-empty slots read for player `uuid` as `(slot index, item id)`; `None` when the
+    /// player was not read for the command being run.
+    pub fn player_slots_of(&self, uuid: Uuid) -> Option<&[(i16, u16)]> {
+        self.player_slots.get(&uuid).map(Vec::as_slice)
+    }
+
+    /// Records a player's slot reading for tests. Production reads go through
+    /// `publish_player_slots`, which writes the map directly.
+    #[cfg(test)]
+    pub fn set_player_slots(&mut self, uuid: Uuid, held: Vec<(i16, u16)>) {
+        self.player_slots.insert(uuid, held);
+    }
+
+    /// Drops every player reading, so a later command never sees an old inventory.
+    pub fn clear_player_slots(&mut self) {
+        self.player_slots.clear();
     }
 
     /// The entity that created `uuid`, when the region published one.
@@ -197,6 +278,73 @@ mod tests {
             flags: Flags::default(),
             data: EntityData::new(allocate_id(), random_uuid(), 71, 0.25, 0.25),
         }
+    }
+
+    #[test]
+    fn player_slots_are_read_through_the_mailbox_and_replace_the_last_reading() {
+        use super::super::region::{Command, Mailbox};
+        use ferrite_item::ItemStack;
+        let player = Uuid::from_u128(0x61);
+        let silent = Uuid::from_u128(0x62);
+        let mailbox = Mailbox::default();
+        let quiet = Mailbox::default();
+        let sword = ferrite_item::item_id("minecraft:diamond_sword").expect("item");
+        let answering = {
+            let mailbox = mailbox.clone();
+            std::thread::spawn(move || {
+                // A stand-in for the owning region: answers one `ReadSlots` from its inventory,
+                // a sword in the selected slot (-1) and dirt in container slot 8.
+                let dirt = ferrite_item::item_id("minecraft:dirt").expect("item");
+                loop {
+                    let command = mailbox.lock().unwrap().pop_front();
+                    if let Some(Command::ReadSlots { slots, reply }) = command {
+                        let stacks = slots
+                            .iter()
+                            .map(|slot| match slot {
+                                -1 => ItemStack::with_count(sword, 1),
+                                8 => ItemStack::with_count(dirt, 64),
+                                _ => ItemStack::empty(),
+                            })
+                            .collect();
+                        let _ = reply.send(stacks);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+        };
+        let index = std::sync::Mutex::new(EntityIndex::default());
+        index.lock().unwrap().set_player_slots(silent, vec![(0, 1)]);
+        publish_player_slots(
+            &index,
+            [(player, &mailbox), (silent, &quiet)],
+            std::time::Duration::from_millis(400),
+        );
+        answering.join().unwrap();
+        let index = index.lock().unwrap();
+        let dirt = ferrite_item::item_id("minecraft:dirt").expect("item");
+        assert_eq!(
+            index.player_slots_of(player),
+            Some(&[(-1, sword), (8, dirt)][..])
+        );
+        // A player who did not answer is unpublished, and the earlier reading is gone.
+        assert_eq!(index.player_slots_of(silent), None);
+        // Nothing was queued for the quiet player beyond the one read it never answered.
+        assert_eq!(quiet.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_commands_that_can_ask_about_inventories_trigger_a_read() {
+        assert!(reads_entity_slots(
+            "execute if items entity @s weapon.mainhand *"
+        ));
+        assert!(reads_entity_slots(
+            "execute unless slots entity @a armor.head run say x"
+        ));
+        assert!(!reads_entity_slots(
+            "execute if items block 0 0 0 container.0 *"
+        ));
+        assert!(!reads_entity_slots("say hello"));
     }
 
     #[test]

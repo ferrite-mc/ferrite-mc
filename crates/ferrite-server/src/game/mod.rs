@@ -2738,7 +2738,9 @@ async fn run(
                       let (origin, yaw, pitch) = online.get(&uuid).map_or(([0.0; 3], 0.0, 0.0), |player| (player.pos, player.yaw, player.pitch));
                       let name = command_state.lock().unwrap().players.iter().find(|p| p.uuid == uuid).map(|p| p.name.clone());
                       let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      if entity_index::reads_entity_slots(&command) { let entities = command_state.lock().unwrap().entities.clone(); entity_index::publish_player_slots(&entities, mailboxes.iter().map(|(player, entry)| (*player, &entry.1)), entity_index::PLAYER_SLOT_WAIT); }
                       if let Err(error) = command_tree.execute(command.trim_start_matches('/'), command_source) { emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(error.to_string()), overlay:false }); }
+                      command_state.lock().unwrap().entities.lock().unwrap().clear_player_slots();
                       let source_name = online.get(&uuid).map_or_else(|| "Server".to_owned(), |player| player.name.clone());
                       let runtime_dimension = online.get(&uuid).map_or(Dimension::Overworld, |p| p.dimension);
                       let mut runtime = CommandRuntime {
@@ -2884,7 +2886,9 @@ async fn run(
                   GameMessage::Console{command,complete}=>{
                       let (actions, mut received) = mpsc::unbounded_channel();
                       let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
+                      if entity_index::reads_entity_slots(&command) { let entities = command_state.lock().unwrap().entities.clone(); entity_index::publish_player_slots(&entities, mailboxes.iter().map(|(player, entry)| (*player, &entry.1)), entity_index::PLAYER_SLOT_WAIT); }
                       let result = command_tree.execute(command.trim().trim_start_matches('/'), command_source).map_err(|e| e.to_string());
+                      command_state.lock().unwrap().entities.lock().unwrap().clear_player_slots();
                       let mut stop = false;
                       let mut runtime = CommandRuntime {
                           reply: Reply { outbound: None },
