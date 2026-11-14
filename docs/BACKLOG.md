@@ -101,11 +101,20 @@ server-side only.
 
 ## 4. World interaction and gameplay
 
-- Waterlogged edge cases, fluid/redstone interaction, flow into unloaded chunks.
-- Neighbour-update ordering and placement rules; audit crop growth and gravity-block chains against
-  vanilla before implementing.
+- Waterlogging, fluid/redstone interaction and fluid-wash drops are implemented and covered by
+  the `world-interaction-audit.md` tests. Flow into unloaded chunks still does not resume on load:
+  `Region::wake_loaded_chunks` implements and unit-tests the border pass, but its tick-loop call is
+  disabled because a join-time scan costs about 1 s of region time. Re-enable it with chunk-direct
+  reads or a blocked-fluid queue and a join benchmark. Remaining audit blockers are vines, sapling
+  tree growth (worldgen feature set), bamboo `leaves` updates and real-client checks.
+- Neighbour-update ordering and placement rules match the audited six-face order; sugar cane, cactus,
+  bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage growth now have random-tick
+  handlers. Gravity-block chains were audited earlier.
 - Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is implemented (`game/map_menu.rs` over `game/map.rs` `MapStore`; zoom out, lock, clone, restart persistence are unit-tested).
-- Maps: only the visible cursor decoration is sent; hidden cursors and styled captions are refused.
+- Maps: styled captions are sent as component NBT. Hidden cursors are omitted because the 26.3
+  decoration record has no visibility bit (`FerriteMapView`, `PlayerExtrasTest`).
+- `Structure#getEntities` and non-empty `EntityTransformer` lists are applied at the transformed
+  position (`CapturedStructure.placeEntities`, `StructureEntitiesTest`).
 
 ## 5. Protocol and networking
 

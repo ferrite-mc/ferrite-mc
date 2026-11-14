@@ -2175,7 +2175,8 @@ async fn run(
                     if worlds.owner(dimension,chunk).is_some(){
                       let source=dimensions.source(dimension).clone();
                       let tracking=tracking.clone();
-                      worlds.schedule_at_chunk(dimension,chunk,move |r|r.apply_fluid_place(&source,&tracking,(x,y,z),expected,state));
+                      let signals=signal_tx.clone();
+                      worlds.schedule_at_chunk(dimension,chunk,move |r|r.apply_fluid_place(&source,&tracking,signals.clone(),(x,y,z),expected,state));
                     }
                   },
                   Signal::RedstoneChange{dimension,positions}=>{
