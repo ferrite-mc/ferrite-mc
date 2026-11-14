@@ -265,6 +265,12 @@ public abstract class PlayerMisc extends PlayerStubs {
         Objects.requireNonNull(projectile, "projectile");
         org.bukkit.entity.EntityType thrown = null;
         double power = 1.5;
+        // A free rocket: the host launches it straight up from the eyes (its own flight model).
+        if (org.bukkit.entity.Firework.class.isAssignableFrom(projectile)) {
+            @SuppressWarnings("unchecked") var rocket = (T) getWorld().spawnEntity(getEyeLocation(), org.bukkit.entity.EntityType.FIREWORK_ROCKET);
+            if (callback != null) callback.accept(rocket);
+            return rocket;
+        }
         if (org.bukkit.entity.Snowball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SNOWBALL;
         else if (org.bukkit.entity.Egg.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.EGG;
         else if (org.bukkit.entity.EnderPearl.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.ENDER_PEARL;

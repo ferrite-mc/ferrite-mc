@@ -272,7 +272,7 @@
 - **블록 엔티티:** 위 표의 종류는 구현했다. 그 밖의 `sendBlockUpdate` 대상은 `UnsupportedOperationException`을 유지한다.
 - **레시피(§7):** 조리·대장간·석재 절단 레시피는 런타임에 추가할 수 없다(Java 목록에만 남는다). 결과 아이템의 메타,
   `ExactChoice`, 클라이언트 레시피북 표시는 없다.
-- **투사체 종류:** 관통 화살·위더 해골·셜커 탄·눈 엔더·브리즈 바람 구슬·낚싯찌는 `launchProjectile`에 없다. `World#getEnderDragonBattle`은 `null`.
+- **투사체 종류:** `launchProjectile(Firework)`는 구현했다(호스트 폭죽이 눈 위치에서 위로 난다, 속도 인자 무시). 관통 화살·위더 해골·셜커 탄·눈 엔더·브리즈 바람 구슬·낚싯찌는 `launchProjectile`에 없다. `World#getEnderDragonBattle`은 `null`.
 - **TAGS 라이프사이클 이벤트:** 태그 레지스트리가 시작 후 고정이라 거부한다. `fromLegacy`의 데이터 바이트는 지원하지 않는다.
 - **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 그 밖의 Paper 생명주기·스케줄러(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
