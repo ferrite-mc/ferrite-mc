@@ -648,17 +648,10 @@ public abstract class PlayerMisc extends PlayerStubs {
         if (enderChest == null) enderChest = getServer().createInventory(this, org.bukkit.event.inventory.InventoryType.ENDER_CHEST);
         return enderChest;
     }
-    @Override public org.bukkit.inventory.EntityEquipment getEquipment() {
-        var inventory = getInventory();
-        return (org.bukkit.inventory.EntityEquipment) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.inventory.EntityEquipment.class}, (proxy, method, args) -> {
-            try {
-                return inventory.getClass().getMethod(method.getName(), method.getParameterTypes()).invoke(inventory, args);
-            } catch (NoSuchMethodException e) {
-                throw new UnsupportedOperationException("Ferrite: not implemented: EntityEquipment#" + method.getName());
-            } catch (java.lang.reflect.InvocationTargetException e) {
-                throw e.getCause();
-            }
-        });
+    private org.bukkit.inventory.EntityEquipment equipment;
+    @Override public synchronized org.bukkit.inventory.EntityEquipment getEquipment() {
+        if (equipment == null) equipment = new FerriteEntityEquipment(this);
+        return equipment;
     }
     @Override public org.bukkit.inventory.ItemStack getItemOnCursor() { return getOpenInventory().getCursor(); }
     /** The client keeps the cookie under the key; a cookie is at most 5120 bytes. */
