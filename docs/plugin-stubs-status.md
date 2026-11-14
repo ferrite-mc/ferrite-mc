@@ -3,6 +3,38 @@
 > **2026-11-14:** 가장 최근 상세 기록은 아래 2026-11-14 plugin-g(Worker D) 절이다. 레인 병합 뒤에는
 > 현재 소스와 대조해야 하며, 요약은 `README.md`와 `docs/BACKLOG.md`를 따른다.
 
+## 2026-11-14 — claude-api (Lane B4): 플러그인 한계 점검
+
+기준 소스와 대조해 `README.md`의 "남은 한계"를 하나씩 확인했다. 실제 클라이언트로 확인한 것은 없다.
+
+- **런타임 레시피(조리·대장장이·석재 절단).** 이미 구현되어 있었다. `FerriteRecipes`가 furnace/blasting/smoking/
+  campfire/stonecutting/smithing transform·trim을 데이터팩 JSON으로 보내고 `game/crafting.rs`의
+  `add_plugin_recipe`가 레시피북에 넣는다. 화로 계열·모닥불·석재 절단기·대장장이 작업대가 이 목록으로 맞춘다.
+  `plugin-api-stubs.md`의 "제작 메뉴에는 쓰이지 않는다"는 문장은 오래된 것이어서 고쳤다. 클라이언트 레시피북
+  전송(`recipe_packets.rs`, `RecipeSync::with_plugin_recipes`)은 바이트 수준 테스트만 있고 실제 클라이언트 렌더링은
+  확인하지 않았다. 검증: Rust `crafting`/`recipe_packets` 테스트, JUnit `PluginRecipeHostTest`(13개).
+- **`Firework` 핸들, `Player#fireworkBoost`.** 이미 구현: 수명·최대 수명·`detonate`는 살아 있는 로켓에 닿고,
+  `getFireworkMeta`/`getItem`은 생성 시점 메타를 돌려준다. 생성 뒤 `setItem`/`setFireworkMeta`/`setAttachedTo`와
+  크로스보우 각도 발사는 이유를 담은 `UnsupportedOperationException`이다(`FireworkHandleTest`). 붙은 폭죽의 가속은
+  호스트의 `fireworkBoost(int,int,String)` 근사이며 바닐라 물리와 같다고 주장하지 않는다.
+- **`Player#getConnection`, `postEffects`.** 이미 구현: 연결은 플레이어 메서드로 위임하고 `reenterConfiguration`,
+  `sendReportDetails`는 거부한다. `postEffects`는 `/posteffect` 명령을 거쳐 목록을 호스트와 맞추며 명령이 실패하면
+  `false`를 돌려준다(`PlayerExtrasTest.connectionForwardsToThePlayer`, `postEffectsMirrorTheListAndDeduplicate`).
+- **`World#getWorldPath`(런타임 월드).** 이미 구현: 카탈로그가 월드를 만들 때 저장 디렉터리를 등록하고
+  (`set_world_path`), 메모리 월드는 빈 답이라 Java가 거부한다(Rust `chunks.rs` 테스트, `PlayerExtrasTest`).
+- **고침: `GeneratedStructure#getPieces`.** 예전에는 빈 목록을 돌려줘 "조각이 없는 구조물"이라고 말하고 있었다.
+  호스트는 구조물 시작의 경계 상자만 보고하므로(`getStructureStarts(int,int)` → `id minX minY minZ maxX maxY maxZ`)
+  이제 `UnsupportedOperationException`("bounding box, not its pieces")을 던진다. JUnit
+  `WorldSearchTest.aStructureStartHasABoundingBoxButNoPieces`.
+- **고침: `locateNearestBiome` 간격 인자.** 호스트는 `findClosestBiome3d(..., 32, 64)`로 고정되어 있다(`Host.locateBiome`;
+  Paper의 `locateNearestBiome(Location,int,Biome...)` 기본값과 같다). 이전 문서의 "y=64·8블록 간격 근사"는 틀린
+  서술이다. 명시한 `horizontalInterval`/`verticalInterval`이 32/64가 아니면 조용히 무시하는 대신 호스트 호출 전에
+  거부한다. 비권장 `(Location, Biome, int[, int])` 형식의 step은 계속 검색 정밀도에만 쓰이는 근사로 두었다.
+  JUnit `WorldSearchTest.biomeSearchIntervalsOtherThanTheHostsAreRefusedNotIgnored`.
+- **열어 둔 것.** 구조물 조각(`getPieces`)과 임의 interval은 JVM 월드젠 호스트(`java/ferrite-worldgen-host`)를 고쳐야 하고,
+  그 호스트 테스트는 `FERRITE_TEST_ACCEPT_EULA`(Mojang EULA 수락)가 필요해 이 작업에서는 실행하지 않았다.
+  POI `IS_OCCUPIED`는 티켓을 잡는 AI가 없어 계속 빈 결과다.
+
 ## 2026-11-14 — Worker D (plugin-g): 남은 타일/청크 경로
 
 - `Player#sendBlockUpdate` 스컬: `note_block_sound`를 실제 스냅샷에 싣는다. Java가 `note,<namespace:path>`를 보내고
