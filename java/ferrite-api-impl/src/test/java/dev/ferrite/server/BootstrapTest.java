@@ -23,7 +23,7 @@ class BootstrapTest {
         @org.bukkit.event.EventHandler public void inherited(CancelEvent event) { called.incrementAndGet(); }
     }
     static final class ChildListener extends ParentListener {}
-    @Test void paperOnlyLoadsAndFailureRollsBack() throws Exception {
+    @Test void paperOnlyLoadsAndOneFailingFileDoesNotStopTheOthers() throws Exception {
         var jar = java.nio.file.Files.createTempFile("ferrite-paper", ".jar");
         try (var input = new java.util.jar.JarFile(System.getProperty("test.dependency.jar")); var output = new java.util.jar.JarOutputStream(java.nio.file.Files.newOutputStream(jar))) {
             var entries = input.entries();
@@ -43,8 +43,11 @@ class BootstrapTest {
         assertTrue(manager.isPluginEnabled("PaperOnly"));
         manager.disablePlugins();
         var failing = new FerriteServer().plugins;
-        assertThrows(IllegalStateException.class, () -> failing.loadOrdered(new String[]{jar.toString(), jar + ".missing"}, null));
-        assertEquals(0, failing.getPlugins().length);
+        // A file that cannot load is logged and skipped; it must not take the other plugins down with it.
+        failing.loadOrdered(new String[]{jar + ".missing", jar.toString()}, null);
+        assertEquals(1, failing.getPlugins().length);
+        assertTrue(failing.isPluginEnabled("PaperOnly"));
+        failing.disablePlugins();
     }
     @Test void loadsRunsAndDisablesPlugin() {
         List<String> log = new ArrayList<>();

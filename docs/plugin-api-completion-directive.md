@@ -282,3 +282,13 @@
 - **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 그 밖의 Paper 생명주기·스케줄러(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
 
+
+### 10.4 실제 서드파티 플러그인 호환 (2026-11-14)
+
+하니스: `cargo run -p ferrite-plugin --example load_plugins -- <플러그인 폴더> [이름…]`(먼저 `gradle shadedJar`, Java 25 필요).
+서드파티 jar는 커밋하지 않는다. 고친 것은 모두 `RealPluginCompatTest`/`BootstrapTest`에 회귀 테스트가 있다.
+
+- **활성화 확인:** Vault, EssentialsX 2.22.0(자기 jar가 26.x 이전이라 "지원하지 않는 서버 버전" 경고를 낸다), PlaceholderAPI, Votifier, BlueMap, Multiverse-Core 5.8.2, AuthMe, DiscordSRV, SkinsRestorer, ChestShop, Skript 2.17.1.
+- **고친 것:** 플러그인 하나가 로드·활성화에 실패해도 호스트 전체가 멈추지 않는다(`loadOrdered`가 플러그인마다 격리, 실패 로그에 파일명). 정적 `@EventHandler` 메서드(바인딩 안 함). `CraftServer#getCommandMap` 선언(ACF/Multiverse가 `getDeclaredMethod`로 찾음). `VanillaCommandWrapper` 스텁. `GameProfile` 속성(`Property`/`PropertyMap`). `VanillaArgumentProvider`(`FerriteArgumentProvider`, 일부 인자 종류는 `UnsupportedOperationException`). `Bukkit.createBlockData(material, "[…]")`가 속성 문자열을 받는다. `UnsafeValues#modifyItemStack`(`ItemComponents`: 이름·설명·모델 데이터·내구도·불괴·수리 비용·마법부여·포션 기본 효과). `PotionMeta`·`EnchantmentStorageMeta`는 Java 쪽에만 있다. 메타 필드가 없는 컴포넌트(`fireworks` 등)는 매칭용으로 값을 보관하되 **호스트로 보내는 순간 `UnsupportedOperationException`**으로 거부한다(조용히 버리지 않는다). `log4j-core`·`netty-all` 번들(Skript·AuthMe가 필요로 함).
+- **동작하지 않는 것(정직한 한계):** packetevents·ProtocolLib류와 ViaVersion의 채널 주입은 실제 NMS 네트워크 스택(`ServerConnection`, Netty 채널)이 필요해 로드는 되지만 주입에 실패한다. TAB 6.2.1 jar는 26.x를 지원하지 않는다. ProtocolLib·WorldEdit·LuckPerms·CoreProtect는 받을 수 있는 릴리스가 없어 시험하지 못했다. 로드 성공이 곧 기능 동작을 뜻하지는 않는다 — 명령·이벤트를 실제 클라이언트로 돌려 보지 않았다.
+- **계약 변경:** 이전에는 한 파일이 실패하면 로드된 플러그인을 모두 되돌렸다. 이제는 실패한 파일만 건너뛴다(`BootstrapTest.paperOnlyLoadsAndOneFailingFileDoesNotStopTheOthers`).

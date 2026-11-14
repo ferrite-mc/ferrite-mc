@@ -49,7 +49,10 @@ final class FerritePluginManager extends PluginManagerStubs {
             if (method.getParameterCount() != 1 || !org.bukkit.event.Event.class.isAssignableFrom(method.getParameterTypes()[0]) || method.getReturnType() != void.class) throw new IllegalArgumentException("Invalid event handler: " + method);
             try {
                 method.setAccessible(true);
-                handlers.add(new Handler(method.getParameterTypes()[0], annotation.priority(), annotation.ignoreCancelled(), owner, java.lang.invoke.MethodHandles.lookup().unreflect(method).bindTo(listener)));
+                var handle = java.lang.invoke.MethodHandles.lookup().unreflect(method);
+                // A static handler has no receiver to bind; Bukkit's reflective invoke ignores it too.
+                if (!java.lang.reflect.Modifier.isStatic(method.getModifiers())) handle = handle.bindTo(listener);
+                handlers.add(new Handler(method.getParameterTypes()[0], annotation.priority(), annotation.ignoreCancelled(), owner, handle));
                 noteListener(method.getParameterTypes()[0]);
             } catch (IllegalAccessException e) { throw new IllegalArgumentException(e); }
         }
@@ -113,6 +116,9 @@ final class FerritePluginManager extends PluginManagerStubs {
             for (int index = 0; index < files.length; index++) {
                 String path = files[index];
                 File file = new File(path);
+                String loadedName = null;
+                JavaPlugin loadedPlugin = null;
+                try {
                 PluginDescriptionFile desc;
                 boolean aware;
                 boolean paper;
@@ -154,6 +160,7 @@ final class FerritePluginManager extends PluginManagerStubs {
                     loader.addLibraries(libraries);
                     java.util.logging.Logger.getLogger(desc.getName()).info("Loaded " + libraries.size() + " libraries");
                 }
+                loadedName = desc.getName().toLowerCase(Locale.ROOT);
                 loaders.put(desc.getName().toLowerCase(Locale.ROOT), loader);
                 for (String alias : desc.getProvidedPlugins()) loaders.putIfAbsent(alias.toLowerCase(Locale.ROOT), loader);
                 if (paper && metadata.get("bootstrapper") instanceof String bootstrapper) {
@@ -162,6 +169,7 @@ final class FerritePluginManager extends PluginManagerStubs {
                     FerriteBootstrap.run(bootstrapper, loader, desc, file.toPath(), new File(server.pluginsFolder == null ? "plugins" : server.pluginsFolder, desc.getName()).toPath(), world);
                 }
                 JavaPlugin plugin = Class.forName(desc.getMain(), true, loader).asSubclass(JavaPlugin.class).getDeclaredConstructor().newInstance();
+                loadedPlugin = plugin;
                 plugins.add(plugin); regionAware.put(plugin, aware); server.registerCommands(plugin); plugin.onLoad();
                 List<org.bukkit.permissions.Permission> declared = new ArrayList<>();
                 for (org.bukkit.permissions.Permission permission : desc.getPermissions()) {
@@ -170,8 +178,27 @@ final class FerritePluginManager extends PluginManagerStubs {
                     declared.add(permission);
                 }
                 declaredPermissions.put(plugin, declared);
+                } catch (Throwable failure) {
+                    // Like Bukkit, one plugin that cannot load never takes the others down with it.
+                    server.getLogger().log(java.util.logging.Level.SEVERE, "Could not load '" + file.getName() + "'", failure);
+                    if (loadedPlugin != null) {
+                        try { loadedPlugin.setEnabled(false); } catch (Throwable ignored) { /* never enabled */ }
+                        plugins.remove(loadedPlugin); regionAware.remove(loadedPlugin); declaredPermissions.remove(loadedPlugin);
+                    }
+                    if (loadedName != null) {
+                        var broken = loaders.remove(loadedName);
+                        loaders.values().removeIf(other -> other == broken);
+                        if (broken != null) try { broken.close(); } catch (IOException ignored) { /* already unusable */ }
+                    }
+                }
             }
-            for (JavaPlugin plugin : plugins) plugin.setEnabled(true);
+            for (JavaPlugin plugin : List.copyOf(plugins)) {
+                try { plugin.setEnabled(true); }
+                catch (Throwable failure) {
+                    plugin.getLogger().log(java.util.logging.Level.SEVERE, "Error occurred while enabling " + plugin.getName(), failure);
+                    try { plugin.setEnabled(false); } catch (Throwable ignored) { /* half-enabled */ }
+                }
+            }
             FerriteLifecycleManager.fireCommands(io.papermc.paper.plugin.lifecycle.event.registrar.ReloadableRegistrarEvent.Cause.INITIAL);
         } catch (Throwable e) { disablePlugins(); throw new IllegalStateException("Failed to load plugin", e); }
     }

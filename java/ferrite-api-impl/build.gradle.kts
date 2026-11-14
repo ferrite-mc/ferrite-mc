@@ -7,6 +7,8 @@ dependencies { implementation("io.papermc.paper:paper-api:26.3.build.227-stable"
     implementation("org.apache.maven.resolver:maven-resolver-supplier:1.9.24"); implementation("org.slf4j:slf4j-jdk14:2.0.17")
     // Bukkit (SimpleCommandMap) and plugins use commons-lang3 from the server classpath.
     implementation("org.apache.commons:commons-lang3:3.12.0")
+    // Paper ships log4j-core and netty; plugins attach log filters and Netty handlers, so they must resolve.
+    implementation("org.apache.logging.log4j:log4j-core:2.24.3"); implementation("io.netty:netty-all:4.1.118.Final")
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4"); testRuntimeOnly("org.junit.platform:junit-platform-launcher") }
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 tasks.test { useJUnitPlatform() }

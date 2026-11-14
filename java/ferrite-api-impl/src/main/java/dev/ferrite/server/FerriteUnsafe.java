@@ -67,7 +67,9 @@ public final class FerriteUnsafe implements UnsafeValues {
     @Override public int getDataVersion() { return DATA_VERSION; }
 
     @Override public ItemStack modifyItemStack(ItemStack stack, String arguments) {
-        return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "modifyItemStack(ItemStack,String)", ItemStack.class, stack, arguments);
+        java.util.Objects.requireNonNull(stack, "stack");
+        java.util.Objects.requireNonNull(arguments, "arguments");
+        return ItemComponents.apply(stack, arguments);
     }
 
     @Override public void checkSupported(PluginDescriptionFile description) throws InvalidPluginException {

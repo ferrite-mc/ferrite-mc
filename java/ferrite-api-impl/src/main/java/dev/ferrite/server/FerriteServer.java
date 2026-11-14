@@ -470,8 +470,8 @@ public class FerriteServer extends ServerStubs {
     @Override public org.bukkit.block.data.BlockData createBlockData(org.bukkit.Material material) { return FerriteBlockData.create(material); }
     @Override public org.bukkit.block.data.BlockData createBlockData(org.bukkit.Material material, String data) {
         java.util.Objects.requireNonNull(material, "material");
-        if (data != null && !data.isEmpty()) throw new UnsupportedOperationException("Ferrite: block-state properties are owned by the Rust server: " + data);
-        return FerriteBlockData.create(material);
+        if (data == null || data.isEmpty() || data.equals("[]")) return FerriteBlockData.create(material);
+        return FerriteBlockData.create(material, data.startsWith("[") ? data : "[" + data + "]");
     }
     @Override public org.bukkit.block.data.BlockData createBlockData(org.bukkit.Material material, java.util.function.Consumer<? super org.bukkit.block.data.BlockData> consumer) {
         var data = FerriteBlockData.create(material);
