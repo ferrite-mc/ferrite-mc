@@ -208,6 +208,35 @@ public final class Bootstrap {
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
         return !event.isCancelled();
     }
+    /**
+     * Fires Bukkit's {@code BlockExplodeEvent} for the blocks a plugin explosion would destroy.
+     * Returns null when the world is unknown, "" when a listener cancelled the explosion, and the
+     * surviving block positions (encoded like {@link HostBridge#ITEM}) otherwise.
+     */
+    public static String fireBlockExplode(String world, String center, String blocks, float yield) {
+        var resolved = server.getWorld(java.util.UUID.fromString(world));
+        if (resolved == null) return null;
+        var centerFields = center.split(",");
+        if (centerFields.length != 3) throw new IllegalArgumentException("Ferrite: invalid explosion centre " + center);
+        var centerBlock = resolved.getBlockAt(Integer.parseInt(centerFields[0]), Integer.parseInt(centerFields[1]), Integer.parseInt(centerFields[2]));
+        var list = new java.util.ArrayList<org.bukkit.block.Block>();
+        if (!blocks.isEmpty()) {
+            for (var line : blocks.split(String.valueOf(HostBridge.ITEM))) {
+                var fields = line.split(",");
+                if (fields.length != 3) continue;
+                list.add(resolved.getBlockAt(Integer.parseInt(fields[0]), Integer.parseInt(fields[1]), Integer.parseInt(fields[2])));
+            }
+        }
+        var event = new org.bukkit.event.block.BlockExplodeEvent(centerBlock, FerriteEventObjects.state(centerBlock, centerBlock.getType()), list, yield, org.bukkit.ExplosionResult.DESTROY);
+        synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
+        if (event.isCancelled()) return "";
+        var kept = new StringBuilder();
+        for (var block : event.blockList()) {
+            if (kept.length() > 0) kept.append(HostBridge.ITEM);
+            kept.append(block.getX()).append(',').append(block.getY()).append(',').append(block.getZ());
+        }
+        return kept.toString();
+    }
     /** Fires Bukkit's {@code BlockPlaceEvent}; false means a listener cancelled the placement. */
     public static boolean fireBlockPlace(String id, String name, int x, int y, int z, int face, String placed, String replaced) {
         var block = FerriteEventObjects.block(x, y, z, material(placed));

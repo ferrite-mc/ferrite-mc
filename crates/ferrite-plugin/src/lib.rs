@@ -33,6 +33,7 @@ pub const PLAYER_MOVE_EVENT: &str = "org.bukkit.event.player.PlayerMoveEvent";
 pub const PLAYER_INTERACT_EVENT: &str = "org.bukkit.event.player.PlayerInteractEvent";
 pub const BLOCK_BREAK_EVENT: &str = "org.bukkit.event.block.BlockBreakEvent";
 pub const BLOCK_PLACE_EVENT: &str = "org.bukkit.event.block.BlockPlaceEvent";
+pub const BLOCK_EXPLODE_EVENT: &str = "org.bukkit.event.block.BlockExplodeEvent";
 pub const PLAYER_COMMAND_PREPROCESS_EVENT: &str =
     "org.bukkit.event.player.PlayerCommandPreprocessEvent";
 pub const INVENTORY_CLICK_EVENT: &str = "org.bukkit.event.inventory.InventoryClickEvent";
@@ -205,6 +206,11 @@ pub trait WorldView: Send + Sync {
     /// Loads chunk `(x, z)` of a runtime world, generating it when it does not exist
     /// (`World#loadChunk`). `Some(true)` once it is readable; `None` for an unknown world.
     fn load_chunk(&self, _world: uuid::Uuid, _x: i32, _z: i32) -> Option<bool> {
+        None
+    }
+    /// The chunk coordinates the world currently keeps resident (`World#getLoadedChunks`).
+    /// `None` when the view cannot enumerate them; an empty answer is a world with no chunk.
+    fn loaded_chunks(&self, _world: uuid::Uuid) -> Option<Vec<(i32, i32)>> {
         None
     }
     /// The block entities inside the box `min..=max` of the loaded chunks, each as its position
@@ -1184,6 +1190,17 @@ pub trait ServerHooks: Send + Sync {
         placed: &str,
         replaced: &str,
     ) -> Result<bool, Error>;
+    /// Fires Bukkit's `BlockExplodeEvent` for the blocks an explosion would destroy. `None`
+    /// leaves the host's list untouched; `Some(list)` is what listeners left (empty = cancelled).
+    fn blocks_exploded(
+        &self,
+        _world: uuid::Uuid,
+        _center: BlockPosition,
+        _blocks: &[BlockPosition],
+        _yield: f32,
+    ) -> Result<Option<Vec<BlockPosition>>, Error> {
+        Ok(None)
+    }
     /// Fires Bukkit's `PlayerCommandPreprocessEvent`; `false` means cancelled.
     fn player_command(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<bool, Error>;
     /// Fires Bukkit's `ChunkLoadEvent` after the chunk's packet was queued.
@@ -3284,6 +3301,60 @@ impl PluginHost {
             Ok(Some(result))
         })?)
     }
+    /// Fires Bukkit's `BlockExplodeEvent` for the blocks an explosion would destroy. `Ok(None)`
+    /// means no listener was registered (the host list stands); `Ok(Some(kept))` is what the
+    /// listeners left, and an empty list means the event was cancelled.
+    pub fn fire_blocks_exploded(
+        &self,
+        world: uuid::Uuid,
+        center: BlockPosition,
+        blocks: &[BlockPosition],
+        yield_: f32,
+    ) -> Result<Option<Vec<BlockPosition>>, Error> {
+        if !self.listens_for(BLOCK_EXPLODE_EVENT) {
+            return Ok(None);
+        }
+        let encoded = blocks
+            .iter()
+            .map(|b| format!("{},{},{}", b.x, b.y, b.z))
+            .collect::<Vec<_>>()
+            .join("\u{1d}");
+        let center = format!("{},{},{}", center.x, center.y, center.z);
+        Ok(self.jvm.with_env(|env| {
+            let world = env.new_string(world.to_string())?;
+            let center = env.new_string(&center)?;
+            let blocks = env.new_string(&encoded)?;
+            let value = env
+                .call_static_method(
+                    BOOTSTRAP,
+                    "fireBlockExplode",
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;F)Ljava/lang/String;",
+                    &[
+                        JValue::Object(world.as_ref()),
+                        JValue::Object(center.as_ref()),
+                        JValue::Object(blocks.as_ref()),
+                        JValue::Float(yield_),
+                    ],
+                )?
+                .l()?;
+            if value.is_null() {
+                return Ok(None);
+            }
+            let text: String = env.get_string(&JString::from(value))?.into();
+            Ok(Some(
+                text.split('\u{1d}')
+                    .filter_map(|part| {
+                        let mut fields = part.split(',');
+                        Some(BlockPosition {
+                            x: fields.next()?.parse().ok()?,
+                            y: fields.next()?.parse().ok()?,
+                            z: fields.next()?.parse().ok()?,
+                        })
+                    })
+                    .collect(),
+            ))
+        })?)
+    }
     fn fire_string_id(&self, method: &str, signature: &str, id: uuid::Uuid) -> Result<(), Error> {
         self.jvm.with_env(|env| {
             let id = env.new_string(id.to_string())?;
@@ -3791,6 +3862,15 @@ impl ServerHooks for PluginHost {
         replaced: &str,
     ) -> Result<bool, Error> {
         self.fire_block_place(id, name, block, face, placed, replaced)
+    }
+    fn blocks_exploded(
+        &self,
+        world: uuid::Uuid,
+        center: BlockPosition,
+        blocks: &[BlockPosition],
+        yield_: f32,
+    ) -> Result<Option<Vec<BlockPosition>>, Error> {
+        self.fire_blocks_exploded(world, center, blocks, yield_)
     }
     fn player_command(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<bool, Error> {
         self.fire_player_command(id, name, message)

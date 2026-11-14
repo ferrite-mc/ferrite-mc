@@ -555,6 +555,23 @@ async fn run_server(
         }
     }
     ferrite_server::plugins::chunks::set_world_dir(config.world.clone());
+    // The vanilla dimensions share the world root; the nether and end live in DIM-1/DIM1, which
+    // is the Folder `World#getWorldPath` reports for them.
+    for dimension in [game::Dimension::Nether, game::Dimension::End] {
+        ferrite_server::plugins::chunks::remove_world_path(ferrite_server::plugins::world_id(
+            dimension,
+        ));
+    }
+    if let Some(root) = &config.world {
+        ferrite_server::plugins::chunks::set_world_path(
+            ferrite_server::plugins::world_id(game::Dimension::Nether),
+            root.join("DIM-1"),
+        );
+        ferrite_server::plugins::chunks::set_world_path(
+            ferrite_server::plugins::world_id(game::Dimension::End),
+            root.join("DIM1"),
+        );
+    }
     game::set_map_server_root(config.world.clone());
     // The plugin bridge and the game loop share these sources, so a plugin write lands in the
     // same chunk data the server ticks.

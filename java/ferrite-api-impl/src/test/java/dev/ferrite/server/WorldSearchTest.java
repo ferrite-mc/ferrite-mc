@@ -95,6 +95,7 @@ class WorldSearchTest {
     }
 
     @Test void generateTreeAsksTheHostToPlaceTheMatchingFeature() {
+        sent.clear();
         HostBridge.transport = (owner, subject, method, args) -> {
             sent.add(method + "|" + args);
             return "true";
@@ -104,6 +105,32 @@ class WorldSearchTest {
         assertTrue(sent.get(0).startsWith("placeFeature(Location,String)|"), sent.get(0));
         assertTrue(sent.get(0).endsWith("minecraft:fancy_oak"), sent.get(0));
         assertEquals("minecraft:oak", FerriteWorld.treeFeature(org.bukkit.TreeType.TREE));
+        assertEquals("minecraft:red_poplar", FerriteWorld.treeFeature(org.bukkit.TreeType.RED_POPLAR));
+        assertEquals("minecraft:pale_oak_creaking", FerriteWorld.treeFeature(org.bukkit.TreeType.PALE_OAK_CREAKING));
+    }
+
+    @Test void generateTreeWithABlockChangeDelegateReplaysTheHostBlocks() {
+        sent.clear();
+        HostBridge.transport = (owner, subject, method, args) -> {
+            sent.add(method + "|" + args);
+            return method.equals("featureBlocks(Location,String)")
+                ? "4,70,5,minecraft:oak_log[axis=y]\n4,71,5,minecraft:oak_log[axis=y]" : "";
+        };
+        var delegate = new org.bukkit.BlockChangeDelegate() {
+            private final java.util.Map<String, org.bukkit.block.data.BlockData> blocks = new java.util.HashMap<>();
+            @Override public boolean setBlockData(int x, int y, int z, org.bukkit.block.data.BlockData data) {
+                blocks.put(x + "," + y + "," + z, data);
+                return true;
+            }
+            @Override public org.bukkit.block.data.BlockData getBlockData(int x, int y, int z) { return blocks.get(x + "," + y + "," + z); }
+            @Override public int getHeight() { return 320; }
+            @Override public boolean isEmpty(int x, int y, int z) { return getBlockData(x, y, z) == null; }
+        };
+        assertTrue(world.generateTree(new Location(world, 4, 70, 5), org.bukkit.TreeType.TREE, delegate));
+        assertEquals(org.bukkit.Material.OAK_LOG, delegate.getBlockData(4, 70, 5).getMaterial());
+        assertEquals(org.bukkit.Material.OAK_LOG, delegate.getBlockData(4, 71, 5).getMaterial());
+        assertEquals(1, sent.size());
+        assertTrue(sent.get(0).startsWith("featureBlocks(Location,String)|"), sent.get(0));
     }
 
     @Test void loadedTemplatesKnowTheirSizeAndPlaceThroughThePlaceCommand() throws Exception {

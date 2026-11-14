@@ -268,7 +268,13 @@ class PlayerExtrasTest {
         assertEquals(1, world.getForceLoadedChunks().size());
         world.setChunkForceLoaded(2, 3, false);
         assertFalse(world.isChunkForceLoaded(2, 3));
-        var plugin = (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.plugin.Plugin.class}, (proxy, method, args) -> method.getName().equals("hashCode") ? 7 : method.getName().equals("equals") ? proxy == args[0] : null);
+        var plugin = (org.bukkit.plugin.Plugin) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.plugin.Plugin.class}, (proxy, method, args) -> switch (method.getName()) {
+            case "hashCode" -> 7;
+            case "equals" -> proxy == args[0];
+            case "isEnabled" -> true;
+            case "getName" -> "ticket-plugin";
+            default -> null;
+        });
         assertTrue(world.addPluginChunkTicket(1, 1, plugin));
         assertFalse(world.addPluginChunkTicket(1, 1, plugin));
         assertEquals(1, world.getPluginChunkTickets().get(plugin).size());
@@ -922,6 +928,7 @@ class PlayerExtrasTest {
         HostBridge.transport = (owner, subject, method, args) -> switch (method) {
             case "isChunkLoaded(int,int)" -> args.startsWith("1") ? "true" : "false";
             case "isChunkGenerated(int,int)" -> args.startsWith("1") ? "true" : "false";
+            case "unloadChunk(int,int)" -> args.startsWith("1") ? "false" : "true";
             default -> "";
         };
         try {
@@ -970,10 +977,15 @@ class PlayerExtrasTest {
         assertFalse(tracker.isInCombat());
     }
 
-    @Test void noLoadedColumnMeansNoLightningRod() {
-        HostBridge.transport = (owner, subject, method, args) -> method.equals("getLoadedChunkCoordinates()") ? "0,0" : "";
+    @Test void noLightningRodInReachMeansNoLocation() {
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "findLightningRod(int,int,int)" -> "";
+            case "findLightningTarget(int,int,int)" -> "1 64 1";
+            default -> "";
+        };
         try {
             assertNull(player.getWorld().findLightningRod(new org.bukkit.Location(player.getWorld(), 1, 64, 1)));
+            assertEquals(64, player.getWorld().findLightningTarget(new org.bukkit.Location(player.getWorld(), 1, 64, 1)).getBlockY());
         } finally { HostBridge.transport = null; }
     }
 

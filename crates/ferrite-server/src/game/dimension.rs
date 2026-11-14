@@ -156,6 +156,8 @@ impl RuntimeWorldCatalog {
         self.by_name.insert(folded, id);
         self.by_key.insert(key, id);
         self.by_id.insert(id, descriptor.clone());
+        // `World#getWorldPath` for a runtime world is the directory its chunk source saves into.
+        crate::plugins::chunks::set_world_path(id, root.join(name));
         Ok(descriptor)
     }
 
@@ -171,6 +173,7 @@ impl RuntimeWorldCatalog {
         let descriptor = self.by_id.remove(&id)?;
         self.by_name.remove(&descriptor.name.to_lowercase());
         self.by_key.remove(&descriptor.key);
+        crate::plugins::chunks::remove_world_path(id);
         Some(descriptor)
     }
 

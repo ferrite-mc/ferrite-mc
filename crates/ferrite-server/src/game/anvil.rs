@@ -610,6 +610,21 @@ impl AnvilChunkSource {
     pub fn chunk_resident(&self, x: i32, z: i32) -> bool {
         self.with_loaded_chunk(x, z, |_| ()).is_some()
     }
+    /// Every chunk this source currently keeps resident, for `World#getLoadedChunks`. The cache
+    /// is keyed by `(x, z, biome)` so one chunk can appear several times; the result is deduped.
+    pub fn resident_chunks(&self) -> Vec<(i32, i32)> {
+        let cache = self.cache.lock().unwrap();
+        let mut out: Vec<(i32, i32)> = cache
+            .entries
+            .iter()
+            .filter_map(|(&(x, z, _), entry)| {
+                matches!(entry, Entry::Ready(Ok(_), _)).then_some((x, z))
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
     /// Whether the chunk is stored in this source's region files. Never loads or creates it;
     /// a memory-backed source stores nothing.
     pub fn chunk_saved(&self, x: i32, z: i32) -> bool {

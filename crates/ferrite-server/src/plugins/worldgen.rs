@@ -111,9 +111,59 @@ pub fn place_feature(
     if call.owner != "World" || call.method != "placeFeature(Location,String)" {
         return None;
     }
-    if uuid::Uuid::parse_str(&call.subject).ok()? != ferrite_plugin::default_world_id() {
+    let world = uuid::Uuid::parse_str(&call.subject).ok()?;
+    let dimension = super::world_dimension(world)?;
+    let (x, y, z, feature) = feature_request(call)?;
+    let blocks = match terrain.place(dimension, &format!("feature;{feature};{x};{y};{z}")) {
+        Ok(blocks) => blocks,
+        Err(_) => return Some((Vec::new(), "false".into())),
+    };
+    // The console only addresses the overworld directly; the nether and end need an explicit
+    // dimension, otherwise a tree grown there would land in the overworld.
+    let prefix = if dimension == Dimension::Overworld {
+        String::new()
+    } else {
+        format!("execute in {} run ", dimension.key())
+    };
+    let lines: Vec<String> = blocks
+        .iter()
+        .filter_map(|([bx, by, bz], state)| {
+            Some(format!(
+                "{prefix}setblock {bx} {by} {bz} {}",
+                state_text(*state)?
+            ))
+        })
+        .collect();
+    let reply = if lines.is_empty() { "false" } else { "true" };
+    Some((lines, reply.into()))
+}
+
+/// `World#generateTree(Location, TreeType, BlockChangeDelegate)`: the blocks the feature would
+/// change as `x,y,z,state` lines, without touching the world, so Java can replay them into the
+/// delegate. `None` for another call or a world the console/generator cannot address.
+pub fn place_feature_blocks(terrain: &dyn ChunkGenerator, call: &HostCall) -> Option<String> {
+    if call.owner != "World" || call.method != "featureBlocks(Location,String)" {
         return None;
     }
+    let world = uuid::Uuid::parse_str(&call.subject).ok()?;
+    let dimension = super::world_dimension(world)?;
+    let (x, y, z, feature) = feature_request(call)?;
+    let blocks = terrain
+        .place(dimension, &format!("feature;{feature};{x};{y};{z}"))
+        .ok()?;
+    Some(
+        blocks
+            .iter()
+            .filter_map(|([bx, by, bz], state)| {
+                Some(format!("{bx},{by},{bz},{}", state_text(*state)?))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The `(x, y, z, feature)` a `placeFeature`/`featureBlocks` call carries.
+fn feature_request(call: &HostCall) -> Option<(i32, i32, i32, String)> {
     let mut parts = call
         .args
         .first()?
@@ -125,24 +175,7 @@ pub fn place_feature(
     };
     let (x, y, z) = (axis()?, axis()?, axis()?);
     let feature = call.args.get(1)?.to_ascii_lowercase();
-    if !is_resource_key(&feature) {
-        return None;
-    }
-    let blocks = match terrain.place(
-        Dimension::Overworld,
-        &format!("feature;{feature};{x};{y};{z}"),
-    ) {
-        Ok(blocks) => blocks,
-        Err(_) => return Some((Vec::new(), "false".into())),
-    };
-    let lines: Vec<String> = blocks
-        .iter()
-        .filter_map(|([bx, by, bz], state)| {
-            Some(format!("setblock {bx} {by} {bz} {}", state_text(*state)?))
-        })
-        .collect();
-    let reply = if lines.is_empty() { "false" } else { "true" };
-    Some((lines, reply.into()))
+    is_resource_key(&feature).then_some((x, y, z, feature))
 }
 
 #[cfg(test)]
@@ -228,6 +261,23 @@ mod tests {
         let (lines, reply) = place("minecraft:oak").unwrap();
         assert_eq!(lines, vec!["setblock 1 65 -2 minecraft:oak_log[axis=y]"]);
         assert_eq!(reply, "true");
+        // A tree in the nether names its dimension, so it cannot land in the overworld.
+        let mut nether = call("placeFeature(Location,String)", &[&at, "minecraft:oak"]);
+        nether.subject = crate::plugins::world_id(Dimension::Nether).to_string();
+        let (lines, reply) = place_feature(&Fake, &nether).unwrap();
+        assert_eq!(
+            lines,
+            vec!["execute in minecraft:the_nether run setblock 1 65 -2 minecraft:oak_log[axis=y]"]
+        );
+        assert_eq!(reply, "true");
+        // The delegate overload needs the blocks without the world changing.
+        assert_eq!(
+            place_feature_blocks(
+                &Fake,
+                &call("featureBlocks(Location,String)", &[&at, "minecraft:oak"])
+            ),
+            Some("1,65,-2,minecraft:oak_log[axis=y]".to_owned())
+        );
         assert_eq!(
             place("minecraft:empty").unwrap(),
             (Vec::new(), "false".into())
