@@ -32,9 +32,8 @@ pub struct MoreState {
     pub stopwatches: BTreeMap<String, i64>,
     /// `/scoreboard objectives modify <o> displayautoupdate`: objectives with it enabled.
     pub objective_auto_update: std::collections::BTreeSet<String>,
-    /// `/scoreboard objectives modify <o> numberformat` as `blank`, `fixed:<text>` or
-    /// `styled:<style>`. Kept as state only: the `SetObjective` packet this protocol crate
-    /// writes has no number-format field.
+    /// `/scoreboard objectives modify <o> numberformat`: the format resent with `SetObjective`
+    /// (mode 2) whenever the objective is displayed or changed.
     pub objective_number_format: BTreeMap<String, ferrite_protocol::packets::play::NumberFormat>,
     /// `/scoreboard players display name`: `(holder, objective)` -> component text.
     pub score_display_name: BTreeMap<(String, String), String>,
@@ -2109,6 +2108,12 @@ fn profiling_run(
     } else {
         0.0
     };
+    if perf {
+        match write_perf_report(seconds, ticks, per_second) {
+            Some(path) => tracing::info!("profiling report written to {path}"),
+            None => tracing::warn!("could not write the profiling report"),
+        }
+    }
     feedback(
         ctx,
         stopped,
@@ -2119,6 +2124,22 @@ fn profiling_run(
         ],
     )?;
     Ok(ticks as i32)
+}
+
+/// Writes a `/perf stop` report to `debug/perf-<time>.txt` and returns its path. Vanilla's Spark
+/// report has more detail; this records the same three numbers the command reports.
+fn write_perf_report(seconds: f64, ticks: i64, per_second: f64) -> Option<String> {
+    let dir = std::path::Path::new("debug");
+    std::fs::create_dir_all(dir).ok()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let path = dir.join(format!("perf-{stamp}.txt"));
+    let report = format!(
+        "# Ferrite tick profile\nseconds: {seconds:.3}\nticks: {ticks}\nticks_per_second: {per_second:.2}\n"
+    );
+    std::fs::write(&path, report).ok()?;
+    Some(path.display().to_string())
 }
 
 fn debug_tree() -> NodeBuilder<Source> {
@@ -3242,6 +3263,15 @@ mod tests {
         );
         assert!(inline_dialog(r#"{type:"minecraft:nope",title:"Hi"}"#).is_err());
         assert!(inline_dialog("[1]").is_err());
+    }
+
+    #[test]
+    fn perf_stop_writes_a_report_file() {
+        let path = write_perf_report(1.5, 30, 20.0).expect("report file");
+        let text = std::fs::read_to_string(&path).expect("read report");
+        assert!(text.contains("ticks: 30"), "{text}");
+        assert!(text.contains("ticks_per_second: 20.00"), "{text}");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

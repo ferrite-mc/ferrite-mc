@@ -1,11 +1,12 @@
 # Vanilla command coverage
 
 > **Current snapshot: 2026-11-14.** The tree-parity numbers and the upper "Lane C" and
-> "Lane B" sections are the current reference. Sections after "Snapshot of 2026-11-04" are
+> "Lane B" sections are the current reference, re-verified against source and
+> `vanilla/26.3/generated` on 2026-11-14 (lane C). Sections after "Snapshot of 2026-11-04" are
 > historical and may be stale. Where they disagree, the upper blocks win. Anything marked
 > "unverified" still needs a real client or a jar check.
 
-## Tree parity (measured 2026-11-13)
+## Tree parity (measured 2026-11-14)
 
 `crates/ferrite-server/src/game/commands_tree_parity.rs` walks the live tree (`dispatcher()`)
 through the public `CommandDispatcher` API and diffs it path by path against
@@ -20,8 +21,8 @@ every difference.
 | vanilla roots in `commands.json` | 94 |
 | vanilla roots registered | 94 |
 | non-vanilla roots (`tps`, `mspt`, `profile`) | 3 |
-| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 82 |
-| vanilla roots that still differ | 12 |
+| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 79 |
+| vanilla roots that still differ | 15 |
 | individual differences / allow-list entries covering them | 186 / 24 |
 
 Classes: **a** behaviour-equivalent layout, **b** behaviour gap (fixed, or listed as a blocker),
@@ -79,28 +80,34 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
     `predicate`.
   - `store result|success` into `block`, `entity` (players only), `storage`, `score`, `bossbar`
     (`value|max`).
-  - A fork swallows the errors of its branches like vanilla, so the relations and nodes below are
-    plain redirects: their failure reaches the caller.
+  - A fork swallows the errors of its branches like vanilla, so a relation the server cannot
+    answer is a plain redirect: its failure reaches the caller.
+  - `on attacker|leasher|owner|target` read the region-published `CommandEntity` relations
+    (`last_killer`, leash holder, tamed-animal owner, mob target) and fork to the related
+    entities; a relation that is empty (a player with no snapshot entry, an untamed mob) forks
+    to no sources like vanilla's optional entity argument. Test:
+    `on_relations_use_the_published_snapshot`.
   - **Not supported** (each fails with a message, never silently): `summon` (spawning is
     scheduled onto the owning region, so the new entity is not visible to the rest of the
-    chain); `on attacker|leasher|origin|owner|target` (the `CommandEntity` snapshot,
-    `game/entity_index.rs`, carries no relation data; `vehicle|passengers|controller` come from
-    the ride table); `if items|slots entity` (entity inventories live in regions and cannot be
-    read while a command runs); item predicates with components; `store ... entity` for
-    non-player entities. `if|unless predicate <id>` evaluates datapack (`data/<ns>/predicate`) and
-    vanilla predicates for `match_block`, `entity_properties` (type, location), `inverted`,
-    `all_of`, `any_of`; other condition types are false; an unknown id is an error. Test:
-    `datapack_predicates_decide_if_and_unless`.
+    chain); `on origin` (the spawn-origin entity is not in the snapshot); `if items|slots entity`
+    (entity inventories live in regions and cannot be read while a command runs); item
+    predicates with components; `store ... entity` for non-player entities. `if|unless predicate
+    <id>` evaluates datapack (`data/<ns>/predicate`) and vanilla predicates for `match_block`,
+    `entity_properties` (type, location), `inverted`, `all_of`, `any_of`; other condition types
+    are false; an unknown id is an error. Test: `datapack_predicates_decide_if_and_unless`.
   - A `return` run by one fork of `execute as @a run return ...` does not stop the other forks.
 - `/time` (`commands_time.rs`): `set <time>|<timemarker>`, `add`, `query time|gametime|
   <timeline> [repetition]`, `pause`, `resume`, `rate`, `of <clock>` for the `overworld` and
   `the_end` clocks (data from `data/minecraft/world_clock` and `timeline`; the Nether has no
-  default clock). Unverified: that a marker moves to its next occurrence (`already_at_time_marker`
-  when already there), and the `set_time` packet's pause/rate fields (not sent).
+  default clock). A marker advances to its next occurrence, or fails with
+  `already_at_time_marker`; test `set_time_marker_moves_to_the_next_occurrence`. Unverified: the
+  `set_time` packet's pause/rate fields (not sent).
 - `/datapack` (`functions.rs`, `commands_server.rs`): `list [available|enabled]`, `enable <name>
   [first|last|before|after]`, `disable`, `create`. The order is stored in
-  `datapacks/.ferrite-order` (last pack wins) and honoured at load. Unverified: ordering
-  semantics and the invalid-name rule. Not modelled: built-in packs (`vanilla`, feature packs).
+  `datapacks/.ferrite-order` (last pack wins) and honoured at load; test
+  `datapack_create_list_enable_order_and_disable` covers create, list, enable (all placements),
+  reload order and disable. Unverified: the invalid-name rule. Not modelled: built-in packs
+  (`vanilla`, feature packs).
 - `/function` and `/return`: `function <id> with storage|block|entity <source> [path]` works for
   players (entity data) and block entities. `return <n>`, `return fail`, `return run <command>`
   end the innermost function; outside a function they fail with a **non-vanilla** message
@@ -110,8 +117,11 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   ("The source and destination areas cannot overlap" unless `force`), `move` clears the source,
   block entities are copied. `from <dim>`/`to <dim>` work across dimensions: the source region reads
   (`clone_read`), the destination region writes (`Signal::CrossClone`, `game/mod.rs`); `move`
-  clears the source afterwards (`Signal::CrossCloneClear`). Test:
-  `clone_between_dimensions_reads_one_world_and_writes_another`. Not verified with a real client.
+  clears the source afterwards (`Signal::CrossCloneClear`). The size and overlap checks are
+  shared by both paths (`validate_clone`), so a clone whose `from`/`to` name another dimension
+  is still rejected before anything is read. Tests:
+  `clone_between_dimensions_reads_one_world_and_writes_another` (replace, `filtered`, `move`),
+  `clone_validation_is_shared_with_the_cross_dimension_path`. Not verified with a real client.
   Unverified: whether vanilla counts only changed blocks.
 - `/fill` and `/setblock`: `strict` is accepted and behaves like `replace`; its real semantics
   are unverified.
@@ -154,7 +164,8 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   (defaults come from the entity type via `attributes::limits_for`; an attribute the type does not
   carry fails `failed.no_attribute`; the simulation reads only the player overrides), `/perf` and
   `/debug` (already-running/not-running state, `debug function` writes
-  `debug/commands-<time>.txt`; `/perf` writes no report), `/forceload`, `/fetchprofile` (online
+  `debug/commands-<time>.txt`; `/perf stop` writes `debug/perf-<time>.txt` with seconds, ticks
+  and ticks per second), `/forceload`, `/fetchprofile` (online
   players only), `/rotate` (assumes the command's dimension), `/locate`, `/dialog`, `/spectate`:
   checked in source for the claims in the old prose below; none of them was compared
   with vanilla behaviour beyond that, so this lane does not claim parity for them.
@@ -168,7 +179,7 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 | blocker | evidence |
 |---|---|
 | `execute summon` | `Action::Summon` is async and returns no uuid, so the new entity cannot be the source of the rest of the chain |
-| `execute on attacker|leasher|origin|owner|target`, `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) carries uuid, kind, position, tags and name only: no relations, NBT or inventory; `vehicle|passengers|controller` work through `ride` |
+| `execute on origin`, `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) now carries `attacker|owner|leasher|target`, so those four relations work; it still carries no spawn-origin entity, NBT or inventory |
 | `if predicate` (partial) | `match_block`, `entity_properties` (type, location), `inverted`, `all_of`, `any_of` are evaluated (`commands_late::condition`); every other condition type evaluates false; `ferrite-loot` exposes no public predicate evaluator (its `Condition::test` is `pub(crate)`) |
 | `/test` structure runner | no structure placement / test-instance block / tick runner: `block_based` instances and the block-targeting forms cannot run |
 | `/jfr` | no JVM |
@@ -444,6 +455,7 @@ the number it parses but never completes. A criterion that is "other" never fire
 | player_killed_entity | 83 / 6 | plain entity type only; killing_blow/projectile, distance, equipment, dimension not done; tags are rejected by `kill_type` |
 | recipe_crafted | 26 / 1 | decorated pot ingredients not done |
 | slept_in_bed | 1 / 0 | |
+| started_riding | 1 / 0 | the one vanilla criterion is the boat-and-goat predicate; fired by `/ride mount` from the ride table and the published entity kinds. Plugin and right-click horse mounts do not emit it yet |
 | tame_animal | 1 / 20 | blocked: ferrite-entity has no cat/wolf variants (only horse/llama); `Criterion::Tames` matches unconditioned only |
 | tick | 1 / 0 | |
 
@@ -454,7 +466,7 @@ fall_after_explosion 1, fall_from_height 1, filled_bucket 6, fishing_rod_hooked 
 hero_of_the_village 1, item_durability_changed 1, kill_mob_near_sculk_catalyst 1,
 killed_by_arrow 3, levitation 1, lightning_strike 1, player_generates_container_loot 10,
 player_hurt_entity 3, player_interacted_with_entity 8, player_sheared_equipment 1,
-ride_entity_in_lava 1, shot_crossbow 1, slide_down_block 1, spear_mobs 1, started_riding 1,
+ride_entity_in_lava 1, shot_crossbow 1, slide_down_block 1, spear_mobs 1,
 summoned_entity 3, target_hit 1, thrown_item_picked_up_by_entity 2,
 thrown_item_picked_up_by_player 1, used_totem 1, using_item 3, villager_trade 2.
 Reason: no event hook exists for these in the world loop. For the hit and kill triggers the damage
@@ -522,7 +534,10 @@ or re-verified in this pass.
 
 ### /ride
 
-Seat offsets follow the vanilla attachment points (`seats_follow_the_vanilla_attachment_points`);
+`/ride mount` also queues the `started_riding` advancement for a player rider, with the vehicle
+and passenger kinds from the ride table and the entity snapshot
+(`started_riding_matches_the_vanilla_goat_boat_advancement`). Other ways onto a vehicle do not
+emit it yet. Seat offsets follow the vanilla attachment points (`seats_follow_the_vanilla_attachment_points`);
 seat scale, baby size and horse rearing offsets are not applied. Region hand-off keeps the rider for
 a short grace (`a_vehicle_in_transit_between_regions_keeps_its_rider_for_a_short_grace`,
 `a_teleported_vehicle_carries_its_rider_without_orphaning_it`). A cross-dimension move ends the

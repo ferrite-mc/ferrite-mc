@@ -2670,8 +2670,7 @@ impl Decode for NumberFormat {
 }
 
 /// `minecraft:set_objective`: add (0), remove (1) or change (2). Add and change carry the
-/// display component, render type and an optional number format; Ferrite always writes the
-/// "no number format" marker.
+/// display component, render type and an optional number format.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetObjective {
     pub name: String,

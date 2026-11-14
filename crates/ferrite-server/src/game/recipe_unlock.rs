@@ -59,6 +59,9 @@ pub enum Criterion {
     /// `nether_travel`: the distance between where the player entered the Nether and where they
     /// came back out.
     NetherTravel(DistanceCheck),
+    /// `started_riding`: the vehicle and passenger types the rider's `minecraft:vehicle`
+    /// predicate names.
+    StartedRiding(StartedRiding),
     /// A trigger whose conditions are a few plain predicates (an item, an entity type, a loot
     /// table, a level, the player's height, the damage's direct entity).
     Plain(Box<Plain>),
@@ -66,6 +69,58 @@ pub enum Criterion {
     /// supported shape); the payload is the trigger id, read by [`coverage`].
     #[cfg_attr(not(test), allow(dead_code))]
     Other(String),
+}
+
+/// The vehicle and passengers a `started_riding` criterion asks for, read from the `minecraft:vehicle`
+/// entity predicate. Empty lists match anything.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StartedRiding {
+    /// Vehicle entity type ids or `#tags`.
+    pub vehicles: Vec<String>,
+    /// Passenger entity type ids or `#tags`; every listed type must be one of the passengers.
+    pub passengers: Vec<String>,
+}
+
+/// Reads a `started_riding` criterion. Vanilla 26.3 ships one, for riding a boat that carries a
+/// goat; the shapes accepted here are the ones that predicate uses.
+fn started_riding(conditions: &serde_json::Value) -> Option<StartedRiding> {
+    if conditions.is_null() {
+        return Some(StartedRiding::default());
+    }
+    let object = conditions.as_object()?;
+    if object.is_empty() {
+        return Some(StartedRiding::default());
+    }
+    if object.keys().any(|key| key != "player") {
+        return None;
+    }
+    let player = object.get("player")?;
+    if player["type"] != "minecraft:entity_properties" || player["entity"] != "this" {
+        return None;
+    }
+    let predicate = player["predicate"].as_object()?;
+    if predicate.len() != 1 {
+        return None;
+    }
+    let vehicle = predicate.get("minecraft:vehicle")?.as_object()?;
+    if vehicle
+        .keys()
+        .any(|key| key != "minecraft:entity_type" && key != "minecraft:passenger")
+    {
+        return None;
+    }
+    let mut out = StartedRiding::default();
+    if let Some(kind) = vehicle.get("minecraft:entity_type") {
+        out.vehicles = alternatives(kind);
+    }
+    if let Some(passenger) = vehicle.get("minecraft:passenger") {
+        let passenger = passenger.as_object()?;
+        if passenger.len() != 1 {
+            return None;
+        }
+        out.passengers = alternatives(passenger.get("minecraft:entity_type")?);
+    }
+    Some(out)
 }
 
 /// The conditions of an `item_used_on_block` criterion this server can check.
@@ -672,6 +727,11 @@ pub enum Event {
     /// The player came back from the Nether; `delta` is where they stand now minus where they
     /// entered the Nether, in the overworld (`nether_travel`).
     NetherTravel { delta: [f64; 3] },
+    /// A player got on a vehicle (`started_riding`); the kinds come from the entity snapshot.
+    StartedRiding {
+        vehicle: String,
+        passengers: Vec<String>,
+    },
     /// One of the [`PLAIN_TRIGGERS`] fired.
     Plain(PlainEvent),
 }
@@ -904,6 +964,21 @@ pub fn criteria_for_event(event: &Event) -> Vec<String> {
                 (Criterion::NetherTravel(wanted), Event::NetherTravel { delta }) => {
                     wanted.matches(*delta)
                 }
+                (
+                    Criterion::StartedRiding(wanted),
+                    Event::StartedRiding {
+                        vehicle,
+                        passengers,
+                    },
+                ) => {
+                    (wanted.vehicles.is_empty()
+                        || id_matches(&wanted.vehicles, "entity_type", vehicle))
+                        && wanted.passengers.iter().all(|wanted| {
+                            passengers.iter().any(|got| {
+                                id_matches(std::slice::from_ref(wanted), "entity_type", got)
+                            })
+                        })
+                }
                 (Criterion::Plain(wanted), Event::Plain(happened)) => wanted.matches(happened),
                 _ => false,
             };
@@ -1048,6 +1123,10 @@ pub fn parse_rule(id: &str, json: &serde_json::Value) -> Option<Rule> {
             }
             Some("minecraft:placed_block") => placed_block(&c["conditions"])
                 .map_or_else(|| Criterion::Other(trigger.clone()), Criterion::Places),
+            Some("minecraft:started_riding") => started_riding(&c["conditions"]).map_or_else(
+                || Criterion::Other(trigger.clone()),
+                Criterion::StartedRiding,
+            ),
             Some("minecraft:changed_dimension") => {
                 let conditions = c["conditions"].as_object();
                 match conditions
@@ -1196,6 +1275,7 @@ fn trigger_of(criterion: &Criterion) -> &'static str {
         Criterion::Sleeps => "minecraft:slept_in_bed",
         Criterion::KilledByEntity => "minecraft:entity_killed_player",
         Criterion::NetherTravel(_) => "minecraft:nether_travel",
+        Criterion::StartedRiding(_) => "minecraft:started_riding",
         Criterion::HasEffects(_) => "minecraft:effects_changed",
         Criterion::Plain(plain) => PLAIN_TRIGGERS
             .iter()
@@ -1399,6 +1479,32 @@ mod tests {
             .map(|(trigger, counts)| (trigger.as_str(), *counts))
             .collect();
         assert_eq!(open, [("minecraft:impossible", (0, 1))], "{recipes:?}");
+    }
+
+    #[test]
+    fn started_riding_matches_the_vanilla_goat_boat_advancement() {
+        if rules().is_empty() {
+            return;
+        }
+        let id = "minecraft:husbandry/ride_a_boat_with_a_goat#ride_a_boat_with_a_goat";
+        let event = |vehicle: &str, passengers: &[&str]| Event::StartedRiding {
+            vehicle: vehicle.into(),
+            passengers: passengers.iter().map(|kind| (*kind).to_owned()).collect(),
+        };
+        assert!(
+            criteria_for_event(&event("minecraft:oak_boat", &["minecraft:goat"]))
+                .contains(&id.to_owned()),
+            "a goat in a boat completes the advancement"
+        );
+        assert!(
+            !criteria_for_event(&event("minecraft:oak_boat", &[])).contains(&id.to_owned()),
+            "a boat without the goat does not"
+        );
+        assert!(
+            !criteria_for_event(&event("minecraft:horse", &["minecraft:goat"]))
+                .contains(&id.to_owned()),
+            "another vehicle does not"
+        );
     }
 
     #[test]

@@ -6987,6 +6987,27 @@ async fn clone_between_dimensions_reads_one_world_and_writes_another() {
     // The source is untouched by a normal clone, the other dimension never saw the blocks.
     assert_eq!(overworld.block(2, 200, 0), Some(gold));
     assert_ne!(overworld.block(5, 200, 0), Some(gold));
+    // `filtered` and `move` keep vanilla's meaning across dimensions: only the matching block
+    // is written, and only what was copied is cleared from the source.
+    overworld.set_block(1, 201, 0, stone).unwrap();
+    overworld.set_block(2, 201, 0, gold).unwrap();
+    world
+        .console_command(
+            "clone 1 201 0 2 201 0 to minecraft:the_nether 12 201 0 filtered minecraft:gold_block move"
+                .into(),
+        )
+        .await
+        .unwrap();
+    let filtered = async {
+        while nether.block(13, 201, 0) != Some(gold) || overworld.block(2, 201, 0) != Some(0) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), filtered)
+        .await
+        .expect("the filtered gold arrives and its source is cleared");
+    assert_eq!(nether.block(12, 201, 0), Some(0));
+    assert_eq!(overworld.block(1, 201, 0), Some(stone));
     // `move` clears the source once the destination is written.
     world
         .console_command(

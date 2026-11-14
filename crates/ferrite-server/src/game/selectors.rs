@@ -600,6 +600,10 @@ mod tests {
             tags: BTreeSet::from(["boss".to_owned()]),
             custom_name: Some("Boss".into()),
             health: None,
+            attacker: None,
+            owner: None,
+            leasher: None,
+            target: None,
         });
         (state, alice, zombie)
     }

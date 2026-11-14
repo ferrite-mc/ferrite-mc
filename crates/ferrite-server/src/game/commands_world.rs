@@ -1107,6 +1107,39 @@ pub struct CloneRead {
     pub copied: Vec<ClonedBlock>,
 }
 
+/// The size and overlap checks vanilla runs before a `/clone` reads anything. Same- and
+/// cross-dimension clones share them: `from <dim>`/`to <dim>` can still name the executing
+/// dimension on both sides (for example `execute in the_nether run clone ... from overworld to
+/// overworld`), in which case the areas really can overlap.
+pub fn validate_clone(
+    begin: [i32; 3],
+    end: [i32; 3],
+    destination: [i32; 3],
+    options: &CloneOptions,
+) -> Result<(), String> {
+    let (min, max) = bounds(begin, end);
+    let area = volume(min, max);
+    if area > MAX_BLOCKS {
+        return Err(format!(
+            "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {area})"
+        ));
+    }
+    let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    let mut destination_max = [0; 3];
+    for axis in 0..3 {
+        destination_max[axis] = destination[axis]
+            .checked_add(size[axis])
+            .ok_or_else(|| "Invalid position".to_string())?;
+    }
+    // `commands.clone.overlap`: overlapping areas fail unless `force` or the clone is a no-op.
+    let overlap =
+        (0..3).all(|axis| min[axis] <= destination_max[axis] && destination[axis] <= max[axis]);
+    if overlap && options.mover != CloneMove::Force {
+        return Err("The source and destination areas cannot overlap".into());
+    }
+    Ok(())
+}
+
 /// Reads the blocks of `begin..=end` that `mode` selects (`commands.clone.toobig` and the
 /// snapshot step of vanilla's `CloneCommands`).
 pub fn clone_read(
@@ -1301,26 +1334,7 @@ fn clone(
             ));
         }
     }
-    let (min, max) = bounds(begin, end);
-    let area = volume(min, max);
-    if area > MAX_BLOCKS {
-        return Err(format!(
-            "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {area})"
-        ));
-    }
-    let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-    let mut destination_max = [0; 3];
-    for axis in 0..3 {
-        destination_max[axis] = destination[axis]
-            .checked_add(size[axis])
-            .ok_or_else(|| "Invalid position".to_string())?;
-    }
-    // `commands.clone.overlap`: overlapping areas fail unless `force` or the clone is a no-op.
-    let overlap =
-        (0..3).all(|axis| min[axis] <= destination_max[axis] && destination[axis] <= max[axis]);
-    if overlap && options.mover != CloneMove::Force {
-        return Err("The source and destination areas cannot overlap".into());
-    }
+    validate_clone(begin, end, destination, options)?;
     let read = clone_read(begin, end, mode, options, world)?;
     let mut changes = if options.mover == CloneMove::Move {
         clone_clear_source(&read, world)?
@@ -1761,6 +1775,27 @@ mod tests {
             &origin(),
             world,
         )
+    }
+
+    #[test]
+    fn clone_validation_is_shared_with_the_cross_dimension_path() {
+        // Overlap is rejected unless `force`, even when the two areas are named in another
+        // dimension than the executor's.
+        let overlap = CloneOptions::default();
+        assert_eq!(
+            validate_clone([0, 64, 0], [1, 64, 0], [1, 64, 0], &overlap).unwrap_err(),
+            "The source and destination areas cannot overlap"
+        );
+        let force = CloneOptions {
+            mover: CloneMove::Force,
+            ..CloneOptions::default()
+        };
+        validate_clone([0, 64, 0], [1, 64, 0], [1, 64, 0], &force).unwrap();
+        assert!(
+            validate_clone([0, 64, 0], [200, 64, 200], [0, 64, 0], &force)
+                .unwrap_err()
+                .contains("Too many blocks")
+        );
     }
 
     #[test]

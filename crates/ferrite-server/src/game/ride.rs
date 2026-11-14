@@ -728,6 +728,10 @@ mod tests {
                     tags: Default::default(),
                     custom_name: None,
                     health: None,
+                    attacker: None,
+                    owner: None,
+                    leasher: None,
+                    target: None,
                 });
             }
         }
@@ -882,6 +886,10 @@ mod tests {
                 tags: Default::default(),
                 custom_name: None,
                 health: None,
+                attacker: None,
+                owner: None,
+                leasher: None,
+                target: None,
             });
         let steps = plan(&state);
         assert_eq!(
