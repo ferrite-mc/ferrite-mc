@@ -19,7 +19,7 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 | 🔧 In progress | Plugin compatibility (part of the Paper/Bukkit API and part of NMS; unsupported calls fail explicitly) |
 | ⛔ Not yet | Real-client verification |
 
-**The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and breath approximations (speed, collision exits, cloud shape), the gateway's 16-block outer-island search versus vanilla's 5, and real-client visuals.
+**The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and fireball-breath approximations (speed, collision exits, cloud shape) and real-client visuals.
 
 The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls surface as `UnsupportedOperationException("Ferrite: not implemented: …")` or an explicit `NoSuchMethodError`. Large plugins such as EssentialsX and plugins that depend on NMS do not work across all paths yet.
 

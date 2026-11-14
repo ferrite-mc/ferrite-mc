@@ -41,6 +41,9 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - Entity and block-entity persistence across restarts; the world is saved as Anvil under `world/`.
 - All 94 vanilla command roots are registered, many only partly — `docs/COMMANDS-STATUS.md`.
 - Signed chat, Velocity/Bungee forwarding, the per-connection writer task, the chunk packet cache.
+- 2026-11-14: gateway landing radius 5; perched breath cloud 200 ticks at radius 5; sheep
+  dyeing; `execute summon` hands its new entity to the chain; non-player slot predicates and
+  `World#getFluidData`.
 
 ## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
@@ -63,8 +66,10 @@ server-side only.
 - Dragon: the strafe phase, the gateway creation beam, the 2400-tick automatic beam and the
   perched subphases are implemented. The perched timings were checked against the 26.3 jar
   (scan 20×10, 25/100 ticks, roar 40, one cloud at tick 10 per 200-tick flame, four flames then
-  takeoff). Left: the give-up charge and attack turn, the outer-island radius and the
-  guarded-spike choice (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
+  takeoff). The gateway landing radius now matches vanilla's 5. Left: the charge flies at
+  `MAX_SPEED` instead of vanilla's 3.0, ignores collision exits, and does not save its target;
+  the breath cloud uses flat 3 magic damage rather than the mob effect; the guarded-spike choice
+  can differ on non-vanilla host terrain (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
   bottle, wind charge, splash and lingering potion, and the fishing bobber are in
   (`ferrite-entity/src/{arrow,bobber,potion}.rs`). A lingering cloud inserts a visible
