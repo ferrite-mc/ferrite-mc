@@ -127,6 +127,22 @@ pub fn placement_state(
             {
                 clicked_facing
             }
+            // `DoorBlock`, `FenceGateBlock` and `StairBlock` face the way the player looks
+            // (`getHorizontalDirection`), unlike repeaters, chests and most others, which
+            // face back at the player.
+            "facing"
+                if (name.ends_with("_door")
+                    || name.ends_with("_fence_gate")
+                    || name.ends_with("_stairs"))
+                    && ["north", "east", "south", "west"].contains(value) =>
+            {
+                match facing {
+                    "north" => "south",
+                    "south" => "north",
+                    "east" => "west",
+                    _ => "east",
+                }
+            }
             "facing" if ["north", "east", "south", "west"].contains(value) => facing,
             "half" if name.contains("stairs") => {
                 if upper {
@@ -208,9 +224,29 @@ mod tests {
         let water = ferrite_data::blocks::default_state("minecraft:water").unwrap();
         let state = placement_state(item, 2, 0.8, 0.0, water).unwrap();
         let (_, props) = ferrite_data::blocks::state(state).unwrap();
-        assert!(props.contains(&("facing", "north")));
+        // Yaw 0 looks south: stairs, doors and gates face the way the player looks.
+        assert!(props.contains(&("facing", "south")));
         assert!(props.contains(&("half", "top")));
         assert!(props.contains(&("waterlogged", "true")));
+    }
+    #[test]
+    fn doors_and_gates_face_the_look_while_diodes_face_back_at_the_player() {
+        let facing_of = |item: &str, yaw: f32| {
+            let item = ferrite_data::registries::id("minecraft:item", &format!("minecraft:{item}"))
+                .unwrap();
+            let state = placement_state(item, 1, 0.5, yaw, 0).unwrap();
+            let (_, props) = ferrite_data::blocks::state(state).unwrap();
+            props.iter().find(|(k, _)| *k == "facing").unwrap().1
+        };
+        // Yaw 0 looks south, yaw 90 looks west.
+        assert_eq!(facing_of("oak_door", 0.0), "south");
+        assert_eq!(facing_of("oak_fence_gate", 90.0), "west");
+        assert_eq!(
+            facing_of("repeater", 0.0),
+            "north",
+            "`DiodeBlock` faces the player"
+        );
+        assert_eq!(facing_of("comparator", 90.0), "east");
     }
     #[test]
     fn torch_on_a_side_face_becomes_the_matching_wall_torch() {

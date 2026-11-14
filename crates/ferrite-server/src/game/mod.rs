@@ -2176,12 +2176,12 @@ async fn run(
                     }
                   },
                   Signal::RedstoneChange{dimension,positions}=>{
-                    for pos in positions {
+                    for (pos,origin) in positions {
                       let chunk=ChunkPos(pos[0].div_euclid(16),pos[2].div_euclid(16));
                       if worlds.owner(dimension,chunk).is_some(){
                         let source=dimensions.source(dimension).clone();
                         let tracking=tracking.clone();
-                        worlds.schedule_at_chunk(dimension,chunk,move |r|r.wake_redstone(&source,&tracking,pos));
+                        worlds.schedule_at_chunk(dimension,chunk,move |r|r.wake_redstone(&source,&tracking,pos,origin));
                       }
                     }
                   },

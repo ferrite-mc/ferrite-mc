@@ -29,7 +29,7 @@ const WIRE_LIMIT: usize = 4096;
 /// Vanilla `RedstoneTorchBlock.RECENT_TOGGLE_TIMER` and `MAX_RECENT_TOGGLES`.
 const TORCH_TOGGLE_WINDOW: u64 = 60;
 const TORCH_MAX_TOGGLES: usize = 8;
-/// Vanilla burnout lasts until the torch is updated again; a conservative 8 s.
+/// `scheduleTick(pos, block, 160)` after a burnout.
 const TORCH_BURNOUT_TICKS: u64 = 160;
 /// Vanilla button press lengths: stone 1 s, wooden 1.5 s.
 const STONE_BUTTON_TICKS: u64 = 20;
@@ -38,11 +38,9 @@ const WOOD_BUTTON_TICKS: u64 = 30;
 const POWER: [&str; 16] = [
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
 ];
-/// Vanilla note block `note` property range (0..=24).
-const NOTE: [&str; 25] = [
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
-    "17", "18", "19", "20", "21", "22", "23", "24",
-];
+/// A cross-region wake: the block to re-evaluate (in the other region) and the block here
+/// whose change caused it. Blocks that watch a face (observers) need to know which one.
+pub type Wake = ([i32; 3], [i32; 3]);
 
 /// Block access for the engine. `block` returns `None` for chunks this region does not own,
 /// so a signal never leaks into another region's territory (Folia ownership).
@@ -58,9 +56,9 @@ pub trait RedstoneWorld {
         self.block(pos)
     }
 
-    /// Ask the regions owning `positions` to re-evaluate redstone there. The default is a
+    /// Ask the regions owning the `Wake` targets to re-evaluate redstone there. The default is a
     /// no-op for local worlds and tests.
-    fn wake_redstone(&mut self, _positions: &[[i32; 3]]) {}
+    fn wake_redstone(&mut self, _wakes: &[Wake]) {}
 
     /// Vanilla `BlockState.getAnalogOutputSignal` for a container (`hasAnalogOutputSignal`),
     /// which a comparator compares instead of the block's weak power.
@@ -93,19 +91,19 @@ impl RedstoneWorld for RegionFluidWorld<'_> {
             .and_then(|state| u16::try_from(state).ok())
     }
 
-    fn wake_redstone(&mut self, positions: &[[i32; 3]]) {
+    fn wake_redstone(&mut self, wakes: &[Wake]) {
         let Some(signals) = &self.signals else {
             return;
         };
-        let positions: Vec<_> = positions
+        let wakes: Vec<_> = wakes
             .iter()
             .copied()
-            .filter(|pos| self.source.block(pos[0], pos[1], pos[2]).is_some())
+            .filter(|(pos, _)| self.source.block(pos[0], pos[1], pos[2]).is_some())
             .collect();
-        if !positions.is_empty() {
+        if !wakes.is_empty() {
             let _ = signals.send(Signal::RedstoneChange {
                 dimension: self.source.dimension(),
-                positions,
+                positions: wakes,
             });
         }
     }
@@ -218,187 +216,473 @@ fn is_torch(state: u16) -> bool {
     matches!(name(state), Some("redstone_torch" | "redstone_wall_torch"))
 }
 
-/// Redstone components are not conductive even when their model is a full cube, matching
-/// vanilla `BlockState.isRedstoneConductor` overrides.
-fn is_component(name: &str) -> bool {
-    matches!(
-        name,
-        "redstone_wire"
-            | "lever"
-            | "redstone_torch"
-            | "redstone_wall_torch"
-            | "redstone_block"
-            | "repeater"
-            | "comparator"
-            | "observer"
-            | "target"
-            | "daylight_detector"
-            | "redstone_lamp"
-            | "note_block"
-            | "tnt"
-            | "powered_rail"
-            | "piston"
-            | "sticky_piston"
-    ) || name.ends_with("_button")
-        || name.ends_with("_pressure_plate")
-        || name.ends_with("_door")
-        || name.ends_with("_trapdoor")
-        || name.ends_with("_fence_gate")
+/// `NeighborUpdater.UPDATE_ORDER`: the order a changed block notifies its neighbours in, which
+/// differs from `Direction.values()` and decides which of two reacting blocks updates first.
+const UPDATE_ORDER: [Direction; 6] = [
+    Direction::West,
+    Direction::East,
+    Direction::Down,
+    Direction::Up,
+    Direction::North,
+    Direction::South,
+];
+
+const HORIZONTAL: [Direction; 4] = [
+    Direction::North,
+    Direction::East,
+    Direction::South,
+    Direction::West,
+];
+
+fn clockwise(direction: Direction) -> Direction {
+    match direction {
+        Direction::North => Direction::East,
+        Direction::East => Direction::South,
+        Direction::South => Direction::West,
+        Direction::West => Direction::North,
+        other => other,
+    }
 }
 
-/// Vanilla `BlockState.isRedstoneConductor`: a full, opaque block that carries strong power.
+fn counter_clockwise(direction: Direction) -> Direction {
+    clockwise(direction).opposite()
+}
+
+/// Face index in `ferrite_data::block_props::face_occlusion`: west, east, down, up, north, south.
+const fn face_index(direction: Direction) -> usize {
+    match direction {
+        Direction::West => 0,
+        Direction::East => 1,
+        Direction::Down => 2,
+        Direction::Up => 3,
+        Direction::North => 4,
+        Direction::South => 5,
+    }
+}
+
+/// Vanilla `BlockState.isRedstoneConductor`: a full block that carries strong power. Redstone
+/// components, pistons, observers and the like are excluded by the generated block data.
 fn is_conductor(state: u16) -> bool {
-    name(state).is_some_and(|name| !is_component(name))
-        && ferrite_data::block_props::get(state).can_occlude
+    ferrite_data::block_props::get(state).is_redstone_conductor
 }
 
-/// Direct (strong) signal a block state emits (`BlockState.getDirectSignal`). Comparators carry
-/// their computed analog strength in [`Redstone::analog`], passed in by the caller.
-fn direct_signal(state: u16, analog: Option<u8>) -> u8 {
-    match name(state) {
-        Some("redstone_block") => 15,
-        Some("redstone_torch" | "redstone_wall_torch") => {
-            if property_bool(state, "lit") {
-                15
+/// Vanilla `BlockState.isSignalSource`: what a wire connects to sideways.
+fn is_signal_source(state: u16) -> bool {
+    name(state).is_some_and(|name| {
+        matches!(
+            name,
+            "redstone_wire"
+                | "lever"
+                | "redstone_torch"
+                | "redstone_wall_torch"
+                | "redstone_block"
+                | "repeater"
+                | "comparator"
+                | "observer"
+                | "target"
+                | "daylight_detector"
+                | "lightning_rod"
+                | "tripwire_hook"
+                | "detector_rail"
+                | "trapped_chest"
+                | "lectern"
+                | "sculk_sensor"
+                | "calibrated_sculk_sensor"
+        ) || name.ends_with("_button")
+            || name.ends_with("_pressure_plate")
+    })
+}
+
+/// `FaceAttachedHorizontalDirectionalBlock.getConnectedDirection`: the way from the block
+/// the lever or button sits on towards the lever.
+fn connected_direction(state: u16) -> Option<Direction> {
+    match property(state, "face") {
+        Some("floor") => Some(Direction::Up),
+        Some("ceiling") => Some(Direction::Down),
+        _ => facing(state),
+    }
+}
+
+fn connection_key(direction: Direction) -> &'static str {
+    match direction {
+        Direction::North => "north",
+        Direction::East => "east",
+        Direction::South => "south",
+        _ => "west",
+    }
+}
+
+/// Weak signal `state` emits towards a consumer standing at the other end of `toward`
+/// (`BlockState.getSignal(level, pos, toward)`: `toward` points from the consumer to the
+/// source). `output` is a comparator's computed strength. `wires` is false while a wire
+/// network computes its own targets (`RedStoneWireBlock.shouldSignal`).
+fn signal_toward(state: u16, output: u8, toward: Direction, wires: bool) -> u8 {
+    let Some(block) = name(state) else {
+        return 0;
+    };
+    let lit = |on: bool| if on { 15 } else { 0 };
+    match block {
+        "redstone_block" => 15,
+        "redstone_torch" => lit(property_bool(state, "lit") && toward != Direction::Up),
+        "redstone_wall_torch" => lit(property_bool(state, "lit") && facing(state) != Some(toward)),
+        "lever" | "detector_rail" | "tripwire_hook" => lit(property_bool(state, "powered")),
+        // `TrappedChestBlock.getSignal`: the number of viewers, clamped to 0..=15.
+        "trapped_chest" => output.min(15),
+        "observer" | "repeater" => {
+            lit(property_bool(state, "powered") && facing(state) == Some(toward))
+        }
+        "comparator" => {
+            if property_bool(state, "powered") && facing(state) == Some(toward) {
+                output
             } else {
                 0
             }
         }
-        Some("lever") => {
-            if property_bool(state, "powered") {
-                15
+        "target"
+        | "daylight_detector"
+        | "light_weighted_pressure_plate"
+        | "heavy_weighted_pressure_plate" => property_u8(state, "power").unwrap_or(0),
+        "redstone_wire" => {
+            if !wires || toward == Direction::Down {
+                return 0;
+            }
+            let power = property_u8(state, "power").unwrap_or(0);
+            let connected = toward != Direction::Up
+                && property(state, connection_key(toward.opposite()))
+                    .is_some_and(|value| value != "none");
+            if toward == Direction::Up || connected {
+                power
             } else {
                 0
             }
         }
-        Some("observer") => {
-            if property_bool(state, "powered") {
-                15
-            } else {
-                0
-            }
+        name if name.ends_with("_button") || name.ends_with("_pressure_plate") => {
+            lit(property_bool(state, "powered"))
         }
-        Some("repeater") => {
-            if property_bool(state, "powered") {
-                15
-            } else {
-                0
-            }
-        }
-        Some("comparator") => analog.unwrap_or(0),
-        Some("target" | "daylight_detector") => property_u8(state, "power").unwrap_or(0),
-        Some("light_weighted_pressure_plate" | "heavy_weighted_pressure_plate") => {
-            property_u8(state, "power").unwrap_or(0)
-        }
-        Some("redstone_wire") => property_u8(state, "power").unwrap_or(0),
-        Some(name)
-            if (name.ends_with("_button") || name.ends_with("_pressure_plate"))
-                && property_bool(state, "powered") =>
-        {
-            15
-        }
-        Some(name) if name.ends_with("_button") || name.ends_with("_pressure_plate") => 0,
         _ => 0,
     }
 }
 
-/// Weak signal a source emits towards a neighbour (`BlockState.getSignal`). A conductive block
-/// emits the strong signal it carries instead; [`power_from`] handles that case.
-fn weak_signal(state: u16, analog: Option<u8>) -> u8 {
-    if is_conductor(state) {
+/// Strong signal towards `toward` (`BlockState.getDirectSignal`): only what a conductive
+/// block can pass on.
+fn direct_toward(state: u16, output: u8, toward: Direction, wires: bool) -> u8 {
+    let Some(block) = name(state) else {
         return 0;
+    };
+    match block {
+        "redstone_torch" | "redstone_wall_torch" if toward == Direction::Down => {
+            signal_toward(state, output, toward, wires)
+        }
+        "lever" => {
+            if property_bool(state, "powered") && connected_direction(state) == Some(toward) {
+                15
+            } else {
+                0
+            }
+        }
+        name if name.ends_with("_button") => {
+            if property_bool(state, "powered") && connected_direction(state) == Some(toward) {
+                15
+            } else {
+                0
+            }
+        }
+        // `DetectorRailBlock.getDirectSignal`: powered rails only push upwards.
+        "detector_rail" if toward == Direction::Up => signal_toward(state, output, toward, wires),
+        // `TripWireHookBlock.getDirectSignal`: powered and facing `toward`.
+        "tripwire_hook" if facing(state) == Some(toward) => {
+            signal_toward(state, output, toward, wires)
+        }
+        // `TrappedChestBlock.getDirectSignal`: only upwards.
+        "trapped_chest" if toward == Direction::Up => signal_toward(state, output, toward, wires),
+        name if name.ends_with("_pressure_plate") && toward == Direction::Up => {
+            signal_toward(state, output, toward, wires)
+        }
+        "repeater" | "observer" | "comparator" | "redstone_wire" => {
+            signal_toward(state, output, toward, wires)
+        }
+        _ => 0,
     }
-    direct_signal(state, analog)
 }
 
-/// Strong power carried by the conductive block at `pos`: the largest direct signal of any
-/// neighbour. Sources are read directly, so this never recurses through another conductor.
-fn strong_block_power(
-    world: &impl RedstoneWorld,
-    pos: [i32; 3],
-    analog: &HashMap<[i32; 3], u8>,
-) -> u8 {
-    let mut power = 0;
-    for direction in Direction::ALL {
-        let neighbour = offset(pos, direction);
-        let Some(state) = world.signal_block(neighbour) else {
-            continue;
+/// `BlockState.getAnalogOutputSignal` for blocks whose level is a property.
+fn analog_property_signal(state: u16) -> Option<u8> {
+    match name(state)? {
+        "composter" => property_u8(state, "level"),
+        "cake" => property_u8(state, "bites").map(|bites| 7u8.saturating_sub(bites) * 2),
+        "end_portal_frame" => Some(if property_bool(state, "eye") { 15 } else { 0 }),
+        "respawn_anchor" => {
+            property_u8(state, "charges").map(|c| (f32::from(c) / 4.0 * 15.0) as u8)
+        }
+        "beehive" | "bee_nest" => property_u8(state, "honey_level"),
+        "cauldron" => Some(0),
+        "lava_cauldron" => Some(3),
+        "water_cauldron" | "powder_snow_cauldron" => property_u8(state, "level"),
+        _ => None,
+    }
+}
+
+/// `analog` also carries item-frame strengths, under a key that cannot collide with a block
+/// position (y is shifted by a million per direction). One frame per block face matters:
+/// `ComparatorBlock.getItemFrame` accepts exactly one frame facing the comparator's direction.
+const FRAME_BIAS: i32 = 1_000_000;
+
+fn frame_key(pos: [i32; 3], facing: Direction) -> [i32; 3] {
+    let index = Direction::ALL
+        .iter()
+        .position(|&d| d == facing)
+        .map_or(0, |i| i as i32 + 1);
+    [pos[0], pos[1].saturating_add(FRAME_BIAS * index), pos[2]]
+}
+
+/// Reads power the way `Level`/`SignalGetter` does, over blocks this region may read.
+struct Probe<'a, W: RedstoneWorld> {
+    world: &'a W,
+    analog: &'a HashMap<[i32; 3], u8>,
+    /// Whether wires emit (false while a wire network computes its own target).
+    wires: bool,
+}
+
+impl<'a, W: RedstoneWorld> Probe<'a, W> {
+    fn new(world: &'a W, analog: &'a HashMap<[i32; 3], u8>) -> Self {
+        Self {
+            world,
+            analog,
+            wires: true,
+        }
+    }
+
+    fn output(&self, pos: [i32; 3]) -> u8 {
+        self.analog.get(&pos).copied().unwrap_or(0)
+    }
+
+    /// `Level.getDirectSignal(pos, toward)`.
+    fn direct(&self, pos: [i32; 3], toward: Direction) -> u8 {
+        self.world.signal_block(pos).map_or(0, |state| {
+            direct_toward(state, self.output(pos), toward, self.wires)
+        })
+    }
+
+    /// `Level.getDirectSignalTo(pos)`: the strongest direct signal reaching a conductor.
+    fn direct_to(&self, pos: [i32; 3]) -> u8 {
+        Direction::ALL
+            .iter()
+            .map(|&direction| self.direct(offset(pos, direction), direction))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `Level.getSignal(pos, toward)`: a conductor also passes on the strong power it carries.
+    fn signal(&self, pos: [i32; 3], toward: Direction) -> u8 {
+        let Some(state) = self.world.signal_block(pos) else {
+            return 0;
         };
-        let signal = if is_comparator(state) {
-            analog.get(&neighbour).copied().unwrap_or(0)
+        let weak = signal_toward(state, self.output(pos), toward, self.wires);
+        if is_conductor(state) {
+            weak.max(self.direct_to(pos))
         } else {
-            direct_signal(state, None)
-        };
-        power = power.max(signal);
+            weak
+        }
     }
-    power
+
+    /// `Level.getBestNeighborSignal` (also what `hasNeighborSignal` tests for non-zero).
+    fn neighbor_signal(&self, pos: [i32; 3]) -> u8 {
+        Direction::ALL
+            .iter()
+            .map(|&direction| self.signal(offset(pos, direction), direction))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `DiodeBlock.getInputSignal`: the block behind a repeater or comparator, wires included.
+    fn diode_input(&self, pos: [i32; 3], facing: Direction) -> u8 {
+        let behind = offset(pos, facing);
+        let power = self.signal(behind, facing);
+        if power >= 15 {
+            return power;
+        }
+        match self.world.signal_block(behind) {
+            Some(state) if is_wire(state) => power.max(property_u8(state, "power").unwrap_or(0)),
+            _ => power,
+        }
+    }
+
+    /// Strength a block reports to a comparator (`hasAnalogOutputSignal`).
+    fn analog_block(&self, pos: [i32; 3], state: u16) -> Option<u8> {
+        analog_property_signal(state).or_else(|| self.world.container_signal(pos))
+    }
+
+    /// `ComparatorBlock.getInputSignal`: containers and other analog blocks directly behind,
+    /// or one block further behind through a conductor.
+    fn comparator_input(&self, pos: [i32; 3], facing: Direction) -> u8 {
+        let mut input = self.diode_input(pos, facing);
+        let behind = offset(pos, facing);
+        let Some(state) = self.world.signal_block(behind) else {
+            return input;
+        };
+        if let Some(analog) = self.analog_block(behind, state) {
+            input = analog;
+        } else if input < 15 && is_conductor(state) {
+            let far = offset(behind, facing);
+            if let Some(far_state) = self.world.signal_block(far) {
+                // `Math.max(block analog, item frame analog)`; either one alone counts.
+                let block = self.analog_block(far, far_state);
+                let frame = self.analog.get(&frame_key(far, facing)).copied();
+                if let Some(best) = block.into_iter().chain(frame).max() {
+                    input = best;
+                }
+            }
+        }
+        input
+    }
+
+    /// `SignalGetter.getControlInputSignal`.
+    fn control_input(&self, pos: [i32; 3], toward: Direction, diodes_only: bool) -> u8 {
+        let Some(state) = self.world.signal_block(pos) else {
+            return 0;
+        };
+        if diodes_only {
+            return if is_diode(state) {
+                self.direct(pos, toward)
+            } else {
+                0
+            };
+        }
+        if name(state) == Some("redstone_block") {
+            15
+        } else if is_wire(state) {
+            property_u8(state, "power").unwrap_or(0)
+        } else if is_signal_source(state) {
+            self.direct(pos, toward)
+        } else {
+            0
+        }
+    }
+
+    /// `DiodeBlock.getAlternateSignal`: the larger of the two side inputs.
+    fn side_input(&self, pos: [i32; 3], facing: Direction, diodes_only: bool) -> u8 {
+        [clockwise(facing), counter_clockwise(facing)]
+            .into_iter()
+            .map(|side| self.control_input(offset(pos, side), side, diodes_only))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `ComparatorBlock.calculateOutputSignal`.
+    fn comparator_output(&self, pos: [i32; 3], state: u16) -> u8 {
+        let Some(facing) = facing(state) else {
+            return 0;
+        };
+        let input = self.comparator_input(pos, facing);
+        let side = self.side_input(pos, facing, false);
+        if side > input {
+            0
+        } else if property(state, "mode") == Some("subtract") {
+            input - side
+        } else {
+            input
+        }
+    }
 }
 
-/// Power arriving at `pos` from `direction` (`Level.getSignal` through the neighbour).
+/// Power arriving at `pos` from `direction` (`Level.getSignal(pos.relative(direction), direction)`).
 fn power_from(
     world: &impl RedstoneWorld,
     pos: [i32; 3],
     direction: Direction,
     analog: &HashMap<[i32; 3], u8>,
 ) -> u8 {
+    Probe::new(world, analog).signal(offset(pos, direction), direction)
+}
+
+/// Every direction an adjacent block can power `pos` from (`Level.getBestNeighborSignal`).
+fn input_power(world: &impl RedstoneWorld, pos: [i32; 3], analog: &HashMap<[i32; 3], u8>) -> u8 {
+    Probe::new(world, analog).neighbor_signal(pos)
+}
+
+/// `RedStoneWireBlock.shouldConnectTo`.
+fn should_connect_to(state: u16, direction: Option<Direction>) -> bool {
+    match name(state) {
+        Some("redstone_wire") => true,
+        Some("repeater") => {
+            facing(state).is_some_and(|f| Some(f) == direction || Some(f.opposite()) == direction)
+        }
+        Some("observer") => direction.is_some() && facing(state) == direction,
+        _ => direction.is_some() && is_signal_source(state),
+    }
+}
+
+/// `RedStoneWireBlock.canSurviveOn`: a sturdy top, or a hopper.
+fn can_hold_wire(state: u16) -> bool {
+    !ferrite_data::block_props::face_occlusion(state, face_index(Direction::Up)).is_empty()
+        || name(state) == Some("hopper")
+}
+
+/// `RedStoneWireBlock.getConnectingSide`.
+fn connecting_side(
+    world: &impl RedstoneWorld,
+    pos: [i32; 3],
+    direction: Direction,
+    non_solid_above: bool,
+) -> &'static str {
     let neighbour = offset(pos, direction);
     let Some(state) = world.signal_block(neighbour) else {
-        return 0;
-    };
-    if is_wire(state) {
-        return property_u8(state, "power").unwrap_or(0);
-    }
-    if let Some(signal) = world.container_signal(neighbour) {
-        return signal;
-    }
-    if is_conductor(state) {
-        return strong_block_power(world, neighbour, analog);
-    }
-    if is_comparator(state) {
-        return analog.get(&neighbour).copied().unwrap_or(0);
-    }
-    weak_signal(state, None)
-}
-
-/// Every direction an adjacent block can power `pos` from.
-fn input_power(world: &impl RedstoneWorld, pos: [i32; 3], analog: &HashMap<[i32; 3], u8>) -> u8 {
-    Direction::ALL
-        .iter()
-        .map(|&direction| power_from(world, pos, direction, analog))
-        .max()
-        .unwrap_or(0)
-}
-
-fn redstone_part(name: &str) -> bool {
-    is_component(name)
-        || name.ends_with("_button")
-        || name.ends_with("_pressure_plate")
-        || name.ends_with("_door")
-        || name.ends_with("_trapdoor")
-        || name.ends_with("_fence_gate")
-}
-
-/// Wire connection property (`RedStoneWireBlock.getConnectionState`): `side` to an adjacent
-/// wire or component, `up` when the wire climbs to the block above the neighbour, `none`.
-fn connection(world: &impl RedstoneWorld, pos: [i32; 3], direction: Direction) -> &'static str {
-    let neighbour = offset(pos, direction);
-    let Some(state) = world.block(neighbour) else {
         return "none";
     };
-    if is_wire(state) {
-        return "side";
+    if non_solid_above {
+        let on_top =
+            name(state).is_some_and(|name| name.ends_with("_trapdoor")) || can_hold_wire(state);
+        let above_connects = world
+            .signal_block(offset(neighbour, Direction::Up))
+            .is_some_and(|above| should_connect_to(above, None));
+        if on_top && above_connects {
+            let sturdy =
+                !ferrite_data::block_props::face_occlusion(state, face_index(direction.opposite()))
+                    .is_empty();
+            return if sturdy { "up" } else { "side" };
+        }
     }
-    if world
-        .block(offset(neighbour, Direction::Up))
-        .is_some_and(is_wire)
-        && !is_conductor(state)
-    {
-        return "up";
+    let below_connects = world
+        .signal_block(offset(neighbour, Direction::Down))
+        .is_some_and(|below| should_connect_to(below, None));
+    if !should_connect_to(state, Some(direction)) && (is_conductor(state) || !below_connects) {
+        "none"
+    } else {
+        "side"
     }
-    if name(state).is_some_and(redstone_part) || is_conductor(state) {
-        return "side";
+}
+
+/// `RedStoneWireBlock.getConnectionState`: sides in north, east, south, west order. A dot
+/// with nothing to connect to stays a dot; any other wire without a line along an axis
+/// reaches out to both sides of that axis.
+fn wire_shape(world: &impl RedstoneWorld, pos: [i32; 3], old: u16) -> [&'static str; 4] {
+    let non_solid_above = world
+        .signal_block(offset(pos, Direction::Up))
+        .is_none_or(|above| !is_conductor(above));
+    let mut shape =
+        HORIZONTAL.map(|direction| connecting_side(world, pos, direction, non_solid_above));
+    let was_dot = HORIZONTAL
+        .iter()
+        .all(|&direction| property(old, connection_key(direction)) == Some("none"));
+    if was_dot && shape.iter().all(|side| *side == "none") {
+        return shape;
     }
-    "none"
+    let [north, east, south, west] = shape.map(|side| side != "none");
+    let no_north_south = !north && !south;
+    let no_east_west = !east && !west;
+    if !west && no_north_south {
+        shape[3] = "side";
+    }
+    if !east && no_north_south {
+        shape[1] = "side";
+    }
+    if !north && no_east_west {
+        shape[0] = "side";
+    }
+    if !south && no_east_west {
+        shape[2] = "side";
+    }
+    shape
 }
 
 fn with_wire_shape(
@@ -407,26 +691,43 @@ fn with_wire_shape(
     world: &impl RedstoneWorld,
     pos: [i32; 3],
 ) -> Option<u16> {
+    let shape = wire_shape(world, pos, state);
     let mut changes = Vec::with_capacity(5);
     changes.push(("power", POWER[power as usize]));
-    for direction in [
-        Direction::North,
-        Direction::East,
-        Direction::South,
-        Direction::West,
-    ] {
-        let key = match direction {
-            Direction::North => "north",
-            Direction::East => "east",
-            Direction::South => "south",
-            _ => "west",
-        };
-        changes.push((key, connection(world, pos, direction)));
+    for (direction, side) in HORIZONTAL.into_iter().zip(shape) {
+        changes.push((connection_key(direction), side));
     }
     with_properties(state, &changes)
 }
 
-/// Connected wire component around `start`, bounded by [`WIRE_LIMIT`].
+/// The wires a wire at `pos` exchanges power with (`RedStoneWireBlock.calculateTargetStrength`):
+/// horizontal neighbours, plus the wire one step up over a conductor (unless the block above
+/// this wire is one) or one step down off a non-conductor.
+fn wire_links(world: &impl RedstoneWorld, pos: [i32; 3]) -> Vec<[i32; 3]> {
+    let above_clear = world
+        .signal_block(offset(pos, Direction::Up))
+        .is_some_and(|above| !is_conductor(above));
+    let mut links = Vec::with_capacity(8);
+    for direction in HORIZONTAL {
+        let neighbour = offset(pos, direction);
+        let Some(state) = world.signal_block(neighbour) else {
+            continue;
+        };
+        links.push(neighbour);
+        if is_conductor(state) {
+            if above_clear {
+                links.push(offset(neighbour, Direction::Up));
+            }
+        } else {
+            links.push(offset(neighbour, Direction::Down));
+        }
+    }
+    links.retain(|&link| world.signal_block(link).is_some_and(is_wire));
+    links
+}
+
+/// Connected wire network around `start`, bounded by [`WIRE_LIMIT`]. Only wires this region
+/// owns are members; wires across the boundary feed it through [`wire_powers`].
 fn wire_component(world: &impl RedstoneWorld, start: [i32; 3]) -> Vec<[i32; 3]> {
     let mut seen = HashSet::new();
     let mut wires = Vec::new();
@@ -442,17 +743,16 @@ fn wire_component(world: &impl RedstoneWorld, start: [i32; 3]) -> Vec<[i32; 3]> 
             continue;
         }
         wires.push(pos);
-        for direction in Direction::ALL {
-            let neighbour = offset(pos, direction);
-            if !seen.contains(&neighbour) && world.block(neighbour).is_some_and(is_wire) {
-                queue.push_back(neighbour);
+        for link in wire_links(world, pos) {
+            if !seen.contains(&link) {
+                queue.push_back(link);
             }
         }
     }
     wires
 }
 
-/// Recompute a wire component from its non-wire sources, then relax power along the wires.
+/// Recompute a wire network from its non-wire sources, then relax power along the links.
 /// This is `RedStoneWireBlock.calculateTargetStrength` applied until the network settles.
 fn wire_powers(
     world: &impl RedstoneWorld,
@@ -461,41 +761,27 @@ fn wire_powers(
 ) -> HashMap<[i32; 3], u8> {
     let members: HashSet<[i32; 3]> = wires.iter().copied().collect();
     let mut power: HashMap<[i32; 3], u8> = wires.iter().map(|&pos| (pos, 0)).collect();
+    let mut links: HashMap<[i32; 3], Vec<[i32; 3]>> = HashMap::new();
     let mut queue = VecDeque::new();
+    let probe = Probe {
+        world,
+        analog,
+        wires: false,
+    };
     for &pos in wires {
-        let mut target = 0;
-        // `getBlockSignal`: wire on a conductive block reads the strong power it carries.
-        let below = offset(pos, Direction::Down);
-        if let Some(state) = world.signal_block(below) {
-            if is_conductor(state) {
-                target = target.max(strong_block_power(world, below, analog));
-            } else {
-                target = target.max(weak_signal(state, analog.get(&below).copied()));
-            }
-        }
-        for direction in Direction::ALL {
-            let neighbour = offset(pos, direction);
-            if members.contains(&neighbour) {
-                continue;
-            }
-            let Some(state) = world.signal_block(neighbour) else {
-                continue;
-            };
-            if is_wire(state) {
-                // A wire across the boundary feeds this component with vanilla attenuation.
+        // `getBestNeighborSignal` with wires silenced, then the neighbours' own wires.
+        let mut target = probe.neighbor_signal(pos);
+        let around = wire_links(world, pos);
+        for &link in &around {
+            if !members.contains(&link)
+                && let Some(state) = world.signal_block(link)
+            {
+                // A wire across the boundary feeds this network with vanilla attenuation.
                 // Its own region keeps its power up to date and wakes this one on changes.
                 target = target.max(property_u8(state, "power").unwrap_or(0).saturating_sub(1));
-            } else if is_conductor(state) {
-                target = target.max(strong_block_power(world, neighbour, analog));
-            } else {
-                let analog = if is_comparator(state) {
-                    analog.get(&neighbour).copied()
-                } else {
-                    None
-                };
-                target = target.max(weak_signal(state, analog));
             }
         }
+        links.insert(pos, around);
         if target > 0 {
             power.insert(pos, target);
             queue.push_back(pos);
@@ -506,12 +792,8 @@ fn wire_powers(
         if strength <= 1 {
             continue;
         }
-        for direction in Direction::ALL {
-            let neighbour = offset(pos, direction);
-            if !members.contains(&neighbour) {
-                continue;
-            }
-            if power[&neighbour] < strength - 1 {
+        for &neighbour in &links[&pos] {
+            if members.contains(&neighbour) && power[&neighbour] < strength - 1 {
                 power.insert(neighbour, strength - 1);
                 queue.push_back(neighbour);
             }
@@ -537,7 +819,14 @@ enum Kind {
     ObserverPulse,
     ObserverOff,
     Daylight,
+    LampOff,
 }
+
+/// Vanilla `TickPriority`: lower runs first among ticks due together.
+const EXTREMELY_HIGH: i8 = -3;
+const VERY_HIGH: i8 = -2;
+const HIGH: i8 = -1;
+const NORMAL: i8 = 0;
 
 /// One region's redstone state: scheduled ticks, dirty blocks and the wire work list.
 /// Something standing on a pressure plate (vanilla `BasePressurePlateBlock.getEntityCount`
@@ -603,10 +892,18 @@ pub struct Redstone {
     plate_due: HashMap<[i32; 3], u64>,
     clock: u64,
     scheduled: HashMap<([i32; 3], Kind), u64>,
+    /// `TickPriority` of a scheduled tick (absent means normal).
+    priorities: HashMap<([i32; 3], Kind), i8>,
+    /// Insertion order of a scheduled tick (`TickNextTickData.subTickOrder`): ticks due at the
+    /// same time with the same priority run in the order they were scheduled.
+    sequence: HashMap<([i32; 3], Kind), u64>,
+    next_sequence: u64,
     dirty: VecDeque<[i32; 3]>,
     wires: HashSet<[i32; 3]>,
     /// Computed comparator strength per position (the state only carries `powered`).
     analog: HashMap<[i32; 3], u8>,
+    /// Trapped chests with a non-zero viewer count in `analog`.
+    chests: HashSet<[i32; 3]>,
     /// Recent off->on transitions for `RedstoneTorchBlock` burnout.
     toggles: HashMap<[i32; 3], VecDeque<u64>>,
     plates: HashSet<[i32; 3]>,
@@ -617,11 +914,28 @@ pub struct Redstone {
 
 impl Redstone {
     fn schedule(&mut self, pos: [i32; 3], kind: Kind, delay: u64) {
+        self.schedule_with(pos, kind, delay, NORMAL);
+    }
+
+    /// `Level.scheduleTick(pos, block, delay, priority)`: a tick already pending for the
+    /// same block keeps its original time and priority, as in vanilla's tick queue.
+    fn schedule_with(&mut self, pos: [i32; 3], kind: Kind, delay: u64, priority: i8) {
         let due = self.clock + delay;
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.scheduled.entry((pos, kind)) {
+            slot.insert(due);
+            self.sequence.insert((pos, kind), self.next_sequence);
+            self.next_sequence += 1;
+            if priority != NORMAL {
+                self.priorities.insert((pos, kind), priority);
+            }
+        }
+    }
+
+    /// `TickNextTickData`/`willTickThisTick`: a tick for this block is already due now.
+    fn will_tick_this_tick(&self, pos: [i32; 3], kind: Kind) -> bool {
         self.scheduled
-            .entry((pos, kind))
-            .and_modify(|current| *current = (*current).min(due))
-            .or_insert(due);
+            .get(&(pos, kind))
+            .is_some_and(|due| *due <= self.clock)
     }
 
     /// `Level.markAndNotifyBlock`: notify the changed block and its six neighbours.
@@ -633,8 +947,22 @@ impl Redstone {
 
     /// Re-evaluates a change another region made across the boundary. It never wakes back to
     /// the source, so two regions cannot ping-pong the same edge forever.
-    pub fn foreign_changed(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
+    pub fn foreign_changed(
+        &mut self,
+        world: &mut impl RedstoneWorld,
+        pos: [i32; 3],
+        origin: [i32; 3],
+    ) {
         self.after_change(world, pos, false);
+        // `ObserverBlock.updateShape`: an observer looking at the changed block across the
+        // boundary pulses; the region that made the change cannot schedule it.
+        if let Some(state) = world.block(pos)
+            && is_observer(state)
+            && facing(state).is_some_and(|facing| offset(pos, facing) == origin)
+            && !property_bool(state, "powered")
+        {
+            self.schedule(pos, Kind::ObserverPulse, 2);
+        }
     }
 
     pub fn take_primed(&mut self) -> Vec<([i32; 3], i32)> {
@@ -709,15 +1037,23 @@ impl Redstone {
     }
 
     fn run_scheduled(&mut self, world: &mut impl RedstoneWorld) {
-        let due: Vec<([i32; 3], Kind)> = self
+        // Vanilla runs ticks due together by (time, priority, insertion order).
+        let mut due: Vec<(u64, i8, u64, [i32; 3], Kind)> = self
             .scheduled
             .iter()
             .filter(|&(_, &time)| time <= self.clock)
-            .map(|(&key, _)| key)
-            .take(UPDATE_LIMIT)
+            .map(|(&(pos, kind), &time)| {
+                let priority = self.priorities.get(&(pos, kind)).copied().unwrap_or(NORMAL);
+                let order = self.sequence.get(&(pos, kind)).copied().unwrap_or(0);
+                (time, priority, order, pos, kind)
+            })
             .collect();
-        for (pos, kind) in due {
+        due.sort_by_key(|&(time, priority, order, pos, _)| (time, priority, order, pos));
+        due.truncate(UPDATE_LIMIT);
+        for (_, _, _, pos, kind) in due {
             self.scheduled.remove(&(pos, kind));
+            self.priorities.remove(&(pos, kind));
+            self.sequence.remove(&(pos, kind));
             match kind {
                 Kind::Diode => self.update_diode(world, pos),
                 Kind::Torch => self.update_torch(world, pos),
@@ -725,6 +1061,7 @@ impl Redstone {
                 Kind::ObserverPulse => self.pulse_observer(world, pos),
                 Kind::ObserverOff => self.unpulse_observer(world, pos),
                 Kind::Daylight => self.update_daylight(world, pos),
+                Kind::LampOff => self.lamp_off(world, pos),
             }
         }
     }
@@ -793,10 +1130,16 @@ impl Redstone {
             for dy in -2..=1 {
                 for dz in -2..=2 {
                     let candidate = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
-                    if world.block(candidate).is_some_and(|state| {
-                        matches!(name(state), Some("piston" | "sticky_piston"))
-                    }) {
+                    let Some(candidate_state) = world.block(candidate) else {
+                        continue;
+                    };
+                    if matches!(name(candidate_state), Some("piston" | "sticky_piston")) {
                         self.piston_candidates.insert(candidate);
+                    }
+                    // Wires link diagonally up and down staircases, so a change reaches wires
+                    // one block away in any direction.
+                    if is_wire(candidate_state) && dx.abs() <= 1 && dy.abs() <= 1 && dz.abs() <= 1 {
+                        self.wires.insert(candidate);
                     }
                 }
             }
@@ -806,37 +1149,40 @@ impl Redstone {
         } else if let Some(state) = world.block(pos) {
             self.update_component(world, pos, state);
         }
-        for direction in Direction::ALL {
+        for direction in UPDATE_ORDER {
             let neighbour = offset(pos, direction);
             let Some(state) = world.block(neighbour) else {
                 if wake {
-                    wakes.push(neighbour);
+                    wakes.push((neighbour, pos));
                 }
                 continue;
             };
             if is_wire(state) {
                 self.wires.insert(neighbour);
             } else if is_observer(state) && facing(state) == Some(direction.opposite()) {
-                // `ObserverBlock.updateShape`: the observer saw a block change in front.
-                self.schedule(neighbour, Kind::ObserverPulse, 2);
+                // `ObserverBlock.updateShape`: the observer saw a block change in front;
+                // one that is already pulsing ignores it.
+                if !property_bool(state, "powered") {
+                    self.schedule(neighbour, Kind::ObserverPulse, 2);
+                }
             } else {
                 self.update_component(world, neighbour, state);
             }
         }
         // Strong power reaches components through one conductive block. A lever on a wall
         // powers the stone behind it, which in turn powers the torch standing on that stone.
-        for direction in Direction::ALL {
+        for direction in UPDATE_ORDER {
             let carrier = offset(pos, direction);
             let Some(carrier_state) = world.block(carrier) else {
                 if wake {
-                    wakes.push(carrier);
+                    wakes.push((carrier, pos));
                 }
                 continue;
             };
             if !is_conductor(carrier_state) {
                 continue;
             }
-            for inner in Direction::ALL {
+            for inner in UPDATE_ORDER {
                 let target = offset(carrier, inner);
                 if target == pos {
                     continue;
@@ -844,9 +1190,14 @@ impl Redstone {
                 if let Some(state) = world.block(target) {
                     if is_wire(state) {
                         self.wires.insert(target);
-                    } else if !is_conductor(state) {
+                    } else {
+                        // Lamps, note blocks and the like are conductive consumers too.
                         self.update_component(world, target, state);
                     }
+                } else if wake {
+                    // Strong power carried through this conductor reaches a block the
+                    // neighbouring region owns.
+                    wakes.push((target, pos));
                 }
             }
         }
@@ -866,34 +1217,45 @@ impl Redstone {
                 self.wires.insert(pos);
             }
             "repeater" => {
-                let delay = u64::from(property_u8(state, "delay").unwrap_or(1)) * 2;
-                self.schedule(pos, Kind::Diode, delay);
+                // `RepeaterBlock.updateShape` refreshes `locked`; `DiodeBlock.neighborChanged`
+                // then runs `checkTickOnNeighbor`.
                 self.update_lock(world, pos, state);
+                let state = world.block(pos).unwrap_or(state);
+                self.check_repeater_tick(world, pos, state);
             }
-            "comparator" => self.schedule(pos, Kind::Diode, 2),
-            "redstone_torch" | "redstone_wall_torch" => self.schedule(pos, Kind::Torch, 2),
+            "comparator" => self.check_comparator_tick(world, pos, state),
+            "redstone_torch" | "redstone_wall_torch" => {
+                // `RedstoneTorchBlock.neighborChanged`: a torch that disagrees with its input
+                // looks again in two ticks, unless it is already due.
+                let input = torch_input(world, pos, state, &self.analog);
+                if property_bool(state, "lit") == input
+                    && !self.will_tick_this_tick(pos, Kind::Torch)
+                {
+                    self.schedule(pos, Kind::Torch, 2);
+                }
+            }
             "redstone_lamp" => {
-                let lit = input_power(world, pos, &self.analog) > 0;
-                if lit != property_bool(state, "lit")
-                    && let Some(next) =
-                        with_properties(state, &[("lit", if lit { "true" } else { "false" })])
+                // `RedstoneLampBlock.neighborChanged`: lights at once, goes dark after 4 ticks.
+                let signal = input_power(world, pos, &self.analog) > 0;
+                let lit = property_bool(state, "lit");
+                if lit && !signal {
+                    self.schedule(pos, Kind::LampOff, 4);
+                } else if !lit
+                    && signal
+                    && let Some(next) = with_properties(state, &[("lit", "true")])
                 {
                     self.write(world, pos, next);
                 }
             }
             "note_block" => {
+                // `NoteBlock.neighborChanged` only follows the signal; playing the note
+                // does not change it.
                 let powered = input_power(world, pos, &self.analog) > 0;
-                if powered && !property_bool(state, "powered") {
-                    let note = (property_u8(state, "note").unwrap_or(0) + 1) % 25;
-                    let note = NOTE[usize::from(note)];
-                    if let Some(next) =
-                        with_properties(state, &[("powered", "true"), ("note", note)])
-                    {
-                        self.write(world, pos, next);
-                    }
-                } else if !powered
-                    && property_bool(state, "powered")
-                    && let Some(next) = with_properties(state, &[("powered", "false")])
+                if powered != property_bool(state, "powered")
+                    && let Some(next) = with_properties(
+                        state,
+                        &[("powered", if powered { "true" } else { "false" })],
+                    )
                 {
                     self.write(world, pos, next);
                 }
@@ -906,7 +1268,7 @@ impl Redstone {
                 }
             }
             "powered_rail" => {
-                let powered = input_power(world, pos, &self.analog) > 0;
+                let powered = rail_powered(world, pos, state, &self.analog);
                 if powered != property_bool(state, "powered")
                     && let Some(next) = with_properties(
                         state,
@@ -914,6 +1276,13 @@ impl Redstone {
                     )
                 {
                     self.write(world, pos, next);
+                    // `updateNeighborsAt(pos.below())`, and above on a slope, reach the rails
+                    // diagonally up and down the track.
+                    self.dirty.push_back(offset(pos, Direction::Down));
+                    if property(state, "shape").is_some_and(|shape| shape.starts_with("ascending"))
+                    {
+                        self.dirty.push_back(offset(pos, Direction::Up));
+                    }
                 }
             }
             "daylight_detector" => {
@@ -965,7 +1334,9 @@ impl Redstone {
         } else {
             (pos, state)
         };
-        let powered = input_power(world, pos, &self.analog) > 0;
+        // `DoorBlock.neighborChanged`: either half's neighbours power the door.
+        let powered = input_power(world, pos, &self.analog) > 0
+            || input_power(world, offset(pos, Direction::Up), &self.analog) > 0;
         if powered == property_bool(state, "powered") {
             return;
         }
@@ -995,16 +1366,16 @@ impl Redstone {
         }
     }
 
-    /// `DiodeBlock.isLocked`: a powered diode on either side points into this one.
+    /// `RepeaterBlock.updateShape`: the `locked` property follows a powered diode on a side.
     fn update_lock(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
         let Some(direction) = facing(state) else {
             return;
         };
-        // Comparators have no `locked` property; their frozen output is runtime state.
+        // Comparators have no `locked` property and are never locked.
         if property(state, "locked").is_none() {
             return;
         }
-        let locked = is_locked(world, pos, direction);
+        let locked = is_locked(world, pos, direction, &self.analog);
         if locked != property_bool(state, "locked")
             && let Some(next) =
                 with_properties(state, &[("locked", if locked { "true" } else { "false" })])
@@ -1013,6 +1384,68 @@ impl Redstone {
         }
     }
 
+    /// `DiodeBlock.checkTickOnNeighbor` for a repeater.
+    fn check_repeater_tick(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
+        let Some(facing) = facing(state) else {
+            return;
+        };
+        if is_locked(world, pos, facing, &self.analog) {
+            return;
+        }
+        let powered = property_bool(state, "powered");
+        let should_turn_on = Probe::new(world, &self.analog).diode_input(pos, facing) > 0;
+        if powered == should_turn_on || self.will_tick_this_tick(pos, Kind::Diode) {
+            return;
+        }
+        // `shouldPrioritize`: a diode in front that points across this one reads it first.
+        let front = offset(pos, facing.opposite());
+        let priority = if world
+            .signal_block(front)
+            .is_some_and(|other| is_diode(other) && self::facing(other) != Some(facing.opposite()))
+        {
+            EXTREMELY_HIGH
+        } else if powered {
+            VERY_HIGH
+        } else {
+            HIGH
+        };
+        let delay = u64::from(property_u8(state, "delay").unwrap_or(1)) * 2;
+        self.schedule_with(pos, Kind::Diode, delay, priority);
+    }
+
+    /// `ComparatorBlock.checkTickOnNeighbor`: look again when the output or `powered` is stale.
+    fn check_comparator_tick(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3], state: u16) {
+        let Some(facing) = facing(state) else {
+            return;
+        };
+        if self.will_tick_this_tick(pos, Kind::Diode) {
+            return;
+        }
+        let powered = property_bool(state, "powered");
+        let output = Probe::new(world, &self.analog).comparator_output(pos, state);
+        // The output lives in a block entity in vanilla; a powered comparator whose output
+        // this region has not computed yet counts as stale.
+        let stored = self
+            .analog
+            .get(&pos)
+            .copied()
+            .unwrap_or(if powered { u8::MAX } else { 0 });
+        if output == stored && powered == (output > 0) {
+            return;
+        }
+        let front = offset(pos, facing.opposite());
+        let priority = if world
+            .signal_block(front)
+            .is_some_and(|other| is_diode(other) && self::facing(other) != Some(facing.opposite()))
+        {
+            HIGH
+        } else {
+            NORMAL
+        };
+        self.schedule_with(pos, Kind::Diode, 2, priority);
+    }
+
+    /// The tick of a repeater (`DiodeBlock.tick`) or comparator (`ComparatorBlock.tick`).
     fn update_diode(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
         let Some(state) = world.block(pos) else {
             return;
@@ -1020,48 +1453,34 @@ impl Redstone {
         let Some(facing) = facing(state) else {
             return;
         };
-        let back = facing.opposite();
-        let input = power_from(world, pos, back, &self.analog);
         if is_repeater(state) {
-            self.update_lock(world, pos, state);
-            if is_locked(world, pos, facing) {
+            if is_locked(world, pos, facing, &self.analog) {
                 return;
             }
-            let powered = input > 0;
-            if powered != property_bool(state, "powered")
-                && let Some(next) = with_properties(
-                    state,
-                    &[("powered", if powered { "true" } else { "false" })],
-                )
-            {
-                self.write(world, pos, next);
-            }
-            return;
-        }
-        // `ComparatorBlock`: compare the back with the strongest side input. A powered diode
-        // on either side locks the comparator's output until the lock is released.
-        if is_locked(world, pos, facing) {
-            return;
-        }
-        let sides = perpendicular(facing)
-            .into_iter()
-            .map(|side| power_from(world, pos, side, &self.analog))
-            .max()
-            .unwrap_or(0);
-        let output = match property(state, "mode") {
-            Some("subtract") => input.saturating_sub(sides),
-            _ => {
-                if input >= sides {
-                    input
-                } else {
-                    0
+            let powered = property_bool(state, "powered");
+            let should_turn_on = Probe::new(world, &self.analog).diode_input(pos, facing) > 0;
+            if powered && !should_turn_on {
+                if let Some(next) = with_properties(state, &[("powered", "false")]) {
+                    self.write(world, pos, next);
+                }
+            } else if !powered {
+                if let Some(next) = with_properties(state, &[("powered", "true")]) {
+                    self.write(world, pos, next);
+                }
+                if !should_turn_on {
+                    // A pulse shorter than the delay is stretched to the full delay.
+                    let delay = u64::from(property_u8(state, "delay").unwrap_or(1)) * 2;
+                    self.schedule_with(pos, Kind::Diode, delay, VERY_HIGH);
                 }
             }
-        };
+            return;
+        }
+        // `ComparatorBlock.refreshOutputState`.
+        let output = Probe::new(world, &self.analog).comparator_output(pos, state);
         let previous = self.analog.insert(pos, output);
         if previous != Some(output) {
             // The comparator's state only carries `powered`; a change between two non-zero
-            // strengths must still refresh the wire it feeds.
+            // strengths must still refresh what it feeds.
             for direction in Direction::ALL {
                 let neighbour = offset(pos, direction);
                 if world.block(neighbour).is_some_and(is_wire) {
@@ -1082,6 +1501,20 @@ impl Redstone {
         }
     }
 
+    /// `RedstoneLampBlock.tick`: a lit lamp without a signal goes dark.
+    fn lamp_off(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
+        let Some(state) = world.block(pos) else {
+            return;
+        };
+        if name(state) == Some("redstone_lamp")
+            && property_bool(state, "lit")
+            && input_power(world, pos, &self.analog) == 0
+            && let Some(next) = with_properties(state, &[("lit", "false")])
+        {
+            self.write(world, pos, next);
+        }
+    }
+
     fn update_torch(&mut self, world: &mut impl RedstoneWorld, pos: [i32; 3]) {
         let Some(state) = world.block(pos) else {
             return;
@@ -1089,56 +1522,36 @@ impl Redstone {
         if !is_torch(state) {
             return;
         }
-        let attach = match name(state) {
-            Some("redstone_wall_torch") => facing(state)
-                .map(Direction::opposite)
-                .unwrap_or(Direction::Down),
-            _ => Direction::Down,
-        };
-        // A torch must not read its own direct signal through the block it is attached to.
-        let mut input = 0;
-        let attach_pos = offset(pos, attach);
-        if let Some(attach_state) = world.signal_block(attach_pos) {
-            input = direct_signal(attach_state, None);
-            for direction in Direction::ALL {
-                let neighbour = offset(attach_pos, direction);
-                if neighbour == pos {
-                    continue;
-                }
-                let Some(other) = world.signal_block(neighbour) else {
-                    continue;
-                };
-                let signal = if is_comparator(other) {
-                    self.analog.get(&neighbour).copied().unwrap_or(0)
-                } else {
-                    direct_signal(other, None)
-                };
-                input = input.max(signal);
-            }
-        }
+        let input = torch_input(world, pos, state, &self.analog);
         let lit = property_bool(state, "lit");
-        let next = if input > 0 {
-            if lit { Some(false) } else { None }
-        } else if lit {
-            None
-        } else {
-            // Burnout: too many toggles in the recent window keeps the torch dark.
-            let recent = self.toggles.entry(pos).or_default();
-            recent.retain(|&time| time + TORCH_TOGGLE_WINDOW > self.clock);
-            if recent.len() >= TORCH_MAX_TOGGLES {
-                self.schedule(pos, Kind::Torch, TORCH_BURNOUT_TICKS);
-                None
-            } else {
-                Some(true)
-            }
-        };
-        let Some(next) = next else {
-            return;
-        };
-        self.toggles.entry(pos).or_default().push_back(self.clock);
-        if let Some(state) = with_properties(state, &[("lit", if next { "true" } else { "false" })])
+        // `RedstoneTorchBlock.tick`: forget toggles older than 60 ticks (`RECENT_TOGGLES`).
+        let clock = self.clock;
+        let recent = self.toggles.entry(pos).or_default();
+        while recent
+            .front()
+            .is_some_and(|&time| clock.saturating_sub(time) > TORCH_TOGGLE_WINDOW)
         {
-            self.write(world, pos, state);
+            recent.pop_front();
+        }
+        if lit {
+            if !input {
+                return;
+            }
+            // Turning off is what counts; the eighth toggle in the window burns the torch out
+            // and it looks again after 160 ticks (`isToggledTooFrequently(level, pos, true)`).
+            recent.push_back(clock);
+            let burnt_out = recent.len() >= TORCH_MAX_TOGGLES;
+            if let Some(next) = with_properties(state, &[("lit", "false")]) {
+                self.write(world, pos, next);
+            }
+            if burnt_out {
+                self.schedule(pos, Kind::Torch, TORCH_BURNOUT_TICKS);
+            }
+        } else if !input
+            && recent.len() < TORCH_MAX_TOGGLES
+            && let Some(next) = with_properties(state, &[("lit", "true")])
+        {
+            self.write(world, pos, next);
         }
     }
 
@@ -1274,9 +1687,93 @@ impl Redstone {
         }
     }
 
+    /// Replaces the item-frame strengths (`ItemFrame.getAnalogOutput`) the region computed:
+    /// `(block, facing, strength)` per frame. A face with two frames counts as none, like
+    /// `ComparatorBlock.getItemFrame`, which needs exactly one. Blocks whose frame output
+    /// changed update their neighbours (`updateNeighbourForOutputSignal`).
+    pub fn set_item_frames(&mut self, frames: &[([i32; 3], Direction, u8)]) {
+        let mut counted: HashMap<[i32; 3], (u32, u8)> = HashMap::new();
+        for &(pos, facing, strength) in frames {
+            let entry = counted
+                .entry(frame_key(pos, facing))
+                .or_insert((0, strength));
+            entry.0 += 1;
+        }
+        let next: HashMap<[i32; 3], u8> = counted
+            .into_iter()
+            .filter_map(|(key, (count, strength))| (count == 1).then_some((key, strength)))
+            .collect();
+        self.replace_outputs(
+            &next,
+            |key| key[1].abs() >= FRAME_BIAS / 2,
+            |key| {
+                let index = (key[1] + FRAME_BIAS / 2).div_euclid(FRAME_BIAS);
+                [key[0], key[1] - index * FRAME_BIAS, key[2]]
+            },
+        );
+    }
+
+    /// Replaces the open-viewer counts of trapped chests (`TrappedChestBlock.getSignal`,
+    /// clamped to 0..=15 when read). A chest nobody has open is simply absent.
+    pub fn set_chest_viewers(&mut self, viewers: &HashMap<[i32; 3], u8>) {
+        let next: HashMap<[i32; 3], u8> = viewers
+            .iter()
+            .filter(|&(_, &count)| count > 0)
+            .map(|(&pos, &count)| (pos, count))
+            .collect();
+        let chests = std::mem::take(&mut self.chests);
+        for pos in chests
+            .iter()
+            .filter(|pos| !next.contains_key(*pos))
+            .copied()
+        {
+            self.analog.remove(&pos);
+            self.dirty.push_back(pos);
+        }
+        for (&pos, &count) in &next {
+            if self.analog.insert(pos, count) != Some(count) {
+                self.dirty.push_back(pos);
+            }
+        }
+        self.chests = next.keys().copied().collect();
+    }
+
+    fn replace_outputs(
+        &mut self,
+        next: &HashMap<[i32; 3], u8>,
+        is_member: impl Fn([i32; 3]) -> bool,
+        block_of: impl Fn([i32; 3]) -> [i32; 3],
+    ) {
+        let stale: Vec<[i32; 3]> = self
+            .analog
+            .keys()
+            .copied()
+            .filter(|&key| is_member(key) && !next.contains_key(&key))
+            .collect();
+        for key in stale {
+            self.analog.remove(&key);
+            self.dirty.push_back(block_of(key));
+        }
+        for (&key, &strength) in next {
+            if self.analog.insert(key, strength) != Some(strength) {
+                self.dirty.push_back(block_of(key));
+            }
+        }
+    }
+
     /// Entities other than players for this tick's pressure plates.
     pub fn set_occupants(&mut self, occupants: Vec<Occupant>) {
         self.occupants = occupants;
+    }
+
+    /// Whether item-frame outputs are currently held, so the region can clear them.
+    pub fn has_frames(&self) -> bool {
+        self.analog.keys().any(|key| key[1].abs() >= FRAME_BIAS / 2)
+    }
+
+    /// Whether any trapped chest has viewers recorded.
+    pub fn has_chests(&self) -> bool {
+        !self.chests.is_empty()
     }
 
     /// Whether any pressure plate is being watched, so the region can skip gathering entities.
@@ -1290,9 +1787,18 @@ impl Redstone {
             clock: self.clock,
             ..Self::default()
         };
+        let priorities = &mut self.priorities;
+        let sequence = &mut self.sequence;
+        out.next_sequence = self.next_sequence;
         self.scheduled.retain(|(pos, kind), due| {
             if keep(pos[0], pos[2]) {
                 out.scheduled.insert((*pos, *kind), *due);
+                if let Some(priority) = priorities.remove(&(*pos, *kind)) {
+                    out.priorities.insert((*pos, *kind), priority);
+                }
+                if let Some(order) = sequence.remove(&(*pos, *kind)) {
+                    out.sequence.insert((*pos, *kind), order);
+                }
                 false
             } else {
                 true
@@ -1338,6 +1844,14 @@ impl Redstone {
                 true
             }
         });
+        self.chests.retain(|pos| {
+            if keep(pos[0], pos[2]) {
+                out.chests.insert(*pos);
+                false
+            } else {
+                true
+            }
+        });
         self.toggles.retain(|pos, recent| {
             if keep(pos[0], pos[2]) {
                 out.toggles.insert(*pos, std::mem::take(recent));
@@ -1360,7 +1874,15 @@ impl Redstone {
     /// Merges another region's redstone work. Scheduled ticks and torch-toggle timestamps are
     /// absolute in the source region's clock, so both are re-based on this region's clock.
     pub fn merge(&mut self, other: Self) {
-        for (key, due) in other.scheduled {
+        self.priorities.extend(other.priorities);
+        // Merged ticks queue behind the ones already here, keeping their own relative order.
+        let mut incoming: Vec<_> = other.scheduled.into_iter().collect();
+        incoming.sort_by_key(|(key, _)| other.sequence.get(key).copied().unwrap_or(0));
+        for (key, due) in incoming {
+            if !self.scheduled.contains_key(&key) {
+                self.sequence.insert(key, self.next_sequence);
+                self.next_sequence += 1;
+            }
             let remaining = due.saturating_sub(other.clock);
             let due = self.clock.saturating_add(remaining);
             self.scheduled
@@ -1371,6 +1893,7 @@ impl Redstone {
         self.dirty.extend(other.dirty);
         self.wires.extend(other.wires);
         self.analog.extend(other.analog);
+        self.chests.extend(other.chests);
         self.plates.extend(other.plates);
         self.plate_due.extend(other.plate_due);
         self.daylights.extend(other.daylights);
@@ -1393,25 +1916,143 @@ fn rebase(time: u64, from: u64, to: u64) -> u64 {
     }
 }
 
-/// `DiodeBlock.isLocked`: a powered diode on either side points into `pos`.
-fn is_locked(world: &impl RedstoneWorld, pos: [i32; 3], direction: Direction) -> bool {
-    perpendicular(direction).into_iter().any(|side| {
-        let neighbour = offset(pos, side);
-        world.signal_block(neighbour).is_some_and(|other| {
-            is_diode(other)
-                && facing(other) == Some(side.opposite())
-                && property_bool(other, "powered")
-        })
-    })
+/// `RepeaterBlock.isLocked`: a powered diode on either side points into the repeater at `pos`.
+fn is_locked(
+    world: &impl RedstoneWorld,
+    pos: [i32; 3],
+    facing: Direction,
+    analog: &HashMap<[i32; 3], u8>,
+) -> bool {
+    Probe::new(world, analog).side_input(pos, facing, true) > 0
 }
 
-/// Horizontal directions perpendicular to a horizontal facing (`Direction.Plane.HORIZONTAL`).
-fn perpendicular(direction: Direction) -> [Direction; 2] {
-    match direction {
-        Direction::North | Direction::South => [Direction::East, Direction::West],
-        Direction::East | Direction::West => [Direction::North, Direction::South],
-        Direction::Up | Direction::Down => [Direction::North, Direction::South],
+/// `PoweredRailBlock.updateState`: a signal at the rail or, along the track, at a powered rail
+/// of the same axis up to eight rails away in either direction.
+fn rail_powered(
+    world: &impl RedstoneWorld,
+    pos: [i32; 3],
+    state: u16,
+    analog: &HashMap<[i32; 3], u8>,
+) -> bool {
+    input_power(world, pos, analog) > 0
+        || rail_chain(world, pos, state, true, 0, analog)
+        || rail_chain(world, pos, state, false, 0, analog)
+}
+
+/// `PoweredRailBlock.findPoweredRailSignal`.
+#[allow(clippy::needless_late_init)]
+fn rail_chain(
+    world: &impl RedstoneWorld,
+    pos: [i32; 3],
+    state: u16,
+    forward: bool,
+    depth: i32,
+    analog: &HashMap<[i32; 3], u8>,
+) -> bool {
+    if depth >= 8 {
+        return false;
     }
+    let [mut x, mut y, z] = pos;
+    let mut z = z;
+    let mut check = true;
+    let axis_east_west;
+    match property(state, "shape") {
+        Some("north_south") => {
+            z += if forward { 1 } else { -1 };
+            axis_east_west = false;
+        }
+        Some("east_west") => {
+            x += if forward { -1 } else { 1 };
+            axis_east_west = true;
+        }
+        Some("ascending_east") => {
+            if forward {
+                x -= 1;
+            } else {
+                x += 1;
+                y += 1;
+                check = false;
+            }
+            axis_east_west = true;
+        }
+        Some("ascending_west") => {
+            if forward {
+                x -= 1;
+                y += 1;
+                check = false;
+            } else {
+                x += 1;
+            }
+            axis_east_west = true;
+        }
+        Some("ascending_north") => {
+            if forward {
+                z += 1;
+            } else {
+                z -= 1;
+                y += 1;
+                check = false;
+            }
+            axis_east_west = false;
+        }
+        Some("ascending_south") => {
+            if forward {
+                z += 1;
+                y += 1;
+                check = false;
+            } else {
+                z -= 1;
+            }
+            axis_east_west = false;
+        }
+        _ => return false,
+    }
+    rail_same_with_power(world, [x, y, z], forward, depth, axis_east_west, analog)
+        || (check
+            && rail_same_with_power(world, [x, y - 1, z], forward, depth, axis_east_west, analog))
+}
+
+/// `PoweredRailBlock.isSameRailWithPower`.
+fn rail_same_with_power(
+    world: &impl RedstoneWorld,
+    pos: [i32; 3],
+    forward: bool,
+    depth: i32,
+    axis_east_west: bool,
+    analog: &HashMap<[i32; 3], u8>,
+) -> bool {
+    let Some(state) = world.signal_block(pos) else {
+        return false;
+    };
+    if name(state) != Some("powered_rail") {
+        return false;
+    }
+    let crosses = match property(state, "shape") {
+        Some("north_south" | "ascending_north" | "ascending_south") => axis_east_west,
+        Some("east_west" | "ascending_east" | "ascending_west") => !axis_east_west,
+        _ => true,
+    };
+    if crosses || !property_bool(state, "powered") {
+        return false;
+    }
+    input_power(world, pos, analog) > 0 || rail_chain(world, pos, state, forward, depth + 1, analog)
+}
+
+/// `RedstoneTorchBlock.hasNeighborSignal`: the block the torch hangs on is powered from any
+/// side but the torch's own.
+fn torch_input(
+    world: &impl RedstoneWorld,
+    pos: [i32; 3],
+    state: u16,
+    analog: &HashMap<[i32; 3], u8>,
+) -> bool {
+    let attach = match name(state) {
+        Some("redstone_wall_torch") => facing(state)
+            .map(Direction::opposite)
+            .unwrap_or(Direction::Down),
+        _ => Direction::Down,
+    };
+    Probe::new(world, analog).signal(offset(pos, attach), attach) > 0
 }
 
 #[cfg(test)]
@@ -1498,7 +2139,7 @@ mod tests {
     struct Edge {
         owns_left: bool,
         blocks: HashMap<[i32; 3], u16>,
-        wakes: Vec<[i32; 3]>,
+        wakes: Vec<Wake>,
     }
 
     impl Edge {
@@ -1532,8 +2173,8 @@ mod tests {
             Some(self.state(pos))
         }
 
-        fn wake_redstone(&mut self, positions: &[[i32; 3]]) {
-            self.wakes.extend_from_slice(positions);
+        fn wake_redstone(&mut self, wakes: &[Wake]) {
+            self.wakes.extend_from_slice(wakes);
         }
     }
 
@@ -1542,10 +2183,10 @@ mod tests {
         let mut world = Edge::new(true);
         let mut redstone = Redstone::default();
         redstone.blocks_changed(&mut world, &[[15, 64, 0]]);
-        assert_eq!(world.wakes, [[16, 64, 0]]);
+        assert_eq!(world.wakes, [([16, 64, 0], [15, 64, 0])]);
         world.wakes.clear();
         // Handling a foreign change must not bounce the wake back to its source.
-        redstone.foreign_changed(&mut world, [15, 64, 0]);
+        redstone.foreign_changed(&mut world, [15, 64, 0], [16, 64, 0]);
         assert!(world.wakes.is_empty());
     }
 
@@ -1561,7 +2202,7 @@ mod tests {
         );
         world.blocks.insert([16, 64, 0], lamp());
         let mut redstone = Redstone::default();
-        redstone.foreign_changed(&mut world, [16, 64, 0]);
+        redstone.foreign_changed(&mut world, [16, 64, 0], [15, 64, 0]);
         assert_eq!(
             world.state([16, 64, 0]),
             make("redstone_lamp", &[("lit", "true")])
@@ -1616,6 +2257,11 @@ mod tests {
         redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
         tick(&mut redstone, &mut grid, 2);
         assert_eq!(property(grid.state([1, 64, 0]), "power"), Some("0"));
+        assert!(
+            property_bool(grid.state([2, 64, 0]), "lit"),
+            "`RedstoneLampBlock` waits 4 ticks before going dark"
+        );
+        tick(&mut redstone, &mut grid, 4);
         assert!(!property_bool(grid.state([2, 64, 0]), "lit"));
     }
 
@@ -1628,7 +2274,7 @@ mod tests {
             [1, 64, 0],
             make(
                 "repeater",
-                &[("facing", "east"), ("delay", "2"), ("powered", "false")],
+                &[("facing", "west"), ("delay", "2"), ("powered", "false")],
             ),
         );
         grid.add([2, 64, 0], lamp());
@@ -1650,7 +2296,7 @@ mod tests {
         grid.add([2, 64, 0], lamp());
         let source = make(
             "lever",
-            &[("face", "wall"), ("facing", "east"), ("powered", "false")],
+            &[("face", "wall"), ("facing", "west"), ("powered", "false")],
         );
         grid.add([0, 63, 0], source);
         let mut redstone = Redstone::default();
@@ -1663,6 +2309,11 @@ mod tests {
         redstone.blocks_changed(&mut grid, &[[0, 63, 0]]);
         tick(&mut redstone, &mut grid, 2);
         assert!(!property_bool(grid.state([1, 64, 0]), "lit"));
+        assert!(
+            property_bool(grid.state([2, 64, 0]), "lit"),
+            "the lamp keeps shining for its 4-tick delay"
+        );
+        tick(&mut redstone, &mut grid, 4);
         assert!(!property_bool(grid.state([2, 64, 0]), "lit"));
     }
 
@@ -1670,13 +2321,12 @@ mod tests {
     fn comparator_compares_subtracts_and_reports_analog_strength() {
         let mut grid = Grid::new();
         grid.add([0, 64, 0], make("target", &[("power", "10")]));
-        grid.add([1, 64, 1], make("target", &[("power", "4")]));
         grid.add(
             [1, 64, 0],
             make(
                 "comparator",
                 &[
-                    ("facing", "east"),
+                    ("facing", "west"),
                     ("mode", "compare"),
                     ("powered", "false"),
                 ],
@@ -1695,15 +2345,62 @@ mod tests {
         grid.add([1, 64, 0], subtract);
         redstone.blocks_changed(&mut grid, &[[1, 64, 0]]);
         tick(&mut redstone, &mut grid, 2);
-        assert_eq!(property(grid.state([2, 64, 0]), "power"), Some("6"));
+        assert_eq!(
+            property(grid.state([2, 64, 0]), "power"),
+            Some("10"),
+            "subtracting a missing side input leaves the input"
+        );
 
-        grid.add([1, 64, 1], make("target", &[("power", "15")]));
+        // A powered repeater pointing into the side is a 15 side input.
+        grid.add([1, 64, 2], make("target", &[("power", "15")]));
+        grid.add(
+            [1, 64, 1],
+            make(
+                "repeater",
+                &[("facing", "south"), ("delay", "1"), ("powered", "true")],
+            ),
+        );
         let compare = with_properties(grid.state([1, 64, 0]), &[("mode", "compare")]).unwrap();
         grid.add([1, 64, 0], compare);
         redstone.blocks_changed(&mut grid, &[[1, 64, 1], [1, 64, 0]]);
         tick(&mut redstone, &mut grid, 2);
         assert_eq!(property(grid.state([2, 64, 0]), "power"), Some("0"));
+        tick(&mut redstone, &mut grid, 4);
         assert!(!property_bool(grid.state([3, 64, 0]), "lit"));
+    }
+
+    #[test]
+    fn comparator_output_subtracts_a_wire_side_input_and_reads_what_it_faces() {
+        let mut grid = Grid::new();
+        let comparator = |mode: &str| {
+            make(
+                "comparator",
+                &[("facing", "west"), ("mode", mode), ("powered", "false")],
+            )
+        };
+        grid.add([1, 64, 0], comparator("subtract"));
+        grid.add([0, 64, 0], make("target", &[("power", "10")]));
+        grid.add([1, 64, 1], make("redstone_wire", &[("power", "4")]));
+        let analog = HashMap::new();
+        let output = |grid: &Grid, mode: &str| {
+            Probe::new(grid, &analog).comparator_output([1, 64, 0], comparator(mode))
+        };
+        assert_eq!(output(&grid, "subtract"), 6, "10 - 4");
+        assert_eq!(output(&grid, "compare"), 10, "10 >= 4 keeps the input");
+        grid.add([1, 64, 1], make("redstone_wire", &[("power", "12")]));
+        assert_eq!(
+            output(&grid, "compare"),
+            0,
+            "a side input above the input silences it"
+        );
+        // Behind a conductor the comparator reads the container two blocks away.
+        grid.add([1, 64, 1], air());
+        grid.add([0, 64, 0], make("stone", &[]));
+        grid.add([-1, 64, 0], make("composter", &[("level", "5")]));
+        assert_eq!(output(&grid, "compare"), 5);
+        // A composter right behind it is read directly.
+        grid.add([0, 64, 0], make("composter", &[("level", "3")]));
+        assert_eq!(output(&grid, "compare"), 3);
     }
 
     #[test]
@@ -1792,7 +2489,11 @@ mod tests {
             redstone.take_primed(),
             vec![([7, 64, 0], ferrite_entity::tnt::FUSE)]
         );
-        assert_eq!(property(grid.state([9, 64, 0]), "note"), Some("1"));
+        assert_eq!(
+            property(grid.state([9, 64, 0]), "note"),
+            Some("0"),
+            "`NoteBlock.neighborChanged` plays the note without changing it"
+        );
         assert!(property_bool(grid.state([9, 64, 0]), "powered"));
         assert!(property_bool(grid.state([11, 64, 0]), "open"));
     }
@@ -1944,18 +2645,21 @@ mod tests {
     #[test]
     fn strong_power_reaches_wire_and_lamp_through_stone() {
         let mut grid = Grid::new();
-        let source = lever();
+        let source = make(
+            "lever",
+            &[("face", "wall"), ("facing", "west"), ("powered", "false")],
+        );
         grid.add([0, 64, 0], source);
         grid.add([1, 64, 0], make("stone", &[]));
         grid.add([1, 65, 0], wire());
-        grid.add([2, 65, 0], lamp());
+        grid.add([2, 64, 0], lamp());
         let mut redstone = Redstone::default();
 
         grid.add([0, 64, 0], use_block(source).unwrap());
         redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
         tick(&mut redstone, &mut grid, 1);
         assert_eq!(property(grid.state([1, 65, 0]), "power"), Some("15"));
-        assert!(property_bool(grid.state([2, 65, 0]), "lit"));
+        assert!(property_bool(grid.state([2, 64, 0]), "lit"));
     }
 
     #[test]
@@ -1997,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn comparator_output_freezes_while_locked_and_resumes_after_unlock() {
+    fn a_powered_repeater_is_a_side_input_to_a_comparator_not_a_lock() {
         let mut grid = Grid::new();
         grid.add([0, 64, 0], make("target", &[("power", "10")]));
         grid.add(
@@ -2005,7 +2709,7 @@ mod tests {
             make(
                 "comparator",
                 &[
-                    ("facing", "east"),
+                    ("facing", "west"),
                     ("mode", "compare"),
                     ("powered", "false"),
                 ],
@@ -2018,25 +2722,29 @@ mod tests {
         tick(&mut redstone, &mut grid, 2);
         assert_eq!(property(grid.state([2, 64, 0]), "power"), Some("10"));
 
-        // A powered repeater pointing into the comparator's side locks it.
+        // `ComparatorBlock` has no lock: a powered repeater pointing into its side is a 15
+        // side input, so compare mode (side > input) outputs nothing.
         grid.add([1, 64, 2], make("target", &[("power", "15")]));
         grid.add(
             [1, 64, 1],
             make(
                 "repeater",
-                &[("facing", "north"), ("delay", "1"), ("powered", "true")],
+                &[("facing", "south"), ("delay", "1"), ("powered", "true")],
             ),
         );
         redstone.blocks_changed(&mut grid, &[[1, 64, 1]]);
         tick(&mut redstone, &mut grid, 2);
+        assert_eq!(property(grid.state([2, 64, 0]), "power"), Some("0"));
 
-        grid.add([0, 64, 0], make("target", &[("power", "4")]));
+        // The input is still read while the side input is there: a stronger input wins.
+        grid.add([0, 64, 0], make("target", &[("power", "15")]));
         redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
         tick(&mut redstone, &mut grid, 2);
-        assert_eq!(property(grid.state([2, 64, 0]), "power"), Some("10"));
+        assert_eq!(property(grid.state([2, 64, 0]), "power"), Some("15"));
 
+        grid.add([0, 64, 0], make("target", &[("power", "4")]));
         grid.add([1, 64, 1], air());
-        redstone.blocks_changed(&mut grid, &[[1, 64, 1]]);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0], [1, 64, 1]]);
         tick(&mut redstone, &mut grid, 2);
         assert_eq!(property(grid.state([2, 64, 0]), "power"), Some("4"));
     }
@@ -2050,7 +2758,7 @@ mod tests {
             [1, 64, 0],
             make(
                 "repeater",
-                &[("facing", "east"), ("delay", "1"), ("powered", "false")],
+                &[("facing", "west"), ("delay", "1"), ("powered", "false")],
             ),
         );
         let mut redstone = Redstone::default();
@@ -2066,7 +2774,7 @@ mod tests {
             [1, 64, 1],
             make(
                 "repeater",
-                &[("facing", "north"), ("delay", "1"), ("powered", "true")],
+                &[("facing", "south"), ("delay", "1"), ("powered", "true")],
             ),
         );
         redstone.blocks_changed(&mut grid, &[[1, 64, 1]]);
@@ -2089,6 +2797,7 @@ mod tests {
     fn wire_connects_up_to_a_raised_wire_and_side_to_components() {
         let mut grid = Grid::new();
         grid.add([0, 64, 0], wire());
+        grid.add([1, 64, 0], make("stone", &[]));
         grid.add([1, 65, 0], wire());
         grid.add(
             [0, 64, 1],
@@ -2113,12 +2822,13 @@ mod tests {
         grid.add([1, 64, 0], make("redstone_torch", &[("lit", "true")]));
         let mut source = make(
             "lever",
-            &[("face", "wall"), ("facing", "east"), ("powered", "false")],
+            &[("face", "wall"), ("facing", "west"), ("powered", "false")],
         );
         grid.add([0, 63, 0], source);
         let mut redstone = Redstone::default();
 
-        for _ in 0..4 {
+        // Seven turn-offs are fine; the eighth within 60 ticks burns the torch out.
+        for _ in 0..7 {
             source = use_block(source).unwrap();
             grid.add([0, 63, 0], source);
             redstone.blocks_changed(&mut grid, &[[0, 63, 0]]);
@@ -2144,6 +2854,220 @@ mod tests {
 
         tick(&mut redstone, &mut grid, 160);
         assert!(property_bool(grid.state([1, 64, 0]), "lit"));
+    }
+
+    fn on_lever(face: &str, facing: &str) -> u16 {
+        make(
+            "lever",
+            &[("face", face), ("facing", facing), ("powered", "true")],
+        )
+    }
+
+    #[test]
+    fn repeater_stretches_a_pulse_shorter_than_its_delay() {
+        let mut grid = Grid::new();
+        let off = lever();
+        grid.add([0, 64, 0], off);
+        grid.add(
+            [1, 64, 0],
+            make(
+                "repeater",
+                &[("facing", "west"), ("delay", "1"), ("powered", "false")],
+            ),
+        );
+        grid.add([2, 64, 0], lamp());
+        let mut redstone = Redstone::default();
+
+        // One tick of input: gone again before the repeater's two-tick delay is up.
+        grid.add([0, 64, 0], use_block(off).unwrap());
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        grid.add([0, 64, 0], off);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(
+            property_bool(grid.state([1, 64, 0]), "powered"),
+            "`DiodeBlock.tick` turns on even though the input is already gone"
+        );
+        assert!(property_bool(grid.state([2, 64, 0]), "lit"));
+        tick(&mut redstone, &mut grid, 1);
+        assert!(property_bool(grid.state([1, 64, 0]), "powered"));
+        tick(&mut redstone, &mut grid, 1);
+        assert!(
+            !property_bool(grid.state([1, 64, 0]), "powered"),
+            "and turns off after one more delay"
+        );
+    }
+
+    #[test]
+    fn repeater_and_observer_power_only_the_block_in_front_of_them() {
+        let mut grid = Grid::new();
+        // A repeater facing west takes input from the west and outputs east.
+        grid.add(
+            [1, 64, 0],
+            make(
+                "repeater",
+                &[("facing", "west"), ("delay", "1"), ("powered", "true")],
+            ),
+        );
+        grid.add([0, 64, 0], make("redstone_block", &[]));
+        grid.add([2, 64, 0], lamp());
+        grid.add([1, 64, 1], lamp());
+        grid.add([1, 64, -1], lamp());
+        // An observer facing east watches the east and outputs west.
+        grid.add(
+            [11, 64, 0],
+            make("observer", &[("facing", "east"), ("powered", "true")]),
+        );
+        grid.add([10, 64, 0], lamp());
+        grid.add([12, 64, 0], lamp());
+        grid.add([11, 64, 1], lamp());
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[1, 64, 0], [11, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(
+            property_bool(grid.state([2, 64, 0]), "lit"),
+            "repeater front"
+        );
+        assert!(
+            !property_bool(grid.state([1, 64, 1]), "lit"),
+            "repeater side"
+        );
+        assert!(
+            !property_bool(grid.state([1, 64, -1]), "lit"),
+            "repeater side"
+        );
+        assert!(
+            property_bool(grid.state([10, 64, 0]), "lit"),
+            "observer back"
+        );
+        assert!(
+            !property_bool(grid.state([12, 64, 0]), "lit"),
+            "observer face"
+        );
+        assert!(
+            !property_bool(grid.state([11, 64, 1]), "lit"),
+            "observer side"
+        );
+    }
+
+    #[test]
+    fn a_torch_powers_the_block_above_it_but_not_the_one_it_stands_on() {
+        let mut grid = Grid::new();
+        grid.add([1, 63, 0], make("stone", &[]));
+        grid.add([1, 64, 0], make("redstone_torch", &[("lit", "true")]));
+        grid.add([1, 65, 0], make("stone", &[]));
+        grid.add([2, 65, 0], lamp());
+        grid.add([1, 63, 1], lamp());
+        grid.add([1, 62, 0], lamp());
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[1, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(
+            property_bool(grid.state([2, 65, 0]), "lit"),
+            "`getDirectSignal(DOWN)` strongly powers the block above"
+        );
+        assert!(
+            !property_bool(grid.state([1, 62, 0]), "lit"),
+            "the support block is not powered by its own torch"
+        );
+        assert!(
+            property_bool(grid.state([1, 64, 0]), "lit"),
+            "so the torch does not turn itself off"
+        );
+    }
+
+    #[test]
+    fn wire_networks_follow_staircases_and_dots_do_not_power_sideways() {
+        let mut grid = Grid::new();
+        let source = lever();
+        grid.add([-1, 64, 0], source);
+        grid.add([0, 64, 0], wire());
+        grid.add([1, 64, 0], make("stone", &[]));
+        grid.add([1, 65, 0], wire());
+        grid.add([2, 64, 0], wire());
+        let mut redstone = Redstone::default();
+        grid.add([-1, 64, 0], use_block(source).unwrap());
+        redstone.blocks_changed(&mut grid, &[[-1, 64, 0]]);
+        tick(&mut redstone, &mut grid, 2);
+        assert_eq!(property(grid.state([0, 64, 0]), "power"), Some("15"));
+        assert_eq!(
+            property(grid.state([1, 65, 0]), "power"),
+            Some("14"),
+            "up over the conductor"
+        );
+        assert_eq!(
+            property(grid.state([2, 64, 0]), "power"),
+            Some("13"),
+            "and down again"
+        );
+        assert_eq!(property(grid.state([0, 64, 0]), "east"), Some("up"));
+
+        // A wire on a redstone block with nothing beside it is a dot: lamps next to it stay dark.
+        let mut grid = Grid::new();
+        grid.add([1, 63, 0], make("redstone_block", &[]));
+        grid.add([1, 64, 0], wire());
+        grid.add([2, 64, 0], lamp());
+        grid.add([1, 63, 1], lamp());
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[1, 64, 0]]);
+        tick(&mut redstone, &mut grid, 6);
+        let dot = grid.state([1, 64, 0]);
+        assert_eq!(property(dot, "power"), Some("15"));
+        assert_eq!(property(dot, "east"), Some("none"));
+        assert!(!property_bool(grid.state([2, 64, 0]), "lit"));
+    }
+
+    #[test]
+    fn wire_does_not_connect_to_plain_blocks_or_lamps() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], wire());
+        grid.add([1, 64, 0], make("stone", &[]));
+        grid.add([-1, 64, 0], lamp());
+        grid.add(
+            [0, 64, 1],
+            make("repeater", &[("facing", "north"), ("delay", "1")]),
+        );
+        grid.add(
+            [0, 64, -1],
+            make("repeater", &[("facing", "east"), ("delay", "1")]),
+        );
+        let shape = wire_shape(&grid, [0, 64, 0], grid.state([0, 64, 0]));
+        // East (stone) and west (lamp) stay unconnected; the repeater in line to the south
+        // connects, and the lone line extends north although the repeater there points across.
+        assert_eq!(shape, ["side", "none", "side", "none"]);
+        grid.add([0, 64, -1], air());
+        let shape = wire_shape(&grid, [0, 64, 0], grid.state([0, 64, 0]));
+        assert_eq!(shape, ["side", "none", "side", "none"]);
+        assert_eq!(
+            connecting_side(&grid, [0, 64, 0], Direction::North, true),
+            "none",
+            "nothing north of it connects by itself"
+        );
+    }
+
+    #[test]
+    fn either_half_of_a_door_feels_a_signal() {
+        let mut grid = Grid::new();
+        let door = |half: &str| {
+            make(
+                "oak_door",
+                &[
+                    ("half", half),
+                    ("facing", "north"),
+                    ("open", "false"),
+                    ("powered", "false"),
+                ],
+            )
+        };
+        grid.add([1, 64, 0], door("lower"));
+        grid.add([1, 65, 0], door("upper"));
+        grid.add([0, 65, 0], on_lever("wall", "west"));
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[0, 65, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(property_bool(grid.state([1, 64, 0]), "open"));
+        assert!(property_bool(grid.state([1, 65, 0]), "open"));
     }
 
     /// Scheduled redstone ticks are absolute in their region's clock. A merge from a region
@@ -2174,5 +3098,328 @@ mod tests {
         assert!(!moved.scheduled.contains_key(&([32, 64, 0], Kind::Diode)));
         assert!(redstone.scheduled.contains_key(&([32, 64, 0], Kind::Diode)));
         assert!(!redstone.scheduled.contains_key(&([0, 64, 0], Kind::Diode)));
+    }
+
+    fn torch_world() -> (Grid, Redstone) {
+        let mut grid = Grid::new();
+        grid.add([1, 63, 0], make("stone", &[]));
+        grid.add([1, 64, 0], make("redstone_torch", &[("lit", "true")]));
+        grid.add(
+            [0, 63, 0],
+            make(
+                "lever",
+                &[("face", "wall"), ("facing", "west"), ("powered", "true")],
+            ),
+        );
+        (grid, Redstone::default())
+    }
+
+    /// `RedstoneTorchBlock.isToggledTooFrequently`: toggles older than 60 ticks (`clock -
+    /// first > 60`) are forgotten, exactly 60 still count, and only turning off records one.
+    #[test]
+    fn torch_burnout_window_is_sixty_ticks_and_counts_turn_offs() {
+        let (mut grid, mut redstone) = torch_world();
+        redstone.clock = 100;
+        redstone
+            .toggles
+            .insert([1, 64, 0], VecDeque::from(vec![40; 7]));
+        redstone.update_torch(&mut grid, [1, 64, 0]);
+        assert!(!property_bool(grid.state([1, 64, 0]), "lit"));
+        assert!(
+            redstone.scheduled.contains_key(&([1, 64, 0], Kind::Torch)),
+            "the eighth toggle within the window schedules the 160 tick relight"
+        );
+
+        let (mut grid, mut redstone) = torch_world();
+        redstone.clock = 100;
+        redstone
+            .toggles
+            .insert([1, 64, 0], VecDeque::from(vec![39; 7]));
+        redstone.update_torch(&mut grid, [1, 64, 0]);
+        assert!(!property_bool(grid.state([1, 64, 0]), "lit"));
+        assert!(
+            !redstone.scheduled.contains_key(&([1, 64, 0], Kind::Torch)),
+            "toggles 61 ticks old no longer count"
+        );
+        assert_eq!(redstone.toggles[&[1, 64, 0]].len(), 1);
+    }
+
+    fn rail(powered: bool, shape: &str) -> u16 {
+        make(
+            "powered_rail",
+            &[
+                ("powered", if powered { "true" } else { "false" }),
+                ("shape", shape),
+            ],
+        )
+    }
+
+    /// `PoweredRailBlock.findPoweredRailSignal`: a powered rail powers rails along its axis,
+    /// up to eight beyond the one that receives the signal, and no further.
+    #[test]
+    fn a_powered_rail_line_carries_power_eight_rails_along_the_track() {
+        let mut grid = Grid::new();
+        for x in 1..=10 {
+            grid.add([x, 64, 0], rail(false, "east_west"));
+        }
+        grid.add(
+            [0, 64, 0],
+            make(
+                "lever",
+                &[("face", "floor"), ("facing", "north"), ("powered", "true")],
+            ),
+        );
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 6);
+        for x in 1..=9 {
+            assert!(
+                property_bool(grid.state([x, 64, 0]), "powered"),
+                "rail {x} is within reach"
+            );
+        }
+        assert!(
+            !property_bool(grid.state([10, 64, 0]), "powered"),
+            "the tenth rail is one too far"
+        );
+
+        // Cutting the source unpowers the whole line again.
+        grid.add(
+            [0, 64, 0],
+            make(
+                "lever",
+                &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+            ),
+        );
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 12);
+        for x in 1..=10 {
+            assert!(
+                !property_bool(grid.state([x, 64, 0]), "powered"),
+                "rail {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_powered_rail_does_not_carry_power_across_a_perpendicular_track() {
+        let mut grid = Grid::new();
+        grid.add([1, 64, 0], rail(false, "east_west"));
+        grid.add([2, 64, 0], rail(false, "north_south"));
+        grid.add(
+            [0, 64, 0],
+            make(
+                "lever",
+                &[("face", "floor"), ("facing", "north"), ("powered", "true")],
+            ),
+        );
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 4);
+        assert!(property_bool(grid.state([1, 64, 0]), "powered"));
+        assert!(!property_bool(grid.state([2, 64, 0]), "powered"));
+    }
+
+    #[test]
+    fn detector_rail_tripwire_hook_and_trapped_chest_emit_like_vanilla() {
+        let detector = make(
+            "detector_rail",
+            &[("powered", "true"), ("shape", "east_west")],
+        );
+        let state = detector;
+        assert_eq!(signal_toward(state, 0, Direction::West, true), 15);
+        assert_eq!(direct_toward(state, 0, Direction::Up, true), 15);
+        assert_eq!(direct_toward(state, 0, Direction::North, true), 0);
+        let off = make(
+            "detector_rail",
+            &[("powered", "false"), ("shape", "east_west")],
+        );
+        assert_eq!(direct_toward(off, 0, Direction::Up, true), 0);
+
+        let hook = make(
+            "tripwire_hook",
+            &[
+                ("facing", "north"),
+                ("powered", "true"),
+                ("attached", "true"),
+            ],
+        );
+        assert_eq!(signal_toward(hook, 0, Direction::East, true), 15);
+        assert_eq!(direct_toward(hook, 0, Direction::North, true), 15);
+        assert_eq!(direct_toward(hook, 0, Direction::South, true), 0);
+
+        let chest = make("trapped_chest", &[("facing", "north"), ("type", "single")]);
+        assert_eq!(signal_toward(chest, 0, Direction::Up, true), 0);
+        assert_eq!(signal_toward(chest, 4, Direction::East, true), 4);
+        assert_eq!(signal_toward(chest, 20, Direction::East, true), 15);
+        assert_eq!(direct_toward(chest, 4, Direction::Up, true), 4);
+        assert_eq!(direct_toward(chest, 4, Direction::East, true), 0);
+    }
+
+    /// A trapped chest powers the block beneath it strongly (`getDirectSignal` only towards
+    /// up, the way a pressure plate does), so a lamp under that block lights while it is open.
+    #[test]
+    fn trapped_chest_viewers_power_a_lamp_below_through_direct_signal() {
+        let mut grid = Grid::new();
+        grid.add(
+            [0, 66, 0],
+            make("trapped_chest", &[("facing", "north"), ("type", "single")]),
+        );
+        grid.add([0, 65, 0], make("stone", &[]));
+        grid.add([0, 64, 0], lamp());
+        let mut redstone = Redstone::default();
+        redstone.set_chest_viewers(&HashMap::from([([0, 66, 0], 1u8)]));
+        tick(&mut redstone, &mut grid, 2);
+        assert!(property_bool(grid.state([0, 64, 0]), "lit"));
+        redstone.set_chest_viewers(&HashMap::new());
+        tick(&mut redstone, &mut grid, 6);
+        assert!(!property_bool(grid.state([0, 64, 0]), "lit"));
+        assert!(!redstone.has_chests());
+    }
+
+    /// `ComparatorBlock.getItemFrame`: through a conductor the comparator reads the frame
+    /// behind it, `rotation % 8 + 1` when it holds an item and 0 when empty.
+    #[test]
+    fn comparator_reads_an_item_frame_behind_a_conductor() {
+        let mut grid = Grid::new();
+        grid.add([1, 64, 0], make("stone", &[]));
+        grid.add(
+            [2, 64, 0],
+            make(
+                "comparator",
+                &[
+                    ("facing", "west"),
+                    ("mode", "compare"),
+                    ("powered", "false"),
+                ],
+            ),
+        );
+        grid.add([3, 64, 0], wire());
+        let mut redstone = Redstone::default();
+        redstone.set_item_frames(&[([0, 64, 0], Direction::West, 4)]);
+        redstone.blocks_changed(&mut grid, &[[2, 64, 0]]);
+        tick(&mut redstone, &mut grid, 4);
+        assert_eq!(property(grid.state([3, 64, 0]), "power"), Some("4"));
+
+        // The frame turned: its output changes and the comparator follows.
+        redstone.set_item_frames(&[([0, 64, 0], Direction::West, 8)]);
+        tick(&mut redstone, &mut grid, 4);
+        assert_eq!(property(grid.state([3, 64, 0]), "power"), Some("8"));
+
+        // A frame facing another way, or two on one face, is not what the comparator reads.
+        redstone.set_item_frames(&[([0, 64, 0], Direction::East, 8)]);
+        tick(&mut redstone, &mut grid, 4);
+        assert_eq!(property(grid.state([3, 64, 0]), "power"), Some("0"));
+        redstone.set_item_frames(&[
+            ([0, 64, 0], Direction::West, 8),
+            ([0, 64, 0], Direction::West, 3),
+        ]);
+        tick(&mut redstone, &mut grid, 4);
+        assert_eq!(property(grid.state([3, 64, 0]), "power"), Some("0"));
+
+        redstone.set_item_frames(&[]);
+        assert!(!redstone.has_frames());
+    }
+
+    /// Vanilla orders ticks due together by priority and then insertion order.
+    #[test]
+    fn scheduled_ticks_with_equal_time_and_priority_run_in_insertion_order() {
+        let mut redstone = Redstone::default();
+        // Positions deliberately sort against the insertion order.
+        let order = [[9, 64, 0], [3, 64, 0], [7, 64, 0], [1, 64, 0]];
+        for pos in order {
+            redstone.schedule(pos, Kind::Diode, 2);
+        }
+        redstone.clock = 2;
+        let mut due: Vec<_> = redstone
+            .scheduled
+            .keys()
+            .map(|&(pos, kind)| (redstone.sequence[&(pos, kind)], pos))
+            .collect();
+        due.sort();
+        assert_eq!(due.iter().map(|(_, pos)| *pos).collect::<Vec<_>>(), order);
+
+        // Splitting and merging keeps the relative order of the moved ticks.
+        let mut moved = redstone.split(|x, _| x < 8);
+        let mut target = Redstone::default();
+        target.schedule([100, 64, 0], Kind::Diode, 2);
+        target.merge(moved.split(|_, _| true));
+        let sequence = |pos| target.sequence[&(pos, Kind::Diode)];
+        assert!(sequence([100, 64, 0]) < sequence([3, 64, 0]));
+        assert!(sequence([3, 64, 0]) < sequence([1, 64, 0]));
+    }
+
+    /// A conductor on this side carrying strong power to a block the neighbouring region
+    /// owns wakes that block, and an observer watching the changed block across the
+    /// boundary pulses.
+    #[test]
+    fn boundary_circuits_wake_the_other_region() {
+        let mut left = Edge::new(true);
+        left.blocks.insert([14, 64, 0], make("stone", &[]));
+        left.blocks.insert([15, 64, 0], make("stone", &[]));
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut left, &[[14, 64, 0]]);
+        assert!(
+            left.wakes.contains(&([16, 64, 0], [14, 64, 0])),
+            "the block behind the carrier conductor is woken: {:?}",
+            left.wakes
+        );
+
+        let mut right = Edge::new(false);
+        right.blocks.insert(
+            [16, 64, 0],
+            make("observer", &[("facing", "west"), ("powered", "false")]),
+        );
+        let mut redstone = Redstone::default();
+        redstone.foreign_changed(&mut right, [16, 64, 0], [15, 64, 0]);
+        assert!(
+            redstone
+                .scheduled
+                .contains_key(&([16, 64, 0], Kind::ObserverPulse))
+        );
+        // An observer facing away is not looking at the change.
+        let mut other = Redstone::default();
+        right.blocks.insert(
+            [16, 64, 0],
+            make("observer", &[("facing", "east"), ("powered", "false")]),
+        );
+        other.foreign_changed(&mut right, [16, 64, 0], [15, 64, 0]);
+        assert!(other.scheduled.is_empty());
+    }
+
+    /// A repeater at the edge must react to its input across the boundary: the owning
+    /// region evaluates it from the foreign read, then its own change wakes the other side.
+    #[test]
+    fn a_repeater_next_to_the_boundary_reacts_and_wakes_back() {
+        let mut right = Edge::new(false);
+        right.blocks.insert(
+            [16, 64, 0],
+            make(
+                "repeater",
+                &[
+                    ("facing", "west"),
+                    ("delay", "1"),
+                    ("powered", "false"),
+                    ("locked", "false"),
+                ],
+            ),
+        );
+        right.blocks.insert(
+            [15, 64, 0],
+            make(
+                "lever",
+                &[("face", "floor"), ("facing", "north"), ("powered", "true")],
+            ),
+        );
+        let mut redstone = Redstone::default();
+        redstone.foreign_changed(&mut right, [16, 64, 0], [15, 64, 0]);
+        for _ in 0..4 {
+            redstone.tick(&mut right, &[]);
+        }
+        assert!(property_bool(right.state([16, 64, 0]), "powered"));
+        assert!(
+            right.wakes.iter().any(|(pos, _)| pos[0] == 15),
+            "the repeater's own change wakes the region that owns x=15"
+        );
     }
 }

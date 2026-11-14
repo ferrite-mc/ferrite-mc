@@ -19,6 +19,10 @@
 //! rather than through a level graph, and ticking follows the held chunks instead of the
 //! simulation distance.
 
+// The level helpers document the vanilla model and are exercised by the tests; only the
+// view-distance helpers are on the live path.
+#![cfg_attr(not(test), allow(dead_code))]
+
 /// `ChunkLevel.FULL_CHUNK_LEVEL`.
 pub const FULL_LEVEL: i32 = 33;
 /// `ChunkLevel.BLOCK_TICKING_LEVEL`.

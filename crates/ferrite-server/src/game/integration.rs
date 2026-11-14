@@ -4800,7 +4800,7 @@ async fn redstone_repeater_delay_for_bot_on_fixture_world() {
             [1, 64, 0],
             block_state(
                 "minecraft:repeater",
-                &[("facing", "east"), ("delay", "4"), ("powered", "false")],
+                &[("facing", "west"), ("delay", "4"), ("powered", "false")],
             ),
         ),
         (
@@ -4834,7 +4834,7 @@ async fn redstone_repeater_delay_for_bot_on_fixture_world() {
 async fn redstone_torch_inverter_for_bot_on_fixture_world() {
     let lever = block_state(
         "minecraft:lever",
-        &[("face", "floor"), ("facing", "north"), ("powered", "false")],
+        &[("face", "wall"), ("facing", "west"), ("powered", "false")],
     );
     let (world, temp, addr, server) = redstone_fixture(&[
         ([0, 64, 0], lever),

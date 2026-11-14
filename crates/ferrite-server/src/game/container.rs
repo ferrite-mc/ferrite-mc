@@ -28,6 +28,9 @@ pub struct Containers {
     counter: i32,
     /// Stacks the player dropped, spawned as item entities by the region this tick.
     pub thrown: Vec<ItemStack>,
+    /// Experience a station click spawned as orbs: `(block, points)`, spawned at the block's
+    /// centre by the region this tick.
+    pub orbs: Vec<([i32; 3], i32)>,
     /// Snowballs, eggs and ender pearls the player threw, launched by the region this tick.
     pub launched: Vec<(ferrite_entity::arrow::Kind, Option<ItemStack>)>,
     /// Inventory slots of fishing rods the player used this tick: the region casts or reels.
@@ -127,6 +130,7 @@ impl Default for Containers {
             open: None,
             counter: 0,
             thrown: Vec::new(),
+            orbs: Vec::new(),
             launched: Vec::new(),
             shoulders: Vec::new(),
             fishing: Vec::new(),
@@ -454,6 +458,7 @@ impl Player {
             .filter(|(before, after)| *before != *after && holds_potion(before))
             .count();
         let xp = clicker.xp;
+        let block_xp = clicker.block_xp;
         let levels = clicker.levels;
         let crafted = clicker.crafted;
         if let (Some(OpenAt::Inventory(opened)), Some(source)) = (&self.menus.open_at, &self.source)
@@ -503,6 +508,13 @@ impl Player {
             }
         }
         self.menus.thrown.extend(drops);
+        // `GrindstoneMenu$4.onTake` awards through `ContainerLevelAccess`: only a grindstone
+        // block spawns the orbs; one opened without a block pays nothing.
+        if block_xp > 0
+            && let Some(OpenAt::Block(at, "minecraft:grindstone")) = self.menus.open_at
+        {
+            self.menus.orbs.push((at, block_xp));
+        }
         for _ in 0..taken_potions {
             super::recipe_unlock::push_plain(
                 self.uuid,

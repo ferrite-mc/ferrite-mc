@@ -12,8 +12,9 @@ use ferrite_recipe::{CookingKind, RecipeBook, RecipeKind};
 /// Vanilla `CraftingMenu.slotChangedCraftingGrid`: the grid's result from the recipe book.
 ///
 /// Special recipes (`crafting_special_*`, such as firework rockets or banner copying) have no
-/// fixed result in `ferrite-recipe` and craft nothing. No 26.3 crafting result carries a
-/// component patch, so a result is its item and count.
+/// fixed result in `ferrite-recipe` and craft nothing. A transmute recipe (dyeing a shulker box
+/// or bundle, cloning a map) keeps the components of its input stack, as
+/// `TransmuteRecipe.assemble` does with `transmuteCopy`; every other result is its item and count.
 struct RecipeCrafter(RecipeBook);
 
 /// Recipes plugins changed at runtime (`Server#addRecipe`, `removeRecipe`, `clearRecipes`,
@@ -72,6 +73,8 @@ struct Crafted {
     count: u32,
     /// The result stack with a plugin's metadata, when the recipe has any.
     stack: Option<ItemStack>,
+    /// The matched recipe when it is a transmute recipe.
+    transmute: Option<ferrite_recipe::CraftingTransmute>,
 }
 
 impl RecipeCrafter {
@@ -91,6 +94,20 @@ impl RecipeCrafter {
                     height,
                 )
             })?;
+        if let RecipeKind::CraftingTransmute(transmute) = &recipe.kind {
+            // A transmute recipe without a result item (map cloning) keeps the input's item.
+            return Some(Crafted {
+                id: recipe.id.clone(),
+                item: transmute
+                    .result
+                    .as_ref()
+                    .map(|result| result.item.clone())
+                    .unwrap_or_default(),
+                count: transmute.result.as_ref().map_or(1, |result| result.count),
+                stack: None,
+                transmute: Some(transmute.clone()),
+            });
+        }
         let result = recipe.result()?;
         let stack = plugin.extras.contains_key(&recipe.id).then(|| {
             let base = ItemStack::from_name(&result.item)
@@ -102,11 +119,54 @@ impl RecipeCrafter {
             item: result.item.clone(),
             count: result.count,
             stack: stack.flatten(),
+            transmute: None,
         })
     }
 }
 
 impl RecipeCrafter {
+    /// `TransmuteRecipe.assemble`: the first input stack with its item replaced by the recipe's
+    /// result (or kept, for map cloning) and every component carried over, so a dyed shulker box
+    /// keeps its contents. A recipe that adds its material count to the result counts the
+    /// material stacks in the grid.
+    fn transmute(
+        &self,
+        grid: &[ItemStack],
+        recipe: &ferrite_recipe::CraftingTransmute,
+        result_item: &str,
+        base_count: i32,
+    ) -> Option<ItemStack> {
+        let tags = self.0.tags();
+        let is_input = |stack: &ItemStack| {
+            !stack.is_empty()
+                && stack
+                    .name()
+                    .is_some_and(|name| recipe.input.matches(name, tags))
+        };
+        let input = grid.iter().find(|stack| is_input(stack))?;
+        let materials = if recipe.add_material_count_to_result {
+            let counted = grid
+                .iter()
+                .filter(|stack| {
+                    !stack.is_empty()
+                        && !is_input(stack)
+                        && stack
+                            .name()
+                            .is_some_and(|name| recipe.material.matches(name, tags))
+                })
+                .count();
+            i32::try_from(counted).ok()?
+        } else {
+            0
+        };
+        let mut out = input.clone();
+        if !result_item.is_empty() {
+            out.item = ferrite_item::item_id(result_item)?;
+        }
+        out.count = base_count + materials;
+        Some(out)
+    }
+
     /// Vanilla `RecipeManager.getRecipeFor(RecipeType, input)` for one furnace family, with the
     /// 26.3 recipe's result, cooking time and experience.
     fn cooking(&self, kind: FurnaceKind, input: &ItemStack) -> Option<CookingOutput> {
@@ -150,6 +210,10 @@ struct EnchantEntry {
     supported: String,
     /// Enchantments in the `exclusive_set` tag, resolved.
     exclusive: HashSet<String>,
+    /// `min_cost`: `Enchantment.getMinCost(level) = base + (level - 1) * per_level_above_first`.
+    min_cost: (i32, i32),
+    /// Whether the enchantment is in `#minecraft:curse`.
+    curse: bool,
 }
 
 static ENCHANTMENTS: OnceLock<HashMap<String, EnchantEntry>> = OnceLock::new();
@@ -161,6 +225,7 @@ fn enchantments() -> &'static HashMap<String, EnchantEntry> {
             return HashMap::new();
         };
         let mut map = HashMap::new();
+        let curses = enchantment_tag(&dir, "#minecraft:curse");
         let Ok(files) = std::fs::read_dir(dir.join("enchantment")) else {
             return map;
         };
@@ -189,9 +254,21 @@ fn enchantments() -> &'static HashMap<String, EnchantEntry> {
                 .and_then(serde_json::Value::as_str)
                 .map(|reference| enchantment_tag(&dir, reference))
                 .unwrap_or_default();
+            let min_cost = {
+                let field = |name: &str| {
+                    json.get("min_cost")
+                        .and_then(|cost| cost.get(name))
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|number| i32::try_from(number).ok())
+                        .unwrap_or(0)
+                };
+                (field("base"), field("per_level_above_first"))
+            };
             map.insert(
                 format!("minecraft:{stem}"),
                 EnchantEntry {
+                    min_cost,
+                    curse: curses.contains(&format!("minecraft:{stem}")),
                     max_level: i32::try_from(max_level).unwrap_or(1),
                     anvil_cost: i32::try_from(anvil_cost).unwrap_or(1),
                     supported: supported.to_owned(),
@@ -248,6 +325,22 @@ impl Crafter for RecipeCrafter {
             .is_some_and(|entry| entry.exclusive.contains(b))
     }
 
+    fn grindstone_enchantment(&self, enchantment: &str, level: i32) -> Option<(i32, bool)> {
+        let entry = enchantments().get(enchantment)?;
+        let (base, per_level) = entry.min_cost;
+        Some((base + (level - 1) * per_level, entry.curse))
+    }
+
+    fn random_below(&self, bound: i32) -> i32 {
+        use std::hash::BuildHasher;
+        if bound <= 0 {
+            return 0;
+        }
+        // `RandomState` is seeded from the OS per call, which is all an XP roll needs.
+        let roll = std::collections::hash_map::RandomState::new().hash_one(0u8);
+        (roll % u64::from(bound.unsigned_abs())) as i32
+    }
+
     fn craft(&self, grid: &[ItemStack], width: usize) -> ItemStack {
         if width == 0 || !grid.len().is_multiple_of(width) {
             return ItemStack::empty();
@@ -262,6 +355,9 @@ impl Crafter for RecipeCrafter {
                     return Some(stack);
                 }
                 let count = i32::try_from(crafted.count).ok()?;
+                if let Some(transmute) = &crafted.transmute {
+                    return self.transmute(grid, transmute, &crafted.item, count);
+                }
                 Some(ItemStack::from_name(&crafted.item)?.copy_with_count(count))
             })
             .unwrap_or_default()
@@ -597,6 +693,10 @@ pub fn match_for_plugin(
 ) -> Option<(String, String, u32)> {
     let book = BOOK.get_or_init(load).as_ref()?;
     let crafted = book.find(names, width, height)?;
+    // Map cloning has no fixed result item; only a grid's contents can say what it makes.
+    if crafted.item.is_empty() {
+        return None;
+    }
     Some((crafted.id, crafted.item, crafted.count))
 }
 
@@ -794,6 +894,44 @@ mod tests {
 
     fn stack(name: &str, count: i32) -> ItemStack {
         ItemStack::from_name(name).unwrap().copy_with_count(count)
+    }
+
+    #[test]
+    fn dyeing_a_shulker_box_keeps_its_contents() {
+        let crafter = crafter();
+        let mut shulker = stack("shulker_box", 1);
+        shulker.components.insert(
+            component_ids::CONTAINER,
+            Component::Container(vec![stack("diamond", 3)]),
+        );
+        let grid = [shulker.clone(), stack("red_dye", 1)];
+        let dyed = crafter.craft(&grid, 2);
+        assert_eq!(dyed.name(), Some("minecraft:red_shulker_box"));
+        assert_eq!(dyed.count, 1);
+        assert_eq!(
+            dyed.effective_component(component_ids::CONTAINER),
+            Some(Component::Container(vec![stack("diamond", 3)])),
+            "`TransmuteRecipe.assemble` copies the input's components"
+        );
+        // The same dye on another colour of box works too, and an empty box stays empty.
+        let blue = crafter.craft(&[stack("red_shulker_box", 1), stack("blue_dye", 1)], 2);
+        assert_eq!(blue.name(), Some("minecraft:blue_shulker_box"));
+    }
+
+    #[test]
+    fn cloning_a_map_keeps_the_filled_map_and_counts_the_blank_ones() {
+        let crafter = crafter();
+        let mut filled = stack("filled_map", 1);
+        filled
+            .components
+            .insert(component_ids::MAP_ID, Component::MapId(7));
+        let cloned = crafter.craft(&[filled.clone(), stack("map", 1), stack("map", 1)], 3);
+        assert_eq!(cloned.name(), Some("minecraft:filled_map"));
+        assert_eq!(cloned.count, 3, "the original and two copies");
+        assert_eq!(
+            cloned.effective_component(component_ids::MAP_ID),
+            Some(Component::MapId(7))
+        );
     }
 
     #[test]
@@ -1223,6 +1361,8 @@ mod tests {
         let mut inventory = ferrite_inventory::PlayerInventory::new();
         let mut menu = ferrite_inventory::Menu::stonecutter(1);
         menu.set_slot(&mut inventory, crafter, 0, stack("dirt", 4));
+        // `StonecutterMenu.setupRecipeList` clears the selection: the result shows once a button picks one.
+        menu.button_click(0, 0);
         assert_eq!(menu.result().name(), Some("minecraft:stick"));
         assert!(remove_recipe("plugin:cut_dirt"));
         assert!(crafter.stonecutting(&dirt).is_empty());
