@@ -5193,7 +5193,10 @@ async fn plugin_load_data_restores_health_hunger_and_experience() {
     }
     let mut saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&file).expect("saveData wrote the file")).unwrap();
-    assert_eq!(saved["vitals"]["health"], 20.0, "a fresh player is saved at full health");
+    assert_eq!(
+        saved["vitals"]["health"], 20.0,
+        "a fresh player is saved at full health"
+    );
     assert_eq!(saved["vitals"]["food"], 20);
     // A hurt, hungry player with some experience, as another process might have saved them.
     saved["vitals"] = serde_json::json!({

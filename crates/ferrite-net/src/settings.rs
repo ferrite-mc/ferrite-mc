@@ -229,13 +229,17 @@ mod tests {
             virtual_host(player),
             Some(("play.example.com".to_owned(), 25565))
         );
-        record_virtual_host(player, "lobby.example.com\0203.0.113.7\0uuid\0[]", 25570);
+        record_virtual_host(player, "lobby.example.com\x00203.0.113.7\0uuid\0[]", 25570);
         assert_eq!(
             virtual_host(player),
             Some(("lobby.example.com".to_owned(), 25570))
         );
         record_virtual_host(player, "\0only-forwarding", 1);
-        assert_eq!(virtual_host(player).unwrap().1, 25570, "an empty name keeps the old one");
+        assert_eq!(
+            virtual_host(player).unwrap().1,
+            25570,
+            "an empty name keeps the old one"
+        );
         forget(player);
         assert_eq!(virtual_host(player), None);
     }

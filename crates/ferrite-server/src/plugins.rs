@@ -724,9 +724,6 @@ impl ferrite_plugin::WorldView for SourceWorldView {
     fn loaded_chunks(&self, world: uuid::Uuid) -> Option<Vec<(i32, i32)>> {
         Some(self.source(world)?.resident_chunks())
     }
-    fn loaded_chunks(&self, world: uuid::Uuid) -> Option<Vec<(i32, i32)>> {
-        Some(self.source(world)?.resident_chunks())
-    }
     fn block_entities(
         &self,
         world: uuid::Uuid,

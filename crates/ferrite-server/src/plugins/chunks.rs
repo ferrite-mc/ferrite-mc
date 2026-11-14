@@ -15,6 +15,9 @@ use std::{
 };
 use uuid::Uuid;
 
+type ChunkSet = BTreeSet<(i32, i32)>;
+type PluginChunkMap = Mutex<HashMap<Uuid, ChunkSet>>;
+
 fn loaded() -> &'static Mutex<BTreeSet<(i32, i32)>> {
     static LOADED: OnceLock<Mutex<BTreeSet<(i32, i32)>>> = OnceLock::new();
     LOADED.get_or_init(Default::default)
@@ -22,8 +25,8 @@ fn loaded() -> &'static Mutex<BTreeSet<(i32, i32)>> {
 
 /// Chunks a plugin loaded, force-loaded or tickets, per world. The game loop never clears these;
 /// only `World#unloadChunk` and the matching ticket/forceload removal do.
-fn plugin_chunks() -> &'static Mutex<HashMap<Uuid, BTreeSet<(i32, i32)>>> {
-    static PLUGIN: OnceLock<Mutex<HashMap<Uuid, BTreeSet<(i32, i32)>>>> = OnceLock::new();
+fn plugin_chunks() -> &'static PluginChunkMap {
+    static PLUGIN: OnceLock<PluginChunkMap> = OnceLock::new();
     PLUGIN.get_or_init(Default::default)
 }
 
@@ -390,12 +393,21 @@ mod tests {
     fn chunk_count_is_the_union_of_player_and_plugin_chunks() {
         let world = Uuid::from_u128(0x9005);
         set_world_dir(None);
+        set_loaded(9100, 9100, false);
+        let before: usize = answer(&call("getChunkCount()", &[]))
+            .unwrap()
+            .parse()
+            .unwrap();
         set_loaded(9100, 9100, true);
         hold(world, 9200, 9200, true);
         let mut all = call("getChunkCount()", &[]);
         all.subject = world.to_string();
         assert_eq!(answer(&all).as_deref(), Some("1"));
-        assert_eq!(answer(&call("getChunkCount()", &[])).as_deref(), Some("1"));
+        let expected = (before + 1).to_string();
+        assert_eq!(
+            answer(&call("getChunkCount()", &[])).as_deref(),
+            Some(expected.as_str())
+        );
         hold(world, 9200, 9200, false);
         set_loaded(9100, 9100, false);
     }

@@ -623,10 +623,7 @@ pub fn splash_scale(center: [f64; 3], entity: ([f64; 3], [f64; 3]), margin: f64)
         [center[0] - 0.125, center[1], center[2] - 0.125],
         [center[0] + 0.125, center[1] + 0.25, center[2] + 0.125],
     );
-    let grown = (
-        entity.0.map(|v| v - margin),
-        entity.1.map(|v| v + margin),
-    );
+    let grown = (entity.0.map(|v| v - margin), entity.1.map(|v| v + margin));
     let gap = box_gap_sqr(potion, grown);
     (gap < 16.0).then(|| 1.0 - gap.sqrt() / 4.0)
 }
@@ -927,7 +924,10 @@ mod tests {
         let speed = MobEffectInstance::new(Effect::Speed.id(), 3600, 0);
         assert_eq!(splash_duration(speed, 0.5).unwrap().duration, 1800);
         assert_eq!(splash_duration(speed, 0.333).unwrap().duration, 1199);
-        assert!(splash_duration(speed, 0.005).is_none(), "18 ticks is under a second");
+        assert!(
+            splash_duration(speed, 0.005).is_none(),
+            "18 ticks is under a second"
+        );
         let long = MobEffectInstance::new(Effect::Speed.id(), 3600, 1);
         assert_eq!(splash_duration(long, 1.0).unwrap().amplifier, 1);
     }

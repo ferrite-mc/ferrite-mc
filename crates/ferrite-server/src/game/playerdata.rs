@@ -39,7 +39,13 @@ impl Vitals {
             return None;
         }
         let food = self.food.clamp(0, 20);
-        let finite = |value: f32, max: f32| if value.is_finite() { value.clamp(0.0, max) } else { 0.0 };
+        let finite = |value: f32, max: f32| {
+            if value.is_finite() {
+                value.clamp(0.0, max)
+            } else {
+                0.0
+            }
+        };
         Some(Self {
             health: self.health.min(max_health),
             absorption: finite(self.absorption, 1024.0),
@@ -334,11 +340,22 @@ mod tests {
             ..vitals.clone()
         };
         let fixed = wild.sanitized(20.0).unwrap();
-        assert_eq!((fixed.health, fixed.food, fixed.saturation), (20.0, 20, 20.0));
+        assert_eq!(
+            (fixed.health, fixed.food, fixed.saturation),
+            (20.0, 20, 20.0)
+        );
         assert_eq!((fixed.exhaustion, fixed.xp_progress), (40.0, 1.0));
         assert_eq!((fixed.xp_level, fixed.xp_total), (0, 0));
         for health in [0.0, -1.0, f32::NAN] {
-            assert_eq!(Vitals { health, ..vitals.clone() }.sanitized(20.0), None, "{health}");
+            assert_eq!(
+                Vitals {
+                    health,
+                    ..vitals.clone()
+                }
+                .sanitized(20.0),
+                None,
+                "{health}"
+            );
         }
         // An older save has no vitals key at all.
         let json = serde_json::to_value(&base).unwrap();

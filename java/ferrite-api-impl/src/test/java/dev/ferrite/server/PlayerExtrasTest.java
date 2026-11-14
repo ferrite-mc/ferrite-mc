@@ -550,10 +550,12 @@ class PlayerExtrasTest {
             assertEquals(org.bukkit.entity.EntityType.ARROW, arrow.getType());
             var small = player.launchProjectile(org.bukkit.entity.SmallFireball.class, new org.bukkit.util.Vector(0, 0, 1), null);
             assertEquals(org.bukkit.entity.EntityType.SMALL_FIREBALL, small.getType());
-            assertThrows(UnsupportedOperationException.class, () -> player.launchProjectile(org.bukkit.entity.DragonFireball.class, null, null));
+            var dragon = player.launchProjectile(org.bukkit.entity.DragonFireball.class, null, null);
+            assertEquals(org.bukkit.entity.EntityType.DRAGON_FIREBALL, dragon.getType());
         } finally { HostBridge.transport = null; }
         assertEquals(java.util.List.of(
             "spawnArrow(Location,double,double,double,String)",
+            "launchThrown(Location,EntityType,double,double,double,String,String)",
             "launchThrown(Location,EntityType,double,double,double,String,String)"), calls);
     }
 

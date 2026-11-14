@@ -10045,8 +10045,16 @@ impl Region {
         // `ProjectileUtil.computeMargin`: 0.3 once the potion has flown a few ticks.
         const MARGIN: f64 = 0.3;
         let reach = (
-            [center[0] - 0.125 - 4.0, center[1] - 2.0, center[2] - 0.125 - 4.0],
-            [center[0] + 0.125 + 4.0, center[1] + 0.25 + 2.0, center[2] + 0.125 + 4.0],
+            [
+                center[0] - 0.125 - 4.0,
+                center[1] - 2.0,
+                center[2] - 0.125 - 4.0,
+            ],
+            [
+                center[0] + 0.125 + 4.0,
+                center[1] + 0.25 + 2.0,
+                center[2] + 0.125 + 4.0,
+            ],
         );
         let inside = |min: [f64; 3], max: [f64; 3]| {
             (0..3).all(|axis| min[axis] < reach.1[axis] && max[axis] > reach.0[axis])
@@ -12434,13 +12442,15 @@ mod tests {
     fn plugin_firework_operations_change_the_rocket_and_detonate_bursts_it() {
         use ferrite_plugin::EntityOperation as Op;
         let mut region = Region::default();
-        let key = region.entities.insert(ferrite_entity::firework::new_firework(
-            ferrite_math::Vec3::new(0.5, 90.0, 0.5),
-            3,
-            1,
-            None,
-            &mut ferrite_entity::Rng::new(5),
-        ));
+        let key = region
+            .entities
+            .insert(ferrite_entity::firework::new_firework(
+                ferrite_math::Vec3::new(0.5, 90.0, 0.5),
+                3,
+                1,
+                None,
+                &mut ferrite_entity::Rng::new(5),
+            ));
         let uuid = region.entities.data(key).unwrap().uuid;
         let state = |region: &Region| region.entities.data(key).unwrap().firework.clone().unwrap();
         assert!(region.plugin_entity_op(uuid, &Op::SetFireworkMaxLife(60)));
@@ -12558,7 +12568,11 @@ mod tests {
         for _ in 0..ferrite_entity::potion::PotionCloud::WAIT - 1 {
             region.tick_potion_clouds();
         }
-        assert_eq!(effect_level(&region, inside, Effect::Speed), 0, "still waiting");
+        assert_eq!(
+            effect_level(&region, inside, Effect::Speed),
+            0,
+            "still waiting"
+        );
         region.tick_potion_clouds();
         assert_eq!(effect_level(&region, inside, Effect::Speed), 1);
         assert_eq!(effect_level(&region, outside, Effect::Speed), 0);

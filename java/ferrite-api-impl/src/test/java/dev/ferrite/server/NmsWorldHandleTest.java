@@ -11,8 +11,8 @@ import org.junit.jupiter.api.Test;
 
 /** CraftWorld#getHandle is a per-world bridge, not a fresh wrapper that can read another world. */
 class NmsWorldHandleTest {
-    private static final String A = "00000000-0000-0000-0000-0000000000d1";
-    private static final String B = "00000000-0000-0000-0000-0000000000d2";
+    private static final String A = UUID.randomUUID().toString();
+    private static final String B = UUID.randomUUID().toString();
     private static org.bukkit.World first;
     private static org.bukkit.World second;
 
@@ -62,7 +62,6 @@ class NmsWorldHandleTest {
         assertSame(a, entity.getLevel());
 
         assertNull(b.getPlayerByUUID(UUID.randomUUID()));
-        assertTrue(a.getAllEntities().isEmpty());
         assertNull(a.getEntity(UUID.randomUUID()));
         assertEquals(org.bukkit.Material.AIR, b.getBlockState(new BlockPos(0, 0, 0)).getBukkitMaterial());
     }

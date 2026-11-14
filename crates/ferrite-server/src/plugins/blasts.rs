@@ -294,9 +294,21 @@ mod tests {
             })
         );
         for (method, args, expected) in [
-            ("detonate()", vec![], ferrite_plugin::EntityOperation::SetFireworkLife(i32::MAX - 1)),
-            ("setFireworkLife(int)", vec!["7"], ferrite_plugin::EntityOperation::SetFireworkLife(7)),
-            ("setFireworkMaxLife(int)", vec!["30"], ferrite_plugin::EntityOperation::SetFireworkMaxLife(30)),
+            (
+                "detonate()",
+                vec![],
+                ferrite_plugin::EntityOperation::SetFireworkLife(i32::MAX - 1),
+            ),
+            (
+                "setFireworkLife(int)",
+                vec!["7"],
+                ferrite_plugin::EntityOperation::SetFireworkLife(7),
+            ),
+            (
+                "setFireworkMaxLife(int)",
+                vec!["30"],
+                ferrite_plugin::EntityOperation::SetFireworkMaxLife(30),
+            ),
         ] {
             assert_eq!(
                 on_entity(method, &args),

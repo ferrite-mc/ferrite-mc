@@ -79,7 +79,11 @@ pub fn step(pos: Vec3, vel: Vec3, target: Vec3) -> (Vec3, Vec3) {
     }
     // Vanilla compares `newPos.y - delta.y` (the old height) with the target's.
     let up = if pos.y < target.y { 1.0 } else { -1.0 };
-    let scale = if distance > 0.0 { speed / distance } else { 0.0 };
+    let scale = if distance > 0.0 {
+        speed / distance
+    } else {
+        0.0
+    };
     let vel = Vec3::new(dx * scale, y + (up - y) * 0.015, dz * scale);
     (next, vel)
 }
@@ -215,7 +219,10 @@ mod tests {
         // Within a block of the target both the horizontal speed and the climb are damped by 0.8.
         let (_, near) = step(Vec3::new(9.2, 60.0, 0.0), Vec3::new(0.0, 0.5, 0.0), target);
         // The old height (60) is not below the target's (60), so it eases toward -1.
-        assert!((near.y - (0.4 + (-1.0 - 0.4) * 0.015)).abs() < 1e-9, "{near:?}");
+        assert!(
+            (near.y - (0.4 + (-1.0 - 0.4) * 0.015)).abs() < 1e-9,
+            "{near:?}"
+        );
     }
 
     #[test]

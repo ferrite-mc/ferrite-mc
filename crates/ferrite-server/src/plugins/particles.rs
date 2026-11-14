@@ -179,8 +179,7 @@ pub fn particle_command(call: &HostCall) -> Option<PlayerCommand> {
     if !name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
         return None;
     }
-    let id =
-        ferrite_data::registries::id("minecraft:particle_type", &format!("minecraft:{name}"))?;
+    let id = ferrite_data::registries::id("minecraft:particle_type", &format!("minecraft:{name}"))?;
     let data = options(name, arg(11)?)?;
     let position = |i: usize| finite(arg(i)?).filter(|v| v.abs() < 3.0e7);
     let small = |i: usize| finite(arg(i)?).map(|v| v as f32);

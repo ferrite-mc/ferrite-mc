@@ -125,9 +125,9 @@ class ApiSurfaceTest {
     }
 
     @Test void offlinePlayersAndOperatorListIncludeKnownNames() {
-        server.registerOfflinePlayer(java.util.UUID.fromString("00000000-0000-0000-0000-0000000000bb"), "KnownOffline", false);
-        assertNotNull(server.getOfflinePlayerIfCached("KnownOffline"));
-        assertTrue(Arrays.stream(server.getOfflinePlayers()).anyMatch(candidate -> "KnownOffline".equals(candidate.getName())));
+        server.registerOfflinePlayer(java.util.UUID.randomUUID(), "SurfaceOffline", false);
+        assertNotNull(server.getOfflinePlayerIfCached("SurfaceOffline"));
+        assertTrue(Arrays.stream(server.getOfflinePlayers()).anyMatch(candidate -> "SurfaceOffline".equals(candidate.getName())));
     }
 
     @Test void pluginManagerRejectsListenersForUnknownPlugins() {
