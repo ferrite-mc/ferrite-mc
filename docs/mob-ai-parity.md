@@ -87,7 +87,6 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 ## Jar notes that contradict older docs
 
 - Gateway outer-island search: vanilla `findExitPosition` calls
-  `findTallestBlock(..., 5, ...)` (radius 5); Ferrite searches 16 blocks. The older
-  `docs/end-dimension.md` said Ferrite's radius was smaller; it is larger.
+  `findTallestBlock(..., 5, ...)` (radius 5); Ferrite now uses the same radius 5 (was 16).
 - The gateway creation beam does **not** block a teleport in vanilla (`EndGatewayBlock` only
   checks `isCoolingDown`), so the fix gates on the 40-tick cooldown only.

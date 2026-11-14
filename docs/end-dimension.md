@@ -118,7 +118,7 @@ What works, how it is built, and what is still missing.
   is not saved (a reloaded charge aborts to holding, as vanilla does with no target); the head is
   taken at 5 blocks in front of the body, not read from a model; the cloud keeps the shared 600
   tick, radius 3 to 5 shape rather than vanilla's 200-tick radius-5 cloud. The dragon smashes
-  every block in its body except `#minecraft:dragon_immune`. The gateway radius stays 16 (see
+  every block in its body except `#minecraft:dragon_immune`. The gateway radius is now 5 (see
   below).
 - **Gateway beam.** A gateway gets the vanilla block entity (`minecraft:end_gateway`, `Age` as a
   long). The server sends the existing `ClientboundBlockEntityDataPacket` (`BlockEntityData`, id
@@ -182,11 +182,13 @@ What works, how it is built, and what is still missing.
   `TheEndGatewayBlockEntity` in the 26.3 jar. The runtime clock still restarts from the stored
   age after a restart and is idle when nobody is in the End, and the client rendering of the
   purple beam is unverified (see below).
-- **Outer islands.** A gateway landing searches up to 16 blocks around the point 1024 blocks out
-  for the nearest loaded column with ground and two air above; an all-void 3x3 chunk area cancels
-  the trip instead of dropping the player into the void. Vanilla `findExitPosition` uses
-  `findTallestBlock(..., 5, ...)`, so Ferrite's 16-block radius is larger, not smaller as this
-  file previously said.
+- **Outer islands.** A gateway landing searches up to 5 blocks around the point 1024 blocks out
+  for the nearest loaded column with ground and two air above, matching vanilla 26.3
+  `TheEndGatewayBlockEntity.findExitPosition` (`findTallestBlock(level, pos + (0, 2, 0), 5,
+  false)`, read with `javap` from the local server jar). An all-void 3x3 chunk area cancels the
+  trip instead of dropping the player into the void; ground 6 blocks away no longer counts.
+  Tests: `a_gateway_landing_at_1024_blocks_finds_solid_ground_within_five_blocks`,
+  `a_gateway_with_no_ground_within_five_blocks_cancels_instead_of_dropping_into_the_void`.
 - **Guarded-spike choice.** The cage pair follows the two shortest loaded spike tops. On a host
   terrain without vanilla's spike podiums the choice can differ from the generated world's
   shuffled sizes.
