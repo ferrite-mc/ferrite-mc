@@ -423,10 +423,9 @@ impl RecipeCrafter {
                 {
                     continue;
                 }
-                let (Some(material), Some(pattern)) = (
-                    addition.and_then(trim_material_of),
-                    trim.pattern.as_deref(),
-                ) else {
+                let (Some(material), Some(pattern)) =
+                    (addition.and_then(trim_material_of), trim.pattern.as_deref())
+                else {
                     continue;
                 };
                 let trim = Trim {
@@ -604,7 +603,10 @@ pub fn match_for_plugin(
 /// The recipe types a plugin can add: Bukkit's `ShapedRecipe`, `ShapelessRecipe`, the four cooking
 /// recipes, `StonecuttingRecipe`, `SmithingTransformRecipe` and `SmithingTrimRecipe`.
 fn addable(kind: &RecipeKind) -> bool {
-    !matches!(kind, RecipeKind::CraftingTransmute(_) | RecipeKind::Special(_))
+    !matches!(
+        kind,
+        RecipeKind::CraftingTransmute(_) | RecipeKind::Special(_)
+    )
 }
 
 /// `Server#addRecipe`: a recipe in vanilla data pack JSON, with the metadata of its result stack.
@@ -752,8 +754,8 @@ pub fn plugin_book_view(
     }
     let result_of = |recipe: &ferrite_recipe::Recipe| {
         let result = recipe.result()?;
-        let stack = ItemStack::from_name(&result.item)?
-            .copy_with_count(i32::try_from(result.count).ok()?);
+        let stack =
+            ItemStack::from_name(&result.item)?.copy_with_count(i32::try_from(result.count).ok()?);
         Some(plugin.dress(&recipe.id, stack))
     };
     let update = super::recipe_wire::update_body(
@@ -1086,10 +1088,19 @@ mod tests {
             crafted.effective_component(component_ids::ENCHANTMENTS),
             Some(Component::Enchantments(e)) if e.level("minecraft:sharpness") == Some(3)
         ));
-        assert_eq!(crafted.effective_component(component_ids::DAMAGE), Some(Component::Damage(7)));
+        assert_eq!(
+            crafted.effective_component(component_ids::DAMAGE),
+            Some(Component::Damage(7))
+        );
         assert!(remove_recipe("plugin:meta_craft"));
         assert_eq!(crafter.craft(&grid, 2), ItemStack::empty());
-        assert!(!plugin_recipes().read().unwrap().extras.contains_key("plugin:meta_craft"));
+        assert!(
+            !plugin_recipes()
+                .read()
+                .unwrap()
+                .extras
+                .contains_key("plugin:meta_craft")
+        );
     }
 
     #[test]
@@ -1102,19 +1113,34 @@ mod tests {
             (FurnaceKind::BlastFurnace, "blasting"),
             (FurnaceKind::Smoker, "smoking"),
         ] {
-            assert!(crafter.cook(kind, &gravel).is_none(), "{type_name}: no recipe yet");
+            assert!(
+                crafter.cook(kind, &gravel).is_none(),
+                "{type_name}: no recipe yet"
+            );
             let id = format!("plugin:cook_{type_name}");
             let json = format!(
                 r#"{{"type":"minecraft:{type_name}","ingredient":"minecraft:gravel","result":{{"id":"minecraft:glass","count":2}},"experience":1.5,"cookingtime":37}}"#
             );
-            assert_eq!(add_plugin_recipe(&id, &json, Some(named("Fused")), 0), Ok(true));
-            let out = crafter.cook(kind, &gravel).expect("the plugin recipe cooks");
+            assert_eq!(
+                add_plugin_recipe(&id, &json, Some(named("Fused")), 0),
+                Ok(true)
+            );
+            let out = crafter
+                .cook(kind, &gravel)
+                .expect("the plugin recipe cooks");
             assert_eq!(out.result.name(), Some("minecraft:glass"));
             assert_eq!(out.result.count, 2);
             assert_eq!((out.cook_time, out.experience), (37, 1.5));
-            assert!(custom_name(&out.result).is_some_and(|n| n.contains("Fused")), "{type_name}");
+            assert!(
+                custom_name(&out.result).is_some_and(|n| n.contains("Fused")),
+                "{type_name}"
+            );
             // The other two families do not see it.
-            for other in [FurnaceKind::Furnace, FurnaceKind::BlastFurnace, FurnaceKind::Smoker] {
+            for other in [
+                FurnaceKind::Furnace,
+                FurnaceKind::BlastFurnace,
+                FurnaceKind::Smoker,
+            ] {
                 if other != kind {
                     assert!(
                         crafter.cook(other, &gravel).is_none()
@@ -1124,7 +1150,10 @@ mod tests {
                 }
             }
             assert!(remove_recipe(&id));
-            assert!(crafter.cook(kind, &gravel).is_none(), "{type_name}: removed");
+            assert!(
+                crafter.cook(kind, &gravel).is_none(),
+                "{type_name}: removed"
+            );
         }
     }
 
@@ -1179,10 +1208,16 @@ mod tests {
         let dirt = stack("dirt", 1);
         assert!(crafter.stonecutting(&dirt).is_empty());
         let json = r#"{"type":"minecraft:stonecutting","ingredient":"minecraft:dirt","result":{"id":"minecraft:stick","count":6}}"#;
-        assert_eq!(add_plugin_recipe("plugin:cut_dirt", json, Some(named("Twig")), 0), Ok(true));
+        assert_eq!(
+            add_plugin_recipe("plugin:cut_dirt", json, Some(named("Twig")), 0),
+            Ok(true)
+        );
         let options = crafter.stonecutting(&dirt);
         assert_eq!(options.len(), 1);
-        assert_eq!((options[0].name(), options[0].count), (Some("minecraft:stick"), 6));
+        assert_eq!(
+            (options[0].name(), options[0].count),
+            (Some("minecraft:stick"), 6)
+        );
         assert!(custom_name(&options[0]).is_some_and(|n| n.contains("Twig")));
         // The menu offers it and crafts it.
         let mut inventory = ferrite_inventory::PlayerInventory::new();
@@ -1195,7 +1230,9 @@ mod tests {
         let stone = stack("stone", 1);
         let before = crafter.stonecutting(&stone).len();
         assert!(before > 1);
-        assert!(remove_recipe("minecraft:stone_slab_from_stone_stonecutting"));
+        assert!(remove_recipe(
+            "minecraft:stone_slab_from_stone_stonecutting"
+        ));
         assert_eq!(crafter.stonecutting(&stone).len(), before - 1);
         reset_recipes();
         assert_eq!(crafter.stonecutting(&stone).len(), before);
@@ -1209,26 +1246,44 @@ mod tests {
         let mut sword = stack("diamond_sword", 1);
         let mut enchants = ferrite_item::Enchantments::new();
         enchants.set("minecraft:sharpness", 4);
-        sword
-            .components
-            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(enchants));
+        sword.components.insert(
+            component_ids::ENCHANTMENTS,
+            Component::Enchantments(enchants),
+        );
         // No template and no addition: both are optional in vanilla.
         let json = r#"{"type":"minecraft:smithing_transform","base":"minecraft:diamond_sword","result":{"id":"minecraft:golden_sword"}}"#;
-        assert!(crafter.smithing(&ItemStack::empty(), &sword, &ItemStack::empty()).is_none());
-        assert_eq!(add_plugin_recipe("plugin:gild", json, Some(named("Gilded")), 0), Ok(true));
+        assert!(
+            crafter
+                .smithing(&ItemStack::empty(), &sword, &ItemStack::empty())
+                .is_none()
+        );
+        assert_eq!(
+            add_plugin_recipe("plugin:gild", json, Some(named("Gilded")), 0),
+            Ok(true)
+        );
         let out = crafter
             .smithing(&ItemStack::empty(), &sword, &ItemStack::empty())
             .expect("the plugin smithing recipe matches an empty template and addition");
         assert_eq!(out.name(), Some("minecraft:golden_sword"));
         assert!(custom_name(&out).is_some_and(|n| n.contains("Gilded")));
         assert_eq!(
-            crafter.smithing_recipe_id(&ItemStack::empty(), &sword, &ItemStack::empty()).as_deref(),
+            crafter
+                .smithing_recipe_id(&ItemStack::empty(), &sword, &ItemStack::empty())
+                .as_deref(),
             Some("plugin:gild")
         );
         // A recipe without a template only matches an empty template slot.
-        assert!(crafter.smithing(&template, &sword, &ItemStack::empty()).is_none());
+        assert!(
+            crafter
+                .smithing(&template, &sword, &ItemStack::empty())
+                .is_none()
+        );
         assert!(remove_recipe("plugin:gild"));
-        assert!(crafter.smithing(&ItemStack::empty(), &sword, &ItemStack::empty()).is_none());
+        assert!(
+            crafter
+                .smithing(&ItemStack::empty(), &sword, &ItemStack::empty())
+                .is_none()
+        );
 
         // A recipe with a template and an addition, no metadata on the result: the base's enchantments survive.
         let json = r#"{"type":"minecraft:smithing_transform","template":"minecraft:stick","base":"minecraft:diamond_sword","addition":"minecraft:gold_ingot","result":{"id":"minecraft:iron_sword"}}"#;
@@ -1241,7 +1296,11 @@ mod tests {
             out.effective_component(component_ids::ENCHANTMENTS),
             Some(Component::Enchantments(e)) if e.level("minecraft:sharpness") == Some(4)
         ));
-        assert!(crafter.smithing(&template, &sword, &stack("iron_ingot", 1)).is_none());
+        assert!(
+            crafter
+                .smithing(&template, &sword, &stack("iron_ingot", 1))
+                .is_none()
+        );
         assert!(remove_recipe("plugin:swap"));
     }
 
@@ -1253,9 +1312,10 @@ mod tests {
         let mut sword = stack("diamond_sword", 1);
         let mut enchants = ferrite_item::Enchantments::new();
         enchants.set("minecraft:sharpness", 5);
-        sword
-            .components
-            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(enchants));
+        sword.components.insert(
+            component_ids::ENCHANTMENTS,
+            Component::Enchantments(enchants),
+        );
         let template = stack("netherite_upgrade_smithing_template", 1);
         let out = crafter
             .smithing(&template, &sword, &stack("netherite_ingot", 1))
@@ -1272,7 +1332,10 @@ mod tests {
         let _guard = overlay_lock();
         let crafter = crafter();
         let json = r##"{"type":"minecraft:smithing_trim","template":"minecraft:stick","base":"#minecraft:trimmable_armor","addition":"minecraft:amethyst_shard","pattern":"minecraft:wild"}"##;
-        assert_eq!(add_plugin_recipe("plugin:trim_stick", json, None, 0), Ok(true));
+        assert_eq!(
+            add_plugin_recipe("plugin:trim_stick", json, None, 0),
+            Ok(true)
+        );
         let armor = stack("iron_helmet", 1);
         let trimmed = crafter
             .smithing(&stack("stick", 1), &armor, &stack("amethyst_shard", 1))
@@ -1282,7 +1345,11 @@ mod tests {
             Some(Component::Trim(trim)) if trim.pattern == "minecraft:wild" && trim.material == "minecraft:amethyst"
         ));
         assert!(remove_recipe("plugin:trim_stick"));
-        assert!(crafter.smithing(&stack("stick", 1), &armor, &stack("amethyst_shard", 1)).is_none());
+        assert!(
+            crafter
+                .smithing(&stack("stick", 1), &armor, &stack("amethyst_shard", 1))
+                .is_none()
+        );
     }
 
     #[test]

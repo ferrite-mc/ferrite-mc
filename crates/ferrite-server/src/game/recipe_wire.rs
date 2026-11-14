@@ -189,7 +189,11 @@ pub fn encode_entry(
         }
         RecipeKind::CraftingShaped(shaped) => {
             // `ShapedRecipePattern` shrinks the pattern: blank outer rows and columns are gone.
-            let rows = shaped.pattern.iter().enumerate().filter(|(_, row)| row.iter().any(Option::is_some));
+            let rows = shaped
+                .pattern
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.iter().any(Option::is_some));
             let (top, bottom) = (
                 rows.clone().map(|(i, _)| i).min()?,
                 rows.map(|(i, _)| i).max()?,
@@ -197,7 +201,12 @@ pub fn encode_entry(
             let columns: Vec<usize> = shaped
                 .pattern
                 .iter()
-                .flat_map(|row| row.iter().enumerate().filter(|(_, cell)| cell.is_some()).map(|(i, _)| i))
+                .flat_map(|row| {
+                    row.iter()
+                        .enumerate()
+                        .filter(|(_, cell)| cell.is_some())
+                        .map(|(i, _)| i)
+                })
                 .collect();
             let (left, right) = (*columns.iter().min()?, *columns.iter().max()?);
             let (width, height) = (right - left + 1, bottom - top + 1);
@@ -305,7 +314,9 @@ pub fn update_body(
         }
         let ids = match key.as_str() {
             "minecraft:furnace_input" => cooking_inputs(&recipes, tags, CookingKind::Smelting),
-            "minecraft:blast_furnace_input" => cooking_inputs(&recipes, tags, CookingKind::Blasting),
+            "minecraft:blast_furnace_input" => {
+                cooking_inputs(&recipes, tags, CookingKind::Blasting)
+            }
             "minecraft:smoker_input" => cooking_inputs(&recipes, tags, CookingKind::Smoking),
             "minecraft:campfire_input" => {
                 cooking_inputs(&recipes, tags, CookingKind::CampfireCooking)
@@ -360,11 +371,7 @@ fn cooking_inputs(recipes: &[&Recipe], tags: &ItemTags, kind: CookingKind) -> BT
         .collect()
 }
 
-fn smithing_slot(
-    recipes: &[&Recipe],
-    tags: &ItemTags,
-    slot: usize,
-) -> BTreeSet<i32> {
+fn smithing_slot(recipes: &[&Recipe], tags: &ItemTags, slot: usize) -> BTreeSet<i32> {
     recipes
         .iter()
         .filter_map(|recipe| match &recipe.kind {
@@ -386,7 +393,10 @@ mod tests {
     fn data() -> Option<(RecipeBook, String)> {
         let root = [
             Path::new("vanilla/26.3/generated"),
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../vanilla/26.3/generated")),
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../vanilla/26.3/generated"
+            )),
         ]
         .into_iter()
         .find(|dir| dir.join("ferrite/recipes.json").is_file())?;
@@ -422,13 +432,19 @@ mod tests {
         let mut checked = std::collections::BTreeMap::<&str, usize>::new();
         let mut skipped = 0;
         for recipe in book.recipes() {
-            let Some(entry) = vanilla.recipes.get(&recipe.id).and_then(|r| r.displays.first())
+            let Some(entry) = vanilla
+                .recipes
+                .get(&recipe.id)
+                .and_then(|r| r.displays.first())
             else {
                 continue;
             };
             // A result with a component patch (suspicious stew) is dressed by the caller, not by
             // this test's plain stack.
-            if recipe.result().is_some_and(|result| result.components.is_some()) {
+            if recipe
+                .result()
+                .is_some_and(|result| result.components.is_some())
+            {
                 continue;
             }
             let kind = match &recipe.kind {
@@ -439,8 +455,14 @@ mod tests {
                 RecipeKind::SmithingTransform(_) => "smithing",
                 _ => continue,
             };
-            let encoded = encode_entry(recipe, book.tags(), entry.index, group_of(entry), &stack_of(recipe))
-                .unwrap_or_else(|| panic!("{} did not encode", recipe.id));
+            let encoded = encode_entry(
+                recipe,
+                book.tags(),
+                entry.index,
+                group_of(entry),
+                &stack_of(recipe),
+            )
+            .unwrap_or_else(|| panic!("{} did not encode", recipe.id));
             // A set mixing items and tags lists the tag's members in the tag file's order, which
             // the loaded tag table (a hash set) no longer has; the client treats it as a set.
             if mixes_tags(recipe) {
@@ -454,27 +476,43 @@ mod tests {
                 "display of {}",
                 recipe.id
             );
-            assert_eq!(hex(&encoded.wire), hex(&entry.wire), "entry of {}", recipe.id);
+            assert_eq!(
+                hex(&encoded.wire),
+                hex(&entry.wire),
+                "entry of {}",
+                recipe.id
+            );
             *checked.entry(kind).or_default() += 1;
         }
-        assert!(skipped * 20 < checked.values().sum::<usize>(), "{skipped} recipes skipped");
+        assert!(
+            skipped * 20 < checked.values().sum::<usize>(),
+            "{skipped} recipes skipped"
+        );
         // Every supported kind was really compared.
         for kind in ["shaped", "shapeless", "cooking", "stonecutting", "smithing"] {
-            assert!(checked.get(kind).copied().unwrap_or(0) > 0, "no {kind} recipe was compared");
+            assert!(
+                checked.get(kind).copied().unwrap_or(0) > 0,
+                "no {kind} recipe was compared"
+            );
         }
     }
 
     fn mixes_tags(recipe: &Recipe) -> bool {
         let mixed = |ingredient: &Ingredient| {
             ingredient.options.len() > 1
-                && ingredient.options.iter().any(|o| matches!(o, IngredientEntry::Tag(_)))
+                && ingredient
+                    .options
+                    .iter()
+                    .any(|o| matches!(o, IngredientEntry::Tag(_)))
         };
         match &recipe.kind {
             RecipeKind::CraftingShaped(r) => r.pattern.iter().flatten().flatten().any(mixed),
             RecipeKind::CraftingShapeless(r) => r.ingredients.iter().any(mixed),
             RecipeKind::Cooking(r) => mixed(&r.ingredient),
             RecipeKind::Stonecutting(r) => mixed(&r.ingredient),
-            RecipeKind::SmithingTransform(r) => mixed(&r.template) || mixed(&r.base) || mixed(&r.addition),
+            RecipeKind::SmithingTransform(r) => {
+                mixed(&r.template) || mixed(&r.base) || mixed(&r.addition)
+            }
             _ => false,
         }
     }
@@ -493,8 +531,10 @@ mod tests {
                 .as_str()
                 .unwrap(),
         );
-        let body = update_body(&base, &book, &|_| true, &[], &|recipe| Some(stack_of(recipe)))
-            .expect("the body encodes");
+        let body = update_body(&base, &book, &|_| true, &[], &|recipe| {
+            Some(stack_of(recipe))
+        })
+        .expect("the body encodes");
         // The item sets are equal as sets and the stonecutter options are the same list.
         assert_eq!(sets_of(&body), sets_of(&base));
         assert_eq!(hex(&stonecutter_of(&body)), hex(&stonecutter_of(&base)));
@@ -516,7 +556,9 @@ mod tests {
             let key = String::from_utf8(rest[..len].to_vec()).unwrap();
             rest = &rest[len..];
             let count = VarInt::decode(&mut rest).unwrap().0;
-            let mut ids: Vec<i32> = (0..count).map(|_| VarInt::decode(&mut rest).unwrap().0).collect();
+            let mut ids: Vec<i32> = (0..count)
+                .map(|_| VarInt::decode(&mut rest).unwrap().0)
+                .collect();
             ids.sort_unstable();
             out.insert(key, ids);
         }

@@ -450,7 +450,9 @@ mod tests {
             let found = match_cooking_in(&recipes, &tags, kind, "minecraft:gravel");
             assert_eq!(found.map(|r| r.id.as_str()), Some(id));
         }
-        assert!(match_cooking_in(&recipes, &tags, CookingKind::Smelting, "minecraft:sand").is_none());
+        assert!(
+            match_cooking_in(&recipes, &tags, CookingKind::Smelting, "minecraft:sand").is_none()
+        );
 
         let cut = |id: &str, item: &str| {
             parse_recipe_json(
@@ -461,7 +463,11 @@ mod tests {
             )
             .unwrap()
         };
-        let cuts = [cut("plugin:x", "stone"), cut("plugin:y", "dirt"), cut("plugin:z", "stone")];
+        let cuts = [
+            cut("plugin:x", "stone"),
+            cut("plugin:y", "dirt"),
+            cut("plugin:z", "stone"),
+        ];
         let ids: Vec<_> = stonecutting_in(&cuts, &tags, "minecraft:stone")
             .iter()
             .map(|r| r.id.as_str())

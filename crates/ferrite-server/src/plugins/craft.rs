@@ -20,7 +20,10 @@ fn recipe_changes(call: &HostCall) -> Option<String> {
                         None => return Some("!the result's item metadata is not readable".into()),
                     }
                 };
-                (meta, call.args.get(3)?.parse::<i32>().ok().filter(|d| *d >= 0)?)
+                (
+                    meta,
+                    call.args.get(3)?.parse::<i32>().ok().filter(|d| *d >= 0)?,
+                )
             } else {
                 (None, 0)
             };
@@ -234,17 +237,30 @@ mod tests {
                 &[id, json, meta, damage],
             ))
         };
-        assert_eq!(add("plugin:route_fuse", smelt, &named, "0").as_deref(), Some("true"));
-        assert_eq!(add("plugin:route_fuse", smelt, "", "0").as_deref(), Some("false"), "taken");
+        assert_eq!(
+            add("plugin:route_fuse", smelt, &named, "0").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            add("plugin:route_fuse", smelt, "", "0").as_deref(),
+            Some("false"),
+            "taken"
+        );
         // Metadata the host cannot read refuses the recipe instead of adding it bare.
         let unreadable = add("plugin:route_unreadable", smelt, "not a payload", "0");
         assert!(unreadable.is_some_and(|reply| reply.starts_with('!')));
         // A negative wear is a malformed call.
         assert_eq!(add("plugin:route_wear", smelt, "", "-1"), None);
         let transmute = r#"{"type":"minecraft:crafting_transmute","input":"minecraft:dirt","material":"minecraft:sand","result":"minecraft:stone"}"#;
-        assert!(add("plugin:route_transmute", transmute, "", "0").is_some_and(|r| r.starts_with('!')));
+        assert!(
+            add("plugin:route_transmute", transmute, "", "0").is_some_and(|r| r.starts_with('!'))
+        );
         assert_eq!(
-            answer(&change("removeCraftingRecipe(String)", &["plugin:route_fuse"])).as_deref(),
+            answer(&change(
+                "removeCraftingRecipe(String)",
+                &["plugin:route_fuse"]
+            ))
+            .as_deref(),
             Some("true")
         );
     }
