@@ -87,9 +87,15 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
     entities; a relation that is empty (a player with no snapshot entry, an untamed mob) forks
     to no sources like vanilla's optional entity argument. Test:
     `on_relations_use_the_published_snapshot`.
-  - **Not supported** (each fails with a message, never silently): `summon` (spawning is
-    scheduled onto the owning region, so the new entity is not visible to the rest of the
-    chain); `on origin` (the spawn-origin entity is not in the snapshot); `if items|slots entity`
+  - `summon <entity>` (2026-11-14) is a two-phase hand-off: the command thread assigns the uuid,
+    publishes a provisional `CommandEntity` (spawn position, dimension) so `@s`, `as`, `if entity`
+    see the new mob, and queues `Action::SummonChain`; the game loop schedules the spawn on the
+    owning region under that uuid (or withdraws the entry when the chunk is not loaded), and the
+    region's next snapshot sync replaces the entry. No other region's live state is read. Limits:
+    mobs only (`MobKind`), no NBT, the provisional entry has no tags/health until the first sync.
+    Tests: `summon_branch_makes_the_new_entity_the_source_of_the_chain` (dispatcher),
+    `summon_chain_spawns_the_mob_under_the_published_uuid` (region behaviour).
+  - **Not supported** (each fails with a message, never silently): `on origin` (the spawn-origin entity is not in the snapshot); `if items|slots entity`
     (entity inventories live in regions and cannot be read while a command runs); item
     predicates with components; `store ... entity` for non-player entities. `if|unless predicate
     <id>` evaluates datapack (`data/<ns>/predicate`) and vanilla predicates for `match_block`,
@@ -193,7 +199,6 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 
 | blocker | evidence |
 |---|---|
-| `execute summon` | `Action::Summon` is async and returns no uuid, so the new entity cannot be the source of the rest of the chain |
 | `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) carries `attacker|owner|leasher|target`, and `EntityIndex::origin_of` carries the creator, so those relations work (2026-11-14: `execute on origin` answers for arrow/trident shooters, item throwers and fishing-bobber owners; tests `sync_publishes_who_created_an_arrow_or_threw_an_item`, `on_relations_use_the_published_snapshot`). Other creators (TNT igniter, area effect cloud owner, fangs) are not in `ferrite-entity`'s data, a lane A interface. The snapshot still carries no NBT or inventory |
 | `if predicate` (partial) | `match_block`, `entity_properties` (type, location), `inverted`, `all_of`, `any_of` are evaluated (`commands_late::condition`); every other condition type evaluates false; `ferrite-loot` exposes no public predicate evaluator (its `Condition::test` is `pub(crate)`) |
 | `/test` structure runner | no structure placement / test-instance block / tick runner: `block_based` instances and the block-targeting forms cannot run |

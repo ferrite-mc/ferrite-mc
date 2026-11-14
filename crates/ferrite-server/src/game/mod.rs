@@ -236,6 +236,59 @@ mod tests {
     }
 
     #[test]
+    fn summon_chain_spawns_the_mob_under_the_published_uuid() {
+        let (worlds, _runtime) = two_world_fixture();
+        let vanilla = WorldId::Vanilla(Dimension::Overworld);
+        let chunk = ChunkPos(0, 0);
+        let mut holds = HashMap::new();
+        add_holds(&worlds, &mut holds, None, vanilla, [chunk]);
+        let sender = Uuid::from_u128(5);
+        let summoned = Uuid::from_u128(0x5eed);
+        let player_worlds = HashMap::new();
+        assert!(summon_chain_in(
+            &worlds,
+            summon_chain_world(
+                &player_worlds,
+                sender,
+                Dimension::Overworld,
+                Dimension::Overworld
+            ),
+            ferrite_entity::mob::MobKind::Pig,
+            [8.5, 64.0, 8.5],
+            summoned,
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(vanilla, chunk, move |region| {
+            let mut index = entity_index::EntityIndex::default();
+            index.sync(
+                &mut std::collections::HashSet::new(),
+                &region.entities,
+                Dimension::Overworld,
+            );
+            let _ = tx.send(index.get(summoned).map(|entry| entry.pos));
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+            Some([8.5, 64.0, 8.5]),
+            "the region entity carries the uuid the chain already used"
+        );
+        // An unloaded chunk is refused so the caller can withdraw the provisional entry.
+        assert!(!summon_chain_in(
+            &worlds,
+            summon_chain_world(
+                &player_worlds,
+                sender,
+                Dimension::Overworld,
+                Dimension::Overworld
+            ),
+            ferrite_entity::mob::MobKind::Pig,
+            [1600.5, 64.0, 8.5],
+            Uuid::from_u128(1),
+        ));
+        worlds.shutdown();
+    }
+
+    #[test]
     fn plugin_world_id_follows_the_players_world() {
         let id = Uuid::from_u128(77);
         let runtime = WorldId::Runtime(id);
@@ -1188,6 +1241,53 @@ fn summon_for_player(
     }
     worlds.schedule_at_world_chunk(world, chunk, move |region| {
         region.summon(kind, pos, no_ai);
+    });
+    true
+}
+
+/// The world an `execute summon` lands in: the sender's own, unless the chain moved to another
+/// dimension with `execute in`.
+fn summon_chain_world(
+    player_worlds: &HashMap<Uuid, WorldId>,
+    sender: Uuid,
+    sender_dimension: Dimension,
+    dimension: Dimension,
+) -> WorldId {
+    if dimension == sender_dimension {
+        player_world(player_worlds, sender, dimension)
+    } else {
+        WorldId::Vanilla(dimension)
+    }
+}
+
+/// `execute summon`, phase two: spawns a mob that already has its uuid (the command thread
+/// published a provisional snapshot entry under it). False when the chunk is not loaded; the
+/// caller then withdraws the provisional entry.
+fn summon_chain_in(
+    worlds: &Worlds,
+    world: WorldId,
+    kind: ferrite_entity::mob::MobKind,
+    pos: [f64; 3],
+    uuid: Uuid,
+) -> bool {
+    if !pos
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+    {
+        return false;
+    }
+    let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    if worlds.owner_world(world, chunk).is_none() {
+        return false;
+    }
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
+        let mut record = ferrite_entity::mob::new_mob(
+            kind,
+            ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+            &mut ferrite_entity::Rng::new(uuid.as_u128() as u64),
+        );
+        record.data.uuid = uuid;
+        region.entities.insert(record);
     });
     true
 }
@@ -2703,6 +2803,12 @@ async fn run(
                                   chat(outbound, "That position is not loaded");
                               }
                           },
+                          commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
+                              if !summon_chain_in(&worlds, summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension), kind, pos, summoned) {
+                                  command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
+                                  chat(outbound, "That position is not loaded");
+                              }
+                          },
                           commands::Action::Enchant { targets, enchantment, level } => { for target in targets { if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { let target_name = names.get(&target).cloned().unwrap_or_default(); target_mailbox.lock().unwrap().push_back(Command::Enchant { target, target_name, enchantment: enchantment.clone(), level, feedback: Some(outbound.clone()) }); } } },
                           other => { runtime.apply(other).await; }
                       }}
@@ -2847,6 +2953,12 @@ async fn run(
                                   worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.summon(kind, pos, no_ai); });
                                   tracing::info!("Summoned new {} at {pos:?}", kind.display_name());
                               } else {
+                                  tracing::warn!("summon target chunk is not loaded");
+                              }
+                          },
+                          commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
+                              if !summon_chain_in(&worlds, WorldId::Vanilla(dimension), kind, pos, summoned) {
+                                  command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   tracing::warn!("summon target chunk is not loaded");
                               }
                           },
@@ -4430,6 +4542,7 @@ impl CommandRuntime<'_> {
             | Action::Give { .. }
             | Action::Experience { .. }
             | Action::Summon { .. }
+            | Action::SummonChain { .. }
             | Action::SummonCrystal { .. }
             | Action::GameRule(..)
             | Action::Enchant { .. } => false,

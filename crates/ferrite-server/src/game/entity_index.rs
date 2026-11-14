@@ -89,6 +89,12 @@ impl EntityIndex {
         self.origins.get(&uuid).copied()
     }
 
+    /// Withdraws one entry (a provisional `execute summon` entry whose spawn was refused).
+    pub fn forget(&mut self, uuid: Uuid) {
+        self.entries.remove(&uuid);
+        self.origins.remove(&uuid);
+    }
+
     /// Adds or replaces one snapshot entry (used by tests and by `sync`).
     pub fn insert(&mut self, entity: CommandEntity) {
         self.entries.insert(entity.uuid, entity);

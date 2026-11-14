@@ -3,8 +3,9 @@
 //!
 //! What these cannot do on this server is listed in `docs/COMMANDS-STATUS.md`: `on origin` knows
 //! only arrow/trident shooters, item throwers and bobber owners (the other relations come from the
-//! snapshot and the ride table), `summon` cannot hand the new entity to the rest of the chain, and `items|slots
-//! entity` cannot read an inventory owned by a region.
+//! snapshot and the ride table), `summon` hands the new entity to the rest of the chain through
+//! a provisional snapshot entry, and `items|slots entity` cannot read an inventory owned by a
+//! region.
 
 use ferrite_command::arguments::{EntityTarget, RegistryParser};
 use ferrite_command::{
@@ -400,17 +401,75 @@ fn related_uuid(
         .collect()
 }
 
-/// `summon <entity>`: spawning is scheduled onto the region that owns the chunk, so the new
-/// entity does not exist yet when the rest of the chain runs. It fails instead of running the
-/// chain as the wrong entity.
+/// `summon <entity>`: a two-phase hand-off, because the region that owns the chunk creates the
+/// entity asynchronously.
+///
+/// Phase one runs here, on the command thread: the entity gets its uuid now, a provisional entry
+/// goes into the world-visible snapshot (so `@s`, `as`, `if entity` and the other relations
+/// resolve it for the rest of the chain), and `Action::SummonChain` is queued. Phase two runs on
+/// the game loop: it schedules the spawn on the owning region with that uuid, and withdraws the
+/// provisional entry when the chunk is not loaded. The region keeps the only live state; later
+/// actions of the chain reach it through the same ordered queue, after the spawn. The region's
+/// first snapshot sync replaces the provisional entry with the real one.
 pub(super) fn summon_branch(execute: NodeId) -> NodeBuilder<Source> {
     literal::<Source>("summon").then(
         argument::<Source>("entity", ArgumentType::ResourceLocation).redirect_with(
             execute,
-            |_ctx| {
-                Err(CommandError::failed(
-                    "execute summon is not supported: the summoned entity is created asynchronously by its region and cannot be the source of the rest of the chain",
-                ))
+            |ctx| {
+                let name = ctx
+                    .string("entity")
+                    .ok_or_else(|| CommandError::failed("missing entity argument 'entity'"))?;
+                let kind = ferrite_entity::mob::MobKind::from_name(name).ok_or_else(|| {
+                    if ferrite_data::entity_props::by_name(name).is_some() {
+                        CommandError::failed(format!("Unable to summon entity {name}"))
+                    } else {
+                        CommandError::failed(format!("Invalid entity {name}"))
+                    }
+                })?;
+                let source = ctx.source();
+                let uuid = ferrite_entity::random_uuid();
+                {
+                    let state = source.state.lock().unwrap();
+                    state
+                        .entities
+                        .lock()
+                        .unwrap()
+                        .insert(super::entity_index::CommandEntity {
+                            uuid,
+                            network_id: 0,
+                            kind: kind.entity_type(),
+                            pos: source.origin,
+                            yaw: 0.0,
+                            pitch: 0.0,
+                            dimension: source.dimension,
+                            tags: Default::default(),
+                            custom_name: None,
+                            health: None,
+                            attacker: None,
+                            owner: None,
+                            leasher: None,
+                            target: None,
+                        });
+                }
+                if send(
+                    source,
+                    super::commands::Action::SummonChain {
+                        kind,
+                        pos: source.origin,
+                        uuid,
+                        dimension: source.dimension,
+                    },
+                )
+                .is_err()
+                {
+                    let state = source.state.lock().unwrap();
+                    state.entities.lock().unwrap().forget(uuid);
+                    return Err(CommandError::failed("command target unavailable"));
+                }
+                let mut next = source.clone();
+                next.uuid = Some(uuid);
+                next.name = Some(kind.display_name().to_owned());
+                Ok(next)
             },
         ),
     )
@@ -707,12 +766,42 @@ mod tests {
     }
 
     #[test]
-    fn summon_branch_fails_instead_of_running_as_the_wrong_entity() {
+    fn summon_branch_makes_the_new_entity_the_source_of_the_chain() {
         let tree = super::super::commands::dispatcher();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut source = source();
+        source.actions = tx;
+        let ran = tree
+            .execute(
+                "execute summon minecraft:pig if entity @s[type=minecraft:pig] run data merge storage t {pig:1}",
+                source.clone(),
+            )
+            .unwrap();
+        assert_eq!(ran, 1, "@s is the provisional pig");
+        assert_eq!(storage(&source, "minecraft:t"), "{pig:1}");
+        let Ok(super::super::commands::Action::SummonChain {
+            kind,
+            pos,
+            uuid,
+            dimension,
+        }) = rx.try_recv()
+        else {
+            panic!("the summon was queued for the owning region");
+        };
+        assert_eq!(kind, ferrite_entity::mob::MobKind::Pig);
+        assert_eq!(pos, [10.0, 64.0, 10.0]);
+        assert_eq!(dimension, crate::game::Dimension::Overworld);
+        let state = source.state.lock().unwrap();
+        let index = state.entities.lock().unwrap();
+        assert_eq!(index.get(uuid).map(|entry| entry.pos), Some(pos));
+        drop(index);
+        drop(state);
+        while rx.try_recv().is_ok() {}
         let error = tree
-            .execute("execute summon minecraft:pig run say x", source())
+            .execute("execute summon minecraft:nope run say x", source.clone())
             .unwrap_err();
-        assert!(error.to_string().contains("not supported"), "{error}");
+        assert!(error.to_string().contains("Invalid entity"), "{error}");
+        assert!(rx.try_recv().is_err(), "an unknown entity queues nothing");
     }
 
     #[test]
