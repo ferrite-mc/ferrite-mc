@@ -23,6 +23,7 @@ pub mod arrow;
 pub mod bobber;
 pub mod breed;
 pub mod combat;
+pub mod creeper;
 pub mod dragon;
 pub mod effect;
 pub mod enderman;

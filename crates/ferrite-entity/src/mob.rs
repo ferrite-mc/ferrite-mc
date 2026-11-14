@@ -309,6 +309,10 @@ pub struct MobState {
     pub sheared: bool,
     /// Ticks left in a sheep's `EatBlockGoal`; zero when it is not eating.
     pub eat_timer: u8,
+    /// Whether a creeper is charged by lightning (`Creeper.DATA_IS_POWERED`).
+    pub powered: bool,
+    /// The creeper's synched swell direction: `1` while the fuse burns, `-1` otherwise.
+    pub swell_dir: i8,
     /// Ticks an enderman has been stared at by `stare_target` (`aggroTime`); zero when calm.
     pub stare_time: u8,
     pub stare_target: Option<uuid::Uuid>,
@@ -405,6 +409,8 @@ impl MobState {
             wool_color: 0,
             sheared: false,
             eat_timer: 0,
+            powered: false,
+            swell_dir: -1,
             stare_time: 0,
             stare_target: None,
             stared_at: false,
@@ -485,6 +491,9 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     }
     if kind == MobKind::Enderman {
         crate::enderman::define_metadata(&mut data.metadata);
+    }
+    if kind == MobKind::Creeper {
+        crate::creeper::define_metadata(&mut data.metadata);
     }
     if kind == MobKind::Sheep
         && let Some(state) = data.mob.as_mut()

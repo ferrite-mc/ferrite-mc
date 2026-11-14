@@ -624,6 +624,9 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             }
             c.insert("carriedBlockState".into(), Tag::Compound(state));
         }
+        if mob.kind == MobKind::Creeper {
+            c.insert("powered".into(), Tag::Byte(mob.powered as i8));
+        }
         if mob.kind == MobKind::Sheep {
             // Vanilla saves the legacy colour id as `Color` and the shorn flag as `Sheared`.
             c.insert("Color".into(), Tag::Byte(mob.wool_color as i8));
@@ -855,6 +858,14 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                         _ => Vec::new(),
                     };
                     mob.carried = ferrite_data::blocks::state_id(name, &props);
+                }
+                if kind == MobKind::Creeper {
+                    mob.powered = boolean(c, "powered");
+                    ferrite_entity::creeper::define_metadata(&mut data.metadata);
+                    data.metadata.set(
+                        ferrite_entity::creeper::POWERED_INDEX,
+                        ferrite_protocol::packets::play::MetaValue::Boolean(mob.powered),
+                    );
                 }
                 if kind == MobKind::Sheep {
                     mob.wool_color = match c.get("Color") {
@@ -1209,6 +1220,23 @@ mod tests {
         );
         let loaded = from_nbt(&to_nbt(&[empty]));
         assert_eq!(loaded[0].data.mob.as_ref().unwrap().carried, None);
+    }
+
+    #[test]
+    fn a_charged_creeper_stays_charged_across_a_save() {
+        let mut record = mob::new_mob(
+            MobKind::Creeper,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        record.data.mob.as_mut().unwrap().powered = true;
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let data = &loaded[0].data;
+        assert!(data.mob.as_ref().unwrap().powered);
+        assert_eq!(
+            data.metadata.get(ferrite_entity::creeper::POWERED_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(true))
+        );
     }
 
     #[test]

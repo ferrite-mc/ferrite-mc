@@ -395,6 +395,9 @@ pub enum MobEvent {
     Explode { center: Vec3, power: f32 },
     /// Two animals bred; the baby is already in the store.
     Bred(crate::breed::Bred),
+    /// A creeper's fuse started: the region plays the hiss at `at`
+    /// (`crate::creeper::HISS_SOUND`).
+    Hiss { at: Vec3 },
     /// A sheep ate at `at`: the region turns a grass block into dirt (`grass`) or removes the
     /// plant (`!grass`) when `mobGriefing` allows it.
     EatBlock { at: [i32; 3], grass: bool },
@@ -765,6 +768,8 @@ pub fn tick_full(
                 match kind {
                     MobKind::Creeper => {
                         let mut explode = false;
+                        let mut hiss = false;
+                        let mut power = CREEPER_POWER;
                         if let Some(state) = mob::state_mut(store, key) {
                             // `SwellGoal`: ignite inside three blocks, then keep swelling until
                             // the target is more than seven blocks away.
@@ -774,20 +779,29 @@ pub fn tick_full(
                                 CREEPER_TRIGGER_DISTANCE
                             };
                             if horizontal <= reach && (target.pos.y - start.y).abs() <= 2.0 {
+                                // `Creeper.tick`: the fuse hisses as the swell leaves zero.
+                                hiss = state.swell == 0;
                                 state.swell = state.swell.saturating_add(1);
+                                state.swell_dir = 1;
                                 explode = state.swell >= CREEPER_SWELL_TICKS;
                             } else {
                                 state.swell = state.swell.saturating_sub(1);
+                                state.swell_dir = -1;
                             }
+                            power = crate::creeper::explosion_power(state.powered);
+                        }
+                        if hiss {
+                            events.push(MobEvent::Hiss { at: start });
                         }
                         if explode {
                             events.push(MobEvent::Explode {
                                 center: Vec3::new(start.x, start.y + 0.5, start.z),
-                                power: CREEPER_POWER,
+                                power,
                             });
                             mob::kill(store, key);
                             continue;
                         }
+                        crate::creeper::sync(store, key);
                     }
                     MobKind::Skeleton => {
                         let eye_height = f64::from(kind.props().eye_height);
@@ -853,6 +867,14 @@ pub fn tick_full(
                     }
                     _ => {}
                 }
+            } else if kind == MobKind::Creeper {
+                // No target: `Creeper.tick` keeps adding the swell direction (-1), so a fuse
+                // that lost its target winds down instead of staying lit.
+                if let Some(state) = mob::state_mut(store, key) {
+                    state.swell_dir = -1;
+                    state.swell = state.swell.saturating_sub(1);
+                }
+                crate::creeper::sync(store, key);
             } else if kind == MobKind::Enderman && rng.next_int(200) == 0 {
                 blink(store, key, blocks, start, rng);
             }

@@ -6524,6 +6524,12 @@ impl Region {
                         .push(ferrite_entity::dragon::BreathCloud::perched(pos));
                 }
                 ai::MobEvent::EatBlock { at, grass } => self.eat_block(ctx, at, grass),
+                ai::MobEvent::Hiss { at } => self.play_sound_near(
+                    at,
+                    ferrite_entity::creeper::HISS_SOUND,
+                    ferrite_entity::creeper::HISS_VOLUME,
+                    ferrite_entity::creeper::HISS_PITCH,
+                ),
                 ai::MobEvent::Status { key, status } => self.broadcast_status(ctx, key, status),
                 ai::MobEvent::Bred(bred) => {
                     // Vanilla gives 1-7 experience points to the breeding and counts it for the
@@ -8137,7 +8143,7 @@ impl Region {
             Some(true) => {}
         }
         if let Some(pos) = self.entities.pos(key) {
-            self.play_sound_near(pos, "minecraft:entity.sheep.shear");
+            self.play_sound_near(pos, "minecraft:entity.sheep.shear", 1.0, 1.0);
         }
         if gamemode != 1
             && let Some(p) = self.players.get_mut(&player)
@@ -8220,7 +8226,7 @@ impl Region {
     }
 
     /// Plays a sound event at `pos` for every player of this region within 16 blocks.
-    fn play_sound_near(&self, pos: ferrite_math::Vec3, name: &str) {
+    fn play_sound_near(&self, pos: ferrite_math::Vec3, name: &str, volume: f32, pitch: f32) {
         let Some(sound) = ferrite_data::registries::id("minecraft:sound_event", name) else {
             return;
         };
@@ -8239,8 +8245,8 @@ impl Region {
                     x: (pos.x * 8.0) as i32,
                     y: (pos.y * 8.0) as i32,
                     z: (pos.z * 8.0) as i32,
-                    volume: 1.0,
-                    pitch: 1.0,
+                    volume,
+                    pitch,
                     seed: 0,
                 },
             );
@@ -9446,6 +9452,8 @@ impl Region {
             let mut victims = Vec::new();
             for key in near {
                 if mob::is_mob(&self.entities, key) {
+                    // `Creeper.thunderHit`: a bolt charges a creeper (and hurts it all the same).
+                    ferrite_entity::creeper::thunder_hit(&mut self.entities, key);
                     mob::hurt(&mut self.entities, key, 5.0, None);
                     if let Some(state) = mob::state(&self.entities, key) {
                         victims.push(state.kind.name().to_owned());
