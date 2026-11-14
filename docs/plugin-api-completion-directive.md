@@ -233,6 +233,14 @@
 | `World#createExplosion`(모든 overload) | Java가 `(Location, power, fire, breakBlocks)`로 정규화(출처 엔티티는 위치가 없을 때 중심만 정한다) → `PlayerCommand::Explosion{world,..}` → 기본 월드 또는 런타임 월드의 소유 리전. 다른 월드의 위치는 `IllegalArgumentException` | Java `#everyExplosionOverload...`, Rust `blasts::tests::a_runtime_world_gets_its_own_explosion` |
 | `Server#addRecipe`/`removeRecipe`/`clearRecipes`/`resetRecipes` | `FerriteRecipes`가 `ShapedRecipe`/`ShapelessRecipe`(`MaterialChoice`만)를 바닐라 레시피 JSON으로 호스트에 보냄 → `game/crafting.rs` 오버레이(바닐라 먼저, 제거된 id는 건너뜀, 그다음 플러그인 레시피) → `ferrite-recipe::match_crafting_in`. `ExactChoice`와 메타가 있는 결과는 `UnsupportedOperationException`. 제작 메뉴 결과에 반영되며, 클라이언트 레시피북·자동 채우기에는 나오지 않는다 | Rust `crafting::tests::a_plugin_recipe_crafts_until_it_is_removed`·`removing_a_vanilla_recipe...`·`clearing_hides...`, `plugins::craft::tests::adding_and_removing...`, `ferrite-recipe` `runtime_recipes_match...`, Java `PluginRecipeHostTest` |
 | `sendBlockUpdate`: 스냅샷 아이템의 `ItemMeta` | `ItemMetaWire`(인벤토리 슬롯과 같은 직렬화) → `meta,<슬롯>,<hex>` → `with_meta` | Rust `a_stack_in_the_snapshot_can_carry_metadata`, Java `aStackWithMetadataSends...` |
+| Paper 부트스트래퍼 `DATAPACK_DISCOVERY` | `FerriteBootstrap` — `paper-plugin.yml`의 `bootstrapper`를 플러그인 생성 전에 실행, 데이터팩을 `<월드>/datapacks/<플러그인>-<id>`로 복사. `TAGS` 등 다른 라이프사이클 이벤트는 이유를 밝히고 거부 | Java `FerriteBootstrapTest` |
+| `help.yml` | `FerriteHelpMap(server, File)` — `ignore-plugins`, `amended-topics`, `index-topics` | Java `ApiSurfaceTest` |
+| 지도 커서 스타일 캡션 | `ferrite-nbt::read_network_prefix`, `NetworkText{Plain,Rich}`, `MapCaption`; 캡션 모드 `0/1/2` (**Java가 `0/1`을 보내는데 Rust가 bool로 읽던 잠재 버그도 수정**) | Rust `styled_and_numeric_caption_modes_are_parsed`·play.rs 왕복, Java `styledMapCaptionsTravelAsComponentNbt` |
+| `sendBlockUpdate`: 주크박스·교탁·명령 블록·스포너·스컬크 센서·벌집·구조물 블록 | `tile_update.rs` `SETTINGS`/`KEYED_STACK` (키는 로컬 `server-26.3.jar`를 `javap`로 읽어 확인). 침대는 26.3에 블록 엔티티가 없어 `UnsupportedOperationException` | Rust `tile_update` 테스트, Java `PlayerTileUpdateTest` |
+| 기본 월드 엔티티 스냅샷 | `facts::publish_entities`가 오버월드도 SNBT 저장(20틱 주기) → `CapturedStructure`/`getStructures` | Rust facts·snapshot 테스트 |
+| `CraftMagicNumbers` | `INSTANCE`, `getMaterial`(모르는 키는 예외), `getKey`, `getDefaultBlockData`, `isLegacy`, `fromLegacy` | Java `BootstrapTest` |
+| `World#setVoidDamage…`, `Player#getConnection`/`postEffects`, `World#getWorldPath`, POI 검색, 블록 엔티티 수 | §10.2 아래·10.3 참고 | Java `PlayerExtrasTest`, Rust `craft::tests::void_rules...` |
+| `Player#fireworkBoost` | 호스트에 폭죽 엔티티 추가(`ferrite-entity::firework`: 수명 `10*비행+rand(6)+rand(7)`, 비행 중 `×1.15, +0.04`, 블록 충돌·수명 종료 시 상태 17 폭발, 별이 있으면 반경 5칸에 `5+2*별` 피해). 활강 상태는 `START_FALL_FLYING`부터 착지까지 추적(`isGliding()`)하고, 붙은 폭죽은 매 틱 시선 방향으로 `SetEntityMotion`을 보낸다. `World#spawn`의 `firework_rocket`도 지원 | Rust `firework::tests::*`, `motion::tests::a_firework_boost...`, `facts::tests::gliding_follows_the_registry` |
 
 ### 10.2 문서가 낡았던 것 (코드에는 이미 있음)
 
@@ -253,7 +261,7 @@
 
 호스트 라우트도 Java 케이스도 없는 서명만 적었다(`World`는 카탈로그와 `crates/**`·Java `case`를 대조).
 
-- **Player:** `fireworkBoost`(폭죽 엔티티 모델 없음), `loadData`(저장된 플레이어 데이터를 살아 있는 리전 상태에 다시 적용하는 경로 없음).
+- **Player:** `fireworkBoost`는 부스트와 폭죽 엔티티는 동작하지만 반환하는 `Firework` 핸들은 항상 `null`이고(엔티티가 호스트에만 있음), 아이템 메타의 폭죽 색·모양은 클라이언트에 보이지 않으며(메타데이터 ItemStack에 컴포넌트 없음), 붙은 폭죽의 가속은 시선 방향 정상 속도(약 1.6)를 보내는 근사다. `loadData`(저장된 플레이어 데이터를 살아 있는 리전 상태에 다시 적용하는 경로 없음).
   `getConnection`(플레이어 메서드로 전달하는 프록시; `reenterConfiguration`·`sendReportDetails`는 `UnsupportedOperationException`)과
   `postEffects`(`/posteffect`를 콘솔로 실행하고 목록은 Java에 미러링 — 명령으로 바꾼 상태는 `values()`에 보이지 않는다)는 구현했다.
 - **World:** `locateNearestPoi`/`locateAllPoiInRange`는 POI 저장소가 없어 로드된 청크를 스캔한다(`Occupancy.ANY`만 지원,
@@ -261,10 +269,11 @@
   `getTickableTileEntityCount`는 바닐라에서 틱 처리를 하는 타입 목록(`TICKING_BLOCK_ENTITIES`) 기준이다.
   `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API(26.3 build 227)에
   존재하지 않아 구현 대상이 아니다.
-- **블록 엔티티:** 주크박스·교탁·명령 블록·스포너·벌집·스컬크 센서·구조물 블록·침대. 26.3의 NBT 키 이름을
-  확인할 수 있는 자료(서버 코드)가 로컬에 없어서 추측으로 구현하지 않았다. `UnsupportedOperationException`을 유지한다.
+- **블록 엔티티:** 위 표의 종류는 구현했다. 그 밖의 `sendBlockUpdate` 대상은 `UnsupportedOperationException`을 유지한다.
 - **레시피(§7):** 조리·대장간·석재 절단 레시피는 런타임에 추가할 수 없다(Java 목록에만 남는다). 결과 아이템의 메타,
   `ExactChoice`, 클라이언트 레시피북 표시는 없다.
+- **투사체 종류:** 관통 화살·위더 해골·셜커 탄·눈 엔더·브리즈 바람 구슬·낚싯찌는 `launchProjectile`에 없다. `World#getEnderDragonBattle`은 `null`.
+- **TAGS 라이프사이클 이벤트:** 태그 레지스트리가 시작 후 고정이라 거부한다. `fromLegacy`의 데이터 바이트는 지원하지 않는다.
 - **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 그 밖의 Paper 생명주기·스케줄러(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
 

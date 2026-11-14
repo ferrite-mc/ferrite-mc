@@ -261,7 +261,7 @@ class PlayerTileUpdateTest {
         assertEquals("item,0,minecraft:music_disc_cat,1", calls.get(0)[5]);
         calls.clear();
         var book = new ItemStack(Material.WRITABLE_BOOK);
-        player.sendBlockUpdate(at(), tile(org.bukkit.block.Lectern.class, Material.LECTERN, inventory(1, java.util.Map.of(0, book)), java.util.Map.of("getPage", 2)));
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Lectern.class, Material.LECTERN, inventory(9, java.util.Map.of(0, book)), java.util.Map.of("getPage", 2)));
         assertEquals("minecraft:lectern", calls.get(0)[4]);
         assertArrayEquals(new String[]{"item,0,minecraft:writable_book,1", "put,Page,2"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
         calls.clear();

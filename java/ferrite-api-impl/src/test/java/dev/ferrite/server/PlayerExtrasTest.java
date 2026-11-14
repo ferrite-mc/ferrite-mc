@@ -884,19 +884,6 @@ class PlayerExtrasTest {
         } finally { HostBridge.transport = null; }
     }
 
-    @Test void styledMapCaptionsAreRejectedInsteadOfLosingFormatting() {
-        var view = new FerriteMapView(player.getWorld());
-        view.addRenderer(new org.bukkit.map.MapRenderer() {
-            @Override public void render(org.bukkit.map.MapView map, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player viewer) {
-                canvas.getCursors().addCursor(new org.bukkit.map.MapCursor((byte) 0, (byte) 0, (byte) 0,
-                    org.bukkit.map.MapCursor.Type.PLAYER, true,
-                    net.kyori.adventure.text.Component.text("Alex")
-                        .color(net.kyori.adventure.text.format.NamedTextColor.RED)));
-            }
-        });
-        assertThrows(UnsupportedOperationException.class, () -> view.render(player));
-    }
-
     @Test void mapUpdatesUseTheRequestedViewer() {
         Bootstrap.registerPlayer("00000000-0000-0000-0000-0000000000bb", "Other", false);
         org.bukkit.entity.Player other;

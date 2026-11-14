@@ -924,6 +924,24 @@ public abstract class PlayerMisc extends PlayerStubs {
     }
     @Override public io.papermc.paper.entity.PlayerPostEffects postEffects() { return postEffects; }
 
+    /**
+     * `Player#fireworkBoost`: a rocket attached to the gliding player. Like Paper it does nothing
+     * (returns null) when the player is not gliding. The rocket exists only in the host, so the
+     * returned handle is always null even when the boost happened.
+     */
+    @Override public org.bukkit.entity.Firework fireworkBoost(org.bukkit.inventory.ItemStack stack) {
+        java.util.Objects.requireNonNull(stack, "stack");
+        if (stack.getType() != org.bukkit.Material.FIREWORK_ROCKET) throw new IllegalArgumentException("stack must be a firework rocket");
+        if (!isGliding()) return null;
+        int flight = 1, explosions = 0;
+        if (stack.getItemMeta() instanceof org.bukkit.inventory.meta.FireworkMeta meta) {
+            flight = Math.max(0, Math.min(127, meta.getPower()));
+            explosions = Math.min(64, meta.getEffectsSize());
+        }
+        HostBridge.callVoid("Player", getUniqueId(), "fireworkBoost(int,int)", flight, explosions);
+        return null;
+    }
+
     // ---- game connection ---------------------------------------------------------------------------------------
     /** `Player#getConnection`: the connection calls forward to the player methods that already do the work. */
     @Override public io.papermc.paper.connection.PlayerGameConnection getConnection() {

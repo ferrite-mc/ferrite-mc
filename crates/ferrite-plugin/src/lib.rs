@@ -884,6 +884,12 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         velocity: [f64; 3],
     },
+    /// `Player#fireworkBoost`: launches a rocket attached to the gliding player.
+    FireworkBoost {
+        player: uuid::Uuid,
+        flight: u8,
+        explosions: u8,
+    },
     /// Opens a crafting station without a block (`Player#openWorkbench`, `openAnvil`, ...).
     OpenStation {
         player: uuid::Uuid,

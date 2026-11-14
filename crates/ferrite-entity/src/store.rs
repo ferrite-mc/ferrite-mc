@@ -102,6 +102,8 @@ pub struct EntityData {
     pub block_state: Option<u16>,
     /// Remaining fuse ticks of a primed TNT entity (vanilla `PrimedTnt.fuse`).
     pub fuse: Option<i32>,
+    /// Firework rocket state, for `minecraft:firework_rocket`.
+    pub firework: Option<crate::firework::FireworkState>,
     /// Scoreboard tags (`/tag`), which entity selectors match with `tag=`.
     pub tags: BTreeSet<String>,
     /// Section the entity is listed under in the index.
@@ -135,6 +137,7 @@ impl EntityData {
             effects: ActiveEffects::default(),
             block_state: None,
             fuse: None,
+            firework: None,
             tags: BTreeSet::new(),
             cell: Cell::new(0, 0, 0),
             home: (0, 0),

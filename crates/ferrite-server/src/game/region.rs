@@ -184,6 +184,11 @@ pub enum Command {
     PluginVelocity {
         velocity: [f64; 3],
     },
+    /// A plugin's `Player#fireworkBoost`: a rocket attached to the gliding player.
+    PluginFireworkBoost {
+        flight: u8,
+        explosions: u8,
+    },
     /// A plugin's `Player#openWorkbench` and the other block-less crafting stations.
     PluginOpenStation {
         station: String,
@@ -1127,6 +1132,8 @@ pub struct Player {
     pub changed_blocks: Vec<[i32; 3]>,
     /// TNT this player primed this tick, with the fuse length; spawned as `PrimedTnt`.
     pub primed_tnt: Vec<([i32; 3], i32)>,
+    /// Rockets a plugin attached to this player this tick: `(flight, explosions)`.
+    pub firework_launches: Vec<(u8, u8)>,
     /// Cells where this player placed end crystals this tick.
     pub crystals: Vec<[i32; 3]>,
     /// Fire this player lit this tick; the region schedules `FireBlock` ticks for it.
@@ -1750,6 +1757,14 @@ fn add_trader_xp(entities: &mut EntityStore, trader: Uuid, xp: i32) {
 }
 
 impl Player {
+    /// Records the client's on-ground flag; landing ends fall-flying.
+    fn set_ground(&mut self, ground: bool) {
+        self.ground = ground;
+        if ground {
+            crate::plugins::facts::set_gliding(self.uuid, false);
+        }
+    }
+
     /// Sends the riptide spin flag to this player and the other viewers in its dimension.
     fn broadcast_spin(&self, spin: bool) {
         send(self, &spin_metadata(self.entity, spin));
@@ -4184,6 +4199,12 @@ impl Player {
                     );
                     continue;
                 }
+                Command::PluginFireworkBoost { flight, explosions } => {
+                    if crate::plugins::facts::is_gliding(self.uuid) {
+                        self.firework_launches.push((flight, explosions));
+                    }
+                    continue;
+                }
                 Command::PluginOpenStation { station } => {
                     self.open_plugin_station(&station);
                     continue;
@@ -5031,6 +5052,10 @@ impl Player {
                                 self.survival.sprinting = false;
                                 crate::plugins::facts::set_sprinting(self.uuid, false);
                             }
+                            // START_FALL_FLYING; vanilla refuses it on the ground.
+                            6 if !self.ground => {
+                                crate::plugins::facts::set_gliding(self.uuid, true)
+                            }
                             _ => {}
                         }
                     }
@@ -5080,7 +5105,7 @@ impl Player {
                                 continue;
                             }
                             self.pos = to;
-                            self.ground = p.flags & 1 != 0;
+                            self.set_ground(p.flags & 1 != 0);
                             changed = true;
                         } else {
                             self.teleport();
@@ -5110,7 +5135,7 @@ impl Player {
                             self.pos = to;
                             self.yaw = p.yaw;
                             self.pitch = p.pitch;
-                            self.ground = p.flags & 1 != 0;
+                            self.set_ground(p.flags & 1 != 0);
                             changed = true;
                         } else {
                             self.teleport();
@@ -5121,12 +5146,12 @@ impl Player {
                     if p.yaw.is_finite() && p.pitch.is_finite() {
                         self.yaw = p.yaw;
                         self.pitch = p.pitch;
-                        self.ground = p.flags & 1 != 0;
+                        self.set_ground(p.flags & 1 != 0);
                         changed = true;
                     }
                 }
                 ServerboundPlay::Flags(p) => {
-                    self.ground = p.flags & 1 != 0;
+                    self.set_ground(p.flags & 1 != 0);
                 }
                 ServerboundPlay::UseItem(p) => self.use_item(&p),
                 // `ServerboundClientCommandPacket.Action.PERFORM_RESPAWN`.
@@ -7144,6 +7169,92 @@ impl Region {
         true
     }
 
+    /// Ticks firework rockets: free ones climb, attached ones push their gliding player along
+    /// their look direction, and a rocket whose life ends bursts (status 17) and hurts what is near.
+    fn tick_fireworks(&mut self, ctx: &TickContext) {
+        // Rockets plugins attached this tick.
+        let launches: Vec<(Uuid, [f64; 3], u8, u8)> = self
+            .players
+            .values_mut()
+            .flat_map(|p| {
+                let (uuid, pos) = (p.uuid, p.pos);
+                p.firework_launches
+                    .drain(..)
+                    .map(move |(flight, explosions)| (uuid, pos, flight, explosions))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (uuid, pos, flight, explosions) in launches {
+            let record = ferrite_entity::firework::new_firework(
+                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                flight,
+                explosions,
+                Some(uuid),
+                &mut self.rng,
+            );
+            self.entities.insert(record);
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let blocks = TickBlocks {
+            source: Some(source),
+            seen: Default::default(),
+        };
+        let tick = ferrite_entity::firework::tick_fireworks(&mut self.entities, &blocks);
+        for (key, uuid) in tick.attached {
+            let Some(p) = self.players.get(&uuid) else {
+                if let Some(f) = self.entities.flags_mut(key) {
+                    f.set(ferrite_entity::Flags::REMOVED, true);
+                }
+                continue;
+            };
+            if !crate::plugins::facts::is_gliding(uuid) {
+                // Vanilla discards a rocket whose rider stopped gliding.
+                if let Some(f) = self.entities.flags_mut(key) {
+                    f.set(ferrite_entity::Flags::REMOVED, true);
+                }
+                continue;
+            }
+            let (yaw, pitch) = (
+                f64::from(p.yaw).to_radians(),
+                f64::from(p.pitch).to_radians(),
+            );
+            let look = ferrite_math::Vec3::new(
+                -yaw.sin() * pitch.cos(),
+                -pitch.sin(),
+                yaw.cos() * pitch.cos(),
+            );
+            let velocity = ferrite_entity::firework::boost(ferrite_math::Vec3::default(), look);
+            send(
+                p,
+                &SetEntityMotion {
+                    id: VarInt(p.entity),
+                    velocity: ferrite_protocol::types::LpVec3([velocity.x, velocity.y, velocity.z]),
+                },
+            );
+            self.entities
+                .set_pos(key, ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
+        }
+        for burst in tick.bursts {
+            // Vanilla `FireworkRocketEntity.explode` broadcasts entity event 17.
+            self.broadcast_status(ctx, burst.key, 17);
+            let Some(damage) = ferrite_entity::firework::burst_damage(burst.explosions) else {
+                continue;
+            };
+            for p in self.players.values_mut() {
+                let d = [
+                    p.pos[0] - burst.pos.x,
+                    p.pos[1] - burst.pos.y,
+                    p.pos[2] - burst.pos.z,
+                ];
+                if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() <= 5.0 && p.gamemode != 3 {
+                    p.hurt(DamageKind::Generic, damage);
+                }
+            }
+        }
+    }
+
     fn broadcast_status(&self, ctx: &TickContext, key: ferrite_entity::EntityKey, status: u8) {
         let Some(id) = self.entities.data(key).map(|data| data.id) else {
             return;
@@ -8797,6 +8908,9 @@ impl Region {
                 ferrite_entity::falling::new_falling(pos, state)
             }
             "minecraft:tnt" => ferrite_entity::tnt::new_primed_tnt(pos, 80),
+            "minecraft:firework_rocket" => {
+                ferrite_entity::firework::new_firework(pos, 1, 0, None, &mut self.rng)
+            }
             thrown if arrow::Kind::thrown_from_name(thrown).is_some() => arrow::new_thrown(
                 arrow::Kind::thrown_from_name(thrown).unwrap(),
                 pos,
@@ -10562,6 +10676,7 @@ impl Region {
             self.pick_up_items(ctx);
             self.tick_falling(ctx);
             self.tick_tnt(ctx);
+            self.tick_fireworks(ctx);
         }
         stage!("containers");
         self.tick_beacons(ctx);

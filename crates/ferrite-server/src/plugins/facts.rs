@@ -82,6 +82,8 @@ struct Controls {
     /// `Input` flags: 1 forward, 2 backward, 4 left, 8 right, 16 jump, 32 shift, 64 sprint.
     input: u8,
     sprinting: bool,
+    /// Fall-flying (`START_FALL_FLYING` until the player lands).
+    gliding: bool,
 }
 
 fn controls_registry() -> &'static Mutex<HashMap<Uuid, Controls>> {
@@ -109,9 +111,29 @@ pub fn set_sprinting(player: Uuid, sprinting: bool) {
         .sprinting = sprinting;
 }
 
+/// Records a start or end of fall-flying.
+pub fn set_gliding(player: Uuid, gliding: bool) {
+    controls_registry()
+        .lock()
+        .unwrap()
+        .entry(player)
+        .or_default()
+        .gliding = gliding;
+}
+
+/// Whether the player is fall-flying.
+pub fn is_gliding(player: Uuid) -> bool {
+    controls_registry()
+        .lock()
+        .unwrap()
+        .get(&player)
+        .is_some_and(|controls| controls.gliding)
+}
+
 fn controls_answer(controls: &Controls, method: &str) -> Option<String> {
     Some(match method {
         "isSneaking()" => (controls.input & 32 != 0).to_string(),
+        "isGliding()" => controls.gliding.to_string(),
         "isSprinting()" => (controls.sprinting || controls.input & 64 != 0).to_string(),
         "getInputFlags()" => controls.input.to_string(),
         _ => return None,
@@ -763,7 +785,7 @@ pub fn answer(call: &HostCall) -> Option<String> {
     }
     if matches!(
         call.method.as_str(),
-        "isSneaking()" | "isSprinting()" | "getInputFlags()"
+        "isSneaking()" | "isSprinting()" | "isGliding()" | "getInputFlags()"
     ) {
         // An online player who has sent no keys yet is standing still.
         registry().lock().unwrap().get(&player)?;
@@ -1403,5 +1425,15 @@ mod tests {
         );
         facts.address = None;
         assert_eq!(answer_at(&facts, "getAddressText()", now), None);
+    }
+
+    #[test]
+    fn gliding_follows_the_registry() {
+        let player = Uuid::from_u128(0x61_1d);
+        assert!(!is_gliding(player));
+        set_gliding(player, true);
+        assert!(is_gliding(player));
+        set_gliding(player, false);
+        assert!(!is_gliding(player));
     }
 }

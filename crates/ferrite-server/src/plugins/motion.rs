@@ -21,6 +21,20 @@ pub fn motion_command(call: &HostCall) -> Option<PlayerCommand> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
+    if call.method == "fireworkBoost(int,int)" {
+        let flight: u8 = call
+            .args
+            .first()?
+            .parse()
+            .ok()
+            .filter(|f| (0..=127).contains(f))?;
+        let explosions: u8 = call.args.get(1)?.parse().ok().filter(|n| *n <= 64)?;
+        return Some(PlayerCommand::FireworkBoost {
+            player,
+            flight,
+            explosions,
+        });
+    }
     let velocity = match call.method.as_str() {
         "setVelocity(Vector)" => {
             let mut parts = call.args.first()?.split(PART).map(number);
@@ -96,5 +110,20 @@ mod tests {
         ] {
             assert!(motion_command(&bad).is_none(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_firework_boost_carries_flight_and_star_counts_and_rejects_bad_ones() {
+        let ok = motion_command(&call("fireworkBoost(int,int)", &["2", "3"]));
+        assert!(matches!(
+            ok,
+            Some(PlayerCommand::FireworkBoost {
+                flight: 2,
+                explosions: 3,
+                ..
+            })
+        ));
+        assert!(motion_command(&call("fireworkBoost(int,int)", &["-1", "0"])).is_none());
+        assert!(motion_command(&call("fireworkBoost(int,int)", &["1", "999"])).is_none());
     }
 }
