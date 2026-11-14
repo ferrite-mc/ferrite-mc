@@ -180,7 +180,7 @@ fn anvil_repairs_renames_and_charges_levels() {
     assert_eq!(f.menu.anvil_cost(), 0);
     assert_eq!(f.slot(2), empty());
     f.menu.set_slot(&mut f.inv, &TestCrafter, 1, second.clone());
-    // Two half-damaged swords plus the 5% combine bonus fully repair the result for 2 levels.
+    // Two half-damaged swords plus the 12% combine bonus (12% of the maximum) fully repair the result for 2 levels.
     assert_eq!(f.menu.anvil_cost(), 2);
     assert_eq!(f.slot(2).damage(), 0);
     assert_eq!(f.slot(2).name(), Some("minecraft:iron_sword"));
@@ -1527,4 +1527,42 @@ fn shulker_box_menu_has_27_slots_and_refuses_nested_boxes() {
     assert_eq!(f.carried(), item("red_shulker_box", 1));
     assert!(is_shulker_box(&item("shulker_box", 1)));
     assert!(!is_shulker_box(&item("shield", 1)));
+}
+
+#[test]
+fn anvil_rename_only_keeps_the_repair_cost_and_creative_lifts_the_cap() {
+    let mut f = Fixture::new(Menu::anvil(11));
+    let mut sword = item("iron_sword", 1);
+    sword
+        .components
+        .insert(component_ids::REPAIR_COST, Component::RepairCost(7));
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 0, sword.clone());
+    f.menu.rename("Renamed".into(), &TestCrafter);
+    // 7 prior-work levels plus one for the rename; the repair cost is not raised for a pure rename.
+    assert_eq!(f.menu.anvil_cost(), 8);
+    assert!(matches!(
+        f.slot(2).effective_component(component_ids::REPAIR_COST),
+        Some(Component::RepairCost(7))
+    ));
+    // A pure rename never costs 40 or more: it stops at 39.
+    sword
+        .components
+        .insert(component_ids::REPAIR_COST, Component::RepairCost(63));
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 0, sword.clone());
+    assert_eq!(f.menu.anvil_cost(), 39);
+    assert!(!f.slot(2).is_empty());
+    // Repairing an expensive item is refused unless the viewer has infinite materials.
+    let mut damaged = sword.clone();
+    damaged
+        .components
+        .insert(component_ids::DAMAGE, Component::Damage(100));
+    f.menu.rename(String::new(), &TestCrafter);
+    f.menu.set_slot(&mut f.inv, &TestCrafter, 0, damaged);
+    f.menu
+        .set_slot(&mut f.inv, &TestCrafter, 1, item("iron_ingot", 1));
+    assert_eq!(f.slot(2), empty());
+    f.menu.set_infinite_materials(true);
+    f.menu
+        .set_slot(&mut f.inv, &TestCrafter, 1, item("iron_ingot", 1));
+    assert!(!f.slot(2).is_empty());
 }

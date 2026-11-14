@@ -1026,6 +1026,15 @@ impl Player {
             _ => return,
         };
         self.open_menu(make, title, None);
+        self.grant_infinite_materials();
+    }
+
+    /// A creative viewer's anvil has no 40-level cap.
+    fn grant_infinite_materials(&mut self) {
+        let creative = self.gamemode == 1;
+        if let Some(menu) = self.menus.open.as_mut() {
+            menu.set_infinite_materials(creative);
+        }
     }
 
     /// Builds and sends one packet a plugin asked for (see `plugins/network.rs`).
@@ -1517,6 +1526,7 @@ impl Player {
                 "container.anvil",
                 Some(OpenAt::Anvil([pos.x, pos.y, pos.z])),
             );
+            self.grant_infinite_materials();
             return true;
         }
         if let Some(kind) = block_name(&source, [pos.x, pos.y, pos.z]).and_then(furnace::kind) {

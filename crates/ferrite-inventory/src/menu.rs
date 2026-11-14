@@ -678,6 +678,8 @@ pub struct Menu {
     rename: String,
     /// Vanilla `AnvilMenu.cost`: experience levels taking the result costs.
     anvil_cost: i32,
+    /// Vanilla `Player.hasInfiniteMaterials`: the anvil's 40-level cap does not apply.
+    infinite_materials: bool,
     /// Vanilla `StonecutterMenu.recipes` and `selectedRecipeIndex`.
     stonecutting: Vec<ItemStack>,
     stonecutting_index: usize,
@@ -773,6 +775,7 @@ impl Menu {
             beacon: matches!(kind, MenuKind::Beacon).then(BeaconState::default),
             rename: String::new(),
             anvil_cost: 0,
+            infinite_materials: false,
             stonecutting: Vec::new(),
             stonecutting_index: 0,
             loom_pattern: 0,
@@ -1547,6 +1550,11 @@ impl Menu {
     /// same kind) merge into the first: equal levels combine to one more, the cap is the
     /// enchantment's maximum, and an enchantment the item does not support or that excludes one
     /// already present is left out (and makes the result empty when nothing else applied).
+    /// Whether the viewer has infinite materials (creative mode), which lifts the anvil's level cap.
+    pub fn set_infinite_materials(&mut self, infinite: bool) {
+        self.infinite_materials = infinite;
+    }
+
     fn update_anvil(&mut self, crafter: &dyn Crafter) {
         let left = self.container[0].clone();
         let right = self.container[1].clone();
@@ -1557,7 +1565,9 @@ impl Menu {
             return;
         }
         let mut result = left.clone();
-        let mut cost = repair_cost(&left) + repair_cost(&right);
+        let base_cost = repair_cost(&left) + repair_cost(&right);
+        let mut cost = base_cost;
+        let mut rename_cost = 0;
         let mut changed = false;
 
         let current_name = custom_name(&left).unwrap_or_default();
@@ -1571,6 +1581,7 @@ impl Menu {
                     .insert_opaque(ids::CUSTOM_NAME, Tag::String(wanted.into()));
             }
             cost += 1;
+            rename_cost = 1;
             changed = true;
         }
 
@@ -1598,8 +1609,8 @@ impl Menu {
                     let max = left.max_damage().unwrap_or(0);
                     let left_durability = max - left.damage();
                     let right_durability = max - right.damage();
-                    // Vanilla gives a 5% bonus of the maximum durability for a combined repair.
-                    let total = (left_durability + right_durability + max / 20).min(max);
+                    // Vanilla adds 12% of the maximum durability to a combined repair.
+                    let total = (left_durability + right_durability + max * 12 / 100).min(max);
                     // Vanilla only charges when the combination actually repairs something.
                     if total > 0 && max - total < left.damage() {
                         result
@@ -1639,17 +1650,27 @@ impl Menu {
             }
         }
 
-        // Vanilla refuses a result at the 40-level cap.
-        if cost >= 40 {
+        // Vanilla caps a rename-only result at 39 levels; any other result at 40 or more is refused
+        // unless the viewer has infinite materials.
+        let work = cost - base_cost;
+        let rename_only = work > 0 && rename_cost == work;
+        if rename_only && cost >= 40 {
+            cost = 39;
+        }
+        if cost >= 40 && !self.infinite_materials {
             self.anvil_cost = 40;
             self.sync_data();
             return;
         }
         if changed {
-            let penalty = repair_cost(&left).max(repair_cost(&right));
+            let mut penalty = repair_cost(&left).max(repair_cost(&right));
+            // Vanilla leaves the repair cost alone when the only work is a rename.
+            if !rename_only {
+                penalty = penalty * 2 + 1;
+            }
             result
                 .components
-                .insert(ids::REPAIR_COST, Component::RepairCost(penalty * 2 + 1));
+                .insert(ids::REPAIR_COST, Component::RepairCost(penalty));
             self.anvil_cost = cost.max(1);
             self.result = result;
         }
