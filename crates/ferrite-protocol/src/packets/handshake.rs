@@ -53,3 +53,39 @@ impl Packet for Intention {
     const STATE: State = State::Handshaking;
     const BOUND: Bound = Bound::Serverbound;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(value: Intention) {
+        let mut bytes = Vec::new();
+        value.encode(&mut bytes);
+        let mut input = bytes.as_slice();
+        assert_eq!(Intention::decode(&mut input).unwrap(), value);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn intention_roundtrips_for_every_intent() {
+        for intent in [Intent::Status, Intent::Login, Intent::Transfer] {
+            roundtrip(Intention {
+                protocol_version: crate::PROTOCOL_VERSION,
+                server_address: "play.example.org".into(),
+                server_port: 25565,
+                intent,
+            });
+        }
+        assert_eq!(Intention::ID, 0x00);
+    }
+
+    #[test]
+    fn intention_rejects_unknown_intent() {
+        let mut bytes = Vec::new();
+        VarInt(777).encode(&mut bytes);
+        "localhost".to_string().encode(&mut bytes);
+        25565u16.encode(&mut bytes);
+        VarInt(9).encode(&mut bytes);
+        assert!(Intention::decode(&mut bytes.as_slice()).is_err());
+    }
+}
