@@ -27,6 +27,41 @@ public class Entity {
     public void setRemainingFireTicks(int ticks) { bukkit.setFireTicks(ticks); }
     public void setInvulnerable(boolean value) { bukkit.setInvulnerable(value); }
     public void setSilent(boolean value) { bukkit.setSilent(value); }
+    /** Velocity in blocks per tick (NMS {@code getDeltaMovement}). */
+    public net.minecraft.world.phys.Vec3 getDeltaMovement() { var v = bukkit.getVelocity(); return new net.minecraft.world.phys.Vec3(v.getX(), v.getY(), v.getZ()); }
+    public void setDeltaMovement(net.minecraft.world.phys.Vec3 v) { bukkit.setVelocity(v.toBukkit()); }
+    public void setDeltaMovement(double x, double y, double z) { bukkit.setVelocity(new org.bukkit.util.Vector(x, y, z)); }
+    public void setPos(double x, double y, double z) { var l = bukkit.getLocation(); bukkit.teleport(new org.bukkit.Location(l.getWorld(), x, y, z, l.getYaw(), l.getPitch())); }
+    public void teleportTo(double x, double y, double z) { setPos(x, y, z); }
+    public void setYRot(float yaw) { bukkit.setRotation(yaw, bukkit.getLocation().getPitch()); }
+    public void setXRot(float pitch) { bukkit.setRotation(bukkit.getLocation().getYaw(), pitch); }
+    public boolean onGround() { return bukkit.isOnGround(); }
+    public boolean isOnFire() { return bukkit.getFireTicks() > 0; }
+    public boolean isInWater() { return bukkit.isInWater(); }
+    public boolean isNoGravity() { return !bukkit.hasGravity(); }
+    public void setNoGravity(boolean value) { bukkit.setGravity(!value); }
+    public float getBbWidth() { return (float) bukkit.getWidth(); }
+    public float getBbHeight() { return (float) bukkit.getHeight(); }
+    public double getEyeY() { return bukkit instanceof org.bukkit.entity.LivingEntity l ? l.getEyeLocation().getY() : getY() + bukkit.getHeight() * 0.85; }
+    public boolean hasCustomName() { return bukkit.customName() != null; }
+    public net.minecraft.network.chat.Component getCustomName() { var n = bukkit.customName(); return n == null ? null : net.minecraft.network.chat.Component.literal(net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(n)); }
+    public java.util.Set<String> getTags() { return bukkit.getScoreboardTags(); }
+    public boolean addTag(String tag) { return bukkit.addScoreboardTag(tag); }
+    public boolean removeTag(String tag) { return bukkit.removeScoreboardTag(tag); }
+    /** The entities riding this one, each wrapped the way {@link #of} wraps a Bukkit entity. */
+    public java.util.List<Entity> getPassengers() { var out = new java.util.ArrayList<Entity>(); for (var p : bukkit.getPassengers()) out.add(of(p)); return out; }
+    public boolean isVehicle() { return !bukkit.getPassengers().isEmpty(); }
+    public boolean isPassenger() { return bukkit.getVehicle() != null; }
+    public Entity getVehicle() { var v = bukkit.getVehicle(); return v == null ? null : of(v); }
+    public boolean hasPassenger(Entity other) { return bukkit.getPassengers().contains(other.bukkit); }
+    public boolean startRiding(Entity vehicle) { return vehicle.bukkit.addPassenger(bukkit); }
+    public void stopRiding() { var v = bukkit.getVehicle(); if (v != null) v.removePassenger(bukkit); }
+    /** The NMS handle for a Bukkit entity: players and other living entities keep their richer wrappers. */
+    public static Entity of(org.bukkit.entity.Entity entity) {
+        if (entity instanceof org.bukkit.craftbukkit.entity.CraftPlayer p) return p.getHandle();
+        if (entity instanceof org.bukkit.entity.LivingEntity l) return new LivingEntity(l);
+        return new Entity(entity);
+    }
     public void discard() { bukkit.remove(); }
     @Override public boolean equals(Object other) { return other instanceof Entity e && e.bukkit.getUniqueId().equals(bukkit.getUniqueId()); }
     @Override public int hashCode() { return bukkit.getUniqueId().hashCode(); }

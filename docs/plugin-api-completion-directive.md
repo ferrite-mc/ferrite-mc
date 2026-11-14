@@ -276,6 +276,8 @@
 - **`Player#loadData`/`saveData`:** `PlayerCommand::PlayerData` → 리전 `Command::PluginLoadData/PluginSaveData`. load는 저장 파일의 인벤토리·선택 슬롯·게임 모드를 적용하고, 같은 월드에서 저장된 파일이면 위치도 되돌린다(월드가 다르면 위치는 건드리지 않는다). 체력·허기·경험치는 저장 파일 형식에 없어 되돌리지 않는다.
 - **NMS 메뉴(§2.4):** 상자 계열과 `SHULKER_BOX`는 그대로 열고, 작업대·모루·마법부여·숫돌·베틀·대장간·석재 절단기·지도 제작대는 호스트 스테이션으로 연다(내용 패킷은 명시적 예외). 호퍼·발사기·화로·양조기·신호기·교탁·상인·크래프터는 구체적인 이유와 대체 API를 담은 예외를 유지한다.
 - **TAGS 라이프사이클 이벤트:** 태그 레지스트리가 시작 후 고정이라 거부한다. `fromLegacy`의 데이터 바이트는 지원하지 않는다.
+- **NMS 엔티티·월드 핸들(§2.2/2.5):** `net.minecraft.world.entity.Entity`는 이제 델타 이동(`getDeltaMovement/setDeltaMovement`), `setPos/teleportTo`, 회전, 지면·불·물 상태, 크기, 커스텀 이름, 스코어보드 태그, 승객·탑승 관계(`getPassengers/getVehicle/startRiding/stopRiding`)를 Bukkit 호출로 읽고 쓴다(Entity.of로 플레이어/생명체 래퍼 선택). `LivingEntity`는 흡수 체력·수면·활강·아이템 사용·박힌 화살·효과 확인, `ServerLevel`은 시드·스폰·차원 키·엔티티 목록·UUID 조회, `Vec3`는 벡터 연산을 갖는다. 모두 Bukkit(→호스트 라우트)을 거치므로 리전 소유권을 우회하지 않는다. 테스트 `NmsEntityHandleTest`. 직접 NMS 필드 접근(`entityData`, 속성 맵 등)은 노출하지 않는다.
+- **눈 엔더·낚싯찌:** 요새 위치 탐색(눈 엔더)과 입질·낚시 판정(낚싯찌)이 있어야 의미 있는 동작이 되므로, 겉모양만 나는 가짜를 만들지 않고 `UnsupportedOperationException`을 유지한다.
 - **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 그 밖의 Paper 생명주기·스케줄러(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
 
