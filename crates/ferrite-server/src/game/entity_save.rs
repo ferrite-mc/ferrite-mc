@@ -611,6 +611,19 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             Tag::Int(mob.dragon_phase_ticks as i32),
         );
         c.insert("PerchFlames".into(), Tag::Int(i32::from(mob.perch_flames)));
+        if let Some((name, props)) = mob.carried.and_then(ferrite_data::blocks::state) {
+            // `Enderman.addAdditionalSaveData`: the carried block as a block state compound.
+            let mut state = Compound::new();
+            state.insert("Name".into(), Tag::String(name.to_owned()));
+            if !props.is_empty() {
+                let mut properties = Compound::new();
+                for (key, value) in props {
+                    properties.insert((*key).into(), Tag::String((*value).to_owned()));
+                }
+                state.insert("Properties".into(), Tag::Compound(properties));
+            }
+            c.insert("carriedBlockState".into(), Tag::Compound(state));
+        }
         if mob.kind == MobKind::Sheep {
             // Vanilla saves the legacy colour id as `Color` and the shorn flag as `Sheared`.
             c.insert("Color".into(), Tag::Byte(mob.wool_color as i8));
@@ -827,6 +840,21 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 }
                 if kind.is_tameable() {
                     ferrite_entity::tame::define_metadata(&mut data.metadata, &mob);
+                }
+                if let Some(Tag::Compound(state)) = c.get("carriedBlockState")
+                    && let Some(Tag::String(name)) = state.get("Name")
+                {
+                    let props: Vec<(&str, &str)> = match state.get("Properties") {
+                        Some(Tag::Compound(p)) => p
+                            .iter()
+                            .filter_map(|(k, v)| match v {
+                                Tag::String(v) => Some((k.as_str(), v.as_str())),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    mob.carried = ferrite_data::blocks::state_id(name, &props);
                 }
                 if kind == MobKind::Sheep {
                     mob.wool_color = match c.get("Color") {
@@ -1160,6 +1188,27 @@ mod tests {
             data.metadata.get(ferrite_entity::sheep::WOOL_INDEX),
             Some(ferrite_protocol::packets::play::MetaValue::Byte(byte)) if *byte == 11 | 0x10
         ));
+    }
+
+    #[test]
+    fn an_enderman_keeps_its_carried_block_state_across_a_save() {
+        let mut record = mob::new_mob(
+            MobKind::Enderman,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        let log = ferrite_data::blocks::state_id("minecraft:oak_log", &[("axis", "z")]).unwrap();
+        record.data.mob.as_mut().unwrap().carried = Some(log);
+        let loaded = from_nbt(&to_nbt(&[record]));
+        assert_eq!(loaded[0].data.mob.as_ref().unwrap().carried, Some(log));
+        // An enderman carrying nothing saves no compound at all.
+        let empty = mob::new_mob(
+            MobKind::Enderman,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        let loaded = from_nbt(&to_nbt(&[empty]));
+        assert_eq!(loaded[0].data.mob.as_ref().unwrap().carried, None);
     }
 
     #[test]

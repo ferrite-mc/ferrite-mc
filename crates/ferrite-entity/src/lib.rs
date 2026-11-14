@@ -25,6 +25,7 @@ pub mod breed;
 pub mod combat;
 pub mod dragon;
 pub mod effect;
+pub mod enderman;
 pub mod experience;
 pub mod eye;
 pub mod falling;

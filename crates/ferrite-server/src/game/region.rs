@@ -6359,6 +6359,16 @@ impl Region {
             .collect();
         for p in self.players.values() {
             super::targeting::publish(p.uuid, p.gamemode);
+            // Endermen anywhere read where this player looks, and whether a carved pumpkin
+            // hides them.
+            super::targeting::publish_gaze(
+                p.uuid,
+                ferrite_entity::enderman::Gaze {
+                    look: ferrite_entity::combat::look_vector(p.yaw, p.pitch),
+                    pumpkin: p.inventory.get(ferrite_inventory::HEAD).name()
+                        == Some("minecraft:carved_pumpkin"),
+                },
+            );
         }
         let mut players: HashMap<Uuid, ferrite_math::Vec3> = ctx
             .positions
@@ -6383,6 +6393,8 @@ impl Region {
             untargetable: super::targeting::untargetable(),
             // Vanilla `Difficulty.HARD` is 3.
             hard: ctx.state.lock().unwrap().difficulty == 3,
+            gazes: super::targeting::gazes(),
+            raining: ctx.raining,
         };
         let targets: Vec<_> = players
             .iter()
@@ -12623,6 +12635,78 @@ mod tests {
             super::super::WorldId::Vanilla(super::super::Dimension::Nether);
         region.tick_mobs(&ctx, &blocks);
         assert!(region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
+    }
+
+    #[test]
+    fn an_enderman_is_angered_by_a_stare_from_a_player_in_another_region() {
+        let ctx = tick_context();
+        let player = Uuid::from_u128(0xe1de_0001);
+        let (outbound, _receiver) = OutboundSender::channel(4096);
+        ctx.tracking.lock().unwrap().insert(
+            player,
+            (
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+                HashSet::new(),
+                outbound,
+            ),
+        );
+        // The player belongs to another region: this region sees only the shared position
+        // snapshot and the gaze that region published.
+        let feet = [0.5, 65.0, 0.5];
+        ctx.positions.lock().unwrap().insert(player, feet);
+        let mut region = Region::default();
+        let enderman = region.entities.insert(mob::new_mob(
+            MobKind::Enderman,
+            ferrite_math::Vec3::new(10.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        let eye = region.entities.pos(enderman).unwrap()
+            + ferrite_math::Vec3::new(0.0, f64::from(MobKind::Enderman.props().eye_height), 0.0);
+        let look = (eye
+            - ferrite_entity::combat::eye_position(ferrite_math::Vec3::new(
+                feet[0], feet[1], feet[2],
+            )))
+        .normalize();
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        super::super::targeting::publish_gaze(
+            player,
+            ferrite_entity::enderman::Gaze {
+                look,
+                pumpkin: false,
+            },
+        );
+        for _ in 0..2_000 {
+            region.tick_mobs(&ctx, &blocks);
+            if mob::state(&region.entities, enderman).unwrap().target == Some(player) {
+                break;
+            }
+        }
+        assert_eq!(
+            mob::state(&region.entities, enderman).unwrap().target,
+            Some(player),
+            "a stare from another region must anger it"
+        );
+        // The same player under a carved pumpkin is not noticed.
+        let calm = region.entities.insert(mob::new_mob(
+            MobKind::Enderman,
+            ferrite_math::Vec3::new(10.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        super::super::targeting::publish_gaze(
+            player,
+            ferrite_entity::enderman::Gaze {
+                look,
+                pumpkin: true,
+            },
+        );
+        for _ in 0..1_000 {
+            region.tick_mobs(&ctx, &blocks);
+        }
+        assert_eq!(mob::state(&region.entities, calm).unwrap().target, None);
+        super::super::targeting::forget(player);
     }
 
     #[test]

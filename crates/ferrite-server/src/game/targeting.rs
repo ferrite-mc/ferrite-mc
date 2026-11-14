@@ -7,12 +7,16 @@
 //! untargetable into this small table (bounded by the online player count, cleared when the
 //! player leaves) and target lists are filtered through it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use ferrite_entity::enderman::Gaze;
 use std::sync::{Mutex, MutexGuard};
 
 use uuid::Uuid;
 
 static UNTARGETABLE: Mutex<Option<HashSet<Uuid>>> = Mutex::new(None);
+/// Where each player looks, for endermen in other regions (see [`publish_gaze`]).
+static GAZES: Mutex<Option<HashMap<Uuid, Gaze>>> = Mutex::new(None);
 
 fn table() -> MutexGuard<'static, Option<HashSet<Uuid>>> {
     UNTARGETABLE.lock().unwrap_or_else(|e| e.into_inner())
@@ -39,6 +43,29 @@ pub fn forget(player: Uuid) {
     if let Some(set) = table().as_mut() {
         set.remove(&player);
     }
+    if let Some(map) = GAZES.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        map.remove(&player);
+    }
+}
+
+/// Called by the owning region every tick for each of its players: the view vector and whether
+/// a carved pumpkin is worn. The shared position snapshot carries neither, and an enderman in
+/// another region reads them from here, the same way it reads [`publish`]ed game modes.
+pub fn publish_gaze(player: Uuid, gaze: Gaze) {
+    GAZES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(player, gaze);
+}
+
+/// The last published gaze of every player.
+pub fn gazes() -> HashMap<Uuid, Gaze> {
+    GAZES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
 }
 
 /// The players hostile mobs may not target right now.

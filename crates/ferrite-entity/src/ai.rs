@@ -572,6 +572,11 @@ pub fn tick_with_owner_attacks_and_holders(
 /// World rules the mob goals read.
 #[derive(Debug, Default)]
 pub struct MobRules {
+    /// Where players look and whether they wear a carved pumpkin, for the enderman stare.
+    /// Players without an entry are not looking at anything.
+    pub gazes: std::collections::HashMap<Uuid, crate::enderman::Gaze>,
+    /// Whether it is raining (endermen are hurt by rain under open sky).
+    pub raining: bool,
     /// Creative and spectator players: seen by every goal except hostile target selection.
     pub untargetable: std::collections::HashSet<Uuid>,
     /// Hard difficulty (skeletons shoot twice as often).
@@ -591,7 +596,12 @@ pub fn tick_full(
     holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
-    let MobRules { untargetable, hard } = rules;
+    let MobRules {
+        untargetable,
+        hard,
+        gazes,
+        raining,
+    } = rules;
     let bow_cooldown = if *hard {
         SKELETON_COOLDOWN_HARD
     } else {
@@ -686,6 +696,37 @@ pub fn tick_full(
             }
         }
 
+        if kind == MobKind::Enderman {
+            // `EndermanLookForPlayerGoal`: a calm enderman angers at a player who stares at it.
+            if mob::state(store, key).is_some_and(|s| s.anger == 0) {
+                let candidates: Vec<crate::enderman::Candidate> = hostile_targets
+                    .iter()
+                    .filter_map(|target| {
+                        gazes
+                            .get(&target.uuid)
+                            .map(|gaze| crate::enderman::Candidate {
+                                uuid: target.uuid,
+                                pos: target.pos,
+                                gaze: *gaze,
+                            })
+                    })
+                    .collect();
+                crate::enderman::tick_stare(store, key, blocks, &candidates, rng);
+            }
+            // `isSensitiveToWater`: one point of drowning damage a tick in water or rain, and
+            // nine hurts in ten teleport it away.
+            if crate::enderman::in_water_or_rain(store, key, blocks, *raining)
+                && matches!(
+                    mob::hurt(store, key, crate::enderman::WATER_DAMAGE, None),
+                    Some(mob::Hurt::Survived { .. })
+                )
+                && rng.next_int(10) != 0
+            {
+                let at = store.pos(key).unwrap_or_default();
+                blink(store, key, blocks, at, rng);
+            }
+            crate::enderman::sync(store, key);
+        }
         if kind.is_hostile() {
             let (current, calm) =
                 mob::state(store, key).map_or((None, false), |s| (s.target, s.anger == 0));
@@ -1468,7 +1509,7 @@ mod tests {
         let creative = target(0.5, 0.5);
         let hidden = MobRules {
             untargetable: [creative.uuid].into(),
-            hard: false,
+            ..Default::default()
         };
         let mut rng = Rng::new(2);
         let mut hits = 0;
@@ -2036,8 +2077,8 @@ mod tests {
             ));
             let mut rng = Rng::new(4);
             let rules = MobRules {
-                untargetable: Default::default(),
                 hard,
+                ..Default::default()
             };
             let player = target(0.5, 0.5);
             let mut ticks = Vec::new();

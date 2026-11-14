@@ -309,6 +309,13 @@ pub struct MobState {
     pub sheared: bool,
     /// Ticks left in a sheep's `EatBlockGoal`; zero when it is not eating.
     pub eat_timer: u8,
+    /// Ticks an enderman has been stared at by `stare_target` (`aggroTime`); zero when calm.
+    pub stare_time: u8,
+    pub stare_target: Option<uuid::Uuid>,
+    /// Whether anything ever stared at this enderman (`DATA_STARED_AT`).
+    pub stared_at: bool,
+    /// The block state an enderman carries (`DATA_CARRY_STATE`); kept and saved, not synched.
+    pub carried: Option<u16>,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -398,6 +405,10 @@ impl MobState {
             wool_color: 0,
             sheared: false,
             eat_timer: 0,
+            stare_time: 0,
+            stare_target: None,
+            stared_at: false,
+            carried: None,
             wander_yaw: 0.0,
             moving: false,
             target: None,
@@ -471,6 +482,9 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         && let Some(state) = data.mob.as_ref()
     {
         crate::breed::define_metadata(&mut data.metadata, state);
+    }
+    if kind == MobKind::Enderman {
+        crate::enderman::define_metadata(&mut data.metadata);
     }
     if kind == MobKind::Sheep
         && let Some(state) = data.mob.as_mut()
