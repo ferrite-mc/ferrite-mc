@@ -66,8 +66,8 @@ server-side only.
 - Dragon: the strafe phase, the gateway creation beam, the 2400-tick automatic beam and the
   perched subphases are implemented. The perched timings were checked against the 26.3 jar
   (scan 20×10, 25/100 ticks, roar 40, one cloud at tick 10 per 200-tick flame, four flames then
-  takeoff). The gateway landing radius now matches vanilla's 5. Left: the charge flies at
-  `MAX_SPEED` instead of vanilla's 3.0, ignores collision exits, and does not save its target;
+  takeoff). The gateway landing radius now matches vanilla's 5. The charge now uses the 3.0
+  fly-speed slope clamp and the 10-tick recovery; left: collision exits and saving its target;
   the breath cloud uses flat 3 magic damage rather than the mob effect; the guarded-spike choice
   can differ on non-vanilla host terrain (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
@@ -83,8 +83,9 @@ server-side only.
   The default world, nether and end publish entity NBT under their own world ids
   (`plugins.rs::world_id`), so capture is no longer runtime-world-only.
 - Metadata breadth per entity type. Default attributes are now sent when a viewer starts
-  tracking a living entity; passengers on pairing start and the remaining per-type metadata are
-  still missing (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+  tracking a living entity; vehicle passengers and a skeleton's bow are sent on pairing start.
+  Remaining per-type metadata, a generic equip API and custom equipment persistence are still
+  missing (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
 ## 3. Plugin API breadth
 
@@ -118,11 +119,11 @@ server-side only.
 ## 4. World interaction and gameplay
 
 - Waterlogging, fluid/redstone interaction and fluid-wash drops are implemented and covered by
-  the `world-interaction-audit.md` tests. Flow into unloaded chunks still does not resume on load:
-  `Region::wake_loaded_chunks` implements and unit-tests the border pass, but its tick-loop call is
-  disabled because a join-time scan costs about 1 s of region time. Re-enable it with chunk-direct
-  reads or a blocked-fluid queue and a join benchmark. Remaining audit blockers are vines, sapling
-  tree growth (worldgen feature set), bamboo `leaves` updates and real-client checks.
+  the `world-interaction-audit.md` tests. `Region::wake_loaded_chunks` implements the border pass
+  and `Region::tick` runs it; the join benchmark is in the audit. Vines now follow their 26.3
+  random tick, including the `spread_vines` rule and face-aware slab/stairs support, and bamboo
+  `leaves` updates are in. Remaining audit blockers are sapling tree growth (worldgen feature set)
+  and real-client checks.
 - Neighbour-update ordering and placement rules match the audited six-face order; sugar cane, cactus,
   bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage growth now have random-tick
   handlers. Gravity-block chains were audited earlier.
