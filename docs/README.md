@@ -8,6 +8,8 @@ Current as of **2026-11-14**, `main` = `433b907`.
   verification and roadmap.
 - [`BACKLOG.md`](BACKLOG.md) — the single list of open work.
 - [`COMMANDS-STATUS.md`](COMMANDS-STATUS.md) — command-tree parity and remaining command blockers.
+- [`claude-lanes-2026-11-14.md`](claude-lanes-2026-11-14.md) — ownership split for the two
+  Claude lanes (scope and acceptance; the items themselves stay in `BACKLOG.md`).
 - Plugin API:
   - [`plugin-api-stubs.md`](plugin-api-stubs.md) — method-level evidence and explicit refusals.
   - [`plugin-stubs-status.md`](plugin-stubs-status.md) — session-by-session plugin API status.

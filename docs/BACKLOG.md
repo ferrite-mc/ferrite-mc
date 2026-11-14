@@ -5,6 +5,9 @@ Single list of open work, checked against source on **2026-11-14** at `main` = `
 command/plugin lanes are merged. Older coordinator and handoff notes are historical; use this
 file and the current source instead of their "remaining" lists. The open runtime-world sequence
 is captured below so it stays with the release branch.
+The two Claude lanes (world/entity and command/protocol/plugin) own the sections below as
+mapped in [`claude-lanes-2026-11-14.md`](claude-lanes-2026-11-14.md); this file remains the
+list of record.
 
 ## Contract for every task
 
