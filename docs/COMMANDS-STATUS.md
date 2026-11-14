@@ -122,6 +122,14 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   is still rejected before anything is read. Tests:
   `clone_between_dimensions_reads_one_world_and_writes_another` (replace, `filtered`, `move`),
   `clone_validation_is_shared_with_the_cross_dimension_path`. Not verified with a real client.
+  Updated 2026-11-14: `from`/`to` also resolve runtime worlds by resource key (`ferrite:<name>`,
+  `RuntimeWorldCatalog::by_key`), the hand-off carries a `WorldId` (`CrossClone::source_world|
+  target_world`) and runs through `schedule_at_world_chunk`, and an unknown key fails with
+  vanilla's `argument.dimension.invalid` text ("Unknown dimension '<key>'") before anything is
+  read. Tests: `clone_between_the_default_and_a_runtime_world` (default to runtime, runtime to
+  default with `move`, unknown key writes nothing), `clone_worlds_resolve_vanilla_keys_and_reject_unknown_ones_with_vanillas_message`.
+  Limit: the command's own world is still the vanilla dimension of its source; a command cannot
+  yet run *as* a runtime world, so `from`/`to` omitted never means a runtime world.
   Unverified: whether vanilla counts only changed blocks.
 - `/fill` and `/setblock`: `strict` is accepted and behaves like `replace`; its real semantics
   are unverified.

@@ -164,6 +164,10 @@ impl RuntimeWorldCatalog {
     pub fn get(&self, id: uuid::Uuid) -> Option<&RuntimeWorldDescriptor> {
         self.by_id.get(&id)
     }
+    /// A runtime world by its resource key (`ferrite:<name>`), the form `/clone from|to` takes.
+    pub fn by_key(&self, key: &str) -> Option<&RuntimeWorldDescriptor> {
+        self.by_key.get(key).and_then(|id| self.by_id.get(id))
+    }
     pub fn by_name(&self, name: &str) -> Option<&RuntimeWorldDescriptor> {
         self.by_name
             .get(&name.trim().to_lowercase())

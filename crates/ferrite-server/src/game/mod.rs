@@ -2105,14 +2105,17 @@ async fn run(
                       match &clone.read {
                           Err(error) => tell(&clone.reply, error),
                           Ok(_) => {
-                              let target = Arc::clone(dimensions.source(clone.target_dimension));
+                              let Some(target) = world_source(&dimensions, &runtime_world_catalog, clone.target_world) else {
+                                  tell(&clone.reply, "Chunk not loaded");
+                                  continue;
+                              };
                               let tracking = tracking.clone();
                               let signals = signal_tx.clone();
                               let chunk = ChunkPos(
                                   clone.destination[0].div_euclid(16),
                                   clone.destination[2].div_euclid(16),
                               );
-                              worlds.schedule_at_chunk(clone.target_dimension, chunk, move |_region| {
+                              worlds.schedule_at_world_chunk(clone.target_world, chunk, move |_region| {
                                   let Ok(read) = &clone.read else { return };
                                   match commands_world::apply_clone_write(
                                       read,
@@ -2140,14 +2143,14 @@ async fn run(
                   Signal::CrossCloneClear(clone) => {
                       let clone = *clone;
                       if let Ok(read) = &clone.read {
-                          let origin = Arc::clone(dimensions.source(clone.source_dimension));
+                          let Some(origin) = world_source(&dimensions, &runtime_world_catalog, clone.source_world) else { continue };
                           let tracking = tracking.clone();
                           let chunk = ChunkPos(
                               read.min[0].div_euclid(16),
                               read.min[2].div_euclid(16),
                           );
                           let read = read.clone();
-                          worlds.schedule_at_chunk(clone.source_dimension, chunk, move |_region| {
+                          worlds.schedule_at_world_chunk(clone.source_world, chunk, move |_region| {
                               let _ = commands_world::apply_clone_clear(&read, &*origin, &tracking);
                           });
                       }
@@ -2657,6 +2660,7 @@ async fn run(
                           worlds: &worlds,
                           dimensions: &dimensions,
                           dimension: runtime_dimension,
+                          catalog: &runtime_world_catalog,
                           tracking: &tracking,
                       };
                       while let Ok(action) = received.try_recv() { match action {
@@ -2795,6 +2799,7 @@ async fn run(
                           worlds: &worlds,
                           dimensions: &dimensions,
                           dimension: Dimension::Overworld,
+                          catalog: &runtime_world_catalog,
                           tracking: &tracking,
                       };
                       while let Ok(action) = received.try_recv() { match action {
@@ -3873,6 +3878,8 @@ struct CommandRuntime<'a> {
     dimensions: &'a Arc<DimensionRegistry>,
     /// The dimension the command source acts in.
     dimension: Dimension,
+    /// Runtime worlds, so `/clone from|to <key>` can name them.
+    catalog: &'a RuntimeWorldCatalog,
     tracking: &'a region::Tracking,
 }
 
@@ -4305,21 +4312,18 @@ impl CommandRuntime<'_> {
         else {
             return false;
         };
-        let named = |name: &Option<String>| match name {
-            Some(key) => Dimension::from_key(key).ok_or_else(|| key.clone()),
-            None => Ok(self.dimension),
-        };
-        let (source_dimension, target_dimension) = match (
-            named(&options.source_dimension),
-            named(&options.target_dimension),
+        let here = WorldId::Vanilla(self.dimension);
+        let (source_world, target_world) = match (
+            clone_world(&options.source_dimension, here, self.catalog),
+            clone_world(&options.target_dimension, here, self.catalog),
         ) {
             (Ok(source), Ok(target)) => (source, target),
-            (Err(key), _) | (_, Err(key)) => {
-                self.reply.text(&format!("Unknown dimension '{key}'"));
+            (Err(error), _) | (_, Err(error)) => {
+                self.reply.text(&error);
                 return true;
             }
         };
-        if source_dimension == self.dimension && target_dimension == self.dimension {
+        if source_world == here && target_world == here {
             return false;
         }
         let (begin, end, destination) = (
@@ -4336,25 +4340,34 @@ impl CommandRuntime<'_> {
             begin[2].min(end[2]).div_euclid(16),
         );
         let target_chunk = ChunkPos(destination[0].div_euclid(16), destination[2].div_euclid(16));
-        if self.worlds.owner(source_dimension, source_chunk).is_none()
-            || self.worlds.owner(target_dimension, target_chunk).is_none()
+        if self
+            .worlds
+            .owner_world(source_world, source_chunk)
+            .is_none()
+            || self
+                .worlds
+                .owner_world(target_world, target_chunk)
+                .is_none()
         {
             self.reply.text("Chunk not loaded");
             return true;
         }
-        let source = Arc::clone(self.dimensions.source(source_dimension));
+        let Some(source) = world_source(self.dimensions, self.catalog, source_world) else {
+            self.reply.text("Chunk not loaded");
+            return true;
+        };
         let (mode, options) = (*mode, options.clone());
         let signals = self.signals.clone();
         let reply = self.reply.outbound.cloned();
         self.worlds
-            .schedule_at_chunk(source_dimension, source_chunk, move |_region| {
+            .schedule_at_world_chunk(source_world, source_chunk, move |_region| {
                 let read = commands_world::clone_read(begin, end, mode, &options, &*source);
                 let _ = signals.send(region::Signal::CrossClone(Box::new(
                     commands_world::CrossClone {
                         read,
                         destination,
-                        source_dimension,
-                        target_dimension,
+                        source_world,
+                        target_world,
                         mover: options.mover,
                         reply,
                     },
@@ -5831,6 +5844,25 @@ fn world_storage_root(
     }
 }
 /// The chunk source behind a world identity, if that world is still loaded.
+/// The world a `/clone` `from`/`to` argument names: a vanilla dimension, a runtime world by its
+/// resource key, or `here` when the argument is absent. Vanilla's `DimensionArgument` message
+/// (`argument.dimension.invalid`: "Unknown dimension '%s'") answers anything else.
+fn clone_world(
+    named: &Option<String>,
+    here: WorldId,
+    catalog: &RuntimeWorldCatalog,
+) -> Result<WorldId, String> {
+    let Some(key) = named else { return Ok(here) };
+    Dimension::from_key(key)
+        .map(WorldId::Vanilla)
+        .or_else(|| {
+            catalog
+                .by_key(key)
+                .map(|descriptor| WorldId::Runtime(descriptor.id))
+        })
+        .ok_or_else(|| format!("Unknown dimension '{key}'"))
+}
+
 fn world_source(
     dimensions: &DimensionRegistry,
     catalog: &RuntimeWorldCatalog,
@@ -5843,6 +5875,27 @@ fn world_source(
             .map(|descriptor| Arc::clone(&descriptor.source)),
     }
 }
+#[cfg(test)]
+mod clone_world_tests {
+    use super::*;
+
+    #[test]
+    fn clone_worlds_resolve_vanilla_keys_and_reject_unknown_ones_with_vanillas_message() {
+        let catalog = RuntimeWorldCatalog::default();
+        let here = WorldId::Vanilla(Dimension::Overworld);
+        let name = |key: &str| Some(key.to_owned());
+        assert_eq!(clone_world(&None, here, &catalog), Ok(here));
+        assert_eq!(
+            clone_world(&name("minecraft:the_nether"), here, &catalog),
+            Ok(WorldId::Vanilla(Dimension::Nether))
+        );
+        assert_eq!(
+            clone_world(&name("ferrite:missing"), here, &catalog),
+            Err("Unknown dimension 'ferrite:missing'".to_owned())
+        );
+    }
+}
+
 #[cfg(test)]
 mod integration;
 

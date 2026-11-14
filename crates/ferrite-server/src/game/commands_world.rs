@@ -1253,8 +1253,8 @@ pub fn clone_write(
 pub struct CrossClone {
     pub read: Result<CloneRead, String>,
     pub destination: [i32; 3],
-    pub source_dimension: super::Dimension,
-    pub target_dimension: super::Dimension,
+    pub source_world: super::WorldId,
+    pub target_world: super::WorldId,
     pub mover: CloneMove,
     /// The player's chat, when a player ran the command.
     pub reply: Option<ferrite_net::game::OutboundSender>,
