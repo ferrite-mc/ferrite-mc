@@ -115,9 +115,15 @@ What works, how it is built, and what is still missing.
   `clamp(delta, +-100) * 0.7 / f3 / f4`), and perched phases keep that yaw instead of snapping
   back to the circle; the breath cloud forms at the head position plus 2.5 blocks forward
   (`breath_aim`) and the region lowers it onto the first non-air block below the head
-  (`breath_floor`, falling back to head height over the void). Approximated: the charge flies
-  at `MAX_SPEED` instead of vanilla's fly speed 3.0, ignores the collision exits, and its target
-  is not saved (a reloaded charge aborts to holding, as vanilla does with no target); the head is
+  (`breath_floor`, falling back to head height over the void). Charge (jar-checked 2026-11-14): `getFlySpeed()` is 3.0 but
+  `EnderDragon.aiStep` uses it only to clamp the vertical slope (`dy / horizontal distance`),
+  so `clamp_slope` applies it to the charge's step and `MAX_SPEED` still caps the kinematic speed
+  (vanilla's inertia model is not reproduced). The collision exits do not exist in practice: the
+  dragon has `noPhysics`, so `Entity.move` clears `horizontalCollision` and `verticalCollision`
+  every tick. The recovery counter now matches `timeSinceCharge++ >= 10` (holding resumes 10
+  ticks after the exit tick, not 9). The charge target is not saved, which is also vanilla (only
+  the phase is stored; a reloaded charge aborts to holding). Approximated:
+  the head is
   taken at 5 blocks in front of the body, not read from a model; the cloud's harm is Ferrite's
   flat 3 magic damage every 20 ticks rather than the cloud's own mob effect (potion duration
   scale 0.25), which is not modelled. The dragon smashes

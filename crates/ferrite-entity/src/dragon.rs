@@ -185,6 +185,10 @@ pub const SCAN_CHARGE_RANGE: f64 = 150.0;
 pub const CHARGE_REACH: f64 = 10.0;
 pub const CHARGE_FAR: f64 = 150.0;
 pub const CHARGE_RECOVERY_TICKS: u32 = 10;
+/// `DragonChargePlayerPhase.getFlySpeed()` (jar-checked, 3.0; every other phase uses 0.6). In
+/// `EnderDragon.aiStep` it is not a speed: it clamps the vertical slope `dy / horizontal distance`
+/// toward the phase target, so a charge may dive far more steeply than other phases.
+pub const CHARGE_FLY_SPEED: f64 = 3.0;
 /// A scanning dragon turns toward the player only while its heading is off by more than this
 /// many degrees (`acos(dot) * 57.29 + 0.5` outside `0..=10`).
 pub const SCAN_TURN_THRESHOLD: f32 = 10.0;
@@ -244,6 +248,18 @@ pub fn scan_turn(yaw: f32, rate: f32, pos: Vec3, player: Vec3) -> (f32, f32) {
     let f3 = f4.min(40.0);
     let rate = rate * 0.8 + delta as f32 * (0.7 / f3 / f4);
     (yaw + rate, rate)
+}
+
+/// Limits the vertical part of `step` to `fly_speed` times its horizontal length, as
+/// `EnderDragon.aiStep` clamps `dy / horizontal` to `+-getFlySpeed()`. A step with no horizontal
+/// part is left alone (vanilla skips the clamp when the horizontal distance is zero).
+pub fn clamp_slope(step: Vec3, fly_speed: f64) -> Vec3 {
+    let horizontal = (step.x * step.x + step.z * step.z).sqrt();
+    if horizontal <= 0.0 {
+        return step;
+    }
+    let limit = fly_speed * horizontal;
+    Vec3::new(step.x, step.y.clamp(-limit, limit), step.z)
 }
 
 fn wrap_degrees(angle: f64) -> f64 {
@@ -667,7 +683,10 @@ pub fn fly(
             Phase::Charging => charge_target.map_or(circle, |target| target.pos),
         },
     };
-    let step = goal - previous;
+    let mut step = goal - previous;
+    if phase == DragonPhase::ChargePlayer {
+        step = clamp_slope(step, CHARGE_FLY_SPEED);
+    }
     let length = (step.x * step.x + step.y * step.y + step.z * step.z).sqrt();
     let pos = if length <= MAX_SPEED {
         goal
@@ -761,9 +780,12 @@ pub fn fly(
                 phase_ticks = 0;
             }
         }
-        // Charging: fly at the fixed position; within 10 blocks (or when it is more than 150
-        // away) a 10-tick recovery runs, then the holding pattern resumes. A charge with no
-        // target (a reloaded save) aborts at once.
+        // Charging: fly at the fixed position. Within 10 blocks, or when it is more than 150
+        // away, `timeSinceCharge` starts; it counts up each tick and the phase ends on the tick
+        // that finds it already at 10 (`timeSinceCharge++ >= 10`). `horizontalCollision` and
+        // `verticalCollision` are the vanilla exits too, but the dragon has `noPhysics`, so
+        // `Entity.move` clears both every tick and they can never fire; none is modelled. A
+        // charge with no target (a reloaded save) aborts at once.
         DragonPhase::ChargePlayer => match charge_target_pos {
             None => {
                 phase = DragonPhase::Holding;
@@ -771,17 +793,19 @@ pub fn fly(
             }
             Some(target) => {
                 let distance_sqr = target.distance_to_sqr(pos);
-                if charge_recovery > 0
-                    || distance_sqr < CHARGE_REACH * CHARGE_REACH
-                    || distance_sqr > CHARGE_FAR * CHARGE_FAR
-                {
+                if charge_recovery > 0 {
+                    let before = charge_recovery;
                     charge_recovery += 1;
-                    if charge_recovery >= CHARGE_RECOVERY_TICKS {
+                    if before >= CHARGE_RECOVERY_TICKS {
                         phase = DragonPhase::Holding;
                         phase_ticks = 0;
                         charge_target_pos = None;
                         charge_recovery = 0;
                     }
+                } else if distance_sqr < CHARGE_REACH * CHARGE_REACH
+                    || distance_sqr > CHARGE_FAR * CHARGE_FAR
+                {
+                    charge_recovery = 1;
                 }
             }
         },
@@ -1563,13 +1587,66 @@ mod tests {
                 reached_at = Some(tick);
             }
             if phase_of(&store, key) == DragonPhase::Holding {
-                // Nine recovery ticks after the one that reached the target, then holding.
-                assert_eq!(tick, reached_at.unwrap() + CHARGE_RECOVERY_TICKS - 1);
+                // `timeSinceCharge` starts on the reaching tick and the phase ends on the tick
+                // that finds it at 10, so holding resumes 10 ticks after the reaching tick.
+                assert_eq!(tick, reached_at.unwrap() + CHARGE_RECOVERY_TICKS);
                 assert_eq!(mob::state(&store, key).unwrap().dragon_charge_target, None);
                 return;
             }
         }
         panic!("the charge never ended");
+    }
+
+    #[test]
+    fn a_charge_dives_with_the_fly_speed_3_slope_clamp() {
+        // 1 block across, 100 down: the slope clamp keeps the dive at 3 blocks per block.
+        let step = clamp_slope(Vec3::new(1.0, -100.0, 0.0), CHARGE_FLY_SPEED);
+        assert_eq!((step.x, step.y, step.z), (1.0, -3.0, 0.0));
+        // Other phases would be held to 0.6; the charge is not.
+        assert!(clamp_slope(Vec3::new(1.0, -100.0, 0.0), 0.6).y > step.y);
+        // A shallow step and a purely vertical one are untouched.
+        let shallow = Vec3::new(10.0, 4.0, 0.0);
+        assert_eq!(clamp_slope(shallow, CHARGE_FLY_SPEED), shallow);
+        let vertical = Vec3::new(0.0, -50.0, 0.0);
+        assert_eq!(clamp_slope(vertical, CHARGE_FLY_SPEED), vertical);
+        // In `fly`: a charge aimed almost straight down moves down steeply but never past
+        // `MAX_SPEED`.
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        let spot = store.pos(key).unwrap();
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(2.0, -140.0, 0.0));
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        let moved = store.pos(key).unwrap() - spot;
+        assert!(moved.y < -1.0, "the dive should be steep: {moved:?}");
+        assert!(moved.length_sqr() <= MAX_SPEED * MAX_SPEED + 1e-9);
+    }
+
+    #[test]
+    fn a_charge_flies_through_blocks_and_only_distance_ends_it() {
+        // `noPhysics` means vanilla never sees a collision, so nothing but distance starts the
+        // recovery: far inside the 10..150 band the phase keeps going tick after tick.
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        let spot = store.pos(key).unwrap();
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(120.0, 0.0, 0.0));
+        for _ in 0..20 {
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+            assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+            assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 0);
+        }
+        // A target already beyond 150 blocks starts the 10-tick recovery at once.
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(store.pos(key).unwrap() + Vec3::new(500.0, 0.0, 0.0));
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 1);
+        for _ in 0..CHARGE_RECOVERY_TICKS {
+            assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        }
+        assert_eq!(phase_of(&store, key), DragonPhase::Holding);
     }
 
     #[test]
