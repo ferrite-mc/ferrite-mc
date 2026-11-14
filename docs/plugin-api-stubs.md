@@ -153,7 +153,44 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | 엔티티 조회 | `World#getEntities*`는 플레이어와 호스트가 게시한 비플레이어 엔티티를 합친다. | `FerriteWorld#hostEntities` → `facts::world_entities`; 제거·월드 필터 회귀 테스트가 있다. 기본 월드의 구조물 엔티티 NBT 경계는 별도 잔여 작업이다. |
 | 월드젠 호스트 | `locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE` | vanilla 월드젠 호스트 (EULA 때문에 개발자 로컬만) |
 
-## 스텁 카탈로그 분류 (2026-11-13 재생성, plugins-z)
+## 스텁 카탈로그 분류 (2026-11-14 재생성, claude-api / Lane B)
+
+`cd java/ferrite-api-impl && ./gradlew test --no-daemon --console=plain`을 이 작업에서 다시 돌려 `build/catalog/*.txt`를 만들었다
+(JUnit 446개 통과; 실제 클라이언트로 확인한 것은 없다). 분류 방법은 아래 2026-11-13 절과 같다: `ferrite.native=false`에서
+"not implemented"가 난 메서드 이름이 `crates/**`의 문자열 서명 또는 `FerriteWorld`의 `case "<이름>"`(여러 이름을 묶은 `case`
+포함)으로 처리되는지 본다. 이름 단위라서 인자 조합별 완전성은 검증하지 않았다.
+
+| 목록 | 줄 수 | 서로 다른 이름 | 정말 열려 있음 |
+|---|---:|---:|---:|
+| `player-missing.txt` | 90 | 75 | 0 |
+| `server-missing.txt` | 4 | 4 | 0 |
+| `world-missing.txt` | 58 | 43 | 2 (`getBlockState(int,int,int)`, `vanillaBiomeProvider()`) |
+
+2026-11-13 표의 Player 12·World 14는 **오래된 수치**다. 그 사이에 `getConnection`, `postEffects`, `loadData`, `fireworkBoost`,
+`sleep`, `spawnAt`, `copy`, `getWorldPath`, `isVoidDamageEnabled`, `locateNearestPoi`/`locateAllPoiInRange`, `spawn`,
+`addEntity`/`createEntity`, `getTileEntityCount` 등이 호스트 또는 Java 경로를 얻었고, 이 작업에서 `World#getFluidData`가 추가됐다.
+`player-missing.txt`/`world-missing.txt`에 남은 줄은 호스트 없는 JUnit의 폴백 결과이므로 "구현 안 됨"이 아니다.
+
+- **`World#getFluidData(int,int,int)` / `(Location)` — 구현(2026-11-14).** `FerriteFluidData`가 블록의 바닐라 상태 문자열에서
+  `BlockState.getFluidState()`와 같은 규칙으로 유체를 만든다: `water`/`lava`는 `level=0`이 원천(양 8), 1~7은 흐름(양 `8-level`),
+  8 이상은 낙하 기둥(양 8); `waterlogged=true`와 `kelp`·`kelp_plant`·`seagrass`·`tall_seagrass`·`bubble_column`은 물 원천; 그 밖은
+  `Fluid.EMPTY`. `getLevel`이 바닐라 유체 양을 돌려준다는 해석은 인터페이스에서 읽은 것이며 Paper 구현으로 대조하지 못했다.
+  `computeFlowDirection`/`computeHeight`는 이웃 블록이 필요해 `UnsupportedOperationException`으로 거부한다. JUnit
+  `FerriteFluidDataTest`(6개).
+- **`World#getBlockState(int,int,int)` — 열려 있음.** Paper 기본 구현은 `getBlockAt(x,y,z).getState()`인데 `Block#getState`
+  자체가 호스트에 핸들러가 없다(Java `Block` 프록시는 `getState`를 `HostBridge.dispatch("Block", …)`로 보낼 뿐이다). 월드 쪽만
+  연결하면 같은 거부가 한 겹 더 생기므로 고치지 않았다. 선행 작업은 `TileState`/`BlockState` 스냅샷 모델이다.
+- **`World#vanillaBiomeProvider()` — 열려 있음.** 월드젠 호스트 소유(EULA 때문에 개발자 로컬만).
+- **POI `Occupancy.IS_OCCUPIED` — 의도한 빈 결과, 테스트로 고정.** 티켓을 잡는 AI가 없어 점유된 POI가 없다. `HAS_SPACE`는
+  점유자를 받는 모든 타입이고 `IS_OCCUPIED`는 항상 빈 목록/`null`이다(`FerriteWorld` 주석, `PlayerExtrasTest`의 `locateNearestPoi`/
+  `locateAllPoiInRange` 단언). 티켓을 지어내지 않았다.
+- **`Structure#getPieces`와 임의 `locateNearestBiome` 간격 — 정밀한 거부 유지.** JUnit `WorldSearchTest.aStructureStartHasABoundingBoxButNoPieces`,
+  `biomeSearchIntervalsOtherThanTheHostsAreRefusedNotIgnored`. 월드젠 호스트 테스트는 EULA가 필요해 실행하지 않았다.
+- **NMS 타입 CraftBukkit 메서드**는 이 목록에 없고 계속 `NoSuchMethodError`다. EULA는 수락하지 않았다.
+
+> 아래 2026-11-13 절은 기록으로 남긴 것이며, 숫자(Player 12 / World 14)와 "정말 열려 있는" 목록은 위 표로 대체됐다.
+
+## 스텁 카탈로그 분류 (2026-11-13 재생성, plugins-z) — 대체됨
 
 `cd java/ferrite-api-impl && ./gradlew test --no-daemon --console=plain`이 `build/catalog/*.txt`를 다시 만든다.
 이 목록은 `ferrite.native=false`에서 기본 인자로 호출해 "not implemented"가 난 메서드이므로, 아래 기준으로 분류했다.

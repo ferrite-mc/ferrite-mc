@@ -177,6 +177,11 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 }
                 if (args.length > 2) throw new UnsupportedOperationException("Ferrite: unsupported getHighestBlockYAt overload"); int x, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); z = l.getBlockZ(); } else { x = (int) args[0]; z = (int) args[1]; } var height = heights.get(new Column(x, z)); if (height == null) { int value = Native.highestBlockY(id.toString(), x, z); if (value == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + x + "," + z); height = value; heights.put(new Column(x, z), height); } yield height; }
             case "getBiome", "getComputedBiome" -> { int x, y, z; if (args[0] instanceof org.bukkit.Location l) { x = l.getBlockX(); y = l.getBlockY(); z = l.getBlockZ(); } else { x = (int) args[0]; y = (int) args[1]; z = (int) args[2]; } var key = Native.biomeAt(id.toString(), x, y, z); if (key == null) throw new UnsupportedOperationException("Ferrite: no biome data at " + x + "," + y + "," + z); var biome = org.bukkit.Registry.BIOME.get(org.bukkit.NamespacedKey.fromString(key)); if (biome == null) throw new IllegalStateException("Unknown biome " + key); yield biome; }
+            case "getFluidData" -> {
+                // Paper's default is the fluid state of the block there; Ferrite derives it from the vanilla state string.
+                if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield FerriteFluidData.of(stateAt(new Pos(l.getBlockX(), l.getBlockY(), l.getBlockZ())));
+                yield FerriteFluidData.of(stateAt(new Pos((int) args[0], (int) args[1], (int) args[2])));
+            }
             case "getBlockAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield block(new Pos(l.getBlockX(), l.getBlockY(), l.getBlockZ())); yield block(new Pos((int) args[0], (int) args[1], (int) args[2])); }
             case "getEmptyChunkSnapshot" -> {
                 var world = (org.bukkit.World) proxy;
