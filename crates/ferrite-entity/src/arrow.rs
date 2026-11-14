@@ -47,6 +47,32 @@ pub static CHANNELED: std::sync::Mutex<Vec<(Vec3, Option<Uuid>)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Entity type id of `minecraft:arrow`.
+/// Entity type id of `minecraft:spectral_arrow`.
+pub fn spectral_arrow_type() -> u16 {
+    static KIND: OnceLock<u16> = OnceLock::new();
+    *KIND.get_or_init(|| {
+        ferrite_data::entity_props::by_name("spectral_arrow")
+            .expect("vanilla has a spectral_arrow entity type")
+            .id
+    })
+}
+
+/// A spectral arrow: flies like an arrow and makes the mob it hits glow for ten seconds.
+pub fn new_spectral_arrow(
+    pos: Vec3,
+    vel: Vec3,
+    damage: f32,
+    owner: Option<Uuid>,
+    rng: &mut Rng,
+) -> EntityRecord {
+    let mut record = new_arrow(pos, vel, damage, owner, rng);
+    record.data.kind = spectral_arrow_type();
+    record
+}
+
+/// `SpectralArrow.DEFAULT_DURATION`.
+pub const SPECTRAL_GLOW_TICKS: i32 = 200;
+
 pub fn arrow_type() -> u16 {
     static KIND: OnceLock<u16> = OnceLock::new();
     *KIND.get_or_init(|| {
@@ -118,6 +144,8 @@ pub enum Kind {
     WitherSkull,
     /// `minecraft:shulker_bullet`: flies straight (no homing) and hurts what it hits for 4.
     ShulkerBullet,
+    /// `minecraft:spectral_arrow`: an arrow whose mob target glows.
+    SpectralArrow,
     /// `minecraft:trident`: flies like an arrow for 8 damage; the region drops the item where it ends.
     Trident,
     /// `minecraft:llama_spit`: flies like an arrow for 1 damage.
@@ -146,6 +174,7 @@ impl Kind {
             Self::DragonFireball => "dragon_fireball",
             Self::WitherSkull => "wither_skull",
             Self::ShulkerBullet => "shulker_bullet",
+            Self::SpectralArrow => "spectral_arrow",
             Self::Trident => "trident",
             Self::LlamaSpit => "llama_spit",
             Self::ExperienceBottle => "experience_bottle",
@@ -199,6 +228,7 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::DragonFireball,
         Kind::WitherSkull,
         Kind::ShulkerBullet,
+        Kind::SpectralArrow,
         Kind::Trident,
         Kind::LlamaSpit,
         Kind::ExperienceBottle,
@@ -272,10 +302,12 @@ pub fn tick_thrown(
             continue;
         };
         let data_uuid = data.uuid;
-        if matches!(kind, Kind::Arrow | Kind::Trident | Kind::LlamaSpit)
-            || store
-                .flags(key)
-                .is_some_and(|flags| flags.has(Flags::REMOVED))
+        if matches!(
+            kind,
+            Kind::Arrow | Kind::SpectralArrow | Kind::Trident | Kind::LlamaSpit
+        ) || store
+            .flags(key)
+            .is_some_and(|flags| flags.has(Flags::REMOVED))
         {
             continue;
         }
@@ -454,7 +486,7 @@ pub fn tick_arrows_with_parts(
             .filter(|data| {
                 matches!(
                     kind_of(data),
-                    Some(Kind::Arrow | Kind::Trident | Kind::LlamaSpit)
+                    Some(Kind::Arrow | Kind::SpectralArrow | Kind::Trident | Kind::LlamaSpit)
                 )
             })
             .and_then(|data| data.arrow)
@@ -529,6 +561,13 @@ pub fn tick_arrows_with_parts(
                 crate::dragon::damage_on_part(part, arrow.damage)
             });
             let hurt = mob::hurt(store, target, damage, None);
+            if store.data(key).and_then(kind_of) == Some(Kind::SpectralArrow) {
+                mob::add_effect(
+                    store,
+                    target,
+                    crate::effect::MobEffectInstance::new(23, SPECTRAL_GLOW_TICKS, 0),
+                );
+            }
             if arrow.channeling
                 && let Some(at) = store.pos(target)
             {
@@ -679,6 +718,39 @@ mod tests {
         assert!(
             store.flags(charge).unwrap().has(Flags::REMOVED),
             "a wind charge expires after 100 ticks"
+        );
+    }
+
+    #[test]
+    fn a_spectral_arrow_makes_the_mob_it_hits_glow() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 3.5),
+            &mut Rng::new(2),
+        ));
+        let arrow = store.insert(new_spectral_arrow(
+            Vec3::new(0.5, 64.5, 0.5),
+            Vec3::new(0.0, 0.0, 1.5),
+            2.0,
+            None,
+            &mut Rng::new(1),
+        ));
+        assert_eq!(
+            kind_of(store.data(arrow).unwrap()),
+            Some(Kind::SpectralArrow)
+        );
+        for _ in 0..6 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        assert!(
+            store
+                .data(cow)
+                .unwrap()
+                .effects
+                .get(crate::effect::Effect::Glowing)
+                .is_some()
         );
     }
 

@@ -177,7 +177,7 @@ pub fn spawn_command(call: &HostCall) -> Option<PlayerCommand> {
         "launchThrown(Location,EntityType,double,double,double,String,String)" => {
             let kind = format!("minecraft:{}", call.args.get(1)?.to_ascii_lowercase());
             // A trident is not one of the item-thrown kinds, but the region has its own launch for it.
-            if kind != "minecraft:trident" {
+            if kind != "minecraft:trident" && kind != "minecraft:spectral_arrow" {
                 ferrite_entity::arrow::Kind::thrown_from_name(&kind)?;
             }
             velocity = [

@@ -9042,6 +9042,13 @@ impl Region {
                 self.thrown_tridents.insert(uuid, (owner, stack));
                 record
             }
+            "minecraft:spectral_arrow" => ferrite_entity::arrow::new_spectral_arrow(
+                pos,
+                Vec3::new(velocity[0], velocity[1], velocity[2]),
+                2.0,
+                owner,
+                &mut self.rng,
+            ),
             "minecraft:arrow" => ferrite_entity::arrow::new_arrow(
                 pos,
                 Vec3::new(velocity[0], velocity[1], velocity[2]),

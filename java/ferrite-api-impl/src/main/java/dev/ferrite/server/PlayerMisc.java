@@ -276,6 +276,7 @@ public abstract class PlayerMisc extends PlayerStubs {
         else if (org.bukkit.entity.EnderPearl.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.ENDER_PEARL;
         else if (org.bukkit.entity.WitherSkull.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.WITHER_SKULL;
         else if (org.bukkit.entity.ShulkerBullet.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SHULKER_BULLET;
+        else if (org.bukkit.entity.SpectralArrow.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.SPECTRAL_ARROW; power = 3.0; }
         else if (org.bukkit.entity.SmallFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SMALL_FIREBALL;
         else if (projectile == org.bukkit.entity.Fireball.class || org.bukkit.entity.LargeFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.FIREBALL;
         else if (org.bukkit.entity.ThrownExpBottle.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.EXPERIENCE_BOTTLE; power = 0.7; }
