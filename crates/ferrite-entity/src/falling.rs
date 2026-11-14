@@ -68,6 +68,14 @@ pub fn tick_falling_blocks(
     }
 }
 
+fn is_powder(state: u16) -> bool {
+    ferrite_data::blocks::state(state).is_some_and(|(name, _)| name.ends_with("_concrete_powder"))
+}
+
+fn holds_water(state: u16) -> bool {
+    ferrite_fluid::fluid_state(u32::from(state)).kind == ferrite_fluid::FluidKind::Water
+}
+
 fn replaceable(state: u16) -> bool {
     usize::from(state) < ferrite_data::blocks::STATE_COUNT
         && ferrite_data::block_props::get(state).replaceable
@@ -85,12 +93,41 @@ fn tick_falling(
         data.tick_count += 1;
         (data.block_state.unwrap(), data.tick_count)
     };
+    let before = store.pos(key).unwrap_or_default();
     // `applyGravity` then `move(MoverType.SELF, delta)`.
     let mut vel = store.vel(key).unwrap_or_default();
     vel.y -= GRAVITY;
     store.set_vel(key, vel);
     physics::move_entity(store, key, vel, world);
     let mut vel = store.vel(key).unwrap_or_default();
+    // Concrete powder that reaches water counts as landed: its own cell holds water, or, when
+    // it moves faster than one block a tick, the first water on the way
+    // (`ClipContext.Fluid.SOURCE_ONLY`) is where it stops.
+    let mut in_water = false;
+    if is_powder(state) {
+        let fluid_at = |p: Vec3| {
+            world
+                .block_state(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
+                .is_some_and(holds_water)
+        };
+        let now = store.pos(key).unwrap_or_default();
+        in_water = fluid_at(now);
+        if !in_water && vel.x * vel.x + vel.y * vel.y + vel.z * vel.z > 1.0 {
+            for step in 1..=16 {
+                let t = f64::from(step) / 16.0;
+                let at = Vec3::new(
+                    before.x + (now.x - before.x) * t,
+                    before.y + (now.y - before.y) * t,
+                    before.z + (now.z - before.z) * t,
+                );
+                if fluid_at(at) {
+                    store.set_pos(key, at);
+                    in_water = true;
+                    break;
+                }
+            }
+        }
+    }
     vel = Vec3::new(vel.x * AIR_DRAG, vel.y * AIR_DRAG, vel.z * AIR_DRAG);
     store.set_vel(key, vel);
     let pos = store.pos(key).unwrap_or_default();
@@ -100,7 +137,7 @@ fn tick_falling(
         pos.z.floor() as i32,
     );
     let flags = store.flags(key).unwrap_or_default();
-    let landed = flags.has(Flags::ON_GROUND) || flags.has(Flags::HORIZONTAL_COLLISION);
+    let landed = flags.has(Flags::ON_GROUND) || flags.has(Flags::HORIZONTAL_COLLISION) || in_water;
     if landed && tick_count > 1 && world.block_state(x, y, z).is_some_and(replaceable) {
         // Vanilla: `level.setBlock(blockPosition(), blockState, 3)` then `discard()`.
         world.set_block(x, y, z, state);
@@ -158,6 +195,31 @@ mod tests {
         assert_eq!(world.placed.get(&(0, 64, 0)), Some(&sand()));
         assert!(store.flags(key).unwrap().has(Flags::REMOVED));
         assert!(store.pos(key).is_some());
+    }
+
+    #[test]
+    fn concrete_powder_lands_in_water_before_reaching_the_floor() {
+        let powder = ferrite_data::blocks::default_state("white_concrete_powder").unwrap();
+        let water = ferrite_data::blocks::default_state("water").unwrap();
+        let mut store = EntityStore::default();
+        let key = store.insert(new_falling(Vec3::new(0.5, 80.0, 0.5), powder));
+        // Ten blocks of water over a floor at 40: vanilla places the powder at the water's
+        // surface rather than letting it sink to the bottom.
+        let mut world = Grid {
+            floor: 40,
+            placed: (60..70).map(|y| ((0, y, 0), water)).collect(),
+        };
+        for _ in 0..200 {
+            tick_falling_blocks(&mut store, &mut world, -64, 320);
+        }
+        assert!(store.flags(key).unwrap().has(Flags::REMOVED));
+        let at = world
+            .placed
+            .iter()
+            .find(|(_, state)| **state == powder)
+            .map(|(pos, _)| *pos)
+            .expect("the powder was placed");
+        assert!(at.1 >= 60, "placed at the surface, not the floor: {at:?}");
     }
 
     #[test]

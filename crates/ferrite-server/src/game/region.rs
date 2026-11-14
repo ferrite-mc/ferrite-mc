@@ -9564,7 +9564,6 @@ impl Region {
             return;
         };
         let now = self.tick_clock;
-        let players: Vec<[f64; 3]> = self.players.values().map(|p| p.pos).collect();
         let mut world =
             super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking)
                 .with_signals(ctx.signals.clone());
@@ -9587,11 +9586,13 @@ impl Region {
         self.moving_pistons.advance();
         self.redstone.blocks_changed(&mut world, changed);
         if self.redstone.has_plates() || !self.entities.keys().is_empty() {
-            let occupants = self
-                .entities
-                .keys()
-                .iter()
-                .filter_map(|&key| {
+            // A player's box follows the pose: 1.5 tall sneaking, 0.2 sleeping (a vanilla box
+            // never rotates, so the facing does not matter).
+            let players = self.players.values().map(|p| {
+                super::redstone::Occupant::player_in_pose(p.pos, p.sleeping.is_some(), p.sneaking)
+            });
+            let occupants = players
+                .chain(self.entities.keys().iter().filter_map(|&key| {
                     let at = self.entities.pos(key)?;
                     let data = self.entities.data(key)?;
                     Some(super::redstone::Occupant {
@@ -9600,11 +9601,11 @@ impl Region {
                         height: data.height,
                         living: data.mob.is_some(),
                     })
-                })
+                }))
                 .collect();
             self.redstone.set_occupants(occupants);
         }
-        self.redstone.tick(&mut world, &players);
+        self.redstone.tick(&mut world, &[]);
         let actions = self.redstone.take_piston_actions(&world);
         let mut piston_changes = Vec::new();
         let mut destroyed = Vec::new();

@@ -1570,6 +1570,12 @@ impl Menu {
         self.sync_data();
     }
 
+    /// The shelves around the table, counted again by the caller before each click (vanilla
+    /// counts them in `slotsChanged`); the click's own sync refreshes the buttons.
+    pub fn set_bookshelves(&mut self, bookshelves: i32) {
+        self.enchanting.bookshelves = bookshelves;
+    }
+
     /// The seed the menu offers from; it changes after every enchant (vanilla
     /// `Player.onEnchantmentPerformed`) and the player keeps it for the next table.
     pub fn enchanting_seed(&self) -> i32 {

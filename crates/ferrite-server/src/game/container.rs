@@ -418,6 +418,13 @@ impl Player {
             let len = chest.len();
             chest[2..].clone_from_slice(&super::equine_chest::load(*animal, len - 2));
         }
+        // `EnchantmentMenu.slotsChanged` counts the shelves again every time the slots change.
+        if let (Some(OpenAt::Block(at, "minecraft:enchanting_table")), Some(source)) =
+            (&self.menus.open_at, &self.source)
+            && menu.kind() == ferrite_inventory::MenuKind::Enchanting
+        {
+            menu.set_bookshelves(super::enchant_table::bookshelves(source, *at));
+        }
         // `BrewingStandMenu.PotionSlot.onTake` -> `BREWED_POTION`: a potion leaving one of the
         // three bottle slots.
         let bottles: Vec<ItemStack> = if menu.kind() == ferrite_inventory::MenuKind::BrewingStand {

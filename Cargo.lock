@@ -1186,6 +1186,7 @@ name = "ferrite-entity"
 version = "0.2.1"
 dependencies = [
  "ferrite-data",
+ "ferrite-fluid",
  "ferrite-inventory",
  "ferrite-item",
  "ferrite-math",

@@ -327,6 +327,15 @@ fn stonecutter_grindstone_enchanting_smithing_and_loom_work() {
     f.menu.broadcast_changes(&f.inv);
     assert_eq!(f.menu.data_value(0), 5, "the cost comes from the table");
     assert_eq!(f.menu.data_value(3), 77, "the seed is sent");
+    f.menu.set_bookshelves(6);
+    f.menu.broadcast_changes(&f.inv);
+    assert_eq!(
+        f.menu.data_value(0),
+        8,
+        "the shelves are counted again when the slots change"
+    );
+    f.menu.set_bookshelves(3);
+    f.menu.broadcast_changes(&f.inv);
     assert_eq!(f.menu.data_value(4), 7);
     assert_eq!(f.menu.enchant_cost(1), 9);
     assert_eq!(

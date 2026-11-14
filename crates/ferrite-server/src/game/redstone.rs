@@ -564,6 +564,21 @@ impl Occupant {
         }
     }
 
+    /// A player's box in a pose: 1.8 tall standing, 1.5 sneaking, 0.2 square and tall asleep.
+    pub fn player_in_pose(pos: [f64; 3], sleeping: bool, sneaking: bool) -> Self {
+        let (half, height) = match (sleeping, sneaking) {
+            (true, _) => (0.1, 0.2),
+            (false, true) => (0.3, 1.5),
+            _ => (0.3, 1.8),
+        };
+        Self {
+            pos,
+            half,
+            height,
+            living: true,
+        }
+    }
+
     /// `BasePressurePlateBlock.TOUCH_AABB` (14 px wide, 4 px tall) moved to `plate`.
     fn touches(&self, plate: [i32; 3]) -> bool {
         let (px, py, pz) = (
@@ -1799,6 +1814,20 @@ mod tests {
         assert!(property_bool(grid.state([1, 64, 0]), "powered"));
         tick(&mut redstone, &mut grid, 2);
         assert!(!property_bool(grid.state([1, 64, 0]), "powered"));
+    }
+
+    #[test]
+    fn a_players_box_follows_the_pose() {
+        let standing = Occupant::player_in_pose([0.5, 64.0, 0.5], false, false);
+        assert_eq!((standing.half, standing.height), (0.3, 1.8));
+        assert_eq!(standing, Occupant::player([0.5, 64.0, 0.5]));
+        let sneaking = Occupant::player_in_pose([0.5, 64.0, 0.5], false, true);
+        assert_eq!(sneaking.height, 1.5);
+        let asleep = Occupant::player_in_pose([0.5, 64.0, 0.5], true, true);
+        assert_eq!((asleep.half, asleep.height), (0.1, 0.2));
+        // A sleeper's narrow box misses a plate its neighbour's full box would press.
+        assert!(standing.touches([1, 64, 0]) || !asleep.touches([1, 64, 0]));
+        assert!(!asleep.touches([2, 64, 0]));
     }
 
     #[test]
