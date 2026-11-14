@@ -27,6 +27,7 @@ final class FerriteRegionScheduler implements RegionScheduler {
                 state = ExecutionState.RUNNING;
             }
             try { action.accept(this); }
+            catch (Throwable error) { plugin.getLogger().log(java.util.logging.Level.SEVERE, "Plugin " + plugin.getName() + " generated an exception while executing a region task", error); }
             finally {
                 synchronized (this) {
                     if (state == ExecutionState.CANCELLED_RUNNING) { state = ExecutionState.CANCELLED; tasks.remove(id); }

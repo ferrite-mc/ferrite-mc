@@ -21,27 +21,51 @@ import java.util.function.Consumer;
  * class is created and may register {@code DATAPACK_DISCOVERY} handlers. A discovered pack is copied into the world's
  * {@code datapacks} folder, where the host already reads packs from (and where {@code /datapack} manages them).
  *
- * <p>{@code TAGS} handlers are refused: tags are fixed data in the host, so a handler could never change anything.
+ * <p>A {@code COMMANDS} handler registered here is kept and handed to the plugin's own lifecycle manager once the plugin
+ * has been constructed ({@link #handOver}); it then fires with the plugin's other {@code COMMANDS} handlers (cause
+ * {@code INITIAL} after every plugin is enabled, {@code RELOAD} on {@code Server#reloadData}), which is what Paper does
+ * for commands a bootstrapper registers.
+ *
+ * <p>{@code TAGS} handlers are refused: the block, item and other registry tags are loaded from the data pack when the
+ * host starts and are fixed afterwards, so a handler that edits them could never change what the host matches. A plugin
+ * that needs custom tags ships them in a data pack discovered through {@code DATAPACK_DISCOVERY}.
  */
 final class FerriteBootstrap {
     static final String DATAPACK_DISCOVERY = "datapack_discovery";
+    static final String COMMANDS = FerriteLifecycleManager.COMMANDS;
     private final PluginMeta meta;
     private final Path source;
     private final Path dataDirectory;
     private final Path worldPath;
     private final List<FerriteLifecycleManager.Configuration> handlers = new ArrayList<>();
+    private final List<FerriteLifecycleManager.Configuration> commandHandlers = new ArrayList<>();
 
     FerriteBootstrap(PluginMeta meta, Path source, Path dataDirectory, Path worldPath) {
         this.meta = meta; this.source = source; this.dataDirectory = dataDirectory; this.worldPath = worldPath;
     }
 
-    /** Instantiates and runs the bootstrapper, then fires {@code DATAPACK_DISCOVERY} for what it registered. */
-    static void run(String bootstrapperClass, ClassLoader loader, PluginMeta meta, Path source, Path dataDirectory, Path worldPath) throws ReflectiveOperationException {
+    /**
+     * Instantiates and runs the bootstrapper, then fires {@code DATAPACK_DISCOVERY} for what it registered. The result
+     * carries the {@code COMMANDS} handlers to give the plugin ({@link #handOver}).
+     */
+    static FerriteBootstrap run(String bootstrapperClass, ClassLoader loader, PluginMeta meta, Path source, Path dataDirectory, Path worldPath) throws ReflectiveOperationException {
         var bootstrap = new FerriteBootstrap(meta, source, dataDirectory, worldPath);
         var instance = Class.forName(bootstrapperClass, true, loader).asSubclass(PluginBootstrap.class).getDeclaredConstructor().newInstance();
         instance.bootstrap(bootstrap.context());
         bootstrap.fire();
+        return bootstrap;
     }
+
+    /** Gives the plugin the {@code COMMANDS} handlers its bootstrapper registered, in registration order. */
+    void handOver(org.bukkit.plugin.Plugin plugin) {
+        var manager = FerriteLifecycleManager.of(plugin);
+        if (manager == null) { if (!commandHandlers.isEmpty()) throw new IllegalStateException("Ferrite: " + plugin.getName() + " has no lifecycle manager to receive its bootstrap command handlers"); return; }
+        for (var handler : commandHandlers) manager.adopt(handler);
+        commandHandlers.clear();
+    }
+
+    /** Number of {@code COMMANDS} handlers still waiting for the plugin. */
+    int pendingCommandHandlers() { return commandHandlers.size(); }
 
     BootstrapContext context() {
         var manager = new Manager();
@@ -62,8 +86,12 @@ final class FerriteBootstrap {
             if (!((Object) configuration instanceof FerriteLifecycleManager.Configuration config))
                 throw new IllegalArgumentException("Ferrite: unknown lifecycle handler configuration " + configuration.getClass().getName());
             var name = config.eventType().name();
+            if (COMMANDS.equals(name)) { commandHandlers.add(config); return; }
+            if (name.startsWith("pre_flatten/") || name.startsWith("post_flatten/"))
+                throw new UnsupportedOperationException("Ferrite: lifecycle event '" + name + "' (TAGS) cannot be used: registry tags are loaded from the data pack when the host starts and are fixed afterwards, so a handler could never change what the host matches. "
+                    + "Ship the tags in a data pack and discover it with LifecycleEvents.DATAPACK_DISCOVERY instead");
             if (!DATAPACK_DISCOVERY.equals(name))
-                throw new UnsupportedOperationException("Ferrite: lifecycle event '" + name + "' cannot be used: registry tags are fixed vanilla data in the host (only 'datapack_discovery' is supported during bootstrap)");
+                throw new UnsupportedOperationException("Ferrite: lifecycle event '" + name + "' cannot be used during bootstrap (supported: 'commands' and 'datapack_discovery')");
             handlers.add(config);
         }
     }

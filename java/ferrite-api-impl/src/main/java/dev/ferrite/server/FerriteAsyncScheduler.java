@@ -5,7 +5,8 @@ import java.util.concurrent.*;
 import java.util.function.Consumer;
 import org.bukkit.plugin.Plugin;
 final class FerriteAsyncScheduler implements AsyncScheduler {
-    private final ScheduledExecutorService executor = Executors.newScheduledThreadPool(2, runnable -> { Thread t = new Thread(runnable, "Ferrite plugin async"); t.setDaemon(true); return t; });
+    private static ScheduledExecutorService newExecutor() { return Executors.newScheduledThreadPool(2, runnable -> { Thread t = new Thread(runnable, "Ferrite plugin async"); t.setDaemon(true); return t; }); }
+    private volatile ScheduledExecutorService executor = newExecutor();
     private final Set<Task> tasks = ConcurrentHashMap.newKeySet();
     private final class Task implements ScheduledTask, Runnable {
         final Plugin plugin; final Consumer<ScheduledTask> action; final boolean repeating;
@@ -26,6 +27,8 @@ final class FerriteAsyncScheduler implements AsyncScheduler {
         private void execute() {
             synchronized (this) { if (state != ExecutionState.IDLE || !plugin.isEnabled()) { tasks.remove(this); return; } state = ExecutionState.RUNNING; }
             try { action.accept(this); }
+            // Like Paper's scheduler a failing run is logged and a repeating task keeps its schedule; an exception left for the executor would silently end it.
+            catch (Throwable error) { plugin.getLogger().log(java.util.logging.Level.SEVERE, "Plugin " + plugin.getName() + " generated an exception while executing an async task", error); }
             finally { synchronized (this) { if (state == ExecutionState.CANCELLED_RUNNING) { state = ExecutionState.CANCELLED; tasks.remove(this); } else if (repeating) state = ExecutionState.IDLE; else { state = ExecutionState.FINISHED; tasks.remove(this); } } }
         }
     }
@@ -41,4 +44,6 @@ final class FerriteAsyncScheduler implements AsyncScheduler {
     public ScheduledTask runAtFixedRate(Plugin p, Consumer<ScheduledTask> action, long delay, long period, TimeUnit unit) { if (period < 1) throw new IllegalArgumentException("period"); return schedule(p, action, delay, period, unit); }
     public void cancelTasks(Plugin plugin) { tasks.stream().filter(t -> t.plugin == plugin).forEach(Task::cancel); }
     void shutdown() { executor.shutdownNow(); }
+    /** A server that is started again after {@link #shutdown()} (in-process restarts, tests) gets working async threads back. */
+    void restart() { if (executor.isShutdown()) executor = newExecutor(); }
 }

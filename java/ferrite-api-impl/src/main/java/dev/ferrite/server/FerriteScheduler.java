@@ -7,8 +7,14 @@ final class FerriteScheduler extends SchedulerStubs {
     private int nextId = 1;
     private final List<Task> tasks = new ArrayList<>();
     private final java.util.concurrent.ConcurrentMap<Integer, AsyncTask> asyncTasks = new java.util.concurrent.ConcurrentHashMap<>();
-    private final class AsyncTask implements BukkitTask {
-        final int id; final Plugin owner; volatile boolean cancelled; volatile boolean running; volatile io.papermc.paper.threadedregions.scheduler.ScheduledTask delegate;
+    /** Bukkit's {@code CraftScheduler.validate}: a disabled plugin (including one inside its own {@code onDisable}) cannot schedule. */
+    private static void requireEnabled(Plugin plugin) {
+        java.util.Objects.requireNonNull(plugin, "Plugin cannot be null");
+        if (!plugin.isEnabled()) throw new org.bukkit.plugin.IllegalPluginAccessException("Plugin attempted to register task while disabled");
+    }
+    private final class AsyncTask implements BukkitTask, org.bukkit.scheduler.BukkitWorker {
+        final int id; final Plugin owner; volatile boolean cancelled; volatile boolean running; volatile Thread thread; volatile io.papermc.paper.threadedregions.scheduler.ScheduledTask delegate;
+        public Thread getThread() { return thread; }
         AsyncTask(int id, Plugin owner) { this.id=id; this.owner=owner; }
         public int getTaskId() { return id; }
         public Plugin getOwner() { return owner; }
@@ -19,11 +25,12 @@ final class FerriteScheduler extends SchedulerStubs {
     }
     private synchronized int allocateId() { return nextId++; }
     private BukkitTask async(Plugin plugin, java.util.function.Consumer<? super BukkitTask> action, long delay, long period) {
+        requireEnabled(plugin);
         if (delay < 0 || period < 0) throw new IllegalArgumentException("Invalid timing");
         long millis = Math.multiplyExact(delay, 50);
         long periodMillis = Math.multiplyExact(period, 50);
         AsyncTask task = new AsyncTask(allocateId(), plugin); asyncTasks.put(task.id, task);
-        java.util.function.Consumer<io.papermc.paper.threadedregions.scheduler.ScheduledTask> invoke = ignored -> { task.running = true; try { if (!task.cancelled) action.accept(task); } finally { task.running = false; if (period == 0) asyncTasks.remove(task.id); } };
+        java.util.function.Consumer<io.papermc.paper.threadedregions.scheduler.ScheduledTask> invoke = ignored -> { task.running = true; task.thread = Thread.currentThread(); try { if (!task.cancelled) action.accept(task); } finally { task.running = false; task.thread = null; if (period == 0) asyncTasks.remove(task.id); } };
         var scheduler = org.bukkit.Bukkit.getAsyncScheduler();
         var delegate = period > 0 ? scheduler.runAtFixedRate(plugin, invoke, millis, periodMillis, java.util.concurrent.TimeUnit.MILLISECONDS) : scheduler.runDelayed(plugin, invoke, millis, java.util.concurrent.TimeUnit.MILLISECONDS);
         task.bind(delegate); return task;
@@ -38,6 +45,7 @@ final class FerriteScheduler extends SchedulerStubs {
         public void cancel() { cancelled=true; }
     }
     private synchronized BukkitTask schedule(Plugin plugin, Runnable runnable, long delay, long period) {
+        requireEnabled(plugin);
         if (period < 0 || delay < 0) throw new IllegalArgumentException("Invalid task timing");
         Task task = new Task(allocateId(), plugin, runnable, tick + Math.max(1, delay), period); tasks.add(task); if (Native.enabled()) Native.scheduleGlobal(task.id, delay); return task;
     }
@@ -61,7 +69,7 @@ final class FerriteScheduler extends SchedulerStubs {
     public synchronized boolean isQueued(int id) { return tasks.stream().anyMatch(t -> t.id == id && !t.cancelled) || asyncTasks.containsKey(id); }
     public synchronized boolean isCurrentlyRunning(int id) { AsyncTask async = asyncTasks.get(id); return (async != null && async.running) || tasks.stream().anyMatch(t -> t.id == id && t.running); }
     public synchronized java.util.List<BukkitTask> getPendingTasks() { java.util.List<BukkitTask> result = new ArrayList<>(); tasks.stream().filter(t -> !t.cancelled).forEach(result::add); result.addAll(asyncTasks.values()); return java.util.List.copyOf(result); }
-    public java.util.List<org.bukkit.scheduler.BukkitWorker> getActiveWorkers() { return java.util.List.of(); }
+    public java.util.List<org.bukkit.scheduler.BukkitWorker> getActiveWorkers() { return asyncTasks.values().stream().filter(task -> task.running).map(task -> (org.bukkit.scheduler.BukkitWorker) task).toList(); }
     public BukkitTask runTaskAsynchronously(Plugin p, Runnable r) { return async(p, ignored -> r.run(), 0, 0); }
     public BukkitTask runTaskLaterAsynchronously(Plugin p, Runnable r, long delay) { return async(p, ignored -> r.run(), delay, 0); }
     public BukkitTask runTaskTimerAsynchronously(Plugin p, Runnable r, long delay, long period) { if (period < 1) throw new IllegalArgumentException("period"); return async(p, ignored -> r.run(), delay, period); }

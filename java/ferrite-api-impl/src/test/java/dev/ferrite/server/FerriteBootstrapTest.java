@@ -63,7 +63,11 @@ class FerriteBootstrapTest {
         assertInstanceOf(IllegalArgumentException.class, errors.get(1));
         assertFalse(Files.exists(world.resolve("datapacks/Boot-none")));
         var tags = FerriteLifecycleTypes.<BootstrapContext, io.papermc.paper.plugin.lifecycle.event.LifecycleEvent>prioritized("pre_flatten/minecraft:block", BootstrapContext.class);
-        assertThrows(UnsupportedOperationException.class, () -> context.getLifecycleManager().registerEventHandler(tags.newHandler(event -> {})));
+        var refused = assertThrows(UnsupportedOperationException.class, () -> context.getLifecycleManager().registerEventHandler(tags.newHandler(event -> {})));
+        // The refusal says why and what to do instead.
+        assertTrue(refused.getMessage().contains("pre_flatten/minecraft:block") && refused.getMessage().contains("DATAPACK_DISCOVERY"), refused.getMessage());
+        var postTags = FerriteLifecycleTypes.<BootstrapContext, io.papermc.paper.plugin.lifecycle.event.LifecycleEvent>prioritized("post_flatten/minecraft:item", BootstrapContext.class);
+        assertThrows(UnsupportedOperationException.class, () -> context.getLifecycleManager().registerEventHandler(postTags.newHandler(event -> {})));
     }
 
     @Test void withoutAWorldFolderDiscoveryFailsLoudly() throws Exception {

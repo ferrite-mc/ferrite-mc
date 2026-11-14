@@ -42,6 +42,9 @@ final class FerriteRecipes {
         if (vanilla || custom.containsKey(key)) return false;
         // Every recipe the host can match goes to it as vanilla data pack JSON: crafting, the furnace family, the
         // campfire, the stonecutter and the smithing table. Anything else is refused, never listed without effect.
+        // A potion mix (BrewingRecipe, from PotionBrewer) and the vanilla view's own entries are Bukkit-side only: the
+        // host's brewing stands use the vanilla potion table, so these are listed for getRecipe/removeRecipe, as before.
+        if (recipe instanceof org.bukkit.inventory.BrewingRecipe || recipe instanceof Entry) { custom.put(key, recipe); return true; }
         var json = recipeJson(recipe);
         var extras = resultExtras(recipe);
         var reply = host("addRecipe(String,String,String,int)", key.toString(), json, extras.meta(), Integer.toString(extras.damage()));
