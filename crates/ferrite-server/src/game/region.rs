@@ -5599,6 +5599,10 @@ impl Region {
         )
         .with_signals(signals);
         self.fluid_ticks.advance(&mut world);
+        let washed = std::mem::take(&mut world.washed);
+        for (pos, state) in washed {
+            self.spawn_block_drops(source, pos, state);
+        }
     }
 
     /// Applies a fluid placement handed over by the region that simulated it. The world loop

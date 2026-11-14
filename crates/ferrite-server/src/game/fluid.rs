@@ -16,6 +16,8 @@ pub(super) struct RegionFluidWorld<'a> {
     lava_conversion: bool,
     /// Where cross-region placements and redstone wakes are handed to the world loop.
     pub(super) signals: Option<UnboundedSender<Signal>>,
+    /// Blocks flowing water destroyed (`WaterFluid.beforeDestroyingBlock` drops their loot).
+    pub(super) washed: Vec<([i32; 3], u16)>,
 }
 impl<'a> RegionFluidWorld<'a> {
     pub fn new(
@@ -39,6 +41,7 @@ impl<'a> RegionFluidWorld<'a> {
             water_conversion,
             lava_conversion,
             signals: None,
+            washed: Vec::new(),
         }
     }
     /// Lets the world hand cross-region writes to the chunk owner instead of dropping them.
@@ -93,6 +96,17 @@ impl FluidWorld for RegionFluidWorld<'_> {
         if let Err(error) = self.source.compare_set_block(x, y, z, Some(old), state) {
             tracing::warn!(x,y,z,%error,"fluid block update failed");
             return;
+        }
+        // `WaterFluid.beforeDestroyingBlock`: water that takes the place of a plant, torch,
+        // button or similar block drops what it would have dropped when broken. Lava only
+        // burns it, and waterlogging keeps the block.
+        if ferrite_fluid::fluid_state(old).kind == ferrite_fluid::FluidKind::Empty
+            && ferrite_fluid::is_liquid_block(state)
+            && ferrite_fluid::fluid_state(state).kind == ferrite_fluid::FluidKind::Water
+            && let Ok(old_id) = u16::try_from(old)
+            && ferrite_data::blocks::state(old_id).is_some_and(|(name, _)| !name.ends_with("air"))
+        {
+            self.washed.push(([x, y, z], old_id));
         }
         let packet = ferrite_protocol::packets::play::BlockUpdate {
             location: ferrite_protocol::types::BlockPos::new(x, y, z).pack(),
@@ -184,6 +198,29 @@ mod tests {
             u32::from(ferrite_data::blocks::default_state("water").unwrap()),
         );
         assert_eq!(source.block(16, 65, 0), Some(before));
+    }
+    #[tokio::test]
+    async fn water_that_replaces_a_plant_records_it_for_its_drops() {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        loop {
+            if let Some(result) = source.get(0, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let held = HashMap::from([(ferrite_region::ChunkPos(0, 0), 1)]);
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let id = |name: &str| u32::from(ferrite_data::blocks::default_state(name).unwrap());
+        source.set_block(1, 65, 1, id("oak_sapling")).unwrap();
+        source.set_block(2, 65, 1, id("oak_sapling")).unwrap();
+        let mut world = RegionFluidWorld::new(&source, &held, &tracking);
+        world.set_block(1, 65, 1, id("water"));
+        // Lava only burns the plant: no drops.
+        world.set_block(2, 65, 1, id("lava"));
+        // Replacing air (or flowing water) over water records nothing.
+        world.set_block(3, 65, 1, id("water"));
+        assert_eq!(world.washed, vec![([1, 65, 1], id("oak_sapling") as u16)]);
     }
     #[tokio::test]
     async fn fluid_tick_never_loads_unheld_neighbor() {

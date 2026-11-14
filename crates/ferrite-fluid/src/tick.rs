@@ -1,7 +1,7 @@
 //! Scheduled fluid simulation, based on `FlowingFluid.java#tick`, `#spread`,
 //! `#getSpread` and `#getSlopeDistance`.
 use crate::{
-    Direction, FluidKind, FluidState, FluidWorld, block_for, can_hold_fluid, can_pass_at,
+    Direction, FluidKind, FluidState, FluidWorld, block_for, can_hold_fluid_as, can_pass_at,
     fluid_state, get_new_liquid_with_rules, tick_delay,
 };
 use std::cmp::Reverse;
@@ -251,20 +251,22 @@ impl FluidTicks {
             return;
         }
         let mut spread_down = false;
-        if self.can_enter(world, pos, down, current.kind) {
-            let next = get_new_liquid_with_rules(
-                world,
-                down.0,
-                down.1,
-                down.2,
-                current.kind,
-                world.water_conversion(),
-                world.lava_conversion(),
-            );
-            if next.kind != FluidKind::Empty {
-                self.put(world, down, next);
-                spread_down = true;
-            }
+        // `FlowingFluid.spread`: the liquid the cell below would become decides whether the
+        // block there can take it (a waterlogged block only takes the source type).
+        let below_next = get_new_liquid_with_rules(
+            world,
+            down.0,
+            down.1,
+            down.2,
+            current.kind,
+            world.water_conversion(),
+            world.lava_conversion(),
+        );
+        if below_next.kind != FluidKind::Empty
+            && self.can_enter(world, pos, down, current.kind, below_next.source)
+        {
+            self.put(world, down, below_next);
+            spread_down = true;
         }
         if spread_down {
             let sources = SIDES
@@ -296,25 +298,9 @@ impl FluidTicks {
         };
         let mut choices = Vec::new();
         let mut best = u32::MAX;
+        let mut spreads = Vec::new();
         for d in SIDES {
             let Some(n) = offset(pos, d) else { continue };
-            if !self.can_explore(world, pos, n, current.kind) {
-                continue;
-            }
-            let score = if self.hole(world, n, current.kind) {
-                0
-            } else {
-                self.slope(world, n, pos, current.kind, 1, limit)
-            };
-            if score < best {
-                choices.clear();
-                best = score;
-            }
-            if score == best && self.can_enter(world, pos, n, current.kind) {
-                choices.push(n);
-            }
-        }
-        for n in choices {
             let next = get_new_liquid_with_rules(
                 world,
                 n.0,
@@ -324,9 +310,31 @@ impl FluidTicks {
                 world.water_conversion(),
                 world.lava_conversion(),
             );
-            if next.kind != FluidKind::Empty {
-                self.put(world, n, next);
+            // `FlowingFluid.getSpread`: a neighbor that cannot take the liquid it would
+            // become is not a candidate at all, so it cannot set the best slope either.
+            if !self.can_explore(world, pos, n, current.kind, next.source) {
+                continue;
             }
+            let score = if self.hole(world, n, current.kind) {
+                0
+            } else {
+                self.slope(world, n, pos, current.kind, 1, limit)
+            };
+            if score < best {
+                choices.clear();
+                spreads.clear();
+                best = score;
+            }
+            if score == best
+                && next.kind != FluidKind::Empty
+                && self.can_enter(world, pos, n, current.kind, next.source)
+            {
+                choices.push(n);
+                spreads.push(next);
+            }
+        }
+        for (n, next) in choices.into_iter().zip(spreads) {
+            self.put(world, n, next);
         }
     }
     fn lava_reaction(
@@ -367,29 +375,34 @@ impl FluidTicks {
         }
         false
     }
+    /// Whether the cell `to` takes the liquid `from` pushes into it; `source` is whether that
+    /// liquid is the source type.
     fn can_enter(
         &self,
         w: &impl FluidWorld,
         from: Position,
         to: Position,
         kind: FluidKind,
+        source: bool,
     ) -> bool {
         let target = block(w, to);
         fluid_state(target).kind == FluidKind::Empty
-            && can_hold_fluid(target, kind)
+            && can_hold_fluid_as(target, kind, source)
             && can_pass_at(w, from, to, direction(from, to))
     }
+    /// `FlowingFluid.canMaybePassThrough` plus `canHoldSpecificFluid`.
     fn can_explore(
         &self,
         w: &impl FluidWorld,
         from: Position,
         to: Position,
         kind: FluidKind,
+        source: bool,
     ) -> bool {
         let target = block(w, to);
         let fluid = fluid_state(target);
         (fluid.kind == FluidKind::Empty || (fluid.kind == kind && !fluid.source))
-            && can_hold_fluid(target, kind)
+            && can_hold_fluid_as(target, kind, source)
             && can_pass_at(w, from, to, direction(from, to))
     }
     fn hole(&self, w: &impl FluidWorld, pos: Position, kind: FluidKind) -> bool {
@@ -398,7 +411,7 @@ impl FluidTicks {
         };
         let target = block(w, below);
         can_pass_at(w, pos, below, Direction::Down)
-            && (fluid_state(target).kind == kind || can_hold_fluid(target, kind))
+            && (fluid_state(target).kind == kind || can_hold_fluid_as(target, kind, false))
     }
     fn slope(
         &self,
@@ -412,7 +425,8 @@ impl FluidTicks {
         let mut best = u32::MAX;
         for d in SIDES {
             let Some(n) = offset(pos, d) else { continue };
-            if n == prev || !self.can_explore(w, pos, n, kind) {
+            // The slope search asks `canPassThrough` with the flowing type.
+            if n == prev || !self.can_explore(w, pos, n, kind, false) {
                 continue;
             }
             if self.hole(w, n, kind) {

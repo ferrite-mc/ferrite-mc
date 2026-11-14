@@ -4,7 +4,7 @@
 //! Vanilla `LiquidBlock` maps block levels 8..=15 to the same falling fluid
 //! state; converting that state back therefore produces canonical level 8.
 
-use ferrite_data::{block_props, blocks};
+use ferrite_data::{block_props, blocks, tags};
 
 pub trait FluidWorld {
     fn block(&self, x: i32, y: i32, z: i32) -> u32;
@@ -142,32 +142,67 @@ fn props(state: u32) -> Option<&'static block_props::BlockProps> {
     (usize::from(id) < block_props::STATE_COUNT).then(|| block_props::get(id))
 }
 
-/// Approximation of `FlowingFluid.java#canHoldFluid`: replaceable blocks and
-/// waterloggable blocks can accept water. Other block-specific container rules
-/// are not yet modeled, and existing fluids are accepted only of the same kind.
-pub fn can_hold_fluid(state: u32, kind: FluidKind) -> bool {
-    if kind == FluidKind::Empty {
-        return false;
-    }
-    let existing = fluid_state(state);
-    if existing.kind != FluidKind::Empty {
-        return existing.kind == kind;
-    }
-    let Some(p) = props(state) else {
+/// The registry name of a block state.
+fn block_name(state: u32) -> Option<&'static str> {
+    u16::try_from(state)
+        .ok()
+        .and_then(blocks::state)
+        .map(|(name, _)| name)
+}
+
+/// Whether a block is a `LiquidBlockContainer`: a `SimpleWaterloggedBlock` (it has a
+/// `waterlogged` property) or kelp / seagrass, which never take liquid.
+fn is_liquid_container(state: u32) -> bool {
+    let Ok(id) = u16::try_from(state) else {
         return false;
     };
-    if p.replaceable {
-        return true;
+    let Some((name, properties)) = blocks::state(id) else {
+        return false;
+    };
+    matches!(
+        name,
+        "minecraft:kelp"
+            | "minecraft:kelp_plant"
+            | "minecraft:seagrass"
+            | "minecraft:tall_seagrass"
+    ) || properties.iter().any(|&(key, _)| key == "waterlogged")
+}
+
+/// `FlowingFluid.canHoldAnyFluid`: a liquid container, or a block the
+/// `minecraft:washed_away_by_fluids` tag lists (air, plants, torches, buttons, rails, carpets,
+/// candles, ... and the fluids themselves).
+pub fn holds_any_fluid(state: u32) -> bool {
+    is_liquid_container(state)
+        || block_name(state)
+            .is_some_and(|name| tags::contains("block", "minecraft:washed_away_by_fluids", name))
+}
+
+/// `FlowingFluid.canHoldFluid` for a fluid whose type is the source type when `source` and the
+/// flowing type otherwise. A waterlogged block's `canPlaceLiquid` is `fluid == Fluids.WATER`, so
+/// only the source type fits; kelp and seagrass never take liquid.
+pub fn can_hold_fluid_as(state: u32, kind: FluidKind, source: bool) -> bool {
+    if kind == FluidKind::Empty || !holds_any_fluid(state) {
+        return false;
     }
-    kind == FluidKind::Water
-        && u16::try_from(state)
-            .ok()
-            .and_then(blocks::state)
-            .is_some_and(|(_, properties)| {
-                properties
-                    .iter()
-                    .any(|&(name, value)| name == "waterlogged" && value == "false")
-            })
+    if is_liquid_container(state) {
+        return kind == FluidKind::Water
+            && source
+            && !matches!(
+                block_name(state),
+                Some(
+                    "minecraft:kelp"
+                        | "minecraft:kelp_plant"
+                        | "minecraft:seagrass"
+                        | "minecraft:tall_seagrass"
+                )
+            );
+    }
+    true
+}
+
+/// [`can_hold_fluid_as`] for the source type of `kind`.
+pub fn can_hold_fluid(state: u32, kind: FluidKind) -> bool {
+    can_hold_fluid_as(state, kind, true)
 }
 
 /// Direction from the first block to its neighbor.
