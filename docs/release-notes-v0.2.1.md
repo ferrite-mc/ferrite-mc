@@ -1,5 +1,8 @@
 # Ferrite 0.2.1
 
+> **Historical release note.** For current status see [`../README.md`](../README.md) and
+> [`BACKLOG.md`](BACKLOG.md).
+
 Ferrite 0.2.1 targets Minecraft Java 26.3 (protocol 777).
 
 ## Highlights

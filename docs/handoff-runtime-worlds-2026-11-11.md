@@ -1,5 +1,8 @@
 # Runtime worlds handoff — 2026-11-11
 
+> **Historical handoff (2026-11-11).** Superseded by `docs/BACKLOG.md` section 8 and the current
+> runtime-world tests. Do not treat its "Known gaps" as current without re-checking the source.
+
 ## Current state
 
 Runtime-world work is in progress in `C:\Users\taegy\orca\workspaces\ferrite-mc-ref\plan1104\target\release-prep-v0.1.5`, on branch `release/v0.1.6`. At this handoff, `main` and `release/v0.1.6` both point to `6b711ca` and the worktree is clean. Runtime-world changes were pushed directly to both branches at the user's request. The initial implementation commit is `dceb03b`; follow-up commits address CI failures described below.

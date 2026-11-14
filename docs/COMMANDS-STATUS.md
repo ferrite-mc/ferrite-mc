@@ -1,9 +1,9 @@
 # Vanilla command coverage
 
-> **Partly stale.** The sections after "Snapshot of 2026-11-04" were written on 2026-11-04 and
-> only partly updated afterwards. The blocks above that heading were re-verified against source
-> and `vanilla/26.3/generated` on 2026-11-13 (lane C); where the two disagree, the upper blocks
-> win. Anything marked "unverified" could not be checked against vanilla's source from here.
+> **Current snapshot: 2026-11-14.** The tree-parity numbers and the upper "Lane C" and
+> "Lane B" sections are the current reference. Sections after "Snapshot of 2026-11-04" are
+> historical and may be stale. Where they disagree, the upper blocks win. Anything marked
+> "unverified" still needs a real client or a jar check.
 
 ## Tree parity (measured 2026-11-13)
 

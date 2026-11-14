@@ -1,8 +1,10 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-10**. `README.md` holds the status
-table; this file holds the open work. Worker-specific notes remain in their Orca FB worktrees;
-the open runtime-world sequence is captured below so it stays with the release branch.
+Single list of open work, checked against source on **2026-11-14** at `main` = `433b907`.
+`README.md` holds the status table; this file holds the open work. The six feature lanes plus the
+command/plugin lanes are merged. Older coordinator and handoff notes are historical; use this
+file and the current source instead of their "remaining" lists. The open runtime-world sequence
+is captured below so it stays with the release branch.
 
 ## Contract for every task
 
@@ -55,14 +57,15 @@ server-side only.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
   hold their fuse out to seven blocks and skeletons strafe. Pathfinding and goal selection are
   still to be audited against vanilla for each affected mob; do not claim full parity.
-- Dragon: the strafe phase and the gateway creation beam are implemented. What is left is the
-  perched scanning/attacking/flaming subphases, the purple teleport beam and the automatic
-  2400-tick gateway beam (`docs/end-dimension.md`).
+- Dragon: strafing, the perched scanning/attacking/flaming subphases, the purple teleport beam,
+  and the automatic 2400-tick gateway beam are implemented (`docs/end-dimension.md`). Remaining:
+  verify the subphase timings against the 26.3 jar, refuse gateway teleports while the beam
+  cooldown runs, and widen the outer-island search radius; real-client visuals remain unverified.
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
-  bottle, wind charge, splash and lingering potion are in (`ferrite-entity/src/arrow.rs`). A
-  lingering cloud applies its effects to players (`potion::PotionCloud`) but no area-effect-cloud
-  entity is sent to clients, so it is invisible, and it affects players only, like the splash
-  potion; mobs are not affected. Missing: fishing bobber.
+  bottle, wind charge, splash and lingering potion are in (`ferrite-entity/src/arrow.rs`), and the
+  fishing bobber is implemented (`ferrite-entity/src/bobber.rs`). A lingering cloud still applies
+  its effects to players (`potion::PotionCloud`) without sending an area-effect-cloud entity to
+  clients, so it is invisible, and mobs are not affected.
 - Shoulder parrot is bookkeeping only (`set/get/releaseShoulderEntity*`): no entity, no display.
 - Structure entities: `Structure#getEntities()` returns the captured entities and non-empty
   `EntityTransformer` lists are applied at the transformed position (`CapturedStructure.java`).
@@ -74,8 +77,11 @@ server-side only.
 
 - `Server#createWorld`/`unloadWorld` are implemented (runtime worlds, section 8). Creator options
   Ferrite cannot honour still throw `UnsupportedOperationException`.
-- `Player#sendBlockUpdate` supports signs, banners, skulls (with textures), chests, barrels, shulker boxes, furnaces, dispensers, droppers, hoppers, brewing stands, crafters, campfires and chiseled bookshelves, with item metadata on snapshot stacks; any other tile state throws `UnsupportedOperationException` because the host has no block-entity model for it (`plugins/tile_update.rs` `FAMILIES`). `World#unloadChunk` does not force-unload a live
-  chunk: it succeeds after unload and returns false while a player or `/forceload` holds it.
+- `Player#sendBlockUpdate` supports signs, chests, barrels, shulker boxes, furnaces, banner
+  patterns and skull profiles (`plugins/tile_update.rs` `FAMILIES`). Note-block sounds, skull
+  texture properties and other unmodelled tile states still throw `UnsupportedOperationException`.
+  `World#unloadChunk` does not force-unload a live chunk: it succeeds after unload and returns
+  false while a player or `/forceload` holds it.
 - Ender pearls now route cross-region landings through the world loop to the owner's region. A
   landing after the player changes dimension is ignored.
 - NMS-typed CraftBukkit methods (`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
@@ -129,10 +135,11 @@ server-side only.
 
 - Create the expected default directories, including `plugins/`, on startup. Check fresh and
   existing installations, configured custom paths, headless mode and Windows UI startup.
-- `v0.1.5` is already tagged locally at `0132fd9`; the new plugin/performance changes are prepared
-  for `v0.1.6`. Verify the Windows ZIP and attach it to the GitHub release.
-- Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md`, `docs/windows-console.md` and
-  `docs/plugin-stubs-status.md` in step with code.
+- `v0.3` is the latest tag; `main` is many commits past it. Verify the Windows ZIP/NSIS output
+  and release notes before publishing the next tag, and attach the artifact to the GitHub release.
+- Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md`, `docs/windows-console.md`,
+  `docs/plugin-stubs-status.md`, `README.md` and `docs/COMMANDS-STATUS.md` in step with code;
+  `docs/README.md` marks the historical handoff and coordinator notes.
 - The Windows GUI is a Tauri 2 + WebView2 shell in `crates/ferrite-server`; its layout,
   lifecycle, and known limitations are documented in `docs/windows-console.md`.
 - The portable Windows ZIP currently contains the executable and start notes; the NSIS

@@ -6,7 +6,7 @@ Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레
 Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **상태 (2026-11-13)**: 생존·게임 시스템과 플러그인 API 일부를 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속과 전체 플러그인 생태계 호환은 아직 검증하지 않았습니다.**
+- **상태 (2026-11-14)**: 생존·게임 시스템과 플러그인 API 일부를 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속과 전체 플러그인 생태계 호환은 아직 검증하지 않았습니다.**
 - **라이선스**: GPL-3.0-or-later
 
 > **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
@@ -23,7 +23,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 | 🔧 진행 중 | 플러그인 호환(Paper/Bukkit API 일부, NMS 일부; 미지원 호출은 명시적으로 실패) |
 | ⛔ 아직 없음 | 실제 클라이언트 검증 |
 
-**엔드**: 포탈 활성화와 차원 이동, 도착 플랫폼, 바닐라 월드젠 호스트, 공허 판정, 드래곤 보스바·전투·수정 회복/파괴, 출구 포탈과 게이트웨이를 구현했습니다. 드래곤의 선회·돌진(strafe)·착지/대기/이륙·숨결·화염구 행동, 8개 서브 히트박스, 4개 수정 기반 단계별 재소환, 전투/단계 저장·복원, 게이트웨이 생성 빔(`Age` 블록 엔티티; 서버가 나이를 올리고 저장해 재로드 때 빔이 처음부터 다시 시작되지 않음), 첫 귀환 때의 크레딧 신호(`WIN_GAME`)와 "Free the End" 업적도 서버 쪽에는 구현되어 있습니다. 남은 서버 쪽 차이는 착지 후 스캔/공격/불꽃 서브페이즈의 정확한 타이밍, 보라색 텔레포트 빔과 2400틱 자동 빔, 외곽 섬 탐색 반경입니다. 빔 렌더링, 드래곤 움직임, 보스바, 크레딧 화면 등 실제 클라이언트 화면은 확인하지 않았습니다([`docs/end-dimension.md`](docs/end-dimension.md), 수동 점검표 [`docs/manual-checklist.md`](docs/manual-checklist.md)).
+**엔드**: 포탈 활성화와 차원 이동, 도착 플랫폼, 바닐라 월드젠 호스트, 공허 판정, 드래곤 보스바·전투·수정 회복/파괴, 출구 포탈과 게이트웨이를 구현했습니다. 드래곤의 선회·돌진(strafe)·착지/대기/이륙·숨결·화염구 행동, 8개 서브 히트박스, 4개 수정 기반 단계별 재소환, 전투/단계 저장·복원, 게이트웨이 생성 빔(`Age` 블록 엔티티; 서버가 나이를 올리고 저장해 재로드 때 빔이 처음부터 다시 시작되지 않음), 첫 귀환 때의 크레딧 신호(`WIN_GAME`)와 "Free the End" 업적도 서버 쪽에는 구현되어 있습니다. 착지 후 스캔/공격/불꽃 서브페이즈와 보라색·2400틱 게이트웨이 빔도 서버 쪽에 구현되어 있습니다. 남은 것은 26.3 jar 기준 타이밍 재검증, 게이트웨이 쿨다운 중 텔레포트 거부, 외곽 섬 탐색 반경 보정입니다. 빔 렌더링, 드래곤 움직임, 보스바, 크레딧 화면 등 실제 클라이언트 화면은 확인하지 않았습니다([`docs/end-dimension.md`](docs/end-dimension.md), 수동 점검표 [`docs/manual-checklist.md`](docs/manual-checklist.md)).
 
 플러그인 API는 Paper `Server`/`Player`의 일부만 처리합니다. 처리하지 않는 호출은
 `UnsupportedOperationException("Ferrite: not implemented: …")` 또는 명시적인 `NoSuchMethodError`로
@@ -145,12 +145,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. 기존 CI 기준
-`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo fmt --all -- --check`, `java/ferrite-api-impl`의 `./gradlew test`가 통과했습니다.
-[main CI run 42398148054](https://github.com/yxshadxw/ferrite-mc/actions/runs/42398148054)도 Linux와
-Windows에서 fmt·clippy·전체 Rust 테스트를 통과했습니다. 봇 테스트 성공은 실제 Minecraft 클라이언트
-화면 검증을 의미하지 않습니다.
+서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. 2026-11-14 로컬
+`main`에서 `cargo +stable test --workspace`, `cargo +stable clippy --workspace --all-targets -- -D warnings`,
+`cargo +stable fmt --all -- --check`, `java/ferrite-api-impl`의 Gradle 테스트를 통과했습니다.
+최신 CI 상태는 [GitHub Actions](https://github.com/ferrite-mc/ferrite-mc/actions)에서 확인합니다.
+봇 테스트 성공은 실제 Minecraft 클라이언트 화면 검증을 의미하지 않습니다.
 
 ## 로드맵
 
@@ -164,7 +163,7 @@ Windows에서 fmt·clippy·전체 Rust 테스트를 통과했습니다. 봇 테�
 | 6 | Paper 기능 동등성 | API 일부 구현·검증 중, 전체 동등성 미완료 |
 | 7 | 플러그인 생태계 호환 확대 | 호환 패턴 테스트 진행 중, 실제 플러그인별 검증 필요 |
 
-2026-11-13 기준. 구현 여부와 검증 범위는 [명령어 현황](docs/COMMANDS-STATUS.md)과
+2026-11-14 기준. 구현 여부와 검증 범위는 [명령어 현황](docs/COMMANDS-STATUS.md)과
 [플러그인 API 잔여 목록](docs/plugin-api-stubs.md)에 기록합니다. 실제 Minecraft 클라이언트
 화면 검증, Paper/NMS 전체 호환, 모든 플러그인의 정상 동작은 아직 확인하지 않았습니다.
 

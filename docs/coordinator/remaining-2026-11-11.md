@@ -1,5 +1,9 @@
 # Remaining work audit — 2026-11-11
 
+> **Historical snapshot (2026-11-11).** Superseded by [`docs/BACKLOG.md`](../BACKLOG.md)
+> (2026-11-14) and the current source. Do not use this file as the current work queue; it is kept
+> for provenance. Some items below are already closed by the merged lanes.
+
 Base: `main` = `origin/main` = `6aca3fc`; written on `w5-residual` (L4). Sources read: the coordinator
 `task-queue.md` (it lives only on `origin/integrate/worker-20261109`, not on `main`), `docs/BACKLOG.md`,
 `docs/OPTIMIZATIONS.md`, `docs/plugin-api-stubs.md`, `docs/plugin-stubs-status.md`, `docs/pistons.md`,
