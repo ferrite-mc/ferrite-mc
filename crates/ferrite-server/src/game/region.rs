@@ -5643,9 +5643,9 @@ impl Region {
     /// the unloaded side as sturdy is re-validated. Only border cells that actually hold fluid,
     /// a gravity block or a block whose `canSurvive` now fails are queued, so a full chunk load
     /// does not enqueue an update for every block on the seam.
-    /// Currently test-only: the tick-loop call is disabled until the join-time scan is made
-    /// chunk-direct (see `docs/world-interaction-audit.md`).
-    #[cfg(test)]
+    /// Runs from `Region::tick`, one chunk per tick. The seam faces are read straight from the
+    /// chunks' paletted containers and only the sections whose palettes hold something that can
+    /// need a wake are visited (`docs/world-interaction-audit.md` has the measured cost).
     pub fn wake_loaded_chunks(
         &mut self,
         source: &super::anvil::AnvilChunkSource,
@@ -5662,12 +5662,14 @@ impl Region {
             self.pending_chunk_loads = pending.split_off(CHUNKS_PER_TICK);
         }
         let dimension = source.dimension();
-        let air = u32::from(ferrite_data::blocks::default_state("air").expect("vanilla air"));
-        // A section made only of full opaque blocks cannot hold a fluid, a support-dependent
-        // block or a gravity block, so its 16 layers cannot need a border wake. This keeps the
-        // pass proportional to the surface, not to the full build height.
+        // One cache of the "can this state need a wake" answer for the whole pass: the lookup
+        // goes through the block name, which is far dearer than the palette read around it.
+        let interesting_cache: std::cell::RefCell<HashMap<u32, bool>> = Default::default();
         let interesting = |state: u32| {
-            u16::try_from(state).ok().is_some_and(|state| {
+            if let Some(&known) = interesting_cache.borrow().get(&state) {
+                return known;
+            }
+            let answer = u16::try_from(state).ok().is_some_and(|state| {
                 let name = ferrite_data::blocks::state(state).map(|(name, _)| name);
                 // Cave and void air are separate states and are not full blocks; without this
                 // check every underground cave section would look interesting.
@@ -5677,34 +5679,33 @@ impl Region {
                 ) && (ferrite_data::block_props::get(state).fluid.is_some()
                     || !ferrite_data::block_props::get(state).can_occlude
                     || super::gravity::is_gravity(state))
-            })
+            });
+            interesting_cache.borrow_mut().insert(state, answer);
+            answer
         };
-        let _ = air;
         for chunk in pending {
             if !self.held_chunks.contains_key(&chunk) {
                 continue;
             }
-            // Only sections that hold a fluid, a non-full block or a gravity block can need a
-            // wake. Check the inside chunk and each neighbour separately instead of building one
-            // bounding box: deep water plus a surface plant would otherwise make the scan cover
-            // the whole build height.
-            let mask = |chunk: &ferrite_world::Chunk| {
-                let min = chunk.min_y();
-                let bits: Vec<bool> = chunk
-                    .sections()
-                    .iter()
-                    .map(|section| {
-                        section
-                            .blocks()
-                            .palette()
-                            .iter()
-                            .any(|&state| interesting(state))
-                    })
-                    .collect();
-                (min, bits)
+            // Which sections of a chunk hold a fluid, a non-full block or a gravity block,
+            // read from the section palettes alone (one lock per chunk).
+            let mask = |at: ChunkPos| {
+                source.with_loaded_chunk(at.0, at.1, |chunk| {
+                    let bits: Vec<bool> = chunk
+                        .sections()
+                        .iter()
+                        .map(|section| {
+                            section
+                                .blocks()
+                                .palette()
+                                .iter()
+                                .any(|&state| interesting(state))
+                        })
+                        .collect();
+                    (chunk.min_y(), bits)
+                })
             };
-            let Some((min_y, inside_mask)) = source.with_loaded_chunk(chunk.0, chunk.1, mask)
-            else {
+            let Some((min_y, inside_mask)) = mask(chunk) else {
                 continue;
             };
             if inside_mask.is_empty() {
@@ -5712,97 +5713,154 @@ impl Region {
             }
             let (x0, z0) = (chunk.0 * 16, chunk.1 * 16);
             for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                for t in 0..16 {
-                    let (x, z) = if dx != 0 {
-                        (if dx > 0 { x0 + 15 } else { x0 }, z0 + t)
-                    } else {
-                        (x0 + t, if dz > 0 { z0 + 15 } else { z0 })
-                    };
-                    let (ox, oz) = (x + dx, z + dz);
-                    let outside_chunk = ChunkPos(ox.div_euclid(16), oz.div_euclid(16));
-                    if outside_chunk == chunk {
-                        continue;
-                    }
-                    let outside_mask = source
-                        .with_loaded_chunk(outside_chunk.0, outside_chunk.1, mask)
-                        .map(|(_, bits)| bits)
-                        .unwrap_or_default();
-                    for (index, inside_interesting) in inside_mask.iter().enumerate() {
-                        if !*inside_interesting
-                            && !outside_mask.get(index).copied().unwrap_or(false)
-                        {
-                            continue;
+                let outside_chunk = ChunkPos(chunk.0 + dx, chunk.1 + dz);
+                // Still unloaded: nothing has become readable on that side.
+                let Some((_, outside_mask)) = mask(outside_chunk) else {
+                    continue;
+                };
+                // The sections where either side could need a wake.
+                let sections: Vec<usize> = (0..inside_mask.len())
+                    .filter(|&index| {
+                        inside_mask[index] || outside_mask.get(index).copied().unwrap_or(false)
+                    })
+                    .collect();
+                if sections.is_empty() {
+                    continue;
+                }
+                // The two faces of the seam, read straight from the chunks' paletted containers
+                // (one lock each) instead of one `source.block` call per cell. `face[t][y]`
+                // walks along the seam, then up the section.
+                let (inside_face, outside_face): (
+                    (Option<u8>, Option<u8>),
+                    (Option<u8>, Option<u8>),
+                ) = match (dx, dz) {
+                    (1, 0) => ((Some(15), None), (Some(0), None)),
+                    (-1, 0) => ((Some(0), None), (Some(15), None)),
+                    (0, 1) => ((None, Some(15)), (None, Some(0))),
+                    _ => ((None, Some(0)), (None, Some(15))),
+                };
+                let read = |at: ChunkPos, fixed: (Option<u8>, Option<u8>)| {
+                    source.with_loaded_chunk(at.0, at.1, |chunk| {
+                        let mut cells: Vec<u32> = Vec::with_capacity(sections.len() * 256);
+                        for &index in &sections {
+                            let base = min_y + index as i32 * 16;
+                            for t in 0..16u8 {
+                                let (x, z) = (fixed.0.unwrap_or(t), fixed.1.unwrap_or(t));
+                                for y in base..base + 16 {
+                                    cells.push(chunk.block(x, y, z).unwrap_or(u32::MAX));
+                                }
+                            }
                         }
-                        let base = min_y + index as i32 * 16;
+                        cells
+                    })
+                };
+                let (Some(inside_cells), Some(outside_cells)) =
+                    (read(chunk, inside_face), read(outside_chunk, outside_face))
+                else {
+                    continue;
+                };
+                let mut cell = 0;
+                for &index in &sections {
+                    let base = min_y + index as i32 * 16;
+                    for t in 0..16i32 {
+                        let (x, z) = if dx != 0 {
+                            (if dx > 0 { x0 + 15 } else { x0 }, z0 + t)
+                        } else {
+                            (x0 + t, if dz > 0 { z0 + 15 } else { z0 })
+                        };
+                        let (ox, oz) = (x + dx, z + dz);
                         for y in base..base + 16 {
-                            let Some(inside_state) = source.block(x, y, z) else {
-                                continue;
-                            };
-                            let Some(outside_state) = source.block(ox, y, oz) else {
-                                // Still unloaded: nothing has become readable on that side.
-                                continue;
-                            };
-                            if inside_state == air && outside_state == air {
+                            let (inside_state, outside_state) =
+                                (inside_cells[cell], outside_cells[cell]);
+                            cell += 1;
+                            if inside_state == u32::MAX || outside_state == u32::MAX {
                                 continue;
                             }
-                            // Only fluid that could not move because the other side was unloaded
-                            // needs a wake. An ocean border with water on both sides does not.
-                            if ferrite_fluid::is_liquid_block(inside_state)
-                                && ferrite_fluid::can_hold_fluid(
-                                    outside_state,
-                                    ferrite_fluid::fluid_state(inside_state).kind,
-                                )
-                            {
-                                self.schedule_fluid((x, y, z));
+                            // A pair of full blocks (or air) cannot need a fluid, support or
+                            // gravity wake; this keeps the pass on the surface.
+                            if !interesting(inside_state) && !interesting(outside_state) {
+                                continue;
                             }
-                            if ferrite_fluid::is_liquid_block(outside_state)
-                                && ferrite_fluid::can_hold_fluid(
-                                    inside_state,
-                                    ferrite_fluid::fluid_state(outside_state).kind,
-                                )
-                            {
-                                if self.held_chunks.contains_key(&outside_chunk) {
-                                    self.schedule_fluid((ox, y, oz));
-                                } else {
-                                    let _ = signals.send(Signal::FluidChange {
-                                        dimension,
-                                        x: ox,
-                                        y,
-                                        z: oz,
-                                    });
-                                }
-                            }
-                            let inside_u16 = u16::try_from(inside_state).ok();
-                            let outside_u16 = u16::try_from(outside_state).ok();
-                            if inside_u16.is_some_and(|state| {
-                                !super::neighbors::can_survive(state, [x, y, z], source)
-                            }) {
-                                // The block is ours; the unreadable side is now readable and failed
-                                // its support test. Re-validate it without forwarding the origin.
-                                self.updates.remote_changed([ox, y, oz]);
-                            }
-                            if outside_u16.is_some_and(|state| {
-                                !super::neighbors::can_survive(state, [ox, y, oz], source)
-                            }) {
-                                if self.held_chunks.contains_key(&outside_chunk) {
-                                    self.updates.block_changed([x, y, z]);
-                                } else {
-                                    let _ = signals.send(Signal::NeighborUpdate {
-                                        dimension,
-                                        origin: [x, y, z],
-                                        target: [ox, y, oz],
-                                    });
-                                }
-                            }
-                            if inside_u16.is_some_and(super::gravity::is_gravity)
-                                || outside_u16.is_some_and(super::gravity::is_gravity)
-                            {
-                                self.schedule_gravity(source, &[[x, y, z], [ox, y, oz]]);
-                            }
+                            self.wake_seam_cell(
+                                source,
+                                &signals,
+                                dimension,
+                                outside_chunk,
+                                ([x, y, z], inside_state),
+                                ([ox, y, oz], outside_state),
+                            );
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// The wake-up for one pair of cells that touch across a chunk seam: `inside` is in a
+    /// chunk this region just took, `outside` is across the seam in `outside_chunk`.
+    fn wake_seam_cell(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        signals: &UnboundedSender<Signal>,
+        dimension: super::Dimension,
+        outside_chunk: ChunkPos,
+        inside: ([i32; 3], u32),
+        outside: ([i32; 3], u32),
+    ) {
+        let ([x, y, z], inside_state) = inside;
+        let ([ox, _, oz], outside_state) = outside;
+        // Only fluid that could not move because the other side was unloaded needs a wake. An
+        // ocean border with water on both sides does not.
+        if ferrite_fluid::is_liquid_block(inside_state)
+            && ferrite_fluid::can_hold_fluid(
+                outside_state,
+                ferrite_fluid::fluid_state(inside_state).kind,
+            )
+        {
+            self.schedule_fluid((x, y, z));
+        }
+        if ferrite_fluid::is_liquid_block(outside_state)
+            && ferrite_fluid::can_hold_fluid(
+                inside_state,
+                ferrite_fluid::fluid_state(outside_state).kind,
+            )
+        {
+            if self.held_chunks.contains_key(&outside_chunk) {
+                self.schedule_fluid((ox, y, oz));
+            } else {
+                let _ = signals.send(Signal::FluidChange {
+                    dimension,
+                    x: ox,
+                    y,
+                    z: oz,
+                });
+            }
+        }
+        let inside_u16 = u16::try_from(inside_state).ok();
+        let outside_u16 = u16::try_from(outside_state).ok();
+        if inside_u16.is_some_and(|state| !super::neighbors::can_survive(state, [x, y, z], source))
+        {
+            // The block is ours; the unreadable side is now readable and failed its support
+            // test. Re-validate it without forwarding the origin.
+            self.updates.remote_changed([ox, y, oz]);
+        }
+        if outside_u16
+            .is_some_and(|state| !super::neighbors::can_survive(state, [ox, y, oz], source))
+        {
+            if self.held_chunks.contains_key(&outside_chunk) {
+                self.updates.block_changed([x, y, z]);
+            } else {
+                let _ = signals.send(Signal::NeighborUpdate {
+                    dimension,
+                    origin: [x, y, z],
+                    target: [ox, y, oz],
+                });
+            }
+        }
+        if inside_u16.is_some_and(super::gravity::is_gravity)
+            || outside_u16.is_some_and(super::gravity::is_gravity)
+        {
+            self.schedule_gravity(source, &[[x, y, z], [ox, y, oz]]);
         }
     }
     /// Knocks the entity with `uuid` away from `source`, for a hit another region's shield
@@ -11657,6 +11715,11 @@ impl Region {
         for pos in &button_changed {
             self.updates.block_changed(*pos);
         }
+        // A chunk this region just took may have fluid, support or gravity cells that were
+        // stopped at its edge while the neighbour was unloaded.
+        if let Some(source) = ctx.source.as_deref() {
+            self.wake_loaded_chunks(source, ctx.signals.clone());
+        }
         let mut changed = self.tick_block_updates(ctx);
         changed.extend(button_changed);
         stage!("vaults");
@@ -15972,6 +16035,56 @@ mod neighbor_ownership_tests {
         (ctx, receiver)
     }
 
+    /// The join-time footprint of the wake pass on the real fixture world: every chunk of a
+    /// view-distance-5 square around the spawn is held at once, as when a player joins, and the
+    /// pass runs until its queue is empty. Prints the total and the per-chunk cost
+    /// (`cargo test -p ferrite-server wake_cost -- --nocapture`); it needs the extracted fixture
+    /// world, so it is skipped when `vanilla/` is absent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wake_cost_on_the_fixture_world_join_footprint() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = root.join("vanilla/26.3/fixture-world/world");
+        let Ok(registry) =
+            ferrite_world::RuntimeRegistry::load(root.join("vanilla/26.3/generated"))
+        else {
+            return;
+        };
+        let Ok(spawn) = super::super::anvil::read_spawn(&path) else {
+            return;
+        };
+        let source = AnvilChunkSource::new(path, registry);
+        let (cx, cz) = (spawn[0].div_euclid(16), spawn[2].div_euclid(16));
+        let mut region = Region::default();
+        let mut loaded_chunks = 0;
+        for x in cx - 5..=cx + 5 {
+            for z in cz - 5..=cz + 5 {
+                for _ in 0..500 {
+                    match source.get(x, z, 0) {
+                        Some(Ok(_)) => {
+                            loaded_chunks += 1;
+                            region.hold_chunk(ChunkPos(x, z));
+                            break;
+                        }
+                        Some(Err(_)) => break,
+                        None => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+                    }
+                }
+            }
+        }
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let mut passes = 0;
+        while !region.pending_chunk_loads.is_empty() {
+            region.wake_loaded_chunks(&source, signals.clone());
+            passes += 1;
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "wake pass: {loaded_chunks} chunks, {passes} passes, {elapsed:?} total, {:?} per chunk",
+            elapsed / loaded_chunks.max(1)
+        );
+    }
+
     /// Same region: the water reached the edge of its chunk while the east chunk was unloaded
     /// and stopped. Holding that chunk must schedule the border water again so it flows on.
     #[tokio::test]
@@ -16009,6 +16122,43 @@ mod neighbor_ownership_tests {
             ferrite_fluid::fluid_state(source.block(16, 65, 0).unwrap()).kind,
             ferrite_fluid::FluidKind::Water,
             "the resumed border water crossed into the newly loaded chunk"
+        );
+    }
+
+    /// The wake pass runs from `Region::tick` itself: with no direct call, holding the east chunk
+    /// after the water stopped at the seam is enough for the water to flow across.
+    #[tokio::test]
+    async fn the_tick_loop_wakes_water_at_a_seam_when_a_chunk_is_held_later() {
+        let source = loaded(&[(0, 0)]).await;
+        let (water, stone, air) = (id("water"), id("stone"), id("air"));
+        for x in 12..=15 {
+            source.set_block(x, 64, 0, stone).unwrap();
+            source.set_block(x, 65, 0, air).unwrap();
+        }
+        source.set_block(15, 65, 0, water).unwrap();
+        let (ctx, _rx) = gravity_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        region.tick(&ctx);
+        loop {
+            if let Some(result) = source.get(1, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        source.set_block(16, 64, 0, stone).unwrap();
+        source.set_block(16, 65, 0, air).unwrap();
+        region.hold_chunk(ChunkPos(1, 0));
+        for _ in 0..8 {
+            // The world loop ticks fluids after the region tick (`game/mod.rs`).
+            region.tick(&ctx);
+            region.tick_fluids(&source, &ctx.tracking, ctx.signals.clone(), true, false);
+        }
+        assert_eq!(
+            ferrite_fluid::fluid_state(source.block(16, 65, 0).unwrap()).kind,
+            ferrite_fluid::FluidKind::Water,
+            "the tick loop did not resume the border water"
         );
     }
 
