@@ -23,11 +23,42 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 
 The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls surface as `UnsupportedOperationException("Ferrite: not implemented: …")` or an explicit `NoSuchMethodError`. Large plugins such as EssentialsX and plugins that depend on NMS do not work across all paths yet.
 
-### Plugin API status (code cross-check: 2026-11-12)
+### Plugin API status (code cross-check: 2026-11-14)
 
 This status compares the Java implementations, Rust host dispatchers, and regression tests on
 `main`. Hostless JUnit probe failures are not equivalent to server-side missing implementations:
-the report distinguishes real host paths from deliberate rejection paths.
+the report distinguishes real host paths from deliberate rejection paths. Item-level detail is in
+[`docs/plugin-api-completion-directive.md`](docs/plugin-api-completion-directive.md) §10.
+
+**Newly implemented since 2026-11-12** (details in the directive §10.1 and §10.5)
+
+- Enchanting table follows vanilla: bookshelf count, per-player seed (saved with player data),
+  button cost, weighted choice with exclusions, clue and material cost. Random numbers differ from
+  vanilla's source, so the same seed does not necessarily produce the same buttons.
+- Anvil: same-item merge bonus (12% of max durability), rename-only cost, creative cap.
+- Gravity blocks and fluids: `dragon_egg`, concrete powder solidification, landing in water mid-fall,
+  lava spread delay; pressure plates sense every entity with vanilla re-trigger delay and weighted output.
+- Chunks: clamp of the client's requested view distance; out-of-view chunks saved and unloaded at once.
+- Plugin loading: one failing plugin no longer stops the others.
+- `Player#startRiptideAttack`, `sleep`, `fireworkBoost`, `canCriticalAttack`, `getSentChunkKeys`,
+  `launchProjectile` for trident, snowball, egg, pearl, bottle, potion, wind charge, fireball,
+  firework, wither skull, shulker bullet, spectral arrow, and fishing bobber; eye of ender via item use.
+- `World#createExplosion` (all overloads), `spawn`/`createEntity`/`addEntity`, `getChunksAtAsync`,
+  `DATAPACK_DISCOVERY` bootstrap, `help.yml`, recipe add/remove (menu only, not the client recipe book).
+- Dragon battle `resetCrystals` and `spawnNewGateway(Position)`.
+
+**Remaining gaps** (directive §10.3)
+
+- Firework-specific handle methods, firework color/shape display, approximate firework acceleration.
+- POI search scans loaded chunks; `getWorldPath` is default-world only; `getFluidData`, `spawnAt`,
+  and `vanillaBiomeProvider` are absent from the compiled Paper API.
+- Cooking, smithing, and stonecutting recipes cannot be added at runtime; no result metadata,
+  `ExactChoice`, or client recipe-book display.
+- Some NMS menus are deliberately refused (hopper, dispenser, furnace, brewing stand, and others).
+- `loadData` does not restore health, food, or experience.
+- Real 26.3 client visuals and large third-party plugin behavior remain unverified.
+
+**Earlier items (still valid)**
 
 **Implemented and covered by tests**
 
@@ -45,8 +76,8 @@ the report distinguishes real host paths from deliberate rejection paths.
 
 **Explicitly unsupported or constrained in code**
 
-- `Player#launchProjectile(Trident)` and projectile types unknown to the host. Potion callback
-  content mutation is also unsupported.
+- Projectile types unknown to the host. Potion callback content mutation is also unsupported.
+  (Trident launches are now implemented; see above.)
 - `Player#openCartographyTable`: there is no map store, `idcounts` allocator, or typed map-data
   component, so the table is refused rather than faked.
 - Some `MapCanvas` methods, styled/translated map cursor captions, and hidden cursor transfer.

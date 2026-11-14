@@ -29,12 +29,13 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 `UnsupportedOperationException("Ferrite: not implemented: …")` 또는 명시적인 `NoSuchMethodError`로
 드러납니다. EssentialsX 같은 대형 플러그인의 모든 경로와 NMS 의존 플러그인은 아직 동작하지 않습니다.
 
-### 플러그인 API 현황 (코드 대조: 2026-11-13)
+### 플러그인 API 현황 (코드 대조: 2026-11-14)
 
 `java/ferrite-api-impl`, `crates/ferrite-server/src/plugins`, 게임 루프와 회귀 테스트를
 대조한 결과다. 호스트가 없는 JUnit 폴백 프로브의 `not implemented` 목록은 실제 서버
 미구현 목록과 같지 않다. 아래는 호출 가능 여부가 아니라 **게임 상태·패킷·저장에 실제
-효과가 있는지**를 기준으로 분류했다.
+효과가 있는지**를 기준으로 분류했다. 항목별 상세는 지시서
+[`docs/plugin-api-completion-directive.md`](docs/plugin-api-completion-directive.md) §10을 본다.
 
 **구현되어 테스트로 고정된 범위**
 
@@ -43,7 +44,39 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
   플레이어가 남아 있거나 `WorldUnloadEvent`가 취소되면 월드를 유지한다. 저장 실패 시
   스케줄러와 카탈로그를 복구하는 트랜잭션 경로도 있다.
 - 런타임 월드 재접속: `game/playerdata.rs`가 위치·게임모드·인벤토리·선택 슬롯·탑승
-  차량·런타임 월드 UUID를 저장하고, 재접속 시 해당 월드가 로드되어 있으면 복원한다.
+  차량·런타임 월드 UUID·마법부여 시드를 저장하고, 재접속 시 해당 월드가 로드되어 있으면 복원한다.
+- 마법부여대: 책장 개수, 플레이어별 시드, 버튼 비용, 가중치 선택과 배타 집합, 단서와 재료 소모를
+  바닐라 `EnchantmentMenu` 규칙에 맞췄다. 난수는 바닐라 원본과 같지 않아 같은 시드가 같은 버튼을 내지는 않는다.
+- 모루: 같은 아이템 합치기 보너스(최대 내구도의 12%), 이름만 바꾸는 경우의 수리 비용, 창작 모드 상한을 바닐라와 맞춘다.
+- 중력 블록·유체·레드스톤: `dragon_egg` 추가, 콘크리트 가루 굳음 규칙, 떨어지는 도중 물에 들어간 착지, 용암 지연 난수,
+  압력판의 엔티티 감지와 가중판 출력. 작물 성장은 바닐라와 일치함을 확인했다.
+- 청크: 접속 때 클라이언트가 요청한 뷰 거리를 `clamp(요청, 2, 서버)`로 적용하고, 뷰 사각형 밖 청크는 즉시 저장·언로드한다.
+- 플러그인 로딩: 플러그인 하나가 로드·활성화에 실패해도 나머지는 계속 로드한다. Vault, EssentialsX, PlaceholderAPI,
+  BlueMap, Multiverse-Core, AuthMe, DiscordSRV, SkinsRestorer, ChestShop, Skript 등은 로드·활성화를 확인했다(기능 동작은 아님).
+- Paper 부트스트래퍼 `DATAPACK_DISCOVERY`, `help.yml`(`HelpMap`), 레시피 추가·삭제(제작 메뉴에 반영, 클라이언트 레시피북에는 나오지 않음).
+- 투사체와 전투: 삼지창 발사와 리프티드 공격(`startRiptideAttack`), `launchProjectile`의 삼지창·눈덩이·달걀·진주·경험치 병·물약·바람 구슬·화염구·폭죽·위더 해골·셜커 탄환·스펙트럴 화살·낚싯찌, 눈 엔더. `canCriticalAttack`, 폭죽 부스트(`fireworkBoost`).
+- 수면: `Player#sleep(Location,boolean)`(침대 검증, 점유 확인, 차원별 폭발 처리). 엔드: `getEnderDragonBattle`의 `resetCrystals`, `spawnNewGateway(Position)`.
+- `World#createExplosion`(모든 overload, 다른 월드는 거부), `World#spawn`·`createEntity`·`addEntity`(클래스→엔티티 타입 매핑, 모호하면 거부), `getChunksAtAsync`, `Player#getSentChunkKeys`.
+- `sendBlockUpdate`: 디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된 책장·주크박스·교탁·명령 블록·스포너·스컬크 센서·벌집·구조물 블록 등 블록 엔티티와 머리 텍스처 속성, 아이템 메타 스냅샷.
+- 지도 커서 스타일 캡션(`styled`/`numeric` 모드 0·1·2), `CraftMagicNumbers`(`getMaterial`, `getKey`, `getDefaultBlockData`, `isLegacy`, `fromLegacy`).
+- `Player#loadData`/`saveData`의 인벤토리·선택 슬롯·게임 모드 적용(체력·허기·경험치는 되돌리지 않음), 기본 월드 엔티티 스냅샷과 `CapturedStructure`/`getStructures`.
+- `NmsEntityHandle`: 위치·속도·회전·상태·승객/차량 등을 Bukkit 호출을 거쳐 읽고 쓴다(리전 소유권을 우회하지 않음).
+
+**이전 기록과 달라진 점**
+
+- 이전 문서가 미지원으로 적었던 `Player#launchProjectile(Trident)`, 지도 커서 스타일 캡션, 마법부여대의 자리표시자 구현은 지금 구현되어 있다.
+
+**한계와 남은 것 (지시서 §10.3)**
+
+- `Player`: 폭죽 전용 핸들 메서드, 폭죽 색·모양 표시, 붙은 폭죽 가속의 근사, `getConnection`의 일부 메서드, `postEffects`로 바꾼 상태의 반영 한계.
+- `World`: POI 검색은 로드된 청크를 스캔하는 근사이고 블록 속성 구분에 호스트 정보가 필요하다. `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API에 없다.
+- `sendBlockUpdate`: 침대는 26.3에 블록 엔티티가 없어 거부한다. 목록 밖 대상은 `UnsupportedOperationException`.
+- 레시피: 조리·대장간·석재 절단 레시피의 런타임 추가가 없다. 결과 아이템 메타, `ExactChoice`, 클라이언트 레시피북 표시도 없다.
+- NMS 메뉴: 호퍼·발사기·화로·양조기·신호기·교탁·상인·크래프터는 의도적 거부(이유와 대체 API는 지시서 §10.3).
+- `TAGS` 라이프사이클 이벤트는 태그 레지스트리가 시작 후 고정이라 거부한다. `fromLegacy`의 데이터 바이트는 지원하지 않는다.
+- 눈 엔더의 속도식은 바닐라 `EyeOfEnder.tick`을 기억에 의존해 옮긴 근사다.
+- 청크 틱은 시뮬레이션 거리 설정이 아니라 쥐고 있는 청크 전체에서 돈다. 티켓 종류별 만료(포탈 300틱 등)는 모델링하지 않는다.
+- 실제 26.3 클라이언트 화면(메뉴·맵·보스바·파티클·구조물·리소스 팩)과 대형 플러그인의 기능 동작은 확인하지 않았다. ViaVersion류 채널 주입과 TAB 6.2.1은 동작하지 않는다.
 - 생존: 체력·최대 체력·흡수 체력·허기·포화도·탈진·자연 회복·섭취·화염·용암·익사·
   낙하·공허·기아·효과 피해·사망·죽음 메시지·경험치/아이템 드롭·`keepInventory`·
   즉시 리스폰을 리전 소유 상태로 처리하고 관련 패킷을 보낸다.
@@ -59,22 +92,16 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 - 구조물의 블록·블록 엔티티 캡처/배치, 회전·반전·무결성·`BlockTransformer`, 런타임
   월드의 비플레이어 엔티티 스냅샷과 `EntityTransformer` 배치를 지원한다.
 
-**코드에서 확인한 명시적 미지원 또는 제한**
+**아직 미지원이거나 제한이 있는 것**
 
-- `Player#launchProjectile(Trident)` 및 호스트가 알지 못하는 투사체. 물약 콜백의
-  내용물 변경도 지원하지 않는다.
-- `MapCanvas`의 일부 메서드, 숨김 커서와 스타일/번역 지도 커서 캡션.
 - 구조물 엔티티 스냅샷 열거는 **런타임 월드만** NBT를 제공한다. 기본 오버월드와
-  네더·엔드의 비플레이어 엔티티는 NBT 기반 구조물 캡처/재생성 대상에서 제외된다.
-- 아이템 메타 중 지원 표에 없는 타입, 지원하지 않는 PDC 타입, 표지판·상자·통·셜커
-  표지판·배너·머리·상자·통·셜커 상자·화로·디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된
-  책장 외 블록 엔티티(주크박스·교탁·명령 블록·스포너 등)의 `sendBlockUpdate`, 일부 `BlockData`/청크 스냅샷.
-- `RegistryAccess`의 `GameRule`·`MemoryKey` 값 객체처럼 생성 데이터에 타입·기본값이
-  없는 항목.
-- NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
-  `CraftMagicNumbers`)와 Paper 전체 생명주기 API.
+  네더·엔드의 비플레이어 엔티티는 NBT 기반 구조물 캡처/재생성 대상에서 제외된다(T7 작업 대상).
+- 아이템 메타 중 지원 표에 없는 타입과 지원하지 않는 PDC 타입은 명시적 오류를 낸다.
+- `RegistryAccess`의 `GameRule`·`MemoryKey` 값 객체 중 생성 데이터에 타입·기본값이 없는 항목.
+- NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` 일부)와
+  Paper 전체 생명주기 API(§2, §7). 전체 목록과 진행 상태는 지시서 §10.3을 본다.
 - 런타임 월드 생성기의 커스텀 `WorldCreator#generator`, `generateStructures(false)`,
-  `WorldType`/환경의 일부 값. 현재 `NORMAL`, `NETHER`, `THE_END`만 허용한다.
+  `WorldType`/환경의 일부 값. 현재 `NORMAL`, `NETHER`, `THE_END`만 허용한다(§4 작업 대상).
 
 상세한 메서드별 소유자·근거·테스트는 [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md),
 [`docs/plugin-stubs-status.md`](docs/plugin-stubs-status.md), [`docs/plugin-api-audit.md`](docs/plugin-api-audit.md)에
