@@ -42,9 +42,26 @@ final class FerriteRecipes {
         if (vanilla || custom.containsKey(key)) return false;
         // Every recipe the host can match goes to it as vanilla data pack JSON: crafting, the furnace family, the
         // campfire, the stonecutter and the smithing table. Anything else is refused, never listed without effect.
-        // A potion mix (BrewingRecipe, from PotionBrewer) and the vanilla view's own entries are Bukkit-side only: the
-        // host's brewing stands use the vanilla potion table, so these are listed for getRecipe/removeRecipe, as before.
-        if (recipe instanceof org.bukkit.inventory.BrewingRecipe || recipe instanceof Entry) { custom.put(key, recipe); return true; }
+        // A potion mix (BrewingRecipe, from PotionBrewer) goes to the host's brewing table too; the vanilla view's own
+        // entries stay Bukkit-side only.
+        if (recipe instanceof Entry) { custom.put(key, recipe); return true; }
+        if (recipe instanceof org.bukkit.inventory.BrewingRecipe brewing) {
+            var result = brewing.getResult();
+            String potion = "";
+            if (result.getItemMeta() instanceof org.bukkit.inventory.meta.PotionMeta meta) {
+                if (meta.hasCustomEffects())
+                    throw new UnsupportedOperationException("Ferrite: Server#addRecipe cannot add a BrewingRecipe whose result carries custom potion effects: the host stores a base potion type by id, not an arbitrary effect list. Use a PotionType result, or grant the effects from a PotionEffect event");
+                if (meta.getBasePotionType() != null) potion = meta.getBasePotionType().getKey().toString();
+            }
+            var reply = host("addBrewingRecipe(String,String,String,String,String,int)", key.toString(),
+                brewingItems(brewing.getInput(), "input"), brewingItems(brewing.getIngredient(), "ingredient"),
+                result.getType().getKey().toString(), potion, Integer.toString(result.getAmount()));
+            if (reply != null && reply.startsWith("!"))
+                throw new IllegalArgumentException("Ferrite: recipe " + key + " cannot be added: " + reply.substring(1));
+            if ("false".equals(reply)) return false;
+            custom.put(key, recipe);
+            return true;
+        }
         var json = recipeJson(recipe);
         var extras = resultExtras(recipe);
         var reply = host("addRecipe(String,String,String,int)", key.toString(), json, extras.meta(), Integer.toString(extras.damage()));
@@ -71,6 +88,22 @@ final class FerriteRecipes {
         var keys = new com.google.gson.JsonArray();
         for (var material : materials.getChoices()) keys.add(material.getKey().toString());
         return keys.size() == 1 ? keys.get(0) : keys;
+    }
+
+    /** The item ids a brewing mix slot accepts. A potion mix predicates on items, not metadata. */
+    private static String brewingItems(org.bukkit.inventory.RecipeChoice choice, String name) {
+        java.util.List<org.bukkit.inventory.ItemStack> stacks;
+        if (choice instanceof org.bukkit.inventory.RecipeChoice.MaterialChoice materials) {
+            return materials.getChoices().stream().map(material -> material.getKey().toString())
+                .collect(java.util.stream.Collectors.joining(String.valueOf(HostBridge.ITEM)));
+        } else if (choice instanceof org.bukkit.inventory.RecipeChoice.ExactChoice exact) {
+            stacks = exact.getChoices();
+        } else {
+            throw new UnsupportedOperationException("Ferrite: Server#addRecipe cannot add a BrewingRecipe with a "
+                + choice.getClass().getSimpleName() + " " + name + ": the host's brewing table matches item ids");
+        }
+        return stacks.stream().map(stack -> stack.getType().getKey().toString()).distinct()
+            .collect(java.util.stream.Collectors.joining(String.valueOf(HostBridge.ITEM)));
     }
 
     private static boolean isEmpty(org.bukkit.inventory.RecipeChoice choice) {

@@ -162,6 +162,28 @@ class PlayerExtrasTest {
         assertEquals(java.util.List.of("storeCookie(NamespacedKey,String)|test:session" + HostBridge.ARG + "AQID"), calls);
     }
 
+    @Test void discoveredRecipesReachThePlayersBookOnTheHost() {
+        var calls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> {
+            calls.add(owner + "|" + subject + "|" + method + "|" + args);
+            return method.startsWith("add") || method.startsWith("discover") || method.startsWith("undiscover") ? "1" : "";
+        };
+        var key = new org.bukkit.NamespacedKey("extras", "book");
+        try {
+            var recipe = new org.bukkit.inventory.ShapelessRecipe(key, new org.bukkit.inventory.ItemStack(org.bukkit.Material.STICK));
+            recipe.addIngredient(org.bukkit.Material.DIRT);
+            assertTrue(FerriteRecipes.add(recipe));
+            calls.clear();
+            assertEquals(1, player.discoverRecipes(java.util.List.of(key)));
+            assertTrue(player.hasDiscoveredRecipe(key));
+            assertEquals("Player|" + player.getUniqueId() + "|discoverRecipes(String)|extras:book", calls.get(0));
+            assertEquals(1, player.undiscoverRecipes(java.util.List.of(key)));
+            assertFalse(player.hasDiscoveredRecipe(key));
+            assertEquals("Player|" + player.getUniqueId() + "|undiscoverRecipes(String)|extras:book", calls.get(1));
+            assertTrue(FerriteRecipes.remove(key));
+        } finally { HostBridge.transport = null; }
+    }
+
     @Test void merchantRecipesAreEncodedForTheHost() {
         var calls = new java.util.ArrayList<String>();
         HostBridge.transport = (owner, subject, method, args) -> { calls.add(method + "|" + args); return ""; };

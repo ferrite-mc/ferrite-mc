@@ -22,6 +22,8 @@ const SLOT_ANY_FUEL: i32 = 1;
 const SLOT_ITEM: i32 = 4;
 const SLOT_ITEM_STACK: i32 = 5;
 const SLOT_HOLDER_SET: i32 = 6;
+/// `SlotDisplay.SmithingTrimDemoSlotDisplay` (the trim preview).
+const SLOT_SMITHING_TRIM: i32 = 8;
 
 /// `RecipeDisplay` registry ids.
 const DISPLAY_SHAPELESS: i32 = 0;
@@ -164,9 +166,9 @@ fn category(recipe: &Recipe) -> i32 {
 }
 
 /// Encodes a recipe a plugin added (or any vanilla recipe of the same kinds) as a recipe book
-/// entry. `result` is the stack the recipe makes, with the plugin's metadata. `None` for kinds the
-/// client's book has no plain display for (smithing trims, transmute, special recipes) or when an
-/// item has no registry id.
+/// entry. `result` is the stack the recipe makes, with the plugin's metadata (a smithing trim has
+/// no fixed result and its preview comes from the pattern). `None` for kinds the client's book has
+/// no plain display for (transmute, special recipes) or when an item has no registry id.
 pub fn encode_entry(
     recipe: &Recipe,
     tags: &ItemTags,
@@ -259,6 +261,27 @@ pub fn encode_entry(
             display.extend(item_display("smithing_table")?);
             requirements.extend(
                 [&smithing.template, &smithing.base, &smithing.addition]
+                    .into_iter()
+                    .filter(|ingredient| !ingredient.is_empty()),
+            );
+        }
+        RecipeKind::SmithingTrim(trim) => {
+            // `SmithingTrimRecipe.display`: the result preview is a
+            // `SmithingTrimDemoSlotDisplay` of the base, the addition (the material) and the
+            // trim pattern holder, which is a registry id on the wire.
+            let pattern =
+                ferrite_item::wire::registry_ids::trim_pattern_id(trim.pattern.as_deref()?)?;
+            varint(&mut display, DISPLAY_SMITHING);
+            display.extend(ingredient_display(&trim.template, tags)?);
+            display.extend(ingredient_display(&trim.base, tags)?);
+            display.extend(ingredient_display(&trim.addition, tags)?);
+            varint(&mut display, SLOT_SMITHING_TRIM);
+            display.extend(ingredient_display(&trim.base, tags)?);
+            display.extend(ingredient_display(&trim.addition, tags)?);
+            varint(&mut display, pattern);
+            display.extend(item_display("smithing_table")?);
+            requirements.extend(
+                [&trim.template, &trim.base, &trim.addition]
                     .into_iter()
                     .filter(|ingredient| !ingredient.is_empty()),
             );
@@ -495,6 +518,34 @@ mod tests {
                 "no {kind} recipe was compared"
             );
         }
+    }
+
+    #[test]
+    fn every_smithing_trim_encodes_its_pattern_demo_display() {
+        let Some((book, _)) = data() else {
+            return;
+        };
+        let station = item_display("smithing_table").expect("the smithing table item");
+        let mut checked = 0;
+        for recipe in book.recipes() {
+            let RecipeKind::SmithingTrim(trim) = &recipe.kind else {
+                continue;
+            };
+            if trim.pattern.is_none() {
+                continue;
+            }
+            let encoded = encode_entry(recipe, book.tags(), 900, None, &ItemStack::empty())
+                .unwrap_or_else(|| panic!("{} did not encode", recipe.id));
+            assert_eq!(encoded.display[0], DISPLAY_SMITHING as u8, "{}", recipe.id);
+            assert!(
+                encoded.display.ends_with(&station),
+                "{} ends with the smithing table display",
+                recipe.id
+            );
+            assert_eq!(*encoded.wire.last().unwrap(), 0, "flags byte");
+            checked += 1;
+        }
+        assert!(checked > 0, "the data pack has trim recipes");
     }
 
     fn mixes_tags(recipe: &Recipe) -> bool {

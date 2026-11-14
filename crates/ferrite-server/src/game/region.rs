@@ -2385,6 +2385,30 @@ impl Player {
         else {
             return;
         };
+        // Vanilla `CampfireBlock.useItemOn` -> `CampfireBlockEntity.placeFood`: food goes on the
+        // first empty slot, whatever the campfire's lit state.
+        if ferrite_data::blocks::state(clicked_state).is_some_and(|(name, _)| {
+            matches!(name, "minecraft:campfire" | "minecraft:soul_campfire")
+        }) {
+            let slot = self.hand_slot(p.hand.0);
+            let held = self.inventory.get(slot).clone();
+            if !held.is_empty()
+                && let Some(recipe) = super::campfire_recipe(&held)
+                && super::campfire::place_food(
+                    source.as_ref(),
+                    [clicked.x, clicked.y, clicked.z],
+                    &held,
+                    recipe.cook_time,
+                )
+            {
+                if self.gamemode != 1 {
+                    self.inventory
+                        .set(slot, held.copy_with_count(held.count - 1));
+                }
+                self.sync_block_entity([clicked.x, clicked.y, clicked.z]);
+                return;
+            }
+        }
         // Vanilla `LeverBlock.use` / `ButtonBlock.use`: a right-click toggles the component
         // instead of placing the held item.
         if let Some(next) = super::redstone::use_block(clicked_state) {
@@ -2671,6 +2695,11 @@ impl Player {
                 Some("minecraft:beacon") => {
                     if let Some(source) = self.source.clone() {
                         super::beacon::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                Some("minecraft:campfire" | "minecraft:soul_campfire") => {
+                    if let Some(source) = self.source.clone() {
+                        super::campfire::ensure(source.as_ref(), [target.x, target.y, target.z]);
                     }
                 }
                 Some(block) if super::block_container::is_shulker_box(block) => {
@@ -5165,7 +5194,8 @@ impl Player {
                 ServerboundPlay::ResourcePackResponse(p) => {
                     crate::plugins::facts::set_pack_status(self.uuid, p.action.0);
                     if let Some(plugins) = &self.plugins {
-                        let _ = plugins.resource_pack_status(self.uuid, &self.name, p.id, p.action.0);
+                        let _ =
+                            plugins.resource_pack_status(self.uuid, &self.name, p.id, p.action.0);
                     }
                 }
                 ServerboundPlay::PlayerInput(p) => {
@@ -11126,6 +11156,7 @@ impl Region {
         }
         stage!("containers");
         self.tick_beacons(ctx);
+        self.tick_campfires(ctx);
         for p in self.players.values_mut() {
             p.tick_containers();
         }
@@ -11142,6 +11173,53 @@ impl Region {
         }
         stage!("finish");
         self.publish_command_entities(&ctx.command_entities, ctx.dimension, ctx.world_id);
+    }
+
+    /// Vanilla `CampfireBlockEntity`: every loaded campfire cooks its food for one tick (lit)
+    /// or cools it down (unlit). A finished item is dropped at the block like vanilla's
+    /// `Containers.dropItemStack`, not left in the slot.
+    fn tick_campfires(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let campfires: Vec<[i32; 3]> = source
+            .block_entities()
+            .into_iter()
+            .filter(|(pos, entity)| {
+                self.held_chunks
+                    .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                    && entity.data.get("id")
+                        == Some(&ferrite_nbt::Tag::String("minecraft:campfire".into()))
+            })
+            .map(|(pos, _)| pos)
+            .collect();
+        for pos in campfires {
+            let Some(state) = source
+                .block(pos[0], pos[1], pos[2])
+                .and_then(|state| u16::try_from(state).ok())
+            else {
+                continue;
+            };
+            let Some((name, props)) = ferrite_data::blocks::state(state) else {
+                continue;
+            };
+            if !matches!(name, "minecraft:campfire" | "minecraft:soul_campfire") {
+                continue;
+            }
+            let lit = props
+                .iter()
+                .any(|(key, value)| *key == "lit" && *value == "true");
+            if lit {
+                for stack in
+                    super::campfire::tick(source, pos, &|item| super::campfire_recipe(item))
+                {
+                    let record = item::pop_resource_stack(pos, &stack, &mut self.rng);
+                    self.entities.insert(record);
+                }
+            } else {
+                super::campfire::cool(source, pos);
+            }
+        }
     }
 
     /// Vanilla `BeaconBlockEntity`'s 80-tick timer: recompute each beacon's pyramid, resend the

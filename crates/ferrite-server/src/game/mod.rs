@@ -26,6 +26,7 @@ mod vanilla_gen;
 pub use vanilla_gen::{HostSettings, VanillaGenerator};
 pub mod playerdata;
 pub use brewing::BrewingData;
+pub use campfire::CampfireData;
 pub fn new_anvil_source(
     path: std::path::PathBuf,
     registry: ferrite_world::RuntimeRegistry,
@@ -45,6 +46,7 @@ pub fn new_memory_source(terrain: Option<Arc<dyn ChunkGenerator>>) -> Arc<AnvilC
 pub mod beacon;
 mod block_container;
 mod brewing;
+mod campfire;
 mod chat;
 mod chunk;
 mod command_block;
@@ -90,7 +92,8 @@ pub use crafting::match_for_plugin as match_crafting_for_plugin;
 #[cfg(test)]
 pub(crate) use crafting::overlay_lock as crafting_overlay_lock;
 pub use crafting::{
-    add_plugin_recipe, campfire_recipe, clear_recipes, remove_recipe, reset_recipes,
+    add_plugin_brewing, add_plugin_recipe, campfire_recipe, clear_recipes, plugin_discover_recipes,
+    remove_recipe, reset_recipes,
 };
 mod dispenser;
 pub(crate) mod drops;
@@ -2373,6 +2376,13 @@ async fn run(
         laps.lap("advancement");
                      {
                          let _t = CoordinatorTimer::new(6);
+                         // `Player#discoverRecipe`/`undiscoverRecipe` changes reach the book here,
+                         // where the per-player recipe set lives.
+                         for (who, id, discover) in recipe_packets::take_discovery() {
+                             let mut game = command_state.lock().unwrap();
+                             let recipes = game.more.recipes.entry(who).or_default();
+                             if discover { recipes.insert(id); } else { recipes.remove(&id); }
+                         }
                          let owned = command_state.lock().unwrap().more.recipes.clone();
                          let recipe_settings = command_state.lock().unwrap().more.recipe_settings.clone();
                          recipe_worker.submit((online.clone(), owned, recipe_settings));
