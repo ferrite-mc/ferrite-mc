@@ -263,7 +263,7 @@
 
 호스트 라우트도 Java 케이스도 없는 서명만 적었다(`World`는 카탈로그와 `crates/**`·Java `case`를 대조).
 
-- **Player:** `fireworkBoost`는 부스트와 폭죽 엔티티는 동작하지만 반환하는 `Firework` 핸들은 호스트가 로켓에 붙이는 UUID를 가진다(핸들은 일반 엔티티 핸들이라 폭죽 전용 메서드는 지원하지 않음), 아이템 메타의 폭죽 색·모양은 클라이언트에 보이지 않으며(메타데이터 ItemStack에 컴포넌트 없음), 붙은 폭죽의 가속은 시선 방향 정상 속도(약 1.6)를 보내는 근사다. `loadData`(저장된 플레이어 데이터를 살아 있는 리전 상태에 다시 적용하는 경로 없음).
+- **Player:** 남은 Player API의 구현/거부 표와 한계는 §10.7로 옮겼다(`fireworkBoost` 핸들, `loadData`, 리소스 팩 프롬프트, `spawnParticle` 데이터, `getVirtualHost`, `EntityEquipment`, `copy`/`spawnAt` 거부 등).
   `getConnection`(플레이어 메서드로 전달하는 프록시; `reenterConfiguration`·`sendReportDetails`는 `UnsupportedOperationException`)과
   `postEffects`(`/posteffect`를 콘솔로 실행하고 목록은 Java에 미러링 — 명령으로 바꾼 상태는 `values()`에 보이지 않는다)는 구현했다.
 - **World:** `locateNearestPoi`/`locateAllPoiInRange`는 POI 저장소가 없어 로드된 청크를 스캔한다(`Occupancy.ANY`만 지원,
@@ -273,12 +273,12 @@
   존재하지 않아 구현 대상이 아니다.
 - **블록 엔티티:** 위 표의 종류는 구현했다. 그 밖의 `sendBlockUpdate` 대상은 `UnsupportedOperationException`을 유지한다.
 - **레시피(§7):** §10.6에 구현/거부 표와 한계를 옮겼다(모닥불 레시피는 일치만 하고 호스트에 모닥불 요리가 없음, `smithing_trim`은 클라이언트 레시피북에 안 나옴, `ExactChoice`는 거부).
-- **투사체 종류:** `launchProjectile(Firework)`는 구현했다(호스트 폭죽이 눈 위치에서 위로 난다, 속도 인자 무시). `launchProjectile(BreezeWindCharge)`도 구현했다(`Kind::BreezeWindCharge`, 일반 바람 구슬과 같은 비행·폭발). `launchProjectile(WitherSkull)`도 구현했다(직선 비행, 닿으면 위력 1 폭발, 불은 없음). `launchProjectile(ShulkerBullet)`도 구현했다(유도 없이 직선, 닿은 몹에 4 피해, 공중 부양 효과 없음). `launchProjectile(SpectralArrow)`도 구현했다(화살처럼 날고 맞은 몹이 10초간 발광). 눈 엔더·낚싯찌는 `launchProjectile`에 없다. `World#getEnderDragonBattle`은 End 월드에서 `FerriteDragonBattle`을 돌려준다(호스트가 틱마다 올리는 전투 스냅샷을 읽고, 변경은 큐에 넣어 End 리전의 다음 틱에 적용 — 플레이어가 End에 있을 때만 움직인다. 보스바는 분리된 객체, `resetCrystals`(스파이크 크리스털을 지우고 배치 패스가 전부 다시 놓음)와 `spawnNewGateway(Position)`(그 자리에 관문을 열고, 바닐라처럼 개수는 올리지 않음)도 구현했다, 이름이 `_the_end`로 끝나는 런타임 월드도 같은 호스트 전투를 본다).
-- **`Player#loadData`/`saveData`:** `PlayerCommand::PlayerData` → 리전 `Command::PluginLoadData/PluginSaveData`. load는 저장 파일의 인벤토리·선택 슬롯·게임 모드를 적용하고, 같은 월드에서 저장된 파일이면 위치도 되돌린다(월드가 다르면 위치는 건드리지 않는다). 체력·허기·경험치는 저장 파일 형식에 없어 되돌리지 않는다.
+- **투사체 종류:** `launchProjectile(Firework)`는 구현했다(호스트 폭죽이 눈 위치에서 위로 난다, 속도 인자 무시). `launchProjectile(BreezeWindCharge)`도 구현했다(`Kind::BreezeWindCharge`, 일반 바람 구슬과 같은 비행·폭발). `launchProjectile(WitherSkull)`도 구현했다(직선 비행, 닿으면 위력 1 폭발, 불은 없음). `launchProjectile(ShulkerBullet)`도 구현했다(유도 없이 직선, 닿은 몹에 4 피해, 공중 부양 효과 없음). `launchProjectile(SpectralArrow)`도 구현했다(화살처럼 날고 맞은 몹이 10초간 발광). 낚싯찌(`FishHook`)는 아래 항목대로 `launchProjectile`이 지원하고, 눈 엔더는 `launchProjectile` 대상이 아니다(바닐라 `EyeOfEnder`도 플레이어가 아이템으로만 던진다; Bukkit에는 눈 엔더 `Projectile` 인터페이스가 없다). `World#getEnderDragonBattle`은 End 월드에서 `FerriteDragonBattle`을 돌려준다(호스트가 틱마다 올리는 전투 스냅샷을 읽고, 변경은 큐에 넣어 End 리전의 다음 틱에 적용 — 플레이어가 End에 있을 때만 움직인다. 보스바는 분리된 객체, `resetCrystals`(스파이크 크리스털을 지우고 배치 패스가 전부 다시 놓음)와 `spawnNewGateway(Position)`(그 자리에 관문을 열고, 바닐라처럼 개수는 올리지 않음)도 구현했다, 이름이 `_the_end`로 끝나는 런타임 월드도 같은 호스트 전투를 본다).
+- **`Player#loadData`/`saveData`:** `PlayerCommand::PlayerData` → 리전 `Command::PluginLoadData/PluginSaveData`. load는 저장 파일의 인벤토리·선택 슬롯·게임 모드를 적용하고, 같은 월드에서 저장된 파일이면 위치도 되돌린다(월드가 다르면 위치는 건드리지 않는다). 체력·흡수·허기·포화·소모도·경험치는 이제 저장 파일(`vitals`)에 들어가고 load가 되돌린다(§10.7). 상태 효과·불·산소·낙하 거리는 바닐라처럼 저장하지 않는 쪽이라 되돌리지 않는다.
 - **NMS 메뉴(§2.4):** 상자 계열과 `SHULKER_BOX`는 그대로 열고, 작업대·모루·마법부여·숫돌·베틀·대장간·석재 절단기·지도 제작대는 호스트 스테이션으로 연다(내용 패킷은 명시적 예외). 호퍼·발사기·화로·양조기·신호기·교탁·상인·크래프터는 구체적인 이유와 대체 API를 담은 예외를 유지한다.
 - **TAGS 라이프사이클 이벤트:** 태그 레지스트리가 시작 후 고정이라 거부한다. `fromLegacy`의 데이터 바이트는 지원하지 않는다.
 - **NMS 엔티티·월드 핸들(§2.2/2.5):** `net.minecraft.world.entity.Entity`는 이제 델타 이동(`getDeltaMovement/setDeltaMovement`), `setPos/teleportTo`, 회전, 지면·불·물 상태, 크기, 커스텀 이름, 스코어보드 태그, 승객·탑승 관계(`getPassengers/getVehicle/startRiding/stopRiding`)를 Bukkit 호출로 읽고 쓴다(Entity.of로 플레이어/생명체 래퍼 선택). `LivingEntity`는 흡수 체력·수면·활강·아이템 사용·박힌 화살·효과 확인, `ServerLevel`은 시드·스폰·차원 키·엔티티 목록·UUID 조회, `Vec3`는 벡터 연산을 갖는다. 모두 Bukkit(→호스트 라우트)을 거치므로 리전 소유권을 우회하지 않는다. 테스트 `NmsEntityHandleTest`. 직접 NMS 필드 접근(`entityData`, 속성 맵 등)은 노출하지 않는다.
-- **눈 엔더·낚싯찌:** 눈 엔더는 `ferrite-entity::eye`(80틱 비행, 5분의 4는 아이템으로 떨어지고 나머지는 부서짐, 목표가 12칸 밖이면 12칸 앞·8칸 위로 조준)와 리전 `tick_eyes`(생성 직후 `locate_structure("minecraft:stronghold", …, 100)`로 목표 탐색, 없으면 즉시 부서짐)로 동작하고, 공중에서 눈을 쓰면 던져지며(`EnderEyeItem.use`), `World#spawnEntity(EYE_OF_ENDER)`도 된다. 속도식(`lerp(0.0025,…)`)은 바닐라 `EyeOfEnder.tick`을 기억에 의존해 옮긴 근사다. 낚싯찌는 호스트에 이미 있던 `bobber`를 플러그인이 `launchProjectile(FishHook)`로 던질 수 있게 연결했다(이미 찌가 있으면 무시). `launchProjectile(FishHook)`은 Java가 정한 UUID를 호스트가 찌에 붙여, 핸들(`FISHING_BOBBER`)을 돌려준다(이미 찌가 나가 있으면 호스트가 무시하므로 그 핸들은 실체가 없다).
+- **눈 엔더·낚싯찌:** 눈 엔더는 `ferrite-entity::eye`(80틱 비행, 5분의 4는 아이템으로 떨어지고 나머지는 부서짐, 목표가 12칸 밖이면 12칸 앞·8칸 위로 조준)와 리전 `tick_eyes`(생성 직후 `locate_structure("minecraft:stronghold", …, 100)`로 목표 탐색, 없으면 즉시 부서짐)로 동작하고, 공중에서 눈을 쓰면 던져지며(`EnderEyeItem.use`), `World#spawnEntity(EYE_OF_ENDER)`도 된다. 이동식은 바닐라 `EyeOfEnder.tick`/`updateDeltaMovement` 바이트코드와 대조해 고쳤다(§10.7: 이전 속도로 먼저 움직이고 새 위치에서 속도를 구한다). 낚싯찌는 호스트에 이미 있던 `bobber`를 플러그인이 `launchProjectile(FishHook)`로 던질 수 있게 연결했다(이미 찌가 있으면 무시). `launchProjectile(FishHook)`은 Java가 정한 UUID를 호스트가 찌에 붙여, 핸들(`FISHING_BOBBER`)을 돌려준다(이미 찌가 나가 있으면 호스트가 무시하므로 그 핸들은 실체가 없다).
 - **§8 바닐라 대조(모루):** 바닐라 `AnvilMenu.createResult`와 대조해 세 가지를 고쳤다 — 같은 아이템 합치기 보너스는 최대 내구도의 12%(5%였음), 이름만 바꾸는 경우 비용은 39에서 멈추고 수리 비용(`RepairCost`)을 올리지 않는다, 창작 모드(무한 재료)는 40레벨 상한이 없다(`Menu::set_infinite_materials`). 테스트 `anvil_rename_only_keeps_the_repair_cost_and_creative_lifts_the_cap`. 유체 경계·레드스톤·청크 언로드 흐름·이웃 갱신 순서·작물 성장·중력 블록 연쇄·마법부여대·지도/세공대 결과는 이번에 대조하지 못했다(로컬 서버 jar를 `javap`로 읽을 수는 있지만 항목마다 바이트코드를 따라가야 해서 시간이 들었다).
 - **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다. §7은 §10.6.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
@@ -374,3 +374,39 @@
 - Folia 방식 region/entity/async 스케줄러는 비활성 플러그인에도 예외를 던지지 않는다(Bukkit 스케줄러만 던진다). 이미 취소된 태스크가 되는 것은 같다.
 - 실제 클라이언트로 레시피북 패킷을 확인하지 못했다(바닐라 레시피 바이트와의 대조까지).
 - `cargo clippy --workspace --all-targets -- -D warnings`는 `plugin-new` 병합 뒤 경고 없이 통과한다(`game/chunk_level.rs`는 T3b의 `cfg_attr`, `redstone.rs::rail_chain`은 `needless_late_init` 허용).
+
+### 10.7 T4 — 남은 Player API·투사체·구름·폭죽 (2026-11-14, 브랜치 `yxshadxw/plugin-new`)
+
+**§3 Player 서명별 상태**
+
+| 서명 | 상태 | 호스트 구현 위치 |
+|---|---|---|
+| `setResourcePack(String,String,boolean[,Component])`, `setResourcePack(UUID,String,byte[],Component,boolean)` 등 3개 오버로드 | 구현(id·해시·프롬프트·required) | `plugins/network.rs::resource_pack`, `game/container.rs`(`ResourcePackPush.prompt`) |
+| `PlayerResourcePackStatusEvent` | 구현(클라이언트 응답 → 이벤트) | `game/region.rs`(`ServerboundPlay::ResourcePackResponse`), `ferrite-plugin::fire_resource_pack_status` |
+| `spawnParticle` 전 오버로드(데이터 포함) | 구현 — 블록·먼지·색 전이·색·주문·float·shriek·아이템·trail·vibration·geyser | `plugins/particles.rs`, `ferrite-protocol::packets::play::LevelParticles`(26.3 레이아웃으로 교정) |
+| `getVirtualHost()` | 구현(핸드셰이크 호스트·포트, BungeeCord NUL 뒷부분 제거) | `ferrite-net::settings::record_virtual_host`, `plugins/facts.rs` |
+| `getHAProxyAddress()` | null — PROXY 프로토콜을 받지 않는다 | — |
+| `copy()`, `copy(Location)` | 거부(`UnsupportedOperationException`, Paper도 플레이어 복사 불가) | `PlayerMisc` |
+| `spawnAt(Location,SpawnReason)` | 거부(플레이어는 스폰할 수 있는 엔티티가 아님) | `PlayerMisc` |
+| `getAsString()` / `getPickItemStack()` / `getMemory(MemoryKey)` | null(바닐라 `Player.getPickResult`도 null, 플레이어는 기억 모듈이 없음) | `PlayerMisc` |
+| `getData(DataComponentType.Valued)` / `hasData` | 미구현(null/false) — 플레이어에는 값 컴포넌트가 없고 아이템 컴포넌트는 `ItemStack`쪽 | — |
+| `getEquipment()` 전체 | 구현(`clear()`는 방어구·손만, getter는 null이 아님, 드랍 확률은 항상 1.0이고 setter는 거부, BODY/SADDLE은 비어 있음) | `FerriteEntityEquipment.java` |
+| `fireworkBoost` | 구현 — 이제 `Firework` 전용 핸들(`getLife/setLife/getMaxLife/setMaxLife/getTicksFlown/getTicksToDetonate/detonate/isDetonated/getFireworkMeta/getItem/getAttachedTo/getBoostedEntity/getSpawningEntity`) | `SpawnedEntity.firework`, `EntityOperation::SetFireworkLife/SetFireworkMaxLife`(`game/region.rs::plugin_entity_op`), `plugins/facts.rs`(`getFireworkLife()`) |
+| `loadData()` | 구현 — 인벤토리·슬롯·게임 모드·위치(같은 월드) + 체력·흡수·허기·포화·소모도·경험치(`Vitals`) | `game/playerdata.rs`(`Vitals`), `game/region.rs::apply_vitals/load_player_data` |
+
+- **loadData 판단:** 바닐라 플레이어 저장 형식은 `Health`·`AbsorptionAmount`·`foodLevel`·`foodSaturationLevel`·`foodExhaustionLevel`·`XpLevel`·`XpP`·`XpTotal`을 담고 로그인 때 되돌린다. 우리 저장 파일에도 같은 값을 넣었고(`vitals`), 접속 시에도 적용한다. 체력이 0 이하이거나 NaN이면 적용하지 않는다(죽은 상태로 되살리지 않는다). 상태 효과·불·산소는 저장하지 않는다.
+- **`FireworkMeta`:** 폭죽 아이템의 `getItemMeta()`가 `FireworkMeta`(비행 시간 0..127, 별 목록)를 돌려준다. 이전에는 일반 `ItemMeta`라서 `fireworkBoost`가 비행·별 수를 읽지 못하고 기본값만 썼다. 폭죽 색·모양은 여전히 클라이언트에 보이지 않는다(호스트 `ItemStack`에 컴포넌트 없음).
+- **붙은 폭죽 가속:** 시선 방향으로 정상 속도(≈0.85)를 보내던 근사를 지웠다. 바닐라 식 `delta + look*0.1 + (look*1.5 - delta)*0.5`에 쓰는 `delta`를 "폭죽이 마지막으로 붙은 위치에서 플레이어까지의 한 틱 이동"으로 추정한다(`firework::rider_velocity`). 서버가 플레이어 속도를 직접 적분하지 않기 때문에 추정이며, 폭죽 첫 틱은 델타 0으로 시작한다.
+- **눈 엔더:** 바이트코드와 대조해 이동 순서를 고쳤다 — 바닐라는 현재 속도로 먼저 위치를 옮기고, 새 위치에서 목표까지의 거리로 다음 속도를 구한다(`lerp(0.0025, 수평 속도, 거리)`, 거리<1이면 0.8배, 위로 보는 판단은 이전 높이). 예전 코드는 새 속도로 먼저 움직였다. 테스트 `eye::tests::the_eye_moves_by_its_old_velocity_then_steers_from_the_new_position`.
+- **투사체 점검:** 바닐라 비트리던트 투사체 중 `launchProjectile`이 다루지 않는 것은 없다(화살·눈덩이·달걀·엔더 진주·경험치 병·투척/잔류 포션·바람/브리즈 바람 구슬·작은/큰 화염구·위더 해골·셜커 탄·분광 화살·폭죽·낚싯찌·삼지창). 이미 구현된 비행·충돌·피해·줍기·저장은 다시 만들지 않았다.
+- **포션 범위·구름(바이트코드 대조, `AbstractThrownPotion`/`ThrownSplashPotion`/`AreaEffectCloud`):**
+  - 투척 포션: 대상 상자 `(4,2,4)` 확장, 거리는 포션 상자와 대상 상자(투사체 여백 0.3 포함) 사이의 간격이고(예전엔 발 위치까지 거리), 배율은 `1 - 거리/4`(예전의 최소 0.25 바닥 제거), 지속 시간은 `(int)(배율*지속+0.5)`이며 1초(20틱) 이하가 되면 적용하지 않는다. 즉시 효과(치유/해악)는 배율만큼의 세기로 들어간다(`(int)(배율*(4<<등급)+0.5)`, 해악은 6). 테스트 `potion::tests::a_splash_falls_off_with_the_gap_between_the_boxes_not_the_feet_distance`, `…rounds_the_duration…`, `region::tests::instant_effects_are_scaled_by_distance_and_halved_by_a_cloud`.
+  - 잔류 구름: 대기(10틱) 동안은 아무것도 하지 않는다(예전엔 5틱에 이미 효과를 줬다), 대상 판정은 구름의 0.5칸 높이 상자와 대상 몸 상자가 겹치는지(예전엔 발 기준 -1..2), 즉시 효과는 절반 세기로 적용한다. 테스트 `a_waiting_cloud_hits_nobody_until_tick_ten`, `the_cloud_reaches_every_body_that_meets_its_half_block_box`.
+  - 구름 색은 효과 색 평균이 아니라 기본 물색이다(효과 색 표가 없다). 바닐라의 `PotionContents.getColor`는 구현하지 않았다.
+- **고치지 못한 것(이유):**
+  - 리소스 팩 `required`는 클라이언트에 보낼 뿐 서버가 거부 응답으로 킥하지 않는다(바닐라도 서버 전체 필수 팩일 때만 킥).
+  - `World#spawnParticle`은 데이터 없는 입자만 된다(콘솔 `/particle` 경로).
+  - vibration 입자의 대상이 엔티티일 때 y 오프셋은 0.0 고정이다(바닐라는 엔티티 눈높이를 쓴다).
+  - `getData`/`getMemory`/`getHAProxyAddress`는 위 표대로 null이다.
+  - 폭죽 이동은 호스트 모델이고, 붙은 폭죽 가속의 플레이어 속도는 위 추정이다. 클라이언트 속도를 서버가 권위적으로 갖지 않는 한 정확히 같게 만들 수 없다.
+  - 26.3 클라이언트로 입자·리소스 팩·폭죽을 눈으로 확인하지 않았다(지시에 따라 생략).
