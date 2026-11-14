@@ -23,6 +23,10 @@ trait RandomWorld {
     fn block(&self, p: Pos) -> u32;
     fn set_block(&mut self, p: Pos, state: u32);
     fn brightness(&self, p: Pos) -> u8;
+    /// Vanilla `GameRules.RULE_SPREAD_VINES`; standalone test worlds default to true.
+    fn spread_vines(&self) -> bool {
+        true
+    }
 }
 impl RandomWorld for RegionFluidWorld<'_> {
     fn block(&self, p: Pos) -> u32 {
@@ -33,6 +37,9 @@ impl RandomWorld for RegionFluidWorld<'_> {
     }
     fn brightness(&self, p: Pos) -> u8 {
         RegionFluidWorld::brightness(self, p.0, p.1, p.2)
+    }
+    fn spread_vines(&self) -> bool {
+        RegionFluidWorld::spread_vines(self)
     }
 }
 type Handler = fn(&mut dyn RandomWorld, Pos, u32, &mut Rng);
@@ -166,12 +173,12 @@ fn leaves_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
     }
 }
 
-/// Vanilla `VineBlock` (26.3 jar) random tick. One try in four picks a random direction. A
-/// horizontal face spreads onto a full support or grows down by copying random faces; `up`
-/// either attaches to the block above or, when that cell is empty, spreads a random subset of
-/// the current faces upward. `spread_vines` is not modelled; the vanilla default is true.
+/// Vanilla `VineBlock` (26.3 jar) random tick. The `spread_vines` rule gates the whole tick;
+/// then one try in four picks a random direction. A horizontal face spreads onto a sturdy
+/// support or grows down by copying random faces; `up` either attaches to the block above or,
+/// when that cell is empty, spreads a random subset of the current faces upward.
 fn vine_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
-    if rng.next_int(4) != 0 {
+    if !world.spread_vines() || rng.next_int(4) != 0 {
         return;
     }
     const DIRECTIONS: [((i32, i32, i32), &str); 6] = [
@@ -206,7 +213,7 @@ fn vine_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
         if p.1 >= MAX_WORLD_Y {
             return;
         }
-        if vine_supports(world, (p.0, p.1 + 1, p.2)) {
+        if vine_supports(world, (p.0, p.1 + 1, p.2), "up") {
             if let Some(next) = with_property(state, "up", "true") {
                 world.set_block(p, next);
             }
@@ -217,7 +224,7 @@ fn vine_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
             let mut next = default_block("vine");
             for (face, (fx, fz)) in VINE_HORIZONTAL {
                 let neighbour = (above.0 + fx, above.1, above.2 + fz);
-                if (rng.next_int(2) == 0 || !vine_supports(world, neighbour))
+                if (rng.next_int(2) == 0 || !vine_supports(world, neighbour, face))
                     && let Some(cleared) = with_property(next, face, "false")
                 {
                     next = cleared;
@@ -234,7 +241,7 @@ fn vine_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
     }
     let target = (p.0 + dx, p.1 + dy, p.2 + dz);
     if !named(world.block(target), "air") {
-        if vine_supports(world, target)
+        if vine_supports(world, target, dir)
             && let Some(next) = with_property(state, dir, "true")
         {
             world.set_block(p, next);
@@ -246,16 +253,18 @@ fn vine_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
     let (ccdx, ccdz) = vine_delta(counter);
     let has_clock = property(state, clock, "true");
     let has_counter = property(state, counter, "true");
-    if has_clock && vine_supports(world, (target.0 + cdx, target.1, target.2 + cdz)) {
+    if has_clock && vine_supports(world, (target.0 + cdx, target.1, target.2 + cdz), clock) {
         if let Some(next) = with_property(default_block("vine"), clock, "true") {
             world.set_block(target, next);
         }
-    } else if has_counter && vine_supports(world, (target.0 + ccdx, target.1, target.2 + ccdz)) {
+    } else if has_counter
+        && vine_supports(world, (target.0 + ccdx, target.1, target.2 + ccdz), counter)
+    {
         if let Some(next) = with_property(default_block("vine"), counter, "true") {
             world.set_block(target, next);
         }
     } else if rng.next_f32() < 0.05
-        && vine_supports(world, (target.0, target.1 + 1, target.2))
+        && vine_supports(world, (target.0, target.1 + 1, target.2), "up")
         && let Some(next) = with_property(default_block("vine"), "up", "true")
     {
         world.set_block(target, next);
@@ -307,9 +316,10 @@ fn vine_can_spread(world: &dyn RandomWorld, p: Pos) -> bool {
     true
 }
 
-/// The subset of vanilla `MultifaceBlock.canAttachTo` this block model can answer: a full
-/// collision/occlusion block supports a vine face. Slabs, stairs and fences are not modelled.
-fn vine_supports(world: &dyn RandomWorld, p: Pos) -> bool {
+/// The subset of vanilla `MultifaceBlock.canAttachTo` this block model can answer: the support
+/// must cover the whole face presented to the vine. A full cube always does; a slab covers its
+/// top or bottom face but not its sides; a fence has no full face and stays unsupported.
+fn vine_supports(world: &dyn RandomWorld, p: Pos, face: &str) -> bool {
     let state = world.block(p);
     if named(state, "air") || named(state, "vine") {
         return false;
@@ -317,8 +327,41 @@ fn vine_supports(world: &dyn RandomWorld, p: Pos) -> bool {
     let Ok(state) = u16::try_from(state) else {
         return false;
     };
-    let props = ferrite_data::block_props::get(state);
-    props.full_collision || props.full_occlusion
+    let face = vine_opposite(face);
+    ferrite_data::block_props::collision_shape(state)
+        .iter()
+        .any(|shape| face_is_covered(shape, face))
+}
+
+/// The direction opposite `face`; `face` points from the vine toward its support.
+fn vine_opposite(face: &str) -> &'static str {
+    match face {
+        "down" => "up",
+        "up" => "down",
+        "north" => "south",
+        "south" => "north",
+        "west" => "east",
+        "east" => "west",
+        _ => "",
+    }
+}
+
+/// Whether a collision box covers its whole face at the block boundary. A bottom slab's down
+/// face qualifies, while its side and a top slab's down face do not.
+fn face_is_covered(shape: &[f64; 6], face: &str) -> bool {
+    const EPSILON: f64 = 1e-9;
+    let x = shape[0] <= EPSILON && shape[3] >= 1.0 - EPSILON;
+    let y = shape[1] <= EPSILON && shape[4] >= 1.0 - EPSILON;
+    let z = shape[2] <= EPSILON && shape[5] >= 1.0 - EPSILON;
+    match face {
+        "down" => shape[1] <= EPSILON && x && z,
+        "up" => shape[4] >= 1.0 - EPSILON && x && z,
+        "north" => shape[2] <= EPSILON && x && y,
+        "south" => shape[5] >= 1.0 - EPSILON && x && y,
+        "west" => shape[0] <= EPSILON && z && y,
+        "east" => shape[3] >= 1.0 - EPSILON && z && y,
+        _ => false,
+    }
 }
 
 fn vine_clockwise(face: &str) -> (&'static str, &'static str) {
@@ -824,6 +867,12 @@ fn sample_positions(
         }
     }
 }
+/// Per-tick settings that stay fixed while a region samples its chunks.
+pub(super) struct RandomTickOptions {
+    pub speed: u32,
+    pub spread_vines: bool,
+}
+
 pub(super) struct RandomTicks {
     rng: Rng,
 }
@@ -842,10 +891,16 @@ impl RandomTicks {
         held: &HashMap<ChunkPos, usize>,
         tracking: &Tracking,
         signals: UnboundedSender<Signal>,
-        speed: u32,
+        options: RandomTickOptions,
         fire: &mut super::fire::FireTicks,
     ) {
-        let mut world = RegionFluidWorld::new(source, held, tracking).with_signals(signals);
+        let RandomTickOptions {
+            speed,
+            spread_vines,
+        } = options;
+        let mut world = RegionFluidWorld::new(source, held, tracking)
+            .with_spread_vines(spread_vines)
+            .with_signals(signals);
         for chunk in held.keys() {
             let Some(sections) = source.with_loaded_chunk(chunk.0, chunk.1, ticking_sections)
             else {
@@ -930,10 +985,19 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert!(events.iter().all(|&pos| pos == (32, -48, -16)));
     }
-    #[derive(Default)]
     struct Grid {
         blocks: HashMap<(i32, i32, i32), u32>,
         light: u8,
+        spread_vines: bool,
+    }
+    impl Default for Grid {
+        fn default() -> Self {
+            Self {
+                blocks: HashMap::new(),
+                light: 0,
+                spread_vines: true,
+            }
+        }
     }
     impl RandomWorld for Grid {
         fn block(&self, p: (i32, i32, i32)) -> u32 {
@@ -944,6 +1008,9 @@ mod tests {
         }
         fn brightness(&self, _: (i32, i32, i32)) -> u8 {
             self.light
+        }
+        fn spread_vines(&self) -> bool {
+            self.spread_vines
         }
     }
     fn state(name: &str) -> u32 {
@@ -1279,8 +1346,52 @@ mod tests {
         let below = grid.block((0, -1, 0));
         assert!(named(below, "vine"), "the vine did not grow down");
         assert!(property(below, "north", "true"), "the copied face was lost");
-        assert!(vine_supports(&grid, (0, 0, -1)));
-        assert!(!vine_supports(&grid, (0, 1, 0)));
+        assert!(vine_supports(&grid, (0, 0, -1), "north"));
+        assert!(!vine_supports(&grid, (0, 1, 0), "up"));
+    }
+
+    #[test]
+    fn a_vine_uses_a_slabs_full_face_but_not_its_side() {
+        let mut grid = growth_grid();
+        let slab = |kind: &str| {
+            u32::from(
+                ferrite_data::blocks::state_id("stone_slab", &[("type", kind)])
+                    .expect("vanilla stone slab"),
+            )
+        };
+        grid.set_block((0, 1, 0), slab("bottom"));
+        assert!(
+            vine_supports(&grid, (0, 1, 0), "up"),
+            "a bottom slab's underside is a full face"
+        );
+        grid.set_block((0, 0, -1), slab("bottom"));
+        assert!(
+            !vine_supports(&grid, (0, 0, -1), "north"),
+            "a slab's side is not full"
+        );
+        grid.set_block((0, 2, 0), slab("top"));
+        assert!(
+            !vine_supports(&grid, (0, 2, 0), "up"),
+            "a top slab's underside is half a block above the boundary"
+        );
+    }
+
+    #[test]
+    fn the_spread_vines_rule_stops_every_vine_growth_face() {
+        let mut grid = growth_grid();
+        grid.spread_vines = false;
+        let p = (0, 0, 0);
+        let vine = u32::from(
+            ferrite_data::blocks::state_id("vine", &[("north", "true")]).expect("vanilla vine"),
+        );
+        grid.set_block(p, vine);
+        grid.set_block((0, 0, -1), state("stone"));
+        let mut rng = Rng::new(2);
+        for _ in 0..5000 {
+            vine_tick(&mut grid, p, vine, &mut rng);
+        }
+        assert_eq!(grid.block(p), vine);
+        assert_eq!(grid.block((0, -1, 0)), state("air"));
     }
 
     #[test]

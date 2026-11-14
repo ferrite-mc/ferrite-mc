@@ -1805,6 +1805,7 @@ fn create_world_scheduler(
             let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
             let water_conversion = rules.get_bool("water_source_conversion").unwrap_or(true);
             let lava_conversion = rules.get_bool("lava_source_conversion").unwrap_or(false);
+            let spread_vines = rules.get_bool("spread_vines").unwrap_or(true);
             drop(rules);
             region.tick_fluids(
                 &fluid_source,
@@ -1818,6 +1819,7 @@ fn create_world_scheduler(
                 &fluid_tracking,
                 ctx.signals.clone(),
                 speed.load(Ordering::Relaxed),
+                spread_vines,
             );
         }
         let elapsed = now.elapsed();

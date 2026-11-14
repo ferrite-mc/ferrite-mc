@@ -14,6 +14,8 @@ pub(super) struct RegionFluidWorld<'a> {
     tracking: &'a Tracking,
     water_conversion: bool,
     lava_conversion: bool,
+    /// The `spread_vines` game rule, read by the random-tick vine handler.
+    spread_vines: bool,
     /// Where cross-region placements and redstone wakes are handed to the world loop.
     pub(super) signals: Option<UnboundedSender<Signal>>,
     /// Blocks flowing water destroyed (`WaterFluid.beforeDestroyingBlock` drops their loot).
@@ -40,6 +42,7 @@ impl<'a> RegionFluidWorld<'a> {
             tracking,
             water_conversion,
             lava_conversion,
+            spread_vines: true,
             signals: None,
             washed: Vec::new(),
         }
@@ -47,6 +50,11 @@ impl<'a> RegionFluidWorld<'a> {
     /// Lets the world hand cross-region writes to the chunk owner instead of dropping them.
     pub fn with_signals(mut self, signals: UnboundedSender<Signal>) -> Self {
         self.signals = Some(signals);
+        self
+    }
+    /// Sets the `spread_vines` game rule for random ticks.
+    pub fn with_spread_vines(mut self, spread_vines: bool) -> Self {
+        self.spread_vines = spread_vines;
         self
     }
     pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -59,6 +67,9 @@ impl<'a> RegionFluidWorld<'a> {
     pub(super) fn owns(&self, x: i32, z: i32) -> bool {
         self.held
             .contains_key(&ChunkPos(x.div_euclid(16), z.div_euclid(16)))
+    }
+    pub(super) fn spread_vines(&self) -> bool {
+        self.spread_vines
     }
 }
 impl FluidWorld for RegionFluidWorld<'_> {

@@ -6003,13 +6003,17 @@ impl Region {
         tracking: &Tracking,
         signals: UnboundedSender<Signal>,
         speed: u32,
+        spread_vines: bool,
     ) {
         self.random_ticks.tick(
             source,
             &self.held_chunks,
             tracking,
             signals,
-            speed,
+            super::random_tick::RandomTickOptions {
+                speed,
+                spread_vines,
+            },
             &mut self.fire,
         );
     }
