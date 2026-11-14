@@ -5614,6 +5614,15 @@ pub(super) fn apply_trade_sync(
 /// The fixed `(x, z)` of a chunk face: the coordinate that is set is the edge, the other walks.
 type Face = (Option<u8>, Option<u8>);
 
+/// What the seam wake pass needs to know about one block state.
+#[derive(Clone, Copy, Default)]
+struct SeamInfo {
+    interesting: bool,
+    fluid: bool,
+    gravity: bool,
+    wall: bool,
+}
+
 impl Region {
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
         let first = !self.held_chunks.contains_key(&chunk);
@@ -5664,28 +5673,46 @@ impl Region {
         if pending.len() > CHUNKS_PER_TICK {
             self.pending_chunk_loads = pending.split_off(CHUNKS_PER_TICK);
         }
-        let dimension = source.dimension();
-        // One cache of the "can this state need a wake" answer for the whole pass: the lookup
-        // goes through the block name, which is far dearer than the palette read around it.
-        let interesting_cache: std::cell::RefCell<HashMap<u32, bool>> = Default::default();
-        let interesting = |state: u32| {
-            if let Some(&known) = interesting_cache.borrow().get(&state) {
-                return known;
+        // What the seam pass needs to know about a state, looked up once per distinct state:
+        // the block-name based queries are far dearer than the palette reads around them.
+        let info_cache: std::cell::RefCell<Vec<Option<SeamInfo>>> =
+            std::cell::RefCell::new(vec![None; 1 << 16]);
+        let info = |state: u32| -> SeamInfo {
+            if let Some(Some(known)) = info_cache.borrow().get(state as usize) {
+                return *known;
             }
-            let answer = u16::try_from(state).ok().is_some_and(|state| {
-                let name = ferrite_data::blocks::state(state).map(|(name, _)| name);
-                // Cave and void air are separate states and are not full blocks; without this
-                // check every underground cave section would look interesting.
-                !matches!(
-                    name,
-                    Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
-                ) && (ferrite_data::block_props::get(state).fluid.is_some()
-                    || !ferrite_data::block_props::get(state).can_occlude
-                    || super::gravity::is_gravity(state))
-            });
-            interesting_cache.borrow_mut().insert(state, answer);
+            let answer = u16::try_from(state)
+                .ok()
+                .map_or(SeamInfo::default(), |small| {
+                    let name = ferrite_data::blocks::state(small).map(|(name, _)| name);
+                    let props = ferrite_data::block_props::get(small);
+                    let fluid = props.fluid.is_some();
+                    let gravity = super::gravity::is_gravity(small);
+                    // Cave and void air are separate states and are not full blocks; without this
+                    // check every underground cave section would look interesting.
+                    let air = matches!(
+                        name,
+                        Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+                    );
+                    SeamInfo {
+                        interesting: !air && (fluid || !props.can_occlude || gravity),
+                        fluid,
+                        gravity,
+                        // The support rules that read a horizontal neighbour
+                        // (`neighbors::wall_support`: wall torches, wall signs, wall buttons)
+                        // belong to states with a `facing`; every other rule reads only the
+                        // block's own column, which a seam cannot change.
+                        wall: ferrite_data::blocks::state(small).is_some_and(|(_, props)| {
+                            props.iter().any(|(name, _)| *name == "facing")
+                        }),
+                    }
+                });
+            if let Some(slot) = info_cache.borrow_mut().get_mut(state as usize) {
+                *slot = Some(answer);
+            }
             answer
         };
+        let interesting = |state: u32| info(state).interesting;
         for chunk in pending {
             if !self.held_chunks.contains_key(&chunk) {
                 continue;
@@ -5784,10 +5811,10 @@ impl Region {
                             self.wake_seam_cell(
                                 source,
                                 &signals,
-                                dimension,
                                 outside_chunk,
                                 ([x, y, z], inside_state),
                                 ([ox, y, oz], outside_state),
+                                (info(inside_state), info(outside_state)),
                             );
                         }
                     }
@@ -5802,16 +5829,26 @@ impl Region {
         &mut self,
         source: &super::anvil::AnvilChunkSource,
         signals: &UnboundedSender<Signal>,
-        dimension: super::Dimension,
         outside_chunk: ChunkPos,
         inside: ([i32; 3], u32),
         outside: ([i32; 3], u32),
+        (inside_info, outside_info): (SeamInfo, SeamInfo),
     ) {
+        let dimension = source.dimension();
         let ([x, y, z], inside_state) = inside;
         let ([ox, _, oz], outside_state) = outside;
         // Only fluid that could not move because the other side was unloaded needs a wake. An
-        // ocean border with water on both sides does not.
-        if ferrite_fluid::is_liquid_block(inside_state)
+        // ocean border with the same fluid on both sides was generated settled and does not
+        // (that case alone is what made the join-time scan schedule 130k ticks).
+        let same_fluid = inside_info.fluid
+            && outside_info.fluid
+            && ferrite_fluid::is_liquid_block(inside_state)
+            && ferrite_fluid::is_liquid_block(outside_state)
+            && ferrite_fluid::fluid_state(inside_state).kind
+                == ferrite_fluid::fluid_state(outside_state).kind;
+        if !same_fluid
+            && inside_info.fluid
+            && ferrite_fluid::is_liquid_block(inside_state)
             && ferrite_fluid::can_hold_fluid(
                 outside_state,
                 ferrite_fluid::fluid_state(inside_state).kind,
@@ -5819,7 +5856,9 @@ impl Region {
         {
             self.schedule_fluid((x, y, z));
         }
-        if ferrite_fluid::is_liquid_block(outside_state)
+        if !same_fluid
+            && outside_info.fluid
+            && ferrite_fluid::is_liquid_block(outside_state)
             && ferrite_fluid::can_hold_fluid(
                 inside_state,
                 ferrite_fluid::fluid_state(outside_state).kind,
@@ -5838,14 +5877,17 @@ impl Region {
         }
         let inside_u16 = u16::try_from(inside_state).ok();
         let outside_u16 = u16::try_from(outside_state).ok();
-        if inside_u16.is_some_and(|state| !super::neighbors::can_survive(state, [x, y, z], source))
+        if inside_info.wall
+            && inside_u16
+                .is_some_and(|state| !super::neighbors::can_survive(state, [x, y, z], source))
         {
             // The block is ours; the unreadable side is now readable and failed its support
             // test. Re-validate it without forwarding the origin.
             self.updates.remote_changed([ox, y, oz]);
         }
-        if outside_u16
-            .is_some_and(|state| !super::neighbors::can_survive(state, [ox, y, oz], source))
+        if outside_info.wall
+            && outside_u16
+                .is_some_and(|state| !super::neighbors::can_survive(state, [ox, y, oz], source))
         {
             if self.held_chunks.contains_key(&outside_chunk) {
                 self.updates.block_changed([x, y, z]);
@@ -5857,9 +5899,7 @@ impl Region {
                 });
             }
         }
-        if inside_u16.is_some_and(super::gravity::is_gravity)
-            || outside_u16.is_some_and(super::gravity::is_gravity)
-        {
+        if inside_info.gravity || outside_info.gravity {
             self.schedule_gravity(source, &[[x, y, z], [ox, y, oz]]);
         }
     }

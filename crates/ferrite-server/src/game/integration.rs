@@ -6174,6 +6174,10 @@ async fn anvil_repairs_two_damaged_swords_on_fixture_world() {
     }
     let anvil = u32::from(ferrite_data::blocks::state_id("anvil", &[("facing", "north")]).unwrap());
     source.set_block(0, 64, 0, anvil).unwrap();
+    // The anvil is a gravity block on a chunk seam; the chunk-load wake pass (rightly) lets an
+    // unsupported one fall, so give it the floor the fixture terrain does not.
+    let stone = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+    source.set_block(0, 63, 0, stone).unwrap();
 
     let world = World::start_configured(
         Some(source),
