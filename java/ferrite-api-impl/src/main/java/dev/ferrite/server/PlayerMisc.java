@@ -285,8 +285,11 @@ public abstract class PlayerMisc extends PlayerStubs {
         else if (org.bukkit.entity.EnderPearl.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.ENDER_PEARL;
         else if (org.bukkit.entity.WitherSkull.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.WITHER_SKULL;
         else if (org.bukkit.entity.ShulkerBullet.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SHULKER_BULLET;
+        else if (org.bukkit.entity.LlamaSpit.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.LLAMA_SPIT;
         else if (org.bukkit.entity.SpectralArrow.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.SPECTRAL_ARROW; power = 3.0; }
         else if (org.bukkit.entity.SmallFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.SMALL_FIREBALL;
+        // `DragonFireball` is a `Fireball`, so it must be tested before the plain fireball.
+        else if (org.bukkit.entity.DragonFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.DRAGON_FIREBALL;
         else if (projectile == org.bukkit.entity.Fireball.class || org.bukkit.entity.LargeFireball.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.FIREBALL;
         else if (org.bukkit.entity.ThrownExpBottle.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.EXPERIENCE_BOTTLE; power = 0.7; }
         else if (org.bukkit.entity.ThrownPotion.class.isAssignableFrom(projectile)) {
@@ -789,8 +792,8 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }
     @Override public org.bukkit.inventory.ItemStack getWeapon() { return getInventory().getItemInMainHand(); }
-    /** `Player.getPickResult` is null in vanilla: middle-clicking a player gives nothing. */
-    @Override public org.bukkit.inventory.ItemStack getPickItemStack() { return null; }
+    /** `Entity#getPickItemStack` is `@NotNull`; a player has no pick result, so the empty stack is the "none" value. */
+    @Override public org.bukkit.inventory.ItemStack getPickItemStack() { return org.bukkit.inventory.ItemStack.empty(); }
     /**
      * Entity data as SNBT, like `CraftEntity.getAsString`: a player has no entity encode id
      * (`Entity.saveAsPassenger` refuses), so there is no string.
