@@ -5611,6 +5611,9 @@ pub(super) fn apply_trade_sync(
     }
 }
 
+/// The fixed `(x, z)` of a chunk face: the coordinate that is set is the edge, the other walks.
+type Face = (Option<u8>, Option<u8>);
+
 impl Region {
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
         let first = !self.held_chunks.contains_key(&chunk);
@@ -5730,10 +5733,7 @@ impl Region {
                 // The two faces of the seam, read straight from the chunks' paletted containers
                 // (one lock each) instead of one `source.block` call per cell. `face[t][y]`
                 // walks along the seam, then up the section.
-                let (inside_face, outside_face): (
-                    (Option<u8>, Option<u8>),
-                    (Option<u8>, Option<u8>),
-                ) = match (dx, dz) {
+                let (inside_face, outside_face): (Face, Face) = match (dx, dz) {
                     (1, 0) => ((Some(15), None), (Some(0), None)),
                     (-1, 0) => ((Some(0), None), (Some(15), None)),
                     (0, 1) => ((None, Some(15)), (None, Some(0))),
