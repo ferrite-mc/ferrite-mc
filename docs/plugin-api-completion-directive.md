@@ -249,7 +249,7 @@
 - 배너 `patterns`와 머리 profile name/uuid는 이미 `sendBlockUpdate`로 간다.
 - PDC의 컨테이너·컨테이너 배열·중첩 리스트 타입은 `FerriteDataContainer`가 구현하고
   `ItemPdcNestingTest`가 검증한다. 지원하지 않는 PDC 타입은 예외로 거부한다.
-- `Player#launchProjectile`은 삼지창·눈덩이·달걀·진주·경험치 병·물약·바람 구슬·화염구를 지원한다.
+- `Player#launchProjectile`은 삼지창·눈덩이·달걀·진주·경험치 병·물약·바람 구슬·화염구·라마 침·드래곤 화염구를 지원한다.
 - `World#getChunkGenerationState(Async)`, `unloadChunkRequest`, `isChunkInUse`, `getLoadedChunks`,
   `locateNearestBiome`/`Structure`, `hasStructureAt`, `getStructures`는 `FerriteWorld`가 처리한다.
   호스트 없는 카탈로그(`build/catalog/*-missing.txt`)에 나온다는 이유만으로 미구현이 아니다.
@@ -396,7 +396,8 @@
 | `getHAProxyAddress()` | null — PROXY 프로토콜을 받지 않는다 | — |
 | `copy()`, `copy(Location)` | 거부(`UnsupportedOperationException`, Paper도 플레이어 복사 불가) | `PlayerMisc` |
 | `spawnAt(Location,SpawnReason)` | 거부(플레이어는 스폰할 수 있는 엔티티가 아님) | `PlayerMisc` |
-| `getAsString()` / `getPickItemStack()` / `getMemory(MemoryKey)` | null(바닐라 `Player.getPickResult`도 null, 플레이어는 기억 모듈이 없음) | `PlayerMisc` |
+| `getAsString()` / `getMemory(MemoryKey)` | null — 플레이어에는 엔티티 SNBT가 없고 바닐라 `Player`도 Brain을 갖지 않는다 | `PlayerMisc` |
+| `getPickItemStack()` | 빈 스택 — API가 `@NotNull`이고 플레이어는 픽 결과가 없다 | `PlayerMisc` |
 | `getData(DataComponentType.Valued)` / `hasData` | 미구현(null/false) — 플레이어에는 값 컴포넌트가 없고 아이템 컴포넌트는 `ItemStack`쪽 | — |
 | `getEquipment()` 전체 | 구현(`clear()`는 방어구·손만, getter는 null이 아님, 드랍 확률은 항상 1.0이고 setter는 거부, BODY/SADDLE은 비어 있음) | `FerriteEntityEquipment.java` |
 | `fireworkBoost` | 구현 — 이제 `Firework` 전용 핸들(`getLife/setLife/getMaxLife/setMaxLife/getTicksFlown/getTicksToDetonate/detonate/isDetonated/getFireworkMeta/getItem/getAttachedTo/getBoostedEntity/getSpawningEntity`) | `SpawnedEntity.firework`, `EntityOperation::SetFireworkLife/SetFireworkMaxLife`(`game/region.rs::plugin_entity_op`), `plugins/facts.rs`(`getFireworkLife()`) |
@@ -406,10 +407,10 @@
 - **`FireworkMeta`:** 폭죽 아이템의 `getItemMeta()`가 `FireworkMeta`(비행 시간 0..127, 별 목록)를 돌려준다. 이전에는 일반 `ItemMeta`라서 `fireworkBoost`가 비행·별 수를 읽지 못하고 기본값만 썼다. 폭죽 색·모양은 여전히 클라이언트에 보이지 않는다(호스트 `ItemStack`에 컴포넌트 없음).
 - **붙은 폭죽 가속:** 시선 방향으로 정상 속도(≈0.85)를 보내던 근사를 지웠다. 바닐라 식 `delta + look*0.1 + (look*1.5 - delta)*0.5`에 쓰는 `delta`를 "폭죽이 마지막으로 붙은 위치에서 플레이어까지의 한 틱 이동"으로 추정한다(`firework::rider_velocity`). 서버가 플레이어 속도를 직접 적분하지 않기 때문에 추정이며, 폭죽 첫 틱은 델타 0으로 시작한다.
 - **눈 엔더:** 바이트코드와 대조해 이동 순서를 고쳤다 — 바닐라는 현재 속도로 먼저 위치를 옮기고, 새 위치에서 목표까지의 거리로 다음 속도를 구한다(`lerp(0.0025, 수평 속도, 거리)`, 거리<1이면 0.8배, 위로 보는 판단은 이전 높이). 예전 코드는 새 속도로 먼저 움직였다. 테스트 `eye::tests::the_eye_moves_by_its_old_velocity_then_steers_from_the_new_position`.
-- **투사체 점검:** `launchProjectile`이 다루는 것: (화살·눈덩이·달걀·엔더 진주·경험치 병·투척/잔류 포션·바람/브리즈 바람 구슬·작은/큰 화염구·위더 해골·셜커 탄·분광 화살·폭죽·낚싯찌·삼지창). 나머지 `Projectile`(`LlamaSpit`, `DragonFireball`, `EnderSignal` 등)은 `UnsupportedOperationException("not implemented")`로 거부한다 — 플레이어가 쏘는 바닐라 경로가 없고 호스트에 해당 비행 모델이 없다. 이미 구현된 비행·충돌·피해·줍기·저장은 다시 만들지 않았다.
+- **투사체 점검:** `launchProjectile`이 다루는 것: (화살·눈덩이·달걀·엔더 진주·경험치 병·투척/잔류 포션·바람/브리즈 바람 구슬·작은/큰 화염구·위더 해골·셜커 탄·분광 화살·폭죽·낚싯찌·삼지창·라마 침·드래곤 화염구). `LlamaSpit`과 `DragonFireball`은 호스트 `arrow::Kind`의 기존 비행·충돌 모델을 그대로 쓰고, 드래곤 화염구는 `Fireball`보다 먼저 판별한다. 나머지 `Projectile`(`EnderSignal` 등)은 `UnsupportedOperationException("not implemented")`로 거부한다. 테스트 `PlayerBreadthTest.llamaSpitAndDragonFireballLaunchLikeOtherProjectiles`. 이미 구현된 비행·충돌·피해·줍기·저장은 다시 만들지 않았다.
 - **포션 범위·구름(바이트코드 대조, `AbstractThrownPotion`/`ThrownSplashPotion`/`AreaEffectCloud`):**
   - 투척 포션: 대상 상자 `(4,2,4)` 확장, 거리는 포션 상자와 대상 상자(투사체 여백 0.3 포함) 사이의 간격이고(예전엔 발 위치까지 거리), 배율은 `1 - 거리/4`(예전의 최소 0.25 바닥 제거), 지속 시간은 `(int)(배율*지속+0.5)`이며 1초(20틱) 이하가 되면 적용하지 않는다. 즉시 효과(치유/해악)는 배율만큼의 세기로 들어간다(`(int)(배율*(4<<등급)+0.5)`, 해악은 6). 테스트 `potion::tests::a_splash_falls_off_with_the_gap_between_the_boxes_not_the_feet_distance`, `…rounds_the_duration…`, `region::tests::instant_effects_are_scaled_by_distance_and_halved_by_a_cloud`.
-  - 잔류 구름: 대기(10틱) 동안은 아무것도 하지 않는다(예전엔 5틱에 이미 효과를 줬다), 대상 판정은 구름의 0.5칸 높이 상자와 대상 몸 상자가 겹치는지(예전엔 발 기준 -1..2), 즉시 효과는 절반 세기로 적용한다. 테스트 `a_waiting_cloud_hits_nobody_until_tick_ten`, `the_cloud_reaches_every_body_that_meets_its_half_block_box`.
+  - 잔류 구름: 대기(10틱) 동안은 아무것도 하지 않는다(예전엔 5틱에 이미 효과를 줬다), 대상 판정은 구름의 반경×0.5칸 상자와 대상 몸 상자(AABB)가 겹치는지(예전엔 발 기준 -1..2, 그다음엔 중심 거리), 즉시 효과는 절반 세기로 적용한다. 테스트 `a_waiting_cloud_hits_nobody_until_tick_ten`, `the_cloud_reaches_every_body_that_meets_its_half_block_box`, `a_body_edge_that_reaches_into_the_cloud_is_hit`.
   - 구름 색은 효과 색 평균이 아니라 기본 물색이다(효과 색 표가 없다). 바닐라의 `PotionContents.getColor`는 구현하지 않았다.
 - **고치지 못한 것(이유):**
   - 리소스 팩 `required`는 클라이언트에 보낼 뿐 서버가 거부 응답으로 킥하지 않는다(바닐라도 서버 전체 필수 팩일 때만 킥).

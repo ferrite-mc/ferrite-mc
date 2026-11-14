@@ -538,24 +538,25 @@ impl PotionCloud {
         self.radius
     }
 
-    /// [`Self::tick`] for candidates of the standing human height.
+    /// [`Self::tick`] for candidates of the standing human width and height.
     pub fn tick(
         &mut self,
         candidates: impl IntoIterator<Item = (uuid::Uuid, [f64; 3])>,
     ) -> Option<Vec<(uuid::Uuid, MobEffectInstance)>> {
-        self.tick_boxes(candidates.into_iter().map(|(id, pos)| (id, pos, 1.8)))
+        self.tick_boxes(candidates.into_iter().map(|(id, pos)| (id, pos, 0.6, 1.8)))
     }
 
-    /// Advances one tick over `candidates` (uuid, feet position and height of everything that can
-    /// be affected). Returns `None` once the cloud is gone, otherwise the effects to apply this
-    /// tick as `(uuid, effect)`.
+    /// Advances one tick over `candidates` (uuid, feet position, width and height of everything
+    /// that can be affected). Returns `None` once the cloud is gone, otherwise the effects to
+    /// apply this tick as `(uuid, effect)`.
     ///
     /// Vanilla `AreaEffectCloud.serverTick`: while it waits it does nothing at all; afterwards it
-    /// shrinks every tick and, on every fifth tick, hits whoever's bounding box meets the cloud's
-    /// half-block-tall box and whose centre lies within the radius.
+    /// shrinks every tick and, on every fifth tick, hits every living entity whose bounding box
+    /// intersects the cloud's radius-wide, half-block-tall box. A body can be hit while its centre
+    /// is still outside the radius (its edge reaches in), which a centre-distance test misses.
     pub fn tick_boxes(
         &mut self,
-        candidates: impl IntoIterator<Item = (uuid::Uuid, [f64; 3], f64)>,
+        candidates: impl IntoIterator<Item = (uuid::Uuid, [f64; 3], f64, f64)>,
     ) -> Option<Vec<(uuid::Uuid, MobEffectInstance)>> {
         self.age += 1;
         if self.age >= Self::WAIT + Self::DURATION {
@@ -577,16 +578,20 @@ impl PotionCloud {
         if self.effects.is_empty() {
             return Some(applied);
         }
-        for (id, pos, height) in candidates {
+        for (id, pos, width, height) in candidates {
             if self.victims.iter().any(|(victim, _)| *victim == id) {
                 continue;
             }
-            let dx = pos[0] - self.center.x;
-            let dz = pos[2] - self.center.z;
             let radius = f64::from(self.radius);
+            let half = width.max(0.0) * 0.5;
+            let horizontal = pos[0] + half >= self.center.x - radius
+                && pos[0] - half <= self.center.x + radius
+                && pos[2] + half >= self.center.z - radius
+                && pos[2] - half <= self.center.z + radius;
             // The cloud's box is `Self::BOX_HEIGHT` tall from its own height up.
-            let overlaps = pos[1] < self.center.y + Self::BOX_HEIGHT && pos[1] + height > self.center.y;
-            if dx * dx + dz * dz > radius * radius || !overlaps {
+            let vertical = pos[1] < self.center.y + Self::BOX_HEIGHT
+                && pos[1] + height.max(0.0) > self.center.y;
+            if !horizontal || !vertical {
                 continue;
             }
             self.victims.push((id, now + Self::REAPPLICATION_DELAY));
@@ -869,18 +874,38 @@ mod tests {
         let applied = cloud
             .tick_boxes([
                 // Feet 1.5 below, head 0.3 above the cloud's floor: overlaps.
-                (below, [0.0, 62.5, 0.0], 1.8),
+                (below, [0.0, 62.5, 0.0], 0.6, 1.8),
                 // Feet 1.8 below, head just short of the floor: does not.
-                (short_below, [0.0, 62.2, 0.0], 1.8),
+                (short_below, [0.0, 62.2, 0.0], 0.6, 1.8),
                 // Feet 0.4 above the floor: inside the half block.
-                (tall, [0.0, 64.4, 0.0], 1.8),
+                (tall, [0.0, 64.4, 0.0], 0.6, 1.8),
                 // Feet at 0.5 above is outside (the box is open at the top).
-                (edge, [0.0, 64.5, 0.0], 1.8),
-                (above, [0.0, 66.0, 0.0], 1.8),
+                (edge, [0.0, 64.5, 0.0], 0.6, 1.8),
+                (above, [0.0, 66.0, 0.0], 0.6, 1.8),
             ])
             .unwrap();
         let hit: Vec<_> = applied.iter().map(|(id, _)| *id).collect();
         assert_eq!(hit, [below, tall]);
+    }
+
+    /// Regression: vanilla intersects the entity's whole bounding box with the cloud's box, so a
+    /// 0.6-wide body whose centre is 0.2 outside the radius still overlaps and must be hit.
+    #[test]
+    fn a_body_edge_that_reaches_into_the_cloud_is_hit() {
+        let id = uuid::Uuid::from_u128(1);
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 9);
+        let radius = f64::from(cloud.radius());
+        let applied = cloud
+            .tick_boxes([(id, [radius + 0.2, 64.0, 0.0], 0.6, 1.8)])
+            .unwrap();
+        assert_eq!(applied.len(), 1);
+
+        let far = uuid::Uuid::from_u128(2);
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 9);
+        let applied = cloud
+            .tick_boxes([(far, [radius + 0.5, 64.0, 0.0], 0.6, 1.8)])
+            .unwrap();
+        assert!(applied.is_empty());
     }
 
     #[test]

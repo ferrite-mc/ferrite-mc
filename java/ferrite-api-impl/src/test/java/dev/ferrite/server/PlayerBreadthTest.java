@@ -182,6 +182,13 @@ class PlayerBreadthTest {
         assertLaunch(org.bukkit.entity.Trident.class, EntityType.TRIDENT, 2.5);
     }
 
+    @Test void llamaSpitAndDragonFireballLaunchLikeOtherProjectiles() {
+        // Both have host flight models; a dragon fireball is a `Fireball`, so it must not fall
+        // through to the plain fireball case.
+        assertLaunch(org.bukkit.entity.LlamaSpit.class, EntityType.LLAMA_SPIT, 1.5);
+        assertLaunch(org.bukkit.entity.DragonFireball.class, EntityType.DRAGON_FIREBALL, 1.5);
+    }
+
     @Test void aTridentWithAnExplicitVelocityKeepsEveryComponent() {
         var handle = player.launchProjectile(org.bukkit.entity.Trident.class, new org.bukkit.util.Vector(0.25, -1, 2));
         assertEquals(EntityType.TRIDENT, handle.getType());

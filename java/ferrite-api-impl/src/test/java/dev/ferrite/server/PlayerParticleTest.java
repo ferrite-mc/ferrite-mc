@@ -113,7 +113,7 @@ class PlayerParticleTest {
         assertThrows(UnsupportedOperationException.class, () -> player.spawnAt(player.getLocation(), org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.CUSTOM));
         assertThrows(UnsupportedOperationException.class, () -> player.spawnAt(player.getLocation()));
         assertNull(player.getAsString());
-        assertNull(player.getPickItemStack());
+        assertTrue(player.getPickItemStack().getType().isAir(), "pick item is an empty stack, never null");
         assertNull(player.getMemory(org.bukkit.entity.memory.MemoryKey.HOME));
     }
 }
