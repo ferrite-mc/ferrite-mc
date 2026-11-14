@@ -95,8 +95,11 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
     mobs only (`MobKind`), no NBT, the provisional entry has no tags/health until the first sync.
     Tests: `summon_branch_makes_the_new_entity_the_source_of_the_chain` (dispatcher),
     `summon_chain_spawns_the_mob_under_the_published_uuid` (region behaviour).
-  - **Not supported** (each fails with a message, never silently): `on origin` (the spawn-origin entity is not in the snapshot); `if items|slots entity`
-    (entity inventories live in regions and cannot be read while a command runs); item
+  - `if|unless items|slots entity` reads the published slots of non-player entities (horse armour
+    in `armor.body` only; see Blockers). Tests: `entity_inventory_conditions_read_the_published_slots`
+    (dispatcher), `sync_publishes_the_horse_armour_slot_and_forgets_it` (region snapshot).
+  - **Not supported** (each fails with a message, never silently): `if items|slots entity` for
+    **players** (their inventory is not published); item
     predicates with components; `store ... entity` for non-player entities. `if|unless predicate
     <id>` evaluates datapack (`data/<ns>/predicate`) and vanilla predicates for `match_block`,
     `entity_properties` (type, location), `inverted`, `all_of`, `any_of`; other condition types
@@ -199,7 +202,7 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 
 | blocker | evidence |
 |---|---|
-| `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) carries `attacker|owner|leasher|target`, and `EntityIndex::origin_of` carries the creator, so those relations work (2026-11-14: `execute on origin` answers for arrow/trident shooters, item throwers and fishing-bobber owners; tests `sync_publishes_who_created_an_arrow_or_threw_an_item`, `on_relations_use_the_published_snapshot`). Other creators (TNT igniter, area effect cloud owner, fangs) are not in `ferrite-entity`'s data, a lane A interface. The snapshot still carries no NBT or inventory |
+| `if|unless items|slots entity` (players), `store ... entity` (non-player) | 2026-11-14: `if|unless items|slots entity` answers for **non-player** entities from the snapshot (`EntityIndex::slots_of`); `ferrite-entity` models only horse armour (`armor.body`, `MobState::armor`), so that is the only slot published (other equipment, `horse.N`, `mob.inventory.N` and villager inventories do not exist in the entity data; `saddle` is not a `SlotRanges` name in the 26.3 jar). `items` treats an unpublished slot as empty; `slots` on an entity with no published match fails with "not modelled" rather than answering false. A player in the selection fails with a message (player inventory is owned by the player's region and is not published). `store ... entity` for non-players needs entity NBT, which the snapshot does not carry: remaining. `CommandEntity` carries `attacker|owner|leasher|target`, and `EntityIndex::origin_of` carries the creator (`execute on origin` answers for arrow/trident shooters, item throwers and fishing-bobber owners; tests `sync_publishes_who_created_an_arrow_or_threw_an_item`, `on_relations_use_the_published_snapshot`). Other creators (TNT igniter, area effect cloud owner, fangs) are not in `ferrite-entity`'s data, a lane A interface |
 | `if predicate` (partial) | `match_block`, `entity_properties` (type, location), `inverted`, `all_of`, `any_of` are evaluated (`commands_late::condition`); every other condition type evaluates false; `ferrite-loot` exposes no public predicate evaluator (its `Condition::test` is `pub(crate)`) |
 | `/test` structure runner | no structure placement / test-instance block / tick runner: `block_based` instances and the block-targeting forms cannot run |
 | `/jfr` | no JVM |

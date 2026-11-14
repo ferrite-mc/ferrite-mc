@@ -4,8 +4,8 @@
 //! What these cannot do on this server is listed in `docs/COMMANDS-STATUS.md`: `on origin` knows
 //! only arrow/trident shooters, item throwers and bobber owners (the other relations come from the
 //! snapshot and the ride table), `summon` hands the new entity to the rest of the chain through
-//! a provisional snapshot entry, and `items|slots entity` cannot read an inventory owned by a
-//! region.
+//! a provisional snapshot entry, and `items|slots entity` reads only the slots the regions publish (not a
+//! player inventory).
 
 use ferrite_command::arguments::{EntityTarget, RegistryParser};
 use ferrite_command::{
@@ -15,7 +15,7 @@ use ferrite_command::{
 use ferrite_world::HeightmapKind;
 
 use super::commands::{Source, send};
-use super::commands_exec::{Gate, passed};
+use super::commands_exec::{Gate, passed, resolve_in_optional};
 
 fn block_position(ctx: &CommandContext<Source>, name: &str) -> Result<[i32; 3], CommandError> {
     match ctx.argument(name) {
@@ -101,7 +101,9 @@ pub(super) fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Sourc
                             "item_predicate",
                             ArgumentType::opaque("minecraft:item_predicate"),
                         )
-                        .gate(execute, unless, condition_entity_inventory),
+                        .gate(execute, unless, |ctx, unless| {
+                            condition_entity_inventory(ctx, unless, true)
+                        }),
                     ),
                 ),
             ),
@@ -116,11 +118,9 @@ pub(super) fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Sourc
         ))
         .then(literal::<Source>("entity").then(
             argument::<Source>("source", ArgumentType::entities()).then(
-                argument::<Source>("slots", slot_source()).gate(
-                    execute,
-                    unless,
-                    condition_entity_inventory,
-                ),
+                argument::<Source>("slots", slot_source()).gate(execute, unless, |ctx, unless| {
+                    condition_entity_inventory(ctx, unless, false)
+                }),
             ),
         ));
     vec![biome, loaded, function, stopwatch, items, slots]
@@ -267,13 +267,75 @@ fn condition_container(
     passed(ctx, unless, count > 0)
 }
 
+/// Whether a requested slot name covers a published slot (`armor.*` includes `armor.body`).
+fn slot_name_covers(requested: &str, slot: &str) -> bool {
+    requested == slot || (requested == "armor.*" && slot.starts_with("armor."))
+}
+
+/// `if items|slots entity <targets> <slots> [<item_predicate>]` for entities that are not
+/// players. The owning regions publish the item slots they model into the entity snapshot
+/// (`EntityIndex::slots_of`: horse armour in `armor.body`); the test reads only that.
+///
+/// * `items` passes when a selected entity holds a matching stack in a requested slot; a slot
+///   the snapshot does not list is empty, which is what the server holds for it.
+/// * `slots` passes when a requested slot is published for a selected entity. An entity whose
+///   slot set is not modelled cannot be answered, so that case is an error, not a quiet `false`.
+/// * Player inventories live in the player's region and are not published: a selection that
+///   contains a player and matches nothing fails with a message instead of answering `false`.
 fn condition_entity_inventory(
-    _ctx: &CommandContext<Source>,
-    _unless: bool,
+    ctx: &CommandContext<Source>,
+    unless: bool,
+    with_items: bool,
 ) -> Result<Source, CommandError> {
-    Err(CommandError::failed(
-        "execute if items|slots entity is not supported: entity inventories are owned by region threads and cannot be read while a command runs",
-    ))
+    let entities = resolve_in_optional(ctx, "source")?;
+    let requested: Vec<&str> = ctx
+        .string("slots")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .collect();
+    let predicate = ctx.string("item_predicate").unwrap_or("*");
+    let mut matched = false;
+    let mut players = false;
+    let mut unmodelled = None;
+    {
+        let source = ctx.source();
+        let state = source.state.lock().unwrap();
+        let index = state.entities.lock().unwrap();
+        for entity in &entities {
+            if entity.player {
+                players = true;
+                continue;
+            }
+            let published = index.slots_of(entity.uuid);
+            let mut any = false;
+            for (slot, item) in published {
+                if !requested.iter().any(|name| slot_name_covers(name, slot)) {
+                    continue;
+                }
+                any = true;
+                if !with_items || item_matches(predicate, *item)? {
+                    matched = true;
+                }
+            }
+            if !any && !with_items {
+                unmodelled = Some(entity.name.clone());
+            }
+        }
+    }
+    if !matched {
+        if players {
+            return Err(CommandError::failed(
+                "execute if items|slots entity cannot read a player's inventory: it is owned by the player's region and not published to commands",
+            ));
+        }
+        if let Some(name) = unmodelled {
+            return Err(CommandError::failed(format!(
+                "execute if slots entity: the slots of {name} are not modelled by this server"
+            )));
+        }
+    }
+    passed(ctx, unless, matched)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -642,16 +704,70 @@ mod tests {
     }
 
     #[test]
-    fn entity_inventory_conditions_fail_honestly() {
+    fn entity_inventory_conditions_read_the_published_slots() {
         let tree = super::super::commands::dispatcher();
         let source = source();
-        for command in [
-            "execute if items entity @s weapon.mainhand *",
-            "execute if slots entity @s weapon.mainhand",
-        ] {
-            let error = tree.execute(command, source.clone()).unwrap_err();
-            assert!(error.to_string().contains("not supported"), "{error}");
+        let iron = ferrite_item::item_id("minecraft:iron_horse_armor").expect("item");
+        let horse = Uuid::from_u128(0x41);
+        let pig = Uuid::from_u128(0x42);
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            for (uuid, tag) in [(horse, "horse"), (pig, "pig")] {
+                index.insert(CommandEntity {
+                    uuid,
+                    network_id: 1,
+                    kind: 0,
+                    pos: [1.0, 64.0, 1.0],
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    dimension: crate::game::Dimension::Overworld,
+                    tags: [tag.to_owned()].into(),
+                    custom_name: None,
+                    health: None,
+                    attacker: None,
+                    owner: None,
+                    leasher: None,
+                    target: None,
+                });
+            }
+            index.set_slot(horse, "armor.body", iron);
         }
+        // `data merge` reports 0 when nothing changes, so every command writes its own key.
+        let run = |command: &str, key: usize| {
+            tree.execute(
+                &command.replace("{a:1}", &format!("{{k{key}:1}}")),
+                source.clone(),
+            )
+        };
+        for passing in [
+            "execute if items entity @e[tag=horse] armor.body minecraft:iron_horse_armor run data merge storage t {a:1}",
+            "execute if items entity @e[tag=horse] armor.* * run data merge storage t {a:1}",
+            "execute if slots entity @e[tag=horse] armor.body run data merge storage t {a:1}",
+            "execute unless items entity @e[tag=horse] armor.body minecraft:diamond run data merge storage t {a:1}",
+            "execute unless items entity @e[tag=pig] armor.body * run data merge storage t {a:1}",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(run(passing.1, passing.0).unwrap(), 1, "{}", passing.1);
+        }
+        for failing in [
+            "execute if items entity @e[tag=horse] armor.body minecraft:diamond run data merge storage t {a:1}",
+            "execute if items entity @e[tag=pig] armor.body * run data merge storage t {a:1}",
+            "execute if items entity @e[tag=horse] weapon.mainhand * run data merge storage t {a:1}",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(run(failing.1, 10 + failing.0).unwrap(), 0, "{}", failing.1);
+        }
+        // An entity whose slot set is not modelled is an error for `slots`, not a quiet false.
+        let error = run("execute if slots entity @e[tag=pig] armor.body", 20).unwrap_err();
+        assert!(error.to_string().contains("not modelled"), "{error}");
+        // A player's inventory is not published.
+        let error = run("execute if items entity @s weapon.mainhand *", 21).unwrap_err();
+        assert!(error.to_string().contains("player's inventory"), "{error}");
     }
 
     #[test]

@@ -86,7 +86,7 @@ fn resolve_in(ctx: &CommandContext<Source>, name: &str) -> Result<Vec<EntityView
 }
 
 /// [`resolve_in`] for the forking modifiers: nothing selected means no source continues.
-fn resolve_in_optional(
+pub(super) fn resolve_in_optional(
     ctx: &CommandContext<Source>,
     name: &str,
 ) -> Result<Vec<EntityView>, CommandError> {
