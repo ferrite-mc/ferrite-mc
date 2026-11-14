@@ -31,6 +31,41 @@ fn recipe_changes(call: &HostCall) -> Option<String> {
     }
 }
 
+/// `World#setVoidDamage…`: the rules the game loop applies below the world.
+/// Arguments are `enabled`, `amount` and `offset`.
+fn void_rules(call: &HostCall) -> Option<String> {
+    if call.owner != "World" || call.method != "setVoidDamage(boolean,float,double)" {
+        return None;
+    }
+    let world = uuid::Uuid::parse_str(&call.subject).ok()?;
+    let enabled = match call.args.first()?.as_str() {
+        "true" => true,
+        "false" => false,
+        _ => return None,
+    };
+    let amount: f32 = call
+        .args
+        .get(1)?
+        .parse()
+        .ok()
+        .filter(|a: &f32| a.is_finite() && *a >= 0.0)?;
+    let offset: f64 = call
+        .args
+        .get(2)?
+        .parse()
+        .ok()
+        .filter(|o: &f64| o.is_finite())?;
+    super::facts::set_void_damage(
+        world,
+        super::facts::VoidDamage {
+            enabled,
+            amount,
+            offset,
+        },
+    );
+    Some(String::new())
+}
+
 /// The reply to `craftMatrix(int,String)`: the recipe id, the result item key and its count joined
 /// by the item separator, or `None` when nothing matches or the grid is malformed.
 ///
@@ -39,6 +74,9 @@ pub fn answer(call: &HostCall) -> Option<String> {
     if call.owner == "Server"
         && let Some(reply) = recipe_changes(call)
     {
+        return Some(reply);
+    }
+    if let Some(reply) = void_rules(call) {
         return Some(reply);
     }
     if call.owner != "Server" || call.method != "craftMatrix(int,String)" {
@@ -113,6 +151,27 @@ mod tests {
             method: method.into(),
             args: args.iter().map(|a| (*a).to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn void_rules_reach_the_registry_and_reject_bad_input() {
+        let world = uuid::Uuid::from_u128(0x77_0001);
+        let set = |args: &[&str]| {
+            answer(&HostCall {
+                owner: "World".into(),
+                subject: world.to_string(),
+                method: "setVoidDamage(boolean,float,double)".into(),
+                args: args.iter().map(|a| (*a).to_owned()).collect(),
+            })
+        };
+        assert_eq!(super::super::facts::void_damage(world), Default::default());
+        assert_eq!(set(&["false", "9.5", "-32"]).as_deref(), Some(""));
+        let rules = super::super::facts::void_damage(world);
+        assert!(!rules.enabled);
+        assert_eq!((rules.amount, rules.offset), (9.5, -32.0));
+        assert_eq!(set(&["maybe", "1", "0"]), None);
+        assert_eq!(set(&["true", "-1", "0"]), None);
+        assert_eq!(super::super::facts::void_damage(world), rules);
     }
 
     #[test]

@@ -244,6 +244,9 @@ pub struct Survival {
     pub sprinting: bool,
     /// Below this height the void hurts: the dimension's minimum build height - 64.
     pub void_y: f64,
+    /// Damage per tick below `void_y`; `None` once a plugin switched the void off
+    /// (`World#setVoidDamageEnabled(false)`).
+    pub void_damage: Option<f32>,
     /// `true` once health reached zero (`LivingEntity.isDeadOrDying`).
     pub dead: bool,
     /// Set by the region once the death drops, message and packets ran.
@@ -282,6 +285,7 @@ impl Default for Survival {
             was_ground: true,
             sprinting: false,
             void_y: VOID_Y,
+            void_damage: Some(4.0),
             dead: false,
             death_processed: false,
             death_cause: None,
@@ -440,8 +444,10 @@ impl Survival {
         }
 
         // `Player.isBelowWorld`: 4 damage per tick below min build height - 64.
-        if pos[1] < self.void_y {
-            queue_damage(&mut queue, DamageKind::Void, 4.0);
+        if pos[1] < self.void_y
+            && let Some(amount) = self.void_damage
+        {
+            queue_damage(&mut queue, DamageKind::Void, amount);
         }
 
         if creative {
@@ -714,6 +720,34 @@ mod tests {
             false,
         );
         assert_eq!(damage(queue), [(DamageKind::Void, 4.0)]);
+    }
+
+    #[test]
+    fn a_plugin_can_change_or_switch_off_the_void_damage() {
+        let mut state = Survival::new();
+        state.void_damage = Some(9.0);
+        let queue = state.environment_tick(
+            [0.0, VOID_Y - 1.0, 0.0],
+            false,
+            false,
+            false,
+            false,
+            0,
+            false,
+        );
+        assert_eq!(damage(queue), [(DamageKind::Void, 9.0)]);
+        let mut state = Survival::new();
+        state.void_damage = None;
+        let queue = state.environment_tick(
+            [0.0, VOID_Y - 1.0, 0.0],
+            false,
+            false,
+            false,
+            false,
+            0,
+            false,
+        );
+        assert!(damage(queue).is_empty());
     }
 
     #[test]

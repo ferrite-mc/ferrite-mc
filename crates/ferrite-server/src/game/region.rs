@@ -3240,7 +3240,9 @@ impl Player {
             self.survival.air = super::survival::MAX_AIR;
         }
         // The nether and the end start at y 0, so their void is 64 blocks below that.
-        self.survival.void_y = f64::from(self.dimension.min_y() - 64);
+        let void = crate::plugins::facts::void_damage(super::plugin_world_id(self.world_id));
+        self.survival.void_y = f64::from(self.dimension.min_y()) + void.offset;
+        self.survival.void_damage = void.enabled.then_some(void.amount);
         let damage = self.survival.environment_tick(
             self.pos,
             self.ground,

@@ -251,8 +251,18 @@ class PlayerExtrasTest {
         assertTrue(world.canGenerateStructures());
         assertNull(world.getRaid(1));
         assertEquals(4.0f, world.getVoidDamageAmount());
-        world.setVoidDamageAmount(8f);
+        assertTrue(world.isVoidDamageEnabled());
+        var voidCalls = new java.util.ArrayList<String>();
+        HostBridge.transport = (owner, subject, method, args) -> { voidCalls.add(method + "|" + args); return ""; };
+        try {
+            world.setVoidDamageAmount(8f);
+            world.setVoidDamageEnabled(false);
+            assertThrows(IllegalArgumentException.class, () -> world.setVoidDamageAmount(-1f));
+        } finally { HostBridge.transport = null; }
         assertEquals(8f, world.getVoidDamageAmount());
+        assertFalse(world.isVoidDamageEnabled());
+        assertEquals(2, voidCalls.size());
+        assertTrue(voidCalls.get(1).startsWith("setVoidDamage(boolean,float,double)|false" + HostBridge.ARG + "8.0"));
         world.setChunkForceLoaded(2, 3, true);
         assertTrue(world.isChunkForceLoaded(2, 3));
         assertEquals(1, world.getForceLoadedChunks().size());

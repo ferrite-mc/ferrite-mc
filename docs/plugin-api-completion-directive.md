@@ -246,13 +246,16 @@
 - 11-13 `commands/plugins` 후속(lane `blocked-x/y/z`, `plugins-z`)은 PR #24·#25로 통합돼 있고,
   PR #25 이후 브랜치에만 남은 커밋은 테스트·문서 3개뿐이어서 이 브랜치에 체리픽했다(`blocked-y`와 `blocked-z`는 남은 것이 없다).
 
+`World#setVoidDamageEnabled/Amount/MinBuildHeightOffset`은 이제 호스트(`facts::VoidDamage`)를 거쳐 게임 루프의 void 피해에 반영된다
+(바닐라 차원은 모두 기본 월드 설정을 공유한다).
+
 ### 10.3 아직 남은 것 (코드 근거가 있는 목록)
 
 호스트 라우트도 Java 케이스도 없는 서명만 적었다(`World`는 카탈로그와 `crates/**`·Java `case`를 대조).
 
 - **Player:** `fireworkBoost`(폭죽 엔티티 모델 없음), `getConnection`, `loadData`, `postEffects`, `spawnAt`.
 - **World:** `getFluidData`(흐름 방향 계산에 이웃 블록 충돌 정보가 필요), `getTileEntityCount`/`getTickableTileEntityCount`,
-  `getWorldPath`, `isVoidDamageEnabled`(setter가 게임 루프에 연결돼야 한다), `locateAllPoiInRange`,
+  `getWorldPath`, `locateAllPoiInRange`,
   `locateNearestPoi`, `vanillaBiomeProvider`.
 - **블록 엔티티:** 주크박스·교탁·명령 블록·스포너·벌집·스컬크 센서·구조물 블록·침대. 26.3의 NBT 키 이름을
   확인할 수 있는 자료(서버 코드)가 로컬에 없어서 추측으로 구현하지 않았다. `UnsupportedOperationException`을 유지한다.

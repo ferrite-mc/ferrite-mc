@@ -506,6 +506,45 @@ pub fn fall_distance(player: Uuid) -> Option<f32> {
     fall_registry().lock().unwrap().get(&player).copied()
 }
 
+/// What `World#setVoidDamageEnabled`, `setVoidDamageAmount` and `setVoidDamageMinBuildHeightOffset`
+/// set for one world.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoidDamage {
+    pub enabled: bool,
+    pub amount: f32,
+    /// Blocks below the dimension's minimum build height where the void starts.
+    pub offset: f64,
+}
+
+impl Default for VoidDamage {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            amount: 4.0,
+            offset: -64.0,
+        }
+    }
+}
+
+fn void_registry() -> &'static Mutex<HashMap<Uuid, VoidDamage>> {
+    static VOID: OnceLock<Mutex<HashMap<Uuid, VoidDamage>>> = OnceLock::new();
+    VOID.get_or_init(Default::default)
+}
+
+pub fn set_void_damage(world: Uuid, settings: VoidDamage) {
+    void_registry().lock().unwrap().insert(world, settings);
+}
+
+/// The void rules of a world; vanilla's when no plugin changed them.
+pub fn void_damage(world: Uuid) -> VoidDamage {
+    void_registry()
+        .lock()
+        .unwrap()
+        .get(&world)
+        .copied()
+        .unwrap_or_default()
+}
+
 type SentChunks = HashMap<Uuid, std::collections::HashSet<(i32, i32)>>;
 
 fn sent_registry() -> &'static Mutex<SentChunks> {

@@ -194,11 +194,16 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> spawnLimits = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Map<org.bukkit.entity.SpawnCategory, Integer> ticksPerSpawns = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean allowAnimals = true, allowMonsters = true;
-    // Kept so plugins read back what they set; the game does not act on these.
+    // Pushed to the host on every change; the game loop applies them below the world.
+    private volatile boolean voidDamageEnabled = true;
     private volatile float voidDamageAmount = 4.0f;
     private volatile double voidDamageOffset = -64.0;
     private final java.util.Map<Long, java.util.Set<org.bukkit.plugin.Plugin>> chunkTickets = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Set<Long> forceLoaded = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private void pushVoidDamage() {
+        HostBridge.call("World", id, "setVoidDamage(boolean,float,double)", String.class,
+            voidDamageEnabled, voidDamageAmount, voidDamageOffset);
+    }
     private static long chunkKey(int x, int z) { return ((long) x & 0xffffffffL) | (((long) z & 0xffffffffL) << 32); }
     private static int keyX(long key) { return (int) key; }
     private static int keyZ(long key) { return (int) (key >> 32); }
@@ -782,10 +787,24 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
                 yield text == null || text.isEmpty() ? 0 : text.split(String.valueOf(HostBridge.ITEM)).length;
             }
+            case "isVoidDamageEnabled" -> voidDamageEnabled;
+            case "setVoidDamageEnabled" -> { voidDamageEnabled = (boolean) args[0]; pushVoidDamage(); yield null; }
             case "getVoidDamageAmount" -> voidDamageAmount;
-            case "setVoidDamageAmount" -> { voidDamageAmount = (float) args[0]; yield null; }
+            case "setVoidDamageAmount" -> {
+                float amount = (float) args[0];
+                if (!(amount >= 0f) || Float.isInfinite(amount)) throw new IllegalArgumentException("void damage amount must be finite and >= 0");
+                voidDamageAmount = amount;
+                pushVoidDamage();
+                yield null;
+            }
             case "getVoidDamageMinBuildHeightOffset" -> voidDamageOffset;
-            case "setVoidDamageMinBuildHeightOffset" -> { voidDamageOffset = (double) args[0]; yield null; }
+            case "setVoidDamageMinBuildHeightOffset" -> {
+                double offset = (double) args[0];
+                if (Double.isNaN(offset) || Double.isInfinite(offset)) throw new IllegalArgumentException("void damage offset must be finite");
+                voidDamageOffset = offset;
+                pushVoidDamage();
+                yield null;
+            }
             case "getFeatureFlags", "getListeningPluginChannels" -> java.util.Set.of();
             case "getGenerator", "getBiomeProvider", "getEnderDragonBattle" -> null;
             case "locateNearestBiome", "locateNearestStructure", "hasStructureAt" -> locate(method, args);
