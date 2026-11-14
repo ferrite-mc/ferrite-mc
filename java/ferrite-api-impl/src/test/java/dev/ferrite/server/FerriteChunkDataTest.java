@@ -85,6 +85,15 @@ class FerriteChunkDataTest {
         assertThrows(NullPointerException.class, () -> table.populateLoot(new java.util.Random(), null));
     }
 
+    @Test void aChunkSnapshotRefusesBlockDataInsteadOfInventingEmptyTerrain() {
+        var chunk = org.bukkit.Bukkit.getWorld("chunkdata").getChunkAt(0, 0);
+        var snapshot = chunk.getChunkSnapshot(true, true, false);
+        var refused = assertThrows(UnsupportedOperationException.class, () -> snapshot.getBlockType(0, 64, 0));
+        assertTrue(refused.getMessage().contains("does not capture block"), refused.getMessage());
+        // World#getEmptyChunkSnapshot still reports its known-empty state.
+        assertEquals(Material.AIR, org.bukkit.Bukkit.getWorld("chunkdata").getEmptyChunkSnapshot(0, 0, false, false).getBlockType(0, 64, 0));
+    }
+
     @Test void chunkStateComesFromTheHost() {
         var world = org.bukkit.Bukkit.getWorld("chunkdata");
         HostBridge.transport = (owner, subject, method, args) -> switch (method) {

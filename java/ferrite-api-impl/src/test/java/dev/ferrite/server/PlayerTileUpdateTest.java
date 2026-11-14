@@ -182,7 +182,7 @@ class PlayerTileUpdateTest {
         assertArrayEquals(new String[]{"pattern,minecraft:stripe_top,red", "pattern,minecraft:cross,light_blue"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
     }
 
-    @Test void aSkullSendsItsProfileTexturesAndRefusesSoundsAndUnsafeProperties() {
+    @Test void aSkullSendsItsProfileTexturesAndNoteBlockSoundButRefusesUnsafeProperties() {
         var id = java.util.UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5");
         var plain = new java.util.HashMap<String, Object>();
         plain.put("getPlayerProfile", profile("Notch", id, false));
@@ -207,11 +207,13 @@ class PlayerTileUpdateTest {
         unsafe.put("getPlayerProfile", profile("Notch", id, "a,b"));
         unsafe.put("getNoteBlockSound", null);
         assertThrows(IllegalArgumentException.class, () -> player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, unsafe)));
+        calls.clear();
         var sound = new java.util.HashMap<String, Object>();
         sound.put("getPlayerProfile", null);
         sound.put("getNoteBlockSound", org.bukkit.NamespacedKey.minecraft("entity.pig.ambient"));
-        assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, sound)));
-        assertTrue(calls.isEmpty());
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Skull.class, Material.PLAYER_HEAD, null, sound));
+        assertEquals("minecraft:skull", calls.get(0)[4]);
+        assertEquals("note,minecraft:entity.pig.ambient", calls.get(0)[5]);
     }
 
     @Test void unmodelledFamiliesAreRefusedBeforeTheHost() {
