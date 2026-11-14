@@ -816,4 +816,68 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public java.net.SocketAddress getSocketAddress() { return getAddress(); }
     @Override public java.net.InetSocketAddress getVirtualHost() { return null; }
     @Override public java.net.InetSocketAddress getHAProxyAddress() { return null; }
+
+    // ---- post effects ----------------------------------------------------------------------------------------
+    private final java.util.List<net.kyori.adventure.key.Key> postEffectKeys = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final io.papermc.paper.entity.PlayerPostEffects postEffects = new io.papermc.paper.entity.PlayerPostEffects() {
+        // The game keeps the list and sends the packet (`/posteffect`); this mirrors what the plugin changed.
+        @Override public java.util.List<net.kyori.adventure.key.Key> values() { return java.util.List.copyOf(postEffectKeys); }
+        @Override public boolean set(java.util.SequencedCollection<net.kyori.adventure.key.Key> keys) {
+            java.util.Objects.requireNonNull(keys, "keys");
+            var wanted = new java.util.ArrayList<>(new java.util.LinkedHashSet<>(keys));
+            if (wanted.equals(postEffectKeys)) return false;
+            clear();
+            for (var key : wanted) add(key);
+            return true;
+        }
+        @Override public boolean add(net.kyori.adventure.key.Key key) {
+            java.util.Objects.requireNonNull(key, "key");
+            if (postEffectKeys.contains(key)) return false;
+            if (!postEffectCommand("add", key.asString())) return false;
+            postEffectKeys.add(key);
+            return true;
+        }
+        @Override public boolean remove(net.kyori.adventure.key.Key key) {
+            java.util.Objects.requireNonNull(key, "key");
+            if (!postEffectKeys.contains(key)) return false;
+            postEffectCommand("remove", key.asString());
+            return postEffectKeys.remove(key);
+        }
+        @Override public boolean clear() {
+            if (postEffectKeys.isEmpty()) return false;
+            postEffectCommand("clear", null);
+            postEffectKeys.clear();
+            return true;
+        }
+        @Override public void update() { /* every change is sent as it happens */ }
+    };
+    private boolean postEffectCommand(String verb, String key) {
+        String line = "posteffect " + verb + " " + getName() + (key == null ? "" : " " + key);
+        return getServer().dispatchCommand(getServer().getConsoleSender(), line);
+    }
+    @Override public io.papermc.paper.entity.PlayerPostEffects postEffects() { return postEffects; }
+
+    // ---- game connection ---------------------------------------------------------------------------------------
+    /** `Player#getConnection`: the connection calls forward to the player methods that already do the work. */
+    @Override public io.papermc.paper.connection.PlayerGameConnection getConnection() {
+        var self = (org.bukkit.entity.Player) this;
+        return (io.papermc.paper.connection.PlayerGameConnection) java.lang.reflect.Proxy.newProxyInstance(
+            getClass().getClassLoader(), new Class<?>[]{io.papermc.paper.connection.PlayerGameConnection.class}, (proxy, method, args) -> {
+                try {
+                    return switch (method.getName()) {
+                        case "getPlayer" -> self;
+                        case "isConnected" -> self.isOnline();
+                        case "disconnect" -> { self.kick((net.kyori.adventure.text.Component) args[0]); yield null; }
+                        case "getClientAddress" -> self.getAddress();
+                        case "getAddress" -> self.getAddress();
+                        case "reenterConfiguration" -> throw new UnsupportedOperationException("Ferrite: re-entering the configuration phase is not supported");
+                        case "sendReportDetails" -> throw new UnsupportedOperationException("Ferrite: report details are not sent to clients");
+                        case "hashCode" -> System.identityHashCode(proxy);
+                        case "equals" -> proxy == args[0];
+                        case "toString" -> "PlayerGameConnection{" + self.getName() + "}";
+                        default -> org.bukkit.entity.Player.class.getMethod(method.getName(), method.getParameterTypes()).invoke(self, args);
+                    };
+                } catch (java.lang.reflect.InvocationTargetException e) { throw e.getCause(); }
+            });
+    }
 }

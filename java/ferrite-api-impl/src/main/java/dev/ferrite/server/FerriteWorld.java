@@ -200,6 +200,36 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private volatile double voidDamageOffset = -64.0;
     private final java.util.Map<Long, java.util.Set<org.bukkit.plugin.Plugin>> chunkTickets = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Set<Long> forceLoaded = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Block entity types that run a server-side ticker in vanilla (a `ticker` in their block's `getTicker`). */
+    static final java.util.Set<String> TICKING_BLOCK_ENTITIES = java.util.Set.of(
+        "minecraft:furnace", "minecraft:blast_furnace", "minecraft:smoker", "minecraft:hopper", "minecraft:brewing_stand",
+        "minecraft:beacon", "minecraft:conduit", "minecraft:campfire", "minecraft:bell", "minecraft:beehive",
+        "minecraft:spawner", "minecraft:trial_spawner", "minecraft:vault", "minecraft:jukebox", "minecraft:chest",
+        "minecraft:trapped_chest", "minecraft:ender_chest", "minecraft:sculk_sensor", "minecraft:calibrated_sculk_sensor",
+        "minecraft:sculk_shrieker", "minecraft:sculk_catalyst", "minecraft:end_gateway", "minecraft:piston",
+        "minecraft:decorated_pot");
+
+    /** Counts the block entities of the loaded chunks, one host query per chunk. */
+    private int tileEntities(boolean tickingOnly) {
+        var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
+        if (text == null || text.isEmpty()) return 0;
+        int total = 0;
+        for (var pair : text.split(String.valueOf(HostBridge.ITEM))) {
+            var xz = pair.split(",");
+            int x = Integer.parseInt(xz[0]) << 4, z = Integer.parseInt(xz[1]) << 4;
+            @SuppressWarnings("unchecked") var reply = (java.util.List<String>) HostBridge.call("World", id,
+                "ferriteBlockEntities(int,int,int,int,int,int)", java.util.List.class, x, minHeight(), z, x + 15, minHeight() + height() - 1, z + 15);
+            if (reply == null) throw new UnsupportedOperationException("Ferrite: block entity data is unavailable for world " + name);
+            for (var item : reply) {
+                if (item.isEmpty()) continue;
+                if (!tickingOnly) { total++; continue; }
+                var parts = item.split(",", 4);
+                var nbt = parts.length == 4 ? StructureNbt.compound(parts[3]) : null;
+                if (nbt != null && nbt.get("id") instanceof String type && TICKING_BLOCK_ENTITIES.contains(type)) total++;
+            }
+        }
+        return total;
+    }
     private void pushVoidDamage() {
         HostBridge.call("World", id, "setVoidDamage(boolean,float,double)", String.class,
             voidDamageEnabled, voidDamageAmount, voidDamageOffset);
@@ -774,6 +804,13 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 for (var candidate : FerriteTags.tags("blocks", org.bukkit.Material.class))
                     if (candidate.getKey().getKey().equals(tag)) yield java.util.Set.copyOf(candidate.getValues());
                 throw new UnsupportedOperationException("Ferrite: block tag minecraft:" + tag + " is not in the generated data");
+            }
+            case "getTileEntityCount" -> tileEntities(false);
+            case "getTickableTileEntityCount" -> tileEntities(true);
+            case "getWorldPath" -> {
+                var dir = (String) HostBridge.call("World", id, "getWorldPath()", String.class);
+                if (dir == null || dir.isEmpty()) throw new UnsupportedOperationException("Ferrite: this world is not saved to disk");
+                yield java.nio.file.Path.of(dir);
             }
             case "canGenerateStructures" -> true;
             case "generateTree" -> {

@@ -995,4 +995,55 @@ class PlayerExtrasTest {
             (self, method, args) -> method.getName().equals("getType") ? org.bukkit.Material.CHEST : null);
         assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(new org.bukkit.Location(player.getWorld(), 0, 64, 0), chest));
     }
+
+    @Test void connectionForwardsToThePlayer() {
+        var connection = player.getConnection();
+        assertSame(player, connection.getPlayer());
+        assertEquals(player.isOnline(), connection.isConnected());
+        assertThrows(UnsupportedOperationException.class, connection::reenterConfiguration);
+    }
+
+    @Test void postEffectsMirrorTheListAndDeduplicate() {
+        var effects = player.postEffects();
+        assertTrue(effects.values().isEmpty());
+        assertFalse(effects.remove(net.kyori.adventure.key.Key.key("minecraft:blur")));
+        assertFalse(effects.clear());
+        effects.update();
+    }
+
+    @Test void worldPathComesFromTheHost() {
+        var world = player.getWorld();
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("getWorldPath()") ? "/srv/world" : "";
+        try { assertEquals(java.nio.file.Path.of("/srv/world"), world.getWorldPath()); } finally { HostBridge.transport = null; }
+        HostBridge.transport = (owner, subject, method, args) -> "";
+        try { assertThrows(UnsupportedOperationException.class, world::getWorldPath); } finally { HostBridge.transport = null; }
+    }
+
+    private static String idNbt(String id) {
+        var out = new java.io.ByteArrayOutputStream();
+        try (var data = new java.io.DataOutputStream(out)) {
+            data.writeByte(10); data.writeShort(0);
+            data.writeByte(8); data.writeUTF("id"); data.writeUTF(id);
+            data.writeByte(0);
+        } catch (java.io.IOException e) { throw new IllegalStateException(e); }
+        var hex = new StringBuilder();
+        for (byte b : out.toByteArray()) hex.append(String.format("%02x", b));
+        return hex.toString();
+    }
+
+    @Test void tileEntityCountsComeFromTheLoadedChunks() {
+        var world = player.getWorld();
+        char item = HostBridge.ITEM;
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "getLoadedChunkCoordinates()" -> "0,0" + item + "1,0";
+            case "ferriteBlockEntities(int,int,int,int,int,int)" -> args.startsWith("0")
+                ? "1,64,1," + idNbt("minecraft:furnace") + item + "2,64,2," + idNbt("minecraft:sign")
+                : "17,64,1," + idNbt("minecraft:chest");
+            default -> "";
+        };
+        try {
+            assertEquals(3, world.getTileEntityCount());
+            assertEquals(2, world.getTickableTileEntityCount());
+        } finally { HostBridge.transport = null; }
+    }
 }

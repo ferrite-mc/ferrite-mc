@@ -82,6 +82,20 @@ pub fn answer(call: &HostCall) -> Option<String> {
             let loaded = loaded().lock().unwrap().contains(&key);
             Some((loaded || saved_on_disk(key.0, key.1)).to_string())
         }
+        // `World#getWorldPath`: the directory the world saves into, empty for the in-memory world.
+        ("getWorldPath()", []) => Some(
+            world_dir()
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|dir| {
+                    std::path::absolute(dir)
+                        .unwrap_or_else(|_| dir.clone())
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .unwrap_or_default(),
+        ),
         ("getLoadedChunkCoordinates()", []) => Some(
             loaded()
                 .lock()
@@ -166,9 +180,14 @@ mod tests {
         let file = ferrite_world::RegionFile::open(region.join("r.0.0.mca"), 0, 0).unwrap();
         file.write_chunk(3, 4, b"x", ferrite_world::RegionCompression::None)
             .unwrap();
+        assert_eq!(answer(&call("getWorldPath()", &[])).as_deref(), Some(""));
         set_world_dir(Some(dir.path().to_path_buf()));
         assert!(saved_on_disk(3, 4));
         assert!(!saved_on_disk(5, 5));
+        assert_eq!(
+            answer(&call("getWorldPath()", &[])).as_deref(),
+            Some(dir.path().to_str().unwrap())
+        );
         set_world_dir(None);
     }
 }
