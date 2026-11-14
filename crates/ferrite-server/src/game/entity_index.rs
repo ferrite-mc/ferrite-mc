@@ -150,7 +150,7 @@ impl EntityIndex {
                 .or_else(|| data.item.as_ref().and_then(|item| item.thrower))
                 .or_else(|| data.bobber.as_ref().map(|bobber| bobber.owner));
             if let Some(origin) = origin {
-                self.origins.insert(data.uuid, origin);
+                self.set_origin(data.uuid, origin);
             }
             owned.insert(entity.uuid);
             self.insert(entity);
