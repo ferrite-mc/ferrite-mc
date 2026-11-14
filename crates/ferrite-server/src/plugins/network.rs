@@ -292,6 +292,9 @@ pub fn network_command(call: &HostCall) -> Option<PlayerCommand> {
             hidden,
         });
     }
+    if let Some(command) = super::particles::particle_command(call) {
+        return Some(command);
+    }
     if call.method == "updateCommands()" {
         return Some(PlayerCommand::UpdateCommands { player });
     }

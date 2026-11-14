@@ -145,6 +145,38 @@ impl Decode for LpVec3 {
     }
 }
 
+/// A particle and its option data (`ParticleTypes.STREAM_CODEC`: the registry id, then whatever
+/// that particle type's codec writes - a colour, a block state, an item...). The server builds
+/// `data` itself, so encoding is the id followed by the bytes; decoding only understands the
+/// option-less particles, because the layout of the rest depends on the registry.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParticleOptions {
+    pub id: i32,
+    pub data: Vec<u8>,
+}
+impl ParticleOptions {
+    pub fn new(id: i32) -> Self {
+        Self {
+            id,
+            data: Vec::new(),
+        }
+    }
+    pub fn with_data(id: i32, data: Vec<u8>) -> Self {
+        Self { id, data }
+    }
+}
+impl Encode for ParticleOptions {
+    fn encode(&self, out: &mut Vec<u8>) {
+        crate::codec::VarInt(self.id).encode(out);
+        out.extend_from_slice(&self.data);
+    }
+}
+impl Decode for ParticleOptions {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        Ok(Self::new(crate::codec::VarInt::decode(buf)?.0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

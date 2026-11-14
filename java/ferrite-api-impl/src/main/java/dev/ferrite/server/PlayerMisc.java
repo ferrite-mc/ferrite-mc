@@ -736,6 +736,62 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public org.bukkit.event.player.PlayerResourcePackStatusEvent.Status getResourcePackStatus() {
         try { return super.getResourcePackStatus(); } catch (UnsupportedOperationException none) { return null; }
     }
+    /**
+     * `Player#spawnParticle` (every other overload funnels into this one): the data object is
+     * checked against the particle's data class, reduced to a text spec and sent as the real
+     * 26.3 `ClientboundLevelParticlesPacket`, so dust colours, block/item particles, spells,
+     * trails and vibrations reach the client.
+     */
+    @Override public <T> void spawnParticle(org.bukkit.Particle particle, double x, double y, double z, int count, double offsetX, double offsetY, double offsetZ,
+            double speedX, double speedY, double speedZ, T data, boolean force, org.bukkit.Particle.RandomizationType type) {
+        Objects.requireNonNull(particle, "particle");
+        Objects.requireNonNull(type, "type");
+        if (count < 0) throw new IllegalArgumentException("count must not be negative: " + count);
+        var spec = particleSpec(particle, data);
+        HostBridge.callVoid("Player", getUniqueId(), "spawnParticleData(Particle,double,double,double,int,double,double,double,double,double,double,String,boolean,RandomizationType)",
+                particle, x, y, z, count, offsetX, offsetY, offsetZ, speedX, speedY, speedZ, spec, force, type);
+    }
+
+    /** The text form of a particle's data for the host; throws like Bukkit when the data does not fit. */
+    static String particleSpec(org.bukkit.Particle particle, Object data) {
+        Class<?> type = particle.getDataType();
+        if (type == Void.class) {
+            if (data != null) throw new IllegalArgumentException("data (" + data.getClass() + ") should be null for " + particle.getKey());
+            return "";
+        }
+        if (data == null) throw new IllegalArgumentException("missing required data " + type + " for " + particle.getKey());
+        if (!type.isInstance(data)) throw new IllegalArgumentException("data (" + data.getClass() + ") should be " + type + " for " + particle.getKey());
+        String name = particle.getKey().getKey();
+        if (data instanceof org.bukkit.block.data.BlockData block) return "block:" + FerriteBlockStates.stateId(block.getAsString());
+        if (data instanceof org.bukkit.inventory.ItemStack stack) {
+            if (stack.getType().isAir()) throw new IllegalArgumentException("item particle data must not be air");
+            return "item:" + stack.getType().getKey() + ":" + Math.max(1, Math.min(99, stack.getAmount()));
+        }
+        if (data instanceof org.bukkit.Particle.DustTransition t) return "transition:" + t.getColor().asRGB() + ":" + t.getToColor().asRGB() + ":" + t.getSize();
+        if (data instanceof org.bukkit.Particle.DustOptions d) return "dust:" + d.getColor().asRGB() + ":" + d.getSize();
+        if (data instanceof org.bukkit.Particle.Spell spell) return "spell:" + spell.getColor().asARGB() + ":" + spell.getPower();
+        if (data instanceof org.bukkit.Particle.Trail trail) {
+            var target = trail.getTarget();
+            return "trail:" + target.getX() + ":" + target.getY() + ":" + target.getZ() + ":" + trail.getColor().asARGB() + ":" + trail.getDuration();
+        }
+        if (data instanceof org.bukkit.Particle.GeyserBase base) return "geyserbase:" + base.getWaterBlocks() + ":" + base.getBurstImpulse();
+        if (data instanceof org.bukkit.Particle.Geyser geyser) return "geyser:" + geyser.getWaterBlocks();
+        if (data instanceof org.bukkit.Vibration vibration) {
+            int ticks = vibration.getArrivalTime();
+            if (vibration.getDestination() instanceof org.bukkit.Vibration.Destination.BlockDestination block) {
+                var at = block.getLocation();
+                return "vibration:block:" + at.getBlockX() + ":" + at.getBlockY() + ":" + at.getBlockZ() + ":" + ticks;
+            }
+            if (vibration.getDestination() instanceof org.bukkit.Vibration.Destination.EntityDestination entity) {
+                return "vibration:entity:" + entity.getEntity().getUniqueId() + ":0.0:" + ticks;
+            }
+            throw new IllegalArgumentException("unknown vibration destination " + vibration.getDestination());
+        }
+        if (data instanceof org.bukkit.Color color) return "color:" + color.asARGB();
+        if (data instanceof Float value) return "float:" + value;
+        if (data instanceof Integer value) return "int:" + value;
+        throw new IllegalArgumentException("unsupported particle data " + data.getClass() + " for " + name);
+    }
     @Override public org.bukkit.inventory.ItemStack getItemInHand() { return getInventory().getItemInMainHand(); }
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }

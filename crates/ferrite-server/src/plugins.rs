@@ -19,6 +19,7 @@ mod maps;
 mod messaging;
 mod motion;
 mod network;
+mod particles;
 pub mod playerops;
 mod riding;
 pub mod rules;

@@ -2497,8 +2497,11 @@ packet!(TabList,125,Clientbound,{header:PlainText,footer:PlainText});
 // `minecraft:sound`: a registry holder, the source category, fixed-point position, volume,
 // pitch and the random seed used to pick a sound variant.
 packet!(SoundEffect,119,Clientbound,{sound:VarInt,source:VarInt,x:i32,y:i32,z:i32,volume:f32,pitch:f32,seed:i64});
-// `minecraft:level_particles` for particle options without extra type data.
-packet!(LevelParticles,48,Clientbound,{particle:VarInt,long_distance:bool,always_show:bool,x:f64,y:f64,z:f64,velocity_x:f32,velocity_y:f32,velocity_z:f32,speed:f32,count:i32});
+// `minecraft:level_particles` (26.3 `ClientboundLevelParticlesPacket`): the particle with its
+// option data, the two visibility flags, position, the spread (`xDist..`), the three maximum
+// speeds, the count and the randomization type (0 default, 1 alternative, 2 alternative with
+// speed). `ClientboundLevelParticlesPacket(.., maxSpeed, count)` repeats one speed three times.
+packet!(LevelParticles,48,Clientbound,{particle:crate::types::ParticleOptions,long_distance:bool,always_show:bool,x:f64,y:f64,z:f64,velocity_x:f32,velocity_y:f32,velocity_z:f32,speed:f32,speed_y:f32,speed_z:f32,count:VarInt,randomization:VarInt});
 packet!(InitializeBorder,44,Clientbound,{x:f64,z:f64,old_diameter:f64,new_diameter:f64,speed:VarLong,portal_teleport_boundary:VarInt,warning_blocks:VarInt,warning_time:VarInt});
 packet!(SetBorderCenter,90,Clientbound,{x:f64,z:f64});
 packet!(SetBorderLerpSize,91,Clientbound,{old_diameter:f64,new_diameter:f64,speed:VarLong});
@@ -3165,7 +3168,10 @@ mod command_feedback_tests {
             sound: None,
         });
         rt(LevelParticles {
-            particle: VarInt(9),
+            particle: crate::types::ParticleOptions::new(9),
+            speed_y: 0.2,
+            speed_z: 0.2,
+            randomization: VarInt(0),
             long_distance: false,
             always_show: false,
             x: 0.5,
@@ -3175,8 +3181,37 @@ mod command_feedback_tests {
             velocity_y: 0.1,
             velocity_z: 0.0,
             speed: 0.2,
-            count: 12,
+            count: VarInt(12),
         });
+    }
+
+    /// 26.3 `ClientboundLevelParticlesPacket.STREAM_CODEC`: particle id and its option bytes
+    /// come first, then the flags, position, spread, three speeds, count and randomization.
+    #[test]
+    fn level_particles_put_the_option_bytes_right_after_the_particle_id() {
+        let mut out = Vec::new();
+        LevelParticles {
+            particle: crate::types::ParticleOptions::with_data(14, vec![0xAA, 0xBB]),
+            long_distance: true,
+            always_show: false,
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            velocity_x: 0.5,
+            velocity_y: 0.5,
+            velocity_z: 0.5,
+            speed: 1.0,
+            speed_y: 2.0,
+            speed_z: 3.0,
+            count: VarInt(300),
+            randomization: VarInt(2),
+        }
+        .encode(&mut out);
+        assert_eq!(out[..3], [14, 0xAA, 0xBB]);
+        assert_eq!(out[3..5], [1, 0]);
+        // 3 doubles, 6 floats, a 2-byte VarInt count and the randomization byte.
+        assert_eq!(out.len(), 3 + 2 + 24 + 24 + 2 + 1);
+        assert_eq!(out[out.len() - 3..], [0xac, 0x02, 2]);
     }
 
     #[test]

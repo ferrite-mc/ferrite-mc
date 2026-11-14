@@ -446,6 +446,18 @@ pub enum PluginPacket {
     ResourcePackPop {
         id: Option<uuid::Uuid>,
     },
+    /// `Player#spawnParticle`: `ClientboundLevelParticlesPacket` with the particle's option
+    /// bytes already encoded by the host.
+    Particle {
+        particle: i32,
+        options: Vec<u8>,
+        force: bool,
+        pos: [f64; 3],
+        spread: [f32; 3],
+        speed: [f32; 3],
+        count: i32,
+        randomization: i32,
+    },
     CompassTarget {
         pos: [i32; 3],
     },

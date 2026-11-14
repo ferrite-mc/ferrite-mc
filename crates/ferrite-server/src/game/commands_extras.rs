@@ -1150,7 +1150,7 @@ fn particle(
         ctx,
         viewers,
         PlayerPacket::Particles(LevelParticles {
-            particle: ferrite_protocol::VarInt(particle),
+            particle: ferrite_protocol::types::ParticleOptions::new(particle),
             long_distance: force,
             always_show: force,
             x: position[0],
@@ -1160,7 +1160,11 @@ fn particle(
             velocity_y: delta[1] as f32,
             velocity_z: delta[2] as f32,
             speed,
-            count,
+            // `sendParticles(.., maxSpeed, count)` repeats the one speed on every axis.
+            speed_y: speed,
+            speed_z: speed,
+            count: ferrite_protocol::VarInt(count),
+            randomization: ferrite_protocol::VarInt(0),
         }),
     )?;
     feedback(ctx, "commands.particle.success", vec![raw])
@@ -1924,7 +1928,7 @@ mod tests {
         match only_packet(&actions) {
             PlayerPacket::Particles(packet) => {
                 assert_eq!(packet.x, 1.5);
-                assert_eq!(packet.count, 12);
+                assert_eq!(packet.count.0, 12);
                 assert_eq!(packet.speed, 0.5);
             }
             other => panic!("expected particles, got {other:?}"),
