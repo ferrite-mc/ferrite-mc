@@ -377,15 +377,15 @@ pub(crate) fn parse_recipe(id: &str, value: &Value) -> Result<Recipe> {
             result: required_result(object, id)?,
         }),
         "smithing_transform" => RecipeKind::SmithingTransform(SmithingTransform {
-            template: ingredient_field(object, "template", id)?,
+            template: optional_ingredient_field(object, "template", id)?,
             base: ingredient_field(object, "base", id)?,
-            addition: ingredient_field(object, "addition", id)?,
+            addition: optional_ingredient_field(object, "addition", id)?,
             result: required_result(object, id)?,
         }),
         "smithing_trim" => RecipeKind::SmithingTrim(SmithingTrim {
-            template: ingredient_field(object, "template", id)?,
+            template: optional_ingredient_field(object, "template", id)?,
             base: ingredient_field(object, "base", id)?,
-            addition: ingredient_field(object, "addition", id)?,
+            addition: optional_ingredient_field(object, "addition", id)?,
             pattern: optional_str(object, "pattern", id)?,
         }),
         _ => RecipeKind::Special(SpecialRecipe {
@@ -552,6 +552,19 @@ fn ingredient_field(object: &Map<String, Value>, key: &str, id: &str) -> Result<
         .get(key)
         .ok_or_else(|| Error::recipe(id, format!("missing `{key}`")))?;
     Ingredient::from_value(value, id)
+}
+
+/// A smithing slot vanilla makes optional (`Optional<Ingredient>`): a missing key is an
+/// [`Ingredient`] with no alternatives, which only an empty slot satisfies.
+fn optional_ingredient_field(
+    object: &Map<String, Value>,
+    key: &str,
+    id: &str,
+) -> Result<Ingredient> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(Ingredient::default()),
+        Some(value) => Ingredient::from_value(value, id),
+    }
 }
 
 fn required_result(object: &Map<String, Value>, id: &str) -> Result<ItemStack> {

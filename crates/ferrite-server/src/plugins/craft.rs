@@ -2,15 +2,30 @@
 
 use ferrite_plugin::{HOST_ITEM_SEPARATOR, HostCall};
 
-/// `Server#addRecipe`, `removeRecipe`, `clearRecipes` and `resetRecipes`: changes to the crafting
-/// recipes every menu uses. `addCraftingRecipe` answers `true`, `false` (the id is taken) or `!`
-/// followed by why the recipe cannot be added.
+/// `Server#addRecipe`, `removeRecipe`, `clearRecipes` and `resetRecipes`: changes to the recipes
+/// every menu uses. `addRecipe(String,String,String,int)` takes the id, the recipe JSON, the result's
+/// metadata (the `setItemMeta` payload, empty for none) and its wear, and answers `true`, `false`
+/// (the id is taken) or `!` followed by why the recipe cannot be added.
 fn recipe_changes(call: &HostCall) -> Option<String> {
     match call.method.as_str() {
-        "addCraftingRecipe(String,String)" => {
+        "addRecipe(String,String,String,int)" | "addCraftingRecipe(String,String)" => {
             let id = call.args.first()?;
+            let (meta, damage) = if call.method.starts_with("addRecipe") {
+                let payload = call.args.get(2)?;
+                let meta = if payload.is_empty() {
+                    None
+                } else {
+                    match super::inventory::parse_item_meta(payload) {
+                        Some(meta) => Some(meta),
+                        None => return Some("!the result's item metadata is not readable".into()),
+                    }
+                };
+                (meta, call.args.get(3)?.parse::<i32>().ok().filter(|d| *d >= 0)?)
+            } else {
+                (None, 0)
+            };
             Some(
-                match crate::game::add_plugin_recipe(id, call.args.get(1)?) {
+                match crate::game::add_plugin_recipe(id, call.args.get(1)?, meta, damage) {
                     Ok(added) => added.to_string(),
                     Err(why) => format!("!{why}"),
                 },
@@ -176,6 +191,7 @@ mod tests {
 
     #[test]
     fn adding_and_removing_a_crafting_recipe_changes_what_the_grid_crafts() {
+        let _guard = crate::game::crafting_overlay_lock();
         let json = r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:sand","minecraft:sand"],"result":{"id":"minecraft:emerald","count":2}}"#;
         let grid = call("2", &["SAND", "SAND", "AIR", "AIR"]);
         assert_eq!(answer(&grid), None);
@@ -200,5 +216,36 @@ mod tests {
         assert_eq!(answer(&remove).as_deref(), Some("true"));
         assert_eq!(answer(&remove).as_deref(), Some("false"));
         assert_eq!(answer(&grid), None);
+    }
+
+    /// A `setItemMeta` payload with a name and nothing else (the nine fields joined by U+001E).
+    fn name_only(name: &str) -> String {
+        format!("{name}\u{1e}\u{1e}\u{1e}0\u{1e}\u{1e}0\u{1e}\u{1e}\u{1e}")
+    }
+
+    #[test]
+    fn add_recipe_takes_any_kind_with_its_result_metadata_and_refuses_what_it_cannot_read() {
+        let _guard = crate::game::crafting_overlay_lock();
+        let smelt = r#"{"type":"minecraft:smelting","ingredient":"minecraft:gravel","result":{"id":"minecraft:glass"},"experience":0.1,"cookingtime":100}"#;
+        let named = name_only(r#"{"text":"Fused"}"#);
+        let add = |id: &str, json: &str, meta: &str, damage: &str| {
+            answer(&change(
+                "addRecipe(String,String,String,int)",
+                &[id, json, meta, damage],
+            ))
+        };
+        assert_eq!(add("plugin:route_fuse", smelt, &named, "0").as_deref(), Some("true"));
+        assert_eq!(add("plugin:route_fuse", smelt, "", "0").as_deref(), Some("false"), "taken");
+        // Metadata the host cannot read refuses the recipe instead of adding it bare.
+        let unreadable = add("plugin:route_unreadable", smelt, "not a payload", "0");
+        assert!(unreadable.is_some_and(|reply| reply.starts_with('!')));
+        // A negative wear is a malformed call.
+        assert_eq!(add("plugin:route_wear", smelt, "", "-1"), None);
+        let transmute = r#"{"type":"minecraft:crafting_transmute","input":"minecraft:dirt","material":"minecraft:sand","result":"minecraft:stone"}"#;
+        assert!(add("plugin:route_transmute", transmute, "", "0").is_some_and(|r| r.starts_with('!')));
+        assert_eq!(
+            answer(&change("removeCraftingRecipe(String)", &["plugin:route_fuse"])).as_deref(),
+            Some("true")
+        );
     }
 }

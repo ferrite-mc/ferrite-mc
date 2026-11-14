@@ -66,12 +66,24 @@ impl RecipeBook {
 
     /// Matches a furnace-family input.
     pub fn match_cooking(&self, kind: CookingKind, item: &str) -> Option<&Recipe> {
+        self.match_cooking_where(kind, item, &|_| true)
+    }
+
+    /// [`RecipeBook::match_cooking`] limited to the recipes `allow` accepts (a plugin removed
+    /// the others).
+    pub fn match_cooking_where(
+        &self,
+        kind: CookingKind,
+        item: &str,
+        allow: &dyn Fn(&Recipe) -> bool,
+    ) -> Option<&Recipe> {
         let candidates = self.cooking_candidates(item)?;
         for index in candidates {
             let recipe = &self.recipes()[*index];
             if let RecipeKind::Cooking(cooking) = &recipe.kind
                 && cooking.kind == kind
                 && cooking.ingredient.matches(item, self.tags())
+                && allow(recipe)
             {
                 return Some(recipe);
             }
@@ -81,6 +93,15 @@ impl RecipeBook {
 
     /// Every stonecutter recipe accepting `item`, in recipe-id order.
     pub fn stonecutting_options(&self, item: &str) -> Vec<&Recipe> {
+        self.stonecutting_options_where(item, &|_| true)
+    }
+
+    /// [`RecipeBook::stonecutting_options`] limited to the recipes `allow` accepts.
+    pub fn stonecutting_options_where(
+        &self,
+        item: &str,
+        allow: &dyn Fn(&Recipe) -> bool,
+    ) -> Vec<&Recipe> {
         let Some(candidates) = self.stonecutting_candidates(item) else {
             return Vec::new();
         };
@@ -89,12 +110,37 @@ impl RecipeBook {
             let recipe = &self.recipes()[*index];
             if let RecipeKind::Stonecutting(stonecutting) = &recipe.kind
                 && stonecutting.ingredient.matches(item, self.tags())
+                && allow(recipe)
             {
                 recipes.push(recipe);
             }
         }
         recipes
     }
+}
+
+/// [`RecipeBook::match_cooking`] over a plain list of recipes (added at runtime), first match wins.
+pub fn match_cooking_in<'a>(
+    recipes: &'a [Recipe],
+    tags: &ItemTags,
+    kind: CookingKind,
+    item: &str,
+) -> Option<&'a Recipe> {
+    recipes.iter().find(|recipe| {
+        matches!(&recipe.kind, RecipeKind::Cooking(cooking)
+            if cooking.kind == kind && cooking.ingredient.matches(item, tags))
+    })
+}
+
+/// [`RecipeBook::stonecutting_options`] over a plain list of recipes, in list order.
+pub fn stonecutting_in<'a>(recipes: &'a [Recipe], tags: &ItemTags, item: &str) -> Vec<&'a Recipe> {
+    recipes
+        .iter()
+        .filter(|recipe| {
+            matches!(&recipe.kind, RecipeKind::Stonecutting(cutting)
+                if cutting.ingredient.matches(item, tags))
+        })
+        .collect()
 }
 
 impl CraftingShaped {
@@ -375,6 +421,53 @@ mod tests {
         ];
         assert!(match_crafting_in(&recipes, &tags, &extra, 2, 2).is_none());
         assert!(match_crafting_in(&recipes, &tags, &[stone; 16], 4, 4).is_none());
+    }
+
+    #[test]
+    fn runtime_cooking_recipes_match_by_kind_and_stonecutting_lists_every_option() {
+        let smelt = |id: &str, kind: &str, item: &str| {
+            parse_recipe_json(
+                id,
+                &format!(
+                    r#"{{"type":"minecraft:{kind}","ingredient":"minecraft:{item}","result":{{"id":"minecraft:glass"}},"experience":0.5,"cookingtime":40}}"#
+                ),
+            )
+            .unwrap()
+        };
+        let recipes = [
+            smelt("plugin:a", "smelting", "gravel"),
+            smelt("plugin:b", "smoking", "gravel"),
+            smelt("plugin:c", "campfire_cooking", "gravel"),
+            smelt("plugin:d", "blasting", "gravel"),
+        ];
+        let tags = ItemTags::default();
+        for (kind, id) in [
+            (CookingKind::Smelting, "plugin:a"),
+            (CookingKind::Smoking, "plugin:b"),
+            (CookingKind::CampfireCooking, "plugin:c"),
+            (CookingKind::Blasting, "plugin:d"),
+        ] {
+            let found = match_cooking_in(&recipes, &tags, kind, "minecraft:gravel");
+            assert_eq!(found.map(|r| r.id.as_str()), Some(id));
+        }
+        assert!(match_cooking_in(&recipes, &tags, CookingKind::Smelting, "minecraft:sand").is_none());
+
+        let cut = |id: &str, item: &str| {
+            parse_recipe_json(
+                id,
+                &format!(
+                    r#"{{"type":"minecraft:stonecutting","ingredient":"minecraft:{item}","result":{{"id":"minecraft:stick","count":2}}}}"#
+                ),
+            )
+            .unwrap()
+        };
+        let cuts = [cut("plugin:x", "stone"), cut("plugin:y", "dirt"), cut("plugin:z", "stone")];
+        let ids: Vec<_> = stonecutting_in(&cuts, &tags, "minecraft:stone")
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, ["plugin:x", "plugin:z"]);
+        assert!(stonecutting_in(&cuts, &tags, "minecraft:sand").is_empty());
     }
 
     #[test]
