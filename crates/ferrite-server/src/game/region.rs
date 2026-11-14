@@ -873,6 +873,14 @@ pub struct TickContext {
     pub hooks: Option<Arc<SharedPluginHooks>>,
 }
 
+/// The Bukkit UUID a region's world is published under, for world events.
+fn plugin_world_id(ctx: &TickContext) -> Uuid {
+    match ctx.world_id {
+        super::WorldId::Vanilla(dimension) => crate::plugins::world_id(dimension),
+        super::WorldId::Runtime(id) => id,
+    }
+}
+
 /// Picks the bridge for an event about a non-player entity: the live shared handle first, else
 /// the first player's own handle. Exactly one bridge is returned, so the event fires once.
 pub(super) fn resolve_damage_hooks(
@@ -10283,6 +10291,34 @@ impl Region {
         self.explode_by(center, power, breaks, None, ctx);
     }
 
+    /// Vanilla `ServerExplosion` finalization: level event 2000 at the centre, with data 1 for a
+    /// blast of radius 2 or more (the larger particle); the client plays the explosion sound from
+    /// the same event, so every player within 64 blocks hears and sees it.
+    fn explosion_effects(&self, center: [f64; 3], power: f32) {
+        let at = ferrite_protocol::types::BlockPos::new(
+            center[0].floor() as i32,
+            center[1].floor() as i32,
+            center[2].floor() as i32,
+        );
+        for p in self.players.values() {
+            let dx = p.pos[0] - center[0];
+            let dy = p.pos[1] - center[1];
+            let dz = p.pos[2] - center[2];
+            if dx * dx + dy * dy + dz * dz > 64.0 * 64.0 {
+                continue;
+            }
+            send(
+                p,
+                &LevelEvent {
+                    event: 2000,
+                    location: at.pack(),
+                    data: i32::from(power >= 2.0),
+                    global: false,
+                },
+            );
+        }
+    }
+
     /// Vanilla `Explosion`: entity knockback and exposure first, then the ray cast blocks and
     /// their loot-table drops. `killer` receives credit for mobs the blast kills.
     fn explode_by(
@@ -10390,17 +10426,52 @@ impl Region {
         for pos in chained {
             self.explode_by([pos.x, pos.y + 1.0, pos.z], 6.0, true, killer, ctx);
         }
+        // Vanilla `ServerExplosion` finalizes the explosion even when blocks are kept: level
+        // event 2000 makes the client show the particles and play the explosion sound.
+        self.explosion_effects(center, power);
         if !breaks {
             return;
         }
         // Destroyed blocks, with the state read before it turns into air.
         let air = u32::from(ferrite_data::blocks::default_state("air").expect("vanilla air"));
-        let destroyed;
+        let mut destroyed;
         let mut removed = Vec::new();
         {
             let mut world =
                 super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
             destroyed = super::explosion::explode_blocks(&world, center, power, &mut self.rng);
+            // Bukkit fires BlockExplodeEvent before any block is removed; a cancel leaves the
+            // terrain untouched. The event sees the same blocks the ray cast selected.
+            if let Some((hooks, policy)) = self.damage_hooks(ctx) {
+                let positions: Vec<ferrite_plugin::BlockPosition> = destroyed
+                    .iter()
+                    .map(|[x, y, z]| ferrite_plugin::BlockPosition {
+                        x: *x,
+                        y: *y,
+                        z: *z,
+                    })
+                    .collect();
+                let center_pos = ferrite_plugin::BlockPosition {
+                    x: center[0].floor() as i32,
+                    y: center[1].floor() as i32,
+                    z: center[2].floor() as i32,
+                };
+                match hooks.blocks_exploded(plugin_world_id(ctx), center_pos, &positions, power) {
+                    Ok(Some(kept)) => {
+                        let kept: std::collections::HashSet<[i32; 3]> =
+                            kept.iter().map(|p| [p.x, p.y, p.z]).collect();
+                        destroyed.retain(|pos| kept.contains(pos));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let allow = policy == PluginEventPolicy::Allow;
+                        tracing::warn!(%error, allow, "plugin block explode event failed");
+                        if !allow {
+                            destroyed.clear();
+                        }
+                    }
+                }
+            }
             for pos in &destroyed {
                 // Never touch another region's blocks.
                 let chunk = ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16));

@@ -4,7 +4,75 @@
 //! Chunk state (`isChunkLoaded`, `isChunkGenerated`, `loadChunk`) is answered here for every
 //! world except the default one, whose loaded set `chunks` tracks.
 
-use ferrite_plugin::{HOST_NULL, Heightmap, HostCall};
+use ferrite_plugin::{HOST_NULL, Heightmap, HostCall, WorldView};
+
+/// `ServerLevel.findLightningRod` searches 128 blocks around the position and keeps a rod that
+/// is the top block of its column (`heightmap(WORLD_SURFACE) - 1`); the strike point is the block
+/// above the rod. Vanilla walks the POI storage, which only holds loaded chunks, so the same
+/// restriction applies here.
+fn lightning_rod(
+    view: &dyn WorldView,
+    world: uuid::Uuid,
+    [ox, oy, oz]: [i32; 3],
+) -> Option<[i32; 3]> {
+    const RADIUS: i32 = 128;
+    let mut best: Option<([i32; 3], i64)> = None;
+    for cx in (ox - RADIUS).div_euclid(16)..=(ox + RADIUS).div_euclid(16) {
+        for cz in (oz - RADIUS).div_euclid(16)..=(oz + RADIUS).div_euclid(16) {
+            if view.chunk_loaded(world, cx, cz) == Some(false) {
+                continue;
+            }
+            for x in cx * 16..cx * 16 + 16 {
+                if (x - ox).abs() > RADIUS {
+                    continue;
+                }
+                for z in cz * 16..cz * 16 + 16 {
+                    let (dx, dz) = ((x - ox) as i64, (z - oz) as i64);
+                    if dx * dx + dz * dz > i64::from(RADIUS * RADIUS) {
+                        continue;
+                    }
+                    let Some(top) = view.heightmap(world, x, z, Heightmap::WorldSurface) else {
+                        continue;
+                    };
+                    let dy = i64::from(top - oy);
+                    let distance = dx * dx + dy * dy + dz * dz;
+                    if distance > i64::from(RADIUS * RADIUS)
+                        || best.is_some_and(|(_, nearest)| distance >= nearest)
+                    {
+                        continue;
+                    }
+                    let is_rod = view.block(world, x, top, z).is_some_and(|block| {
+                        block.split('[').next() == Some("minecraft:lightning_rod")
+                    });
+                    if is_rod {
+                        // `ServerLevel.findLightningRod` maps the POI position to `above()`.
+                        best = Some(([x, top + 1, z], distance));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(position, _)| position)
+}
+
+/// `ServerLevel.findLightningTargetAround`: the rod strike point when there is a rod, otherwise
+/// the block above the MOTION_BLOCKING height. Living entities next to the column are not chosen:
+/// the host view does not expose them, so a strike always lands on the column.
+fn lightning_target(
+    view: &dyn WorldView,
+    world: uuid::Uuid,
+    x: i32,
+    _y: i32,
+    z: i32,
+) -> Option<[i32; 3]> {
+    let top = view.heightmap(world, x, z, Heightmap::MotionBlocking)?;
+    let column = [x, top + 1, z];
+    Some(lightning_rod(view, world, column).unwrap_or(column))
+}
+
+fn position_text([x, y, z]: [i32; 3]) -> String {
+    format!("{x} {y} {z}")
+}
 
 /// The reply to a heightmap or light query, or `None` for another call.
 pub fn answer(call: &HostCall) -> Option<String> {
@@ -37,6 +105,32 @@ fn answer_with_view(
             view?
                 .light_level(world?, x.parse().ok()?, y.parse().ok()?, z.parse().ok()?)
                 .map(|level| level.to_string())
+        })(),
+        ("findLightningRod(int,int,int)", [x, y, z]) => (|| {
+            let view = view?;
+            Some(
+                lightning_rod(
+                    view,
+                    world?,
+                    [x.parse().ok()?, y.parse().ok()?, z.parse().ok()?],
+                )
+                .map(position_text)
+                .unwrap_or_default(),
+            )
+        })(),
+        ("findLightningTarget(int,int,int)", [x, y, z]) => (|| {
+            let view = view?;
+            Some(
+                lightning_target(
+                    view,
+                    world?,
+                    x.parse().ok()?,
+                    y.parse().ok()?,
+                    z.parse().ok()?,
+                )
+                .map(position_text)
+                .unwrap_or_default(),
+            )
         })(),
         ("isChunkLoaded(int,int)", [x, z]) => (|| {
             view?
@@ -362,5 +456,55 @@ mod tests {
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
         root.join("reports/blocks.json").exists().then_some(root)
+    }
+
+    /// A flat world with one lightning rod at (4, 64, 5), the top of its column.
+    struct Lightning;
+    impl ferrite_plugin::WorldView for Lightning {
+        fn block(&self, _: Uuid, x: i32, y: i32, z: i32) -> Option<String> {
+            Some(
+                if (x, z) == (4, 5) && y == 64 {
+                    "minecraft:lightning_rod"
+                } else {
+                    "minecraft:air"
+                }
+                .to_owned(),
+            )
+        }
+        fn sky_light(&self, _: Uuid, _: i32, _: i32, _: i32) -> Option<u8> {
+            None
+        }
+        fn highest_block(&self, _: Uuid, x: i32, z: i32) -> Option<i32> {
+            Some(if (x, z) == (4, 5) { 64 } else { 63 })
+        }
+        fn biome(&self, _: Uuid, _: i32, _: i32, _: i32) -> Option<String> {
+            Some("minecraft:plains".to_owned())
+        }
+        fn heightmap(&self, _: Uuid, x: i32, z: i32, _: ferrite_plugin::Heightmap) -> Option<i32> {
+            Some(if (x, z) == (4, 5) { 64 } else { 63 })
+        }
+        fn chunk_loaded(&self, _: Uuid, _: i32, _: i32) -> Option<bool> {
+            Some(true)
+        }
+    }
+
+    #[test]
+    fn lightning_prefers_a_rod_that_tops_its_column() {
+        let world = Uuid::from_u128(0x7f);
+        let ask = |method: &str, x: i32, z: i32| {
+            answer_with_view(
+                &call(world, method, &[&x.to_string(), "64", &z.to_string()]),
+                Some(&Lightning),
+            )
+            .unwrap()
+        };
+        assert_eq!(ask("findLightningRod(int,int,int)", 1, 1), "4 65 5");
+        assert_eq!(ask("findLightningTarget(int,int,int)", 1, 1), "4 65 5");
+        // No rod within the 128-block search: the strike point is above the MOTION_BLOCKING height.
+        assert_eq!(
+            ask("findLightningTarget(int,int,int)", 200, 200),
+            "200 64 200"
+        );
+        assert_eq!(ask("findLightningRod(int,int,int)", 400, 400), "");
     }
 }

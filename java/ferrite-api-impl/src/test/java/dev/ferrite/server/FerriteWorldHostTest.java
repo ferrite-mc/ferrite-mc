@@ -283,6 +283,21 @@ class FerriteWorldHostTest {
         assertThrows(IllegalArgumentException.class, () -> world.spawn(new Location(world, 0, 64, 0), org.bukkit.entity.Player.class));
     }
 
+    @Test void lightningRodAndTargetComeFromTheHost() {
+        replies.put("findLightningRod(int,int,int)", "4 65 5");
+        replies.put("findLightningTarget(int,int,int)", "4 65 5");
+        var at = new Location(world, 1, 64, 1);
+        var rod = world.findLightningRod(at);
+        assertNotNull(rod);
+        assertEquals(4, rod.getBlockX());
+        assertEquals(65, rod.getBlockY(), "the strike point is above the rod");
+        assertEquals(5, rod.getBlockZ());
+        assertEquals("findLightningRod(int,int,int)|" + 1 + HostBridge.ARG + 64 + HostBridge.ARG + 1, lastCall());
+        assertEquals(4, world.findLightningTarget(at).getBlockX());
+        replies.put("findLightningRod(int,int,int)", "");
+        assertNull(world.findLightningRod(at));
+    }
+
     @Test void createEntityKeepsTheEntityOutOfTheWorldUntilAddEntity() {
         replies.put("spawnEntity(Location,EntityType,String)", "");
         var created = world.createEntity(new Location(world, 3, 64, 3), org.bukkit.entity.Cow.class);

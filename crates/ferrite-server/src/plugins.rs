@@ -450,6 +450,12 @@ impl PluginBridge {
                                 players(command);
                                 return Some(String::new());
                             }
+                            if let Some(reply) = terrain
+                                .as_deref()
+                                .and_then(|terrain| worldgen::place_feature_blocks(terrain, call))
+                            {
+                                return Some(reply);
+                            }
                             if let Some((lines, reply)) = terrain
                                 .as_deref()
                                 .and_then(|terrain| worldgen::place_feature(terrain, call))
@@ -700,10 +706,17 @@ impl ferrite_plugin::WorldView for SourceWorldView {
         Some(source.chunk_resident(x, z) || source.chunk_saved(x, z))
     }
     fn load_chunk(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<bool> {
-        Some(
-            self.source(world)?
-                .ensure_chunk_loaded(x, z, CHUNK_LOAD_TIMEOUT),
-        )
+        let loaded = self
+            .source(world)?
+            .ensure_chunk_loaded(x, z, CHUNK_LOAD_TIMEOUT);
+        if loaded {
+            // `World#loadChunk` keeps the chunk visible to `getLoadedChunks` until it is unloaded.
+            crate::plugins::chunks::mark_loaded(world, x, z);
+        }
+        Some(loaded)
+    }
+    fn loaded_chunks(&self, world: uuid::Uuid) -> Option<Vec<(i32, i32)>> {
+        Some(self.source(world)?.resident_chunks())
     }
     fn block_entities(
         &self,

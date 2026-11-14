@@ -200,14 +200,31 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     private volatile double voidDamageOffset = -64.0;
     private final java.util.Map<Long, java.util.Set<org.bukkit.plugin.Plugin>> chunkTickets = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Set<Long> forceLoaded = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** Chunk keys the host currently keeps loaded on this world's behalf (tickets + forceload). */
+    private final java.util.Set<Long> hostHeld = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Tells the host the final union of this chunk's plugin holds, so two plugins can share one. */
+    private void refreshHold(int x, int z) {
+        long key = chunkKey(x, z);
+        boolean held = forceLoaded.contains(key)
+            || chunkTickets.getOrDefault(key, java.util.Set.of()).size() > 0;
+        boolean known = hostHeld.contains(key);
+        if (held == known) return;
+        if (held) hostHeld.add(key); else hostHeld.remove(key);
+        try { HostBridge.callBoolean("World", id, "holdChunk(int,int,boolean)", x, z, held); }
+        catch (UnsupportedOperationException noHost) { /* remembered only; the chunk list still reflects it */ }
+    }
     /** Block entity types that run a server-side ticker in vanilla (a `ticker` in their block's `getTicker`). */
     static final java.util.Set<String> TICKING_BLOCK_ENTITIES = java.util.Set.of(
         "minecraft:furnace", "minecraft:blast_furnace", "minecraft:smoker", "minecraft:hopper", "minecraft:brewing_stand",
         "minecraft:beacon", "minecraft:conduit", "minecraft:campfire", "minecraft:bell", "minecraft:beehive",
-        "minecraft:spawner", "minecraft:trial_spawner", "minecraft:vault", "minecraft:jukebox", "minecraft:chest",
-        "minecraft:trapped_chest", "minecraft:ender_chest", "minecraft:sculk_sensor", "minecraft:calibrated_sculk_sensor",
-        "minecraft:sculk_shrieker", "minecraft:sculk_catalyst", "minecraft:end_gateway", "minecraft:piston",
-        "minecraft:decorated_pot");
+        "minecraft:mob_spawner", "minecraft:trial_spawner", "minecraft:vault", "minecraft:jukebox",
+        // `ShulkerBoxBlock`, `SignBlock`/`HangingSignBlock` and `CrafterBlock` return a server
+        // ticker unconditionally; `DaylightDetectorBlock` only in a sky-light dimension.
+        "minecraft:shulker_box", "minecraft:sign", "minecraft:hanging_sign", "minecraft:daylight_detector",
+        "minecraft:sculk_sensor", "minecraft:calibrated_sculk_sensor", "minecraft:sculk_shrieker",
+        "minecraft:sculk_catalyst", "minecraft:end_gateway", "minecraft:piston", "minecraft:crafter",
+        "minecraft:creaking_heart", "minecraft:potent_sulfur");
 
     private record PoiHit(io.papermc.paper.entity.poi.PoiType poiType, org.bukkit.Location location)
         implements io.papermc.paper.entity.poi.PoiSearchResult {}
@@ -282,8 +299,21 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 if (item.isEmpty()) continue;
                 if (!tickingOnly) { total++; continue; }
                 var parts = item.split(",", 4);
-                var nbt = parts.length == 4 ? StructureNbt.compound(parts[3]) : null;
-                if (nbt != null && nbt.get("id") instanceof String type && TICKING_BLOCK_ENTITIES.contains(type)) total++;
+                if (parts.length != 4) continue;
+                var nbt = StructureNbt.compound(parts[3]);
+                if (!(nbt != null && nbt.get("id") instanceof String type && TICKING_BLOCK_ENTITIES.contains(type))) continue;
+                // Vanilla's ticker is conditional for these blocks (their `getTicker` returns
+                // null for the other states), so count only the states that really tick.
+                if (type.equals("minecraft:jukebox")) {
+                    if (!stateAt(new Pos(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]))).contains("has_record=true")) continue;
+                } else if (type.equals("minecraft:creaking_heart")) {
+                    if (stateAt(new Pos(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]))).contains("state=uprooted")) continue;
+                } else if (type.equals("minecraft:daylight_detector") && environment() != org.bukkit.World.Environment.NORMAL) {
+                    // Its ticker only exists in dimensions with sky light; neither the nether nor
+                    // the end does.
+                    continue;
+                }
+                total++;
             }
         }
         return total;
@@ -436,28 +466,24 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
     }
 
     /** World queries answered from Java-side state and the player list. */
-    /** The nearest lightning rod within 128 blocks, looking at the top block of each loaded column. */
+    /**
+     * `ServerLevel.findLightningRod`: the block above the nearest lightning rod whose column top is
+     * the rod itself, within 128 blocks and only in chunks the server has loaded. The host walks its
+     * own chunk data, so this works for the overworld, nether, end and runtime worlds alike.
+     */
     private org.bukkit.Location findRod(org.bukkit.Location from) {
-        var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
-        if (text == null || text.isEmpty()) return null;
-        Pos best = null;
-        double bestDistance = 128.0 * 128.0;
-        for (var pair : text.split(String.valueOf(HostBridge.ITEM))) {
-            var parts = pair.split(",");
-            int cx = Integer.parseInt(parts[0]), cz = Integer.parseInt(parts[1]);
-            if (Math.abs((cx << 4) + 8 - from.getX()) > 144 || Math.abs((cz << 4) + 8 - from.getZ()) > 144) continue;
-            for (int dx = 0; dx < 16; dx++) for (int dz = 0; dz < 16; dz++) {
-                int x = (cx << 4) + dx, z = (cz << 4) + dz;
-                double d = (x + 0.5 - from.getX()) * (x + 0.5 - from.getX()) + (z + 0.5 - from.getZ()) * (z + 0.5 - from.getZ());
-                if (d >= bestDistance) continue;
-                try {
-                    int top = Native.highestBlockY(id.toString(), x, z);
-                    if (top == Integer.MIN_VALUE) continue;
-                    if (typeAt(new Pos(x, top, z)) == org.bukkit.Material.LIGHTNING_ROD) { best = new Pos(x, top, z); bestDistance = d; }
-                } catch (UnsupportedOperationException | IllegalStateException noData) { /* column not readable */ }
-            }
-        }
-        return best == null ? null : new org.bukkit.Location(proxy, best.x(), best.y(), best.z());
+        return hostPosition("findLightningRod(int,int,int)", from);
+    }
+    /** `ServerLevel.findLightningTargetAround`: the rod strike point, else the column's MOTION_BLOCKING top. */
+    private org.bukkit.Location findTarget(org.bukkit.Location from) {
+        return hostPosition("findLightningTarget(int,int,int)", from);
+    }
+    private org.bukkit.Location hostPosition(String method, org.bukkit.Location from) {
+        var reply = (String) HostBridge.call("World", id, method, String.class, from.getBlockX(), from.getBlockY(), from.getBlockZ());
+        if (reply == null) throw new UnsupportedOperationException("Ferrite: " + method.substring(0, method.indexOf('(')) + " needs the world host");
+        if (reply.isEmpty()) return null;
+        var parts = reply.split(" ");
+        return new org.bukkit.Location((org.bukkit.World) proxy, Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
     }
     /** Biome temperature (cooler above y=81, noise ignored) or humidity at a position. */
     private double climate(boolean temperature, int x, int y, int z) {
@@ -527,7 +553,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 }
                 return null;
             }
-            case "isChunkInUse" -> { return chunkLoaded((int) args[0], (int) args[1]); }
+            case "isChunkInUse" -> { return HostBridge.callBoolean("World", id, "isChunkInUse(int,int)", (int) args[0], (int) args[1]); }
             case "getChunkAtAsync" -> {
                 // The chunk handle is a view that needs no loading step, so the callback runs at once.
                 var done = new java.util.concurrent.CompletableFuture<org.bukkit.Chunk>();
@@ -562,16 +588,21 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 return (boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, cx, cz);
             }
             case "getChunkGenerationState", "getChunkGenerationStateAsync" -> {
-                boolean generated = (boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, (int) args[0], (int) args[1]);
-                var state = generated ? io.papermc.paper.world.chunk.ChunkGenerationState.GENERATED : io.papermc.paper.world.chunk.ChunkGenerationState.NOT_GENERATED;
+                int cx = (int) args[0], cz = (int) args[1];
+                boolean generated = (boolean) HostBridge.call("World", id, "isChunkGenerated(int,int)", Boolean.class, cx, cz);
+                // Paper's states: a saved but non-resident chunk is PARTIAL, a resident one is
+                // GENERATED. OUTDATED needs a saved DataVersion check Ferrite does not keep.
+                var state = !generated ? io.papermc.paper.world.chunk.ChunkGenerationState.NOT_GENERATED
+                    : chunkLoaded(cx, cz) ? io.papermc.paper.world.chunk.ChunkGenerationState.GENERATED
+                    : io.papermc.paper.world.chunk.ChunkGenerationState.PARTIAL;
                 return method.equals("getChunkGenerationState") ? state : java.util.concurrent.CompletableFuture.completedFuture(state);
             }
             case "unloadChunk", "unloadChunkRequest" -> {
-                // The server unloads a chunk by itself once nobody holds it, so a request succeeds
-                // exactly when the chunk is already unloaded and fails while a player or the spawn holds it.
+                // The host drops the plugin hold; a chunk a player still holds (or a source that
+                // keeps it resident) refuses, exactly like Bukkit's "cannot unload now".
                 int cx = args[0] instanceof org.bukkit.Chunk c ? c.getX() : (int) args[0];
                 int cz = args[0] instanceof org.bukkit.Chunk c ? c.getZ() : (int) args[1];
-                return !chunkLoaded(cx, cz);
+                return HostBridge.callBoolean("World", id, "unloadChunk(int,int)", cx, cz);
             }
             case "loadChunk" -> {
                 // The host loads the chunk (generating it only when `generate` is set) and
@@ -583,14 +614,7 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 return (boolean) HostBridge.call("World", id, "loadChunk(int,int)", Boolean.class, cx, cz);
             }
             case "findLightningRod" -> { return findRod((org.bukkit.Location) args[0]); }
-            case "findLightningTarget" -> {
-                var at = (org.bukkit.Location) args[0];
-                var rod = findRod(at);
-                if (rod != null) return rod;
-                int top = Native.highestBlockY(id.toString(), at.getBlockX(), at.getBlockZ());
-                if (top == Integer.MIN_VALUE) throw new UnsupportedOperationException("Ferrite: no height data at " + at.getBlockX() + "," + at.getBlockZ());
-                return new org.bukkit.Location(proxy, at.getBlockX(), top + 1, at.getBlockZ());
-            }
+            case "findLightningTarget" -> { return findTarget((org.bukkit.Location) args[0]); }
             case "getLoadedChunks" -> {
                 var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
                 var chunks = new java.util.ArrayList<org.bukkit.Chunk>();
@@ -742,11 +766,31 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 chunkTickets.forEach((key, plugins) -> { for (var plugin : plugins) tickets.computeIfAbsent(plugin, ignored -> new java.util.ArrayList<>()).add(chunk(keyX(key), keyZ(key))); });
                 yield tickets;
             }
-            case "addPluginChunkTicket" -> chunkTickets.computeIfAbsent(chunkKey((int) args[0], (int) args[1]), ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(java.util.Objects.requireNonNull((org.bukkit.plugin.Plugin) args[2], "plugin"));
-            case "removePluginChunkTicket" -> { var plugins = chunkTickets.get(chunkKey((int) args[0], (int) args[1])); yield plugins != null && plugins.remove((org.bukkit.plugin.Plugin) args[2]); }
-            case "removePluginChunkTickets" -> { chunkTickets.values().forEach(plugins -> plugins.remove((org.bukkit.plugin.Plugin) args[0])); yield null; }
+            case "addPluginChunkTicket" -> {
+                int x = (int) args[0], z = (int) args[1];
+                boolean added = chunkTickets.computeIfAbsent(chunkKey(x, z), ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(java.util.Objects.requireNonNull((org.bukkit.plugin.Plugin) args[2], "plugin"));
+                refreshHold(x, z);
+                yield added;
+            }
+            case "removePluginChunkTicket" -> {
+                int x = (int) args[0], z = (int) args[1];
+                var plugins = chunkTickets.get(chunkKey(x, z));
+                boolean removed = plugins != null && plugins.remove((org.bukkit.plugin.Plugin) args[2]);
+                refreshHold(x, z);
+                yield removed;
+            }
+            case "removePluginChunkTickets" -> {
+                for (var entry : chunkTickets.entrySet()) entry.getValue().remove((org.bukkit.plugin.Plugin) args[0]);
+                for (long key : hostHeld) refreshHold(keyX(key), keyZ(key));
+                yield null;
+            }
             case "isChunkForceLoaded" -> forceLoaded.contains(chunkKey((int) args[0], (int) args[1]));
-            case "setChunkForceLoaded" -> { if ((boolean) args[2]) forceLoaded.add(chunkKey((int) args[0], (int) args[1])); else forceLoaded.remove(chunkKey((int) args[0], (int) args[1])); yield null; }
+            case "setChunkForceLoaded" -> {
+                int x = (int) args[0], z = (int) args[1];
+                if ((boolean) args[2]) forceLoaded.add(chunkKey(x, z)); else forceLoaded.remove(chunkKey(x, z));
+                refreshHold(x, z);
+                yield null;
+            }
             case "getForceLoadedChunks" -> { var chunks = new java.util.ArrayList<org.bukkit.Chunk>(); for (long key : forceLoaded) chunks.add(chunk(keyX(key), keyZ(key))); yield chunks; }
             case "getRaids", "getPopulators" -> java.util.List.of();
             case "getRaid", "locateNearestRaid" -> null;
@@ -882,15 +926,32 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             }
             case "canGenerateStructures" -> true;
             case "generateTree" -> {
-                // (Location, TreeType) | (Location, Random, TreeType); a BlockChangeDelegate cannot be honoured.
-                if (args.length < 2 || !(args[0] instanceof org.bukkit.Location at) || !(args[args.length - 1] instanceof org.bukkit.TreeType type)) yield NONE;
+                // (Location, TreeType) | (Location, Random, TreeType) | (... , BlockChangeDelegate).
+                if (args.length < 2 || !(args[0] instanceof org.bukkit.Location at)) yield NONE;
+                org.bukkit.TreeType type = null;
+                for (var arg : args) if (arg instanceof org.bukkit.TreeType found) type = found;
+                if (type == null) yield NONE;
                 var feature = treeFeature(type);
                 if (feature == null) yield false;
+                org.bukkit.BlockChangeDelegate delegate = null;
+                for (var arg : args) if (arg instanceof org.bukkit.BlockChangeDelegate d) delegate = d;
+                if (delegate != null) {
+                    // The delegate owns the changes; the host only reports the feature's blocks.
+                    var reply = (String) HostBridge.call("World", id, "featureBlocks(Location,String)", String.class, at, feature);
+                    if (reply == null) throw new UnsupportedOperationException("Ferrite: generateTree with a BlockChangeDelegate needs the world host");
+                    boolean applied = true;
+                    for (var line : reply.split("\n")) {
+                        if (line.isEmpty()) continue;
+                        var fields = line.split(",", 4);
+                        if (fields.length != 4) continue;
+                        applied &= delegate.setBlockData(Integer.parseInt(fields[0]), Integer.parseInt(fields[1]), Integer.parseInt(fields[2]), FerriteBlockData.create(fields[3]));
+                    }
+                    yield applied && !reply.isEmpty();
+                }
                 yield Boolean.parseBoolean((String) HostBridge.call("World", id, "placeFeature(Location,String)", String.class, at, feature));
             }
             case "getChunkCount" -> {
-                var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
-                yield text == null || text.isEmpty() ? 0 : text.split(String.valueOf(HostBridge.ITEM)).length;
+                yield Integer.parseInt((String) HostBridge.call("World", id, "getChunkCount()", String.class));
             }
             case "isVoidDamageEnabled" -> voidDamageEnabled;
             case "setVoidDamageEnabled" -> { voidDamageEnabled = (boolean) args[0]; pushVoidDamage(); yield null; }
@@ -938,6 +999,15 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case MANGROVE -> "minecraft:mangrove";
             case TALL_MANGROVE -> "minecraft:tall_mangrove";
             case CHERRY -> "minecraft:cherry";
+            case PALE_OAK -> "minecraft:pale_oak";
+            case PALE_OAK_CREAKING -> "minecraft:pale_oak_creaking";
+            case RED_POPLAR -> "minecraft:red_poplar";
+            case ORANGE_POPLAR -> "minecraft:orange_poplar";
+            case YELLOW_POPLAR -> "minecraft:yellow_poplar";
+            case COCOA_TREE -> "minecraft:jungle_tree";
+            case MEGA_PINE -> "minecraft:mega_pine";
+            case CRIMSON_FUNGUS -> "minecraft:crimson_fungus";
+            case WARPED_FUNGUS -> "minecraft:warped_fungus";
             case AZALEA -> "minecraft:azalea_tree";
             case RED_MUSHROOM -> "minecraft:huge_red_mushroom";
             case BROWN_MUSHROOM -> "minecraft:huge_brown_mushroom";
