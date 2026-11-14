@@ -43,8 +43,35 @@ pub fn get(player: Uuid) -> Option<ClientSettings> {
 
 pub fn forget(player: Uuid) {
     registry().lock().unwrap().remove(&player);
+    virtual_hosts().lock().unwrap().remove(&player);
     pings().lock().unwrap().remove(&player);
     brands().lock().unwrap().remove(&player);
+}
+
+fn virtual_hosts() -> &'static Mutex<HashMap<Uuid, (String, u16)>> {
+    static HOSTS: OnceLock<Mutex<HashMap<Uuid, (String, u16)>>> = OnceLock::new();
+    HOSTS.get_or_init(Default::default)
+}
+
+/// The host name and port the client typed to connect (the handshake's `server_address` and
+/// `server_port`), for `Player#getVirtualHost`. A BungeeCord handshake carries forwarding data
+/// after the first NUL, which is not part of the name.
+pub fn record_virtual_host(player: Uuid, address: &str, port: u16) {
+    let host: String = address
+        .split('\0')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(255)
+        .collect();
+    if !host.is_empty() {
+        virtual_hosts().lock().unwrap().insert(player, (host, port));
+    }
+}
+
+pub fn virtual_host(player: Uuid) -> Option<(String, u16)> {
+    virtual_hosts().lock().unwrap().get(&player).cloned()
 }
 
 fn brands() -> &'static Mutex<HashMap<Uuid, String>> {
@@ -190,5 +217,26 @@ mod tests {
         );
         assert!(is_keepalive_answer(&[28, 0, 0, 0, 0, 0, 0, 0, 1]));
         assert!(!is_keepalive_answer(&[29]));
+    }
+
+    /// `Player#getVirtualHost`: what the client typed, without BungeeCord's forwarding data.
+    #[test]
+    fn the_virtual_host_is_the_handshake_name_and_port() {
+        let player = Uuid::from_u128(0x7e57_4057);
+        assert_eq!(virtual_host(player), None);
+        record_virtual_host(player, "play.example.com", 25565);
+        assert_eq!(
+            virtual_host(player),
+            Some(("play.example.com".to_owned(), 25565))
+        );
+        record_virtual_host(player, "lobby.example.com\0203.0.113.7\0uuid\0[]", 25570);
+        assert_eq!(
+            virtual_host(player),
+            Some(("lobby.example.com".to_owned(), 25570))
+        );
+        record_virtual_host(player, "\0only-forwarding", 1);
+        assert_eq!(virtual_host(player).unwrap().1, 25570, "an empty name keeps the old one");
+        forget(player);
+        assert_eq!(virtual_host(player), None);
     }
 }

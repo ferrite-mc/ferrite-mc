@@ -314,7 +314,16 @@ async fn handle_connection(
         } else {
             None
         };
-        return offline_login(stream, decoder, config, key, legacy, peer).await;
+        return offline_login(
+            stream,
+            decoder,
+            config,
+            key,
+            legacy,
+            peer,
+            (handshake.server_address.clone(), handshake.server_port),
+        )
+        .await;
     }
     let packet = read_packet_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
     let mut body = packet.as_slice();
@@ -353,6 +362,7 @@ async fn offline_login(
     key: Option<std::sync::Arc<rsa::RsaPrivateKey>>,
     legacy: Option<forwarding::LegacyForwarding>,
     peer: std::net::IpAddr,
+    virtual_host: (String, u16),
 ) -> Result<()> {
     use ferrite_protocol::packets::login::{LoginStart, LoginSuccess, SetCompression};
 
@@ -416,6 +426,7 @@ async fn offline_login(
             }
         }
     };
+    settings::record_virtual_host(profile.uuid, &virtual_host.0, virtual_host.1);
     send_packet(
         &mut stream,
         &SetCompression {

@@ -91,4 +91,29 @@ class PlayerParticleTest {
         assertThrows(IllegalArgumentException.class, () -> player.spawnParticle(Particle.ITEM, 0, 64, 0, 1, new org.bukkit.inventory.ItemStack(Material.AIR)));
         assertThrows(NullPointerException.class, () -> player.spawnParticle(null, 0, 64, 0, 1));
     }
+
+    @Test void theVirtualHostIsTheUnresolvedHandshakeAddress() {
+        HostBridge.transport = (owner, subject, method, args) -> "play.example.com:25565";
+        var host = player.getVirtualHost();
+        assertEquals("play.example.com", host.getHostString());
+        assertEquals(25565, host.getPort());
+        assertTrue(host.isUnresolved());
+        HostBridge.transport = (owner, subject, method, args) -> HostBridge.NULL;
+        assertNull(player.getVirtualHost());
+        assertNull(PlayerMisc.parseVirtualHost("nonsense"));
+        assertNull(PlayerMisc.parseVirtualHost("host:99999"));
+        assertNull(player.getHAProxyAddress());
+    }
+
+    /** Players cannot be cloned or spawned, have no SNBT and no pick item (vanilla `Player`). */
+    @Test void playersRefuseCopyAndSpawnAndHaveNoSnbtOrPickItem() {
+        HostBridge.transport = (owner, subject, method, args) -> { fail("answered without the host: " + method); return ""; };
+        assertThrows(UnsupportedOperationException.class, () -> player.copy());
+        assertThrows(UnsupportedOperationException.class, () -> player.copy(player.getLocation()));
+        assertThrows(UnsupportedOperationException.class, () -> player.spawnAt(player.getLocation(), org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.CUSTOM));
+        assertThrows(UnsupportedOperationException.class, () -> player.spawnAt(player.getLocation()));
+        assertNull(player.getAsString());
+        assertNull(player.getPickItemStack());
+        assertNull(player.getMemory(org.bukkit.entity.memory.MemoryKey.HOME));
+    }
 }

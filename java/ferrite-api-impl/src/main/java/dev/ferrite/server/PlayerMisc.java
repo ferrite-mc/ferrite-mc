@@ -796,7 +796,21 @@ public abstract class PlayerMisc extends PlayerStubs {
     @Override public void setItemInHand(org.bukkit.inventory.ItemStack item) { getInventory().setItemInMainHand(item); }
     @Override public void setItemOnCursor(org.bukkit.inventory.ItemStack item) { getOpenInventory().setCursor(item); }
     @Override public org.bukkit.inventory.ItemStack getWeapon() { return getInventory().getItemInMainHand(); }
+    /** `Player.getPickResult` is null in vanilla: middle-clicking a player gives nothing. */
     @Override public org.bukkit.inventory.ItemStack getPickItemStack() { return null; }
+    /**
+     * Entity data as SNBT, like `CraftEntity.getAsString`: a player has no entity encode id
+     * (`Entity.saveAsPassenger` refuses), so there is no string.
+     */
+    @Override public String getAsString() { return null; }
+    /** A player is a connection, not a spawnable entity: vanilla cannot create one from a type. */
+    @Override public org.bukkit.entity.Entity copy() { throw new UnsupportedOperationException("Cannot copy players."); }
+    @Override public org.bukkit.entity.Entity copy(org.bukkit.Location to) { Objects.requireNonNull(to, "location"); throw new UnsupportedOperationException("Cannot copy players."); }
+    @Override public boolean spawnAt(org.bukkit.Location location, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason reason) {
+        Objects.requireNonNull(location, "location");
+        Objects.requireNonNull(reason, "reason");
+        throw new UnsupportedOperationException("Cannot spawn players: they are placed by joining, use teleport instead.");
+    }
 
     // ---- scheduler and view ranges ---------------------------------------------------------------
     private io.papermc.paper.threadedregions.scheduler.EntityScheduler scheduler;
@@ -956,7 +970,23 @@ public abstract class PlayerMisc extends PlayerStubs {
         }
     }
     @Override public java.net.SocketAddress getSocketAddress() { return getAddress(); }
-    @Override public java.net.InetSocketAddress getVirtualHost() { return null; }
+    /** The host name and port the client typed to connect, unresolved like Paper's. */
+    @Override public java.net.InetSocketAddress getVirtualHost() {
+        String text = (String) HostBridge.call("Player", getUniqueId(), "getVirtualHost()", String.class);
+        return parseVirtualHost(text);
+    }
+    static java.net.InetSocketAddress parseVirtualHost(String text) {
+        if (text == null || text.isEmpty()) return null;
+        int colon = text.lastIndexOf(':');
+        if (colon <= 0) return null;
+        try {
+            int port = Integer.parseInt(text.substring(colon + 1));
+            return port < 0 || port > 65535 ? null : java.net.InetSocketAddress.createUnresolved(text.substring(0, colon), port);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+    /** Ferrite does not read the PROXY protocol header, so there is never an HAProxy address (Paper also returns null without one). */
     @Override public java.net.InetSocketAddress getHAProxyAddress() { return null; }
 
     // ---- post effects ----------------------------------------------------------------------------------------

@@ -827,6 +827,10 @@ pub fn answer(call: &HostCall) -> Option<String> {
                 .join(&ferrite_plugin::HOST_ITEM_SEPARATOR.to_string()),
         );
     }
+    if call.method == "getVirtualHost()" {
+        // `host:port` as the client typed it; Java builds the unresolved address.
+        return ferrite_net::settings::virtual_host(player).map(|(host, port)| format!("{host}:{port}"));
+    }
     if call.method == "getClientBrandName()" {
         return ferrite_net::settings::brand(player);
     }
