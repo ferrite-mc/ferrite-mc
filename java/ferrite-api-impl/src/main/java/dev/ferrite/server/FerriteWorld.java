@@ -209,6 +209,64 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         "minecraft:sculk_shrieker", "minecraft:sculk_catalyst", "minecraft:end_gateway", "minecraft:piston",
         "minecraft:decorated_pot");
 
+    private record PoiHit(io.papermc.paper.entity.poi.PoiType poiType, org.bukkit.Location location)
+        implements io.papermc.paper.entity.poi.PoiSearchResult {}
+
+    /**
+     * Points of interest around a location, nearest first. Ferrite has no POI storage, so this scans the loaded chunks
+     * within the radius for blocks that belong to a requested type. Occupancy (villager tickets) is not tracked: only
+     * {@code ANY} is answered.
+     */
+    @SuppressWarnings("unchecked")
+    private java.util.List<PoiHit> poiSearch(Object[] args, boolean nearestOnly) {
+        var origin = (org.bukkit.Location) args[0];
+        int radius = (int) args[2];
+        if (radius < 0) throw new IllegalArgumentException("radius must be >= 0");
+        if (args.length > 3 && args[3] != io.papermc.paper.entity.poi.PoiType.Occupancy.ANY)
+            throw new UnsupportedOperationException("Ferrite: POI occupancy is not tracked; only Occupancy.ANY is supported");
+        java.util.List<FerritePoiType> types = new java.util.ArrayList<>();
+        if (args[1] instanceof FerritePoiType one) types.add(one);
+        else if (args[1] instanceof java.util.function.Predicate<?> filter) {
+            for (var key : FerriteRegistryAccess.poiTypeKeys()) {
+                var type = new FerritePoiType(org.bukkit.NamespacedKey.fromString(key));
+                if (((java.util.function.Predicate<io.papermc.paper.entity.poi.PoiType>) filter).test(type)) types.add(type);
+            }
+        } else throw new IllegalArgumentException("Unsupported PoiType " + args[1]);
+        var names = new java.util.HashSet<String>();
+        for (var type : types) names.addAll(type.blockNames());
+        var hits = new java.util.ArrayList<PoiHit>();
+        if (names.isEmpty() || radius > 256) {
+            if (radius > 256) throw new IllegalArgumentException("radius must be <= 256");
+            return hits;
+        }
+        int ox = origin.getBlockX(), oy = origin.getBlockY(), oz = origin.getBlockZ();
+        var loaded = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
+        if (loaded == null || loaded.isEmpty()) return hits;
+        int low = Math.max(minHeight(), oy - radius), high = Math.min(minHeight() + height() - 1, oy + radius);
+        long limit = (long) radius * radius;
+        for (var pair : loaded.split(String.valueOf(HostBridge.ITEM))) {
+            var xz = pair.split(",");
+            int cx = Integer.parseInt(xz[0]) << 4, cz = Integer.parseInt(xz[1]) << 4;
+            if (cx + 15 < ox - radius || cx > ox + radius || cz + 15 < oz - radius || cz > oz + radius) continue;
+            for (int x = Math.max(cx, ox - radius); x <= Math.min(cx + 15, ox + radius); x++)
+                for (int z = Math.max(cz, oz - radius); z <= Math.min(cz + 15, oz + radius); z++)
+                    for (int y = low; y <= high; y++) {
+                        long dx = x - ox, dy = y - oy, dz = z - oz;
+                        if (dx * dx + dy * dy + dz * dz > limit) continue;
+                        String state;
+                        try { state = stateAt(new Pos(x, y, z)); } catch (UnsupportedOperationException unknown) { continue; }
+                        int bracket = state.indexOf('[');
+                        if (!names.contains(bracket < 0 ? state : state.substring(0, bracket))) continue;
+                        var data = FerriteBlockData.create(state);
+                        for (var type : types) {
+                            if (type.is(data)) { hits.add(new PoiHit(type, new org.bukkit.Location((org.bukkit.World) proxy, x, y, z))); break; }
+                        }
+                    }
+        }
+        hits.sort(java.util.Comparator.comparingDouble(hit -> hit.location().distanceSquared(origin)));
+        return nearestOnly && hits.size() > 1 ? new java.util.ArrayList<>(hits.subList(0, 1)) : hits;
+    }
+
     /** Counts the block entities of the loaded chunks, one host query per chunk. */
     private int tileEntities(boolean tickingOnly) {
         var text = (String) HostBridge.call("World", id, "getLoadedChunkCoordinates()", String.class);
@@ -805,6 +863,11 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                     if (candidate.getKey().getKey().equals(tag)) yield java.util.Set.copyOf(candidate.getValues());
                 throw new UnsupportedOperationException("Ferrite: block tag minecraft:" + tag + " is not in the generated data");
             }
+            case "locateNearestPoi" -> {
+                var hits = poiSearch(args, true);
+                yield hits.isEmpty() ? null : hits.get(0).location();
+            }
+            case "locateAllPoiInRange" -> poiSearch(args, false);
             case "getTileEntityCount" -> tileEntities(false);
             case "getTickableTileEntityCount" -> tileEntities(true);
             case "getWorldPath" -> {

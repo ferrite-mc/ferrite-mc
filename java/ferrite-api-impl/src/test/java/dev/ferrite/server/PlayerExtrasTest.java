@@ -1046,4 +1046,23 @@ class PlayerExtrasTest {
             assertEquals(2, world.getTickableTileEntityCount());
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void poiSearchScansLoadedChunksNearestFirst() {
+        var world = player.getWorld();
+        world.getBlockAt(3, 64, 3).setType(org.bukkit.Material.BELL);
+        world.getBlockAt(9, 64, 9).setType(org.bukkit.Material.BELL);
+        var meeting = new FerritePoiType(org.bukkit.NamespacedKey.minecraft("meeting"));
+        HostBridge.transport = (owner, subject, method, args) -> method.equals("getLoadedChunkCoordinates()") ? "0,0" : "";
+        try {
+            var origin = new org.bukkit.Location(world, 4, 64, 4);
+            var nearest = world.locateNearestPoi(origin, meeting, 16);
+            assertEquals(3, nearest.getBlockX());
+            var all = world.locateAllPoiInRange(origin, type -> type.getKey().getKey().equals("meeting"), 16);
+            assertEquals(2, all.size());
+            assertEquals(9, all.get(1).location().getBlockX());
+            assertTrue(world.locateAllPoiInRange(origin, type -> type.getKey().getKey().equals("meeting"), 2).stream().allMatch(hit -> hit.location().getBlockX() == 3));
+            assertNull(world.locateNearestPoi(new org.bukkit.Location(world, 100, 64, 100), meeting, 4));
+            assertThrows(UnsupportedOperationException.class, () -> world.locateNearestPoi(origin, meeting, 16, io.papermc.paper.entity.poi.PoiType.Occupancy.HAS_SPACE));
+        } finally { HostBridge.transport = null; }
+    }
 }

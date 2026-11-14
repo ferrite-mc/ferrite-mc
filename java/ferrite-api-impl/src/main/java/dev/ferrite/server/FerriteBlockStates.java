@@ -86,4 +86,18 @@ final class FerriteBlockStates {
         }
         return block.firstId() + (int) index;
     }
+
+    /** The block names (`minecraft:bed`-style keys) that own at least one of the given global state ids. */
+    static java.util.Set<String> blockNames(java.util.Collection<Integer> stateIds) {
+        var names = new java.util.HashSet<String>();
+        for (var entry : Holder.BLOCKS.entrySet()) {
+            var block = entry.getValue();
+            long count = 1;
+            for (var values : block.properties().values()) count *= values.size();
+            for (int id : stateIds) {
+                if (id >= block.firstId() && id < block.firstId() + count) { names.add(entry.getKey()); break; }
+            }
+        }
+        return names;
+    }
 }

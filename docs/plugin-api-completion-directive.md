@@ -253,10 +253,14 @@
 
 호스트 라우트도 Java 케이스도 없는 서명만 적었다(`World`는 카탈로그와 `crates/**`·Java `case`를 대조).
 
-- **Player:** `fireworkBoost`(폭죽 엔티티 모델 없음), `getConnection`, `loadData`, `postEffects`, `spawnAt`.
-- **World:** `getFluidData`(흐름 방향 계산에 이웃 블록 충돌 정보가 필요), `getTileEntityCount`/`getTickableTileEntityCount`,
-  `getWorldPath`, `locateAllPoiInRange`,
-  `locateNearestPoi`, `vanillaBiomeProvider`.
+- **Player:** `fireworkBoost`(폭죽 엔티티 모델 없음), `loadData`(저장된 플레이어 데이터를 살아 있는 리전 상태에 다시 적용하는 경로 없음).
+  `getConnection`(플레이어 메서드로 전달하는 프록시; `reenterConfiguration`·`sendReportDetails`는 `UnsupportedOperationException`)과
+  `postEffects`(`/posteffect`를 콘솔로 실행하고 목록은 Java에 미러링 — 명령으로 바꾼 상태는 `values()`에 보이지 않는다)는 구현했다.
+- **World:** `locateNearestPoi`/`locateAllPoiInRange`는 POI 저장소가 없어 로드된 청크를 스캔한다(`Occupancy.ANY`만 지원,
+  호스트가 블록 속성을 주지 않으면 침대 머리/발 같은 구분이 안 된다). `getTileEntityCount`는 로드된 청크의 블록 엔티티 수,
+  `getTickableTileEntityCount`는 바닐라에서 틱 처리를 하는 타입 목록(`TICKING_BLOCK_ENTITIES`) 기준이다.
+  `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API(26.3 build 227)에
+  존재하지 않아 구현 대상이 아니다.
 - **블록 엔티티:** 주크박스·교탁·명령 블록·스포너·벌집·스컬크 센서·구조물 블록·침대. 26.3의 NBT 키 이름을
   확인할 수 있는 자료(서버 코드)가 로컬에 없어서 추측으로 구현하지 않았다. `UnsupportedOperationException`을 유지한다.
 - **레시피(§7):** 조리·대장간·석재 절단 레시피는 런타임에 추가할 수 없다(Java 목록에만 남는다). 결과 아이템의 메타,
