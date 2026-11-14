@@ -314,6 +314,8 @@ pub struct MobState {
     /// The door a zombie is chewing on, and for how many ticks (`BreakDoorGoal.breakTime`).
     pub door_pos: Option<[i32; 3]>,
     pub door_ticks: u16,
+    /// The shaded spot a burning skeleton is running to (`FleeSunGoal.wantedX/Y/Z`).
+    pub shade_pos: Option<[i32; 3]>,
     /// Whether a creeper is charged by lightning (`Creeper.DATA_IS_POWERED`).
     pub powered: bool,
     /// The creeper's synched swell direction: `1` while the fuse burns, `-1` otherwise.
@@ -417,6 +419,7 @@ impl MobState {
             can_break_doors: false,
             door_pos: None,
             door_ticks: 0,
+            shade_pos: None,
             powered: false,
             swell_dir: -1,
             stare_time: 0,

@@ -913,6 +913,21 @@ pub fn tick_full(
                 crate::creeper::sync(store, key);
             } else if kind == MobKind::Enderman && rng.next_int(200) == 0 {
                 blink(store, key, blocks, start, rng);
+            } else if kind == MobKind::Skeleton
+                && let Some(shade) = crate::sun::tick_flee_sun(store, key, blocks, start, rng)
+            {
+                // `FleeSunGoal`: run for the shade at normal speed.
+                walking = follow_path(
+                    store,
+                    key,
+                    blocks,
+                    start,
+                    Vec3::new(
+                        f64::from(shade[0]) + 0.5,
+                        f64::from(shade[1]),
+                        f64::from(shade[2]) + 0.5,
+                    ),
+                );
             }
         } else {
             // Passive goals: flee when hurt, otherwise wander; look at a nearby player.

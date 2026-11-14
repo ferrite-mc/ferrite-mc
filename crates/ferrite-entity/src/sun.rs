@@ -102,6 +102,61 @@ pub fn tick_sun(
     false
 }
 
+/// Vanilla `FleeSunGoal`: an idle skeleton that is on fire under open sky picks a spot out of
+/// the sun (up to ten tries, within 10 blocks horizontally and 3 vertically; `getHidePos`) and
+/// runs to it. Returns the spot to head for, or `None` when it has nowhere to go.
+///
+/// `RestrictSunGoal` (path nodes in sunlight avoided) is not modelled: the A* pathfinder has no
+/// per-node cost hook.
+pub fn tick_flee_sun(
+    store: &mut EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    start: Vec3,
+    rng: &mut Rng,
+) -> Option<[i32; 3]> {
+    let state = mob::state(store, key)?;
+    if state.kind != MobKind::Skeleton || state.is_dead() {
+        return None;
+    }
+    let here = [
+        start.x.floor() as i32,
+        start.y.floor() as i32,
+        start.z.floor() as i32,
+    ];
+    if let Some(shade) = state.shade_pos {
+        let close = (shade[0] - here[0]).abs() <= 1
+            && (shade[1] - here[1]).abs() <= 1
+            && (shade[2] - here[2]).abs() <= 1;
+        if !close {
+            return Some(shade);
+        }
+        if let Some(state) = mob::state_mut(store, key) {
+            state.shade_pos = None;
+        }
+    }
+    let state = mob::state(store, key)?;
+    if state.fire == 0 || !sees_sky(blocks, here[0], here[1] + 1, here[2]) {
+        return None;
+    }
+    for _ in 0..10 {
+        let spot = [
+            here[0] + rng.next_int(21) - 10,
+            here[1] + rng.next_int(7) - 3,
+            here[2] + rng.next_int(21) - 10,
+        ];
+        if !sees_sky(blocks, spot[0], spot[1] + 1, spot[2])
+            && crate::path::start_node(blocks, spot) == Some(spot)
+        {
+            if let Some(state) = mob::state_mut(store, key) {
+                state.shade_pos = Some(spot);
+            }
+            return Some(spot);
+        }
+    }
+    None
+}
+
 /// Whether `state` is a closed wooden door (`#minecraft:wooden_doors`, `open=false`).
 pub fn is_closed_wooden_door(state: Option<u16>) -> bool {
     state
@@ -208,6 +263,8 @@ mod tests {
         light: u8,
         roof: Option<i32>,
         door: Option<(i32, bool)>,
+        /// A roof at y = 70 over every column with `x >= shade_x`.
+        shade_x: Option<i32>,
     }
 
     impl World {
@@ -216,6 +273,7 @@ mod tests {
                 light: 15,
                 roof: None,
                 door: None,
+                shade_x: None,
             }
         }
     }
@@ -235,7 +293,7 @@ mod tests {
 
     impl BlockGetter for World {
         fn block_state(&self, x: i32, y: i32, _z: i32) -> Option<u16> {
-            if y < 64 || self.roof == Some(y) {
+            if y < 64 || self.roof == Some(y) || (y == 70 && self.shade_x.is_some_and(|s| x >= s)) {
                 return ferrite_data::blocks::default_state("stone");
             }
             if let Some((door_x, open)) = self.door
@@ -534,5 +592,82 @@ mod tests {
             }
         }
         assert_eq!(broke, Some((DOOR_BREAK_TICKS as i32, [1, 64, 0])));
+    }
+
+    fn shaded() -> World {
+        World {
+            shade_x: Some(4),
+            ..World::day()
+        }
+    }
+
+    #[test]
+    fn a_burning_idle_skeleton_picks_a_shaded_spot_and_walks_toward_it() {
+        let world = shaded();
+        let (mut store, key) = spawn(MobKind::Skeleton, 0.5);
+        mob::ignite(&mut store, key, 100);
+        let mut rng = Rng::new(5);
+        let rules = MobRules::default();
+        let mut shade = None;
+        for _ in 0..40 {
+            ai::tick_full(
+                &mut store,
+                &world,
+                &distant_player(),
+                &rules,
+                &[],
+                &[],
+                &mut rng,
+            );
+            shade = shade.or(mob::state(&store, key).and_then(|s| s.shade_pos));
+        }
+        let shade = shade.expect("a shaded spot was chosen");
+        assert!(shade[0] >= 4, "{shade:?} is under the roof");
+        assert!(
+            store.pos(key).unwrap().x > 0.5,
+            "the skeleton moved toward the shade"
+        );
+    }
+
+    #[test]
+    fn a_skeleton_that_is_not_burning_stays_put_and_picks_nothing() {
+        let world = shaded();
+        let (mut store, key) = spawn(MobKind::Skeleton, 0.5);
+        let mut rng = Rng::new(5);
+        let start = store.pos(key).unwrap();
+        assert_eq!(
+            tick_flee_sun(&mut store, key, &world, start, &mut rng),
+            None
+        );
+        assert!(mob::state(&store, key).unwrap().shade_pos.is_none());
+    }
+
+    #[test]
+    fn a_burning_skeleton_under_cover_does_not_flee() {
+        let world = World {
+            roof: Some(70),
+            ..World::day()
+        };
+        let (mut store, key) = spawn(MobKind::Skeleton, 0.5);
+        mob::ignite(&mut store, key, 100);
+        let start = store.pos(key).unwrap();
+        let mut rng = Rng::new(5);
+        assert_eq!(
+            tick_flee_sun(&mut store, key, &world, start, &mut rng),
+            None
+        );
+    }
+
+    #[test]
+    fn a_zombie_never_flees_the_sun() {
+        let world = shaded();
+        let (mut store, key) = spawn(MobKind::Zombie, 0.5);
+        mob::ignite(&mut store, key, 100);
+        let start = store.pos(key).unwrap();
+        let mut rng = Rng::new(5);
+        assert_eq!(
+            tick_flee_sun(&mut store, key, &world, start, &mut rng),
+            None
+        );
     }
 }
