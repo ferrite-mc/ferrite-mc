@@ -857,6 +857,23 @@ pub fn tick_full(
                         }
                     }
                     MobKind::Zombie | MobKind::Spider | MobKind::Enderman => {
+                        if kind == MobKind::Spider {
+                            // `LeapAtTargetGoal(0.4)`: pounce from two to four blocks away.
+                            let dy = target.pos.y - start.y;
+                            let has_rider = mob::state(store, key).is_some_and(|s| s.has_rider);
+                            if crate::spider::can_leap(
+                                dx * dx + dy * dy + dz * dz,
+                                was_on_ground,
+                                has_rider,
+                            ) && crate::spider::leap_roll(rng)
+                            {
+                                let vel = store.vel(key).unwrap_or_default();
+                                store.set_vel(
+                                    key,
+                                    crate::spider::leap_velocity(vel, start, target.pos),
+                                );
+                            }
+                        }
                         if kind == MobKind::Zombie {
                             match crate::sun::tick_break_door(
                                 store, key, blocks, target.pos, *hard, *griefing,
@@ -894,6 +911,11 @@ pub fn tick_full(
                             }
                         } else {
                             walking = follow_path(store, key, blocks, start, target.pos);
+                            // `WallClimberNavigation` heads straight for the target; the grid
+                            // A* finding no way round a wall stands in for "must climb it".
+                            if kind == MobKind::Spider && walking.is_none() {
+                                walking = Some(yaw);
+                            }
                             speed = chase_speed(store, key);
                         }
                         // Enderman basics: blink to a nearby walkable spot now and then.
@@ -1175,8 +1197,18 @@ pub fn tick_full(
         if !was_on_ground {
             vel.y -= GRAVITY;
         }
+        // `Spider` climbs a wall it is pushed against (the collision of the last move).
+        if kind == MobKind::Spider && flags.has(Flags::HORIZONTAL_COLLISION) {
+            vel.y = crate::spider::climb_velocity(vel.y, walking.is_some());
+        }
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
+        if kind == MobKind::Spider {
+            let climbing = store
+                .flags(key)
+                .is_some_and(|flags| flags.has(Flags::HORIZONTAL_COLLISION));
+            crate::spider::set_climbing(store, key, climbing);
+        }
 
         // Vertical drag and the friction of the block the mob now stands on.
         let on_ground = store

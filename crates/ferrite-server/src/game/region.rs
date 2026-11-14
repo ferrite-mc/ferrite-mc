@@ -6603,7 +6603,12 @@ impl Region {
         for record in
             spawn::natural_spawn_monsters(&self.entities, blocks, &positions, &mut self.rng, 1)
         {
+            let mut record = record;
+            let jockey = self.spider_jockey(&mut record);
             self.entities.insert(record);
+            if let Some(rider) = jockey {
+                self.entities.insert(rider);
+            }
         }
         // Mobs that died this tick drop their entity loot table once (vanilla
         // `LivingEntity.dropFromLootTable`). The entity itself stays in the store until the
@@ -8216,6 +8221,36 @@ impl Region {
             1.0,
             1.0,
         );
+    }
+
+    /// `Spider.finalizeSpawn`: one natural spider in a hundred comes with a skeleton riding it.
+    /// Seats the skeleton (through [`super::ride`], which keeps it on the spider) and returns its
+    /// record for the caller to insert next to the spider; the spider is marked as carrying a
+    /// rider so it stops leaping.
+    fn spider_jockey(
+        &mut self,
+        spider: &mut ferrite_entity::EntityRecord,
+    ) -> Option<ferrite_entity::EntityRecord> {
+        let is_spider = spider
+            .data
+            .mob
+            .as_ref()
+            .is_some_and(|state| state.kind == MobKind::Spider);
+        if !is_spider || !ferrite_entity::spider::jockey_roll(&mut self.rng) {
+            return None;
+        }
+        let rider = mob::new_mob(MobKind::Skeleton, spider.pos, &mut self.rng);
+        super::ride::mount_in(
+            rider.data.uuid,
+            spider.data.uuid,
+            false,
+            Some("minecraft:spider"),
+        )
+        .ok()?;
+        if let Some(state) = spider.data.mob.as_mut() {
+            state.has_rider = true;
+        }
+        Some(rider)
     }
 
     /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
@@ -14671,6 +14706,33 @@ mod tests {
             &slots,
         );
         state
+    }
+
+    /// A spider that rolls the one-in-a-hundred jockey gets a skeleton seated on it, and stops
+    /// leaping; every other spawn gets no rider.
+    #[test]
+    fn a_jockey_spider_gets_a_seated_skeleton() {
+        let mut region = Region::default();
+        let _turn = super::super::ride::test_turn();
+        let mut jockeys = 0;
+        for _ in 0..4_000 {
+            let mut spider = mob::new_mob(
+                MobKind::Spider,
+                ferrite_math::Vec3::new(0.5, 65.0, 0.5),
+                &mut region.rng,
+            );
+            let uuid = spider.data.uuid;
+            if let Some(rider) = region.spider_jockey(&mut spider) {
+                jockeys += 1;
+                assert_eq!(rider.data.mob.as_ref().unwrap().kind, MobKind::Skeleton);
+                assert!(spider.data.mob.as_ref().unwrap().has_rider);
+                assert_eq!(super::super::ride::vehicle_of(rider.data.uuid), Some(uuid));
+                super::super::ride::forget(rider.data.uuid);
+            } else {
+                assert!(!spider.data.mob.as_ref().unwrap().has_rider);
+            }
+        }
+        assert!((15..70).contains(&jockeys), "{jockeys} jockeys in 4000");
     }
 
     /// A zombie that finishes chewing a closed wooden door removes both halves; an open door or

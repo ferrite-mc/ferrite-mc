@@ -44,6 +44,7 @@ mod rng;
 pub mod sheep;
 pub mod shoulder;
 pub mod spawn;
+pub mod spider;
 mod store;
 pub mod sun;
 pub mod tame;

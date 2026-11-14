@@ -316,6 +316,9 @@ pub struct MobState {
     pub door_ticks: u16,
     /// The shaded spot a burning skeleton is running to (`FleeSunGoal.wantedX/Y/Z`).
     pub shade_pos: Option<[i32; 3]>,
+    /// Whether a spider carries a skeleton jockey (`hasControllingPassenger`), which stops its
+    /// leap. Set by the region that mounts the jockey.
+    pub has_rider: bool,
     /// Whether a creeper is charged by lightning (`Creeper.DATA_IS_POWERED`).
     pub powered: bool,
     /// The creeper's synched swell direction: `1` while the fuse burns, `-1` otherwise.
@@ -420,6 +423,7 @@ impl MobState {
             door_pos: None,
             door_ticks: 0,
             shade_pos: None,
+            has_rider: false,
             powered: false,
             swell_dir: -1,
             stare_time: 0,
@@ -505,6 +509,9 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     }
     if kind == MobKind::Creeper {
         crate::creeper::define_metadata(&mut data.metadata);
+    }
+    if kind == MobKind::Spider {
+        crate::spider::define_metadata(&mut data.metadata);
     }
     if kind == MobKind::Zombie
         && let Some(state) = data.mob.as_mut()
