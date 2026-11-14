@@ -209,6 +209,28 @@ class ApiSurfaceTest {
         assertSame(custom, help.getHelpTopic("ferrite-help-probe"));
     }
 
+    @Test void helpYmlIgnoresPluginsAmendsTopicsAndBuildsIndexes() throws Exception {
+        var file = java.nio.file.Files.createTempFile("help", ".yml").toFile();
+        java.nio.file.Files.writeString(file.toPath(), String.join("\n",
+            "ignore-plugins:", "  - HiddenPlugin",
+            "amended-topics:", "  /ferrite-amend-probe:", "    shortText: Short now", "    fullText: Full now",
+            "index-topics:", "  Probes:", "    shortText: All probes", "    preamble: Pick one", "    commands:", "      - ferrite-amend-probe", ""));
+        var map = new FerriteHelpMap(server, file);
+        var command = new org.bukkit.command.Command("ferrite-amend-probe") {
+            @Override public boolean execute(org.bukkit.command.CommandSender sender, String label, String[] args) { return true; }
+        };
+        server.getCommandMap().register("ferrite", command);
+        var topic = map.getHelpTopic("ferrite-amend-probe");
+        assertEquals("Short now", topic.getShortText());
+        assertEquals("Full now", topic.getFullText(server.getConsoleSender()));
+        var index = map.getHelpTopic("Probes");
+        assertNotNull(index);
+        assertTrue(index.getFullText(server.getConsoleSender()).contains("Pick one"));
+        assertTrue(map.getHelpTopics().stream().anyMatch(candidate -> candidate.getName().equals("Probes")));
+        assertEquals(java.util.List.of("HiddenPlugin"), map.getIgnoredPlugins());
+        assertNull(new FerriteHelpMap(server, new java.io.File("missing-help.yml")).getHelpTopic("nothing-here"));
+    }
+
     @Test void serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest() {
         var stick = new org.bukkit.inventory.ItemStack(Material.STICK, 1);
         assertNotNull(server.getRecipesFor(stick));

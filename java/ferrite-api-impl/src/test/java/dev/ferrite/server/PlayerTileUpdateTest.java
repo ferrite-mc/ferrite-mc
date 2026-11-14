@@ -253,4 +253,67 @@ class PlayerTileUpdateTest {
         assertThrows(NullPointerException.class, () -> player.sendBlockUpdate(at(), null));
         assertTrue(calls.isEmpty());
     }
+
+    @Test void jukeboxLecternCommandBlockAndSpawnerSendTheirSettings() {
+        var disc = new ItemStack(Material.MUSIC_DISC_CAT);
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Jukebox.class, Material.JUKEBOX, null, java.util.Map.of("getRecord", disc)));
+        assertEquals("minecraft:jukebox", calls.get(0)[4]);
+        assertEquals("item,0,minecraft:music_disc_cat,1", calls.get(0)[5]);
+        calls.clear();
+        var book = new ItemStack(Material.WRITABLE_BOOK);
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Lectern.class, Material.LECTERN, inventory(1, java.util.Map.of(0, book)), java.util.Map.of("getPage", 2)));
+        assertEquals("minecraft:lectern", calls.get(0)[4]);
+        assertArrayEquals(new String[]{"item,0,minecraft:writable_book,1", "put,Page,2"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+        calls.clear();
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.CommandBlock.class, Material.COMMAND_BLOCK, null, java.util.Map.of("getCommand", "say hi, all", "getName", "Boss")));
+        assertEquals("minecraft:command_block", calls.get(0)[4]);
+        assertArrayEquals(new String[]{"put,Command,say hi, all", "put,CustomName,Boss"}, calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+        calls.clear();
+        var spawner = new java.util.HashMap<String, Object>();
+        spawner.put("getSpawnedType", org.bukkit.entity.EntityType.ZOMBIE);
+        for (var name : new String[]{"getDelay", "getMinSpawnDelay", "getMaxSpawnDelay", "getSpawnCount", "getMaxNearbyEntities", "getRequiredPlayerRange", "getSpawnRange"}) spawner.put(name, 5);
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.CreatureSpawner.class, Material.SPAWNER, null, spawner));
+        assertEquals("minecraft:mob_spawner", calls.get(0)[4]);
+        var entries = calls.get(0)[5].split(String.valueOf(HostBridge.ITEM));
+        assertEquals("spawn,minecraft:zombie", entries[0]);
+        assertEquals("put,SpawnRange,5", entries[entries.length - 1]);
+    }
+
+    @Test void sculkSensorBeehiveAndStructureBlockSendTheirSettingsAndABedHasNoEntity() {
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.SculkSensor.class, Material.SCULK_SENSOR, null, java.util.Map.of("getLastVibrationFrequency", 9)));
+        assertEquals("minecraft:sculk_sensor", calls.get(0)[4]);
+        assertEquals("put,last_vibration_frequency,9", calls.get(0)[5]);
+        calls.clear();
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.SculkSensor.class, Material.CALIBRATED_SCULK_SENSOR, null, java.util.Map.of("getLastVibrationFrequency", 1)));
+        assertEquals("minecraft:calibrated_sculk_sensor", calls.get(0)[4]);
+        calls.clear();
+        var hive = new java.util.HashMap<String, Object>();
+        hive.put("getFlower", new org.bukkit.Location(player.getWorld(), 7, 66, -8));
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Beehive.class, Material.BEEHIVE, null, hive));
+        assertEquals("minecraft:beehive", calls.get(0)[4]);
+        assertEquals("flower,7,66,-8", calls.get(0)[5]);
+        calls.clear();
+        var structure = new java.util.HashMap<String, Object>();
+        structure.put("getStructureName", "test:house");
+        structure.put("getAuthor", "me");
+        structure.put("getMetadata", "");
+        structure.put("getRelativePosition", new org.bukkit.util.BlockVector(1, 2, 3));
+        structure.put("getStructureSize", new org.bukkit.util.BlockVector(4, 5, 6));
+        structure.put("getRotation", org.bukkit.block.structure.StructureRotation.CLOCKWISE_180);
+        structure.put("getMirror", org.bukkit.block.structure.Mirror.LEFT_RIGHT);
+        structure.put("getUsageMode", org.bukkit.block.structure.UsageMode.SAVE);
+        structure.put("isIgnoreEntities", true);
+        structure.put("isShowAir", false);
+        structure.put("isBoundingBoxVisible", true);
+        structure.put("getIntegrity", 0.5f);
+        structure.put("getSeed", 77L);
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Structure.class, Material.STRUCTURE_BLOCK, null, structure));
+        assertEquals("minecraft:structure_block", calls.get(0)[4]);
+        var entries = java.util.Arrays.asList(calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+        assertTrue(entries.containsAll(java.util.List.of("put,name,test:house", "put,rotation,180", "put,mirror,left_right", "put,mode,save", "put,sizeZ,6", "put,seed,77", "put,integrity,0.5")), entries.toString());
+        calls.clear();
+        var bed = tile(org.bukkit.block.Bed.class, Material.RED_BED, null, java.util.Map.of());
+        assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), bed));
+        assertTrue(calls.isEmpty());
+    }
 }

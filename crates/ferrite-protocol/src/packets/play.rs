@@ -663,7 +663,7 @@ pub struct MapDecoration {
     pub x: i8,
     pub y: i8,
     pub direction: i8,
-    pub caption: Option<PlainText>,
+    pub caption: Option<crate::types::NetworkText>,
 }
 impl Encode for MapDecoration {
     fn encode(&self, out: &mut Vec<u8>) {
@@ -2055,7 +2055,7 @@ mod interaction_tests {
                     x: -128,
                     y: 127,
                     direction: 15,
-                    caption: Some(crate::types::PlainText("Alex".into())),
+                    caption: Some(crate::types::NetworkText::Plain("Alex".into())),
                 },
                 MapDecoration {
                     kind: VarInt(26),
@@ -2105,6 +2105,39 @@ mod interaction_tests {
             encoded,
             vec![3, 2, 1, 1, 1, 0, 128, 127, 15, 0, 1, 1, 5, 6, 1, 44]
         );
+        // A styled caption is a component compound and survives the round trip.
+        let mut styled = ferrite_nbt::Compound::new();
+        styled.insert("text".into(), ferrite_nbt::Tag::String("Ranger".into()));
+        styled.insert("color".into(), ferrite_nbt::Tag::String("red".into()));
+        styled.insert("bold".into(), ferrite_nbt::Tag::Byte(1));
+        roundtrip(MapItemData {
+            map_id: VarInt(3),
+            scale: 0,
+            locked: false,
+            decorations: Some(vec![
+                MapDecoration {
+                    kind: VarInt(1),
+                    x: 1,
+                    y: 2,
+                    direction: 3,
+                    caption: Some(crate::types::NetworkText::Rich(ferrite_nbt::Tag::Compound(
+                        styled,
+                    ))),
+                },
+                MapDecoration {
+                    kind: VarInt(2),
+                    x: 0,
+                    y: 0,
+                    direction: 0,
+                    caption: Some(crate::types::NetworkText::Plain("plain".into())),
+                },
+            ]),
+            width: 0,
+            height: 0,
+            x: 0,
+            z: 0,
+            colors: vec![],
+        });
         assert_eq!(OpenBook::ID, 59);
         roundtrip(OpenBook { hand: VarInt(1) });
         roundtrip(AcknowledgeBlockChange {

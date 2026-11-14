@@ -32,6 +32,13 @@ pub fn read_network(bytes: &[u8]) -> Result<Tag> {
     }
     Ok(tag)
 }
+/// Reads one nameless network tag from the front of `bytes` and reports how many bytes it used.
+pub fn read_network_prefix(bytes: &[u8]) -> Result<(Tag, usize)> {
+    let mut r = Reader::new(bytes)?;
+    let id = r.byte()?;
+    let tag = r.tag(id, 0)?;
+    Ok((tag, r.pos))
+}
 pub fn write_named(name: &str, tag: &Tag) -> Result<Vec<u8>> {
     let mut w = Vec::new();
     w.push(tag.id());

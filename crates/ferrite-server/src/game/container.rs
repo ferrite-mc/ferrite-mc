@@ -1333,6 +1333,7 @@ impl Player {
                 profile,
                 properties,
                 metas,
+                extra,
             } => {
                 let Some(type_id) =
                     ferrite_data::registries::id("minecraft:block_entity_type", &entity)
@@ -1353,6 +1354,7 @@ impl Player {
                                 profile,
                                 properties: &properties,
                                 metas: &metas,
+                                extra: &extra,
                             },
                             &super::region::with_meta_spec,
                         ),

@@ -211,11 +211,16 @@ pub struct EntityFact {
     /// The plugin world this entity belongs to; `None` for dimensions plugins cannot address.
     pub world: Option<Uuid>,
     pub item: Option<ItemFact>,
-    /// The entity's saved NBT as SNBT. Only runtime-world entities carry it: serializing every
-    /// entity of every tick is paid where a plugin can ask for the snapshot, not on the
-    /// overworld, whose entities answer the live-handle snapshot without NBT.
+    /// The entity's saved NBT as SNBT, for the worlds a plugin can capture entities from. Runtime
+    /// worlds refresh it every publish; the overworld keeps it for [`OVERWORLD_SNBT_REFRESH`]
+    /// publishes, because serializing every entity of a busy world each tick is not free.
     pub snbt: Option<String>,
+    /// Publishes since `snbt` was serialized.
+    pub snbt_age: u8,
 }
+
+/// How many publishes an overworld entity's cached SNBT is reused for before it is serialized again.
+pub const OVERWORLD_SNBT_REFRESH: u8 = 20;
 
 fn entity_registry() -> &'static Mutex<HashMap<Uuid, EntityFact>> {
     static ENTITIES: OnceLock<Mutex<HashMap<Uuid, EntityFact>>> = OnceLock::new();
@@ -235,10 +240,19 @@ pub fn publish_entities(
         WorldId::Vanilla(_) => None,
         WorldId::Runtime(id) => Some(id),
     };
-    let with_nbt = matches!(world_id, WorldId::Runtime(_));
+    let with_nbt = matches!(
+        world_id,
+        WorldId::Runtime(_) | WorldId::Vanilla(Dimension::Overworld)
+    );
+    let throttled = matches!(world_id, WorldId::Vanilla(Dimension::Overworld));
     let mut registry = entity_registry().lock().unwrap();
+    let mut cached: HashMap<Uuid, (Option<String>, u8)> = HashMap::new();
     for uuid in owned.drain() {
-        registry.remove(&uuid);
+        if let Some(fact) = registry.remove(&uuid)
+            && throttled
+        {
+            cached.insert(uuid, (fact.snbt, fact.snbt_age));
+        }
     }
     for key in store.keys() {
         let (Some(data), Some(pos), Some(vel), Some(flags)) = (
@@ -271,17 +285,26 @@ pub fn publish_entities(
                 health: item.health,
             }
         });
-        let snbt = with_nbt
-            .then(|| {
-                let record = ferrite_entity::EntityRecord {
-                    pos,
-                    vel,
-                    flags,
-                    data: data.clone(),
-                };
-                super::snapshot::entity_snbt(&record)
-            })
-            .flatten();
+        let reused = cached
+            .remove(&data.uuid)
+            .filter(|(snbt, age)| snbt.is_some() && *age < OVERWORLD_SNBT_REFRESH);
+        let (snbt, snbt_age) = match reused {
+            Some((snbt, age)) => (snbt, age + 1),
+            None => (
+                with_nbt
+                    .then(|| {
+                        let record = ferrite_entity::EntityRecord {
+                            pos,
+                            vel,
+                            flags,
+                            data: data.clone(),
+                        };
+                        super::snapshot::entity_snbt(&record)
+                    })
+                    .flatten(),
+                0,
+            ),
+        };
         registry.insert(
             data.uuid,
             EntityFact {
@@ -295,6 +318,7 @@ pub fn publish_entities(
                 world,
                 item,
                 snbt,
+                snbt_age,
             },
         );
     }
@@ -325,6 +349,7 @@ pub fn publish_for_test(uuid: Uuid, entity_id: i32) {
             world: None,
             item: None,
             snbt: None,
+            snbt_age: 0,
         },
     );
 }
@@ -823,6 +848,7 @@ mod tests {
             world: None,
             item: None,
             snbt: None,
+            snbt_age: 0,
         };
         let cow = Uuid::from_u128(0xc0c0_0001);
         let item = Uuid::from_u128(0xc0c0_0002);

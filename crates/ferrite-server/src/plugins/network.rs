@@ -744,6 +744,7 @@ mod tests {
                 profile: None,
                 properties: Vec::new(),
                 metas: Vec::new(),
+                extra: ferrite_nbt::Compound::new(),
             }
         );
         let refused = |entity: &str| {

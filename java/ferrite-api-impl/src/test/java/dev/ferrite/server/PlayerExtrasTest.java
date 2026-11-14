@@ -1065,4 +1065,26 @@ class PlayerExtrasTest {
             assertThrows(UnsupportedOperationException.class, () -> world.locateNearestPoi(origin, meeting, 16, io.papermc.paper.entity.poi.PoiType.Occupancy.HAS_SPACE));
         } finally { HostBridge.transport = null; }
     }
+
+    @Test void styledMapCaptionsTravelAsComponentNbt() throws Exception {
+        var styled = net.kyori.adventure.text.Component.text("Ranger", net.kyori.adventure.text.format.NamedTextColor.RED, net.kyori.adventure.text.format.TextDecoration.BOLD)
+            .append(net.kyori.adventure.text.Component.text(" II"));
+        var bytes = FerriteMapView.componentNbt(styled);
+        var in = new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes));
+        assertEquals(10, in.readByte());
+        @SuppressWarnings("unchecked") var root = (java.util.Map<String, Object>) StructureNbt.payloadForTest(in, 10);
+        assertEquals("Ranger", root.get("text"));
+        assertEquals("red", root.get("color"));
+        assertEquals((byte) 1, root.get("bold"));
+        assertEquals("[{text= II}]", String.valueOf(root.get("extra")));
+        var view = new FerriteMapView(player.getWorld());
+        view.addRenderer(new org.bukkit.map.MapRenderer() {
+            @Override public void render(org.bukkit.map.MapView map, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player viewer) {
+                canvas.getCursors().addCursor(new org.bukkit.map.MapCursor((byte) 1, (byte) 2, (byte) 3, org.bukkit.map.MapCursor.Type.PLAYER, true, styled));
+            }
+        });
+        var fields = view.render(player).decorations().split(String.valueOf((char) 30), -1);
+        assertEquals("2", fields[4]);
+        assertArrayEquals(bytes, java.util.Base64.getDecoder().decode(fields[5]));
+    }
 }

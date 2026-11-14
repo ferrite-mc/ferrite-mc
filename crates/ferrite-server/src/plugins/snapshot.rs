@@ -39,12 +39,11 @@ const MAX_CHUNKS: i64 = 1024;
 /// `type, x, y, z, yaw, pitch, uuid, health, vx, vy, vz, name, nbt` separated by [`FIELD`].
 ///
 /// `health` and `name` use [`HOST_NULL`], `nbt` is the base64 SNBT of the entity's saved form.
-/// The default world and the other vanilla dimensions are not answered (`None`): their entities
-/// are published without NBT, and a snapshot that could not be turned back into the same entity
-/// is worse than an explicit "unsupported".
+/// The default world answers too (its NBT is at most a second old); the nether and the end are not
+/// addressable by plugins, so they have no records to give.
 fn world_entities(call: &HostCall) -> Option<String> {
     let world = Uuid::parse_str(&call.subject).ok()?;
-    if world == ferrite_plugin::default_world_id() || call.args.len() != 4 {
+    if call.args.len() != 4 {
         return None;
     }
     let bounds: Vec<i32> = call
@@ -365,10 +364,6 @@ mod tests {
             ask(Uuid::new_v4(), ["0", "-1", "0", "-1"]).as_deref(),
             Some("")
         );
-        assert_eq!(
-            ask(ferrite_plugin::default_world_id(), ["0", "-1", "0", "-1"]),
-            None
-        );
         assert_eq!(ask(world, ["0", "0", "100", "100"]), None, "range cap");
         assert_eq!(ask(world, ["1", "0", "0", "0"]), None, "inverted range");
 
@@ -391,6 +386,33 @@ mod tests {
         assert_eq!(ask(world, ["0", "-1", "0", "-1"]).as_deref(), Some(""));
         let empty = EntityStore::new(3);
         super::super::facts::publish_entities(&mut owned, &empty, Dimension::Overworld);
+    }
+
+    #[test]
+    fn the_default_world_lists_its_entities_with_cached_nbt() {
+        let uuid = Uuid::new_v4();
+        let mut store = EntityStore::new(3);
+        store.insert(zombie(uuid));
+        let mut owned = std::collections::HashSet::new();
+        let overworld = WorldId::Vanilla(Dimension::Overworld);
+        // Other tests publish to the shared default world too, so look the entity up by UUID.
+        let find = || {
+            ask(ferrite_plugin::default_world_id(), ["0", "-1", "0", "-1"])
+                .expect("the default world answers")
+                .split(HOST_ITEM_SEPARATOR)
+                .map(|record| record.split(FIELD).map(str::to_owned).collect::<Vec<_>>())
+                .find(|fields| fields.get(6) == Some(&uuid.to_string()))
+        };
+        super::super::facts::publish_entities(&mut owned, &store, overworld);
+        let fields = find().expect("listed");
+        assert_eq!(fields.len(), 13, "{fields:?}");
+        assert_ne!(fields[12], HOST_NULL, "NBT is present");
+        let first_nbt = fields[12].clone();
+        super::super::facts::publish_entities(&mut owned, &store, overworld);
+        assert_eq!(find().expect("still listed")[12], first_nbt);
+        let empty = EntityStore::new(3);
+        super::super::facts::publish_entities(&mut owned, &empty, overworld);
+        assert!(find().is_none());
     }
 
     #[test]

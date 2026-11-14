@@ -241,6 +241,35 @@ impl Decode for Translatable {
     }
 }
 
+/// A network NBT text component: a plain string, or a full component compound (styled text,
+/// translations, `extra` children) as a nameless network tag.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NetworkText {
+    Plain(String),
+    Rich(ferrite_nbt::Tag),
+}
+impl Encode for NetworkText {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Plain(text) => PlainText(text.clone()).encode(out),
+            Self::Rich(tag) => out.extend(
+                ferrite_nbt::binary::write_network(tag).expect("component NBT is encodable"),
+            ),
+        }
+    }
+}
+impl Decode for NetworkText {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        if buf.first() == Some(&8) {
+            return Ok(Self::Plain(PlainText::decode(buf)?.0));
+        }
+        let (tag, used) = ferrite_nbt::binary::read_network_prefix(buf)
+            .map_err(|_| DecodeError::Invalid("invalid component NBT"))?;
+        *buf = &buf[used..];
+        Ok(Self::Rich(tag))
+    }
+}
+
 /// A plain-text network NBT component encoded as a nameless TAG_String.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlainText(pub String);

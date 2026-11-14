@@ -516,6 +516,9 @@ pub enum PluginPacket {
         properties: Vec<(String, String, Option<String>)>,
         /// Metadata of the stacks in `items`, by slot.
         metas: Vec<(u8, ItemMetaSpec)>,
+        /// Keys of the block entity types without an item container (jukebox, lectern, command block,
+        /// spawner, beehive, sculk sensor, structure block), already validated against the family.
+        extra: ferrite_nbt::Compound,
     },
     /// `ClientboundSetEquipmentPacket` for one slot of an entity the client knows; `None` is empty.
     Equipment {
@@ -574,8 +577,15 @@ pub enum SurvivalStat {
     /// The base `max_health`, before effects such as health boost.
     MaxHealth,
 }
+/// A map cursor caption: plain text, or a full text component (style, translation, children).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MapCaption {
+    Plain(String),
+    Rich(ferrite_nbt::Tag),
+}
+
 /// One visible map cursor after the Java bridge has encoded it for the host.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MapDecoration {
     /// Protocol id in the `minecraft:map_decoration_type` registry.
     pub kind: i32,
@@ -583,8 +593,7 @@ pub struct MapDecoration {
     pub y: i8,
     /// Rotation in 0..=15.
     pub direction: u8,
-    /// Plain-text caption. Rich component formatting is rejected by the Java bridge.
-    pub caption: Option<String>,
+    pub caption: Option<MapCaption>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

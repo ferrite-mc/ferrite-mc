@@ -144,6 +144,19 @@ final class StructureNbt {
         else throw new IOException("Not an NBT value: " + value);
     }
 
+    /** Test hook: reads a payload of the given type. */
+    static Object payloadForTest(DataInputStream in, int type) throws IOException { return payload(in, type); }
+
+    /** A nameless network tag (type byte, then the payload) of the plain values {@link #payload} reads. */
+    static byte[] network(Object root) throws IOException {
+        var bytes = new java.io.ByteArrayOutputStream();
+        try (var data = new DataOutputStream(bytes)) {
+            data.writeByte(typeOf(root));
+            writePayload(data, root);
+        }
+        return bytes.toByteArray();
+    }
+
     private static int typeOf(Object value) throws IOException {
         return switch (value) {
             case Byte b -> 1; case Short s -> 2; case Integer i -> 3; case Long l -> 4;

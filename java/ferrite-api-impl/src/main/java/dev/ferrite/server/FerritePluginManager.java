@@ -156,6 +156,11 @@ final class FerritePluginManager extends PluginManagerStubs {
                 }
                 loaders.put(desc.getName().toLowerCase(Locale.ROOT), loader);
                 for (String alias : desc.getProvidedPlugins()) loaders.putIfAbsent(alias.toLowerCase(Locale.ROOT), loader);
+                if (paper && metadata.get("bootstrapper") instanceof String bootstrapper) {
+                    java.nio.file.Path world = null;
+                    try { world = server.getWorlds().isEmpty() ? null : server.getWorlds().get(0).getWorldPath(); } catch (UnsupportedOperationException unsaved) { /* in-memory world */ }
+                    FerriteBootstrap.run(bootstrapper, loader, desc, file.toPath(), new File(server.pluginsFolder == null ? "plugins" : server.pluginsFolder, desc.getName()).toPath(), world);
+                }
                 JavaPlugin plugin = Class.forName(desc.getMain(), true, loader).asSubclass(JavaPlugin.class).getDeclaredConstructor().newInstance();
                 plugins.add(plugin); regionAware.put(plugin, aware); server.registerCommands(plugin); plugin.onLoad();
                 List<org.bukkit.permissions.Permission> declared = new ArrayList<>();

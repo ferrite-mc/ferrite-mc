@@ -29,6 +29,121 @@ const FAMILIES: [(&str, usize, bool); 14] = [
     ("minecraft:chiseled_bookshelf", 6, false),
 ];
 
+/// Block entities whose single stack is saved under its own key instead of `Items`
+/// (`JukeboxBlockEntity` `RecordItem`, `LecternBlockEntity` `Book`).
+const KEYED_STACK: [(&str, &str); 2] = [
+    ("minecraft:jukebox", "RecordItem"),
+    ("minecraft:lectern", "Book"),
+];
+
+/// How a `put` value is typed in the block entity's saved form.
+#[derive(Clone, Copy)]
+enum Kind {
+    Short,
+    Int,
+    Long,
+    Float,
+    Bool,
+    Text,
+    Choice(&'static [&'static str]),
+}
+
+const ROTATIONS: &[&str] = &["none", "clockwise_90", "180", "counterclockwise_90"];
+const MIRRORS: &[&str] = &["none", "left_right", "front_back"];
+const STRUCTURE_MODES: &[&str] = &["save", "load", "corner", "data"];
+
+/// The keys a snapshot may set on a block entity type, with the type each is saved as. The names
+/// and types come from the 26.3 server's `saveAdditional` of each block entity.
+const SETTINGS: [(&str, &[(&str, Kind)]); 8] = [
+    (
+        "minecraft:jukebox",
+        &[("ticks_since_song_started", Kind::Long)],
+    ),
+    ("minecraft:lectern", &[("Page", Kind::Int)]),
+    (
+        "minecraft:command_block",
+        &[
+            ("Command", Kind::Text),
+            ("SuccessCount", Kind::Int),
+            ("CustomName", Kind::Text),
+            ("TrackOutput", Kind::Bool),
+            ("UpdateLastExecution", Kind::Bool),
+            ("auto", Kind::Bool),
+            ("powered", Kind::Bool),
+            ("conditionMet", Kind::Bool),
+        ],
+    ),
+    (
+        "minecraft:mob_spawner",
+        &[
+            ("Delay", Kind::Short),
+            ("MinSpawnDelay", Kind::Short),
+            ("MaxSpawnDelay", Kind::Short),
+            ("SpawnCount", Kind::Short),
+            ("MaxNearbyEntities", Kind::Short),
+            ("RequiredPlayerRange", Kind::Short),
+            ("SpawnRange", Kind::Short),
+        ],
+    ),
+    (
+        "minecraft:sculk_sensor",
+        &[("last_vibration_frequency", Kind::Int)],
+    ),
+    (
+        "minecraft:calibrated_sculk_sensor",
+        &[("last_vibration_frequency", Kind::Int)],
+    ),
+    ("minecraft:beehive", &[]),
+    (
+        "minecraft:structure_block",
+        &[
+            ("name", Kind::Text),
+            ("author", Kind::Text),
+            ("metadata", Kind::Text),
+            ("posX", Kind::Int),
+            ("posY", Kind::Int),
+            ("posZ", Kind::Int),
+            ("sizeX", Kind::Int),
+            ("sizeY", Kind::Int),
+            ("sizeZ", Kind::Int),
+            ("rotation", Kind::Choice(ROTATIONS)),
+            ("mirror", Kind::Choice(MIRRORS)),
+            ("mode", Kind::Choice(STRUCTURE_MODES)),
+            ("ignoreEntities", Kind::Bool),
+            ("strict", Kind::Bool),
+            ("powered", Kind::Bool),
+            ("showair", Kind::Bool),
+            ("showboundingbox", Kind::Bool),
+            ("integrity", Kind::Float),
+            ("seed", Kind::Long),
+        ],
+    ),
+];
+
+/// The longest text a `put` may carry (a command block's command is the long one).
+const MAX_TEXT: usize = 32_767;
+
+/// Parses a `put` value into the tag its key is saved as; `None` when it does not fit the type.
+fn typed(kind: Kind, value: &str) -> Option<Tag> {
+    Some(match kind {
+        Kind::Short => Tag::Short(value.parse().ok().filter(|v: &i16| *v >= 0)?),
+        Kind::Int => Tag::Int(value.parse().ok()?),
+        Kind::Long => Tag::Long(value.parse().ok()?),
+        Kind::Float => Tag::Float(value.parse().ok().filter(|v: &f32| v.is_finite())?),
+        Kind::Bool => Tag::Byte(match value {
+            "true" => 1,
+            "false" => 0,
+            _ => return None,
+        }),
+        Kind::Text => Tag::String(
+            Some(value)
+                .filter(|v| v.chars().count() <= MAX_TEXT)?
+                .to_owned(),
+        ),
+        Kind::Choice(allowed) => Tag::String(allowed.contains(&value).then(|| value.to_owned())?),
+    })
+}
+
 /// Vanilla's `minecraft:banner_pattern` entries (`data/minecraft/banner_pattern`), without namespace.
 const BANNER_PATTERNS: [&str; 43] = [
     "base",
@@ -125,8 +240,15 @@ const MAX_COUNT: i32 = 99;
 pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Option<PluginPacket> {
     let banner = entity == "minecraft:banner";
     let skull = entity == "minecraft:skull";
-    let (size, furnace) = if banner || skull {
+    let keyed = KEYED_STACK.iter().any(|(name, _)| *name == entity);
+    let settings = SETTINGS
+        .iter()
+        .find(|(name, _)| *name == entity)
+        .map(|(_, keys)| *keys);
+    let (size, furnace) = if banner || skull || (settings.is_some() && !keyed) {
         (0, false)
+    } else if keyed {
+        (1, false)
     } else {
         let (_, size, furnace) = FAMILIES
             .iter()
@@ -140,9 +262,41 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
     let mut items: Vec<(u8, String, i32)> = Vec::new();
     let mut metas: Vec<(u8, ferrite_plugin::ItemMetaSpec)> = Vec::new();
     let mut timers = None;
+    let mut extra = Compound::new();
     for entry in entries.split(separator).filter(|e| !e.is_empty()) {
+        // `put,<key>,<value>`: the value may hold commas (a command), so it takes the rest.
+        if let Some(rest) = entry.strip_prefix("put,") {
+            let (key, value) = rest.split_once(',')?;
+            let (_, kind) = settings?.iter().find(|(name, _)| *name == key)?;
+            if extra.contains_key(key) {
+                return None;
+            }
+            extra.insert(key.to_owned(), typed(*kind, value)?);
+            continue;
+        }
         let mut parts = entry.split(',');
         match parts.next()? {
+            // A spawner's mob: `SpawnData` holds the entity's saved form, here only its id.
+            "spawn" if entity == "minecraft:mob_spawner" && !extra.contains_key("SpawnData") => {
+                let id = parts.next()?;
+                if parts.next().is_some() || ferrite_data::entity_props::by_name(id).is_none() {
+                    return None;
+                }
+                let mut entity_tag = Compound::new();
+                entity_tag.insert("id".into(), Tag::String(id.to_owned()));
+                let mut data = Compound::new();
+                data.insert("entity".into(), Tag::Compound(entity_tag));
+                extra.insert("SpawnData".into(), Tag::Compound(data));
+            }
+            // A hive's flower: a block position saved as three ints.
+            "flower" if entity == "minecraft:beehive" && !extra.contains_key("flower_pos") => {
+                let mut coordinate = || -> Option<i32> { parts.next()?.parse().ok() };
+                let at = [coordinate()?, coordinate()?, coordinate()?];
+                if parts.next().is_some() {
+                    return None;
+                }
+                extra.insert("flower_pos".into(), Tag::IntArray(at.to_vec()));
+            }
             "item" => {
                 let slot: u8 = parts
                     .next()?
@@ -246,6 +400,7 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
         profile,
         properties,
         metas,
+        extra,
     })
 }
 
@@ -261,6 +416,7 @@ pub struct TileData<'a> {
     pub profile: Option<(Option<String>, Option<[i32; 4]>)>,
     pub properties: &'a [(String, String, Option<String>)],
     pub metas: &'a [(u8, ferrite_plugin::ItemMetaSpec)],
+    pub extra: &'a Compound,
 }
 
 /// The block entity update tag: vanilla's `Items` list, plus the furnace timers Ferrite keeps.
@@ -272,9 +428,17 @@ pub fn nbt(entity: &str, tile: &TileData<'_>, with_meta: MetaApplier<'_>) -> Com
         profile,
         properties,
         metas,
+        extra,
     } = tile;
     let (furnace, profile) = (*furnace, profile.clone());
     let mut data = Compound::new();
+    for (key, value) in extra.iter() {
+        data.insert(key.clone(), value.clone());
+    }
+    if entity == "minecraft:beehive" {
+        // `BeehiveBlockEntity` always saves its occupants; a snapshot has none.
+        data.insert("bees".into(), Tag::List(List::Compound(Vec::new())));
+    }
     if entity == "minecraft:banner" {
         let layers = patterns
             .iter()
@@ -319,6 +483,10 @@ pub fn nbt(entity: &str, tile: &TileData<'_>, with_meta: MetaApplier<'_>) -> Com
     if entity == "minecraft:banner" || entity == "minecraft:skull" {
         return data;
     }
+    let keyed = KEYED_STACK.iter().find(|(name, _)| *name == entity);
+    if keyed.is_none() && SETTINGS.iter().any(|(name, _)| *name == entity) {
+        return data;
+    }
     let list = items
         .iter()
         .filter_map(|(slot, material, count)| {
@@ -331,7 +499,15 @@ pub fn nbt(entity: &str, tile: &TileData<'_>, with_meta: MetaApplier<'_>) -> Com
             entry.insert("Slot".into(), Tag::Byte(*slot as i8));
             Some(entry)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if let Some((_, key)) = keyed {
+        // A single stack under its own key, without the container slot.
+        if let Some(mut stack) = list.into_iter().next() {
+            stack.shift_remove("Slot");
+            data.insert((*key).to_owned(), Tag::Compound(stack));
+        }
+        return data;
+    }
     data.insert("Items".into(), Tag::List(List::Compound(list)));
     if let Some([burn, burn_total, cook, cook_total]) = furnace {
         data.insert("BurnTime".into(), Tag::Short(burn));
@@ -484,6 +660,7 @@ mod tests {
                     profile: None,
                     properties: &[],
                     metas: &[],
+                    extra: &Compound::new(),
                 },
                 &|s, _| s
             )
@@ -515,6 +692,7 @@ mod tests {
                     profile: None,
                     properties: &[],
                     metas: &[],
+                    extra: &Compound::new(),
                 },
                 &|s, _| s,
             ),
@@ -564,6 +742,7 @@ mod tests {
                     profile,
                     properties: &properties,
                     metas: &metas,
+                    extra: &Compound::new(),
                 },
                 &|s, _| s,
             ),
@@ -733,6 +912,7 @@ mod tests {
                 profile: None,
                 properties: &[],
                 metas: &metas,
+                extra: &Compound::new(),
             },
             &|mut stack, meta| {
                 stack.count = i32::try_from(meta.enchants.len()).unwrap() + 4;
@@ -790,6 +970,161 @@ mod tests {
             ),
             None,
             "banners hold no items"
+        );
+    }
+
+    fn nbt_of(entity: &str, entries: &[&str]) -> Compound {
+        let Some(PluginPacket::TileUpdate {
+            items,
+            furnace,
+            patterns,
+            profile,
+            properties,
+            metas,
+            extra,
+            ..
+        }) = packet([0, 0, 0], entity, &join(entries), SEP)
+        else {
+            panic!("{entity} {entries:?} should be a valid snapshot");
+        };
+        nbt(
+            entity,
+            &TileData {
+                items: &items,
+                furnace,
+                patterns: &patterns,
+                profile,
+                properties: &properties,
+                metas: &metas,
+                extra: &extra,
+            },
+            &|stack, _| stack,
+        )
+    }
+
+    #[test]
+    fn a_jukebox_and_a_lectern_keep_their_single_stack_under_its_own_key() {
+        let jukebox = nbt_of(
+            "minecraft:jukebox",
+            &[
+                "item,0,minecraft:music_disc_cat,1",
+                "put,ticks_since_song_started,40",
+            ],
+        );
+        let Some(Tag::Compound(record)) = jukebox.get("RecordItem") else {
+            panic!("a RecordItem compound: {jukebox:?}");
+        };
+        assert_eq!(
+            record.get("id"),
+            Some(&Tag::String("minecraft:music_disc_cat".into()))
+        );
+        assert!(!record.contains_key("Slot"));
+        assert_eq!(
+            jukebox.get("ticks_since_song_started"),
+            Some(&Tag::Long(40))
+        );
+        assert!(!jukebox.contains_key("Items"));
+
+        let lectern = nbt_of(
+            "minecraft:lectern",
+            &["item,0,minecraft:writable_book,1", "put,Page,3"],
+        );
+        assert!(matches!(lectern.get("Book"), Some(Tag::Compound(_))));
+        assert_eq!(lectern.get("Page"), Some(&Tag::Int(3)));
+        // Only one slot exists.
+        assert_eq!(
+            packet(
+                [0, 0, 0],
+                "minecraft:lectern",
+                "item,1,minecraft:stone,1",
+                SEP
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn settings_are_typed_per_family_and_unknown_keys_are_rejected() {
+        let command = nbt_of(
+            "minecraft:command_block",
+            &[
+                "put,Command,say hi, there",
+                "put,auto,true",
+                "put,SuccessCount,2",
+            ],
+        );
+        assert_eq!(
+            command.get("Command"),
+            Some(&Tag::String("say hi, there".into()))
+        );
+        assert_eq!(command.get("auto"), Some(&Tag::Byte(1)));
+        assert_eq!(command.get("SuccessCount"), Some(&Tag::Int(2)));
+
+        let spawner = nbt_of(
+            "minecraft:mob_spawner",
+            &["spawn,minecraft:zombie", "put,SpawnCount,6", "put,Delay,20"],
+        );
+        assert_eq!(spawner.get("SpawnCount"), Some(&Tag::Short(6)));
+        let Some(Tag::Compound(data)) = spawner.get("SpawnData") else {
+            panic!("SpawnData");
+        };
+        assert!(matches!(data.get("entity"), Some(Tag::Compound(entity))
+            if entity.get("id") == Some(&Tag::String("minecraft:zombie".into()))));
+
+        let structure = nbt_of(
+            "minecraft:structure_block",
+            &[
+                "put,name,test:house",
+                "put,mode,save",
+                "put,rotation,180",
+                "put,integrity,0.5",
+                "put,sizeX,4",
+                "put,seed,9",
+            ],
+        );
+        assert_eq!(structure.get("rotation"), Some(&Tag::String("180".into())));
+        assert_eq!(structure.get("integrity"), Some(&Tag::Float(0.5)));
+        assert_eq!(structure.get("seed"), Some(&Tag::Long(9)));
+
+        let sensor = nbt_of(
+            "minecraft:sculk_sensor",
+            &["put,last_vibration_frequency,7"],
+        );
+        assert_eq!(sensor.get("last_vibration_frequency"), Some(&Tag::Int(7)));
+
+        let hive = nbt_of("minecraft:beehive", &["flower,1,64,-2"]);
+        assert_eq!(
+            hive.get("flower_pos"),
+            Some(&Tag::IntArray(vec![1, 64, -2]))
+        );
+        assert!(matches!(hive.get("bees"), Some(Tag::List(_))));
+
+        for (entity, entry) in [
+            ("minecraft:command_block", "put,Page,1"),
+            ("minecraft:command_block", "put,auto,maybe"),
+            ("minecraft:mob_spawner", "put,SpawnCount,-1"),
+            ("minecraft:mob_spawner", "spawn,minecraft:not_a_mob"),
+            ("minecraft:structure_block", "put,mode,explode"),
+            ("minecraft:structure_block", "put,integrity,nan"),
+            ("minecraft:jukebox", "put,Page,1"),
+            ("minecraft:chest", "put,Page,1"),
+            ("minecraft:beehive", "flower,1,2"),
+        ] {
+            assert_eq!(
+                packet([0, 0, 0], entity, entry, SEP),
+                None,
+                "{entity} {entry}"
+            );
+        }
+        // A key may be set once.
+        assert_eq!(
+            packet(
+                [0, 0, 0],
+                "minecraft:lectern",
+                &join(&["put,Page,1", "put,Page,2"]),
+                SEP
+            ),
+            None
         );
     }
 }

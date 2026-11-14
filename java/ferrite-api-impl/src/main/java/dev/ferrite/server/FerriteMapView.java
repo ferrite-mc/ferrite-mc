@@ -149,22 +149,68 @@ final class FerriteMapView implements org.bukkit.map.MapView {
             var type = cursor.getType();
             if (type == null) throw new UnsupportedOperationException("Ferrite: map cursor has no 26.3 decoration type");
             var caption = cursor.caption();
+            char mode = '0';
             String captionText = "";
             if (caption != null) {
-                if (!(caption instanceof net.kyori.adventure.text.TextComponent text)
-                        || !text.style().isEmpty() || !text.children().isEmpty()) {
-                    throw new UnsupportedOperationException("Ferrite: map cursor captions support plain text only");
+                if (caption instanceof net.kyori.adventure.text.TextComponent text && text.style().isEmpty() && text.children().isEmpty()) {
+                    mode = '1';
+                    captionText = Base64.getEncoder().encodeToString(text.content().getBytes(StandardCharsets.UTF_8));
+                } else {
+                    // Styled, translated or nested text travels as the component's network NBT.
+                    mode = '2';
+                    captionText = Base64.getEncoder().encodeToString(componentNbt(caption));
                 }
-                captionText = Base64.getEncoder().encodeToString(text.content().getBytes(StandardCharsets.UTF_8));
             }
             if (!encoded.isEmpty()) encoded.append(HostBridge.ITEM);
             encoded.append(type.getKey()).append('')
                 .append(cursor.getX()).append('')
                 .append(cursor.getY()).append('')
                 .append(cursor.getDirection()).append('')
-                .append(caption == null ? '0' : '1').append('')
+                .append(mode).append('')
                 .append(captionText);
         }
         return encoded.toString();
+    }
+
+    /** The network NBT of a text component: the Adventure JSON turned into compounds, lists and bytes. */
+    static byte[] componentNbt(net.kyori.adventure.text.Component component) {
+        var json = com.google.gson.JsonParser.parseString(net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().serialize(component));
+        try { return StructureNbt.network(componentTag(json, true)); }
+        catch (java.io.IOException failure) { throw new IllegalStateException("Cannot encode component", failure); }
+    }
+
+    /** {@code text} marks a position that holds a text component: a bare string there becomes {@code {text:"..."}} inside a list. */
+    private static Object componentTag(com.google.gson.JsonElement element, boolean root) {
+        if (element.isJsonPrimitive()) {
+            var primitive = element.getAsJsonPrimitive();
+            if (primitive.isBoolean()) return (byte) (primitive.getAsBoolean() ? 1 : 0);
+            if (primitive.isNumber()) {
+                double number = primitive.getAsDouble();
+                return number == Math.rint(number) && Math.abs(number) < Integer.MAX_VALUE ? (Object) (int) number : (Object) number;
+            }
+            return primitive.getAsString();
+        }
+        if (element.isJsonObject()) {
+            var compound = new java.util.LinkedHashMap<String, Object>();
+            for (var entry : element.getAsJsonObject().entrySet()) {
+                boolean children = entry.getKey().equals("extra") || entry.getKey().equals("with");
+                compound.put(entry.getKey(), children ? componentList(entry.getValue()) : componentTag(entry.getValue(), false));
+            }
+            return compound;
+        }
+        if (element.isJsonArray()) return componentList(element);
+        throw new IllegalArgumentException("Unsupported component value " + element);
+    }
+
+    private static Object componentList(com.google.gson.JsonElement element) {
+        var list = new java.util.ArrayList<Object>();
+        if (!element.isJsonArray()) { list.add(componentTag(element, false)); return list; }
+        for (var item : element.getAsJsonArray()) {
+            var tag = componentTag(item, false);
+            // A list holds one tag type, so every child becomes a compound.
+            if (!(tag instanceof java.util.Map)) { var wrapper = new java.util.LinkedHashMap<String, Object>(); wrapper.put("text", String.valueOf(tag)); tag = wrapper; }
+            list.add(tag);
+        }
+        return list;
     }
 }

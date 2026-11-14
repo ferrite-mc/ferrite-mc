@@ -5,7 +5,7 @@
 //! separated by U+001E; an item is `MATERIAL U+001D amount`, and an empty field is an empty slot.
 //! Values come from plugin code, so every field is validated before it reaches the game loop.
 
-use ferrite_plugin::{HostCall, ItemSnapshot, MapDecoration, PlayerCommand};
+use ferrite_plugin::{HostCall, ItemSnapshot, MapCaption, MapDecoration, PlayerCommand};
 use uuid::Uuid;
 
 const FIELD: char = '\u{1e}';
@@ -13,6 +13,8 @@ const PART: char = '\u{1d}';
 const MAX_ROWS: usize = 6;
 /// Maximum UTF-16 units in a caption that still fit a network NBT string (65,535 bytes).
 const MAX_MAP_CAPTION_UTF16: usize = 21_844;
+/// Upper bound for a styled caption's network NBT.
+const MAX_RICH_CAPTION_BYTES: usize = 65_535;
 
 /// Decodes the payload of `setItemMeta(int,String)`: the metadata fields joined by [`FIELD`].
 /// Anything unreadable refuses the whole payload, so half a stack of metadata is never applied.
@@ -515,26 +517,48 @@ fn map_decorations(encoded: &str) -> Option<Vec<MapDecoration>> {
                 .ok()
                 .filter(|direction| (0..=15).contains(direction))?
                 as u8;
-            let has_caption = fields.next()?.parse::<bool>().ok()?;
+            // `0`/`false`: no caption, `1`/`true`: plain text, `2`: base64 of a network NBT component.
+            let mode = match fields.next()? {
+                "0" | "false" => 0,
+                "1" | "true" => 1,
+                "2" => 2,
+                _ => return None,
+            };
             let encoded_caption = fields.next()?;
             if fields.next().is_some() {
                 return None;
             }
-            let caption = if has_caption {
-                use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(encoded_caption)
-                    .ok()?;
-                let text = String::from_utf8(bytes).ok()?;
-                if text.encode_utf16().count() > MAX_MAP_CAPTION_UTF16 {
-                    return None;
-                }
-                Some(text)
-            } else {
+            let caption = if mode == 0 {
                 if !encoded_caption.is_empty() {
                     return None;
                 }
                 None
+            } else {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded_caption)
+                    .ok()?;
+                if mode == 1 {
+                    let text = String::from_utf8(bytes).ok()?;
+                    if text.encode_utf16().count() > MAX_MAP_CAPTION_UTF16 {
+                        return None;
+                    }
+                    Some(MapCaption::Plain(text))
+                } else {
+                    if bytes.len() > MAX_RICH_CAPTION_BYTES {
+                        return None;
+                    }
+                    let (tag, used) = ferrite_nbt::binary::read_network_prefix(&bytes).ok()?;
+                    if used != bytes.len()
+                        || !matches!(
+                            tag,
+                            ferrite_nbt::Tag::Compound(_) | ferrite_nbt::Tag::String(_)
+                        )
+                    {
+                        return None;
+                    }
+                    Some(MapCaption::Rich(tag))
+                }
             };
             Some(MapDecoration {
                 kind,
@@ -782,7 +806,7 @@ mod tests {
                     x: -128,
                     y: 127,
                     direction: 3,
-                    caption: Some("Alex".into()),
+                    caption: Some(MapCaption::Plain("Alex".into())),
                 },
                 MapDecoration {
                     kind: 26,
@@ -814,6 +838,38 @@ mod tests {
                 ],
             };
             assert_eq!(inventory_command(&call), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn styled_and_numeric_caption_modes_are_parsed() {
+        use base64::Engine;
+        let mut styled = ferrite_nbt::Compound::new();
+        styled.insert("text".into(), ferrite_nbt::Tag::String("Ranger".into()));
+        styled.insert("bold".into(), ferrite_nbt::Tag::Byte(1));
+        let tag = ferrite_nbt::Tag::Compound(styled);
+        let bytes = ferrite_nbt::binary::write_network(&tag).unwrap();
+        let rich = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let plain = base64::engine::general_purpose::STANDARD.encode("Hi");
+        let parsed = map_decorations(&format!(
+            "minecraft:player{FIELD}1{FIELD}2{FIELD}3{FIELD}2{FIELD}{rich}{PART}minecraft:red_x{FIELD}0{FIELD}0{FIELD}0{FIELD}1{FIELD}{plain}{PART}minecraft:red_x{FIELD}0{FIELD}0{FIELD}0{FIELD}0{FIELD}"
+        ))
+        .expect("numeric modes parse");
+        assert_eq!(parsed[0].caption, Some(MapCaption::Rich(tag)));
+        assert_eq!(parsed[1].caption, Some(MapCaption::Plain("Hi".into())));
+        assert_eq!(parsed[2].caption, None);
+        // Trailing bytes, a non-component tag and garbage are refused.
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        let int = ferrite_nbt::binary::write_network(&ferrite_nbt::Tag::Int(1)).unwrap();
+        for bad in [trailing, int, vec![10, 1, 2]] {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bad);
+            assert_eq!(
+                map_decorations(&format!(
+                    "minecraft:player{FIELD}0{FIELD}0{FIELD}0{FIELD}2{FIELD}{encoded}"
+                )),
+                None
+            );
         }
     }
 

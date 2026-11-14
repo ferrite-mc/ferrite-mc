@@ -414,6 +414,80 @@ public abstract class PlayerMisc extends PlayerStubs {
     protected void tellHost(String method, Object... args) {
         try { HostBridge.callVoid("Player", getUniqueId(), method, args); } catch (UnsupportedOperationException offline) { /* no host */ }
     }
+    /** One stack of a tile snapshot as `item,` (and `meta,`) entries; empty stacks add nothing. */
+    private static void addTileItem(java.util.List<String> entries, int slot, org.bukkit.inventory.ItemStack item) {
+        if (item == null || item.getType().isAir() || item.getAmount() <= 0) return;
+        entries.add("item," + slot + "," + item.getType().getKey() + "," + item.getAmount());
+        if (!item.hasItemMeta()) return;
+        var wire = ItemMetaWire.of(item);
+        // Wear and a map id are separate host calls on an inventory slot; the tile snapshot has no such step.
+        if (wire.damage() > 0 || wire.mapId() != null)
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate cannot carry wear or a map view on the " + item.getType() + " in slot " + slot + "; the snapshot carries name, lore, enchantments, flags, model data, repair cost and custom data");
+        if (wire.meta() != null) {
+            var hex = new StringBuilder();
+            for (byte b : wire.meta().getBytes(java.nio.charset.StandardCharsets.UTF_8)) hex.append(String.format("%02x", b));
+            entries.add("meta," + slot + "," + hex);
+        }
+    }
+
+    /** The snapshot entries of the block entities that have no plain item container, or null for any other state. */
+    private String tileSettings(org.bukkit.block.TileState tileState, java.util.List<String> entries) {
+        if (tileState instanceof org.bukkit.block.Jukebox jukebox) {
+            addTileItem(entries, 0, jukebox.getRecord());
+            return "minecraft:jukebox";
+        }
+        if (tileState instanceof org.bukkit.block.Lectern lectern) {
+            addTileItem(entries, 0, lectern.getSnapshotInventory().getItem(0));
+            entries.add("put,Page," + lectern.getPage());
+            return "minecraft:lectern";
+        }
+        if (tileState instanceof org.bukkit.block.CommandBlock command) {
+            entries.add("put,Command," + command.getCommand());
+            if (command.getName() != null && !command.getName().isEmpty() && !command.getName().equals("@"))
+                entries.add("put,CustomName," + command.getName());
+            return "minecraft:command_block";
+        }
+        if (tileState instanceof org.bukkit.block.CreatureSpawner spawner) {
+            if (spawner.getSpawnedType() != null) entries.add("spawn," + spawner.getSpawnedType().key());
+            entries.add("put,Delay," + spawner.getDelay());
+            entries.add("put,MinSpawnDelay," + spawner.getMinSpawnDelay());
+            entries.add("put,MaxSpawnDelay," + spawner.getMaxSpawnDelay());
+            entries.add("put,SpawnCount," + spawner.getSpawnCount());
+            entries.add("put,MaxNearbyEntities," + spawner.getMaxNearbyEntities());
+            entries.add("put,RequiredPlayerRange," + spawner.getRequiredPlayerRange());
+            entries.add("put,SpawnRange," + spawner.getSpawnRange());
+            return "minecraft:mob_spawner";
+        }
+        if (tileState instanceof org.bukkit.block.SculkSensor sensor) {
+            entries.add("put,last_vibration_frequency," + sensor.getLastVibrationFrequency());
+            return tileState.getType() == org.bukkit.Material.CALIBRATED_SCULK_SENSOR ? "minecraft:calibrated_sculk_sensor" : "minecraft:sculk_sensor";
+        }
+        if (tileState instanceof org.bukkit.block.Beehive hive) {
+            var flower = hive.getFlower();
+            if (flower != null) entries.add("flower," + flower.getBlockX() + "," + flower.getBlockY() + "," + flower.getBlockZ());
+            return "minecraft:beehive";
+        }
+        if (tileState instanceof org.bukkit.block.Structure structure) {
+            entries.add("put,name," + (structure.getStructureName() == null ? "" : structure.getStructureName()));
+            entries.add("put,author," + (structure.getAuthor() == null ? "" : structure.getAuthor()));
+            entries.add("put,metadata," + (structure.getMetadata() == null ? "" : structure.getMetadata()));
+            var position = structure.getRelativePosition();
+            entries.add("put,posX," + position.getBlockX()); entries.add("put,posY," + position.getBlockY()); entries.add("put,posZ," + position.getBlockZ());
+            var size = structure.getStructureSize();
+            entries.add("put,sizeX," + size.getBlockX()); entries.add("put,sizeY," + size.getBlockY()); entries.add("put,sizeZ," + size.getBlockZ());
+            entries.add("put,rotation," + switch (structure.getRotation()) { case NONE -> "none"; case CLOCKWISE_90 -> "clockwise_90"; case CLOCKWISE_180 -> "180"; case COUNTERCLOCKWISE_90 -> "counterclockwise_90"; });
+            entries.add("put,mirror," + switch (structure.getMirror()) { case NONE -> "none"; case LEFT_RIGHT -> "left_right"; case FRONT_BACK -> "front_back"; });
+            entries.add("put,mode," + structure.getUsageMode().name().toLowerCase(java.util.Locale.ROOT));
+            entries.add("put,ignoreEntities," + structure.isIgnoreEntities());
+            entries.add("put,showair," + structure.isShowAir());
+            entries.add("put,showboundingbox," + structure.isBoundingBoxVisible());
+            entries.add("put,integrity," + structure.getIntegrity());
+            entries.add("put,seed," + structure.getSeed());
+            return "minecraft:structure_block";
+        }
+        return null;
+    }
+
     /**
      * A tile snapshot shown to this player only (never a world change). Signs and the block entity families the host
      * models (chest, trapped chest, barrel, shulker boxes, furnace, blast furnace, smoker) are sent; any other
@@ -461,6 +535,14 @@ public abstract class PlayerMisc extends PlayerStubs {
             HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, "minecraft:skull", entries);
             return;
         }
+        if (tileState instanceof org.bukkit.block.Bed)
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") has nothing to send: 26.3 beds have no block entity, the colour is part of the block");
+        var settings = new java.util.ArrayList<String>();
+        var special = tileSettings(tileState, settings);
+        if (special != null) {
+            HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, special, settings);
+            return;
+        }
         String entity = switch (type) {
             case CHEST -> "minecraft:chest";
             case TRAPPED_CHEST -> "minecraft:trapped_chest";
@@ -478,7 +560,7 @@ public abstract class PlayerMisc extends PlayerStubs {
             default -> type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
         };
         if (entity == null)
-            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models only signs, banners, skulls, chests, barrels, shulker boxes, furnaces, dispensers, droppers, hoppers, brewing stands, crafters, campfires and chiseled bookshelves as tile entities, and has no other block entity model to encode");
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models signs, banners, skulls, containers (chest, barrel, shulker box, furnaces, dispenser, dropper, hopper, brewing stand, crafter, campfire, chiseled bookshelf), jukebox, lectern, command block, spawner, beehive, sculk sensors and structure block as tile entities, and has no other block entity model to encode");
         int size;
         java.util.function.IntFunction<org.bukkit.inventory.ItemStack> stackAt;
         if (tileState instanceof org.bukkit.block.Campfire campfire) { size = campfire.getSize(); stackAt = campfire::getItem; }
@@ -486,22 +568,7 @@ public abstract class PlayerMisc extends PlayerStubs {
         else if (tileState instanceof io.papermc.paper.block.TileStateInventoryHolder holder) { var snapshot = holder.getSnapshotInventory(); size = snapshot.getSize(); stackAt = snapshot::getItem; }
         else throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") has no item snapshot to encode");
         var entries = new java.util.ArrayList<String>();
-        for (int slot = 0; slot < size; slot++) {
-            var item = stackAt.apply(slot);
-            if (item == null || item.getType().isAir() || item.getAmount() <= 0) continue;
-            entries.add("item," + slot + "," + item.getType().getKey() + "," + item.getAmount());
-            if (item.hasItemMeta()) {
-                var wire = ItemMetaWire.of(item);
-                // Wear and a map id are separate host calls on an inventory slot; the tile snapshot has no such step.
-                if (wire.damage() > 0 || wire.mapId() != null)
-                    throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate cannot carry wear or a map view on the " + item.getType() + " in slot " + slot + "; the snapshot carries name, lore, enchantments, flags, model data, repair cost, persistent data and book content");
-                if (wire.meta() != null) {
-                    var hex = new StringBuilder();
-                    for (byte b : wire.meta().getBytes(java.nio.charset.StandardCharsets.UTF_8)) hex.append(String.format("%02x", b));
-                    entries.add("meta," + slot + "," + hex);
-                }
-            }
-        }
+        for (int slot = 0; slot < size; slot++) addTileItem(entries, slot, stackAt.apply(slot));
         if (tileState instanceof org.bukkit.block.Furnace furnace) {
             // Bukkit exposes the remaining burn time but not the fuel's total, so the total is sent as 0.
             entries.add("furnace," + furnace.getBurnTime() + ",0," + furnace.getCookTime() + "," + furnace.getCookTimeTotal());

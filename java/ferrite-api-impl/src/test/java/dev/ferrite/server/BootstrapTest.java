@@ -417,4 +417,29 @@ class BootstrapTest {
         Bukkit.getPluginManager().clearPlugins();
         assertEquals(0, Bukkit.getPluginManager().getPlugins().length);
     }
+
+    @Test void craftMagicNumbersAnswersFromTheRegistries() {
+        assertEquals(org.bukkit.Material.STONE, org.bukkit.craftbukkit.util.CraftMagicNumbers.getMaterial("minecraft:stone"));
+        assertThrows(IllegalArgumentException.class, () -> org.bukkit.craftbukkit.util.CraftMagicNumbers.getMaterial("minecraft:not_a_thing"));
+        assertThrows(IllegalArgumentException.class, () -> org.bukkit.craftbukkit.util.CraftMagicNumbers.getDefaultBlockData(org.bukkit.Material.DIAMOND));
+        assertEquals(org.bukkit.Material.OAK_STAIRS, org.bukkit.craftbukkit.util.CraftMagicNumbers.getDefaultBlockData(org.bukkit.Material.OAK_STAIRS).getMaterial());
+    }
+
+    @Test void nmsItemStackKeepsEveryMetaField() {
+        var stack = new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_SWORD, 1);
+        var meta = stack.getItemMeta();
+        meta.setDisplayName("Blade");
+        meta.setLore(java.util.List.of("one", "two"));
+        meta.addEnchant(org.bukkit.enchantments.Enchantment.SHARPNESS, 3, true);
+        meta.setCustomModelData(7);
+        meta.getPersistentDataContainer().set(new org.bukkit.NamespacedKey("test", "k"), org.bukkit.persistence.PersistentDataType.STRING, "v");
+        stack.setItemMeta(meta);
+        var nms = org.bukkit.craftbukkit.inventory.CraftItemStack.asNMSCopy(stack);
+        stack.setAmount(5);
+        var back = org.bukkit.craftbukkit.inventory.CraftItemStack.asBukkitCopy(nms);
+        assertEquals(1, back.getAmount());
+        assertEquals(stack.getItemMeta().getEnchants(), back.getItemMeta().getEnchants());
+        assertEquals(java.util.List.of("one", "two"), back.getItemMeta().getLore());
+        assertEquals("v", back.getItemMeta().getPersistentDataContainer().get(new org.bukkit.NamespacedKey("test", "k"), org.bukkit.persistence.PersistentDataType.STRING));
+    }
 }

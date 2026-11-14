@@ -4461,9 +4461,20 @@ impl Player {
                                             x: decoration.x,
                                             y: decoration.y,
                                             direction: decoration.direction as i8,
-                                            caption: decoration
-                                                .caption
-                                                .map(ferrite_protocol::types::PlainText),
+                                            caption: decoration.caption.map(
+                                                |caption| match caption {
+                                                    ferrite_plugin::MapCaption::Plain(text) => {
+                                                        ferrite_protocol::types::NetworkText::Plain(
+                                                            text,
+                                                        )
+                                                    }
+                                                    ferrite_plugin::MapCaption::Rich(tag) => {
+                                                        ferrite_protocol::types::NetworkText::Rich(
+                                                            tag,
+                                                        )
+                                                    }
+                                                },
+                                            ),
                                         }
                                     })
                                     .collect(),
