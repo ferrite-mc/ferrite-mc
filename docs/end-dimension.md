@@ -81,9 +81,11 @@ What works, how it is built, and what is still missing.
   event at `/tick rate 10000`.
 
 - **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
-  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Breath clouds use
-  vanilla's shape: radius 3 growing to 5 over 600 ticks, a 20-tick fireball wait, and 3 damage
-  every 20 ticks.
+  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Fireball clouds use
+  radius 3 growing to 5 over 600 ticks with a 20-tick wait; the perched dragon's cloud is a
+  constant radius 5 that lives 200 ticks (`DragonSittingFlamingPhase`: `setRadius(5.0)`,
+  `setDuration(200)`, read with `javap` from the 26.3 jar) with the `AreaEffectCloud` default
+  20-tick wait. Both hurt 3 every 20 ticks.
 - **Guarded spikes.** The two shortest spikes (the vanilla guarded pair) get a 73-block iron-bar
   cage when their crystal is placed; the cage is restored with the spike on a respawn.
 - **Credits and advancement.** The first trip home through the exit portal sends `WIN_GAME` and
@@ -116,8 +118,9 @@ What works, how it is built, and what is still missing.
   (`breath_floor`, falling back to head height over the void). Approximated: the charge flies
   at `MAX_SPEED` instead of vanilla's fly speed 3.0, ignores the collision exits, and its target
   is not saved (a reloaded charge aborts to holding, as vanilla does with no target); the head is
-  taken at 5 blocks in front of the body, not read from a model; the cloud keeps the shared 600
-  tick, radius 3 to 5 shape rather than vanilla's 200-tick radius-5 cloud. The dragon smashes
+  taken at 5 blocks in front of the body, not read from a model; the cloud's harm is Ferrite's
+  flat 3 magic damage every 20 ticks rather than the cloud's own mob effect (potion duration
+  scale 0.25), which is not modelled. The dragon smashes
   every block in its body except `#minecraft:dragon_immune`. The gateway radius is now 5 (see
   below).
 - **Gateway beam.** A gateway gets the vanilla block entity (`minecraft:end_gateway`, `Age` as a
@@ -149,9 +152,11 @@ What works, how it is built, and what is still missing.
   event at `/tick rate 10000`.
 
 - **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
-  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Breath clouds use
-  vanilla's shape: radius 3 growing to 5 over 600 ticks, a 20-tick fireball wait, and 3 damage
-  every 20 ticks.
+  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Fireball clouds use
+  radius 3 growing to 5 over 600 ticks with a 20-tick wait; the perched dragon's cloud is a
+  constant radius 5 that lives 200 ticks (`DragonSittingFlamingPhase`: `setRadius(5.0)`,
+  `setDuration(200)`, read with `javap` from the 26.3 jar) with the `AreaEffectCloud` default
+  20-tick wait. Both hurt 3 every 20 ticks.
 - **Guarded spikes.** The two shortest spikes (the vanilla guarded pair) get a 73-block iron-bar
   cage when their crystal is placed; the cage is restored with the spike on a respawn.
 - **Credits and advancement.** The first trip home through the exit portal sends `WIN_GAME` and
