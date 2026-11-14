@@ -1,5 +1,22 @@
 # 플러그인 API 스텁 현황 (세션 기록)
 
+## 2026-11-14 — Worker D (plugin-g): 남은 타일/청크 경로
+
+- `Player#sendBlockUpdate` 스컬: `note_block_sound`를 실제 스냅샷에 싣는다. Java가 `note,<namespace:path>`를 보내고
+  `tile_update.rs`가 리소스 키를 검증해 `SkullBlockEntity.saveAdditional`의 `note_block_sound` 문자열로 넣는다.
+  중복·잘못된 키·다른 family는 거부한다. 검증: Rust `a_skull_carries_its_note_block_sound`, JUnit `PlayerTileUpdateTest`.
+- `Chunk#getChunkSnapshot`: 이전에는 모든 블록을 공기로 돌려주는 스냅샷이었다. 이제 블록/조명 질의는
+  "does not capture block or light data"로 명시적으로 거부하고, 바이옴 질의(`getBiome`, `contains(Biome)`)만
+  호스트의 읽기 전용 바이옴 소스로 답한다. `World#getEmptyChunkSnapshot`은 알려진 빈 상태이므로 계속 공기를 돌려준다.
+  검증: JUnit `FerriteChunkSnapshotTest`, `FerriteChunkDataTest`.
+- `ChunkData#getBiome`: 26.3 Paper API의 `ChunkData`에는 `setBiome`이 없고 `Server#createChunkData(World)` 버퍼에는
+  청크 좌표가 없어 호스트 바이옴을 고를 수 없다. PLAINS를 지어내지 않고 계속 명시적으로 거부한다(기존 JUnit 테스트 유지).
+- 실제 26.3 클라이언트로 스컬 사운드·스냅샷을 확인한 것은 아니다.
+- 실제 jar 스캔(2026-11-14, Vault 1.7.3·LuckPerms 5.5.91·EssentialsX 2.22.0·PlaceholderAPI 2.12.3):
+  CraftBukkit/NMS 참조는 0이다. EssentialsX의 `bukkit-api` 누락 4클래스·12멤버는 26.3에서 제거·변경된
+  구 API(`Achievement`, `Potion`, `Material.MONSTER_EGG`, `BannerMeta#getBaseColor` 등)와 플러그인의 구버전
+  컴파일 때문이며 Ferrite 호스트 누락으로 단정하지 않는다. CMI jar는 없어 스캔하지 못했다.
+
 브랜치 `yxshadxw/plan1104`에서 Spigot/Paper/Folia API 스텁을 구현한 기록이다.
 **실제 마인크래프트 클라이언트로 확인한 것은 없다.** 대신 두 가지로 검증했다.
 
@@ -20,7 +37,7 @@ CMI가 동작한다고 말할 수 없다.
 - **`Player#sendBlockUpdate` 배너/머리:** `BannerBlockEntity.saveAdditional`은 `patterns`(`{pattern, color}` 목록)를,
   `SkullBlockEntity`는 `profile`(`ResolvableProfile$Partial`: `name`=`PLAYER_NAME`, `id`=`UUIDUtil.CODEC` int 배열)을 저장한다.
   `tile_update.rs`가 패턴 id(`data/minecraft/banner_pattern`)와 염료 이름 16개를 검증해 `BlockEntityData`로 보낸다.
-  프로필 속성(텍스처)과 노트블록 소리는 `UnsupportedOperationException`으로 거부한다(속성 인코딩은 jar 코덱으로 확인하지 못했다).
+  프로필 속성(텍스처)과 `note_block_sound`도 보내며, 스컬 custom name처럼 `tile_update.rs`에 모델이 없는 값은 스냅샷에 넣지 않는다.
 - **`ChunkData#getBiome`:** 가짜 PLAINS를 없애고 거부한다. `ChunkSnapshot#contains(Biome)`/`getBiome`은 호스트 바이옴 소스를 읽고,
   실제 JVM 호스트 테스트가 확인한다.
 - **월드젠 질의:** `vanilla_host.rs::plugin_world_queries_are_answered_by_the_real_jar`가 실제 26.3 jar로 바이옴 위치, 구조물 위치,

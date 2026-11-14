@@ -57,7 +57,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 - 투사체와 전투: 삼지창 발사와 리프티드 공격(`startRiptideAttack`), `launchProjectile`의 삼지창·눈덩이·달걀·진주·경험치 병·물약·바람 구슬·화염구·폭죽·위더 해골·셜커 탄환·스펙트럴 화살·낚싯찌, 눈 엔더. `canCriticalAttack`, 폭죽 부스트(`fireworkBoost`).
 - 수면: `Player#sleep(Location,boolean)`(침대 검증, 점유 확인, 차원별 폭발 처리). 엔드: `getEnderDragonBattle`의 `resetCrystals`, `spawnNewGateway(Position)`.
 - `World#createExplosion`(모든 overload, 다른 월드는 거부), `World#spawn`·`createEntity`·`addEntity`(클래스→엔티티 타입 매핑, 모호하면 거부), `getChunksAtAsync`, `Player#getSentChunkKeys`.
-- `sendBlockUpdate`: 디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된 책장·주크박스·교탁·명령 블록·스포너·스컬크 센서·벌집·구조물 블록 등 블록 엔티티와 머리 텍스처 속성, 아이템 메타 스냅샷.
+- `sendBlockUpdate`: 디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된 책장·주크박스·교탁·명령 블록·스포너·스컬크 센서·벌집·구조물 블록 등 블록 엔티티와 머리 텍스처 속성·`note_block_sound`, 아이템 메타 스냅샷.
 - 지도 커서 스타일 캡션(`styled`/`numeric` 모드 0·1·2), `CraftMagicNumbers`(`getMaterial`, `getKey`, `getDefaultBlockData`, `isLegacy`, `fromLegacy`).
 - `Player#loadData`/`saveData`의 인벤토리·선택 슬롯·게임 모드 적용(체력·허기·경험치는 되돌리지 않음), 기본 월드 엔티티 스냅샷과 `CapturedStructure`/`getStructures`.
 - `NmsEntityHandle`: 위치·속도·회전·상태·승객/차량 등을 Bukkit 호출을 거쳐 읽고 쓴다(리전 소유권을 우회하지 않음).

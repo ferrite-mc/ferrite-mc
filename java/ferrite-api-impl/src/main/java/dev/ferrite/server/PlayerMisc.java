@@ -583,11 +583,11 @@ public abstract class PlayerMisc extends PlayerStubs {
             return;
         }
         if (tileState instanceof org.bukkit.block.Skull skull) {
-            // SkullBlockEntity saves `profile`, `note_block_sound` and `custom_name`; only the profile's name and
-            // uuid are modelled. Textures (profile properties) and a note block sound are refused, not dropped.
-            if (skull.getNoteBlockSound() != null)
-                throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") cannot carry a note block sound; the host snapshot encodes the profile name, uuid and properties only");
+            // SkullBlockEntity saves `profile`, `note_block_sound` and `custom_name`; the profile's name,
+            // uuid and properties plus the sound are modelled. A custom name is not part of the snapshot.
             var entries = new java.util.ArrayList<String>();
+            var sound = skull.getNoteBlockSound();
+            if (sound != null) entries.add("note," + sound.getNamespace() + ":" + sound.getKey());
             var profile = skull.getPlayerProfile();
             if (profile != null) {
                 var name = profile.getName();

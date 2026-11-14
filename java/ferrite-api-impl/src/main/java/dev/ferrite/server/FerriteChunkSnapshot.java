@@ -7,9 +7,13 @@ import org.bukkit.block.Biome;
 import org.bukkit.block.data.BlockData;
 
 /**
- * A snapshot of a chunk that holds nothing but air. Block contents and light are not captured, so
- * every block reads as air; biomes come from the host's live biome data when the snapshot was
- * requested with biome data. Without biome data, biome queries fail instead of inventing a value.
+ * A snapshot that carries no captured block or light data.
+ *
+ * <p>{@code World#getEmptyChunkSnapshot} asks for exactly that, so every block reads as air. A
+ * {@code Chunk#getChunkSnapshot} has to describe a live chunk instead, and Ferrite does not copy
+ * one: reading another region's chunk here would break region ownership, and the host exposes no
+ * chunk-wide snapshot. Those snapshots answer biome queries (the host's biome source is read-only)
+ * and refuse block and light queries with that reason instead of reporting invented air.
  */
 final class FerriteChunkSnapshot implements org.bukkit.ChunkSnapshot {
     private final int x, z, minHeight, maxHeight;
@@ -17,23 +21,47 @@ final class FerriteChunkSnapshot implements org.bukkit.ChunkSnapshot {
     private final String worldId;
     private final Key worldKey;
     private final boolean includeBiome;
+    /** True only for {@code World#getEmptyChunkSnapshot}, where air is the known answer. */
+    private final boolean empty;
     private final long fullTime;
     /** Distinct biomes sampled from the 4x4x4 biome cells when {@link #contains(Biome)} is called. */
     private volatile java.util.Set<Biome> biomes;
 
     FerriteChunkSnapshot(int x, int z, String worldName, String worldId, Key worldKey, int minHeight, int maxHeight, long fullTime) {
-        this(x, z, worldName, worldId, worldKey, minHeight, maxHeight, fullTime, true);
+        this(x, z, worldName, worldId, worldKey, minHeight, maxHeight, fullTime, true, true);
     }
 
     FerriteChunkSnapshot(int x, int z, String worldName, String worldId, Key worldKey,
                          int minHeight, int maxHeight, long fullTime, boolean includeBiome) {
+        this(x, z, worldName, worldId, worldKey, minHeight, maxHeight, fullTime, includeBiome, true);
+    }
+
+    private FerriteChunkSnapshot(int x, int z, String worldName, String worldId, Key worldKey,
+                                 int minHeight, int maxHeight, long fullTime, boolean includeBiome,
+                                 boolean empty) {
         this.x = x; this.z = z; this.worldName = worldName; this.worldId = worldId; this.worldKey = worldKey;
-        this.minHeight = minHeight; this.maxHeight = maxHeight; this.fullTime = fullTime; this.includeBiome = includeBiome;
+        this.minHeight = minHeight; this.maxHeight = maxHeight; this.fullTime = fullTime;
+        this.includeBiome = includeBiome; this.empty = empty;
+    }
+
+    /** A snapshot of the live chunk: biome queries are answered, block and light queries are refused. */
+    static FerriteChunkSnapshot ofChunk(int x, int z, String worldName, String worldId, Key worldKey,
+                                        int minHeight, int maxHeight, long fullTime, boolean includeBiome) {
+        return new FerriteChunkSnapshot(x, z, worldName, worldId, worldKey, minHeight, maxHeight, fullTime, includeBiome, false);
     }
 
     private void check(int bx, int by, int bz) {
         if (bx < 0 || bx > 15 || bz < 0 || bz > 15) throw new IndexOutOfBoundsException("x/z must be within 0..15");
         if (by < minHeight || by >= maxHeight) throw new IndexOutOfBoundsException("y out of world height");
+    }
+
+    /**
+     * An empty snapshot's air is the real state; a live chunk snapshot has no captured block data,
+     * so answering here would invent air and hide terrain from the caller.
+     */
+    private void requireCapturedBlocks() {
+        if (!empty) throw new UnsupportedOperationException(
+            "Ferrite: Chunk#getChunkSnapshot does not capture block or light data: a whole-chunk read would copy another region's live state, and the host exposes no chunk-wide snapshot; use World#getBlockAt and Block#getLightLevel per position, or World#getEmptyChunkSnapshot for a snapshot that is known to be empty");
     }
 
     private String biomeKey(int bx, int by, int bz) {
@@ -55,14 +83,15 @@ final class FerriteChunkSnapshot implements org.bukkit.ChunkSnapshot {
     @Override public int getZ() { return z; }
     @Override public String getWorldName() { return worldName; }
     @Override public Key getWorldKey() { return worldKey; }
-    @Override public Material getBlockType(int bx, int by, int bz) { check(bx, by, bz); return Material.AIR; }
-    @Override public BlockData getBlockData(int bx, int by, int bz) { check(bx, by, bz); return Material.AIR.createBlockData(); }
-    @Override public int getData(int bx, int by, int bz) { check(bx, by, bz); return 0; }
-    @Override public int getBlockSkyLight(int bx, int by, int bz) { check(bx, by, bz); return 0; }
-    @Override public int getBlockEmittedLight(int bx, int by, int bz) { check(bx, by, bz); return 0; }
-    /** An empty column reports the world's minimum height. */
+    @Override public Material getBlockType(int bx, int by, int bz) { check(bx, by, bz); requireCapturedBlocks(); return Material.AIR; }
+    @Override public BlockData getBlockData(int bx, int by, int bz) { check(bx, by, bz); requireCapturedBlocks(); return Material.AIR.createBlockData(); }
+    @Override public int getData(int bx, int by, int bz) { check(bx, by, bz); requireCapturedBlocks(); return 0; }
+    @Override public int getBlockSkyLight(int bx, int by, int bz) { check(bx, by, bz); requireCapturedBlocks(); return 0; }
+    @Override public int getBlockEmittedLight(int bx, int by, int bz) { check(bx, by, bz); requireCapturedBlocks(); return 0; }
+    /** An empty column reports the world's minimum height; a live chunk snapshot has no height map. */
     @Override public int getHighestBlockYAt(int bx, int bz) {
         if (bx < 0 || bx > 15 || bz < 0 || bz > 15) throw new IndexOutOfBoundsException("x/z must be within 0..15");
+        requireCapturedBlocks();
         return minHeight;
     }
 
@@ -79,8 +108,8 @@ final class FerriteChunkSnapshot implements org.bukkit.ChunkSnapshot {
     }
     @Override public double getRawBiomeTemperature(int bx, int bz) { return getRawBiomeTemperature(bx, 0, bz); }
     @Override public long getCaptureFullTime() { return fullTime; }
-    @Override public boolean isSectionEmpty(int section) { return true; }
-    @Override public boolean contains(BlockData block) { return block.getMaterial().isAir(); }
+    @Override public boolean isSectionEmpty(int section) { requireCapturedBlocks(); return true; }
+    @Override public boolean contains(BlockData block) { requireCapturedBlocks(); return block.getMaterial().isAir(); }
     @Override public boolean contains(Biome biome) {
         java.util.Objects.requireNonNull(biome, "biome");
         if (!includeBiome) return false;

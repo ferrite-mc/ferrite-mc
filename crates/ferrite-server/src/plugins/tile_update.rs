@@ -4,9 +4,10 @@
 //! `furnace,<burn>,<burn total>,<cook>,<cook total>`); this module validates them against the block
 //! entity families Ferrite models and builds the `ClientboundBlockEntityDataPacket` tag: the `Items`
 //! containers of `block_container`/`furnace`, banner `patterns` (`BannerBlockEntity.saveAdditional`:
-//! list of `{pattern, color}`) and skull `profile` (`SkullBlockEntity`: `ResolvableProfile` with the
-//! `name`/`id` keys of `ResolvableProfile$Partial`). Families Ferrite has no model for never get
-//! here: the Java side refuses them, and an unknown type name is rejected again below.
+//! list of `{pattern, color}`), skull `profile` (`SkullBlockEntity`: `ResolvableProfile` with the
+//! `name`/`id` keys of `ResolvableProfile$Partial` and its `properties`) and skull
+//! `note_block_sound` (a resource location). Families Ferrite has no model for never get here:
+//! the Java side refuses them, and an unknown type name is rejected again below.
 
 use ferrite_nbt::{Compound, List, Tag};
 use ferrite_plugin::PluginPacket;
@@ -402,6 +403,14 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
                     value.to_owned(),
                     (!signature.is_empty()).then(|| signature.to_owned()),
                 ));
+            }
+            // `SkullBlockEntity.saveAdditional`: `note_block_sound` is a resource location.
+            "note" if skull && !extra.contains_key("note_block_sound") => {
+                let key = parts.next()?;
+                if parts.next().is_some() || !super::is_resource_key(key) {
+                    return None;
+                }
+                extra.insert("note_block_sound".into(), Tag::String(key.to_owned()));
             }
             // `TheEndGatewayBlockEntity.saveAdditional`: `exit_portal` is an X/Y/Z compound.
             "exit" if entity == "minecraft:end_gateway" && exit.is_none() => {
@@ -803,6 +812,7 @@ mod tests {
             profile,
             properties,
             metas,
+            extra,
             ..
         }) = packet([0, 70, 0], entity, &join(entries), SEP)
         else {
@@ -821,7 +831,7 @@ mod tests {
                     profile,
                     properties: &properties,
                     metas: &metas,
-                    extra: &Compound::new(),
+                    extra: &extra,
                 },
                 &|s, _| s,
             ),
@@ -940,6 +950,51 @@ mod tests {
         assert_eq!(bad("minecraft:skull", &[&long]), None);
         let long_sig = format!("property,textures,v,{}", "s".repeat(1025));
         assert_eq!(bad("minecraft:skull", &[&long_sig]), None);
+    }
+
+    #[test]
+    fn a_skull_carries_its_note_block_sound() {
+        let data = round_trip(
+            "minecraft:skull",
+            &["profile,Notch,", "note,minecraft:entity.pig.ambient"],
+        );
+        assert_eq!(
+            data.get("note_block_sound"),
+            Some(&Tag::String("minecraft:entity.pig.ambient".into()))
+        );
+        // Without a sound the key is absent rather than an empty string.
+        assert_eq!(
+            round_trip("minecraft:skull", &[]).get("note_block_sound"),
+            None
+        );
+        let bad = |entity: &str, entries: &[&str]| packet([0, 0, 0], entity, &join(entries), SEP);
+        // Repeated, malformed, over-long and wrong-family entries are rejected, not repaired.
+        assert_eq!(
+            bad(
+                "minecraft:skull",
+                &[
+                    "note,minecraft:entity.pig.ambient",
+                    "note,minecraft:entity.cow.ambient",
+                ]
+            ),
+            None
+        );
+        assert_eq!(bad("minecraft:skull", &["note,not a key"]), None);
+        assert_eq!(
+            bad(
+                "minecraft:skull",
+                &["note,minecraft:entity.pig.ambient,extra"]
+            ),
+            None
+        );
+        assert_eq!(
+            bad("minecraft:banner", &["note,minecraft:entity.pig.ambient"]),
+            None
+        );
+        assert_eq!(
+            bad("minecraft:chest", &["note,minecraft:entity.pig.ambient"]),
+            None
+        );
     }
 
     fn hex(text: &str) -> String {

@@ -134,9 +134,9 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getChunkSnapshot" -> {
                 var world = (org.bukkit.World) proxy;
                 var key = world.getKey();
-                // Bukkit's three flags control optional snapshot data; the host-backed
-                // snapshot currently exposes biome data and has no separate height-map copy.
-                yield new FerriteChunkSnapshot(
+                // Bukkit's three flags control optional snapshot data; the host-backed snapshot
+                // exposes biome data only, so its block and light queries are refused with that reason.
+                yield FerriteChunkSnapshot.ofChunk(
                     x, z, name, id.toString(),
                     net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()),
                     world.getMinHeight(), world.getMaxHeight(),
