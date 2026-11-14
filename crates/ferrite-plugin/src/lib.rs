@@ -884,6 +884,10 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         velocity: [f64; 3],
     },
+    /// `Player#launchProjectile(FishHook)`: casts the player's fishing bobber.
+    CastBobber {
+        player: uuid::Uuid,
+    },
     /// `Player#saveData` (`load: false`) and `Player#loadData` (`load: true`): write the player's
     /// data file, or read it back over the live player.
     PlayerData {

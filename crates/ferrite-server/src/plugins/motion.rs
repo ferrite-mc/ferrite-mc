@@ -21,6 +21,9 @@ pub fn motion_command(call: &HostCall) -> Option<PlayerCommand> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
+    if call.method == "castBobber()" {
+        return Some(PlayerCommand::CastBobber { player });
+    }
     if let "saveData()" | "loadData()" = call.method.as_str() {
         return Some(PlayerCommand::PlayerData {
             player,
@@ -141,5 +144,13 @@ mod tests {
                 Some(PlayerCommand::PlayerData { load: l, .. }) if l == load
             ));
         }
+    }
+
+    #[test]
+    fn a_bobber_cast_becomes_a_command() {
+        assert!(matches!(
+            motion_command(&call("castBobber()", &[])),
+            Some(PlayerCommand::CastBobber { .. })
+        ));
     }
 }

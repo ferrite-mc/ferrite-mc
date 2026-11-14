@@ -26,6 +26,7 @@ pub mod combat;
 pub mod dragon;
 pub mod effect;
 pub mod experience;
+pub mod eye;
 pub mod falling;
 pub mod firework;
 pub mod horse;

@@ -104,6 +104,8 @@ pub struct EntityData {
     pub fuse: Option<i32>,
     /// Firework rocket state, for `minecraft:firework_rocket`.
     pub firework: Option<crate::firework::FireworkState>,
+    /// Eye of ender state, for `minecraft:eye_of_ender`.
+    pub eye: Option<crate::eye::EyeState>,
     /// Scoreboard tags (`/tag`), which entity selectors match with `tag=`.
     pub tags: BTreeSet<String>,
     /// Section the entity is listed under in the index.
@@ -138,6 +140,7 @@ impl EntityData {
             block_state: None,
             fuse: None,
             firework: None,
+            eye: None,
             tags: BTreeSet::new(),
             cell: Cell::new(0, 0, 0),
             home: (0, 0),

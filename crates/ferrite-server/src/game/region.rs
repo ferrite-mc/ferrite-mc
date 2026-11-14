@@ -188,6 +188,8 @@ pub enum Command {
     PluginSaveData,
     /// A plugin's `Player#loadData`: the saved inventory, game mode and (in the same world) position.
     PluginLoadData,
+    /// A plugin's bobber cast.
+    PluginCastBobber,
     /// A plugin's `Player#fireworkBoost`: a rocket attached to the gliding player.
     PluginFireworkBoost {
         flight: u8,
@@ -1138,6 +1140,10 @@ pub struct Player {
     pub primed_tnt: Vec<([i32; 3], i32)>,
     /// Rockets a plugin attached to this player this tick: `(flight, explosions)`.
     pub firework_launches: Vec<(u8, u8)>,
+    /// Eyes of ender this player threw this tick (spawn positions).
+    pub eye_throws: Vec<[f64; 3]>,
+    /// A plugin asked for a fishing bobber (`launchProjectile(FishHook)`).
+    pub bobber_cast: bool,
     /// Cells where this player placed end crystals this tick.
     pub crystals: Vec<[i32; 3]>,
     /// Fire this player lit this tick; the region schedules `FireBlock` ticks for it.
@@ -3472,6 +3478,22 @@ impl Player {
             self.menus.launched.push((kind, contents));
             return;
         }
+        // An eye of ender used in the air flies toward the nearest stronghold (vanilla `EnderEyeItem.use`).
+        if stack.name() == Some("minecraft:ender_eye") {
+            if !matches!(self.gamemode, 1 | 3) {
+                self.inventory.remove(slot, 1);
+                send(
+                    self,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: self.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            self.eye_throws
+                .push([self.pos[0], self.pos[1] + 1.62 - 0.1, self.pos[2]]);
+            return;
+        }
         // A fishing rod casts a bobber, or reels in the one already out; the region does it.
         if matches!(stack.name(), Some("minecraft:fishing_rod")) {
             self.menus.fishing.push(slot);
@@ -4250,6 +4272,10 @@ impl Player {
                             velocity: ferrite_protocol::types::LpVec3(velocity),
                         },
                     );
+                    continue;
+                }
+                Command::PluginCastBobber => {
+                    self.bobber_cast = true;
                     continue;
                 }
                 Command::PluginSaveData => {
@@ -7340,6 +7366,56 @@ impl Region {
         }
     }
 
+    /// Eyes of ender: a new one looks for the nearest stronghold, then flies; when its life ends it
+    /// drops as an item or shatters.
+    fn tick_eyes(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let throws: Vec<[f64; 3]> = self
+            .players
+            .values_mut()
+            .flat_map(|p| std::mem::take(&mut p.eye_throws))
+            .collect();
+        for at in throws {
+            let record = ferrite_entity::eye::new_eye(
+                ferrite_math::Vec3::new(at[0], at[1], at[2]),
+                &mut self.rng,
+            );
+            self.entities.insert(record);
+        }
+        for (key, pos) in ferrite_entity::eye::untargeted(&self.entities) {
+            // Vanilla searches 100 chunks for a stronghold.
+            let target = match source.locate_structure(
+                "minecraft:stronghold",
+                pos.x.floor() as i32,
+                pos.z.floor() as i32,
+                100,
+            ) {
+                Some(Ok(Some((x, y, z)))) => Some(ferrite_math::Vec3::new(
+                    f64::from(x) + 0.5,
+                    f64::from(y),
+                    f64::from(z) + 0.5,
+                )),
+                _ => None,
+            };
+            ferrite_entity::eye::set_target(&mut self.entities, key, target);
+        }
+        for ended in ferrite_entity::eye::tick_eyes(&mut self.entities) {
+            if ended.drops
+                && let Some(stack) = ferrite_item::ItemStack::from_name("minecraft:ender_eye")
+            {
+                let record = ferrite_entity::item::new_item_stack(
+                    ended.pos,
+                    ferrite_math::Vec3::default(),
+                    &stack,
+                    &mut self.rng,
+                );
+                self.entities.insert(record);
+            }
+        }
+    }
+
     fn broadcast_status(&self, ctx: &TickContext, key: ferrite_entity::EntityKey, status: u8) {
         let Some(id) = self.entities.data(key).map(|data| data.id) else {
             return;
@@ -9016,6 +9092,7 @@ impl Region {
                 ferrite_entity::falling::new_falling(pos, state)
             }
             "minecraft:tnt" => ferrite_entity::tnt::new_primed_tnt(pos, 80),
+            "minecraft:eye_of_ender" => ferrite_entity::eye::new_eye(pos, &mut self.rng),
             "minecraft:firework_rocket" => {
                 ferrite_entity::firework::new_firework(pos, 1, 0, None, &mut self.rng)
             }
@@ -10162,6 +10239,15 @@ impl Region {
         for (side, op) in std::mem::take(&mut p.menus.shoulders) {
             self.apply_shoulder(p, side, op);
         }
+        if std::mem::take(&mut p.bobber_cast)
+            && !p.survival.dead
+            && bobber::find_for(&self.entities, p.uuid).is_none()
+        {
+            let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+            let eye = combat::eye_position(feet);
+            let record = bobber::cast(p.uuid, p.entity, eye, p.yaw, p.pitch, 0, &mut self.rng);
+            self.entities.insert(record);
+        }
         for slot in std::mem::take(&mut p.menus.fishing) {
             self.use_fishing_rod(p, slot);
         }
@@ -10792,6 +10878,7 @@ impl Region {
             self.tick_falling(ctx);
             self.tick_tnt(ctx);
             self.tick_fireworks(ctx);
+            self.tick_eyes(ctx);
         }
         stage!("containers");
         self.tick_beacons(ctx);

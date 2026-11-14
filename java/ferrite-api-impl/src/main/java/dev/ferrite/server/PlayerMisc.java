@@ -265,6 +265,11 @@ public abstract class PlayerMisc extends PlayerStubs {
         Objects.requireNonNull(projectile, "projectile");
         org.bukkit.entity.EntityType thrown = null;
         double power = 1.5;
+        // The bobber is the host's own fishing entity: a cast fails (null) while one is already out.
+        if (org.bukkit.entity.FishHook.class.isAssignableFrom(projectile)) {
+            HostBridge.callVoid("Player", getUniqueId(), "castBobber()");
+            return null;
+        }
         // A free rocket: the host launches it straight up from the eyes (its own flight model).
         if (org.bukkit.entity.Firework.class.isAssignableFrom(projectile)) {
             @SuppressWarnings("unchecked") var rocket = (T) getWorld().spawnEntity(getEyeLocation(), org.bukkit.entity.EntityType.FIREWORK_ROCKET);

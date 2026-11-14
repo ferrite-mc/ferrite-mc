@@ -277,7 +277,7 @@
 - **NMS 메뉴(§2.4):** 상자 계열과 `SHULKER_BOX`는 그대로 열고, 작업대·모루·마법부여·숫돌·베틀·대장간·석재 절단기·지도 제작대는 호스트 스테이션으로 연다(내용 패킷은 명시적 예외). 호퍼·발사기·화로·양조기·신호기·교탁·상인·크래프터는 구체적인 이유와 대체 API를 담은 예외를 유지한다.
 - **TAGS 라이프사이클 이벤트:** 태그 레지스트리가 시작 후 고정이라 거부한다. `fromLegacy`의 데이터 바이트는 지원하지 않는다.
 - **NMS 엔티티·월드 핸들(§2.2/2.5):** `net.minecraft.world.entity.Entity`는 이제 델타 이동(`getDeltaMovement/setDeltaMovement`), `setPos/teleportTo`, 회전, 지면·불·물 상태, 크기, 커스텀 이름, 스코어보드 태그, 승객·탑승 관계(`getPassengers/getVehicle/startRiding/stopRiding`)를 Bukkit 호출로 읽고 쓴다(Entity.of로 플레이어/생명체 래퍼 선택). `LivingEntity`는 흡수 체력·수면·활강·아이템 사용·박힌 화살·효과 확인, `ServerLevel`은 시드·스폰·차원 키·엔티티 목록·UUID 조회, `Vec3`는 벡터 연산을 갖는다. 모두 Bukkit(→호스트 라우트)을 거치므로 리전 소유권을 우회하지 않는다. 테스트 `NmsEntityHandleTest`. 직접 NMS 필드 접근(`entityData`, 속성 맵 등)은 노출하지 않는다.
-- **눈 엔더·낚싯찌:** 요새 위치 탐색(눈 엔더)과 입질·낚시 판정(낚싯찌)이 있어야 의미 있는 동작이 되므로, 겉모양만 나는 가짜를 만들지 않고 `UnsupportedOperationException`을 유지한다.
+- **눈 엔더·낚싯찌:** 눈 엔더는 `ferrite-entity::eye`(80틱 비행, 5분의 4는 아이템으로 떨어지고 나머지는 부서짐, 목표가 12칸 밖이면 12칸 앞·8칸 위로 조준)와 리전 `tick_eyes`(생성 직후 `locate_structure("minecraft:stronghold", …, 100)`로 목표 탐색, 없으면 즉시 부서짐)로 동작하고, 공중에서 눈을 쓰면 던져지며(`EnderEyeItem.use`), `World#spawnEntity(EYE_OF_ENDER)`도 된다. 속도식(`lerp(0.0025,…)`)은 바닐라 `EyeOfEnder.tick`을 기억에 의존해 옮긴 근사다. 낚싯찌는 호스트에 이미 있던 `bobber`를 플러그인이 `launchProjectile(FishHook)`로 던질 수 있게 연결했다(이미 찌가 있으면 무시). 반환 핸들은 `null`이다.
 - **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 그 밖의 Paper 생명주기·스케줄러(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
 
