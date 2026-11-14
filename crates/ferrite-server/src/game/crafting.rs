@@ -702,13 +702,73 @@ pub fn campfire_recipe(input: &ItemStack) -> Option<CookingOutput> {
         .cooking_of(CookingKind::CampfireCooking, input)
 }
 
-/// What a plugin changed so far: its added recipes (id, parsed recipe) and the revision counter
-/// that grows with every change, vanilla removals included.
-pub fn plugin_recipe_state() -> (u64, Vec<ferrite_recipe::Recipe>, Vec<String>) {
+/// The recipe book as plugins changed it: what the client must be told on top of the vanilla
+/// `recipes.json`.
+pub struct PluginBookView {
+    /// Grows with every `addRecipe`, `removeRecipe`, `clearRecipes` and `resetRecipes`.
+    pub revision: u64,
+    /// Vanilla recipe ids a plugin removed: the client's book must not list them.
+    pub hidden: HashSet<String>,
+    /// The plugin recipes the client's book can show (smithing trims and other kinds without a
+    /// plain display stay server-side): id and encoded entry.
+    pub entries: Vec<(String, super::recipe_wire::Encoded)>,
+    /// The `update_recipes` body for this recipe set (furnace and smithing slot items, stonecutter
+    /// options), or `None` when it cannot be built.
+    pub update: Option<Vec<u8>>,
+}
+
+/// The current revision of the plugin recipe overlay (a cheap check before building a view).
+pub fn plugin_recipe_revision() -> u64 {
+    plugin_recipes().read().unwrap().revision
+}
+
+/// Encodes what plugins changed for the client's recipe book. `index_of` hands out the recipe
+/// display id of a plugin recipe (stable for an id), `base_update` is the vanilla `update_recipes`
+/// body.
+pub fn plugin_book_view(
+    base_update: &[u8],
+    index_of: &mut dyn FnMut(&str) -> i32,
+) -> Option<PluginBookView> {
+    let book = BOOK.get_or_init(load).as_ref()?;
     let plugin = plugin_recipes().read().unwrap();
-    let mut removed: Vec<String> = plugin.removed.iter().cloned().collect();
-    removed.sort();
-    (plugin.revision, plugin.added.clone(), removed)
+    let mut entries = Vec::new();
+    for recipe in &plugin.added {
+        let Some(result) = recipe.result() else {
+            continue;
+        };
+        let Some(base) = ItemStack::from_name(&result.item) else {
+            continue;
+        };
+        let stack = plugin.dress(
+            &recipe.id,
+            base.copy_with_count(i32::try_from(result.count).unwrap_or(1)),
+        );
+        let index = index_of(&recipe.id);
+        if let Some(encoded) =
+            super::recipe_wire::encode_entry(recipe, book.0.tags(), index, None, &stack)
+        {
+            entries.push((recipe.id.clone(), encoded));
+        }
+    }
+    let result_of = |recipe: &ferrite_recipe::Recipe| {
+        let result = recipe.result()?;
+        let stack = ItemStack::from_name(&result.item)?
+            .copy_with_count(i32::try_from(result.count).ok()?);
+        Some(plugin.dress(&recipe.id, stack))
+    };
+    let update = super::recipe_wire::update_body(
+        base_update,
+        &book.0,
+        &|recipe| plugin.visible(recipe),
+        &plugin.added,
+        &result_of,
+    );
+    Some(PluginBookView {
+        revision: plugin.revision,
+        hidden: plugin.removed.clone(),
+        entries,
+        update,
+    })
 }
 
 /// The plugin recipe tests share one process-wide overlay, so they run one at a time.

@@ -154,6 +154,19 @@ class PluginRecipeHostTest {
         }
     }
 
+    @Test void theRecipeBookCategoryTravelsWithCraftingAndCookingRecipes() {
+        var shaped = new ShapedRecipe(key("cat_shaped"), new ItemStack(Material.DIAMOND));
+        shaped.shape("A"); shaped.setIngredient('A', Material.DIRT);
+        shaped.setCategory(org.bukkit.inventory.recipe.CraftingBookCategory.REDSTONE);
+        assertTrue(FerriteRecipes.add(shaped));
+        assertEquals("redstone", sent().get("category").getAsString());
+        calls.clear();
+        var food = new org.bukkit.inventory.SmokingRecipe(key("cat_food"), new ItemStack(Material.COOKED_BEEF), Material.BEEF, 0.1f, 100);
+        food.setCategory(org.bukkit.inventory.recipe.CookingBookCategory.FOOD);
+        assertTrue(FerriteRecipes.add(food));
+        assertEquals("food", sent().get("category").getAsString());
+    }
+
     @Test void aStonecuttingRecipeListsItsInputAndResult() {
         var recipe = new org.bukkit.inventory.StonecuttingRecipe(key("cut"), new ItemStack(Material.STICK, 4), new RecipeChoice.MaterialChoice(Material.OAK_PLANKS, Material.SPRUCE_PLANKS));
         assertTrue(FerriteRecipes.add(recipe));

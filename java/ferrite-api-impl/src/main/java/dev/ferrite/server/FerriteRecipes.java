@@ -103,6 +103,7 @@ final class FerriteRecipes {
 
     private static void cookingFields(com.google.gson.JsonObject json, org.bukkit.inventory.CookingRecipe<?> recipe) {
         put(json, "ingredient", recipe.getInputChoice(), true);
+        json.addProperty("category", recipe.getCategory().name().toLowerCase(java.util.Locale.ROOT));
         json.add("result", resultJson(recipe.getResult()));
         json.addProperty("experience", recipe.getExperience());
         json.addProperty("cookingtime", recipe.getCookingTime());
@@ -121,6 +122,7 @@ final class FerriteRecipes {
                 pattern.add(line.toString());
             }
             json.add("pattern", pattern);
+            json.addProperty("category", shaped.getCategory().name().toLowerCase(java.util.Locale.ROOT));
             var key = new com.google.gson.JsonObject();
             for (var entry : choices.entrySet()) if (entry.getValue() != null) key.add(String.valueOf(entry.getKey()), ingredient(entry.getValue()));
             json.add("key", key);
@@ -130,6 +132,7 @@ final class FerriteRecipes {
             var ingredients = new com.google.gson.JsonArray();
             for (var choice : shapeless.getChoiceList()) ingredients.add(ingredient(choice));
             json.add("ingredients", ingredients);
+            json.addProperty("category", shapeless.getCategory().name().toLowerCase(java.util.Locale.ROOT));
             json.add("result", resultJson(recipe.getResult()));
         } else if (recipe instanceof org.bukkit.inventory.FurnaceRecipe furnace) {
             json.addProperty("type", "minecraft:smelting");
