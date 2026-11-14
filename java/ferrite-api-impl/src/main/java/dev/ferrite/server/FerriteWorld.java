@@ -1067,9 +1067,19 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             implements org.bukkit.generator.structure.GeneratedStructure {
         @Override public org.bukkit.generator.structure.Structure getStructure() { return structure; }
         @Override public org.bukkit.util.BoundingBox getBoundingBox() { return box; }
-        @Override public java.util.Collection<org.bukkit.generator.structure.StructurePiece> getPieces() { return java.util.List.of(); }
+        /**
+         * The host reports a structure start's bounding box only (`getStructureStarts(int,int)` answers
+         * `id minX minY minZ maxX maxY maxZ`); the jar's `StructureStart#getPieces` is not carried over the bridge.
+         * An empty list would claim the structure has no pieces, so this refuses instead.
+         */
+        @Override public java.util.Collection<org.bukkit.generator.structure.StructurePiece> getPieces() {
+            throw new UnsupportedOperationException("Ferrite: GeneratedStructure#getPieces is not available: the world generation host reports a structure start's bounding box, not its pieces");
+        }
         @Override public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() { return new FerriteDataContainer(); }
     }
+
+    /** The sampling intervals of the host's biome search (`Host.locateBiome`), equal to Paper's defaults. */
+    private static final int BIOME_HORIZONTAL_INTERVAL = 32, BIOME_VERTICAL_INTERVAL = 64;
 
     /** Biome and structure searches, answered by the vanilla world generation host. */
     private Object locate(String name, Object[] args) {
@@ -1128,6 +1138,16 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         if (legacy) { wanted.add((org.bukkit.block.Biome) args[1]); radius = (int) args[2]; }
         else {
             radius = (int) args[1];
+            // The host searches with the vanilla host's fixed 32-block horizontal and 64-block vertical
+            // sampling (`ServerLevel#findClosestBiome3d(..., 32, 64)`), which is also what Paper's
+            // `locateNearestBiome(Location, int, Biome...)` uses. Other explicit intervals would be
+            // silently ignored, so they are refused.
+            if (args.length >= 4 && args[2] instanceof Integer horizontal && args[3] instanceof Integer vertical
+                    && (horizontal != BIOME_HORIZONTAL_INTERVAL || vertical != BIOME_VERTICAL_INTERVAL)) {
+                throw new UnsupportedOperationException("Ferrite: World#locateNearestBiome samples at the host's fixed "
+                    + BIOME_HORIZONTAL_INTERVAL + "-block horizontal and " + BIOME_VERTICAL_INTERVAL
+                    + "-block vertical intervals; horizontalInterval=" + horizontal + ", verticalInterval=" + vertical + " cannot be honoured");
+            }
             for (var arg : args) {
                 if (arg instanceof org.bukkit.block.Biome[] many) wanted.addAll(java.util.List.of(many));
                 else if (arg instanceof org.bukkit.block.Biome one) wanted.add(one);

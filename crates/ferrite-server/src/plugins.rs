@@ -616,7 +616,9 @@ mod source_world_view_tests {
 }
 
 impl SourceWorldView {
-    fn new(worlds: impl IntoIterator<Item = (Uuid, Arc<crate::game::AnvilChunkSource>)>) -> Self {
+    pub(crate) fn new(
+        worlds: impl IntoIterator<Item = (Uuid, Arc<crate::game::AnvilChunkSource>)>,
+    ) -> Self {
         Self {
             worlds: RwLock::new(worlds.into_iter().collect()),
         }
@@ -639,7 +641,7 @@ impl SourceWorldView {
         self.worlds.write().unwrap().remove(&world)
     }
 
-    fn source(&self, world: Uuid) -> Option<Arc<crate::game::AnvilChunkSource>> {
+    pub(crate) fn source(&self, world: Uuid) -> Option<Arc<crate::game::AnvilChunkSource>> {
         self.worlds.read().unwrap().get(&world).cloned()
     }
 

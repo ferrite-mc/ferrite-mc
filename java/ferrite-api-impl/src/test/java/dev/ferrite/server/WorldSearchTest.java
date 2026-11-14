@@ -173,4 +173,26 @@ class WorldSearchTest {
             () -> world.locateNearestBiome(new Location(world, 0, 64, 0), 100, plains));
         assertTrue(e.getMessage().contains("locateBiome"), e.getMessage());
     }
+
+    @Test void biomeSearchIntervalsOtherThanTheHostsAreRefusedNotIgnored() {
+        var plains = Registry.BIOME.get(NamespacedKey.fromString("minecraft:plains"));
+        HostBridge.transport = (owner, subject, method, args) -> { sent.add(method); return "10 70 0"; };
+        var origin = new Location(world, 0, 64, 0);
+        // The host's own intervals (32 horizontal, 64 vertical: Paper's defaults) are answered.
+        assertEquals(10, world.locateNearestBiome(origin, 100, 32, 64, plains).getLocation().getBlockX());
+        assertEquals(1, sent.size());
+        // Anything else would be silently ignored by the host, so it is refused before any host call.
+        var e = assertThrows(UnsupportedOperationException.class, () -> world.locateNearestBiome(origin, 100, 4, 4, plains));
+        assertTrue(e.getMessage().contains("horizontalInterval=4") && e.getMessage().contains("verticalInterval=4"), e.getMessage());
+        assertThrows(UnsupportedOperationException.class, () -> world.locateNearestBiome(origin, 100, 32, 8, plains));
+        assertEquals(1, sent.size(), "a refused search never reaches the host");
+    }
+
+    @Test void aStructureStartHasABoundingBoxButNoPieces() {
+        HostBridge.transport = (owner, subject, method, args) -> "minecraft:village_plains 0 60 0 20 75 20";
+        var start = world.getStructures(0, 0).iterator().next();
+        assertEquals(21, (int) start.getBoundingBox().getWidthX());
+        var e = assertThrows(UnsupportedOperationException.class, start::getPieces);
+        assertTrue(e.getMessage().contains("bounding box, not its pieces"), e.getMessage());
+    }
 }

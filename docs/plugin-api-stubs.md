@@ -57,7 +57,7 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | API | 구현 위치 | 경계 / 남은 제약 |
 |---|---|---|
 | `Server#getHelpMap` | `FerriteHelpMap` — 명령 맵의 모든 명령을 `GenericCommandHelpTopic`으로 만들고, `registerHelpTopicFactory`가 등록한 팩토리를 우선한다. `addTopic`/`clear`도 동작. | 플러그인 `plugin.yml`의 `help` 토픽과 `getIgnoredPlugins` 설정은 Bukkit `SimpleHelpMap` 로더가 없어 비어 있다. |
-| `Server#getRecipesFor` | `FerriteRecipes` — 데이터팩의 바닐라 레시피를 결과 `Material`로 거른다. `recipeIterator`, `getRecipe`, `addRecipe`, `removeRecipe`, `clearRecipes`, `resetRecipes`도 같은 목록. | 레시피 매칭과 제작 결과 계산은 Rust `ferrite-recipe`가 소유한다. 플러그인이 추가한 레시피는 Bukkit 뷰에만 있고 제작 메뉴에는 쓰이지 않는다. |
+| `Server#getRecipesFor` | `FerriteRecipes` — 데이터팩의 바닐라 레시피를 결과 `Material`로 거른다. `recipeIterator`, `getRecipe`, `addRecipe`, `removeRecipe`, `clearRecipes`, `resetRecipes`도 같은 목록. | 레시피 매칭과 제작 결과 계산은 Rust `ferrite-recipe`가 소유한다. `addRecipe`는 shaped/shapeless, furnace·blasting·smoking·campfire, stonecutting, smithing transform/trim을 Rust 레시피북(`game/crafting.rs`)에 넣어 제작대·화로 계열·모닥불·석재 절단기·대장장이 작업대가 그대로 쓴다. transmute와 `crafting_special_*`, `ExactChoice`/`PredicateChoice`는 이유와 함께 거부한다. 클라이언트 레시피북 전송은 `recipe_packets.rs`가 하지만 실제 클라이언트에서 확인한 것은 아니다. |
 | `Server#createMap`/`getMap` | `FerriteMapView` — 메모리 `MapView`, 렌더러 목록, `sendMap` 때 캔버스 렌더. | 맵 id/메타가 Rust 아이템으로 왕복하지 않는다(아이템은 material+amount). 숨김 커서와 스타일 캡션은 26.3 decoration 레코드에 없어 보내지 않는다. |
 | `Server#getTags`/`getTag` | `FerriteTags` — 데이터팩 `tags/block|item|fluid|entity_type|game_event`. | 위 5개 레지스트리 밖은 `UnsupportedOperationException`. |
 | `InventoryDragEvent` | `game/container.rs` + `ferrite-plugin` + `Bootstrap#fireInventoryDrag` | 드래그가 실제로 바꾼 슬롯만 담는다(시작 시점과 끝 시점의 메뉴 차이). 단일 슬롯 드래그는 `ferrite-inventory`가 일반 클릭으로 적용하지만, 결과가 바뀌면 그 슬롯을 담아 이벤트를 보낸다. |

@@ -7026,3 +7026,127 @@ async fn clone_between_dimensions_reads_one_world_and_writes_another() {
     assert_eq!(nether.block(9, 200, 0), Some(gold));
     world.shutdown().await.unwrap();
 }
+
+/// `/clone` resolves `from`/`to` through the runtime world catalog, so a runtime world is a valid
+/// source and destination, `move` clears the right source, and an unknown key is rejected with
+/// vanilla's message before anything is read or written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clone_between_the_default_and_a_runtime_world() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3");
+    if !root.join("generated/reports/blocks.json").exists() {
+        eprintln!("SKIP: vanilla/26.3/generated is absent");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
+    let source = super::anvil::AnvilChunkSource::new(temp.path().to_path_buf(), registry);
+    let view = std::sync::Arc::new(crate::plugins::SourceWorldView::new([]));
+    let world = World::start_configured(
+        Some(source),
+        [0, 65, 0],
+        super::WorldSettings {
+            runtime_world_view: Some(view.clone()),
+            ..Default::default()
+        },
+    );
+    let source = world
+        .dimensions()
+        .source(super::Dimension::Overworld)
+        .clone();
+    let (runtime, _, _, _, _) = world
+        .create_runtime_world("clonedst", super::Dimension::Overworld, [0, 65, 0], 0)
+        .await
+        .unwrap();
+    let runtime_source = view.source(runtime).expect("runtime world is registered");
+    world
+        .console_command("forceload add 0 0".into())
+        .await
+        .unwrap();
+    world
+        .signals
+        .send(super::Signal::Hold {
+            world: super::WorldId::Runtime(runtime),
+            chunk: ferrite_region::ChunkPos(0, 0),
+            add: true,
+        })
+        .unwrap();
+    // A hold registers the chunk with the world's region; the chunk data itself is loaded the way
+    // plugin reads load it (`SourceWorldView::source_with_chunk`).
+    let loader = runtime_source.clone();
+    let loaded = tokio::task::spawn_blocking(move || {
+        loader.ensure_chunk_loaded(0, 0, std::time::Duration::from_secs(30))
+    })
+    .await
+    .unwrap();
+    assert!(loaded, "the runtime world loads its chunk");
+    let wait = async {
+        while source.get(0, 0, 0).is_none() || runtime_source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+        .await
+        .expect("both worlds load their chunk");
+    let state = |name: &str| u32::from(ferrite_data::blocks::default_state(name).unwrap());
+    let (stone, gold) = (state("minecraft:stone"), state("minecraft:gold_block"));
+    let until = |what: &'static str, mut done: Box<dyn FnMut() -> bool>| async move {
+        let wait = async {
+            while !done() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+            .await
+            .expect(what);
+    };
+
+    // Default world -> runtime world.
+    source.set_block(1, 200, 0, stone).unwrap();
+    source.set_block(2, 200, 0, gold).unwrap();
+    world
+        .console_command("clone 1 200 0 2 200 0 to ferrite:clonedst 4 200 0".into())
+        .await
+        .unwrap();
+    let target = runtime_source.clone();
+    until(
+        "the default world's blocks arrive in the runtime world",
+        Box::new(move || target.block(5, 200, 0) == Some(gold)),
+    )
+    .await;
+    assert_eq!(runtime_source.block(4, 200, 0), Some(stone));
+    assert_eq!(source.block(2, 200, 0), Some(gold));
+    assert_ne!(
+        source.block(5, 200, 0),
+        Some(gold),
+        "a normal clone leaves the source alone"
+    );
+
+    // Runtime world -> default world, with `move`: the runtime source is cleared afterwards.
+    world
+        .console_command("clone from ferrite:clonedst 4 200 0 5 200 0 8 201 0 replace move".into())
+        .await
+        .unwrap();
+    let (back, origin) = (source.clone(), runtime_source.clone());
+    until(
+        "the runtime blocks arrive in the default world and leave their source",
+        Box::new(move || back.block(9, 201, 0) == Some(gold) && origin.block(5, 200, 0) == Some(0)),
+    )
+    .await;
+    assert_eq!(source.block(8, 201, 0), Some(stone));
+    assert_eq!(runtime_source.block(4, 200, 0), Some(0));
+
+    // An unknown key is refused before anything is read or written.
+    world
+        .console_command("clone 1 200 0 2 200 0 to ferrite:missing 20 200 0".into())
+        .await
+        .unwrap();
+    world
+        .console_command("clone from ferrite:missing 1 200 0 2 200 0 20 202 0".into())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_ne!(source.block(21, 200, 0), Some(gold));
+    assert_ne!(source.block(21, 202, 0), Some(gold));
+    assert_ne!(runtime_source.block(21, 200, 0), Some(gold));
+    world.shutdown().await.unwrap();
+}

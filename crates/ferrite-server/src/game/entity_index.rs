@@ -64,6 +64,10 @@ impl CommandEntity {
 #[derive(Debug, Default)]
 pub struct EntityIndex {
     entries: BTreeMap<Uuid, CommandEntity>,
+    /// Who created each entity (`TraceableEntity.getOwner` for `/execute on origin`): the shooter
+    /// of an arrow or trident, the thrower of an item, the owner of a fishing bobber. Kept beside
+    /// `entries` so `CommandEntity` literals elsewhere stay unchanged.
+    origins: BTreeMap<Uuid, Uuid>,
 }
 
 impl EntityIndex {
@@ -73,6 +77,16 @@ impl EntityIndex {
 
     pub fn get(&self, uuid: Uuid) -> Option<&CommandEntity> {
         self.entries.get(&uuid)
+    }
+
+    /// Records who created `entity` (used by `sync` and by tests).
+    pub fn set_origin(&mut self, entity: Uuid, origin: Uuid) {
+        self.origins.insert(entity, origin);
+    }
+
+    /// The entity that created `uuid`, when the region published one.
+    pub fn origin_of(&self, uuid: Uuid) -> Option<Uuid> {
+        self.origins.get(&uuid).copied()
     }
 
     /// Adds or replaces one snapshot entry (used by tests and by `sync`).
@@ -94,6 +108,7 @@ impl EntityIndex {
     ) {
         for uuid in owned.iter() {
             self.entries.remove(uuid);
+            self.origins.remove(uuid);
         }
         owned.clear();
         for key in store.keys() {
@@ -128,6 +143,15 @@ impl EntityIndex {
                     .and_then(|mob| mob.leash.map(|(holder, _)| holder)),
                 target: data.mob.as_ref().and_then(|mob| mob.target),
             };
+            let origin = data
+                .arrow
+                .as_ref()
+                .and_then(|arrow| arrow.owner)
+                .or_else(|| data.item.as_ref().and_then(|item| item.thrower))
+                .or_else(|| data.bobber.as_ref().map(|bobber| bobber.owner));
+            if let Some(origin) = origin {
+                self.set_origin(data.uuid, origin);
+            }
             owned.insert(entity.uuid);
             self.insert(entity);
         }
@@ -233,5 +257,33 @@ mod tests {
         assert_eq!(index.get(uuid).unwrap().health, Some(4.0));
         let other = store.data(plain).unwrap().uuid;
         assert_eq!(index.get(other).unwrap().health, None);
+    }
+
+    #[test]
+    fn sync_publishes_who_created_an_arrow_or_threw_an_item() {
+        use ferrite_entity::Rng;
+        let shooter = Uuid::from_u128(0x5);
+        let mut store = EntityStore::default();
+        let arrow = store.insert(ferrite_entity::arrow::new_arrow(
+            Vec3::new(0.5, 64.0, 0.5),
+            Vec3::ZERO,
+            2.0,
+            Some(shooter),
+            &mut Rng::new(1),
+        ));
+        let plain = store.insert(record(5.5, 64.0, 5.5));
+        let mut index = EntityIndex::default();
+        let mut owned = HashSet::new();
+        index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
+        let arrow_uuid = store.data(arrow).unwrap().uuid;
+        assert_eq!(index.origin_of(arrow_uuid), Some(shooter));
+        assert_eq!(index.origin_of(store.data(plain).unwrap().uuid), None);
+        store.remove(arrow);
+        index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
+        assert_eq!(
+            index.origin_of(arrow_uuid),
+            None,
+            "forgotten with the entity"
+        );
     }
 }

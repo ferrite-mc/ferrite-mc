@@ -122,13 +122,28 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   is still rejected before anything is read. Tests:
   `clone_between_dimensions_reads_one_world_and_writes_another` (replace, `filtered`, `move`),
   `clone_validation_is_shared_with_the_cross_dimension_path`. Not verified with a real client.
+  Updated 2026-11-14: `from`/`to` also resolve runtime worlds by resource key (`ferrite:<name>`,
+  `RuntimeWorldCatalog::by_key`), the hand-off carries a `WorldId` (`CrossClone::source_world|
+  target_world`) and runs through `schedule_at_world_chunk`, and an unknown key fails with
+  vanilla's `argument.dimension.invalid` text ("Unknown dimension '<key>'") before anything is
+  read. Tests: `clone_between_the_default_and_a_runtime_world` (default to runtime, runtime to
+  default with `move`, unknown key writes nothing), `clone_worlds_resolve_vanilla_keys_and_reject_unknown_ones_with_vanillas_message`.
+  Limit: the command's own world is still the vanilla dimension of its source; a command cannot
+  yet run *as* a runtime world, so `from`/`to` omitted never means a runtime world.
   Unverified: whether vanilla counts only changed blocks.
 - `/fill` and `/setblock`: `strict` is accepted and behaves like `replace`; its real semantics
   are unverified.
 - `/data`: entity data covers players only (a non-player entity is a blocker: the snapshot does
   not carry NBT). `data modify ... compute block|entity|default float|integer <provider>` evaluates
   the provider (id or inline SNBT) via `commands_late::provider_value`; test
-  `modify_compute_stores_the_provider_value`. `data get` numeric rules follow
+  `modify_compute_stores_the_provider_value`. Checked 2026-11-14: the provider arguments are tree
+  nodes (`minecraft:context_int_provider`/`context_float_provider`, no allow-list entry remains),
+  a bare number is a constant (an int provider takes whole numbers only; this used to fail as
+  `Unknown ID: minecraft:5`), and every form is evaluated in tests (`every_provider_form_evaluates`:
+  constant, conditional, div, number_dispatcher, weighted_list, match_block with `state`,
+  inverted, all_of, any_of; `the_entity_context_gives_providers_type_and_position` covers
+  `entity_properties`), plus `compute_provider_arguments_are_tree_nodes` and the block-entity
+  end-to-end `modify_block_entity_with_a_computed_value`. `data get` numeric rules follow
   vanilla's `getData`/`getNumeric` as remembered; the `%.2f` scale rendering is unverified.
 - `/scoreboard`: `objectives modify displayautoupdate|numberformat` and `players display
   name|numberformat` store their state (`MoreState`), send vanilla's feedback and resend
@@ -179,7 +194,7 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 | blocker | evidence |
 |---|---|
 | `execute summon` | `Action::Summon` is async and returns no uuid, so the new entity cannot be the source of the rest of the chain |
-| `execute on origin`, `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) now carries `attacker|owner|leasher|target`, so those four relations work; it still carries no spawn-origin entity, NBT or inventory |
+| `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) carries `attacker|owner|leasher|target`, and `EntityIndex::origin_of` carries the creator, so those relations work (2026-11-14: `execute on origin` answers for arrow/trident shooters, item throwers and fishing-bobber owners; tests `sync_publishes_who_created_an_arrow_or_threw_an_item`, `on_relations_use_the_published_snapshot`). Other creators (TNT igniter, area effect cloud owner, fangs) are not in `ferrite-entity`'s data, a lane A interface. The snapshot still carries no NBT or inventory |
 | `if predicate` (partial) | `match_block`, `entity_properties` (type, location), `inverted`, `all_of`, `any_of` are evaluated (`commands_late::condition`); every other condition type evaluates false; `ferrite-loot` exposes no public predicate evaluator (its `Condition::test` is `pub(crate)`) |
 | `/test` structure runner | no structure placement / test-instance block / tick runner: `block_based` instances and the block-targeting forms cannot run |
 | `/jfr` | no JVM |
