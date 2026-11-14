@@ -55,6 +55,11 @@ pub fn answer(call: &HostCall) -> Option<String> {
         "dragonBattleGeneratePortal(boolean)" => Request::GeneratePortal(flag(call.args.first()?)?),
         "dragonBattleInitiateRespawn()" => Request::InitiateRespawn,
         "dragonBattleSpawnGateway()" => Request::SpawnGateway,
+        "dragonBattleResetCrystals()" => Request::ResetCrystals,
+        "dragonBattleSpawnGatewayAt(int,int,int)" => {
+            let coordinate = |index: usize| call.args.get(index)?.parse::<i32>().ok();
+            Request::SpawnGatewayAt([coordinate(0)?, coordinate(1)?, coordinate(2)?])
+        }
         "dragonBattleSetPhase(String)" => {
             let name = call.args.first()?;
             Request::SetPhase(match name.as_str() {
@@ -116,7 +121,26 @@ mod tests {
             answer(&call("dragonBattleSetKilled(boolean)", &["maybe"])),
             None
         );
-        assert_eq!(take_requests().len(), 3);
+        assert_eq!(
+            answer(&call("dragonBattleResetCrystals()", &[])).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            answer(&call(
+                "dragonBattleSpawnGatewayAt(int,int,int)",
+                &["1", "70", "-3"]
+            ))
+            .as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            answer(&call(
+                "dragonBattleSpawnGatewayAt(int,int,int)",
+                &["1", "x", "-3"]
+            )),
+            None
+        );
+        assert_eq!(take_requests().len(), 5);
         assert!(take_requests().is_empty());
     }
 

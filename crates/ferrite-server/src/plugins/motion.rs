@@ -21,8 +21,12 @@ pub fn motion_command(call: &HostCall) -> Option<PlayerCommand> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
-    if call.method == "castBobber()" {
-        return Some(PlayerCommand::CastBobber { player });
+    if call.method == "castBobber()" || call.method == "castBobber(String)" {
+        let entity = match call.args.first() {
+            Some(text) => Some(Uuid::parse_str(text).ok()?),
+            None => None,
+        };
+        return Some(PlayerCommand::CastBobber { player, entity });
     }
     if let "saveData()" | "loadData()" = call.method.as_str() {
         return Some(PlayerCommand::PlayerData {
@@ -30,7 +34,11 @@ pub fn motion_command(call: &HostCall) -> Option<PlayerCommand> {
             load: call.method == "loadData()",
         });
     }
-    if call.method == "fireworkBoost(int,int)" {
+    if call.method == "fireworkBoost(int,int)" || call.method == "fireworkBoost(int,int,String)" {
+        let entity = match call.args.get(2) {
+            Some(text) => Some(Uuid::parse_str(text).ok()?),
+            None => None,
+        };
         let flight: u8 = call
             .args
             .first()?
@@ -42,6 +50,7 @@ pub fn motion_command(call: &HostCall) -> Option<PlayerCommand> {
             player,
             flight,
             explosions,
+            entity,
         });
     }
     let velocity = match call.method.as_str() {
@@ -134,6 +143,21 @@ mod tests {
         ));
         assert!(motion_command(&call("fireworkBoost(int,int)", &["-1", "0"])).is_none());
         assert!(motion_command(&call("fireworkBoost(int,int)", &["1", "999"])).is_none());
+    }
+
+    #[test]
+    fn the_handle_id_travels_with_a_bobber_cast_and_a_firework_boost() {
+        let id = "11111111-2222-3333-4444-555555555555";
+        let expected = Uuid::parse_str(id).unwrap();
+        assert!(matches!(
+            motion_command(&call("castBobber(String)", &[id])),
+            Some(PlayerCommand::CastBobber { entity: Some(e), .. }) if e == expected
+        ));
+        assert!(matches!(
+            motion_command(&call("fireworkBoost(int,int,String)", &["1", "0", id])),
+            Some(PlayerCommand::FireworkBoost { entity: Some(e), .. }) if e == expected
+        ));
+        assert!(motion_command(&call("castBobber(String)", &["nope"])).is_none());
     }
 
     #[test]

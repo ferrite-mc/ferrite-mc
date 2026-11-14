@@ -267,8 +267,12 @@ public abstract class PlayerMisc extends PlayerStubs {
         double power = 1.5;
         // The bobber is the host's own fishing entity: a cast fails (null) while one is already out.
         if (org.bukkit.entity.FishHook.class.isAssignableFrom(projectile)) {
-            HostBridge.callVoid("Player", getUniqueId(), "castBobber()");
-            return null;
+            // The handle carries the id the host gives the bobber; a cast while one is out does nothing there.
+            var hook = UUID.randomUUID();
+            HostBridge.callVoid("Player", getUniqueId(), "castBobber(String)", hook.toString());
+            @SuppressWarnings("unchecked") var handle = (T) SpawnedEntity.of(org.bukkit.entity.EntityType.FISHING_BOBBER, getEyeLocation(), getWorld(), hook);
+            if (callback != null) callback.accept(handle);
+            return handle;
         }
         // A free rocket: the host launches it straight up from the eyes (its own flight model).
         if (org.bukkit.entity.Firework.class.isAssignableFrom(projectile)) {
@@ -941,8 +945,7 @@ public abstract class PlayerMisc extends PlayerStubs {
 
     /**
      * `Player#fireworkBoost`: a rocket attached to the gliding player. Like Paper it does nothing
-     * (returns null) when the player is not gliding. The rocket exists only in the host, so the
-     * returned handle is always null even when the boost happened.
+     * (returns null) when the player is not gliding. The returned handle carries the id the host gives the rocket.
      */
     @Override public org.bukkit.entity.Firework fireworkBoost(org.bukkit.inventory.ItemStack stack) {
         java.util.Objects.requireNonNull(stack, "stack");
@@ -953,8 +956,9 @@ public abstract class PlayerMisc extends PlayerStubs {
             flight = Math.max(0, Math.min(127, meta.getPower()));
             explosions = Math.min(64, meta.getEffectsSize());
         }
-        HostBridge.callVoid("Player", getUniqueId(), "fireworkBoost(int,int)", flight, explosions);
-        return null;
+        var rocket = UUID.randomUUID();
+        HostBridge.callVoid("Player", getUniqueId(), "fireworkBoost(int,int,String)", flight, explosions, rocket.toString());
+        return (org.bukkit.entity.Firework) SpawnedEntity.of(org.bukkit.entity.EntityType.FIREWORK_ROCKET, getLocation(), getWorld(), rocket);
     }
 
     // ---- game connection ---------------------------------------------------------------------------------------

@@ -887,6 +887,8 @@ pub enum PlayerCommand {
     /// `Player#launchProjectile(FishHook)`: casts the player's fishing bobber.
     CastBobber {
         player: uuid::Uuid,
+        /// The id the plugin's handle already carries; the bobber takes it when it spawns.
+        entity: Option<uuid::Uuid>,
     },
     /// `Player#saveData` (`load: false`) and `Player#loadData` (`load: true`): write the player's
     /// data file, or read it back over the live player.
@@ -899,6 +901,8 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         flight: u8,
         explosions: u8,
+        /// The id the plugin's handle already carries; the rocket takes it when it spawns.
+        entity: Option<uuid::Uuid>,
     },
     /// Opens a crafting station without a block (`Player#openWorkbench`, `openAnvil`, ...).
     OpenStation {

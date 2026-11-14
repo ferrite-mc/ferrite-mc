@@ -73,6 +73,9 @@ class FerriteDragonBattleTest {
         assertFalse(calls.contains("dragonBattleInitiateRespawn()|"));
         state = "true,true,20,false,none,64";
         assertFalse(battle.spawnNewGateway(), "the ring is complete");
-        assertThrows(UnsupportedOperationException.class, battle::resetCrystals);
+        battle.resetCrystals();
+        assertTrue(calls.contains("dragonBattleResetCrystals()|"), calls.toString());
+        battle.spawnNewGateway(io.papermc.paper.math.Position.block(5, 70, -3));
+        assertTrue(calls.stream().anyMatch(c -> c.startsWith("dragonBattleSpawnGatewayAt(int,int,int)|") && c.contains("70")), calls.toString());
     }
 }

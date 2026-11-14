@@ -21,6 +21,11 @@ pub enum Request {
     GeneratePortal(bool),
     InitiateRespawn,
     SpawnGateway,
+    /// Opens a gateway at an arbitrary spot (`DragonBattle#spawnNewGateway(Position)`); the
+    /// vanilla count and ring are untouched, as in vanilla.
+    SpawnGatewayAt([i32; 3]),
+    /// Removes the spike crystals and lets the placement pass rebuild all of them.
+    ResetCrystals,
     /// `None` aborts the respawn sequence.
     SetPhase(Option<RespawnStage>),
 }
@@ -60,6 +65,9 @@ impl super::end_fight::FightState {
             Request::SpawnGateway => {
                 self.open_next_gateway();
             }
+            // The region places the blocks; the fight's counters do not change.
+            Request::SpawnGatewayAt(_) => {}
+            Request::ResetCrystals => self.crystals.clear(),
             Request::SetPhase(None) => self.abort_respawn(),
             Request::SetPhase(Some(stage)) => {
                 self.respawn_stage = Some(stage);
@@ -96,6 +104,17 @@ mod tests {
         assert_eq!(fight.respawn_stage, Some(RespawnStage::SummoningPillars));
         fight.apply(Request::SpawnGateway, None);
         assert_eq!(fight.gateways, 1);
+        fight.apply(Request::SpawnGatewayAt([5, 70, 5]), None);
+        assert_eq!(
+            fight.gateways, 1,
+            "a gateway at a chosen spot is not part of the ring"
+        );
+        fight.crystals.extend([1, 2]);
+        fight.apply(Request::ResetCrystals, None);
+        assert!(
+            fight.crystals.is_empty(),
+            "every spike crystal is placed again"
+        );
         assert_eq!(
             fight.apply(Request::GeneratePortal(true), None),
             Some((60, true))

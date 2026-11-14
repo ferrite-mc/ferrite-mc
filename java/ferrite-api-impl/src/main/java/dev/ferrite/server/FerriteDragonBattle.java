@@ -87,7 +87,7 @@ final class FerriteDragonBattle implements DragonBattle {
     }
 
     @Override public void resetCrystals() {
-        throw new UnsupportedOperationException("Ferrite: DragonBattle#resetCrystals is not implemented: the host restores spike crystals only as part of a respawn");
+        HostBridge.callVoid("World", id, "dragonBattleResetCrystals()");
     }
 
     @Override public int getGatewayCount() { return Integer.parseInt(state()[2]); }
@@ -99,7 +99,8 @@ final class FerriteDragonBattle implements DragonBattle {
     }
 
     @Override public void spawnNewGateway(io.papermc.paper.math.Position position) {
-        throw new UnsupportedOperationException("Ferrite: DragonBattle#spawnNewGateway(Position) is not implemented: gateways open only on the vanilla ring");
+        Objects.requireNonNull(position, "position");
+        HostBridge.callVoid("World", id, "dragonBattleSpawnGatewayAt(int,int,int)", position.blockX(), position.blockY(), position.blockZ());
     }
 
     /** Crystals that stand around the exit portal (the four a respawn is started from). */

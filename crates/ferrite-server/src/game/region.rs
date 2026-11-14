@@ -189,11 +189,14 @@ pub enum Command {
     /// A plugin's `Player#loadData`: the saved inventory, game mode and (in the same world) position.
     PluginLoadData,
     /// A plugin's bobber cast.
-    PluginCastBobber,
+    PluginCastBobber {
+        entity: Option<Uuid>,
+    },
     /// A plugin's `Player#fireworkBoost`: a rocket attached to the gliding player.
     PluginFireworkBoost {
         flight: u8,
         explosions: u8,
+        entity: Option<Uuid>,
     },
     /// A plugin's `Player#openWorkbench` and the other block-less crafting stations.
     PluginOpenStation {
@@ -1139,11 +1142,11 @@ pub struct Player {
     /// TNT this player primed this tick, with the fuse length; spawned as `PrimedTnt`.
     pub primed_tnt: Vec<([i32; 3], i32)>,
     /// Rockets a plugin attached to this player this tick: `(flight, explosions)`.
-    pub firework_launches: Vec<(u8, u8)>,
+    pub firework_launches: Vec<(u8, u8, Option<Uuid>)>,
     /// Eyes of ender this player threw this tick (spawn positions).
     pub eye_throws: Vec<[f64; 3]>,
     /// A plugin asked for a fishing bobber (`launchProjectile(FishHook)`).
-    pub bobber_cast: bool,
+    pub bobber_cast: Option<Option<Uuid>>,
     /// Cells where this player placed end crystals this tick.
     pub crystals: Vec<[i32; 3]>,
     /// Fire this player lit this tick; the region schedules `FireBlock` ticks for it.
@@ -4274,8 +4277,8 @@ impl Player {
                     );
                     continue;
                 }
-                Command::PluginCastBobber => {
-                    self.bobber_cast = true;
+                Command::PluginCastBobber { entity } => {
+                    self.bobber_cast = Some(entity);
                     continue;
                 }
                 Command::PluginSaveData => {
@@ -4286,9 +4289,13 @@ impl Player {
                     changed |= self.load_player_data();
                     continue;
                 }
-                Command::PluginFireworkBoost { flight, explosions } => {
+                Command::PluginFireworkBoost {
+                    flight,
+                    explosions,
+                    entity,
+                } => {
                     if crate::plugins::facts::is_gliding(self.uuid) {
-                        self.firework_launches.push((flight, explosions));
+                        self.firework_launches.push((flight, explosions, entity));
                     }
                     continue;
                 }
@@ -6259,11 +6266,43 @@ impl Region {
             .as_deref()
             .and_then(|source| super::end_fight::podium_floor(|y| source.block(0, y, 0)));
         let mut podiums = Vec::new();
+        let mut gateways = Vec::new();
+        let mut reset_crystals = false;
         {
             let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
             for request in requests {
+                match request {
+                    super::end_fight_view::Request::SpawnGatewayAt(at) => gateways.push(at),
+                    super::end_fight_view::Request::ResetCrystals => reset_crystals = true,
+                    _ => {}
+                }
                 podiums.extend(state.more.end_fight.apply(request, floor));
             }
+        }
+        if reset_crystals {
+            // Only the crystals standing on a spike go; the four respawn cells stay.
+            for index in 0..super::end_fight::SPIKE_COUNT {
+                let [x, z] = super::end_fight::spike_column(index);
+                let column = ferrite_math::AABB::new(
+                    f64::from(x) - 2.0,
+                    -64.0,
+                    f64::from(z) - 2.0,
+                    f64::from(x) + 3.0,
+                    320.0,
+                    f64::from(z) + 3.0,
+                );
+                for key in self.entities.query_vec(column) {
+                    if ferrite_entity::dragon::is_crystal(&self.entities, key)
+                        && let Some(flags) = self.entities.flags_mut(key)
+                    {
+                        flags.set(ferrite_entity::Flags::REMOVED, true);
+                    }
+                }
+            }
+        }
+        for at in gateways {
+            self.place_blocks(ctx, &super::end_fight::gateway_blocks(at));
+            self.set_gateway_age(ctx, at, 0);
         }
         for (level, active) in podiums {
             self.place_blocks(ctx, &super::end_fight::podium_blocks([0, level, 0], active));
@@ -7284,25 +7323,32 @@ impl Region {
     /// their look direction, and a rocket whose life ends bursts (status 17) and hurts what is near.
     fn tick_fireworks(&mut self, ctx: &TickContext) {
         // Rockets plugins attached this tick.
-        let launches: Vec<(Uuid, [f64; 3], u8, u8)> = self
+        /// Owner, position, flight, star count and the id the plugin handle already carries.
+        type Launch = (Uuid, [f64; 3], u8, u8, Option<Uuid>);
+        let launches: Vec<Launch> = self
             .players
             .values_mut()
             .flat_map(|p| {
                 let (uuid, pos) = (p.uuid, p.pos);
                 p.firework_launches
                     .drain(..)
-                    .map(move |(flight, explosions)| (uuid, pos, flight, explosions))
+                    .map(move |(flight, explosions, entity)| {
+                        (uuid, pos, flight, explosions, entity)
+                    })
                     .collect::<Vec<_>>()
             })
             .collect();
-        for (uuid, pos, flight, explosions) in launches {
-            let record = ferrite_entity::firework::new_firework(
+        for (uuid, pos, flight, explosions, entity) in launches {
+            let mut record = ferrite_entity::firework::new_firework(
                 ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
                 flight,
                 explosions,
                 Some(uuid),
                 &mut self.rng,
             );
+            if let Some(entity) = entity {
+                record.data.uuid = entity;
+            }
             self.entities.insert(record);
         }
         let Some(source) = ctx.source.as_deref() else {
@@ -10239,13 +10285,16 @@ impl Region {
         for (side, op) in std::mem::take(&mut p.menus.shoulders) {
             self.apply_shoulder(p, side, op);
         }
-        if std::mem::take(&mut p.bobber_cast)
+        if let Some(entity) = p.bobber_cast.take()
             && !p.survival.dead
             && bobber::find_for(&self.entities, p.uuid).is_none()
         {
             let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
             let eye = combat::eye_position(feet);
-            let record = bobber::cast(p.uuid, p.entity, eye, p.yaw, p.pitch, 0, &mut self.rng);
+            let mut record = bobber::cast(p.uuid, p.entity, eye, p.yaw, p.pitch, 0, &mut self.rng);
+            if let Some(entity) = entity {
+                record.data.uuid = entity;
+            }
             self.entities.insert(record);
         }
         for slot in std::mem::take(&mut p.menus.fishing) {
