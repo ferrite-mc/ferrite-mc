@@ -96,13 +96,22 @@ fn resource_pack(player: Uuid, call: &HostCall) -> Option<PlayerCommand> {
         return None;
     }
     let (mut id, mut link, mut hash, mut required) = (None, None, String::new(), false);
+    let mut prompt: Option<String> = None;
     for (kind, value) in types.iter().zip(&call.args) {
         match *kind {
             "UUID" => id = Some(Uuid::parse_str(value).ok()?),
             "String" if link.is_none() => link = Some(url(value)?.to_owned()),
             "byte[]" => hash = pack_hash(value)?,
             "boolean" => required = value == "true",
-            // A prompt (String or Component) is not sent yet; the pack is offered without one.
+            // The prompt: a Component arrives as JSON, a String as legacy-formatted text
+            // (`CraftChatMessage.fromStringOrNull`); null or empty means none.
+            "Component" if value != NULL_ARG => {
+                ferrite_text::Component::from_json(value).ok()?;
+                prompt = Some(value.clone());
+            }
+            "String" if value != NULL_ARG && !value.is_empty() => {
+                prompt = Some(ferrite_text::Component::from_legacy(value).to_json());
+            }
             "String" | "Component" => {}
             _ => return None,
         }
@@ -116,6 +125,7 @@ fn resource_pack(player: Uuid, call: &HostCall) -> Option<PlayerCommand> {
             url,
             hash,
             required,
+            prompt,
         },
     })
 }
@@ -935,6 +945,57 @@ mod tests {
                 "{host:?} {port:?}"
             );
         }
+    }
+
+    /// `addResourcePack`/`setResourcePack` carry a request id, hash, prompt and `required`.
+    #[test]
+    fn resource_pack_overloads_carry_id_prompt_and_required() {
+        let id = "00000000-0000-0000-0000-0000000000bb";
+        let hash = base64::engine::general_purpose::STANDARD.encode([0x01u8; 20]);
+        let component = r#"{"text":"Pick me","color":"gold"}"#;
+        for method in [
+            "addResourcePack(UUID,String,byte[],String,boolean)",
+            "setResourcePack(UUID,String,byte[],String,boolean)",
+        ] {
+            let Some(PluginPacket::ResourcePackPush {
+                id: got,
+                required,
+                prompt,
+                ..
+            }) = packet(call(
+                method,
+                &[id, "https://example.com/p.zip", &hash, "\u{a7}6Pick me", "true"],
+            ))
+            else {
+                panic!("{method}");
+            };
+            assert_eq!(got, Uuid::parse_str(id).unwrap());
+            assert!(required);
+            assert!(prompt.unwrap().contains("Pick me"), "{method}");
+        }
+        let Some(PluginPacket::ResourcePackPush { prompt, .. }) = packet(call(
+            "setResourcePack(UUID,String,byte[],Component,boolean)",
+            &[id, "https://example.com/p.zip", &hash, component, "false"],
+        )) else {
+            panic!("component overload");
+        };
+        assert_eq!(prompt.as_deref(), Some(component));
+        // A null or empty prompt offers the pack without one.
+        let Some(PluginPacket::ResourcePackPush { prompt, .. }) = packet(call(
+            "setResourcePack(UUID,String,byte[],String,boolean)",
+            &[id, "https://example.com/p.zip", &hash, NULL_ARG, "false"],
+        )) else {
+            panic!("null prompt");
+        };
+        assert_eq!(prompt, None);
+        // A prompt that is not a component is rejected rather than shown as raw JSON.
+        assert!(
+            packet(call(
+                "setResourcePack(UUID,String,byte[],Component,boolean)",
+                &[id, "https://example.com/p.zip", &hash, "{not json", "false"],
+            ))
+            .is_none()
+        );
     }
 
     #[test]

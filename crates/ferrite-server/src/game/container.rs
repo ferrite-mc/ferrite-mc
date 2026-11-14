@@ -1114,6 +1114,7 @@ impl Player {
                 url,
                 hash,
                 required,
+                prompt,
             } => send(
                 self,
                 &ferrite_protocol::packets::play::ResourcePackPush {
@@ -1121,7 +1122,10 @@ impl Player {
                     url,
                     hash,
                     required,
-                    prompt: None,
+                    // `ClientboundResourcePackPushPacket.prompt`: an optional network component.
+                    prompt: prompt
+                        .and_then(|json| ferrite_text::Component::from_json(&json).ok())
+                        .map(|text| ferrite_protocol::types::NetworkText::Rich(text.to_nbt())),
                 },
             ),
             PluginPacket::ResourcePackPop { id } => send(

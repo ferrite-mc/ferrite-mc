@@ -389,6 +389,15 @@ public final class Bootstrap {
         try { synchronized (LEGACY_LOCK) { server.plugins.callEvent(new org.bukkit.event.inventory.InventoryCloseEvent(view, org.bukkit.event.inventory.InventoryCloseEvent.Reason.PLUGIN)); } }
         finally { if (player instanceof FerritePlayer ferrite) ferrite.clearPluginView(); }
     }
+    /** Fires {@code PlayerResourcePackStatusEvent} for the client's answer to a pushed pack. */
+    public static void fireResourcePackStatus(String id, String name, String pack, int action) {
+        var player = ensurePlayer(id, name);
+        var statuses = org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.values();
+        if (action < 0 || action >= statuses.length) return;
+        synchronized (LEGACY_LOCK) {
+            server.plugins.callEvent(new org.bukkit.event.player.PlayerResourcePackStatusEvent(player, java.util.UUID.fromString(pack), statuses[action]));
+        }
+    }
     /** What the player is looking at: the inventory a plugin opened for them, or their own. */
     private static org.bukkit.inventory.InventoryView openView(org.bukkit.entity.Player player) {
         if (player instanceof FerritePlayer ferrite && ferrite.pluginView() != null) return ferrite.pluginView();

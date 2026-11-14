@@ -38,6 +38,7 @@ pub const PLAYER_COMMAND_PREPROCESS_EVENT: &str =
 pub const INVENTORY_CLICK_EVENT: &str = "org.bukkit.event.inventory.InventoryClickEvent";
 pub const INVENTORY_DRAG_EVENT: &str = "org.bukkit.event.inventory.InventoryDragEvent";
 pub const INVENTORY_CLOSE_EVENT: &str = "org.bukkit.event.inventory.InventoryCloseEvent";
+pub const RESOURCE_PACK_STATUS_EVENT: &str = "org.bukkit.event.player.PlayerResourcePackStatusEvent";
 pub const PLAYER_DEATH_EVENT: &str = "org.bukkit.event.entity.PlayerDeathEvent";
 pub const PLAYER_RESPAWN_EVENT: &str = "org.bukkit.event.player.PlayerRespawnEvent";
 pub const ENTITY_DAMAGE_EVENT: &str = "org.bukkit.event.entity.EntityDamageEvent";
@@ -439,6 +440,8 @@ pub enum PluginPacket {
         url: String,
         hash: String,
         required: bool,
+        /// The prompt as component JSON.
+        prompt: Option<String>,
     },
     ResourcePackPop {
         id: Option<uuid::Uuid>,
@@ -1269,6 +1272,17 @@ pub trait ServerHooks: Send + Sync {
     }
     /// Fires Bukkit's `InventoryCloseEvent` when a menu closes.
     fn inventory_closed(&self, _id: uuid::Uuid, _name: &str) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Fires `PlayerResourcePackStatusEvent` when the client answers a pushed resource pack;
+    /// `action` is `ServerboundResourcePackPacket.Action`'s ordinal.
+    fn resource_pack_status(
+        &self,
+        _player: uuid::Uuid,
+        _name: &str,
+        _pack: uuid::Uuid,
+        _action: i32,
+    ) -> Result<(), Error> {
         Ok(())
     }
     /// Commands declared by enabled plugins.
@@ -3671,6 +3685,36 @@ impl PluginHost {
         Ok(())
     }
 
+    pub fn fire_resource_pack_status(
+        &self,
+        player: uuid::Uuid,
+        name: &str,
+        pack: uuid::Uuid,
+        action: i32,
+    ) -> Result<(), Error> {
+        if !self.listens_for(RESOURCE_PACK_STATUS_EVENT) {
+            return Ok(());
+        }
+        self.jvm.with_env(|env| {
+            let player = env.new_string(player.to_string())?;
+            let name = env.new_string(name)?;
+            let pack = env.new_string(pack.to_string())?;
+            env.call_static_method(
+                BOOTSTRAP,
+                "fireResourcePackStatus",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V",
+                &[
+                    JValue::Object(player.as_ref()),
+                    JValue::Object(name.as_ref()),
+                    JValue::Object(pack.as_ref()),
+                    JValue::Int(action),
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     pub fn shutdown(&self) -> Result<(), Error> {
         self.issued_regions
             .lock()
@@ -3818,6 +3862,15 @@ impl ServerHooks for PluginHost {
     }
     fn inventory_closed(&self, id: uuid::Uuid, name: &str) -> Result<(), Error> {
         self.fire_inventory_close(id, name)
+    }
+    fn resource_pack_status(
+        &self,
+        player: uuid::Uuid,
+        name: &str,
+        pack: uuid::Uuid,
+        action: i32,
+    ) -> Result<(), Error> {
+        self.fire_resource_pack_status(player, name, pack, action)
     }
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {
         self.declared_commands()

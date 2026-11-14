@@ -5105,6 +5105,9 @@ impl Player {
                 }
                 ServerboundPlay::ResourcePackResponse(p) => {
                     crate::plugins::facts::set_pack_status(self.uuid, p.action.0);
+                    if let Some(plugins) = &self.plugins {
+                        let _ = plugins.resource_pack_status(self.uuid, &self.name, p.id, p.action.0);
+                    }
                 }
                 ServerboundPlay::PlayerInput(p) => {
                     crate::plugins::facts::set_input(self.uuid, p.flags);

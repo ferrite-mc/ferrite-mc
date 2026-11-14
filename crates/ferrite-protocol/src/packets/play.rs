@@ -872,7 +872,7 @@ impl Packet for ClearDialog {
 }
 // A dialog sent as a registry reference: the holder is the entry's registry index plus one.
 packet!(ShowDialog,143,Clientbound,{holder:VarInt});
-packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required:bool,prompt:Option<Vec<u8>>});
+packet!(ResourcePackPush,82,Clientbound,{id:Uuid,url:String,hash:String,required:bool,prompt:Option<crate::types::NetworkText>});
 packet!(ResourcePackPop,81,Clientbound,{id:Option<Uuid>});
 // Vanilla `ClientboundStoreCookiePacket`: the client keeps `payload` (at most 5120 bytes) under `key`.
 packet!(StoreCookie,122,Clientbound,{key:String,payload:Vec<u8>});
@@ -1902,6 +1902,13 @@ mod interaction_tests {
             hash: "ab".repeat(20),
             required: true,
             prompt: None,
+        });
+        roundtrip(ResourcePackPush {
+            id: Uuid::from_u128(8),
+            url: "https://example.com/pack.zip".into(),
+            hash: String::new(),
+            required: false,
+            prompt: Some(crate::types::NetworkText::Plain("Please accept".into())),
         });
         roundtrip(CookieRequest {
             key: "my:key".into(),
