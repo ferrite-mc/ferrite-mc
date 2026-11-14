@@ -320,6 +320,10 @@ pub enum EntityOperation {
     SetWillAge(bool),
     /// Sets an item's remaining durability (`Item#setHealth`).
     SetItemHealth(i32),
+    /// Sets a firework rocket's age in ticks (`Firework#setLife`; `detonate` sets it past its life).
+    SetFireworkLife(i32),
+    /// Sets the age at which a firework rocket bursts (`Firework#setMaxLife`).
+    SetFireworkMaxLife(i32),
 }
 
 /// One step of showing a scoreboard to a player.

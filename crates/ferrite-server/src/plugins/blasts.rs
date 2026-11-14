@@ -125,6 +125,10 @@ pub fn entity_command(call: &HostCall) -> Option<PlayerCommand> {
     };
     let op = match call.method.as_str() {
         "remove()" => Op::Remove,
+        "setFireworkLife(int)" => Op::SetFireworkLife(call.args.first()?.parse().ok()?),
+        "setFireworkMaxLife(int)" => Op::SetFireworkMaxLife(call.args.first()?.parse().ok()?),
+        // `CraftFirework.detonate`: the age is pushed past the lifetime, so it bursts next tick.
+        "detonate()" => Op::SetFireworkLife(i32::MAX - 1),
         "setVelocity(Vector)" => Op::SetVelocity(triple(call.args.first()?)?),
         "teleportTo(double,double,double)" => Op::Teleport([
             number(call.args.first()?)?,
@@ -289,6 +293,18 @@ mod tests {
                 op: ferrite_plugin::EntityOperation::Remove
             })
         );
+        for (method, args, expected) in [
+            ("detonate()", vec![], ferrite_plugin::EntityOperation::SetFireworkLife(i32::MAX - 1)),
+            ("setFireworkLife(int)", vec!["7"], ferrite_plugin::EntityOperation::SetFireworkLife(7)),
+            ("setFireworkMaxLife(int)", vec!["30"], ferrite_plugin::EntityOperation::SetFireworkMaxLife(30)),
+        ] {
+            assert_eq!(
+                on_entity(method, &args),
+                Some(PlayerCommand::EntityOp { uuid, op: expected }),
+                "{method}"
+            );
+        }
+        assert_eq!(on_entity("setFireworkLife(int)", &["soon"]), None);
         let push = format!("0{0}1.5{0}0", ferrite_plugin::HOST_ITEM_SEPARATOR);
         assert_eq!(
             on_entity("setVelocity(Vector)", &[&push]),

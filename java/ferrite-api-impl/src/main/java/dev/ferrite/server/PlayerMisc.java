@@ -1037,7 +1037,8 @@ public abstract class PlayerMisc extends PlayerStubs {
         }
         var rocket = UUID.randomUUID();
         HostBridge.callVoid("Player", getUniqueId(), "fireworkBoost(int,int,String)", flight, explosions, rocket.toString());
-        return (org.bukkit.entity.Firework) SpawnedEntity.of(org.bukkit.entity.EntityType.FIREWORK_ROCKET, getLocation(), getWorld(), rocket);
+        var meta = stack.getItemMeta() instanceof org.bukkit.inventory.meta.FireworkMeta m ? m : (org.bukkit.inventory.meta.FireworkMeta) new org.bukkit.inventory.ItemStack(org.bukkit.Material.FIREWORK_ROCKET).getItemMeta();
+        return SpawnedEntity.firework(getLocation(), getWorld(), rocket, getUniqueId(), meta);
     }
 
     // ---- game connection ---------------------------------------------------------------------------------------

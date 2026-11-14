@@ -116,7 +116,8 @@ pub fn tick_fireworks(store: &mut EntityStore, blocks: &impl BlockGetter) -> Tic
         let data = store.data_mut(key).unwrap();
         data.tick_count += 1;
         let state = data.firework.as_mut().unwrap();
-        state.life += 1;
+        // A plugin may set the age anywhere (`Firework#setLife`), so do not overflow.
+        state.life = state.life.saturating_add(1);
         let done = hit || state.life > state.life_time;
         let (explosions, attached_to) = (state.explosions, state.attached);
         if done {
@@ -142,6 +143,17 @@ pub fn boost(delta: Vec3, look: Vec3) -> Vec3 {
         delta.x + look.x * 0.1 + (look.x * 1.5 - delta.x) * 0.5,
         delta.y + look.y * 0.1 + (look.y * 1.5 - delta.y) * 0.5,
         delta.z + look.z * 0.1 + (look.z * 1.5 - delta.z) * 0.5,
+    )
+}
+
+/// The velocity an attached rocket gives its rider this tick. The region does not integrate
+/// player movement, so the rider's current delta is how far they moved since the rocket was last
+/// put on them (`previous`, one tick ago) — this keeps a fast glider fast, where boosting from
+/// rest would pull them back to under one block per tick.
+pub fn rider_velocity(previous: Vec3, now: Vec3, look: Vec3) -> Vec3 {
+    boost(
+        Vec3::new(now.x - previous.x, now.y - previous.y, now.z - previous.z),
+        look,
     )
 }
 
@@ -261,6 +273,19 @@ mod tests {
             }
         }
         assert_eq!(last.bursts[0].attached, Some(player));
+    }
+
+    /// Regression: the boost was computed from a standing start every tick, which slowed a
+    /// glider already past 1.5 blocks per tick down to 0.85 of the look vector.
+    #[test]
+    fn a_rider_already_moving_fast_keeps_its_speed_under_the_boost() {
+        let look = Vec3::new(0.0, 0.0, 1.0);
+        let previous = Vec3::new(0.0, 100.0, 0.0);
+        let now = Vec3::new(0.0, 100.0, 2.0);
+        let v = rider_velocity(previous, now, look);
+        // 2.0 + 0.1 + (1.5 - 2.0) * 0.5 = 1.85
+        assert!((v.z - 1.85).abs() < 1e-9, "{v:?}");
+        assert!(rider_velocity(previous, previous, look).z < 1.0);
     }
 
     #[test]

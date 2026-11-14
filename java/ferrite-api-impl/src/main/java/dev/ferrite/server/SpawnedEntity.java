@@ -14,9 +14,44 @@ final class SpawnedEntity {
     private SpawnedEntity() { }
 
     static org.bukkit.entity.Entity of(org.bukkit.entity.EntityType type, org.bukkit.Location at, org.bukkit.World world, UUID uuid) {
+        if (type == org.bukkit.entity.EntityType.FIREWORK_ROCKET) return firework(at, world, uuid, null, (org.bukkit.inventory.meta.FireworkMeta) new org.bukkit.inventory.ItemStack(org.bukkit.Material.FIREWORK_ROCKET).getItemMeta());
         Class<?> api = type.getEntityClass() != null ? type.getEntityClass() : org.bukkit.entity.Entity.class;
         return (org.bukkit.entity.Entity) Proxy.newProxyInstance(SpawnedEntity.class.getClassLoader(), new Class<?>[]{api}, (self, method, args) -> {
             Object result = common(self, method.getName(), args == null ? new Object[0] : args, type, at, world, uuid);
+            if (result != NOT_HANDLED) return result;
+            throw new UnsupportedOperationException("Ferrite: not implemented: " + type.name() + "#" + method.getName());
+        });
+    }
+
+    /**
+     * A firework rocket handle: age, lifetime and detonation reach the live rocket; what a rocket
+     * was built from is fixed when it spawns, so the meta and attachment are read-only.
+     */
+    static org.bukkit.entity.Firework firework(org.bukkit.Location at, org.bukkit.World world, UUID uuid, UUID attachedTo, org.bukkit.inventory.meta.FireworkMeta meta) {
+        var type = org.bukkit.entity.EntityType.FIREWORK_ROCKET;
+        return (org.bukkit.entity.Firework) Proxy.newProxyInstance(SpawnedEntity.class.getClassLoader(), new Class<?>[]{org.bukkit.entity.Firework.class}, (self, method, args) -> {
+            Object[] a = args == null ? new Object[0] : args;
+            switch (method.getName()) {
+                case "getLife", "getTicksFlown": { String t = ask(uuid, "getFireworkLife()"); return t == null ? 0 : Integer.parseInt(t); }
+                case "getMaxLife", "getTicksToDetonate": { String t = ask(uuid, "getFireworkMaxLife()"); return t == null ? 0 : Integer.parseInt(t); }
+                case "setLife": tell(uuid, "setFireworkLife(int)", String.valueOf((int) a[0])); return true;
+                case "setMaxLife": tell(uuid, "setFireworkMaxLife(int)", String.valueOf((int) a[0])); return true;
+                case "setTicksFlown": tell(uuid, "setFireworkLife(int)", String.valueOf((int) a[0])); return null;
+                case "setTicksToDetonate": tell(uuid, "setFireworkMaxLife(int)", String.valueOf((int) a[0])); return null;
+                case "getItem": { var stack = new org.bukkit.inventory.ItemStack(org.bukkit.Material.FIREWORK_ROCKET); stack.setItemMeta(meta.clone()); return stack; }
+                case "setItem": throw new UnsupportedOperationException("Ferrite: a launched firework's item is fixed when it spawns");
+                case "detonate": tell(uuid, "detonate()"); return null;
+                case "isDetonated": { String t = ask(uuid, "isValid()"); return t != null && !Boolean.parseBoolean(t); }
+                case "getFireworkMeta": return meta.clone();
+                case "setFireworkMeta": throw new UnsupportedOperationException("Ferrite: a launched firework's explosions and flight are fixed when it spawns");
+                case "getAttachedTo", "getBoostedEntity": return attachedTo == null ? null : org.bukkit.Bukkit.getPlayer(attachedTo);
+                case "getSpawningEntity": return attachedTo;
+                case "setAttachedTo": throw new UnsupportedOperationException("Ferrite: a firework cannot be attached after it spawns");
+                case "isShotAtAngle": return false;
+                case "setShotAtAngle": if ((boolean) a[0]) throw new UnsupportedOperationException("Ferrite: crossbow-angled fireworks are not supported"); return null;
+                default: break;
+            }
+            Object result = common(self, method.getName(), a, type, at, world, uuid);
             if (result != NOT_HANDLED) return result;
             throw new UnsupportedOperationException("Ferrite: not implemented: " + type.name() + "#" + method.getName());
         });

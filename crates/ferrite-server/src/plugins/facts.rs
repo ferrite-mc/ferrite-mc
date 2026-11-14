@@ -233,6 +233,8 @@ pub struct EntityFact {
     /// The plugin world this entity belongs to; `None` for dimensions plugins cannot address.
     pub world: Option<Uuid>,
     pub item: Option<ItemFact>,
+    /// A firework rocket's `(life, max life)` in ticks.
+    pub firework: Option<(i32, i32)>,
     /// The entity's saved NBT as SNBT, for the worlds a plugin can capture entities from. Runtime
     /// worlds refresh it every publish; the overworld keeps it for [`OVERWORLD_SNBT_REFRESH`]
     /// publishes, because serializing every entity of a busy world each tick is not free.
@@ -339,6 +341,7 @@ pub fn publish_entities(
                 health: data.mob.as_ref().map(|mob| mob.health),
                 world,
                 item,
+                firework: data.firework.as_ref().map(|f| (f.life, f.life_time)),
                 snbt,
                 snbt_age,
             },
@@ -370,6 +373,7 @@ pub fn publish_for_test(uuid: Uuid, entity_id: i32) {
             health: None,
             world: None,
             item: None,
+            firework: None,
             snbt: None,
             snbt_age: 0,
         },
@@ -502,6 +506,8 @@ fn entity_answer(call: &HostCall) -> Option<String> {
                 .to_string()
         }
         "getEntityType()" => fact.kind.to_owned(),
+        "getFireworkLife()" => fact.firework?.0.to_string(),
+        "getFireworkMaxLife()" => fact.firework?.1.to_string(),
         _ => return None,
     })
 }
@@ -873,6 +879,7 @@ mod tests {
             health,
             world: None,
             item: None,
+            firework: None,
             snbt: None,
             snbt_age: 0,
         };

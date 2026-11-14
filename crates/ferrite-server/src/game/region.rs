@@ -7452,7 +7452,12 @@ impl Region {
                 -pitch.sin(),
                 yaw.cos() * pitch.cos(),
             );
-            let velocity = ferrite_entity::firework::boost(ferrite_math::Vec3::default(), look);
+            let rocket_at = self.entities.pos(key).unwrap_or_default();
+            let velocity = ferrite_entity::firework::rider_velocity(
+                rocket_at,
+                ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
+                look,
+            );
             send(
                 p,
                 &SetEntityMotion {
@@ -11350,6 +11355,24 @@ impl Region {
                     item.health = *health;
                 }
             }
+            Op::SetFireworkLife(life) => {
+                if let Some(rocket) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.firework.as_mut())
+                {
+                    rocket.life = *life;
+                }
+            }
+            Op::SetFireworkMaxLife(max) => {
+                if let Some(rocket) = self
+                    .entities
+                    .data_mut(key)
+                    .and_then(|data| data.firework.as_mut())
+                {
+                    rocket.life_time = *max;
+                }
+            }
         }
         true
     }
@@ -12223,6 +12246,41 @@ mod tests {
             ferrite_math::Vec3::new(x, 64.0, z),
             &mut ferrite_entity::Rng::new(3),
         ))
+    }
+
+    /// `Firework#setLife`, `setMaxLife` and `detonate` reach the live rocket, and a rocket aged
+    /// past its life bursts on the next tick.
+    #[test]
+    fn plugin_firework_operations_change_the_rocket_and_detonate_bursts_it() {
+        use ferrite_plugin::EntityOperation as Op;
+        let mut region = Region::default();
+        let key = region.entities.insert(ferrite_entity::firework::new_firework(
+            ferrite_math::Vec3::new(0.5, 90.0, 0.5),
+            3,
+            1,
+            None,
+            &mut ferrite_entity::Rng::new(5),
+        ));
+        let uuid = region.entities.data(key).unwrap().uuid;
+        let state = |region: &Region| region.entities.data(key).unwrap().firework.clone().unwrap();
+        assert!(region.plugin_entity_op(uuid, &Op::SetFireworkMaxLife(60)));
+        assert!(region.plugin_entity_op(uuid, &Op::SetFireworkLife(12)));
+        assert_eq!((state(&region).life, state(&region).life_time), (12, 60));
+        // Not a rocket: nothing to change, and nothing breaks.
+        let cow = cow_at(&mut region, 3.0, 3.0);
+        let cow_uuid = region.entities.data(cow).unwrap().uuid;
+        assert!(region.plugin_entity_op(cow_uuid, &Op::SetFireworkLife(5)));
+        // Detonate: aged past its life (without overflowing when ticked), it bursts next tick.
+        assert!(region.plugin_entity_op(uuid, &Op::SetFireworkLife(i32::MAX - 1)));
+        struct Open;
+        impl ferrite_entity::physics::BlockGetter for Open {
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> Option<u16> {
+                ferrite_data::blocks::default_state("air")
+            }
+        }
+        let tick = ferrite_entity::firework::tick_fireworks(&mut region.entities, &Open);
+        assert_eq!(tick.bursts.len(), 1);
+        assert_eq!(tick.bursts[0].explosions, 1);
     }
 
     fn effect_level(region: &Region, key: ferrite_entity::EntityKey, effect: Effect) -> i32 {
