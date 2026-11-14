@@ -1,5 +1,5 @@
 //! Enderman rules beyond the shared hostile goals (vanilla `EnderMan`): the stare that angers
-//! it, water damage, and its synched creepy / stared-at flags.
+//! it, water damage, its synched creepy / stared-at flags, and the take/leave-block goals.
 //!
 //! Checked against the 26.3 jar: `EndermanLookForPlayerGoal` picks the nearest player within the
 //! follow range (64) who is looking at it, starts a five-tick aggro timer and only targets the
@@ -8,9 +8,11 @@
 //! `dot(view, to eye) > 1 - 0.025 / distance` and a clear line of sight to the enderman's eyes;
 //! `isSensitiveToWater` makes `LivingEntity.aiStep` deal 1 drowning damage every tick the mob is
 //! in water or rain, and `Enderman.hurtServer` then teleports it nine times in ten; anger lasts
-//! 20 to 39 seconds. The carried block (`DATA_CARRY_STATE`, byte 16) needs the optional
-//! block-state serializer, which `ferrite-protocol` does not have, so it is kept and saved but
-//! not sent (see `docs/mob-ai-parity.md`).
+//! 20 to 39 seconds. The carried block (`DATA_CARRY_STATE`, byte 16) is kept and saved; the
+//! command/protocol lane adds its optional block-state wire value. `EndermanTakeBlockGoal` scans
+//! a 4x3x4 box for a `#enderman_holdable` block with a clear line of sight and removes it without
+//! drops, storing the block's default state; `EndermanLeaveBlockGoal` tries a 2x2x2 box and the
+//! region applies the air/full-support/`canSurvive`/entity checks before placing it.
 
 use crate::mob::{self, MobKind};
 use crate::physics::{self, BlockGetter};
@@ -37,6 +39,10 @@ pub const ANGER_SPAN: i32 = 381;
 pub const WATER_DAMAGE: f32 = 1.0;
 /// The eye height of an enderman (`3 * 0.9`, from the entity data).
 const BLOCK_STEP: f64 = 0.25;
+/// `EndermanTakeBlockGoal` canUse interval: `reducedTickDelay(20)` is 10 ticks.
+pub const TAKE_INTERVAL: i32 = 10;
+/// `EndermanLeaveBlockGoal` canUse interval: `reducedTickDelay(2000)` is 1000 ticks.
+pub const LEAVE_INTERVAL: i32 = 1000;
 
 /// What the region knows about where a player is looking, published per owning region.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -118,6 +124,127 @@ pub struct Candidate {
     pub uuid: Uuid,
     pub pos: Vec3,
     pub gaze: Gaze,
+}
+
+/// Whether a state is in vanilla's `#minecraft:enderman_holdable` block tag.
+fn holdable(state: u16) -> bool {
+    ferrite_data::blocks::state(state)
+        .is_some_and(|(name, _)| ferrite_data::tags::contains("block", "enderman_holdable", name))
+}
+
+/// Whether the straight line from the enderman's block centre reaches `target` before any
+/// collision shape. Vanilla uses `Level.clip`; the target block itself is allowed to be solid.
+fn reaches_block(blocks: &impl BlockGetter, from: Vec3, target: [i32; 3]) -> bool {
+    let start = Vec3::new(
+        from.x.floor() + 0.5,
+        from.y.floor() + 0.5,
+        from.z.floor() + 0.5,
+    );
+    let end = Vec3::new(
+        f64::from(target[0]) + 0.5,
+        f64::from(target[1]) + 0.5,
+        f64::from(target[2]) + 0.5,
+    );
+    let delta = end - start;
+    let steps = (delta.length() / BLOCK_STEP).ceil().max(1.0) as u32;
+    for step in 1..=steps {
+        let at = start + delta * (f64::from(step) / f64::from(steps));
+        let cell = [
+            at.x.floor() as i32,
+            at.y.floor() as i32,
+            at.z.floor() as i32,
+        ];
+        if cell == target {
+            return true;
+        }
+        if !physics::no_collision(
+            blocks,
+            AABB::new(at.x, at.y, at.z, at.x + 1e-3, at.y + 1e-3, at.z + 1e-3),
+        ) {
+            return false;
+        }
+    }
+    false
+}
+
+/// One `EndermanTakeBlockGoal.tick` attempt. The caller supplies the 1/10 canUse roll.
+/// The block state is returned by position only; the region sets the carried block to its
+/// default state after it removes the actual block, as vanilla does.
+pub fn take_block(
+    store: &EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    griefing: bool,
+    rng: &mut Rng,
+) -> Option<[i32; 3]> {
+    if !griefing {
+        return None;
+    }
+    let state = mob::state(store, key)?;
+    if state.kind != MobKind::Enderman || state.carried.is_some() {
+        return None;
+    }
+    let pos = store.pos(key)?;
+    let target = [
+        (pos.x - 2.0 + rng.next_f64() * 4.0).floor() as i32,
+        (pos.y + rng.next_f64() * 3.0).floor() as i32,
+        (pos.z - 2.0 + rng.next_f64() * 4.0).floor() as i32,
+    ];
+    let block = blocks.block_state(target[0], target[1], target[2])?;
+    if !holdable(block) || !reaches_block(blocks, pos, target) {
+        return None;
+    }
+    Some(target)
+}
+
+/// One `EndermanLeaveBlockGoal.tick` attempt. The caller supplies the 1/1000 canUse roll.
+/// Support (`canSurvive`) and entity occupancy are checked by the region before the block is
+/// actually written; this function only chooses a candidate.
+pub fn leave_block(
+    store: &EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    griefing: bool,
+    rng: &mut Rng,
+) -> Option<([i32; 3], u16)> {
+    if !griefing {
+        return None;
+    }
+    let state = mob::state(store, key)?;
+    if state.kind != MobKind::Enderman {
+        return None;
+    }
+    let carried = state.carried?;
+    if ferrite_data::block_props::get(carried).is_air {
+        return None;
+    }
+    let pos = store.pos(key)?;
+    let target = [
+        (pos.x - 1.0 + rng.next_f64() * 2.0).floor() as i32,
+        (pos.y + rng.next_f64() * 2.0).floor() as i32,
+        (pos.z - 1.0 + rng.next_f64() * 2.0).floor() as i32,
+    ];
+    let current = blocks.block_state(target[0], target[1], target[2])?;
+    if !ferrite_data::block_props::get(current).is_air {
+        return None;
+    }
+    let below = blocks.block_state(target[0], target[1] - 1, target[2])?;
+    let (below_name, _) = ferrite_data::blocks::state(below)?;
+    if below_name == "minecraft:bedrock" || !ferrite_data::block_props::get(below).full_collision {
+        return None;
+    }
+    let area = AABB::new(
+        f64::from(target[0]),
+        f64::from(target[1]),
+        f64::from(target[2]),
+        f64::from(target[0]) + 1.0,
+        f64::from(target[1]) + 1.0,
+        f64::from(target[2]) + 1.0,
+    );
+    if store.query_vec(area).iter().any(|&other| other != key) {
+        return None;
+    }
+    Some((target, carried))
 }
 
 /// One tick of `EndermanLookForPlayerGoal` for a calm enderman. Returns whether the enderman
@@ -237,10 +364,15 @@ mod tests {
         flooded: bool,
         /// A stone wall at this x.
         wall_x: Option<i32>,
+        /// Explicit overrides for tests that need a holdable block.
+        blocks: HashMap<(i32, i32, i32), u16>,
     }
 
     impl BlockGetter for World {
-        fn block_state(&self, x: i32, y: i32, _z: i32) -> Option<u16> {
+        fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+            if let Some(&state) = self.blocks.get(&(x, y, z)) {
+                return Some(state);
+            }
             let name = if y < 64 || (self.wall_x == Some(x) && y < 70) || self.roof == Some(y) {
                 "stone"
             } else if self.flooded && y == 64 {
@@ -544,5 +676,53 @@ mod tests {
             roof: Some(70),
             ..Default::default()
         }));
+    }
+
+    fn holdable_world() -> World {
+        World {
+            blocks: HashMap::from([(
+                (1, 64, 0),
+                ferrite_data::blocks::default_state("minecraft:grass_block").unwrap(),
+            )]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_enderman_takes_a_holdable_block_after_a_line_of_sight_check() {
+        let mut store = EntityStore::default();
+        let key = spawn(&mut store, Vec3::new(0.5, 64.0, 0.5));
+        let world = holdable_world();
+        let mut rng = Rng::new(2);
+        let mut taken = None;
+        for _ in 0..5000 {
+            if let Some(at) = take_block(&store, key, &world, true, &mut rng) {
+                taken = Some(at);
+                break;
+            }
+        }
+        assert_eq!(taken, Some([1, 64, 0]));
+        assert!(take_block(&store, key, &world, false, &mut rng).is_none());
+    }
+
+    #[test]
+    fn a_carrying_enderman_places_its_block_on_a_full_support() {
+        let mut store = EntityStore::default();
+        let key = spawn(&mut store, Vec3::new(0.5, 64.0, 0.5));
+        let grass = ferrite_data::blocks::default_state("minecraft:grass_block").unwrap();
+        mob::state_mut(&mut store, key).unwrap().carried = Some(grass);
+        let world = World::default();
+        let mut rng = Rng::new(3);
+        let mut placed = None;
+        for _ in 0..5000 {
+            if let Some(result) = leave_block(&store, key, &world, true, &mut rng) {
+                placed = Some(result);
+                break;
+            }
+        }
+        let (at, state) = placed.expect("the enderman placed its block");
+        assert_eq!(state, grass);
+        assert_eq!(at[1], 64);
+        assert!(leave_block(&store, key, &world, false, &mut rng).is_none());
     }
 }

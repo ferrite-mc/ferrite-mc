@@ -408,6 +408,16 @@ pub enum MobEvent {
     /// A sheep ate at `at`: the region turns a grass block into dirt (`grass`) or removes the
     /// plant (`!grass`) when `mobGriefing` allows it.
     EatBlock { at: [i32; 3], grass: bool },
+    /// A calm enderman wants to remove the holdable block at `at`; the region owns the
+    /// `mobGriefing` and tag checks and sets the carried default state.
+    TakeBlock { key: crate::EntityKey, at: [i32; 3] },
+    /// A carrying enderman wants to place `state` at `at`; the region validates support and
+    /// clears the carried state only when the placement succeeds.
+    PlaceCarried {
+        key: crate::EntityKey,
+        at: [i32; 3],
+        state: u16,
+    },
     /// An entity event for the players tracking `key` (hearts, smoke).
     Status { key: crate::EntityKey, status: u8 },
 }
@@ -933,8 +943,24 @@ pub fn tick_full(
                     state.swell = state.swell.saturating_sub(1);
                 }
                 crate::creeper::sync(store, key);
-            } else if kind == MobKind::Enderman && rng.next_int(200) == 0 {
-                blink(store, key, blocks, start, rng);
+            } else if kind == MobKind::Enderman {
+                // `EndermanTakeBlockGoal` and `EndermanLeaveBlockGoal`: the region applies the
+                // actual block change after its `mobGriefing`, support and entity checks.
+                if rng.next_int(crate::enderman::TAKE_INTERVAL) == 0
+                    && let Some(at) =
+                        crate::enderman::take_block(store, key, blocks, *griefing, rng)
+                {
+                    events.push(MobEvent::TakeBlock { key, at });
+                }
+                if rng.next_int(crate::enderman::LEAVE_INTERVAL) == 0
+                    && let Some((at, state)) =
+                        crate::enderman::leave_block(store, key, blocks, *griefing, rng)
+                {
+                    events.push(MobEvent::PlaceCarried { key, at, state });
+                }
+                if rng.next_int(200) == 0 {
+                    blink(store, key, blocks, start, rng);
+                }
             } else if kind == MobKind::Skeleton
                 && let Some(shade) = crate::sun::tick_flee_sun(store, key, blocks, start, rng)
             {

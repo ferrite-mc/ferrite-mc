@@ -6644,6 +6644,12 @@ impl Region {
                         .push(ferrite_entity::dragon::BreathCloud::perched(pos));
                 }
                 ai::MobEvent::EatBlock { at, grass } => self.eat_block(ctx, at, grass),
+                ai::MobEvent::TakeBlock { key, at } => {
+                    self.take_enderman_block(ctx, key, at);
+                }
+                ai::MobEvent::PlaceCarried { key, at, state } => {
+                    self.place_enderman_block(ctx, key, at, state);
+                }
                 ai::MobEvent::BreakDoor {
                     at, broken: true, ..
                 } => self.break_door(ctx, at),
@@ -8413,16 +8419,19 @@ impl Region {
         Some(rider)
     }
 
-    /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
-    /// drops; grass becomes dirt), not the sheep's `ate()`, which the AI already did.
-    fn eat_block(&mut self, ctx: &TickContext, at: [i32; 3], grass: bool) {
-        let griefing = ctx
-            .rules
+    /// Whether the live `mob_griefing` rule allows a mob block change.
+    fn mob_griefing(ctx: &TickContext) -> bool {
+        ctx.rules
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get_bool("mob_griefing")
-            .unwrap_or(true);
-        if !griefing {
+            .unwrap_or(true)
+    }
+
+    /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
+    /// drops; grass becomes dirt), not the sheep's `ate()`, which the AI already did.
+    fn eat_block(&mut self, ctx: &TickContext, at: [i32; 3], grass: bool) {
+        if !Self::mob_griefing(ctx) {
             return;
         }
         let state = if grass {
@@ -8433,6 +8442,120 @@ impl Region {
         if let Some(state) = state {
             self.place_blocks(ctx, &[(at, state)]);
         }
+    }
+
+    /// `EndermanTakeBlockGoal`: remove a tagged block without drops and store its block's
+    /// default state. The AI already checked the random roll and line of sight; this is the
+    /// authoritative `mobGriefing` and tag check.
+    fn take_enderman_block(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+        at: [i32; 3],
+    ) {
+        if !Self::mob_griefing(ctx) {
+            return;
+        }
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+        {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let Some(state) = source
+            .block(at[0], at[1], at[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return;
+        };
+        let Some((name, _)) = ferrite_data::blocks::state(state) else {
+            return;
+        };
+        if !ferrite_data::tags::contains("block", "enderman_holdable", name) {
+            return;
+        }
+        let Some(carried) = ferrite_data::blocks::default_state(name) else {
+            return;
+        };
+        self.place_blocks(ctx, &[(at, 0)]);
+        if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+            mob.carried = Some(carried);
+        }
+        ferrite_entity::enderman::sync(&mut self.entities, key);
+    }
+
+    /// `EndermanLeaveBlockGoal`: place a carried default state only on an air cell above a full,
+    /// non-bedrock support, where the state survives and no other entity occupies the cube.
+    fn place_enderman_block(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+        at: [i32; 3],
+        state: u16,
+    ) {
+        if !Self::mob_griefing(ctx) {
+            return;
+        }
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+        {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let Some(current) = source
+            .block(at[0], at[1], at[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return;
+        };
+        if !ferrite_data::block_props::get(current).is_air {
+            return;
+        }
+        let Some(below) = source
+            .block(at[0], at[1] - 1, at[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return;
+        };
+        let Some((below_name, _)) = ferrite_data::blocks::state(below) else {
+            return;
+        };
+        if below_name == "minecraft:bedrock"
+            || !ferrite_data::block_props::get(below).full_collision
+        {
+            return;
+        }
+        let world = super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking);
+        if !super::neighbors::can_survive(state, at, &world) {
+            return;
+        }
+        let area = ferrite_math::AABB::new(
+            f64::from(at[0]),
+            f64::from(at[1]),
+            f64::from(at[2]),
+            f64::from(at[0]) + 1.0,
+            f64::from(at[1]) + 1.0,
+            f64::from(at[2]) + 1.0,
+        );
+        if self
+            .entities
+            .query_vec(area)
+            .iter()
+            .any(|&other| other != key)
+        {
+            return;
+        }
+        self.place_blocks(ctx, &[(at, state)]);
+        if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+            mob.carried = None;
+        }
+        ferrite_entity::enderman::sync(&mut self.entities, key);
     }
 
     /// The world half of shearing: `None` when `key` is not a sheep, `Some(false)` when it is a
@@ -14119,6 +14242,53 @@ mod tests {
         region.held_chunks.insert(ChunkPos(0, 0), 1);
         region.eat_block(&ctx, [2, 63, 2], true);
         assert_eq!(source.block(2, 63, 2), Some(grass));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_enderman_takes_and_places_a_holdable_block() {
+        let source = loaded_source().await;
+        let grass =
+            u32::from(ferrite_data::blocks::default_state("minecraft:grass_block").unwrap());
+        let stone = u32::from(ferrite_data::blocks::default_state("minecraft:stone").unwrap());
+        source.set_block(2, 63, 2, stone).unwrap();
+        source.set_block(2, 64, 2, grass).unwrap();
+        source.set_block(3, 63, 2, stone).unwrap();
+        source.set_block(3, 64, 2, 0).unwrap();
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::Enderman,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        region.take_enderman_block(&ctx, key, [2, 64, 2]);
+        assert_eq!(source.block(2, 64, 2), Some(0));
+        let carried = mob::state(&region.entities, key).unwrap().carried;
+        assert_eq!(carried, Some(u16::try_from(grass).unwrap()));
+        region.place_enderman_block(&ctx, key, [3, 64, 2], carried.unwrap());
+        assert_eq!(source.block(3, 64, 2), Some(grass));
+        assert_eq!(mob::state(&region.entities, key).unwrap().carried, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enderman_block_changes_obey_mob_griefing() {
+        let source = loaded_source().await;
+        let grass =
+            u32::from(ferrite_data::blocks::default_state("minecraft:grass_block").unwrap());
+        source.set_block(2, 63, 2, grass).unwrap();
+        source.set_block(2, 64, 2, 0).unwrap();
+        let ctx = eat_context(&source, false);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::Enderman,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        region.take_enderman_block(&ctx, key, [2, 63, 2]);
+        assert_eq!(source.block(2, 63, 2), Some(grass));
+        assert_eq!(mob::state(&region.entities, key).unwrap().carried, None);
     }
 
     #[test]
