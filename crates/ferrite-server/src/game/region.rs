@@ -709,6 +709,16 @@ fn book_content(
     }
 }
 
+/// The stack left in the hand after a dye was used on a sheep: one fewer in survival, the same
+/// stack in creative (`Player.interactOn` restores a creative player's stack).
+fn stack_after_dye(stack: &ferrite_item::ItemStack, gamemode: i32) -> ferrite_item::ItemStack {
+    if gamemode == 1 {
+        stack.clone()
+    } else {
+        stack.copy_with_count(stack.count - 1)
+    }
+}
+
 pub(super) fn worn_stack(
     mut stack: ferrite_item::ItemStack,
     damage: i32,
@@ -8188,6 +8198,9 @@ impl Region {
                 if self.use_shears_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_dye_on_sheep(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
                 if sneaking
                     && ferrite_entity::mob::state(&self.entities, key)
@@ -8279,6 +8292,44 @@ impl Region {
             };
             if let Some(worn) = worn {
                 p.inventory.set(slot, worn);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// `DyeItem.interactLivingEntity` on a sheep: a live, unsheared sheep of another colour takes
+    /// the dye's colour, the click plays `item.dye.use` and one dye is used up (creative keeps
+    /// the stack, as `Player.interactOn` restores it). Any other click is not used here and
+    /// falls through to feeding. Not modelled: plugin events (`SheepDyeWoolEvent`).
+    fn use_dye_on_sheep(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        let Some(color) = ferrite_entity::sheep::dye_color(held) else {
+            return false;
+        };
+        if !ferrite_entity::sheep::dye(&mut self.entities, key, color) {
+            return false;
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, "minecraft:item.dye.use", 1.0, 1.0);
+        }
+        if let Some(p) = self.players.get_mut(&player) {
+            let stack = p.inventory.get(slot).clone();
+            let rest = stack_after_dye(&stack, gamemode);
+            if rest != stack {
+                p.inventory.set(slot, rest);
                 send(
                     p,
                     &SetPlayerInventory {
@@ -13920,6 +13971,43 @@ mod tests {
         let before = region.entities.keys().len();
         assert_eq!(region.shear_sheep(key), Some(false));
         assert_eq!(region.entities.keys().len(), before, "nothing more dropped");
+    }
+
+    #[test]
+    fn a_dye_recolours_an_unsheared_sheep_in_the_region_and_updates_its_wool_metadata() {
+        let (mut region, key) = sheep_region();
+        // The click path: item name -> colour -> recolour, then the sound; the sheep is blue (11).
+        let red = ferrite_entity::sheep::dye_color("minecraft:red_dye").unwrap();
+        assert!(region.use_dye_on_sheep(Uuid::nil(), key, "minecraft:red_dye", 0, 0));
+        assert_eq!(mob::state(&region.entities, key).unwrap().wool_color, red);
+        let wool = region
+            .entities
+            .data(key)
+            .unwrap()
+            .metadata
+            .get(ferrite_entity::sheep::WOOL_INDEX);
+        assert_eq!(
+            wool,
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(red as i8)),
+            "the wool metadata byte carries the new colour"
+        );
+        // The same colour, a sheared sheep and a non-dye leave the click unused.
+        assert!(!region.use_dye_on_sheep(Uuid::nil(), key, "minecraft:red_dye", 0, 0));
+        assert!(!region.use_dye_on_sheep(Uuid::nil(), key, "minecraft:wheat", 0, 0));
+        mob::state_mut(&mut region.entities, key).unwrap().sheared = true;
+        assert!(!region.use_dye_on_sheep(Uuid::nil(), key, "minecraft:lime_dye", 0, 0));
+        assert_eq!(mob::state(&region.entities, key).unwrap().wool_color, red);
+    }
+
+    #[test]
+    fn a_dye_is_used_up_in_survival_and_kept_in_creative() {
+        let dye = ferrite_item::ItemStack::from_name("minecraft:red_dye")
+            .unwrap()
+            .copy_with_count(5);
+        assert_eq!(stack_after_dye(&dye, 0).count, 4);
+        assert_eq!(stack_after_dye(&dye, 2).count, 4);
+        assert_eq!(stack_after_dye(&dye, 1).count, 5);
+        assert!(stack_after_dye(&dye.copy_with_count(1), 0).is_empty());
     }
 
     #[test]
