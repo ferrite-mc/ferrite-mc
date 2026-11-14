@@ -10155,11 +10155,11 @@ impl Region {
         if self.potion_clouds.is_empty() {
             return;
         }
-        let mut candidates: Vec<(Uuid, [f64; 3], f64)> = self
+        let mut candidates: Vec<(Uuid, [f64; 3], f64, f64)> = self
             .players
             .values()
             .filter(|p| p.gamemode != 3 && !p.survival.dead)
-            .map(|p| (p.uuid, p.pos, if p.sneaking { 1.5 } else { 1.8 }))
+            .map(|p| (p.uuid, p.pos, 0.6, if p.sneaking { 1.5 } else { 1.8 }))
             .collect();
         candidates.extend(self.entities.keys().iter().filter_map(|&key| {
             let data = self.entities.data(key)?;
@@ -10169,7 +10169,7 @@ impl Region {
                 .is_some_and(|f| !f.has(Flags::REMOVED))
                 && data.mob.as_ref().is_some_and(|mob| !mob.is_dead());
             let pos = self.entities.pos(key)?;
-            live.then_some((data.uuid, [pos.x, pos.y, pos.z], data.height))
+            live.then_some((data.uuid, [pos.x, pos.y, pos.z], data.width, data.height))
         }));
         let mut clouds = std::mem::take(&mut self.potion_clouds);
         let entities = &mut self.entities;
