@@ -341,6 +341,23 @@ impl ActiveEffects {
         self.get(effect).is_some()
     }
 
+    /// Vanilla `HealOrHarmMobEffect.applyInstantenousEffect`: healing is `(int)(scale * (4 << amp) + 0.5)`
+    /// points and harming `(int)(scale * (6 << amp) + 0.5)`. Drinking is scale 1, a splash potion
+    /// scales by distance and a lingering cloud applies half.
+    pub fn instant_events(instance: MobEffectInstance, scale: f64) -> Vec<EffectEvent> {
+        let amplifier = instance.amplifier.clamp(0, 30);
+        let points = |base: i32| (scale * f64::from(base << amplifier) + 0.5) as i32 as f32;
+        match instance.kind() {
+            Effect::InstantHealth => vec![EffectEvent::Heal(points(4))],
+            Effect::InstantDamage => vec![EffectEvent::Damage {
+                amount: points(6),
+                can_kill: true,
+                wither: false,
+            }],
+            _ => Vec::new(),
+        }
+    }
+
     /// `LivingEntity.addEffect`: a weaker instance never replaces a stronger one; the same
     /// level only replaces when the new duration is longer. Instant effects apply immediately
     /// and are not stored.
@@ -348,20 +365,7 @@ impl ActiveEffects {
         let mut events = Vec::new();
         let kind = instance.kind();
         if kind.is_instant() {
-            match kind {
-                Effect::InstantHealth => {
-                    events.push(EffectEvent::Heal(2.0f32.powi(instance.amplifier + 1) * 2.0));
-                }
-                Effect::InstantDamage => {
-                    events.push(EffectEvent::Damage {
-                        amount: 3.0 * 2.0f32.powi(instance.amplifier + 1),
-                        can_kill: true,
-                        wither: false,
-                    });
-                }
-                _ => {}
-            }
-            return events;
+            return Self::instant_events(instance, 1.0);
         }
         if let Some(old) = self.get(kind).copied() {
             let stronger = old.amplifier > instance.amplifier;

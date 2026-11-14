@@ -3190,6 +3190,13 @@ impl Player {
         self.refresh_attributes();
     }
 
+    /// An instant effect at `scale` of its strength (splash potions and lingering clouds).
+    fn apply_instant_scaled(&mut self, instance: MobEffectInstance, scale: f64) {
+        let events = ActiveEffects::instant_events(instance, scale);
+        self.apply_effect_events(events);
+        self.refresh_attributes();
+    }
+
     /// `LivingEntity.tickEffects`: ticks the store and sends removals for expired effects.
     fn tick_effects(&mut self) {
         let ticks = self.effects.tick();
@@ -9951,58 +9958,71 @@ impl Region {
         }
     }
 
-    /// Vanilla `ThrownPotion.applySplash`: every player within four blocks gains the potion's
-    /// effects, with the duration falling off with distance.
+    /// Vanilla `ThrownSplashPotion.onHitAsPotion`: every living entity whose box (grown by the
+    /// projectile margin) is within four blocks of the potion's box, found in the box inflated by
+    /// 4 sideways and 2 up and down, gets the effects scaled by `1 - distance / 4`. Lasting effects
+    /// last `scale * duration + 0.5` ticks (and are skipped when that is a second or less);
+    /// instant ones act at `scale` of their strength.
     fn splash_potion(&mut self, center: [f64; 3], stack: &ferrite_item::ItemStack) {
         let effects = Self::bottle_effects(stack);
         if effects.is_empty() {
             return;
         }
+        // `ProjectileUtil.computeMargin`: 0.3 once the potion has flown a few ticks.
+        const MARGIN: f64 = 0.3;
+        let reach = (
+            [center[0] - 0.125 - 4.0, center[1] - 2.0, center[2] - 0.125 - 4.0],
+            [center[0] + 0.125 + 4.0, center[1] + 0.25 + 2.0, center[2] + 0.125 + 4.0],
+        );
+        let inside = |min: [f64; 3], max: [f64; 3]| {
+            (0..3).all(|axis| min[axis] < reach.1[axis] && max[axis] > reach.0[axis])
+        };
         for p in self.players.values_mut() {
-            let distance = ((p.pos[0] - center[0]).powi(2)
-                + (p.pos[1] - center[1]).powi(2)
-                + (p.pos[2] - center[2]).powi(2))
-            .sqrt();
-            if distance > 4.0 {
+            let (half, height) = (0.3, if p.sneaking { 1.5 } else { 1.8 });
+            let min = [p.pos[0] - half, p.pos[1], p.pos[2] - half];
+            let max = [p.pos[0] + half, p.pos[1] + height, p.pos[2] + half];
+            if !inside(min, max) {
                 continue;
             }
-            let scale = (1.0 - distance / 4.0).max(0.25);
-            for instance in &effects {
-                let mut instance = *instance;
-                if instance.duration > 0 {
-                    instance.duration = (f64::from(instance.duration) * scale) as i32;
-                }
-                p.apply_effect(instance);
-            }
-        }
-        // Every living entity in the burst, as vanilla (`ThrownSplashPotion.applySplash` looks
-        // in the box inflated by 4 blocks sideways and 2 up and down), with the same falloff.
-        let reach = ferrite_math::AABB::new(
-            center[0] - 4.0,
-            center[1] - 2.0,
-            center[2] - 4.0,
-            center[0] + 4.0,
-            center[1] + 2.0,
-            center[2] + 4.0,
-        );
-        for key in self.entities.query_vec(reach) {
-            let Some(pos) = self.entities.pos(key) else {
+            let Some(scale) = ferrite_entity::potion::splash_scale(center, (min, max), MARGIN)
+            else {
                 continue;
             };
-            let distance = ((pos.x - center[0]).powi(2)
-                + (pos.y - center[1]).powi(2)
-                + (pos.z - center[2]).powi(2))
-            .sqrt();
-            if distance > 4.0 {
+            for instance in &effects {
+                if instance.kind().is_instant() {
+                    p.apply_instant_scaled(*instance, scale);
+                } else if let Some(instance) =
+                    ferrite_entity::potion::splash_duration(*instance, scale)
+                {
+                    p.apply_effect(instance);
+                }
+            }
+        }
+        let bounds = ferrite_math::AABB::new(
+            reach.0[0], reach.0[1], reach.0[2], reach.1[0], reach.1[1], reach.1[2],
+        );
+        for key in self.entities.query_vec(bounds) {
+            let (Some(pos), Some(data)) = (self.entities.pos(key), self.entities.data(key)) else {
+                continue;
+            };
+            let half = data.width / 2.0;
+            let min = [pos.x - half, pos.y, pos.z - half];
+            let max = [pos.x + half, pos.y + data.height, pos.z + half];
+            if !inside(min, max) {
                 continue;
             }
-            let scale = (1.0 - distance / 4.0).max(0.25);
+            let Some(scale) = ferrite_entity::potion::splash_scale(center, (min, max), MARGIN)
+            else {
+                continue;
+            };
             for instance in &effects {
-                let mut instance = *instance;
-                if instance.duration > 0 {
-                    instance.duration = (f64::from(instance.duration) * scale) as i32;
+                if instance.kind().is_instant() {
+                    mob::apply_instant_scaled(&mut self.entities, key, *instance, scale);
+                } else if let Some(instance) =
+                    ferrite_entity::potion::splash_duration(*instance, scale)
+                {
+                    self.give_mob_effect(key, instance);
                 }
-                self.give_mob_effect(key, instance);
             }
         }
     }
@@ -10130,11 +10150,11 @@ impl Region {
         if self.potion_clouds.is_empty() {
             return;
         }
-        let mut candidates: Vec<(Uuid, [f64; 3])> = self
+        let mut candidates: Vec<(Uuid, [f64; 3], f64)> = self
             .players
             .values()
             .filter(|p| p.gamemode != 3 && !p.survival.dead)
-            .map(|p| (p.uuid, p.pos))
+            .map(|p| (p.uuid, p.pos, if p.sneaking { 1.5 } else { 1.8 }))
             .collect();
         candidates.extend(self.entities.keys().iter().filter_map(|&key| {
             let data = self.entities.data(key)?;
@@ -10144,19 +10164,31 @@ impl Region {
                 .is_some_and(|f| !f.has(Flags::REMOVED))
                 && data.mob.as_ref().is_some_and(|mob| !mob.is_dead());
             let pos = self.entities.pos(key)?;
-            live.then_some((data.uuid, [pos.x, pos.y, pos.z]))
+            live.then_some((data.uuid, [pos.x, pos.y, pos.z], data.height))
         }));
         let mut clouds = std::mem::take(&mut self.potion_clouds);
         let entities = &mut self.entities;
         let mut pending = Vec::new();
         clouds.retain_mut(|cloud| {
-            let Some(applied) = cloud.tick(candidates.iter().copied()) else {
+            let Some(applied) = cloud.tick_boxes(candidates.iter().copied()) else {
                 cloud.despawn(entities);
                 return false;
             };
             cloud.sync(entities);
             for (uuid, effect) in applied {
-                if let Some(p) = self.players.get_mut(&uuid) {
+                // A cloud applies instant effects at half strength.
+                if effect.kind().is_instant() {
+                    if let Some(p) = self.players.get_mut(&uuid) {
+                        p.apply_instant_scaled(effect, 0.5);
+                    } else if let Some(key) = entities
+                        .keys()
+                        .iter()
+                        .copied()
+                        .find(|key| entities.data(*key).is_some_and(|d| d.uuid == uuid))
+                    {
+                        mob::apply_instant_scaled(entities, key, effect, 0.5);
+                    }
+                } else if let Some(p) = self.players.get_mut(&uuid) {
                     p.apply_effect(effect);
                 } else if let Some(key) = entities
                     .keys()
@@ -12202,6 +12234,7 @@ mod tests {
         let mut region = Region::default();
         let at_center = cow_at(&mut region, 8.0, 8.0);
         let half_way = cow_at(&mut region, 10.0, 8.0);
+        let far = cow_at(&mut region, 11.5, 8.0);
         let outside = cow_at(&mut region, 14.0, 8.0);
         region.splash_potion(
             [8.0, 64.0, 8.0],
@@ -12217,10 +12250,42 @@ mod tests {
                 .map(|e| e.duration)
         };
         assert_eq!(duration(at_center), Some(3600));
-        assert_eq!(duration(half_way), Some(1800));
+        // Falloff is by the gap between the boxes (cow 0.9 wide, margin 0.3, potion 0.25 wide):
+        // 2 blocks of centre distance leave a 1.125 gap, 3.5 blocks leave 2.625.
+        let near = duration(half_way).unwrap();
+        assert!((2586..=2588).contains(&near), "{near}");
+        let far_duration = duration(far).unwrap();
+        assert!((1237..=1239).contains(&far_duration), "{far_duration}");
         assert_eq!(duration(outside), None);
         // Each hit mob has an update waiting for its trackers.
-        assert_eq!(region.pending_mob_effects.len(), 2);
+        assert_eq!(region.pending_mob_effects.len(), 3);
+    }
+
+    /// Regression: an instant effect from a splash used to land at full strength wherever the
+    /// mob stood; vanilla scales it by the distance (`(int)(scale * 6 + 0.5)` for harming) and a
+    /// lingering cloud applies half.
+    #[test]
+    fn instant_effects_are_scaled_by_distance_and_halved_by_a_cloud() {
+        let mut region = Region::default();
+        let edge = cow_at(&mut region, 10.0, 8.0);
+        region.splash_potion(
+            [8.0, 64.0, 8.0],
+            &potion_bottle("minecraft:splash_potion", "minecraft:harming"),
+        );
+        // Gap 1.125 -> scale 0.71875 -> (int)(4.3125 + 0.5) = 4 of the cow's 10 health.
+        assert_eq!(mob::state(&region.entities, edge).unwrap().health, 6.0);
+
+        let mut region = Region::default();
+        let inside = cow_at(&mut region, 8.5, 8.5);
+        region.linger_potion(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &lingering_bottle("minecraft:harming"),
+        );
+        for _ in 0..ferrite_entity::potion::PotionCloud::WAIT {
+            region.tick_potion_clouds();
+        }
+        // `(int)(0.5 * 6 + 0.5)` = 3.
+        assert_eq!(mob::state(&region.entities, inside).unwrap().health, 7.0);
     }
 
     #[test]
@@ -12251,9 +12316,12 @@ mod tests {
             ferrite_math::Vec3::new(8.5, 64.0, 8.5),
             &lingering_bottle("minecraft:swiftness"),
         );
-        for _ in 0..ferrite_entity::potion::PotionCloud::CHECK_INTERVAL {
+        // Vanilla: a cloud does nothing while it waits (ten ticks), then hits on the fifth-tick checks.
+        for _ in 0..ferrite_entity::potion::PotionCloud::WAIT - 1 {
             region.tick_potion_clouds();
         }
+        assert_eq!(effect_level(&region, inside, Effect::Speed), 0, "still waiting");
+        region.tick_potion_clouds();
         assert_eq!(effect_level(&region, inside, Effect::Speed), 1);
         assert_eq!(effect_level(&region, outside, Effect::Speed), 0);
         // The cloud entity itself is never a candidate.

@@ -646,6 +646,20 @@ pub fn add_effect(
     (current == instance).then_some(current)
 }
 
+/// An instant effect (healing or harming) at `scale` of its strength, as a splash potion or a
+/// lingering cloud applies it (`applyInstantenousEffect`). Nothing is stored or announced.
+pub fn apply_instant_scaled(
+    store: &mut EntityStore,
+    key: EntityKey,
+    instance: crate::effect::MobEffectInstance,
+    scale: f64,
+) {
+    if is_mob(store, key) {
+        let events = crate::effect::ActiveEffects::instant_events(instance, scale);
+        apply_effect_events(store, key, events);
+    }
+}
+
 /// One tick of a mob's effects: applies regeneration, poison and wither and returns the
 /// effects that expired, whose removal the client must be told about.
 pub fn tick_effects(

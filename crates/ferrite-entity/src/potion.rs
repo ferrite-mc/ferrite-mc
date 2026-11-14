@@ -400,6 +400,8 @@ impl PotionCloud {
     pub const WAIT: u32 = 10;
     pub const REAPPLICATION_DELAY: u32 = 20;
     pub const CHECK_INTERVAL: u32 = 5;
+    /// Height of the cloud's own box (its dimensions are `radius * 2` by `0.5`).
+    pub const BOX_HEIGHT: f64 = 0.5;
     /// Vanilla water colour, used when the bottle has no `custom_color`. Colours averaged from
     /// the effects are not modelled (no local effect colour table), so those clouds look blue.
     pub const DEFAULT_COLOR: i32 = 0x0038_5DC6;
@@ -536,24 +538,37 @@ impl PotionCloud {
         self.radius
     }
 
-    /// Advances one tick over `candidates` (uuid and feet position of everything that can be
-    /// affected). Returns `None` once the cloud is gone, otherwise the effects to apply this
-    /// tick as `(uuid, effect)`.
+    /// [`Self::tick`] for candidates of the standing human height.
     pub fn tick(
         &mut self,
         candidates: impl IntoIterator<Item = (uuid::Uuid, [f64; 3])>,
+    ) -> Option<Vec<(uuid::Uuid, MobEffectInstance)>> {
+        self.tick_boxes(candidates.into_iter().map(|(id, pos)| (id, pos, 1.8)))
+    }
+
+    /// Advances one tick over `candidates` (uuid, feet position and height of everything that can
+    /// be affected). Returns `None` once the cloud is gone, otherwise the effects to apply this
+    /// tick as `(uuid, effect)`.
+    ///
+    /// Vanilla `AreaEffectCloud.serverTick`: while it waits it does nothing at all; afterwards it
+    /// shrinks every tick and, on every fifth tick, hits whoever's bounding box meets the cloud's
+    /// half-block-tall box and whose centre lies within the radius.
+    pub fn tick_boxes(
+        &mut self,
+        candidates: impl IntoIterator<Item = (uuid::Uuid, [f64; 3], f64)>,
     ) -> Option<Vec<(uuid::Uuid, MobEffectInstance)>> {
         self.age += 1;
         if self.age >= Self::WAIT + Self::DURATION {
             return None;
         }
-        if self.age >= Self::WAIT {
-            self.radius += self.radius_per_tick;
-            if self.radius < Self::MIN_RADIUS {
-                return None;
-            }
-        }
         let mut applied = Vec::new();
+        if self.age < Self::WAIT {
+            return Some(applied);
+        }
+        self.radius += self.radius_per_tick;
+        if self.radius < Self::MIN_RADIUS {
+            return None;
+        }
         if !self.age.is_multiple_of(Self::CHECK_INTERVAL) {
             return Some(applied);
         }
@@ -562,18 +577,16 @@ impl PotionCloud {
         if self.effects.is_empty() {
             return Some(applied);
         }
-        for (id, pos) in candidates {
+        for (id, pos, height) in candidates {
             if self.victims.iter().any(|(victim, _)| *victim == id) {
                 continue;
             }
             let dx = pos[0] - self.center.x;
             let dz = pos[2] - self.center.z;
             let radius = f64::from(self.radius);
-            // Vanilla looks inside a box one block tall around the cloud and tests the
-            // horizontal distance against the radius.
-            if dx * dx + dz * dz > radius * radius
-                || !(-1.0..=2.0).contains(&(pos[1] - self.center.y))
-            {
+            // The cloud's box is `Self::BOX_HEIGHT` tall from its own height up.
+            let overlaps = pos[1] < self.center.y + Self::BOX_HEIGHT && pos[1] + height > self.center.y;
+            if dx * dx + dz * dz > radius * radius || !overlaps {
                 continue;
             }
             self.victims.push((id, now + Self::REAPPLICATION_DELAY));
@@ -585,6 +598,43 @@ impl PotionCloud {
         }
         Some(applied)
     }
+}
+
+/// Vanilla `AABB.distanceToSqr(AABB)`: squared gap between two boxes (0 when they touch).
+pub fn box_gap_sqr(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3])) -> f64 {
+    (0..3)
+        .map(|axis| {
+            let gap = (a.0[axis] - b.1[axis]).max(b.0[axis] - a.1[axis]).max(0.0);
+            gap * gap
+        })
+        .sum()
+}
+
+/// Vanilla `ThrownSplashPotion.onHitAsPotion` falloff: a living entity whose box, grown by
+/// `margin`, lies within four blocks of the potion's box (0.25 wide, standing on `center`) gets
+/// `1 - distance / 4` of the effect; further away it gets nothing. `entity` is its box (min, max).
+pub fn splash_scale(center: [f64; 3], entity: ([f64; 3], [f64; 3]), margin: f64) -> Option<f64> {
+    let potion = (
+        [center[0] - 0.125, center[1], center[2] - 0.125],
+        [center[0] + 0.125, center[1] + 0.25, center[2] + 0.125],
+    );
+    let grown = (
+        entity.0.map(|v| v - margin),
+        entity.1.map(|v| v + margin),
+    );
+    let gap = box_gap_sqr(potion, grown);
+    (gap < 16.0).then(|| 1.0 - gap.sqrt() / 4.0)
+}
+
+/// What a splash of `scale` does to a lasting effect: `scale * duration + 0.5` truncated, and
+/// nothing at all when that would end within a second (`MobEffectInstance.endsWithin(20)`).
+pub fn splash_duration(instance: MobEffectInstance, scale: f64) -> Option<MobEffectInstance> {
+    if instance.is_infinite() {
+        return Some(instance);
+    }
+    let mut scaled = instance;
+    scaled.duration = (scale * f64::from(instance.duration) + 0.5) as i32;
+    (scaled.duration > 20).then_some(scaled)
 }
 
 #[cfg(test)]
@@ -744,7 +794,8 @@ mod tests {
     fn a_cloud_applies_effects_every_fifth_tick_inside_its_radius() {
         let id = uuid::Uuid::from_u128(1);
         let mut cloud = cloud_at_origin(&[speed(3600)]);
-        for _ in 1..PotionCloud::CHECK_INTERVAL {
+        // Nothing happens while the cloud waits, not even on the fifth tick.
+        for _ in 1..PotionCloud::WAIT {
             assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]), Some(Vec::new()));
         }
         let applied = cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap();
@@ -755,7 +806,7 @@ mod tests {
 
     #[test]
     fn someone_outside_the_radius_or_far_above_is_not_affected() {
-        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 4);
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 9);
         let near = uuid::Uuid::from_u128(1);
         let far = uuid::Uuid::from_u128(2);
         let high = uuid::Uuid::from_u128(3);
@@ -775,17 +826,85 @@ mod tests {
     #[test]
     fn a_hit_costs_half_a_block_and_the_victim_waits_twenty_ticks() {
         let id = uuid::Uuid::from_u128(1);
-        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 4);
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 9);
         let before = cloud.radius();
         assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap().len(), 1);
-        assert!((before + PotionCloud::RADIUS_ON_USE - cloud.radius()).abs() < 1e-4);
-        // Ticks 10, 15 and 20 are checks too, but the victim is skipped until tick 25.
+        let expected = before + cloud.radius_per_tick + PotionCloud::RADIUS_ON_USE;
+        assert!((expected - cloud.radius()).abs() < 1e-4);
+        // Ticks 15, 20 and 25 are checks too, but the victim is skipped until tick 30.
         for _ in 0..19 {
             let applied = cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap();
             assert!(applied.is_empty(), "age {}", cloud.age());
         }
-        assert_eq!(cloud.age(), 24);
+        assert_eq!(cloud.age(), 29);
         assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap().len(), 1);
+    }
+
+    /// Regression: the cloud used to hit on tick 5 while it was still waiting; vanilla does
+    /// nothing until `waitTime` (10) has passed, so the first hit is on tick 10.
+    #[test]
+    fn a_waiting_cloud_hits_nobody_until_tick_ten() {
+        let id = uuid::Uuid::from_u128(1);
+        let mut cloud = cloud_at_origin(&[speed(3600)]);
+        for age in 1..PotionCloud::WAIT {
+            let applied = cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap();
+            assert!(applied.is_empty(), "age {age}");
+        }
+        assert_eq!(cloud.radius(), PotionCloud::RADIUS, "no shrinking yet");
+        assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]).unwrap().len(), 1);
+    }
+
+    /// The cloud's box is half a block tall from its own height; a body that overlaps it is hit,
+    /// whatever the position of its feet.
+    #[test]
+    fn the_cloud_reaches_every_body_that_meets_its_half_block_box() {
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 9);
+        let (below, tall, above, short_below, edge) = (
+            uuid::Uuid::from_u128(1),
+            uuid::Uuid::from_u128(2),
+            uuid::Uuid::from_u128(3),
+            uuid::Uuid::from_u128(4),
+            uuid::Uuid::from_u128(5),
+        );
+        let applied = cloud
+            .tick_boxes([
+                // Feet 1.5 below, head 0.3 above the cloud's floor: overlaps.
+                (below, [0.0, 62.5, 0.0], 1.8),
+                // Feet 1.8 below, head just short of the floor: does not.
+                (short_below, [0.0, 62.2, 0.0], 1.8),
+                // Feet 0.4 above the floor: inside the half block.
+                (tall, [0.0, 64.4, 0.0], 1.8),
+                // Feet at 0.5 above is outside (the box is open at the top).
+                (edge, [0.0, 64.5, 0.0], 1.8),
+                (above, [0.0, 66.0, 0.0], 1.8),
+            ])
+            .unwrap();
+        let hit: Vec<_> = applied.iter().map(|(id, _)| *id).collect();
+        assert_eq!(hit, [below, tall]);
+    }
+
+    #[test]
+    fn a_splash_falls_off_with_the_gap_between_the_boxes_not_the_feet_distance() {
+        let body = |x: f64| ([x - 0.3, 64.0, -0.3], [x + 0.3, 65.8, 0.3]);
+        // Touching: the whole effect.
+        assert_eq!(splash_scale([0.0, 64.0, 0.0], body(0.0), 0.3), Some(1.0));
+        // A body whose box is 2 blocks away gets half.
+        let gap = splash_scale([0.0, 64.0, 0.0], body(0.125 + 0.6 + 2.0), 0.3).unwrap();
+        assert!((gap - 0.5).abs() < 1e-9, "{gap}");
+        // Four blocks away gets nothing (and the old 0.25 floor is gone).
+        assert_eq!(splash_scale([0.0, 64.0, 0.0], body(6.0), 0.3), None);
+        let near_edge = splash_scale([0.0, 64.0, 0.0], body(0.125 + 0.6 + 3.9), 0.3).unwrap();
+        assert!(near_edge < 0.05, "{near_edge}");
+    }
+
+    #[test]
+    fn a_splash_rounds_the_duration_and_skips_what_would_end_within_a_second() {
+        let speed = MobEffectInstance::new(Effect::Speed.id(), 3600, 0);
+        assert_eq!(splash_duration(speed, 0.5).unwrap().duration, 1800);
+        assert_eq!(splash_duration(speed, 0.333).unwrap().duration, 1199);
+        assert!(splash_duration(speed, 0.005).is_none(), "18 ticks is under a second");
+        let long = MobEffectInstance::new(Effect::Speed.id(), 3600, 1);
+        assert_eq!(splash_duration(long, 1.0).unwrap().amplifier, 1);
     }
 
     #[test]
@@ -805,7 +924,7 @@ mod tests {
 
     #[test]
     fn enough_hits_dissolve_the_cloud() {
-        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 4);
+        let mut cloud = aged(cloud_at_origin(&[speed(3600)]), 9);
         let people: Vec<_> = (0..8u128)
             .map(|n| (uuid::Uuid::from_u128(n + 1), [0.0, 64.0, 0.0]))
             .collect();
@@ -815,7 +934,7 @@ mod tests {
 
     #[test]
     fn a_cloud_without_effects_applies_nothing() {
-        let mut cloud = aged(cloud_at_origin(&[]), 4);
+        let mut cloud = aged(cloud_at_origin(&[]), 9);
         let id = uuid::Uuid::from_u128(1);
         assert_eq!(cloud.tick([(id, [0.0, 64.0, 0.0])]), Some(Vec::new()));
     }
