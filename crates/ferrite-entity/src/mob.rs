@@ -303,6 +303,12 @@ pub struct MobState {
     pub dragon_charge_recovery: u32,
     /// The scanning dragon's yaw rate (`EnderDragon.yRotA`).
     pub dragon_yaw_rate: f32,
+    /// A sheep's wool colour, the `DyeColor` id (`Sheep.DATA_WOOL_ID`).
+    pub wool_color: u8,
+    /// Whether a sheep has been sheared and not yet eaten grass.
+    pub sheared: bool,
+    /// Ticks left in a sheep's `EatBlockGoal`; zero when it is not eating.
+    pub eat_timer: u8,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -389,6 +395,9 @@ impl MobState {
             dragon_charge_target: None,
             dragon_charge_recovery: 0,
             dragon_yaw_rate: 0.0,
+            wool_color: 0,
+            sheared: false,
+            eat_timer: 0,
             wander_yaw: 0.0,
             moving: false,
             target: None,
@@ -462,6 +471,13 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         && let Some(state) = data.mob.as_ref()
     {
         crate::breed::define_metadata(&mut data.metadata, state);
+    }
+    if kind == MobKind::Sheep
+        && let Some(state) = data.mob.as_mut()
+    {
+        // `Sheep.finalizeSpawn` rolls the colour.
+        state.wool_color = crate::sheep::random_color(rng);
+        crate::sheep::define_metadata(&mut data.metadata, state);
     }
     if kind.is_tameable()
         && let Some(state) = data.mob.as_ref()

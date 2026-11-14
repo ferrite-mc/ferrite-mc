@@ -233,6 +233,16 @@ pub fn approach(
     if let Some(state) = baby.data.mob {
         define_metadata(&mut baby.data.metadata, &state);
     }
+    if kind == MobKind::Sheep {
+        // `Sheep.getBreedOffspring`: the lamb's colour mixes its parents'.
+        let color = crate::sheep::offspring_color(parent.wool_color, mate_state.wool_color, rng);
+        if let Some(state) = baby.data.mob.as_mut() {
+            state.wool_color = color;
+        }
+        if let Some(state) = baby.data.mob {
+            crate::sheep::define_metadata(&mut baby.data.metadata, &state);
+        }
+    }
     // `define_metadata` writes the default strength, so the inherited value goes in afterwards.
     if let Some(strength) = strength {
         crate::horse::set_strength(&mut baby.data, strength);

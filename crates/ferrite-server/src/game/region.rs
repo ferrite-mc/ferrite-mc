@@ -6511,6 +6511,7 @@ impl Region {
                     self.breath_clouds
                         .push(ferrite_entity::dragon::BreathCloud::perched(pos));
                 }
+                ai::MobEvent::EatBlock { at, grass } => self.eat_block(ctx, at, grass),
                 ai::MobEvent::Status { key, status } => self.broadcast_status(ctx, key, status),
                 ai::MobEvent::Bred(bred) => {
                     // Vanilla gives 1-7 experience points to the breeding and counts it for the
@@ -6598,6 +6599,11 @@ impl Region {
             })
             .collect();
         for (key, kind, pos, baby, killer, burning) in dead {
+            // A sheep's table picks its wool by colour and sheared state.
+            let facts = mob::state(&self.entities, key)
+                .filter(|s| s.kind == MobKind::Sheep)
+                .map(ferrite_entity::sheep::loot_properties)
+                .unwrap_or_default();
             if let Some(killer) = killer {
                 super::recipe_unlock::KILLS
                     .lock()
@@ -6647,7 +6653,7 @@ impl Region {
             let drops = if baby {
                 Vec::new()
             } else {
-                super::drops::mob_drops_by(kind, &mut self.rng, killer, burning)
+                super::drops::mob_drops_with(kind, &mut self.rng, killer, burning, &facts)
             };
             for stack in drops
                 .into_iter()
@@ -8039,6 +8045,9 @@ impl Region {
                 if self.use_trader(uuid, key) {
                     continue;
                 }
+                if self.use_shears_on_sheep(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
                 if sneaking
                     && ferrite_entity::mob::state(&self.entities, key)
@@ -8092,6 +8101,137 @@ impl Region {
                     p.inventory.set(slot, held.copy_with_count(held.count - 1));
                 }
             }
+        }
+    }
+
+    /// Vanilla `Sheep.mobInteract` with shears: a ready sheep drops one to three wool of its
+    /// colour from `shearing/sheep`, becomes sheared and wears the shears by one; a lamb or an
+    /// already sheared sheep consumes the click and does nothing. Not modelled: the
+    /// `GameEvent.SHEAR` vibration and plugin shear events.
+    fn use_shears_on_sheep(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:shears" {
+            return false;
+        }
+        match self.shear_sheep(key) {
+            None => return false,
+            Some(false) => return true,
+            Some(true) => {}
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, "minecraft:entity.sheep.shear");
+        }
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&player)
+        {
+            let stack = p.inventory.get(slot).clone();
+            let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage);
+            let damage = stack.damage() + 1;
+            let worn = match max {
+                Some(max) if damage >= max => Some(ferrite_item::ItemStack::default()),
+                _ => worn_stack(stack, damage),
+            };
+            if let Some(worn) = worn {
+                p.inventory.set(slot, worn);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
+    /// drops; grass becomes dirt), not the sheep's `ate()`, which the AI already did.
+    fn eat_block(&mut self, ctx: &TickContext, at: [i32; 3], grass: bool) {
+        let griefing = ctx
+            .rules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_bool("mob_griefing")
+            .unwrap_or(true);
+        if !griefing {
+            return;
+        }
+        let state = if grass {
+            ferrite_data::blocks::default_state("minecraft:dirt")
+        } else {
+            Some(0)
+        };
+        if let Some(state) = state {
+            self.place_blocks(ctx, &[(at, state)]);
+        }
+    }
+
+    /// The world half of shearing: `None` when `key` is not a sheep, `Some(false)` when it is a
+    /// lamb or already sheared (the click is consumed), `Some(true)` when it was sheared and its
+    /// wool was dropped.
+    fn shear_sheep(&mut self, key: ferrite_entity::EntityKey) -> Option<bool> {
+        let state = mob::state(&self.entities, key).copied()?;
+        if state.kind != MobKind::Sheep {
+            return None;
+        }
+        let facts = ferrite_entity::sheep::loot_properties(&state);
+        if ferrite_entity::sheep::shear(&mut self.entities, key).is_none() {
+            return Some(false);
+        }
+        let pos = self.entities.pos(key)?;
+        for stack in super::drops::shearing_drops(&facts, &mut self.rng) {
+            // `Sheep.shear` spawns each wool on its own, a block above the feet, with a little
+            // extra push on top of the item's own random toss.
+            for _ in 0..stack.count {
+                let mut one = stack.clone();
+                one.count = 1;
+                let vel = ferrite_math::Vec3::new(
+                    f64::from(self.rng.next_f32() * 0.2 - 0.1)
+                        + f64::from((self.rng.next_f32() - self.rng.next_f32()) * 0.1),
+                    0.2 + f64::from(self.rng.next_f32() * 0.05),
+                    f64::from(self.rng.next_f32() * 0.2 - 0.1)
+                        + f64::from((self.rng.next_f32() - self.rng.next_f32()) * 0.1),
+                );
+                let at = ferrite_math::Vec3::new(pos.x, pos.y + 1.0, pos.z);
+                let record = item::new_item_stack(at, vel, &one, &mut self.rng);
+                self.entities.insert(record);
+            }
+        }
+        Some(true)
+    }
+
+    /// Plays a sound event at `pos` for every player of this region within 16 blocks.
+    fn play_sound_near(&self, pos: ferrite_math::Vec3, name: &str) {
+        let Some(sound) = ferrite_data::registries::id("minecraft:sound_event", name) else {
+            return;
+        };
+        for p in self.players.values() {
+            let dx = p.pos[0] - pos.x;
+            let dz = p.pos[2] - pos.z;
+            if dx * dx + dz * dz > 256.0 {
+                continue;
+            }
+            send(
+                p,
+                &SoundEffect {
+                    sound: super::commands_extras::sound_holder(sound),
+                    // `SoundSource.PLAYERS`.
+                    source: VarInt(7),
+                    x: (pos.x * 8.0) as i32,
+                    y: (pos.y * 8.0) as i32,
+                    z: (pos.z * 8.0) as i32,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    seed: 0,
+                },
+            );
         }
     }
 
@@ -13467,6 +13607,119 @@ mod tests {
         assert!(mob::state(&region.entities, key).unwrap().loot_dropped);
         region.tick(&ctx);
         assert_eq!(dropped_gear(&region).len(), 2, "gear drops exactly once");
+    }
+
+    fn sheep_region() -> (Region, ferrite_entity::EntityKey) {
+        let mut region = Region::default();
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::Sheep,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        ferrite_entity::sheep::set_color(&mut region.entities, key, 11);
+        (region, key)
+    }
+
+    #[test]
+    fn shearing_a_sheep_drops_its_coloured_wool_and_a_second_shear_drops_nothing() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        let (mut region, key) = sheep_region();
+        assert_eq!(region.shear_sheep(key), Some(true));
+        let wool = dropped_items(&region);
+        assert!((1..=3).contains(&wool.len()), "{wool:?}");
+        assert!(wool.iter().all(|name| *name == "minecraft:blue_wool"));
+        assert!(mob::state(&region.entities, key).unwrap().sheared);
+        let before = region.entities.keys().len();
+        assert_eq!(region.shear_sheep(key), Some(false));
+        assert_eq!(region.entities.keys().len(), before, "nothing more dropped");
+    }
+
+    #[test]
+    fn a_lamb_is_not_sheared_and_a_cow_is_not_a_sheep() {
+        let (mut region, key) = sheep_region();
+        mob::state_mut(&mut region.entities, key).unwrap().age = -500;
+        assert_eq!(region.shear_sheep(key), Some(false));
+        assert!(!mob::state(&region.entities, key).unwrap().sheared);
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(4.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        assert_eq!(region.shear_sheep(cow), None);
+    }
+
+    #[test]
+    fn a_dead_sheep_drops_wool_of_its_colour_unless_it_was_sheared() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        for (sheared, expect_wool) in [(false, true), (true, false)] {
+            let (mut region, key) = sheep_region();
+            region.hold_chunk(ChunkPos(0, 0));
+            {
+                let state = mob::state_mut(&mut region.entities, key).unwrap();
+                state.sheared = sheared;
+                state.health = 0.0;
+                state.last_killer = Some(Uuid::from_u128(5));
+            }
+            region.tick(&tick_context());
+            let drops = dropped_items(&region);
+            assert_eq!(
+                drops.contains(&"minecraft:blue_wool"),
+                expect_wool,
+                "sheared {sheared}: {drops:?}"
+            );
+        }
+    }
+
+    fn eat_context(
+        source: &Arc<super::super::anvil::AnvilChunkSource>,
+        griefing: bool,
+    ) -> TickContext {
+        let mut ctx = tick_context();
+        ctx.source = Some(Arc::clone(source));
+        if !griefing {
+            ctx.rules
+                .lock()
+                .unwrap()
+                .set("mob_griefing", "false")
+                .unwrap();
+        }
+        ctx
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_eaten_grass_block_becomes_dirt_and_a_plant_disappears() {
+        let source = loaded_source().await;
+        let grass =
+            u32::from(ferrite_data::blocks::default_state("minecraft:grass_block").unwrap());
+        let plant =
+            u32::from(ferrite_data::blocks::default_state("minecraft:short_grass").unwrap());
+        source.set_block(2, 63, 2, grass).unwrap();
+        source.set_block(4, 64, 4, plant).unwrap();
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.eat_block(&ctx, [2, 63, 2], true);
+        region.eat_block(&ctx, [4, 64, 4], false);
+        let dirt = u32::from(ferrite_data::blocks::default_state("minecraft:dirt").unwrap());
+        assert_eq!(source.block(2, 63, 2), Some(dirt));
+        assert_eq!(source.block(4, 64, 4), Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mob_griefing_off_leaves_the_eaten_block_alone() {
+        let source = loaded_source().await;
+        let grass =
+            u32::from(ferrite_data::blocks::default_state("minecraft:grass_block").unwrap());
+        source.set_block(2, 63, 2, grass).unwrap();
+        let ctx = eat_context(&source, false);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.eat_block(&ctx, [2, 63, 2], true);
+        assert_eq!(source.block(2, 63, 2), Some(grass));
     }
 
     #[test]

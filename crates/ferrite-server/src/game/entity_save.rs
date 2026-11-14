@@ -611,6 +611,11 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             Tag::Int(mob.dragon_phase_ticks as i32),
         );
         c.insert("PerchFlames".into(), Tag::Int(i32::from(mob.perch_flames)));
+        if mob.kind == MobKind::Sheep {
+            // Vanilla saves the legacy colour id as `Color` and the shorn flag as `Sheared`.
+            c.insert("Color".into(), Tag::Byte(mob.wool_color as i8));
+            c.insert("Sheared".into(), Tag::Byte(mob.sheared as i8));
+        }
         c.insert("Age".into(), Tag::Int(mob.age));
         if let Some(owner) = mob.owner {
             c.insert("Owner".into(), Tag::IntArray(uuid_words(owner)));
@@ -822,6 +827,14 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 }
                 if kind.is_tameable() {
                     ferrite_entity::tame::define_metadata(&mut data.metadata, &mob);
+                }
+                if kind == MobKind::Sheep {
+                    mob.wool_color = match c.get("Color") {
+                        Some(Tag::Byte(id)) => (*id & 15) as u8,
+                        _ => 0,
+                    };
+                    mob.sheared = boolean(c, "Sheared");
+                    ferrite_entity::sheep::define_metadata(&mut data.metadata, &mob);
                 }
                 data.mob = Some(mob);
             }
@@ -1124,6 +1137,29 @@ mod tests {
                 "{phase:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_sheep_keeps_its_colour_and_shorn_wool_across_a_save() {
+        let mut record = mob::new_mob(
+            MobKind::Sheep,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.wool_color = 11;
+            state.sheared = true;
+        }
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let data = &loaded[0].data;
+        let state = data.mob.as_ref().unwrap();
+        assert_eq!((state.wool_color, state.sheared), (11, true));
+        // The synched wool byte is rebuilt from the saved state.
+        assert!(matches!(
+            data.metadata.get(ferrite_entity::sheep::WOOL_INDEX),
+            Some(ferrite_protocol::packets::play::MetaValue::Byte(byte)) if *byte == 11 | 0x10
+        ));
     }
 
     #[test]

@@ -26,6 +26,12 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 | enderman | neutral until provoked, anger timer, blink | `NeutralMob`, `EnderMan` teleport | `ai.rs`, `mob::retaliate` | implemented, tests |
 | chicken | wander, panic, breed, follow parent, tempt, look-at | `Chicken.registerGoals` (jar) | `ai.rs` passive goals, `breed.rs` | implemented |
 | chicken | adult lays an egg every 6000–11999 ticks | `Chicken.aiStep`: `isBaby` check, `6000 + nextInt(6000)` (jar) | `ai::MobEvent::LayEgg`, `MobState::egg_time` | implemented, unit + region test |
+| sheep | wool colour and sheared flag in synched byte 18 (`colour \| 0x10`), saved as `Color`/`Sheared` | `Sheep.DATA_WOOL_ID`, `addAdditionalSaveData` (jar) | `sheep.rs`, `entity_save.rs`; tests `a_new_sheep_has_a_colour_and_synched_wool_data`, `a_sheep_keeps_its_colour_and_shorn_wool_across_a_save` | implemented (same region) |
+| sheep | spawn colour: 5% black/gray/light gray, 3% brown, 82% white | `SheepColorSpawnRules` temperate table (jar) | `sheep::random_color`, test `spawn_colours_follow_the_temperate_table` | approximated: warm and cold biome tables absent (no biome at spawn in the entity crate) |
+| sheep | lamb colour is the two-dye recipe mix, else either parent | `DyeColor.getMixedColor` (jar), two-dye recipes in `recipe/*_dye*.json` | `sheep::offspring_color`, `breed::approach` | implemented, test `offspring_mix_the_recipe_colours_and_otherwise_take_a_parent` |
+| sheep | `EatBlockGoal`: 1/1000 (1/50 baby), 40 ticks, eats when the counter reaches 4, grass block to dirt, `#edible_for_sheep` plant removed, `mobGriefing` gates the block change, `ate()` regrows wool and ages a baby 60 ticks, event 10 starts the head-down animation | `EatBlockGoal`, `Sheep.ate` (jar) | `sheep::tick_eat`, `MobEvent::EatBlock`, `Region::eat_block`; tests `eating_grass_turns_the_block_to_dirt_on_the_36th_tick_and_regrows_the_wool`, `eating_a_short_grass_plant_removes_it_and_leaves_the_grass_alone`, `mob_griefing_off_leaves_the_eaten_block_alone`, `an_eaten_grass_block_becomes_dirt_and_a_plant_disappears` | implemented; only `PanicGoal` pre-empts it (not love or follow-parent) |
+| sheep | shears: ready if not sheared and not a baby, 1-3 wool of its colour from `shearing/sheep`, shears lose 1 durability | `Sheep.mobInteract`/`shear`, `loot_table/shearing/sheep*.json` | `Region::shear_sheep`, `use_shears_on_sheep`, `drops::shearing_drops`; tests `shearing_a_sheep_drops_its_coloured_wool_and_a_second_shear_drops_nothing`, `a_lamb_is_not_sheared_and_a_cow_is_not_a_sheep` | implemented; no shear game event, plugin shear event or real client |
+| sheep | death drops pick wool by colour and sheared state | `loot_table/entities/sheep.json` | `drops::mob_drops_with` with `sheep::loot_properties`; tests `a_dead_sheep_drops_wool_of_its_colour_unless_it_was_sheared` (region and loot) | implemented |
 | cow/pig/sheep | wander, panic, breed, follow parent, tempt, look-at | `Animal` goals | `ai.rs`, `breed.rs` | implemented |
 | all animals | baby half size, follow parent within 8 blocks | `AgeableMob`, `FollowParentGoal` | `breed.rs`, `ai::follow_parent` | implemented, test |
 | wolf/llama/trader | taming, leads, caravan (not in this lane's nine) | `Leashable`, `LlamaFollowCaravanGoal` | `ai.rs`, `tame.rs` | implemented, tests |
@@ -45,7 +51,7 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 | creeper | no charged (lightning) explosion, no hiss event | `Creeper` explosion power depends on charged state |
 | enderman | no stare-to-anger, no water damage, no carried-block metadata | `EndermanLookForPlayerGoal` and `EnderMan` water handling |
 | chicken/cow/pig | no chicken jockey, no pig riding, milking only through the existing interaction path | `Chicken` jockey and `Pig` saddle goals are not modelled |
-| sheep | no `EatBlockGoal`, and **no wool colour/sheared state or shearing** | `Sheep.registerGoals` includes `EatBlockGoal`; this is the largest passive gap |
+| sheep | dyeing a sheep with a dye item, warm/cold biome colours, plugin shear events | `Sheep.mobInteract` dye branch, `SheepColorSpawnRules` | `sheep::set_color` exists but nothing calls it from a dye use |
 | all | pathfinding is a block-grid A* with a 32-node cap, not `GroundPathNavigation` | long detours, doors and water are approximated |
 | attributes | default attributes now sent when a viewer starts tracking; equipment/passengers on pairing still incomplete | vanilla `ServerEntity.sendPairingData` sends attributes, equipment and passengers |
 | client | no real 26.3 client was used | visuals, animations and sounds are unverified |
@@ -61,6 +67,10 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 - Dragon perched timings confirmed from the jar and corrected: scan box 20×10, attack 40,
   each flaming phase 200 ticks with one cloud at tick 10, and four flaming phases before
   takeoff. The scan give-up charge and attack turn toward the player are still missing.
+
+- Sheep (see the matrix): colour, sheared state, eating and shearing. Cross-region: none needed,
+  the sheep, its drops and the eaten block are owned by one region (the block write goes through
+  the region scheduler like any other `place_blocks`).
 
 ## Jar notes that contradict older docs
 

@@ -395,6 +395,9 @@ pub enum MobEvent {
     Explode { center: Vec3, power: f32 },
     /// Two animals bred; the baby is already in the store.
     Bred(crate::breed::Bred),
+    /// A sheep ate at `at`: the region turns a grass block into dirt (`grass`) or removes the
+    /// plant (`!grass`) when `mobGriefing` allows it.
+    EatBlock { at: [i32; 3], grass: bool },
     /// An entity event for the players tracking `key` (hearts, smoke).
     Status { key: crate::EntityKey, status: u8 },
 }
@@ -649,6 +652,10 @@ pub fn tick_full(
             }
         }
         let mut directed = false;
+        let mut eating = false;
+        if kind == MobKind::Sheep {
+            eating = crate::sheep::tick_eat(store, key, blocks, rng, &mut events);
+        }
         if kind == MobKind::EnderDragon {
             crate::dragon::fly(store, key, players, rng, &mut events);
             continue;
@@ -986,6 +993,11 @@ pub fn tick_full(
             }
         }
 
+        // `EatBlockGoal` holds MOVE, LOOK and JUMP: an eating sheep stands and looks down.
+        if eating {
+            walking = None;
+            look = None;
+        }
         // Villagers stay within sight of home and refuse to walk into water or lava. A
         // scheduled destination (workstation, bed or bell) is allowed outside the home radius.
         if kind == MobKind::Villager {

@@ -39,6 +39,7 @@ pub mod path;
 pub mod physics;
 pub mod potion;
 mod rng;
+pub mod sheep;
 pub mod shoulder;
 pub mod spawn;
 mod store;
