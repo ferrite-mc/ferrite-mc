@@ -266,11 +266,19 @@
 - **Player:** 남은 Player API의 구현/거부 표와 한계는 §10.7로 옮겼다(`fireworkBoost` 핸들, `loadData`, 리소스 팩 프롬프트, `spawnParticle` 데이터, `getVirtualHost`, `EntityEquipment`, `copy`/`spawnAt` 거부 등).
   `getConnection`(플레이어 메서드로 전달하는 프록시; `reenterConfiguration`·`sendReportDetails`는 `UnsupportedOperationException`)과
   `postEffects`(`/posteffect`를 콘솔로 실행하고 목록은 Java에 미러링 — 명령으로 바꾼 상태는 `values()`에 보이지 않는다)는 구현했다.
-- **World:** `locateNearestPoi`/`locateAllPoiInRange`는 POI 저장소가 없어 로드된 청크를 스캔한다(`Occupancy.ANY`만 지원,
-  호스트가 블록 속성을 주지 않으면 침대 머리/발 같은 구분이 안 된다). `getTileEntityCount`는 로드된 청크의 블록 엔티티 수,
-  `getTickableTileEntityCount`는 바닐라에서 틱 처리를 하는 타입 목록(`TICKING_BLOCK_ENTITIES`) 기준이다.
-  `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API(26.3 build 227)에
-  존재하지 않아 구현 대상이 아니다.
+- **World:** `locateNearestPoi`/`locateAllPoiInRange`는 POI 저장소 대신 로드된 청크의 블록 상태를 스캔한다(기본·네더·엔드·런타임 월드).
+  POI 저장 형식(`poi/r.x.z.mca`의 `Sections`/`Records`/`free_tickets`, `PoiSection$Packed`의 `Valid`/`Records`)은 확인했지만
+  Ferrite가 POI 파일을 쓰지 않아 실제 저장소를 읽지는 않는다. 점유 상태는 `IS_OCCUPIED`가 빈 결과(티켓을 잡는 AI 없음),
+  `HAS_SPACE`가 같은 타입 중 공간이 있는 POI만 반환한다. `getStructures`/`hasStructureAt`/`locateNearestStructure`
+  (`Structure`·`StructureType`·deprecated `org.bukkit.StructureType`)는 구조물 레지스트리와 차원 경계에 연결했다.
+  `locateNearestBiome`은 차원을 따르지만 호스트가 y=64·8블록 간격으로 찾고 interval 인자는 무시한다. `setBiome`은
+  오버월드·네더·엔드에서 `execute in`+`fillbiome`으로 저장·클라이언트 갱신까지 간다(런타임 월드는 콘솔 대상이 없어 거부).
+  게임룰은 서버 전역 표를 모든 월드 UUID에 답한다. `WorldCreator`는 NORMAL/NETHER/THE_END와 seed를 저장·재오픈하고,
+  `generator`/`generateStructures(false)`/NORMAL 외 `WorldType`/`biomeProvider`/`CUSTOM`은 거부한다(호스트 월드젠이 커스텀
+  생성기·구조물 생성 토글·바이옴 소스를 바꾸는 훅을 노출하지 않는다).
+  `getTileEntityCount`는 로드된 청크의 블록 엔티티 수, `getTickableTileEntityCount`는 바닐라에서 틱 처리를 하는 타입 목록
+  (`TICKING_BLOCK_ENTITIES`) 기준이다. `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`,
+  `vanillaBiomeProvider`는 컴파일 대상 Paper API(26.3 build 227)에 존재하지 않아 구현 대상이 아니다.
 - **블록 엔티티:** 위 표의 종류는 구현했다. 그 밖의 `sendBlockUpdate` 대상은 `UnsupportedOperationException`을 유지한다.
 - **레시피(§7):** §10.6에 구현/거부 표와 한계를 옮겼다(모닥불 레시피는 일치만 하고 호스트에 모닥불 요리가 없음, `smithing_trim`은 클라이언트 레시피북에 안 나옴, `ExactChoice`는 거부).
 - **투사체 종류:** `launchProjectile(Firework)`는 구현했다(호스트 폭죽이 눈 위치에서 위로 난다, 속도 인자 무시). `launchProjectile(BreezeWindCharge)`도 구현했다(`Kind::BreezeWindCharge`, 일반 바람 구슬과 같은 비행·폭발). `launchProjectile(WitherSkull)`도 구현했다(직선 비행, 닿으면 위력 1 폭발, 불은 없음). `launchProjectile(ShulkerBullet)`도 구현했다(유도 없이 직선, 닿은 몹에 4 피해, 공중 부양 효과 없음). `launchProjectile(SpectralArrow)`도 구현했다(화살처럼 날고 맞은 몹이 10초간 발광). 낚싯찌(`FishHook`)는 아래 항목대로 `launchProjectile`이 지원하고, 눈 엔더는 `launchProjectile` 대상이 아니다(바닐라 `EyeOfEnder`도 플레이어가 아이템으로만 던진다; Bukkit에는 눈 엔더 `Projectile` 인터페이스가 없다). `World#getEnderDragonBattle`은 End 월드에서 `FerriteDragonBattle`을 돌려준다(호스트가 틱마다 올리는 전투 스냅샷을 읽고, 변경은 큐에 넣어 End 리전의 다음 틱에 적용 — 플레이어가 End에 있을 때만 움직인다. 보스바는 분리된 객체, `resetCrystals`(스파이크 크리스털을 지우고 배치 패스가 전부 다시 놓음)와 `spawnNewGateway(Position)`(그 자리에 관문을 열고, 바닐라처럼 개수는 올리지 않음)도 구현했다, 이름이 `_the_end`로 끝나는 런타임 월드도 같은 호스트 전투를 본다).

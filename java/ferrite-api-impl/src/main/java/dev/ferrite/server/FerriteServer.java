@@ -589,6 +589,9 @@ public class FerriteServer extends ServerStubs {
         if (creator.generator() != null) {
             throw new UnsupportedOperationException("Ferrite: custom chunk generators are not supported (WorldCreator#generator must be null)");
         }
+        if (creator.biomeProvider() != null) {
+            throw new UnsupportedOperationException("Ferrite: custom biome providers are not supported (WorldCreator#biomeProvider must be null)");
+        }
         if (!creator.generateStructures()) {
             throw new UnsupportedOperationException("Ferrite: disabling structure generation is not supported (WorldCreator#generateStructures must be true)");
         }
@@ -603,9 +606,9 @@ public class FerriteServer extends ServerStubs {
         String reply = Bootstrap.<String>awaitLoop(() -> (String) HostBridge.call("Server", "server", "createRuntimeWorld(String,String,long)", String.class, creator.name(), creator.environment().name(), creator.seed()));
         if (reply == null || reply.isBlank()) throw new IllegalStateException("Ferrite: runtime world creation failed");
         var parts = reply.split(String.valueOf(HostBridge.ITEM), -1);
-        if (parts.length != 5) throw new IllegalStateException("Ferrite: invalid runtime world response");
+        if (parts.length != 6) throw new IllegalStateException("Ferrite: invalid runtime world response");
         var world = FerriteWorld.create(this, java.util.UUID.fromString(parts[0]), creator.name(), 0L,
-                Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+                FerriteWorld.environmentOfKey(parts[5]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
         FerriteWorld.setSeed(world, Long.parseLong(parts[4]));
         registerWorld(world);
         synchronized (Bootstrap.LEGACY_LOCK) { plugins.callEvent(new org.bukkit.event.world.WorldLoadEvent(world)); }

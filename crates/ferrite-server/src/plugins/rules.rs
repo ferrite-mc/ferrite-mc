@@ -25,13 +25,15 @@ fn text(value: RuleValue) -> String {
     value.text()
 }
 
-fn is_default_world(subject: &str) -> bool {
-    uuid::Uuid::parse_str(subject).ok() == Some(ferrite_plugin::default_world_id())
+/// Vanilla game rules are one table for the whole server, shared by every dimension, so any
+/// world handle (vanilla or runtime) reads and writes the same live values.
+fn is_world(subject: &str) -> bool {
+    uuid::Uuid::parse_str(subject).is_ok()
 }
 
 /// The reply to a read-only game rule query, or `None` when `call` is something else.
 pub fn answer(call: &HostCall) -> Option<String> {
-    if call.owner != "World" || !is_default_world(&call.subject) {
+    if call.owner != "World" || !is_world(&call.subject) {
         return None;
     }
     let name = call.args.first().map(|a| canonical_name(a));
@@ -63,7 +65,7 @@ pub fn answer(call: &HostCall) -> Option<String> {
 pub fn set_line(call: &HostCall) -> Option<String> {
     if call.owner != "World"
         || call.method != "setGameRuleValue(String,String)"
-        || !is_default_world(&call.subject)
+        || !is_world(&call.subject)
     {
         return None;
     }
@@ -108,6 +110,13 @@ mod tests {
                 .unwrap()
                 .contains("keep_inventory")
         );
+        // The same table answers for every dimension, like vanilla's server-wide rules.
+        let mut nether = call("getGameRuleValue(String)", &["keepInventory"]);
+        nether.subject = uuid::Uuid::from_u128(0x6e6574686572).to_string();
+        assert_eq!(answer(&nether).as_deref(), Some("true"));
+        let mut not_a_world = call("getGameRuleValue(String)", &["keepInventory"]);
+        not_a_world.subject = "not-a-world".into();
+        assert_eq!(answer(&not_a_world), None);
     }
 
     #[test]
@@ -122,5 +131,14 @@ mod tests {
         assert_eq!(set("keepInventory", "maybe"), None);
         assert_eq!(set("nope", "true"), None);
         assert_eq!(set("random_tick_speed", "3 extra"), None);
+        let mut nether = call(
+            "setGameRuleValue(String,String)",
+            &["keepInventory", "true"],
+        );
+        nether.subject = uuid::Uuid::from_u128(0x6e6574686572).to_string();
+        assert_eq!(
+            set_line(&nether).as_deref(),
+            Some("gamerule keep_inventory true")
+        );
     }
 }

@@ -39,7 +39,8 @@ pub const PLAYER_COMMAND_PREPROCESS_EVENT: &str =
 pub const INVENTORY_CLICK_EVENT: &str = "org.bukkit.event.inventory.InventoryClickEvent";
 pub const INVENTORY_DRAG_EVENT: &str = "org.bukkit.event.inventory.InventoryDragEvent";
 pub const INVENTORY_CLOSE_EVENT: &str = "org.bukkit.event.inventory.InventoryCloseEvent";
-pub const RESOURCE_PACK_STATUS_EVENT: &str = "org.bukkit.event.player.PlayerResourcePackStatusEvent";
+pub const RESOURCE_PACK_STATUS_EVENT: &str =
+    "org.bukkit.event.player.PlayerResourcePackStatusEvent";
 pub const PLAYER_DEATH_EVENT: &str = "org.bukkit.event.entity.PlayerDeathEvent";
 pub const PLAYER_RESPAWN_EVENT: &str = "org.bukkit.event.player.PlayerRespawnEvent";
 pub const ENTITY_DAMAGE_EVENT: &str = "org.bukkit.event.entity.EntityDamageEvent";

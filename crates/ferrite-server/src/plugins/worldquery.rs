@@ -4,7 +4,7 @@
 //! Chunk state (`isChunkLoaded`, `isChunkGenerated`, `loadChunk`) is answered here for every
 //! world except the default one, whose loaded set `chunks` tracks.
 
-use ferrite_plugin::{HOST_NULL, Heightmap, HostCall, WorldView};
+use ferrite_plugin::{HOST_ITEM_SEPARATOR, HOST_NULL, Heightmap, HostCall, WorldView};
 
 /// `ServerLevel.findLightningRod` searches 128 blocks around the position and keeps a rod that
 /// is the top block of its column (`heightmap(WORLD_SURFACE) - 1`); the strike point is the block
@@ -146,6 +146,18 @@ fn answer_with_view(
             view?
                 .load_chunk(world?, x.parse().ok()?, z.parse().ok()?)
                 .map(|state| state.to_string())
+        })(),
+        // The default world's set is tracked by `chunks`; every other world's source lists the
+        // chunks it currently holds, so POI scans work in the Nether, the End and runtime worlds.
+        ("getLoadedChunkCoordinates()", []) => (|| {
+            let chunks = view?.loaded_chunks(world?)?;
+            Some(
+                chunks
+                    .into_iter()
+                    .map(|(x, z)| format!("{x},{z}"))
+                    .collect::<Vec<_>>()
+                    .join(&HOST_ITEM_SEPARATOR.to_string()),
+            )
         })(),
         _ => return None,
     };
@@ -450,6 +462,24 @@ mod tests {
             &["0", "0"],
         );
         assert_eq!(answer_with_view(&default, Some(&*view)), None);
+    }
+
+    #[tokio::test]
+    async fn loaded_chunk_coordinates_are_available_for_every_world() {
+        let world = Uuid::from_u128(0x7f);
+        let source = AnvilChunkSource::new_memory_dimension(None, Dimension::Nether);
+        assert!(source.ensure_chunk_loaded(2, -3, LOAD));
+        let view = crate::plugins::world_view_for_sources([(world, source)]);
+        let reply = answer_with_view(
+            &call(world, "getLoadedChunkCoordinates()", &[]),
+            Some(&*view),
+        );
+        assert_eq!(reply.as_deref(), Some("2,-3"));
+        let unknown = call(Uuid::from_u128(0x80), "getLoadedChunkCoordinates()", &[]);
+        assert_eq!(
+            answer_with_view(&unknown, Some(&*view)).as_deref(),
+            Some(HOST_NULL)
+        );
     }
 
     fn vanilla_root() -> Option<std::path::PathBuf> {

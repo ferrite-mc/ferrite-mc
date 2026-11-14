@@ -610,20 +610,17 @@ impl AnvilChunkSource {
     pub fn chunk_resident(&self, x: i32, z: i32) -> bool {
         self.with_loaded_chunk(x, z, |_| ()).is_some()
     }
-    /// Every chunk this source currently keeps resident, for `World#getLoadedChunks`. The cache
-    /// is keyed by `(x, z, biome)` so one chunk can appear several times; the result is deduped.
+    /// The chunks currently resident in this source, sorted by chunk coordinates.
     pub fn resident_chunks(&self) -> Vec<(i32, i32)> {
         let cache = self.cache.lock().unwrap();
-        let mut out: Vec<(i32, i32)> = cache
-            .entries
-            .iter()
-            .filter_map(|(&(x, z, _), entry)| {
-                matches!(entry, Entry::Ready(Ok(_), _)).then_some((x, z))
-            })
-            .collect();
-        out.sort_unstable();
-        out.dedup();
-        out
+        let mut chunks: std::collections::BTreeSet<(i32, i32)> =
+            cache.dirty.keys().copied().collect();
+        for (&(x, z, _), entry) in &cache.entries {
+            if matches!(entry, Entry::Ready(Ok(_), _)) {
+                chunks.insert((x, z));
+            }
+        }
+        chunks.into_iter().collect()
     }
     /// Whether the chunk is stored in this source's region files. Never loads or creates it;
     /// a memory-backed source stores nothing.
@@ -1391,16 +1388,45 @@ fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
 /// fields from a real vanilla `level.dat` are not modeled here; callers only use this for a
 /// freshly created Ferrite world.
 pub fn write_spawn(world: &Path, spawn: [i32; 3]) -> anyhow::Result<()> {
-    write_level(world, spawn, None)
+    write_level(world, spawn, None, None)
 }
 
-/// Like [`write_spawn`], and also records the world seed under `Data.WorldGenSettings.seed`
-/// (the location vanilla used before world generation settings moved out of `level.dat`).
-pub fn write_spawn_and_seed(world: &Path, spawn: [i32; 3], seed: i64) -> anyhow::Result<()> {
-    write_level(world, spawn, Some(seed))
+/// Writes the spawn, seed and the dimension a Ferrite runtime world was opened with.
+/// `level.dat` has no vanilla field for a runtime world's dimension (vanilla stores dimensions
+/// as directories), so Ferrite records its own key and reopens the world in that dimension.
+pub fn write_spawn_seed_and_dimension(
+    world: &Path,
+    spawn: [i32; 3],
+    seed: i64,
+    dimension: Dimension,
+) -> anyhow::Result<()> {
+    write_level(world, spawn, Some(seed), Some(dimension))
 }
 
-fn write_level(world: &Path, spawn: [i32; 3], seed: Option<i64>) -> anyhow::Result<()> {
+/// The dimension recorded by [`write_spawn_seed_and_dimension`], or `None` for a world written
+/// before dimensions were stored.
+pub fn read_dimension(world: &Path) -> anyhow::Result<Option<Dimension>> {
+    let bytes = std::fs::read(world.join("level.dat"))?;
+    let (_, tag) = binary::read_compressed(&bytes, binary::Compression::Gzip)?;
+    let Tag::Compound(root) = tag else {
+        anyhow::bail!("level.dat root is not a compound")
+    };
+    let Some(Tag::Compound(data)) = root.get("Data") else {
+        anyhow::bail!("level.dat missing Data")
+    };
+    match data.get("FerriteDimension") {
+        Some(Tag::String(key)) => Ok(Dimension::from_key(key)),
+        Some(_) => anyhow::bail!("level.dat FerriteDimension is not a string"),
+        None => Ok(None),
+    }
+}
+
+fn write_level(
+    world: &Path,
+    spawn: [i32; 3],
+    seed: Option<i64>,
+    dimension: Option<Dimension>,
+) -> anyhow::Result<()> {
     let mut data = ferrite_nbt::Compound::new();
     let mut pos = ferrite_nbt::Compound::new();
     pos.insert("pos".into(), Tag::IntArray(spawn.to_vec()));
@@ -1409,6 +1435,12 @@ fn write_level(world: &Path, spawn: [i32; 3], seed: Option<i64>) -> anyhow::Resu
         let mut settings = ferrite_nbt::Compound::new();
         settings.insert("seed".into(), Tag::Long(seed));
         data.insert("WorldGenSettings".into(), Tag::Compound(settings));
+    }
+    if let Some(dimension) = dimension {
+        data.insert(
+            "FerriteDimension".into(),
+            Tag::String(dimension.key().to_owned()),
+        );
     }
     data.insert("DataVersion".into(), Tag::Int(5023));
     let mut root = ferrite_nbt::Compound::new();
@@ -1419,7 +1451,7 @@ fn write_level(world: &Path, spawn: [i32; 3], seed: Option<i64>) -> anyhow::Resu
     Ok(())
 }
 
-/// The seed recorded by [`write_spawn_and_seed`], or `None` for a `level.dat` that has none
+/// The seed recorded by [`write_spawn_seed_and_dimension`], or `None` for a `level.dat` that has none
 /// (worlds created before seeds were stored).
 pub fn read_seed(world: &Path) -> anyhow::Result<Option<i64>> {
     let bytes = std::fs::read(world.join("level.dat"))?;

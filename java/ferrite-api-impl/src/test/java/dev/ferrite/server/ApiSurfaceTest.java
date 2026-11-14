@@ -261,8 +261,12 @@ class ApiSurfaceTest {
             var parts = args.split(String.valueOf(HostBridge.ARG), -1);
             if (method.equals("createRuntimeWorld(String,String,long)")) {
                 creates.add(args);
-                var entry = stored.computeIfAbsent(parts[0], name -> new String[]{java.util.UUID.nameUUIDFromBytes(name.getBytes()).toString(), parts[2]});
-                return entry[0] + HostBridge.ITEM + "0" + HostBridge.ITEM + "65" + HostBridge.ITEM + "0" + HostBridge.ITEM + entry[1];
+                var entry = stored.computeIfAbsent(parts[0], name -> new String[]{java.util.UUID.nameUUIDFromBytes(name.getBytes()).toString(), parts[2], switch (parts[1]) {
+                    case "NETHER" -> "minecraft:the_nether";
+                    case "THE_END" -> "minecraft:the_end";
+                    default -> "minecraft:overworld";
+                }});
+                return entry[0] + HostBridge.ITEM + "0" + HostBridge.ITEM + "65" + HostBridge.ITEM + "0" + HostBridge.ITEM + entry[1] + HostBridge.ITEM + entry[2];
             }
             if (method.equals("unloadRuntimeWorld(String,boolean)")) {
                 unloads.add(args);
@@ -328,10 +332,30 @@ class ApiSurfaceTest {
             assertTrue(structures.getMessage().contains("structure generation"), structures.getMessage());
             var type = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_flat").type(org.bukkit.WorldType.FLAT)));
             assertTrue(type.getMessage().contains("FLAT") && type.getMessage().contains("NORMAL"), type.getMessage());
+            var biome = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_biome").biomeProvider(new org.bukkit.generator.BiomeProvider() {
+                @Override public org.bukkit.block.Biome getBiome(org.bukkit.generator.WorldInfo worldInfo, int x, int y, int z) { return org.bukkit.block.Biome.PLAINS; }
+                @Override public java.util.List<org.bukkit.block.Biome> getBiomes(org.bukkit.generator.WorldInfo worldInfo) { return java.util.List.of(org.bukkit.block.Biome.PLAINS); }
+            })));
+            assertTrue(biome.getMessage().contains("biome providers"), biome.getMessage());
             var environment = assertThrows(UnsupportedOperationException.class, () -> server.createWorld(new org.bukkit.WorldCreator("ferrite_custom").environment(org.bukkit.World.Environment.CUSTOM)));
             assertTrue(environment.getMessage().contains("CUSTOM"), environment.getMessage());
             assertTrue(host.creates.isEmpty(), "a rejected creator never reaches the host");
-            for (var name : java.util.List.of("ferrite_gen", "ferrite_nostruct", "ferrite_flat", "ferrite_custom")) assertNull(server.getWorld(name), name);
+            for (var name : java.util.List.of("ferrite_gen", "ferrite_nostruct", "ferrite_flat", "ferrite_custom", "ferrite_biome")) assertNull(server.getWorld(name), name);
+        });
+    }
+
+    @Test void theEnvironmentIsStoredAndComesBackWhenAWorldIsReopened() {
+        withWorldHost(host -> {
+            var first = server.createWorld(new org.bukkit.WorldCreator("ferrite_nether_world")
+                .environment(org.bukkit.World.Environment.NETHER).seed(11L));
+            assertEquals(org.bukkit.World.Environment.NETHER, first.getEnvironment());
+            assertTrue(server.unloadWorld(first, true));
+            // The stored dimension wins over the creator's request, like Paper keeps an existing
+            // world's settings.
+            var reopened = server.createWorld(new org.bukkit.WorldCreator("ferrite_nether_world")
+                .environment(org.bukkit.World.Environment.NORMAL).seed(99L));
+            assertEquals(org.bukkit.World.Environment.NETHER, reopened.getEnvironment());
+            assertEquals(11L, reopened.getSeed());
         });
     }
 

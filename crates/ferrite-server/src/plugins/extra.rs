@@ -227,7 +227,10 @@ fn location_xyz(encoded: &str) -> Option<(f64, f64, f64)> {
 fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
     let dimension = world_dimension(Uuid::parse_str(&call.subject).ok()?)?;
     if dimension != crate::game::Dimension::Overworld
-        && method != "ferriteDataMerge(int,int,int,String)"
+        && !matches!(
+            method,
+            "ferriteDataMerge(int,int,int,String)" | "setBiome(int,int,int,Biome)"
+        )
     {
         return None;
     }
@@ -295,10 +298,13 @@ fn world_action(call: &HostCall, method: &str) -> Option<HostAction> {
                     .filter(|v| v.abs() < 30_000_000)
             };
             let (x, y, z) = (coord(0)?, coord(1)?, coord(2)?);
-            console(
-                format!("fillbiome {x} {y} {z} {x} {y} {z} {}", key(arg(3)?)?),
-                "",
-            )
+            let line = format!("fillbiome {x} {y} {z} {x} {y} {z} {}", key(arg(3)?)?);
+            let line = if dimension == crate::game::Dimension::Overworld {
+                line
+            } else {
+                format!("execute in {} run {line}", dimension.key())
+            };
+            console(line, "")
         }
         "playSound(Location,Sound,float,float)"
         | "playSound(Location,String,float,float)"
@@ -595,6 +601,15 @@ stop"
             Some(
                 "execute in minecraft:the_nether run data merge block 1 64 -2 {marker:\"nether\"}"
             )
+        );
+        assert_eq!(
+            line(world(
+                &nether,
+                "setBiome(int,int,int,Biome)",
+                &["8", "70", "-3", "minecraft:desert"]
+            ))
+            .as_deref(),
+            Some("execute in minecraft:the_nether run fillbiome 8 70 -3 8 70 -3 minecraft:desert")
         );
         assert_eq!(
             line(world(&nether, "strikeLightning(Location)", &[&at])),

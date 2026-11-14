@@ -76,7 +76,7 @@ pub enum ServerboundPlay {
 }
 /// `(id, name, spawn, seed)` of the opened world; the seed is the effective one, which for an
 /// existing world is the seed stored on disk rather than the requested one.
-pub type RuntimeWorldCreateResult = Result<(Uuid, String, [i32; 3], i64), String>;
+pub type RuntimeWorldCreateResult = Result<(Uuid, String, [i32; 3], i64, String), String>;
 
 pub enum GameMessage {
     Joined {

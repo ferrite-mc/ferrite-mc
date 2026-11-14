@@ -1,15 +1,47 @@
-//! Plugin calls answered by the vanilla world generation host: biome and structure queries.
+//! Plugin calls answered by the vanilla world generation host: biome, structure and feature
+//! queries.
 //!
-//! Only the overworld has a console target for plugins, so these accept the default world.
-//! Without a vanilla generator (flat test world) every call returns `None`, which the plugin
-//! sees as "not implemented" rather than a made-up answer.
+//! The three vanilla dimensions are found by their stable world UUIDs, and a runtime world
+//! registers the dimension it was opened with. Without a vanilla generator (flat test world)
+//! every call returns `None`, which the plugin sees as "not implemented" rather than a made-up
+//! answer.
 
 use super::is_resource_key;
 use crate::game::{ChunkGenerator, Dimension};
 use ferrite_plugin::{HOST_NULL, HostCall};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 
 /// A search radius in blocks; vanilla's `/locate` uses 6,400 for biomes and 100 chunks for structures.
 const MAX_RADIUS: i32 = 12_800;
+
+/// Runtime worlds are not one of the three vanilla dimensions, so the worldgen host learns
+/// their dimension when they are created.
+fn runtime_dimensions() -> &'static Mutex<HashMap<uuid::Uuid, Dimension>> {
+    static DIMENSIONS: OnceLock<Mutex<HashMap<uuid::Uuid, Dimension>>> = OnceLock::new();
+    DIMENSIONS.get_or_init(Default::default)
+}
+
+/// Records the dimension of a runtime world for [`world_query`] and [`place_feature`].
+pub fn register_world(world: uuid::Uuid, dimension: Dimension) {
+    runtime_dimensions()
+        .lock()
+        .unwrap()
+        .insert(world, dimension);
+}
+
+/// Forgets a runtime world that was unloaded.
+pub fn unregister_world(world: uuid::Uuid) {
+    runtime_dimensions().lock().unwrap().remove(&world);
+}
+
+/// The dimension a plugin's `World` handle stands for, vanilla or runtime.
+fn dimension_of(world: uuid::Uuid) -> Option<Dimension> {
+    super::world_dimension(world)
+        .or_else(|| runtime_dimensions().lock().unwrap().get(&world).copied())
+}
 
 fn target(text: &str) -> Option<&str> {
     let key = text.strip_prefix('#').unwrap_or(text);
@@ -27,9 +59,7 @@ pub fn world_query(terrain: &dyn ChunkGenerator, call: &HostCall) -> Option<Stri
         return None;
     }
     let world = uuid::Uuid::parse_str(&call.subject).ok()?;
-    if world != ferrite_plugin::default_world_id() {
-        return None;
-    }
+    let dimension = dimension_of(world)?;
     let arg = |index: usize| {
         call.args
             .get(index)
@@ -41,39 +71,25 @@ pub fn world_query(terrain: &dyn ChunkGenerator, call: &HostCall) -> Option<Stri
     match call.method.as_str() {
         "locateBiome(String,int,int,int)" => {
             let found = terrain
-                .locate_biome(
-                    Dimension::Overworld,
-                    target(arg(0)?)?,
-                    int(2)?,
-                    int(3)?,
-                    radius(1)?,
-                )
+                .locate_biome(dimension, target(arg(0)?)?, int(2)?, int(3)?, radius(1)?)
                 .ok()?;
             Some(found.map(position).unwrap_or_default())
         }
         "locateStructure(String,int,int,int)" => {
             let found = terrain
-                .locate_structure(
-                    Dimension::Overworld,
-                    target(arg(0)?)?,
-                    int(2)?,
-                    int(3)?,
-                    radius(1)?,
-                )
+                .locate_structure(dimension, target(arg(0)?)?, int(2)?, int(3)?, radius(1)?)
                 .ok()?;
             Some(found.map(position).unwrap_or_default())
         }
         "hasStructureAt(String,int,int,int)" => {
             let key = arg(0).filter(|key| is_resource_key(key))?;
             let inside = terrain
-                .structure_at(Dimension::Overworld, key, int(1)?, int(2)?, int(3)?)
+                .structure_at(dimension, key, int(1)?, int(2)?, int(3)?)
                 .ok()?;
             Some(inside.to_string())
         }
         "getStructureStarts(int,int)" => {
-            let starts = terrain
-                .structure_starts(Dimension::Overworld, int(0)?, int(1)?)
-                .ok()?;
+            let starts = terrain.structure_starts(dimension, int(0)?, int(1)?).ok()?;
             let lines: Vec<String> = starts
                 .iter()
                 .filter(|(id, _)| is_resource_key(id))
@@ -83,9 +99,7 @@ pub fn world_query(terrain: &dyn ChunkGenerator, call: &HostCall) -> Option<Stri
                 .collect();
             Some(lines.join("\n"))
         }
-        "getBiomeKey(int,int,int)" => terrain
-            .biome_at(Dimension::Overworld, int(0)?, int(1)?, int(2)?)
-            .ok(),
+        "getBiomeKey(int,int,int)" => terrain.biome_at(dimension, int(0)?, int(1)?, int(2)?).ok(),
         _ => None,
     }
 }
@@ -112,7 +126,7 @@ pub fn place_feature(
         return None;
     }
     let world = uuid::Uuid::parse_str(&call.subject).ok()?;
-    let dimension = super::world_dimension(world)?;
+    let dimension = dimension_of(world)?;
     let (x, y, z, feature) = feature_request(call)?;
     let blocks = match terrain.place(dimension, &format!("feature;{feature};{x};{y};{z}")) {
         Ok(blocks) => blocks,
@@ -146,7 +160,7 @@ pub fn place_feature_blocks(terrain: &dyn ChunkGenerator, call: &HostCall) -> Op
         return None;
     }
     let world = uuid::Uuid::parse_str(&call.subject).ok()?;
-    let dimension = super::world_dimension(world)?;
+    let dimension = dimension_of(world)?;
     let (x, y, z, feature) = feature_request(call)?;
     let blocks = terrain
         .place(dimension, &format!("feature;{feature};{x};{y};{z}"))
@@ -193,13 +207,21 @@ mod tests {
         }
         fn locate_biome(
             &self,
-            _: Dimension,
+            dimension: Dimension,
             target: &str,
             x: i32,
             z: i32,
             radius: i32,
         ) -> anyhow::Result<Option<(i32, i32, i32)>> {
-            Ok((target == "minecraft:plains").then_some((x + radius, 70, z)))
+            Ok(match target {
+                "minecraft:plains" if dimension == Dimension::Overworld => {
+                    Some((x + radius, 70, z))
+                }
+                "minecraft:nether_wastes" if dimension == Dimension::Nether => {
+                    Some((x + radius, 70, z))
+                }
+                _ => None,
+            })
         }
         fn biome_at(&self, _: Dimension, _: i32, y: i32, _: i32) -> anyhow::Result<String> {
             Ok(if y < 0 {
@@ -343,6 +365,32 @@ mod tests {
             world_query(&Fake, &call("getBiomeKey(int,int,int)", &["0", "-10", "0"])),
             Some("minecraft:deep_dark".to_owned())
         );
+    }
+
+    #[test]
+    fn runtime_worlds_are_queried_in_the_dimension_they_were_opened_with() {
+        let world = uuid::Uuid::from_u128(0x5150);
+        register_world(world, Dimension::Nether);
+        let mut locate = call(
+            "locateBiome(String,int,int,int)",
+            &["minecraft:nether_wastes", "50", "5", "7"],
+        );
+        locate.subject = world.to_string();
+        assert_eq!(
+            world_query(&Fake, &locate),
+            Some("55 70 7".to_owned()),
+            "the runtime world's own dimension reaches the generator"
+        );
+        unregister_world(world);
+        assert_eq!(world_query(&Fake, &locate), None);
+
+        // The vanilla Nether uses its stable world UUID, with no registration.
+        let mut nether = call(
+            "locateBiome(String,int,int,int)",
+            &["minecraft:nether_wastes", "50", "5", "7"],
+        );
+        nether.subject = crate::plugins::world_id(Dimension::Nether).to_string();
+        assert_eq!(world_query(&Fake, &nether), Some("55 70 7".to_owned()));
     }
 
     #[test]

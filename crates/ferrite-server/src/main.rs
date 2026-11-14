@@ -723,7 +723,7 @@ async fn run_server(
                                 .map_err(|_| "runtime world response lost".to_owned())?
                         })
                     })?;
-                    Ok((created.0, created.2, created.3))
+                    Ok((created.0, created.2, created.3, created.4))
                 })
             }),
             runtime_world_unloader: Some({

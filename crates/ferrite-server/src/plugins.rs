@@ -44,7 +44,7 @@ use ferrite_plugin::{
 };
 
 pub type RuntimeWorldCreateHandler =
-    Arc<dyn Fn(&str, &str, i64) -> Result<(Uuid, [i32; 3], i64), String> + Send + Sync>;
+    Arc<dyn Fn(&str, &str, i64) -> Result<(Uuid, [i32; 3], i64, String), String> + Send + Sync>;
 pub type RuntimeWorldUnloadHandler = Arc<dyn Fn(Uuid, bool) -> Result<bool, String> + Send + Sync>;
 
 /// The reply to `Server#unloadWorld`. A refused or failed unload (players inside, a failed
@@ -177,10 +177,15 @@ impl PluginBridge {
                                 let seed = call.args.get(2)?.parse::<i64>().ok()?;
                                 let create = runtime_world_handler.as_ref()?;
                                 return create(name, environment, seed).ok().map(
-                                    |(id, spawn, seed)| {
+                                    |(id, spawn, seed, dimension)| {
+                                        if let Some(dimension) =
+                                            crate::game::Dimension::from_key(&dimension)
+                                        {
+                                            worldgen::register_world(id, dimension);
+                                        }
                                         format!(
-                                            "{}\u{1d}{}\u{1d}{}\u{1d}{}\u{1d}{}",
-                                            id, spawn[0], spawn[1], spawn[2], seed
+                                            "{}\u{1d}{}\u{1d}{}\u{1d}{}\u{1d}{}\u{1d}{}",
+                                            id, spawn[0], spawn[1], spawn[2], seed, dimension
                                         )
                                     },
                                 );
@@ -190,10 +195,11 @@ impl PluginBridge {
                             {
                                 let id = Uuid::parse_str(call.args.first()?).ok()?;
                                 let save = call.args.get(1)?.parse::<bool>().ok()?;
-                                return Some(unload_reply(
-                                    id,
-                                    (runtime_world_unloader.as_ref()?)(id, save),
-                                ));
+                                let result = (runtime_world_unloader.as_ref()?)(id, save);
+                                if matches!(result, Ok(true)) {
+                                    worldgen::unregister_world(id);
+                                }
+                                return Some(unload_reply(id, result));
                             }
                             if let Some(reply) = items::item_type_answer(call) {
                                 return Some(reply);
@@ -714,6 +720,9 @@ impl ferrite_plugin::WorldView for SourceWorldView {
             crate::plugins::chunks::mark_loaded(world, x, z);
         }
         Some(loaded)
+    }
+    fn loaded_chunks(&self, world: uuid::Uuid) -> Option<Vec<(i32, i32)>> {
+        Some(self.source(world)?.resident_chunks())
     }
     fn loaded_chunks(&self, world: uuid::Uuid) -> Option<Vec<(i32, i32)>> {
         Some(self.source(world)?.resident_chunks())
