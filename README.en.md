@@ -49,17 +49,21 @@ the report distinguishes real host paths from deliberate rejection paths. Item-l
 
 **Remaining gaps** (directive §10.3)
 
-- Firework-specific handle methods, firework color/shape display, approximate firework acceleration.
+- Post-spawn firework handle setters (`setItem`, `setFireworkMeta`, `setAttachedTo`), firework
+  color/shape display, and approximate attached-firework acceleration.
 - POI search scans loaded chunks in every dimension. With no AI that claims POI tickets,
   `IS_OCCUPIED` is always empty and `HAS_SPACE` filters by type. `locateNearestBiome` uses the
-  host's fixed y=64 and 8-block-step approximation and ignores the interval arguments; structure
-  pieces (`getPieces`) are empty. `getWorldPath` is default-world only; `getFluidData`, `spawnAt`,
-  and `vanillaBiomeProvider` are absent from the compiled Paper API.
+  host's fixed 32-block horizontal / 64-block vertical sampling (Paper's defaults); explicit
+  other intervals are refused rather than ignored, and `getPieces` is refused because the host
+  reports only a bounding box. `getWorldPath` works for the default and saved runtime worlds
+  (memory-only worlds are refused); `getFluidData`, `spawnAt`, and `vanillaBiomeProvider` are
+  absent from the compiled Paper API.
 - Runtime worlds accept `NORMAL`, `NETHER`, and `THE_END`, and persist the environment and seed
   in `level.dat` across unload/reopen. Custom `WorldCreator#generator`, `generateStructures(false)`,
   non-`NORMAL` `WorldType`, `biomeProvider`, and `CUSTOM` are rejected explicitly.
-- Cooking, smithing, and stonecutting recipes cannot be added at runtime; no result metadata,
-  `ExactChoice`, or client recipe-book display.
+- Runtime recipe addition covers shaped/shapeless, the furnace family, campfire, stonecutting,
+  and smithing transform/trim; transmute, `crafting_special_*`, `ExactChoice`/`PredicateChoice`,
+  result item metadata, and client recipe-book display are unsupported.
 - Some NMS menus are deliberately refused (hopper, dispenser, furnace, brewing stand, and others).
 - `loadData` does not restore health, food, or experience.
 - Real 26.3 client visuals and large third-party plugin behavior remain unverified.
