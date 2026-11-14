@@ -8,9 +8,8 @@
 //! `dot(view, to eye) > 1 - 0.025 / distance` and a clear line of sight to the enderman's eyes;
 //! `isSensitiveToWater` makes `LivingEntity.aiStep` deal 1 drowning damage every tick the mob is
 //! in water or rain, and `Enderman.hurtServer` then teleports it nine times in ten; anger lasts
-//! 20 to 39 seconds. The carried block (`DATA_CARRY_STATE`, byte 16) needs the optional
-//! block-state serializer, which `ferrite-protocol` does not have, so it is kept and saved but
-//! not sent (see `docs/mob-ai-parity.md`).
+//! 20 to 39 seconds. The carried block (`DATA_CARRY_STATE`, byte 16) uses the optional
+//! block-state serializer (id 15, zero for empty) and is saved with the entity.
 
 use crate::mob::{self, MobKind};
 use crate::physics::{self, BlockGetter};
@@ -19,7 +18,9 @@ use ferrite_math::{AABB, Vec3};
 use ferrite_protocol::packets::play::MetaValue;
 use uuid::Uuid;
 
-/// Synched `EnderMan.DATA_CREEPY` (the open-mouth aggressive face) and `DATA_STARED_AT`.
+/// Synched `EnderMan.DATA_CARRY_STATE`, `DATA_CREEPY` (the open-mouth aggressive face) and
+/// `DATA_STARED_AT`.
+pub const CARRIED_BLOCK_INDEX: u8 = 16;
 pub const CREEPY_INDEX: u8 = 17;
 pub const STARED_AT_INDEX: u8 = 18;
 /// `isLookingAtMe` tolerance, scaled by the distance.
@@ -47,8 +48,9 @@ pub struct Gaze {
     pub pumpkin: bool,
 }
 
-/// Defines the creepy and stared-at flags on an enderman's synched data.
+/// Defines the carried block, creepy and stared-at values on an enderman's synched data.
 pub fn define_metadata(metadata: &mut Metadata) {
+    metadata.define(CARRIED_BLOCK_INDEX, MetaValue::OptionalBlockState(None));
     metadata.define(CREEPY_INDEX, MetaValue::Boolean(false));
     metadata.define(STARED_AT_INDEX, MetaValue::Boolean(false));
 }
@@ -60,6 +62,10 @@ pub fn sync(store: &mut EntityStore, key: EntityKey) {
         && let Some(state) = data.mob
         && state.kind == MobKind::Enderman
     {
+        data.metadata.set(
+            CARRIED_BLOCK_INDEX,
+            MetaValue::OptionalBlockState(state.carried),
+        );
         data.metadata
             .set(CREEPY_INDEX, MetaValue::Boolean(state.target.is_some()));
         data.metadata
@@ -544,5 +550,24 @@ mod tests {
             roof: Some(70),
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn the_carried_block_is_synced_at_index_sixteen() {
+        let mut store = EntityStore::default();
+        let key = spawn(&mut store, Vec3::new(0.5, 64.0, 0.5));
+        let stone = ferrite_data::blocks::state_id("stone", &[]).expect("vanilla stone");
+        mob::state_mut(&mut store, key).unwrap().carried = Some(stone);
+        sync(&mut store, key);
+        assert_eq!(
+            store.data(key).unwrap().metadata.get(CARRIED_BLOCK_INDEX),
+            Some(&MetaValue::OptionalBlockState(Some(stone)))
+        );
+        mob::state_mut(&mut store, key).unwrap().carried = None;
+        sync(&mut store, key);
+        assert_eq!(
+            store.data(key).unwrap().metadata.get(CARRIED_BLOCK_INDEX),
+            Some(&MetaValue::OptionalBlockState(None))
+        );
     }
 }

@@ -421,6 +421,9 @@ pub enum MetaValue {
     OptionalUuid(Option<uuid::Uuid>),
     /// Vanilla `OPTIONAL_BLOCK_POS`: an End crystal's beam target.
     OptionalBlockPos(Option<i64>),
+    /// Vanilla `OPTIONAL_BLOCK_STATE`: an enderman's carried block. Zero is the empty value
+    /// on the wire; otherwise this is the block-state registry id.
+    OptionalBlockState(Option<u16>),
     /// Vanilla `PARTICLE`: a particle type registry id, plus the ARGB colour that tinted
     /// particles (`entity_effect`, protocol id 28) carry as their only option. Particles with
     /// other options (dust, block, item ...) are not modelled.
@@ -444,6 +447,7 @@ impl MetaValue {
             Self::Boolean(_) => 8,
             Self::OptionalBlockPos(_) => 11,
             Self::OptionalUuid(_) => 13,
+            Self::OptionalBlockState(_) => 15,
             Self::Particle { .. } => 16,
             Self::VillagerData { .. } => 18,
             Self::Pose(_) => 20,
@@ -489,6 +493,9 @@ impl Encode for MetaEntry {
                     pos.encode(out);
                 }
             }
+            MetaValue::OptionalBlockState(state) => {
+                VarInt(state.map(i32::from).unwrap_or(0)).encode(out);
+            }
             MetaValue::Particle { id, argb } => {
                 VarInt(*id).encode(out);
                 if let Some(argb) = argb {
@@ -518,6 +525,15 @@ impl MetaEntry {
             } else {
                 None
             }),
+            15 => {
+                let id = VarInt::decode(buf)?.0;
+                let state = match id {
+                    0 => None,
+                    1..=0xffff => Some(id as u16),
+                    _ => return Err(DecodeError::Invalid("invalid block state id")),
+                };
+                MetaValue::OptionalBlockState(state)
+            }
             16 => {
                 let id = VarInt::decode(buf)?.0;
                 let argb = if id == PARTICLE_ENTITY_EFFECT {
@@ -2391,6 +2407,20 @@ mod interaction_tests {
             assert_eq!(
                 MetaEntry::decode_at(8, &mut &bytes[1..]).unwrap().value,
                 MetaValue::OptionalBlockPos(target)
+            );
+        }
+        // An enderman's carried block: serializer 15, one VarInt with zero for empty.
+        for carried in [None, Some(42u16)] {
+            let mut bytes = Vec::new();
+            MetaEntry {
+                index: 16,
+                value: MetaValue::OptionalBlockState(carried),
+            }
+            .encode(&mut bytes);
+            assert_eq!(bytes[..2], [16, 15]);
+            assert_eq!(
+                MetaEntry::decode_at(16, &mut &bytes[1..]).unwrap().value,
+                MetaValue::OptionalBlockState(carried)
             );
         }
         // A cloud's particle: serializer 16, the type id, and an ARGB int for entity_effect.

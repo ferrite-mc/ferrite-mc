@@ -859,6 +859,15 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                     };
                     mob.carried = ferrite_data::blocks::state_id(name, &props);
                 }
+                if kind == MobKind::Enderman {
+                    // The metadata is rebuilt from the saved state so a player who starts
+                    // tracking right after a reload sees the carried block.
+                    ferrite_entity::enderman::define_metadata(&mut data.metadata);
+                    data.metadata.set(
+                        ferrite_entity::enderman::CARRIED_BLOCK_INDEX,
+                        ferrite_protocol::packets::play::MetaValue::OptionalBlockState(mob.carried),
+                    );
+                }
                 if kind == MobKind::Creeper {
                     mob.powered = boolean(c, "powered");
                     ferrite_entity::creeper::define_metadata(&mut data.metadata);
@@ -1212,6 +1221,13 @@ mod tests {
         record.data.mob.as_mut().unwrap().carried = Some(log);
         let loaded = from_nbt(&to_nbt(&[record]));
         assert_eq!(loaded[0].data.mob.as_ref().unwrap().carried, Some(log));
+        assert_eq!(
+            loaded[0]
+                .data
+                .metadata
+                .get(ferrite_entity::enderman::CARRIED_BLOCK_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::OptionalBlockState(Some(log)))
+        );
         // An enderman carrying nothing saves no compound at all.
         let empty = mob::new_mob(
             MobKind::Enderman,
@@ -1220,6 +1236,13 @@ mod tests {
         );
         let loaded = from_nbt(&to_nbt(&[empty]));
         assert_eq!(loaded[0].data.mob.as_ref().unwrap().carried, None);
+        assert_eq!(
+            loaded[0]
+                .data
+                .metadata
+                .get(ferrite_entity::enderman::CARRIED_BLOCK_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::OptionalBlockState(None))
+        );
     }
 
     #[test]
