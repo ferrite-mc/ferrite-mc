@@ -295,6 +295,14 @@ pub struct MobState {
     pub dragon_phase_ticks: u32,
     /// Flaming phases the perched dragon has finished (`DragonSittingFlamingPhase.flameCount`).
     pub perch_flames: u8,
+    /// Where a charging dragon is headed, fixed when the charge started
+    /// (`DragonChargePlayerPhase.targetLocation`). Not saved: a charge without a target aborts to
+    /// the holding pattern, as vanilla does.
+    pub dragon_charge_target: Option<ferrite_math::Vec3>,
+    /// Ticks since the charge reached its target (`timeSinceCharge`); zero while still flying.
+    pub dragon_charge_recovery: u32,
+    /// The scanning dragon's yaw rate (`EnderDragon.yRotA`).
+    pub dragon_yaw_rate: f32,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -378,6 +386,9 @@ impl MobState {
             dragon_phase: crate::dragon::DragonPhase::Holding,
             dragon_phase_ticks: 0,
             perch_flames: 0,
+            dragon_charge_target: None,
+            dragon_charge_recovery: 0,
+            dragon_yaw_rate: 0.0,
             wander_yaw: 0.0,
             moving: false,
             target: None,

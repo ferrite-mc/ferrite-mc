@@ -6481,9 +6481,36 @@ impl Region {
                         None,
                     ));
                 }
-                ai::MobEvent::Breath { pos } => self
-                    .breath_clouds
-                    .push(ferrite_entity::dragon::BreathCloud::perched(pos)),
+                ai::MobEvent::Breath { pos } => {
+                    // The event carries the head's aim point; the cloud forms on the ground
+                    // below it, found by walking down through air.
+                    let pos = ctx.source.as_deref().map_or(pos, |source| {
+                        ferrite_math::Vec3::new(
+                            pos.x,
+                            ferrite_entity::dragon::breath_floor(pos.y, 0, |y| {
+                                source
+                                    .block(pos.x.floor() as i32, y, pos.z.floor() as i32)
+                                    .is_none_or(|state| {
+                                        state == 0
+                                            || u16::try_from(state)
+                                                .ok()
+                                                .and_then(ferrite_data::blocks::state)
+                                                .is_some_and(|(name, _)| {
+                                                    matches!(
+                                                        name,
+                                                        "minecraft:air"
+                                                            | "minecraft:cave_air"
+                                                            | "minecraft:void_air"
+                                                    )
+                                                })
+                                    })
+                            }),
+                            pos.z,
+                        )
+                    });
+                    self.breath_clouds
+                        .push(ferrite_entity::dragon::BreathCloud::perched(pos));
+                }
                 ai::MobEvent::Status { key, status } => self.broadcast_status(ctx, key, status),
                 ai::MobEvent::Bred(bred) => {
                     // Vanilla gives 1-7 experience points to the breeding and counts it for the

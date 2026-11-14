@@ -96,6 +96,8 @@ pub enum DragonPhase {
     /// Perched and breathing flame clouds (`DragonSittingFlamingPhase`).
     PerchFlaming,
     Takeoff,
+    /// Flying at a position fixed when the scan gave up (`DragonChargePlayerPhase`).
+    ChargePlayer,
 }
 
 impl DragonPhase {
@@ -108,6 +110,7 @@ impl DragonPhase {
             Self::PerchAttacking => "perch_attacking",
             Self::PerchFlaming => "perch_flaming",
             Self::Takeoff => "takeoff",
+            Self::ChargePlayer => "charge_player",
         }
     }
 
@@ -120,6 +123,7 @@ impl DragonPhase {
             "perch_attacking" => Some(Self::PerchAttacking),
             "perch_flaming" => Some(Self::PerchFlaming),
             "takeoff" => Some(Self::Takeoff),
+            "charge_player" => Some(Self::ChargePlayer),
             _ => None,
         }
     }
@@ -173,6 +177,21 @@ pub const ATTACK_TICKS: u32 = 40;
 pub const FLAME_TICKS: u32 = 200;
 pub const FLAME_ATTACKS: u8 = 4;
 pub const FLAME_WARMUP_TICKS: u32 = 10;
+/// A scanning dragon that gives up charges the nearest player within this many blocks instead of
+/// taking off (`DragonSittingScanningPhase.CHARGE_TARGETING`, range 150, jar-checked).
+pub const SCAN_CHARGE_RANGE: f64 = 150.0;
+/// `DragonChargePlayerPhase` starts its 10-tick recovery once it is within 10 blocks of the fixed
+/// target (distance squared below 100) or the target is beyond 150 blocks (22500 squared).
+pub const CHARGE_REACH: f64 = 10.0;
+pub const CHARGE_FAR: f64 = 150.0;
+pub const CHARGE_RECOVERY_TICKS: u32 = 10;
+/// A scanning dragon turns toward the player only while its heading is off by more than this
+/// many degrees (`acos(dot) * 57.29 + 0.5` outside `0..=10`).
+pub const SCAN_TURN_THRESHOLD: f32 = 10.0;
+/// The head sits this far in front of the body, and a breath cloud forms half the 5-block spray
+/// length further on (`DragonSittingFlamingPhase`: `head + direction * 5 / 2`).
+pub const HEAD_OFFSET: f64 = 5.0;
+pub const BREATH_AIM_OFFSET: f64 = 2.5;
 /// The distance to the circling path at which takeoff ends.
 pub const TAKEOFF_REACH: f64 = 4.0;
 /// Vanilla `DragonStrafePlayerPhase`: the dragon flies around the selected player and fires a
@@ -195,6 +214,76 @@ pub fn strafe_point(anchor: Vec3, ticks: u32) -> Vec3 {
         anchor.z + STRAFE_RADIUS * angle.sin(),
     )
 }
+/// The heading of a dragon with `yaw`, as a horizontal unit vector.
+fn heading(yaw: f32) -> (f64, f64) {
+    let angle = f64::from(yaw).to_radians();
+    (-angle.sin(), angle.cos())
+}
+
+/// Vanilla `DragonSittingScanningPhase` turn: while the scanned player is more than
+/// [`SCAN_TURN_THRESHOLD`] degrees off the heading, the yaw rate decays by 0.8 and gains
+/// `clamp(wrapDegrees(angle to player - yaw), -100, 100) * (0.7 / f3 / f4)`, where `f4` is the
+/// horizontal head-to-player distance plus one and `f3` is `f4` capped at 40. Returns the new
+/// `(yaw, yaw_rate)`. The yaw here is the heading yaw Ferrite stores, which vanilla's model yaw
+/// differs from by 180 degrees; the turn is the same.
+pub fn scan_turn(yaw: f32, rate: f32, pos: Vec3, player: Vec3) -> (f32, f32) {
+    let head_x = pos.x + heading(yaw).0 * HEAD_OFFSET;
+    let head_z = pos.z + heading(yaw).1 * HEAD_OFFSET;
+    let to_player = Vec3::new(player.x - pos.x, 0.0, player.z - pos.z).normalize();
+    let (hx, hz) = heading(yaw);
+    let dot = (to_player.x * hx + to_player.z * hz) as f32;
+    let angle = f64::from(dot).acos() as f32 * 57.295_776 + 0.5;
+    if !(angle < 0.0 || angle > SCAN_TURN_THRESHOLD) {
+        return (yaw, rate);
+    }
+    let d0 = player.x - head_x;
+    let d1 = player.z - head_z;
+    let wanted = (-d0).atan2(d1).to_degrees();
+    let delta = wrap_degrees(wanted - f64::from(yaw)).clamp(-100.0, 100.0);
+    let f4 = ((d0 * d0 + d1 * d1).sqrt() + 1.0) as f32;
+    let f3 = f4.min(40.0);
+    let rate = rate * 0.8 + delta as f32 * (0.7 / f3 / f4);
+    (yaw + rate, rate)
+}
+
+fn wrap_degrees(angle: f64) -> f64 {
+    let wrapped = angle.rem_euclid(360.0);
+    if wrapped >= 180.0 {
+        wrapped - 360.0
+    } else {
+        wrapped
+    }
+}
+
+/// Where the perched breath cloud forms horizontally, and the height the search for ground
+/// starts at: the head position pushed half the spray length forward
+/// (`DragonSittingFlamingPhase.doServerTick`), at the head's mid height.
+pub fn breath_aim(pos: Vec3, yaw: f32) -> Vec3 {
+    let (hx, hz) = heading(yaw);
+    let head_x = pos.x + hx * HEAD_OFFSET;
+    let head_z = pos.z + hz * HEAD_OFFSET;
+    Vec3::new(
+        head_x + hx * BREATH_AIM_OFFSET,
+        pos.y + 3.0,
+        head_z + hz * BREATH_AIM_OFFSET,
+    )
+}
+
+/// The cloud height under `aim`: vanilla walks down from the head's height while the block is
+/// air; reaching the bottom of the world falls back to the head height; the cloud sits on top of
+/// the block it found.
+pub fn breath_floor(head_y: f64, bottom: i32, is_empty: impl Fn(i32) -> bool) -> f64 {
+    let mut y = head_y;
+    while is_empty(y.floor() as i32) {
+        y -= 1.0;
+        if y < f64::from(bottom) {
+            y = head_y;
+            break;
+        }
+    }
+    y.floor() + 1.0
+}
+
 /// A dragon fireball's cloud starts at radius 3, waits 20 ticks, then grows to radius 5 over its
 /// 30-second life (vanilla `DragonFireball`). The perched breath uses the same cloud shape with
 /// no initial wait. The harmful part hurts for 3 every 20 ticks, 3 health per second.
@@ -349,11 +438,12 @@ pub const HEAL_RANGE: f64 = 32.0;
 pub const HEAL_INTERVAL: u32 = 10;
 pub const HEAL_AMOUNT: f32 = 1.0;
 
+fn valid_position(pos: Vec3) -> bool {
+    pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite()
+}
+
 fn valid_target(target: &Target, from: Vec3) -> bool {
-    target.pos.x.is_finite()
-        && target.pos.y.is_finite()
-        && target.pos.z.is_finite()
-        && target.pos.distance_to_sqr(from) <= TARGET_RANGE * TARGET_RANGE
+    valid_position(target.pos) && target.pos.distance_to_sqr(from) <= TARGET_RANGE * TARGET_RANGE
 }
 
 fn select_target(players: &[Target], from: Vec3, current: Option<Uuid>) -> Option<Target> {
@@ -504,6 +594,15 @@ pub fn fly(
         None => return,
     };
     let previous = store.pos(key).unwrap_or_default();
+    let (mut charge_target_pos, mut charge_recovery, mut yaw_rate) =
+        mob::state(store, key).map_or((None, 0, 0.0), |state| {
+            (
+                state.dragon_charge_target,
+                state.dragon_charge_recovery,
+                state.dragon_yaw_rate,
+            )
+        });
+    let stored_yaw = store.data(key).map_or(0.0, |data| data.yaw);
     let selected = select_target(players, previous, saved_target);
     let charge_target = selected
         .filter(|target| target.pos.distance_to_sqr(previous) <= CHARGE_RANGE * CHARGE_RANGE);
@@ -554,6 +653,7 @@ pub fn fly(
         | DragonPhase::PerchAttacking
         | DragonPhase::PerchFlaming => PERCH_SPOT,
         DragonPhase::Takeoff => circle,
+        DragonPhase::ChargePlayer => charge_target_pos.unwrap_or(previous),
         DragonPhase::Holding => match combat_phase {
             Phase::Circling => circle,
             Phase::Telegraphing => previous,
@@ -581,7 +681,13 @@ pub fn fly(
     } else {
         step
     };
-    let yaw = if look.length_sqr() > 0.25 {
+    let mut yaw = if matches!(
+        phase,
+        DragonPhase::Perched | DragonPhase::PerchAttacking | DragonPhase::PerchFlaming
+    ) {
+        // A perched dragon only turns through the scan, never back to the circle's heading.
+        stored_yaw
+    } else if look.length_sqr() > 0.25 {
         (-look.x).atan2(look.z).to_degrees() as f32
     } else {
         circle_yaw
@@ -599,23 +705,79 @@ pub fn fly(
             phase = DragonPhase::Perched;
             phase_ticks = 0;
         }
-        // Scanning: a player in range for more than `SCAN_ATTACK_DELAY` ticks starts the attack;
-        // with nobody near, the dragon gives up after `SCAN_IDLE_TICKS`.
+        // Scanning: a player in range for more than `SCAN_ATTACK_DELAY` ticks starts the attack
+        // and the dragon turns toward that player; with nobody near, the dragon gives up after
+        // `SCAN_IDLE_TICKS`, charging a player within `SCAN_CHARGE_RANGE` if there is one.
         DragonPhase::Perched => {
-            let near = players.iter().any(|target| {
-                let dx = target.pos.x - pos.x;
-                let dz = target.pos.z - pos.z;
-                dx * dx + dz * dz <= SCAN_RANGE * SCAN_RANGE
-                    && (target.pos.y - pos.y).abs() <= SCAN_RANGE_Y
-            });
-            if near && phase_ticks > SCAN_ATTACK_DELAY {
+            let near = players
+                .iter()
+                .filter(|target| {
+                    let dx = target.pos.x - pos.x;
+                    let dz = target.pos.z - pos.z;
+                    dx * dx + dz * dz <= SCAN_RANGE * SCAN_RANGE
+                        && (target.pos.y - pos.y).abs() <= SCAN_RANGE_Y
+                })
+                .min_by(|a, b| {
+                    a.pos
+                        .distance_to_sqr(pos)
+                        .total_cmp(&b.pos.distance_to_sqr(pos))
+                        .then_with(|| a.uuid.cmp(&b.uuid))
+                })
+                .copied();
+            if let Some(target) = near {
+                (yaw, yaw_rate) = scan_turn(yaw, yaw_rate, pos, target.pos);
+            }
+            if near.is_some() && phase_ticks > SCAN_ATTACK_DELAY {
                 phase = DragonPhase::PerchAttacking;
                 phase_ticks = 0;
-            } else if !near && phase_ticks >= SCAN_IDLE_TICKS {
-                phase = DragonPhase::Takeoff;
+            } else if near.is_none() && phase_ticks >= SCAN_IDLE_TICKS {
+                let victim = players
+                    .iter()
+                    .filter(|target| {
+                        valid_position(target.pos)
+                            && target.pos.distance_to_sqr(pos)
+                                <= SCAN_CHARGE_RANGE * SCAN_CHARGE_RANGE
+                    })
+                    .min_by(|a, b| {
+                        a.pos
+                            .distance_to_sqr(pos)
+                            .total_cmp(&b.pos.distance_to_sqr(pos))
+                            .then_with(|| a.uuid.cmp(&b.uuid))
+                    });
+                if let Some(victim) = victim {
+                    phase = DragonPhase::ChargePlayer;
+                    charge_target_pos = Some(victim.pos);
+                    charge_recovery = 0;
+                } else {
+                    phase = DragonPhase::Takeoff;
+                }
                 phase_ticks = 0;
             }
         }
+        // Charging: fly at the fixed position; within 10 blocks (or when it is more than 150
+        // away) a 10-tick recovery runs, then the holding pattern resumes. A charge with no
+        // target (a reloaded save) aborts at once.
+        DragonPhase::ChargePlayer => match charge_target_pos {
+            None => {
+                phase = DragonPhase::Holding;
+                phase_ticks = 0;
+            }
+            Some(target) => {
+                let distance_sqr = target.distance_to_sqr(pos);
+                if charge_recovery > 0
+                    || distance_sqr < CHARGE_REACH * CHARGE_REACH
+                    || distance_sqr > CHARGE_FAR * CHARGE_FAR
+                {
+                    charge_recovery += 1;
+                    if charge_recovery >= CHARGE_RECOVERY_TICKS {
+                        phase = DragonPhase::Holding;
+                        phase_ticks = 0;
+                        charge_target_pos = None;
+                        charge_recovery = 0;
+                    }
+                }
+            }
+        },
         DragonPhase::PerchAttacking if phase_ticks >= ATTACK_TICKS => {
             phase = DragonPhase::PerchFlaming;
             phase_ticks = 0;
@@ -625,7 +787,7 @@ pub fn fly(
         DragonPhase::PerchFlaming => {
             if phase_ticks == FLAME_WARMUP_TICKS {
                 events.push(MobEvent::Breath {
-                    pos: Vec3::new(pos.x, PERCH_SPOT.y - 3.0, pos.z),
+                    pos: breath_aim(pos, yaw),
                 });
             }
             if phase_ticks >= FLAME_TICKS {
@@ -701,6 +863,9 @@ pub fn fly(
         state.dragon_phase = phase;
         state.dragon_phase_ticks = phase_ticks;
         state.perch_flames = perch_flames;
+        state.dragon_charge_target = charge_target_pos;
+        state.dragon_charge_recovery = charge_recovery;
+        state.dragon_yaw_rate = yaw_rate;
     }
 }
 
@@ -1122,7 +1287,8 @@ mod tests {
         run(&mut store, key, &mut rng, &far, SCAN_IDLE_TICKS - 1);
         assert_eq!(phase_of(&store, key), DragonPhase::Perched);
         run(&mut store, key, &mut rng, &far, 1);
-        assert_eq!(phase_of(&store, key), DragonPhase::Takeoff);
+        // The scan gives up without attacking; a player within 150 blocks is charged.
+        assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
     }
 
     #[test]
@@ -1197,7 +1363,8 @@ mod tests {
         run(&mut store, key, &mut rng, &above, SCAN_IDLE_TICKS - 1);
         assert_eq!(phase_of(&store, key), DragonPhase::Perched);
         run(&mut store, key, &mut rng, &above, 1);
-        assert_eq!(phase_of(&store, key), DragonPhase::Takeoff);
+        // The scan gives up without attacking; a player within 150 blocks is charged.
+        assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
     }
 
     #[test]
@@ -1273,5 +1440,161 @@ mod tests {
             DragonPhase::Holding,
             "a strafe without its player cannot orbit"
         );
+    }
+
+    fn far_player(distance: f64) -> [Target; 1] {
+        [Target {
+            uuid: uuid::Uuid::from_u128(32),
+            pos: PERCH_SPOT + Vec3::new(distance, 0.0, 0.0),
+        }]
+    }
+
+    #[test]
+    fn giving_up_the_scan_charges_a_player_within_150_blocks() {
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        let players = far_player(100.0);
+        run(&mut store, key, &mut rng, &players, SCAN_IDLE_TICKS);
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::ChargePlayer);
+        // The charge aims at where the player stood when the scan gave up.
+        assert_eq!(state.dragon_charge_target, Some(players[0].pos));
+        assert_eq!(state.dragon_phase_ticks, 0);
+    }
+
+    #[test]
+    fn giving_up_the_scan_still_takes_off_when_the_player_is_beyond_150_blocks() {
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        run(
+            &mut store,
+            key,
+            &mut rng,
+            &far_player(151.0),
+            SCAN_IDLE_TICKS,
+        );
+        assert_eq!(phase_of(&store, key), DragonPhase::Takeoff);
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_target, None);
+    }
+
+    #[test]
+    fn a_charge_flies_at_the_fixed_target_then_recovers_for_10_ticks() {
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        let players = far_player(100.0);
+        run(&mut store, key, &mut rng, &players, SCAN_IDLE_TICKS);
+        assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+        // The player moves away; the charge keeps its original target.
+        let moved = [Target {
+            uuid: players[0].uuid,
+            pos: players[0].pos + Vec3::new(0.0, 0.0, 30.0),
+        }];
+        let mut reached_at = None;
+        for tick in 1..=200 {
+            fly(&mut store, key, &moved, &mut rng, &mut Vec::new());
+            let pos = store.pos(key).unwrap();
+            if reached_at.is_none()
+                && pos.distance_to_sqr(players[0].pos) < CHARGE_REACH * CHARGE_REACH
+            {
+                reached_at = Some(tick);
+            }
+            if phase_of(&store, key) == DragonPhase::Holding {
+                // Nine recovery ticks after the one that reached the target, then holding.
+                assert_eq!(tick, reached_at.unwrap() + CHARGE_RECOVERY_TICKS - 1);
+                assert_eq!(mob::state(&store, key).unwrap().dragon_charge_target, None);
+                return;
+            }
+        }
+        panic!("the charge never ended");
+    }
+
+    #[test]
+    fn a_charge_without_a_target_aborts_to_holding() {
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(phase_of(&store, key), DragonPhase::Holding);
+    }
+
+    #[test]
+    fn the_charge_phase_round_trips_through_its_saved_name() {
+        assert_eq!(
+            DragonPhase::from_name(DragonPhase::ChargePlayer.name()),
+            Some(DragonPhase::ChargePlayer)
+        );
+    }
+
+    #[test]
+    fn the_scan_turns_toward_a_player_more_than_ten_degrees_off_the_heading() {
+        let pos = PERCH_SPOT;
+        // Yaw 0 faces +z; the player stands on +x, 90 degrees off.
+        let player = pos + Vec3::new(15.0, 0.0, 0.0);
+        let (yaw, rate) = scan_turn(0.0, 0.0, pos, player);
+        // Facing +z toward +x means a negative yaw (vanilla yaw = -atan2(dx, dz)).
+        assert!(
+            yaw < 0.0 && rate < 0.0,
+            "turned the wrong way: {yaw} {rate}"
+        );
+        // Repeated ticks converge on the player and then stop turning inside 10 degrees.
+        let (mut yaw, mut rate) = (0.0_f32, 0.0_f32);
+        for _ in 0..400 {
+            (yaw, rate) = scan_turn(yaw, rate, pos, player);
+        }
+        assert!((yaw + 90.0).abs() < 15.0, "settled at {yaw}");
+    }
+
+    #[test]
+    fn the_scan_does_not_turn_when_already_facing_the_player() {
+        let pos = PERCH_SPOT;
+        let player = pos + Vec3::new(0.0, 0.0, 15.0);
+        assert_eq!(scan_turn(0.0, 0.0, pos, player), (0.0, 0.0));
+        // Five degrees off is still inside the threshold.
+        assert_eq!(scan_turn(5.0, 0.0, pos, player), (5.0, 0.0));
+    }
+
+    #[test]
+    fn a_perched_scan_with_a_player_turns_the_dragon_and_keeps_the_turn() {
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        store.data_mut(key).unwrap().yaw = 0.0;
+        run(&mut store, key, &mut rng, &near_player(), 10);
+        let yaw = store.data(key).unwrap().yaw;
+        assert!(yaw < 0.0, "the dragon should turn toward +x, yaw {yaw}");
+        // The attack and flame phases keep that yaw instead of snapping back to the circle.
+        let (mut store, key, mut rng) = perched(DragonPhase::PerchAttacking);
+        store.data_mut(key).unwrap().yaw = 33.0;
+        run(&mut store, key, &mut rng, &near_player(), 5);
+        assert_eq!(store.data(key).unwrap().yaw, 33.0);
+    }
+
+    #[test]
+    fn the_breath_aims_where_the_head_points_not_under_the_perch() {
+        let pos = Vec3::new(0.0, 68.0, 0.0);
+        // Yaw 0: heading +z. Head at +5, cloud 2.5 further.
+        let aim = breath_aim(pos, 0.0);
+        assert!(aim.x.abs() < 1e-9 && (aim.z - 7.5).abs() < 1e-9);
+        assert_eq!(aim.y, 71.0);
+        // Yaw -90: heading +x.
+        let aim = breath_aim(pos, -90.0);
+        assert!((aim.x - 7.5).abs() < 1e-9 && aim.z.abs() < 1e-9);
+        // The perched flame event carries the aim point for the dragon's actual yaw.
+        let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
+        store.data_mut(key).unwrap().yaw = -90.0;
+        let mut events = Vec::new();
+        for _ in 0..FLAME_WARMUP_TICKS {
+            fly(&mut store, key, &near_player(), &mut rng, &mut events);
+        }
+        let Some(MobEvent::Breath { pos: cloud }) = events
+            .iter()
+            .find(|event| matches!(event, MobEvent::Breath { .. }))
+        else {
+            panic!("no breath event");
+        };
+        assert!(cloud.x > 7.0 && cloud.z.abs() < 0.5, "cloud at {cloud:?}");
+    }
+
+    #[test]
+    fn the_breath_cloud_sits_on_the_first_block_below_the_head() {
+        // Ground at y = 60: air above it down to 61.
+        assert_eq!(breath_floor(71.0, 0, |y| y > 60), 61.0);
+        // Open void falls back to the head's own height, one above it.
+        assert_eq!(breath_floor(71.0, 0, |_| true), 72.0);
+        // Standing in a block already rests on it.
+        assert_eq!(breath_floor(71.0, 0, |_| false), 72.0);
     }
 }

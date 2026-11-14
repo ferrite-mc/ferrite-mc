@@ -103,6 +103,74 @@ What works, how it is built, and what is still missing.
 
 ## Remaining gaps
 
+- **Perched scan (2026-11-14, jar-checked against `DragonSittingScanningPhase`,
+  `DragonSittingFlamingPhase` and `DragonChargePlayerPhase`).** Modelled: when a scan with nobody
+  in the 20x10 box gives up at 100 ticks, the dragon charges the nearest player within 150
+  blocks (`DragonPhase::ChargePlayer`, target position fixed at that moment, recovery of 10
+  ticks once within 10 blocks or beyond 150, then the holding pattern) and only takes off when
+  nobody is that close; a scanning dragon turns toward the scanned player while its heading is
+  more than 10 degrees off (`scan_turn`: yaw rate decays by 0.8 and gains
+  `clamp(delta, +-100) * 0.7 / f3 / f4`), and perched phases keep that yaw instead of snapping
+  back to the circle; the breath cloud forms at the head position plus 2.5 blocks forward
+  (`breath_aim`) and the region lowers it onto the first non-air block below the head
+  (`breath_floor`, falling back to head height over the void). Approximated: the charge flies
+  at `MAX_SPEED` instead of vanilla's fly speed 3.0, ignores the collision exits, and its target
+  is not saved (a reloaded charge aborts to holding, as vanilla does with no target); the head is
+  taken at 5 blocks in front of the body, not read from a model; the cloud keeps the shared 600
+  tick, radius 3 to 5 shape rather than vanilla's 200-tick radius-5 cloud. The dragon smashes
+  every block in its body except `#minecraft:dragon_immune`. The gateway radius stays 16 (see
+  below).
+- **Gateway beam.** A gateway gets the vanilla block entity (`minecraft:end_gateway`, `Age` as a
+  long). The server sends the existing `ClientboundBlockEntityDataPacket` (`BlockEntityData`, id
+  6) with `Age = 0` to the chunk's viewers. The client's block-entity ticker advances its local
+  `Age`, so that one packet renders the full 200-tick magenta creation beam. No block event or
+  new protocol structure is involved. `Age = 200` is used when only the
+  block survived an older save, so the creation beam is not replayed; a gateway whose block is
+  missing but whose chunk is now loaded is written with `Age = 0`. While a gateway's chunk is held
+  its stored `Age` is advanced one per region tick up to 200 (`end_fight::advance_gateway_age`, no
+  packet: the client ticks its own copy), so a viewer who arrives later, or the chunk after a
+  restart, receives the age already reached instead of 0. A gateway saved at 50 resumes at 50;
+  a finished one is never rewritten. Covered by
+  `a_reloaded_end_gateway_keeps_its_age_and_never_replays_the_creation_beam`
+  (`persistence_tests.rs`). The 200 ticks of re-encoding the chunk packet are the only cost.
+
+- **Purple beam.** Each gateway the region holds has a runtime clock
+  (`end_fight::GatewayBeam`) that follows vanilla's `serverTick`: the age counts on past the
+  200-tick creation beam, and whenever it reaches a multiple of 2400 with no beam running the
+  region sends block event 1 (`BlockEvent`, param A 1) for the gateway block to the chunk's
+  viewers; the client draws the purple beam for the next 40 ticks. A player teleporting through a
+  gateway starts the same beam (the player sets `gateway_used`, the region triggers the clock),
+  and a beam that is already running is not restarted. The clock lives in memory because the
+  stored `Age` stays capped at 200 (rewriting it every tick would resave the chunk forever), so a
+  restart resumes counting from the stored age, and it only ticks while a player is in the End.
+  Covered by the timer unit tests in `end_fight.rs`, two region tests (the event reaches the
+  viewers once; the clock follows region split and merge) and the integration test
+  `a_new_end_gateway_sends_the_block_entity_age_for_its_beam`, which waits for the automatic
+  event at `/tick rate 10000`.
+
+- **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
+  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Breath clouds use
+  vanilla's shape: radius 3 growing to 5 over 600 ticks, a 20-tick fireball wait, and 3 damage
+  every 20 ticks.
+- **Guarded spikes.** The two shortest spikes (the vanilla guarded pair) get a 73-block iron-bar
+  cage when their crystal is placed; the cage is restored with the spike on a respawn.
+- **Credits and advancement.** The first trip home through the exit portal sends `WIN_GAME` and
+  waits for the client's respawn request before moving. The seen flag is saved in
+  `playerdata/<uuid>.json`, so a relog or restart does not replay the credits. Paper's
+  `misc.disable-end-credits` in `config/paper-world-defaults.yml` suppresses the screen while the
+  return trip still happens. The "Free the End" advancement credits melee, arrow and explosion
+  kills by recording the last attacker on the mob and resolving it in the death pass. (Later kills
+  give 500 xp, first kills 12000; the first-kill flag is remembered from the exit portal.)
+- **Persistence.** The fight (started, killed before, dragon alive, gateways, placed spike
+  crystals, respawn stage/timer, exit portal level) is written to
+  `DIM1/data/minecraft/ender_dragon_fight.dat` whenever it changes and read on the first tick in
+  the end. The dragon, its landing phase and the crystals are saved as ordinary entities; the
+  credits flag lives in the player data. A test writes the file through one `AnvilChunkSource`
+  and reopens it through a second one, and the stage timer is pinned at its boundary ticks (50,
+  39/40 and 100) so a restart cannot skip or repeat an action.
+
+## Remaining gaps
+
 - **Perched gaps.** The timings above are jar-checked, but vanilla's scanning dragon can charge
   a player within 150 blocks when it gives up instead of always taking off, and its attack turns
   toward the player; neither is modelled. The breath cloud is placed below the perch rather than
