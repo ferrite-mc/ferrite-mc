@@ -1,10 +1,10 @@
 //! The `/execute` branches beyond the basic modifiers: `if|unless biome|loaded|function|
 //! stopwatch|items|slots`, `positioned over`, `on`, `summon` and `store ... bossbar`.
 //!
-//! What these cannot do on this server is listed in `docs/COMMANDS-STATUS.md`: `on` needs
-//! relationship data the entity snapshot does not carry (only `vehicle`, `passengers` and
-//! `controller` come from the ride table), `summon` cannot hand the new entity to the rest of
-//! the chain, and `items|slots entity` cannot read an inventory owned by a region.
+//! What these cannot do on this server is listed in `docs/COMMANDS-STATUS.md`: `on origin` needs
+//! data the entity snapshot does not carry (the other relations come from the snapshot and the
+//! ride table), `summon` cannot hand the new entity to the rest of the chain, and `items|slots
+//! entity` cannot read an inventory owned by a region.
 
 use ferrite_command::arguments::{EntityTarget, RegistryParser};
 use ferrite_command::{
@@ -317,8 +317,9 @@ pub(super) fn positioned_over(execute: NodeId) -> NodeBuilder<Source> {
 }
 
 /// `on <relation>`: the entity (or entities) related to the executing entity. `vehicle`,
-/// `passengers` and `controller` come from the server's ride table; the other relations need
-/// data the entity snapshot does not hold and fail with a clear message.
+/// `passengers` and `controller` come from the server's ride table; `attacker`, `owner`,
+/// `leasher` and `target` come from the region-published entity snapshot. `origin` (the entity
+/// an entity was spawned from) is not in that snapshot and fails with a clear message.
 pub(super) fn on_branch(execute: NodeId) -> NodeBuilder<Source> {
     let mut on = literal::<Source>("on");
     for relation in ["controller", "passengers", "vehicle"] {
@@ -326,15 +327,18 @@ pub(super) fn on_branch(execute: NodeId) -> NodeBuilder<Source> {
             literal::<Source>(relation).fork(execute, move |ctx| relation_sources(ctx, relation)),
         );
     }
-    // A fork swallows its errors (like vanilla), so the relations this server cannot answer are
-    // plain redirects: the failure reaches the caller instead of silently matching nothing.
-    for relation in ["attacker", "leasher", "origin", "owner", "target"] {
+    for relation in ["attacker", "leasher", "owner", "target"] {
         on = on.then(
-            literal::<Source>(relation).redirect_with(execute, move |ctx| {
-                relation_sources(ctx, relation).map(|_| ctx.source().clone())
-            }),
+            literal::<Source>(relation).fork(execute, move |ctx| relation_sources(ctx, relation)),
         );
     }
+    // A fork swallows its errors (like vanilla), so a relation this server cannot answer is a
+    // plain redirect: the failure reaches the caller instead of silently matching nothing.
+    on = on.then(literal::<Source>("origin").redirect_with(execute, |_ctx| {
+        Err(CommandError::failed(
+            "execute on origin is not supported: the entity snapshot has no spawn-origin data",
+        ))
+    }));
     on
 }
 
@@ -346,17 +350,21 @@ fn relation_sources(
     let Some(me) = source.uuid else {
         return Ok(Vec::new());
     };
+    let state = source.state.lock().unwrap();
     let related = match relation {
         "vehicle" => super::ride::vehicle_of(me).into_iter().collect::<Vec<_>>(),
         "passengers" => super::ride::passengers_of(me),
         "controller" => super::ride::passengers_of(me).into_iter().take(1).collect(),
+        "attacker" => related_uuid(&state, me, |entity| entity.attacker),
+        "owner" => related_uuid(&state, me, |entity| entity.owner),
+        "leasher" => related_uuid(&state, me, |entity| entity.leasher),
+        "target" => related_uuid(&state, me, |entity| entity.target),
         other => {
             return Err(CommandError::failed(format!(
                 "execute on {other} is not supported: the entity snapshot has no {other} data"
             )));
         }
     };
-    let state = source.state.lock().unwrap();
     let mut out = Vec::new();
     for uuid in related {
         let found = super::commands_exec::resolve_optional(
@@ -373,6 +381,22 @@ fn relation_sources(
         }));
     }
     Ok(out)
+}
+
+/// One relation UUID from the region-published snapshot, if this entity has one.
+fn related_uuid(
+    state: &super::commands::GameState,
+    uuid: uuid::Uuid,
+    field: impl FnOnce(&crate::game::entity_index::CommandEntity) -> Option<uuid::Uuid>,
+) -> Vec<uuid::Uuid> {
+    state
+        .entities
+        .lock()
+        .unwrap()
+        .get(uuid)
+        .and_then(field)
+        .into_iter()
+        .collect()
 }
 
 /// `summon <entity>`: spawning is scheduled onto the region that owns the chunk, so the new
@@ -607,15 +631,65 @@ mod tests {
                 "{relation}"
             );
         }
-        for relation in ["attacker", "leasher", "origin", "owner", "target"] {
-            let error = tree
-                .execute(&format!("execute on {relation} run say x"), source.clone())
-                .unwrap_err();
-            assert!(
-                error.to_string().contains("not supported"),
-                "{relation}: {error}"
+        // A player has no snapshot entry, so a relation the snapshot would answer is empty.
+        for relation in ["attacker", "leasher", "owner", "target"] {
+            assert_eq!(
+                tree.execute(
+                    &format!("execute on {relation} run data merge storage t {{bad:1}}"),
+                    source.clone()
+                )
+                .unwrap(),
+                0,
+                "{relation}"
             );
         }
+        let error = tree
+            .execute("execute on origin run say x", source.clone())
+            .unwrap_err();
+        assert!(error.to_string().contains("not supported"), "{error}");
+    }
+
+    #[test]
+    fn on_relations_use_the_published_snapshot() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        let mob = Uuid::from_u128(0x31);
+        let related = Uuid::from_u128(0x32);
+        let entry = |uuid, tags: &[&str]| CommandEntity {
+            uuid,
+            network_id: uuid.as_u128() as i32,
+            kind: 0,
+            pos: [1.0, 64.0, 1.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            dimension: crate::game::Dimension::Overworld,
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            custom_name: None,
+            health: None,
+            attacker: Some(related),
+            owner: Some(related),
+            leasher: Some(related),
+            target: Some(related),
+        };
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            index.insert(entry(mob, &["mob"]));
+            index.insert(entry(related, &["related"]));
+        }
+        for relation in ["attacker", "leasher", "owner", "target"] {
+            tree.execute(
+                &format!(
+                    "execute as @e[tag=mob] on {relation} run data merge storage t {{{relation}:1}}"
+                ),
+                source.clone(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            storage(&source, "minecraft:t"),
+            "{attacker:1,leasher:1,owner:1,target:1}"
+        );
     }
 
     #[test]
@@ -701,6 +775,10 @@ mod tests {
                 tags: ["boss".to_owned()].into_iter().collect(),
                 custom_name: None,
                 health: None,
+                attacker: None,
+                owner: None,
+                leasher: None,
+                target: None,
             });
         tree.execute(
             "execute as @e[tag=boss] at @s run data merge storage t {seen:1}",

@@ -4020,6 +4020,31 @@ impl CommandRuntime<'_> {
         match ride::mount_in(rider.uuid, vehicle.uuid, vehicle.player, vehicle_kind) {
             Ok(()) => {
                 self.broadcast_passengers(vehicle.uuid);
+                // The `started_riding` advancement is about the rider; the vehicle and passenger
+                // kinds come from the same snapshot the command selected them from.
+                if rider.player {
+                    let passengers = {
+                        let state = self.state.lock().unwrap();
+                        let index = state.entities.lock().unwrap();
+                        ride::passengers_of(vehicle.uuid)
+                            .into_iter()
+                            .filter_map(|uuid| {
+                                if self.online.contains_key(&uuid) {
+                                    Some("minecraft:player".to_owned())
+                                } else {
+                                    index.get(uuid).map(|entity| entity.type_name().to_owned())
+                                }
+                            })
+                            .collect()
+                    };
+                    recipe_unlock::push_event(
+                        rider.uuid,
+                        recipe_unlock::Event::StartedRiding {
+                            vehicle: vehicle_kind.unwrap_or_default().to_owned(),
+                            passengers,
+                        },
+                    );
+                }
                 self.reply
                     .key("commands.ride.mount.success", &[&rider.name, &vehicle.name]);
             }
@@ -4301,6 +4326,10 @@ impl CommandRuntime<'_> {
             commands_world::resolve(end, origin),
             commands_world::resolve(destination, origin),
         );
+        if let Err(error) = commands_world::validate_clone(begin, end, destination, options) {
+            self.reply.text(&error);
+            return true;
+        }
         let source_chunk = ChunkPos(
             begin[0].min(end[0]).div_euclid(16),
             begin[2].min(end[2]).div_euclid(16),

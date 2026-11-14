@@ -27,6 +27,16 @@ pub struct CommandEntity {
     pub custom_name: Option<String>,
     /// Current health of a mob; players' health lives in their region, not in this view.
     pub health: Option<f32>,
+    /// The last entity that hurt this one (vanilla `LivingEntity.getLastHurtByMob`). The region
+    /// records the latest attacker for kill credit, which is the same relation `/execute on
+    /// attacker` asks for.
+    pub attacker: Option<Uuid>,
+    /// Owner of a tamed animal (`OwnableEntity.getOwner` for `/execute on owner`).
+    pub owner: Option<Uuid>,
+    /// The entity holding this one's lead (`Leashable.getLeashHolder` for `on leasher`).
+    pub leasher: Option<Uuid>,
+    /// The mob's current attack target (`Mob.getTarget` for `on target`).
+    pub target: Option<Uuid>,
 }
 
 impl CommandEntity {
@@ -110,6 +120,13 @@ impl EntityIndex {
                 tags: data.tags.clone(),
                 custom_name: None,
                 health: data.mob.as_ref().map(|mob| mob.health),
+                attacker: data.mob.as_ref().and_then(|mob| mob.last_killer),
+                owner: data.mob.as_ref().and_then(|mob| mob.owner),
+                leasher: data
+                    .mob
+                    .as_ref()
+                    .and_then(|mob| mob.leash.map(|(holder, _)| holder)),
+                target: data.mob.as_ref().and_then(|mob| mob.target),
             };
             owned.insert(entity.uuid);
             self.insert(entity);
@@ -159,6 +176,38 @@ mod tests {
         store.flags_mut(key).unwrap().set(Flags::REMOVED, true);
         index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
         assert!(index.get(uuid).is_none());
+    }
+
+    #[test]
+    fn sync_publishes_a_mobs_relations_for_execute_on() {
+        use ferrite_entity::mob::{MobKind, new_mob};
+        let mut store = EntityStore::default();
+        let owner = Uuid::from_u128(0x0a);
+        let target = Uuid::from_u128(0x0b);
+        let wolf = store.insert(new_mob(
+            MobKind::Wolf,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut ferrite_entity::Rng::new(3),
+        ));
+        let key = store.data(wolf).map(|data| data.uuid).unwrap();
+        {
+            let state = ferrite_entity::mob::state_mut(&mut store, wolf).unwrap();
+            state.owner = Some(owner);
+            state.leash = Some((owner, 7));
+            state.target = Some(target);
+            state.last_killer = Some(target);
+        }
+        let mut index = EntityIndex::default();
+        index.sync(
+            &mut HashSet::new(),
+            &store,
+            crate::game::Dimension::Overworld,
+        );
+        let entry = index.get(key).expect("published wolf");
+        assert_eq!(entry.owner, Some(owner));
+        assert_eq!(entry.leasher, Some(owner));
+        assert_eq!(entry.target, Some(target));
+        assert_eq!(entry.attacker, Some(target));
     }
 
     #[test]
