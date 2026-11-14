@@ -281,6 +281,7 @@ public abstract class PlayerMisc extends PlayerStubs {
             thrown = org.bukkit.entity.LingeringPotion.class.isAssignableFrom(projectile) ? org.bukkit.entity.EntityType.LINGERING_POTION : org.bukkit.entity.EntityType.SPLASH_POTION;
             power = 0.5;
         }
+        else if (org.bukkit.entity.BreezeWindCharge.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.BREEZE_WIND_CHARGE;
         else if (org.bukkit.entity.WindCharge.class.isAssignableFrom(projectile)) thrown = org.bukkit.entity.EntityType.WIND_CHARGE;
         // Vanilla Trident.PROJECTILE_SHOOT_POWER; the host gives it the default trident item, the thrown-trident damage and the player as owner.
         else if (org.bukkit.entity.Trident.class.isAssignableFrom(projectile)) { thrown = org.bukkit.entity.EntityType.TRIDENT; power = 2.5; }

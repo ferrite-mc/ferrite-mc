@@ -8798,7 +8798,10 @@ impl Region {
             }
             // A wind charge bursts on impact and pushes nearby players; mobs are handled by
             // `arrow::wind_burst` inside the entity store.
-            if landing.kind == arrow::Kind::WindCharge {
+            if matches!(
+                landing.kind,
+                arrow::Kind::WindCharge | arrow::Kind::BreezeWindCharge
+            ) {
                 self.wind_charge_burst(landing.pos, landing.owner, &players);
             }
             if landing.kind == arrow::Kind::EnderPearl

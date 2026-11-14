@@ -122,6 +122,8 @@ pub enum Kind {
     ExperienceBottle,
     /// `minecraft:wind_charge`: flies straight, then bursts and pushes nearby entities.
     WindCharge,
+    /// `minecraft:breeze_wind_charge`: flies and bursts like a wind charge.
+    BreezeWindCharge,
     /// `minecraft:splash_potion`: arcs like a thrown item; the region bursts the potion where it lands.
     SplashPotion,
     /// `minecraft:lingering_potion`: arcs like a splash potion; the region leaves a cloud where it lands.
@@ -142,6 +144,7 @@ impl Kind {
             Self::LlamaSpit => "llama_spit",
             Self::ExperienceBottle => "experience_bottle",
             Self::WindCharge => "wind_charge",
+            Self::BreezeWindCharge => "breeze_wind_charge",
             Self::SplashPotion => "splash_potion",
             Self::LingeringPotion => "lingering_potion",
         }
@@ -157,6 +160,7 @@ impl Kind {
             "small_fireball" => Some(Self::SmallFireball),
             "experience_bottle" => Some(Self::ExperienceBottle),
             "wind_charge" => Some(Self::WindCharge),
+            "breeze_wind_charge" => Some(Self::BreezeWindCharge),
             "splash_potion" => Some(Self::SplashPotion),
             "lingering_potion" => Some(Self::LingeringPotion),
             _ => None,
@@ -189,6 +193,7 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::LlamaSpit,
         Kind::ExperienceBottle,
         Kind::WindCharge,
+        Kind::BreezeWindCharge,
         Kind::SplashPotion,
         Kind::LingeringPotion,
     ]
@@ -266,7 +271,7 @@ pub fn tick_thrown(
         }
         state.age += 1;
         let lifetime = match kind {
-            Kind::WindCharge => WIND_CHARGE_LIFETIME,
+            Kind::WindCharge | Kind::BreezeWindCharge => WIND_CHARGE_LIFETIME,
             _ => LIFETIME,
         };
         if state.age > lifetime {
@@ -278,7 +283,7 @@ pub fn tick_thrown(
         // falls faster than a snowball; the rest arc like thrown items.
         match kind {
             Kind::Fireball | Kind::SmallFireball | Kind::DragonFireball => {}
-            Kind::WindCharge => {
+            Kind::WindCharge | Kind::BreezeWindCharge => {
                 vel.x *= DRAG;
                 vel.z *= DRAG;
             }
@@ -661,6 +666,31 @@ mod tests {
             store.flags(charge).unwrap().has(Flags::REMOVED),
             "a wind charge expires after 100 ticks"
         );
+    }
+
+    #[test]
+    fn a_breeze_wind_charge_flies_level_bursts_and_is_recognised() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let charge = store.insert(new_thrown(
+            Kind::BreezeWindCharge,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, 0.0, 1.0),
+            None,
+        ));
+        assert_eq!(
+            Kind::thrown_from_name("minecraft:breeze_wind_charge"),
+            Some(Kind::BreezeWindCharge)
+        );
+        assert_eq!(
+            kind_of(store.data(charge).unwrap()),
+            Some(Kind::BreezeWindCharge)
+        );
+        tick_thrown(&mut store, &world, &[]);
+        assert_eq!(store.vel(charge).unwrap().y, 0.0, "no gravity");
+        store.data_mut(charge).unwrap().arrow.as_mut().unwrap().age = WIND_CHARGE_LIFETIME;
+        tick_thrown(&mut store, &world, &[]);
+        assert!(store.flags(charge).unwrap().has(Flags::REMOVED));
     }
 
     #[test]
