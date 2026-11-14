@@ -1,7 +1,18 @@
 # 플러그인 API 스텁 현황 (세션 기록)
 
-> **2026-11-14:** 가장 최근 상세 기록은 바로 아래 2026-11-14 claude-api-2 절이다. 레인 병합 뒤에는
+> **2026-11-14:** 가장 최근 상세 기록은 바로 아래 2026-11-14 claude-api-3 절이다. 레인 병합 뒤에는
 > 현재 소스와 대조해야 하며, 요약은 `README.md`와 `docs/BACKLOG.md`를 따른다.
+
+## 2026-11-14 — claude-api-3 (Lane B, B5): `World#getBlockState` / `Block#getState`
+
+- **비타일 블록 스냅샷 구현.** `FerriteWorld`의 `Block` 프록시가 `getState`에 읽기 전용 `BlockState`를 돌려주고,
+  `World#getBlockState(int,int,int)`와 `(Location)`이 같은 경로를 쓴다. `getType`, `getBlockData`, `getX/Y/Z`,
+  `getLocation`, `getWorld`, `getChunk`를 제공하고 `update`는 읽기 전용 거부다.
+- **타일 블록은 거부.** 생성된 블록 데이터의 `EntityBlock` 플래그를 `World#hasBlockEntity(int,int,int)`로 읽어, 상자·화로 등
+  `TileState`가 필요한 블록은 `UnsupportedOperationException`으로 정확히 거부한다. NBT를 지어내지 않는다. 호스트 테스트
+  `plugins::worldquery::tests::block_entity_flag_comes_from_the_generated_block_data`, JUnit `NmsWorldHandleTest`.
+- **남은 것.** `World#vanillaBiomeProvider()`는 월드젠 호스트 소유(EULA)라 계속 열려 있고, 실제 클라이언트로 확인하지 않았다.
+  `world-missing.txt`의 World 미구현은 1개로 줄었다(카탈로그는 이름 단위 분류).
 
 ## 2026-11-14 — claude-api-2 (Lane B, 4단계): 카탈로그 재생성과 `World#getFluidData`
 

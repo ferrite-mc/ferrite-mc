@@ -164,7 +164,7 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 |---|---:|---:|---:|
 | `player-missing.txt` | 90 | 75 | 0 |
 | `server-missing.txt` | 4 | 4 | 0 |
-| `world-missing.txt` | 58 | 43 | 2 (`getBlockState(int,int,int)`, `vanillaBiomeProvider()`) |
+| `world-missing.txt` | 58 | 44 | 1 (`vanillaBiomeProvider()`) |
 
 2026-11-13 표의 Player 12·World 14는 **오래된 수치**다. 그 사이에 `getConnection`, `postEffects`, `loadData`, `fireworkBoost`,
 `sleep`, `spawnAt`, `copy`, `getWorldPath`, `isVoidDamageEnabled`, `locateNearestPoi`/`locateAllPoiInRange`, `spawn`,
@@ -177,9 +177,11 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
   `Fluid.EMPTY`. `getLevel`이 바닐라 유체 양을 돌려준다는 해석은 인터페이스에서 읽은 것이며 Paper 구현으로 대조하지 못했다.
   `computeFlowDirection`/`computeHeight`는 이웃 블록이 필요해 `UnsupportedOperationException`으로 거부한다. JUnit
   `FerriteFluidDataTest`(6개).
-- **`World#getBlockState(int,int,int)` — 열려 있음.** Paper 기본 구현은 `getBlockAt(x,y,z).getState()`인데 `Block#getState`
-  자체가 호스트에 핸들러가 없다(Java `Block` 프록시는 `getState`를 `HostBridge.dispatch("Block", …)`로 보낼 뿐이다). 월드 쪽만
-  연결하면 같은 거부가 한 겹 더 생기므로 고치지 않았다. 선행 작업은 `TileState`/`BlockState` 스냅샷 모델이다.
+- **`World#getBlockState(int,int,int)` / `Block#getState` — 비타일 블록 구현(2026-11-14).** `Block` 프록시가 읽기 전용
+  `BlockState`(타입·`BlockData`·위치·월드)를 돌려주고 `World#getBlockState`가 이를 사용한다. 블록이 블록 엔티티를 가지면
+  `World#hasBlockEntity(int,int,int)`(생성된 블록 데이터의 `EntityBlock` 플래그)로 판별해 `TileState` 스냅샷은 명시적으로
+  `UnsupportedOperationException`으로 거부한다. `BlockState#update`도 읽기 전용이라 거부하며, 변경은 `Block#setBlockData`를 쓴다.
+  JUnit `NmsWorldHandleTest`, Rust `block_entity_flag_comes_from_the_generated_block_data`. 실제 클라이언트로 확인하지 않았다.
 - **`World#vanillaBiomeProvider()` — 열려 있음.** 월드젠 호스트 소유(EULA 때문에 개발자 로컬만).
 - **POI `Occupancy.IS_OCCUPIED` — 의도한 빈 결과, 테스트로 고정.** 티켓을 잡는 AI가 없어 점유된 POI가 없다. `HAS_SPACE`는
   점유자를 받는 모든 타입이고 `IS_OCCUPIED`는 항상 빈 목록/`null`이다(`FerriteWorld` 주석, `PlayerExtrasTest`의 `locateNearestPoi`/

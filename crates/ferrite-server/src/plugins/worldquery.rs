@@ -106,6 +106,19 @@ fn answer_with_view(
                 .light_level(world?, x.parse().ok()?, y.parse().ok()?, z.parse().ok()?)
                 .map(|level| level.to_string())
         })(),
+        // Whether the block at a position has a block entity (vanilla's `EntityBlock`, from the
+        // generated block data). `Block#getState` uses it to refuse tile blocks, whose
+        // `TileState` the host does not model, instead of handing back a plain `BlockState`.
+        ("hasBlockEntity(int,int,int)", [x, y, z]) => (|| {
+            let state = view?.block(world?, x.parse().ok()?, y.parse().ok()?, z.parse().ok()?)?;
+            let name = state.split('[').next()?;
+            let id = ferrite_data::blocks::default_state(name)?;
+            Some(
+                ferrite_data::piston_props::get(id)
+                    .has_block_entity
+                    .to_string(),
+            )
+        })(),
         ("findLightningRod(int,int,int)", [x, y, z]) => (|| {
             let view = view?;
             Some(
@@ -287,6 +300,36 @@ mod tests {
         assert_eq!(answer_with_view(&no_view, None), Some(null));
         let other = call(world, "refreshChunk(int,int)", &["0", "0"]);
         assert_eq!(answer_with_view(&other, None), None);
+    }
+
+    #[tokio::test]
+    async fn block_entity_flag_comes_from_the_generated_block_data() {
+        let world = Uuid::from_u128(0x7b);
+        let source = AnvilChunkSource::new_memory_dimension(None, Dimension::Overworld);
+        assert!(source.ensure_chunk_loaded(0, 0, LOAD));
+        let chest = ferrite_data::blocks::default_state("minecraft:chest").unwrap();
+        source
+            .set_block(2, 70, 2, u32::from(chest))
+            .expect("the chest is written");
+        let view = crate::plugins::world_view_for_sources([(world, Arc::clone(&source))]);
+        let has = |x: &str, y: &str, z: &str| {
+            answer_with_view(
+                &call(world, "hasBlockEntity(int,int,int)", &[x, y, z]),
+                Some(&*view),
+            )
+            .unwrap()
+        };
+        assert_eq!(has("2", "70", "2"), "true", "a chest");
+        assert_eq!(has("2", "60", "2"), "false", "stone underground");
+        assert_eq!(has("2", "75", "2"), "false", "air");
+        assert_eq!(has("zz", "70", "2"), HOST_NULL);
+        assert_eq!(
+            answer_with_view(
+                &call(world, "hasBlockEntity(int,int,int)", &["2", "70", "2"]),
+                None
+            ),
+            Some(HOST_NULL.to_owned())
+        );
     }
 
     #[tokio::test]
