@@ -1,9 +1,9 @@
 //! The `/execute` branches beyond the basic modifiers: `if|unless biome|loaded|function|
 //! stopwatch|items|slots`, `positioned over`, `on`, `summon` and `store ... bossbar`.
 //!
-//! What these cannot do on this server is listed in `docs/COMMANDS-STATUS.md`: `on origin` needs
-//! data the entity snapshot does not carry (the other relations come from the snapshot and the
-//! ride table), `summon` cannot hand the new entity to the rest of the chain, and `items|slots
+//! What these cannot do on this server is listed in `docs/COMMANDS-STATUS.md`: `on origin` knows
+//! only arrow/trident shooters, item throwers and bobber owners (the other relations come from the
+//! snapshot and the ride table), `summon` cannot hand the new entity to the rest of the chain, and `items|slots
 //! entity` cannot read an inventory owned by a region.
 
 use ferrite_command::arguments::{EntityTarget, RegistryParser};
@@ -332,13 +332,7 @@ pub(super) fn on_branch(execute: NodeId) -> NodeBuilder<Source> {
             literal::<Source>(relation).fork(execute, move |ctx| relation_sources(ctx, relation)),
         );
     }
-    // A fork swallows its errors (like vanilla), so a relation this server cannot answer is a
-    // plain redirect: the failure reaches the caller instead of silently matching nothing.
-    on = on.then(literal::<Source>("origin").redirect_with(execute, |_ctx| {
-        Err(CommandError::failed(
-            "execute on origin is not supported: the entity snapshot has no spawn-origin data",
-        ))
-    }));
+    on = on.then(literal::<Source>("origin").fork(execute, |ctx| relation_sources(ctx, "origin")));
     on
 }
 
@@ -359,6 +353,13 @@ fn relation_sources(
         "owner" => related_uuid(&state, me, |entity| entity.owner),
         "leasher" => related_uuid(&state, me, |entity| entity.leasher),
         "target" => related_uuid(&state, me, |entity| entity.target),
+        "origin" => state
+            .entities
+            .lock()
+            .unwrap()
+            .origin_of(me)
+            .into_iter()
+            .collect(),
         other => {
             return Err(CommandError::failed(format!(
                 "execute on {other} is not supported: the entity snapshot has no {other} data"
@@ -643,10 +644,15 @@ mod tests {
                 "{relation}"
             );
         }
-        let error = tree
-            .execute("execute on origin run say x", source.clone())
-            .unwrap_err();
-        assert!(error.to_string().contains("not supported"), "{error}");
+        // `origin` forks like the others: nothing published means no sources, not an error.
+        assert_eq!(
+            tree.execute(
+                "execute on origin run data merge storage t {bad:1}",
+                source.clone()
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -677,7 +683,15 @@ mod tests {
             index.insert(entry(mob, &["mob"]));
             index.insert(entry(related, &["related"]));
         }
-        for relation in ["attacker", "leasher", "owner", "target"] {
+        source
+            .state
+            .lock()
+            .unwrap()
+            .entities
+            .lock()
+            .unwrap()
+            .set_origin(mob, related);
+        for relation in ["attacker", "leasher", "owner", "target", "origin"] {
             tree.execute(
                 &format!(
                     "execute as @e[tag=mob] on {relation} run data merge storage t {{{relation}:1}}"
@@ -688,7 +702,7 @@ mod tests {
         }
         assert_eq!(
             storage(&source, "minecraft:t"),
-            "{attacker:1,leasher:1,owner:1,target:1}"
+            "{attacker:1,leasher:1,owner:1,target:1,origin:1}"
         );
     }
 

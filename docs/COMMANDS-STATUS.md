@@ -194,7 +194,7 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 | blocker | evidence |
 |---|---|
 | `execute summon` | `Action::Summon` is async and returns no uuid, so the new entity cannot be the source of the rest of the chain |
-| `execute on origin`, `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) now carries `attacker|owner|leasher|target`, so those four relations work; it still carries no spawn-origin entity, NBT or inventory |
+| `if|unless items|slots entity`, `store ... entity` (non-player) | `CommandEntity` (`entity_index.rs`) carries `attacker|owner|leasher|target`, and `EntityIndex::origin_of` carries the creator, so those relations work (2026-11-14: `execute on origin` answers for arrow/trident shooters, item throwers and fishing-bobber owners; tests `sync_publishes_who_created_an_arrow_or_threw_an_item`, `on_relations_use_the_published_snapshot`). Other creators (TNT igniter, area effect cloud owner, fangs) are not in `ferrite-entity`'s data, a lane A interface. The snapshot still carries no NBT or inventory |
 | `if predicate` (partial) | `match_block`, `entity_properties` (type, location), `inverted`, `all_of`, `any_of` are evaluated (`commands_late::condition`); every other condition type evaluates false; `ferrite-loot` exposes no public predicate evaluator (its `Condition::test` is `pub(crate)`) |
 | `/test` structure runner | no structure placement / test-instance block / tick runner: `block_based` instances and the block-targeting forms cannot run |
 | `/jfr` | no JVM |
