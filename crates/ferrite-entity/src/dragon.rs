@@ -285,14 +285,21 @@ pub fn breath_floor(head_y: f64, bottom: i32, is_empty: impl Fn(i32) -> bool) ->
 }
 
 /// A dragon fireball's cloud starts at radius 3, waits 20 ticks, then grows to radius 5 over its
-/// 30-second life (vanilla `DragonFireball`). The perched breath uses the same cloud shape with
-/// no initial wait. The harmful part hurts for 3 every 20 ticks, 3 health per second.
+/// 30-second life (vanilla `DragonFireball`). The perched breath has its own constant
+/// radius-5, 200-tick shape (`PERCHED_BREATH_*`). The harmful part hurts for 3 every 20 ticks, 3 health per second.
 pub const BREATH_TICKS: u32 = 600;
 pub const BREATH_RADIUS: f64 = 3.0;
 pub const BREATH_MAX_RADIUS: f64 = 5.0;
 pub const BREATH_WAIT_TICKS: u32 = 20;
 pub const BREATH_HIT_INTERVAL: u32 = 20;
 pub const BREATH_DAMAGE: f32 = 3.0;
+
+/// The perched dragon's cloud (`DragonSittingFlamingPhase`, read with `javap` from the 26.3
+/// jar): `setRadius(5.0)` and `setDuration(200)` with no radius growth, created once when the
+/// flame counter reaches 10; `AreaEffectCloud` keeps its default 20-tick wait before it hurts.
+pub const PERCHED_BREATH_TICKS: u32 = 200;
+pub const PERCHED_BREATH_RADIUS: f64 = 5.0;
+pub const PERCHED_BREATH_WAIT_TICKS: u32 = 20;
 
 /// A vanilla `AreaEffectCloud` of dragon's breath. It remains visible for its whole duration;
 /// only after `wait` does the cloud start hurting players inside its growing radius.
@@ -322,10 +329,10 @@ impl BreathCloud {
         Self {
             center,
             age: 0,
-            duration: BREATH_TICKS,
-            wait: 0,
-            initial_radius: BREATH_RADIUS,
-            max_radius: BREATH_MAX_RADIUS,
+            duration: PERCHED_BREATH_TICKS,
+            wait: PERCHED_BREATH_WAIT_TICKS,
+            initial_radius: PERCHED_BREATH_RADIUS,
+            max_radius: PERCHED_BREATH_RADIUS,
         }
     }
 
@@ -1226,6 +1233,66 @@ mod tests {
 
     fn phase_of(store: &EntityStore, key: EntityKey) -> DragonPhase {
         mob::state(store, key).unwrap().dragon_phase
+    }
+
+    #[test]
+    fn a_perched_breath_cloud_lives_200_ticks_at_a_constant_radius_5() {
+        let mut cloud = BreathCloud::perched(Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(cloud.duration, 200);
+        for _ in 0..PERCHED_BREATH_TICKS {
+            assert_eq!(cloud.radius(), 5.0, "no growth at age {}", cloud.age);
+            assert!(cloud.advance().is_some());
+        }
+        assert_eq!(cloud.radius(), 5.0);
+        assert_eq!(cloud.advance(), None, "gone after 200 ticks, not 600");
+    }
+
+    #[test]
+    fn a_perched_breath_cloud_waits_then_hurts_every_twenty_ticks() {
+        let mut cloud = BreathCloud::perched(Vec3::ZERO);
+        let hits: Vec<u32> = (1..=PERCHED_BREATH_TICKS)
+            .filter(|_| cloud.advance() == Some(BREATH_DAMAGE))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            9,
+            "ticks 40, 60, ..., 200 after the 20-tick wait"
+        );
+        assert_eq!(hits[0], 40);
+    }
+
+    #[test]
+    fn a_flaming_phase_makes_one_cloud_at_the_head_aim_and_four_phases_end_the_perch() {
+        assert_eq!(
+            (FLAME_WARMUP_TICKS, FLAME_TICKS, FLAME_ATTACKS),
+            (10, 200, 4)
+        );
+        // Third flaming phase of four: one cloud at tick 10, then back to scanning.
+        let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
+        mob::state_mut(&mut store, key).unwrap().perch_flames = 3;
+        let mut origin = None;
+        let mut breaths = Vec::new();
+        for tick in 1..=FLAME_TICKS {
+            let mut events = Vec::new();
+            fly(&mut store, key, &[], &mut rng, &mut events);
+            for event in events {
+                if let MobEvent::Breath { pos } = event {
+                    breaths.push(tick);
+                    origin = Some(pos);
+                }
+            }
+        }
+        assert_eq!(breaths.len(), 1, "one cloud per flaming phase");
+        assert!(breaths[0] <= FLAME_WARMUP_TICKS + 1);
+        let body = store.pos(key).unwrap();
+        let yaw = store.data(key).unwrap().yaw;
+        assert_eq!(origin, Some(breath_aim(body, yaw)));
+        assert_eq!(phase_of(&store, key), DragonPhase::Perched);
+        // The fourth flaming phase ends the perch instead.
+        let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
+        mob::state_mut(&mut store, key).unwrap().perch_flames = 4;
+        run(&mut store, key, &mut rng, &[], FLAME_TICKS);
+        assert_eq!(phase_of(&store, key), DragonPhase::Takeoff);
     }
 
     #[test]

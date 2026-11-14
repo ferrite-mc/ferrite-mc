@@ -52,6 +52,31 @@ pub fn color_id(name: &str) -> Option<u8> {
     COLORS.iter().position(|c| *c == name).map(|i| i as u8)
 }
 
+/// The wool colour of a dye item (`minecraft:red_dye` is 14); `None` for any other item. Every
+/// vanilla dye is `<colour>_dye` in `DyeColor` order, which is also the wool colour id.
+pub fn dye_color(item: &str) -> Option<u8> {
+    color_id(item.strip_prefix("minecraft:")?.strip_suffix("_dye")?)
+}
+
+/// `DyeItem.interactLivingEntity` on a sheep: a live, unsheared sheep whose colour differs
+/// takes the dye's colour. Returns whether it changed; the caller plays the sound and takes the
+/// dye. A sheared sheep or one already of that
+/// colour leaves the click unused (babies can be dyed: vanilla only checks `isSheared`).
+pub fn dye(store: &mut EntityStore, key: EntityKey, color: u8) -> bool {
+    let Some(state) = mob::state(store, key) else {
+        return false;
+    };
+    if state.kind != MobKind::Sheep
+        || state.sheared
+        || state.health <= 0.0
+        || state.wool_color == color & 15
+    {
+        return false;
+    }
+    set_color(store, key, color);
+    true
+}
+
 /// Vanilla `SheepColorSpawnRules` in a temperate biome: 5% black, gray and light gray each, 3%
 /// brown and 82% white (of which one in 500 is pink). Warm and cold biome tables need the biome
 /// at the spawn point, which the entity crate does not have, so every sheep uses this table.
@@ -293,6 +318,37 @@ mod tests {
         assert_eq!(color_id("black"), Some(15));
         assert_eq!(color_name(14), "red");
         assert_eq!(color_id("teal"), None);
+    }
+
+    #[test]
+    fn every_dye_item_maps_to_its_wool_colour_and_other_items_to_none() {
+        for (id, name) in COLORS.iter().enumerate() {
+            assert_eq!(dye_color(&format!("minecraft:{name}_dye")), Some(id as u8));
+        }
+        assert_eq!(dye_color("minecraft:red_wool"), None);
+        assert_eq!(dye_color("minecraft:glow_ink_sac"), None);
+        assert_eq!(dye_color("minecraft:bone_meal"), None);
+    }
+
+    #[test]
+    fn dyeing_changes_the_colour_and_the_wool_metadata_but_not_a_sheared_or_same_colour_sheep() {
+        let mut rng = Rng::new(5);
+        let mut store = EntityStore::default();
+        let key = sheep(&mut store, &mut rng);
+        set_color(&mut store, key, 0);
+        assert!(!dye(&mut store, key, 0), "already white");
+        assert!(dye(&mut store, key, 14));
+        assert_eq!(mob::state(&store, key).unwrap().wool_color, 14);
+        assert_eq!(wool_byte(&store, key), 14);
+        mob::state_mut(&mut store, key).unwrap().sheared = true;
+        assert!(!dye(&mut store, key, 3), "a sheared sheep keeps its colour");
+        assert_eq!(mob::state(&store, key).unwrap().wool_color, 14);
+        let cow = store.insert(mob::new_mob(
+            MobKind::Cow,
+            Vec3::new(3.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        assert!(!dye(&mut store, cow, 3));
     }
 
     #[test]

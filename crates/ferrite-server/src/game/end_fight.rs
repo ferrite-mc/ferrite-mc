@@ -545,8 +545,10 @@ pub fn dragon_egg() -> Option<u16> {
     default_state(DRAGON_EGG)
 }
 
-/// How far around the ideal gateway exit to look for the outer island.
-pub const GATEWAY_LANDING_RADIUS: i32 = 16;
+/// How far around the ideal gateway exit to look for the outer island. Vanilla 26.3
+/// `TheEndGatewayBlockEntity.findExitPosition` calls `findTallestBlock(level, pos.offset(0, 2, 0),
+/// 5, false)` (checked with `javap` against the local server jar), so the radius is 5.
+pub const GATEWAY_LANDING_RADIUS: i32 = 5;
 
 /// Where a player stepping into a gateway lands: the nearest loaded column with ground and two
 /// blocks of air above it, searched outward from the point 1024 blocks out. Vanilla searches
@@ -939,6 +941,33 @@ mod tests {
         );
         let mut void = |_: i32, _: i32, _: i32| Some(0);
         assert_eq!(gateway_landing([0, 0], &mut void), None);
+    }
+
+    #[test]
+    fn the_gateway_landing_radius_is_vanillas_five() {
+        assert_eq!(GATEWAY_LANDING_RADIUS, 5);
+    }
+
+    #[test]
+    fn a_gateway_landing_at_1024_blocks_finds_solid_ground_within_five_blocks() {
+        // Island ground 4 blocks from the ideal exit point, in the far island's chunk.
+        let mut block = |x: i32, y: i32, z: i32| -> Option<u32> {
+            Some(u32::from(x == 1020 && z == 0 && y <= 60))
+        };
+        assert_eq!(
+            gateway_landing([1024, 0], &mut block),
+            Some([1020.5, 61.0, 0.5]),
+            "ground at the edge of the search radius is found and stood on"
+        );
+    }
+
+    #[test]
+    fn a_gateway_with_no_ground_within_five_blocks_cancels_instead_of_dropping_into_the_void() {
+        // Ground exists 6 blocks away: beyond vanilla's radius, so the trip is cancelled.
+        let mut block = |x: i32, y: i32, z: i32| -> Option<u32> {
+            Some(u32::from(x == 1030 && z == 0 && y <= 60))
+        };
+        assert_eq!(gateway_landing([1024, 0], &mut block), None);
     }
 
     #[test]

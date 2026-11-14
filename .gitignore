@@ -12,3 +12,5 @@ playerdata/
 /worldgen
 compat-report.md
 check.out
+
+/crates/ferrite-server/debug/
