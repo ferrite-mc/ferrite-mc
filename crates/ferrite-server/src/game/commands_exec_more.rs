@@ -280,8 +280,11 @@ fn slot_name_covers(requested: &str, slot: &str) -> bool {
 ///   the snapshot does not list is empty, which is what the server holds for it.
 /// * `slots` passes when a requested slot is published for a selected entity. An entity whose
 ///   slot set is not modelled cannot be answered, so that case is an error, not a quiet `false`.
-/// * Player inventories live in the player's region and are not published: a selection that
-///   contains a player and matches nothing fails with a message instead of answering `false`.
+/// * A player's inventory is owned by the player's region. The command thread reads it through
+///   the player's mailbox before running a command that can ask (`publish_player_slots`) and
+///   clears it afterwards. A player without that reading (a command block, a function started by
+///   a tick) and a selection that matches nothing fails with a message instead of answering
+///   `false`. Every player slot exists, so `slots` passes for any slot name a player has.
 fn condition_entity_inventory(
     ctx: &CommandContext<Source>,
     unless: bool,
@@ -304,7 +307,27 @@ fn condition_entity_inventory(
         let index = state.entities.lock().unwrap();
         for entity in &entities {
             if entity.player {
-                players = true;
+                // The command thread read this player's inventory through their mailbox before
+                // running the command (`entity_index::publish_player_slots`); without that
+                // reading (a command block or a function tick) nothing can be answered.
+                let Some(held) = index.player_slots_of(entity.uuid) else {
+                    players = true;
+                    continue;
+                };
+                for name in &requested {
+                    // A name no player slot answers to (`armor.body`, `horse.0`) matches nothing.
+                    let Ok(indexes) = super::slot_ops::player_slots(name) else {
+                        continue;
+                    };
+                    if !with_items && !indexes.is_empty() {
+                        matched = true;
+                    }
+                    for (slot, item) in held {
+                        if indexes.contains(slot) && with_items && item_matches(predicate, *item)? {
+                            matched = true;
+                        }
+                    }
+                }
                 continue;
             }
             let published = index.slots_of(entity.uuid);
@@ -326,7 +349,7 @@ fn condition_entity_inventory(
     if !matched {
         if players {
             return Err(CommandError::failed(
-                "execute if items|slots entity cannot read a player's inventory: it is owned by the player's region and not published to commands",
+                "execute if items|slots entity can read a player's inventory only for a command typed by a player or the console: it is owned by the player's region and was not read for this execution",
             ));
         }
         if let Some(name) = unmodelled {
@@ -768,6 +791,113 @@ mod tests {
         // A player's inventory is not published.
         let error = run("execute if items entity @s weapon.mainhand *", 21).unwrap_err();
         assert!(error.to_string().contains("player's inventory"), "{error}");
+        assert!(error.to_string().contains("was not read"), "{error}");
+    }
+
+    #[test]
+    fn player_inventory_conditions_read_the_command_threads_snapshot() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        let id = |name: &str| ferrite_item::item_id(name).expect("item");
+        let horse = Uuid::from_u128(0x51);
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            index.insert(CommandEntity {
+                uuid: horse,
+                network_id: 1,
+                kind: 0,
+                pos: [1.0, 64.0, 1.0],
+                yaw: 0.0,
+                pitch: 0.0,
+                dimension: crate::game::Dimension::Overworld,
+                tags: ["horse".to_owned()].into(),
+                custom_name: None,
+                health: None,
+                attacker: None,
+                owner: None,
+                leasher: None,
+                target: None,
+            });
+            index.set_slot(horse, "armor.body", id("minecraft:iron_horse_armor"));
+            // Alice holds a sword in the selected hotbar slot, dirt in container slot 3 and a
+            // shield in the offhand; her armour slots are empty.
+            index.set_player_slots(
+                Uuid::nil(),
+                vec![
+                    (-1, id("minecraft:diamond_sword")),
+                    (3, id("minecraft:dirt")),
+                    (40, id("minecraft:shield")),
+                ],
+            );
+        }
+        let run = |command: &str, n: i32| {
+            let result = tree.execute(
+                &format!("execute {command} run data merge storage t {{k{n}:1}}"),
+                source.clone(),
+            );
+            result.map(|_| storage(&source, "minecraft:t").contains(&format!("k{n}:1")))
+        };
+        for (n, command) in [
+            "if items entity @s weapon.mainhand minecraft:diamond_sword",
+            "if items entity @s container.3 minecraft:dirt",
+            "if items entity @s hotbar.* minecraft:dirt",
+            "if items entity @s weapon.mainhand #minecraft:swords",
+            "if items entity @s weapon.* *",
+            "if slots entity @s armor.head",
+            "if slots entity @s container.*",
+            "unless items entity @s armor.head *",
+            "unless items entity @s weapon.mainhand minecraft:shield",
+            // A mixed selection passes on either member: the horse's armour, then Alice's sword.
+            "if items entity @e armor.body minecraft:iron_horse_armor",
+            "if items entity @e weapon.mainhand minecraft:diamond_sword",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let n = n as i32;
+            assert!(run(command, n).unwrap(), "{command}");
+        }
+        for (n, command) in [
+            "if items entity @s weapon.mainhand minecraft:dirt",
+            "if items entity @s armor.head *",
+            "if items entity @s container.4 *",
+            // A player has no horse armour slot.
+            "if slots entity @s armor.body",
+            "unless items entity @s container.3 minecraft:dirt",
+            "if items entity @e[tag=horse] weapon.mainhand minecraft:diamond_sword",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(!run(command, 100 + n as i32).unwrap(), "{command}");
+        }
+        // A component condition cannot be answered from an item id and is refused, not guessed.
+        // (Errors surface from the terminal form; a forked `... run` swallows them as vanilla's
+        // Brigadier does.)
+        let error = tree
+            .execute(
+                "execute if items entity @s weapon.mainhand *[custom_name='x']",
+                source.clone(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("component"), "{error}");
+        // After the command the reading is dropped; a later execution path answers an error.
+        source
+            .state
+            .lock()
+            .unwrap()
+            .entities
+            .lock()
+            .unwrap()
+            .clear_player_slots();
+        let error = tree
+            .execute(
+                "execute if items entity @s weapon.mainhand *",
+                source.clone(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("was not read"), "{error}");
     }
 
     #[test]
