@@ -6,6 +6,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.*;
 import org.bukkit.plugin.Plugin;
 final class FerriteEntitySchedulers {
+    /** Paper's entity scheduler refuses a disabled plugin, including one inside its own {@code onDisable}. */
+    private static void requireEnabled(Plugin plugin) {
+        java.util.Objects.requireNonNull(plugin, "Plugin cannot be null");
+        if (!plugin.isEnabled()) throw new org.bukkit.plugin.IllegalPluginAccessException("Plugin attempted to register task while disabled");
+    }
     private final ThreadLocal<String> currentEntity = new ThreadLocal<>();
     boolean isOwned(UUID id) { return id.toString().equals(currentEntity.get()); }
     private final AtomicLong nextId = new AtomicLong(1);
@@ -44,6 +49,7 @@ final class FerriteEntitySchedulers {
         String entity = id.toString();
         return new EntityScheduler() {
             private ScheduledTask schedule(Plugin plugin, Consumer<ScheduledTask> action, Runnable retired, long delay, long period) {
+                requireEnabled(plugin);
                 if (!alive.getAsBoolean()) return null;
                 if (delay < 0 || period < 0) throw new IllegalArgumentException("Invalid timing");
                 Task task = new Task(nextId.getAndIncrement(), entity, alive, plugin, action, retired, period);

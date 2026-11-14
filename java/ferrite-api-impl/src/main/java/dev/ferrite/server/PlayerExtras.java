@@ -179,13 +179,26 @@ public abstract class PlayerExtras extends PlayerSight {
 
     @Override public synchronized int discoverRecipes(Collection<org.bukkit.NamespacedKey> recipes) {
         int added = 0;
-        for (var key : recipes) if (FerriteRecipes.get(key) != null && discovered.add(key)) added++;
+        var accepted = new LinkedHashSet<org.bukkit.NamespacedKey>();
+        for (var key : recipes) if (FerriteRecipes.get(key) != null && discovered.add(key)) { added++; accepted.add(key); }
+        tellHostRecipes("discoverRecipes(String)", accepted);
         return added;
     }
     @Override public synchronized int undiscoverRecipes(Collection<org.bukkit.NamespacedKey> recipes) {
         int removed = 0;
-        for (var key : recipes) if (discovered.remove(key)) removed++;
+        var accepted = new LinkedHashSet<org.bukkit.NamespacedKey>();
+        for (var key : recipes) if (discovered.remove(key)) { removed++; accepted.add(key); }
+        tellHostRecipes("undiscoverRecipes(String)", accepted);
         return removed;
+    }
+
+    /** Tells the host which recipes this player now sees, so the book it sends matches Bukkit's view. */
+    private void tellHostRecipes(String method, Collection<org.bukkit.NamespacedKey> recipes) {
+        if (recipes.isEmpty() || !HostBridge.available()) return;
+        var ids = new StringBuilder();
+        for (var key : recipes) { if (ids.length() > 0) ids.append(HostBridge.ITEM); ids.append(key); }
+        try { HostBridge.callInt("Player", getUniqueId(), method, ids.toString()); }
+        catch (UnsupportedOperationException | IllegalStateException noHost) { /* plain Java keeps the local book */ }
     }
     @Override public synchronized boolean hasDiscoveredRecipe(org.bukkit.NamespacedKey recipe) { return discovered.contains(Objects.requireNonNull(recipe, "recipe")); }
     @Override public synchronized Set<org.bukkit.NamespacedKey> getDiscoveredRecipes() { return Set.copyOf(discovered); }

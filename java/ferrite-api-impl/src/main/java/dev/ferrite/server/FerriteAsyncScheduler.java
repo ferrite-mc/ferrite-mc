@@ -5,6 +5,11 @@ import java.util.concurrent.*;
 import java.util.function.Consumer;
 import org.bukkit.plugin.Plugin;
 final class FerriteAsyncScheduler implements AsyncScheduler {
+    /** Paper's async scheduler refuses a disabled plugin, including one inside its own {@code onDisable}. */
+    private static void requireEnabled(Plugin plugin) {
+        java.util.Objects.requireNonNull(plugin, "Plugin cannot be null");
+        if (!plugin.isEnabled()) throw new org.bukkit.plugin.IllegalPluginAccessException("Plugin attempted to register task while disabled");
+    }
     private static ScheduledExecutorService newExecutor() { return Executors.newScheduledThreadPool(2, runnable -> { Thread t = new Thread(runnable, "Ferrite plugin async"); t.setDaemon(true); return t; }); }
     private volatile ScheduledExecutorService executor = newExecutor();
     private final Set<Task> tasks = ConcurrentHashMap.newKeySet();
@@ -33,6 +38,7 @@ final class FerriteAsyncScheduler implements AsyncScheduler {
         }
     }
     private ScheduledTask schedule(Plugin p, Consumer<ScheduledTask> action, long delay, long period, TimeUnit unit) {
+        requireEnabled(p);
         if (delay < 0 || period < 0) throw new IllegalArgumentException("Invalid timing");
         Task task = new Task(p, action, period > 0); tasks.add(task);
         ScheduledFuture<?> future = period == 0 ? executor.schedule(task, delay, unit) : executor.scheduleAtFixedRate(task, delay, period, unit);

@@ -6,6 +6,11 @@ import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.plugin.Plugin;
 final class FerriteRegionScheduler implements RegionScheduler {
+    /** Paper's scheduler refuses a disabled plugin, including one inside its own {@code onDisable}. */
+    private static void requireEnabled(Plugin plugin) {
+        java.util.Objects.requireNonNull(plugin, "Plugin cannot be null");
+        if (!plugin.isEnabled()) throw new org.bukkit.plugin.IllegalPluginAccessException("Plugin attempted to register task while disabled");
+    }
     private final AtomicLong nextId = new AtomicLong(1);
     private final ConcurrentHashMap<Long, Task> tasks = new ConcurrentHashMap<>();
     private final class Task implements ScheduledTask {
@@ -38,6 +43,7 @@ final class FerriteRegionScheduler implements RegionScheduler {
         }
     }
     private ScheduledTask schedule(Plugin plugin, World world, int x, int z, Consumer<ScheduledTask> action, long delay, long period) {
+        requireEnabled(plugin);
         if (delay < 0 || period < 0) throw new IllegalArgumentException("Invalid timing");
         long id = nextId.getAndIncrement();
         Task task = new Task(id, plugin, world.getUID().toString(), x, z, period, action);

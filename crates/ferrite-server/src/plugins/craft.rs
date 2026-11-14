@@ -34,6 +34,35 @@ fn recipe_changes(call: &HostCall) -> Option<String> {
                 },
             )
         }
+        "addBrewingRecipe(String,String,String,String,String,int)" => {
+            let id = call.args.first()?;
+            // The item lists are one argument each, separated like every other host item list.
+            let split = |text: &str| {
+                text.split(HOST_ITEM_SEPARATOR)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            // `FerriteRecipes` sends the input slot first, then the ingredient.
+            let input = split(call.args.get(1)?);
+            let ingredient = split(call.args.get(2)?);
+            let result = call.args.get(3)?;
+            let potion = call.args.get(4)?;
+            let count = call.args.get(5)?.parse::<i32>().ok()?;
+            Some(
+                match crate::game::add_plugin_brewing(
+                    id,
+                    &ingredient,
+                    &input,
+                    result,
+                    (!potion.is_empty()).then_some(potion.as_str()),
+                    count,
+                ) {
+                    Ok(added) => added.to_string(),
+                    Err(why) => format!("!{why}"),
+                },
+            )
+        }
         "removeCraftingRecipe(String)" => {
             Some(crate::game::remove_recipe(call.args.first()?).to_string())
         }
@@ -84,11 +113,36 @@ fn void_rules(call: &HostCall) -> Option<String> {
     Some(String::new())
 }
 
+/// `Player#discoverRecipe`/`undiscoverRecipe`: the recipe book is per player in Bukkit, so a
+/// plugin-added recipe reaches a client only after this call. The Java method filters to recipes
+/// it knows; the host re-checks and queues the change for the game loop.
+fn player_recipes(call: &HostCall) -> Option<String> {
+    let discover = match call.method.as_str() {
+        "discoverRecipes(String)" => true,
+        "undiscoverRecipes(String)" => false,
+        _ => return None,
+    };
+    if call.owner != "Player" {
+        return None;
+    }
+    let player = uuid::Uuid::parse_str(&call.subject).ok()?;
+    let ids: Vec<&str> = call
+        .args
+        .first()?
+        .split(HOST_ITEM_SEPARATOR)
+        .filter(|id| !id.is_empty())
+        .collect();
+    Some(crate::game::plugin_discover_recipes(player, &ids, discover).to_string())
+}
+
 /// The reply to `craftMatrix(int,String)`: the recipe id, the result item key and its count joined
 /// by the item separator, or `None` when nothing matches or the grid is malformed.
 ///
 /// The grid is `width` columns wide; its items are Bukkit material names (`AIR` is empty).
 pub fn answer(call: &HostCall) -> Option<String> {
+    if let Some(reply) = player_recipes(call) {
+        return Some(reply);
+    }
     if call.owner == "Server"
         && let Some(reply) = recipe_changes(call)
     {

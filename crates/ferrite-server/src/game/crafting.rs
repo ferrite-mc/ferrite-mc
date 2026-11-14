@@ -28,8 +28,19 @@ struct PluginRecipes {
     removed: HashSet<String>,
     /// The item metadata of an added recipe's result (`ItemMeta` on the Bukkit result stack).
     extras: HashMap<String, ResultExtras>,
+    /// Brewing mixes a plugin added (`PotionBrewer#addPotionMix`). Vanilla has no recipe ids for
+    /// its potion table, so these are kept apart from `added`.
+    brewing: Vec<BrewingMix>,
     /// Bumped by every change, so the recipe book can tell a player's copy is stale.
     revision: u64,
+}
+
+/// A plugin brewing mix: an ingredient turns an input bottle into a fixed result stack.
+struct BrewingMix {
+    id: String,
+    ingredient: Vec<String>,
+    input: Vec<String>,
+    result: ItemStack,
 }
 
 /// What a Bukkit result stack carries beyond item and count: wear and `ItemMeta`.
@@ -383,6 +394,19 @@ impl Crafter for RecipeCrafter {
         if ingredient.is_empty() || bottle.is_empty() {
             return None;
         }
+        let ingredient_name = ingredient.name()?;
+        let bottle_name = bottle.name()?;
+        // A plugin mix applies to the item ids it lists and replaces the bottle with its own
+        // stack (vanilla `PotionBrewing.mix` consults its mixes in registration order; plugins
+        // are appended after the vanilla table).
+        let plugin = plugin_recipes().read().unwrap();
+        if let Some(mix) = plugin.brewing.iter().find(|mix| {
+            mix.ingredient.iter().any(|item| item == ingredient_name)
+                && mix.input.iter().any(|item| item == bottle_name)
+        }) {
+            return Some(mix.result.copy_with_count(mix.result.count));
+        }
+        drop(plugin);
         let contents = match bottle.effective_component(component_ids::POTION_CONTENTS) {
             Some(Component::PotionContents(contents)) => contents,
             _ => return None,
@@ -407,8 +431,16 @@ impl Crafter for RecipeCrafter {
     }
 
     fn is_brewing_ingredient(&self, item: &ItemStack) -> bool {
-        item.name()
-            .is_some_and(ferrite_recipe::brewing::is_ingredient)
+        let Some(name) = item.name() else {
+            return false;
+        };
+        ferrite_recipe::brewing::is_ingredient(name)
+            || plugin_recipes()
+                .read()
+                .unwrap()
+                .brewing
+                .iter()
+                .any(|mix| mix.ingredient.iter().any(|item| item == name))
     }
 
     fn burn_time(&self, item: &ItemStack) -> i32 {
@@ -746,10 +778,89 @@ pub fn add_plugin_recipe(
     Ok(true)
 }
 
+/// `PotionBrewer#addPotionMix` (a `BrewingRecipe` through `Server#addRecipe`): an ingredient turns
+/// one of `input` into `result`. `result_potion` is the base potion id of a `PotionMeta` result.
+/// `Ok(false)` when the id is taken by another plugin recipe.
+pub fn add_plugin_brewing(
+    id: &str,
+    ingredient: &[String],
+    input: &[String],
+    result_item: &str,
+    result_potion: Option<&str>,
+    count: i32,
+) -> Result<bool, String> {
+    if ingredient.is_empty() || input.is_empty() {
+        return Err("a brewing mix needs an ingredient and an input item".into());
+    }
+    let count = (1..=99)
+        .contains(&count)
+        .then_some(count)
+        .ok_or("a brewing result needs a count between 1 and 99")?;
+    let Some(book) = BOOK.get_or_init(load).as_ref() else {
+        return Err("recipes are not loaded".into());
+    };
+    let Some(mut result) = ItemStack::from_name(result_item) else {
+        return Err(format!("unknown item `{result_item}`"));
+    };
+    result.count = count;
+    if let Some(potion) = result_potion {
+        result.components.insert(
+            component_ids::POTION_CONTENTS,
+            Component::PotionContents(PotionContents {
+                potion: Some(potion.to_owned()),
+                ..Default::default()
+            }),
+        );
+    }
+    let mut plugin = plugin_recipes().write().unwrap();
+    let taken = plugin.brewing.iter().any(|mix| mix.id == id)
+        || plugin.added.iter().any(|recipe| recipe.id == id)
+        || (book.0.recipe(id).is_some() && !plugin.removed.contains(id));
+    if taken {
+        return Ok(false);
+    }
+    plugin.brewing.push(BrewingMix {
+        id: id.to_owned(),
+        ingredient: ingredient.to_vec(),
+        input: input.to_vec(),
+        result,
+    });
+    plugin.revision += 1;
+    Ok(true)
+}
+
+/// Whether a recipe id exists for `Player#discoverRecipe`: a vanilla recipe a plugin has not
+/// removed, a plugin recipe, or a plugin brewing mix.
+pub fn recipe_exists(id: &str) -> bool {
+    let book = BOOK.get_or_init(load).as_ref();
+    let plugin = plugin_recipes().read().unwrap();
+    plugin.added.iter().any(|recipe| recipe.id == id)
+        || plugin.brewing.iter().any(|mix| mix.id == id)
+        || book.is_some_and(|book| book.0.recipe(id).is_some() && !plugin.removed.contains(id))
+}
+
+/// `Player#discoverRecipe`/`undiscoverRecipe`: queues a per-player book change for the game
+/// loop. Returns how many named recipes exist (the Java method reports that count).
+pub fn plugin_discover_recipes(player: uuid::Uuid, ids: &[&str], discover: bool) -> usize {
+    let mut accepted = 0;
+    for id in ids {
+        if recipe_exists(id) {
+            super::recipe_packets::record_discovery(player, id, discover);
+            accepted += 1;
+        }
+    }
+    accepted
+}
+
 /// `Server#removeRecipe`: a plugin recipe disappears, a vanilla one stops matching. `false` when
 /// nothing by that id exists.
 pub fn remove_recipe(id: &str) -> bool {
     let mut plugin = plugin_recipes().write().unwrap();
+    if let Some(index) = plugin.brewing.iter().position(|known| known.id == id) {
+        plugin.brewing.remove(index);
+        plugin.revision += 1;
+        return true;
+    }
     if let Some(index) = plugin.added.iter().position(|known| known.id == id) {
         plugin.added.remove(index);
         plugin.extras.remove(id);
@@ -778,6 +889,7 @@ pub fn clear_recipes() {
 
 fn clear_into(plugin: &mut PluginRecipes, book: &RecipeBook) {
     plugin.added.clear();
+    plugin.brewing.clear();
     plugin.extras.clear();
     plugin.removed = book
         .recipes()
@@ -811,8 +923,8 @@ pub struct PluginBookView {
     pub revision: u64,
     /// Vanilla recipe ids a plugin removed: the client's book must not list them.
     pub hidden: HashSet<String>,
-    /// The plugin recipes the client's book can show (smithing trims and other kinds without a
-    /// plain display stay server-side): id and encoded entry.
+    /// The recipes the client's book needs encoded at runtime (plugin recipes and every smithing
+    /// trim, which has no static result): id and encoded entry.
     pub entries: Vec<(String, super::recipe_wire::Encoded)>,
     /// The `update_recipes` body for this recipe set (furnace and smithing slot items, stonecutter
     /// options), or `None` when it cannot be built.
@@ -834,22 +946,36 @@ pub fn plugin_book_view(
     let book = BOOK.get_or_init(load).as_ref()?;
     let plugin = plugin_recipes().read().unwrap();
     let mut entries = Vec::new();
-    for recipe in &plugin.added {
-        let Some(result) = recipe.result() else {
-            continue;
-        };
-        let Some(base) = ItemStack::from_name(&result.item) else {
-            continue;
-        };
-        let stack = plugin.dress(
-            &recipe.id,
-            base.copy_with_count(i32::try_from(result.count).unwrap_or(1)),
-        );
+    let mut encode = |recipe: &ferrite_recipe::Recipe, stack: &ItemStack| {
         let index = index_of(&recipe.id);
         if let Some(encoded) =
-            super::recipe_wire::encode_entry(recipe, book.0.tags(), index, None, &stack)
+            super::recipe_wire::encode_entry(recipe, book.0.tags(), index, None, stack)
         {
             entries.push((recipe.id.clone(), encoded));
+        }
+    };
+    for recipe in &plugin.added {
+        let stack = match recipe.result() {
+            Some(result) => {
+                let Some(base) = ItemStack::from_name(&result.item) else {
+                    continue;
+                };
+                plugin.dress(
+                    &recipe.id,
+                    base.copy_with_count(i32::try_from(result.count).unwrap_or(1)),
+                )
+            }
+            // A trim has no fixed result: its display previews the base, material and pattern.
+            None if matches!(recipe.kind, RecipeKind::SmithingTrim(_)) => ItemStack::empty(),
+            None => continue,
+        };
+        encode(recipe, &stack);
+    }
+    // The extracted vanilla book has no entry for a smithing trim either (no fixed result), so
+    // those are encoded here too and become visible when the player unlocks them.
+    for recipe in book.0.recipes() {
+        if matches!(recipe.kind, RecipeKind::SmithingTrim(_)) {
+            encode(recipe, &ItemStack::empty());
         }
     }
     let result_of = |recipe: &ferrite_recipe::Recipe| {
@@ -1310,6 +1436,65 @@ mod tests {
         );
         reset_recipes();
         assert!(crafter.cook(FurnaceKind::Furnace, &ore).is_some());
+    }
+
+    #[test]
+    fn a_plugin_brewing_mix_reaches_the_brewing_stand() {
+        let _guard = overlay_lock();
+        reset_recipes();
+        let crafter = crafter();
+        let ingredient = stack("diamond", 1);
+        let mut bottle = stack("potion", 1);
+        bottle.components.insert(
+            component_ids::POTION_CONTENTS,
+            Component::PotionContents(PotionContents {
+                potion: Some("minecraft:water".into()),
+                ..Default::default()
+            }),
+        );
+        // A diamond is not a vanilla brewing ingredient, so only the plugin mix can match.
+        assert_eq!(
+            add_plugin_brewing(
+                "plugin:mix",
+                &["minecraft:diamond".into()],
+                &["minecraft:potion".into()],
+                "minecraft:splash_potion",
+                Some("minecraft:swiftness"),
+                1,
+            ),
+            Ok(true)
+        );
+        let out = crafter
+            .brew(&ingredient, &bottle)
+            .expect("the plugin mix brews");
+        assert_eq!(out.name(), Some("minecraft:splash_potion"));
+        assert!(matches!(
+            out.effective_component(component_ids::POTION_CONTENTS),
+            Some(Component::PotionContents(contents))
+                if contents.potion.as_deref() == Some("minecraft:swiftness")
+        ));
+        assert!(crafter.is_brewing_ingredient(&ingredient));
+        assert!(remove_recipe("plugin:mix"));
+        assert!(crafter.brew(&ingredient, &bottle).is_none());
+    }
+
+    #[test]
+    fn smithing_trims_get_a_runtime_recipe_book_entry() {
+        let _guard = overlay_lock();
+        reset_recipes();
+        let mut next = 10_000;
+        let Some(view) = plugin_book_view(&[], &mut |_| {
+            next += 1;
+            next
+        }) else {
+            return;
+        };
+        assert!(
+            view.entries
+                .iter()
+                .any(|(id, encoded)| id.ends_with("_smithing_trim") && !encoded.display.is_empty()),
+            "vanilla trims are encoded at runtime"
+        );
     }
 
     #[test]

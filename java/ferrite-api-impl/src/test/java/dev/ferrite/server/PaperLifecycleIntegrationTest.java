@@ -224,6 +224,11 @@ class PaperLifecycleIntegrationTest {
         assertTrue(task.isCancelled());
         assertThrows(IllegalPluginAccessException.class, () -> Bukkit.getScheduler().runTask(plugin, () -> {}));
         assertThrows(IllegalPluginAccessException.class, () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {}));
+        var bukkitWorld = server.getWorld(world("life_disabled"));
+        assertThrows(IllegalPluginAccessException.class, () -> server.getGlobalRegionScheduler().run(plugin, scheduled -> {}));
+        assertThrows(IllegalPluginAccessException.class, () -> server.getRegionScheduler().run(plugin, bukkitWorld, 0, 0, scheduled -> {}));
+        assertThrows(IllegalPluginAccessException.class, () -> server.entityScheduler(UUID.randomUUID(), () -> true).run(plugin, scheduled -> {}, null));
+        assertThrows(IllegalPluginAccessException.class, () -> server.getAsyncScheduler().runNow(plugin, scheduled -> {}));
     }
 
     @Test void disablingAPluginCancelsItsBukkitGlobalRegionEntityAndAsyncTasks() throws Exception {

@@ -494,6 +494,9 @@ pub fn take_all_contents(
     if name == Some("minecraft:brewing_stand") {
         out.extend(super::brewing::take_contents(source, pos));
     }
+    if matches!(name, Some("minecraft:campfire" | "minecraft:soul_campfire")) {
+        out.extend(super::campfire::take_contents(source, pos));
+    }
     if name == Some("minecraft:jukebox") {
         out.extend(super::jukebox::take(source, pos));
     }

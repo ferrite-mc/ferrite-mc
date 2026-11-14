@@ -196,6 +196,26 @@ class PluginRecipeHostTest {
         assertEquals("minecraft:wild", trimJson.get("pattern").getAsString());
     }
 
+    @Test void aBrewingRecipeReachesTheHostPotionTable() {
+        var result = new ItemStack(Material.POTION);
+        var meta = (org.bukkit.inventory.meta.PotionMeta) result.getItemMeta();
+        meta.setBasePotionType(org.bukkit.potion.PotionType.SWIFTNESS);
+        result.setItemMeta(meta);
+        var mix = new org.bukkit.inventory.BrewingRecipe(key("mix"), result,
+            new RecipeChoice.MaterialChoice(Material.POTION), new RecipeChoice.MaterialChoice(Material.SUGAR));
+        assertTrue(FerriteRecipes.add(mix));
+        var fields = only("addBrewingRecipe(String,String,String,String,String,int)")[2].split(String.valueOf(HostBridge.ARG));
+        assertEquals("plugintest:mix", fields[0]);
+        assertEquals("minecraft:potion", fields[1]);
+        assertEquals("minecraft:sugar", fields[2]);
+        assertEquals("minecraft:potion", fields[3]);
+        assertEquals("minecraft:swiftness", fields[4]);
+        assertEquals("1", fields[5]);
+        assertNotNull(FerriteRecipes.get(key("mix")));
+        assertTrue(FerriteRecipes.remove(key("mix")));
+        only("removeCraftingRecipe(String)");
+    }
+
     @Test void aRecipeKindTheHostCannotMatchIsRefused() {
         var transmute = new org.bukkit.inventory.TransmuteRecipe(key("transmute"), Material.STONE, new RecipeChoice.MaterialChoice(Material.DIRT), new RecipeChoice.MaterialChoice(Material.SAND));
         var refused = assertThrows(UnsupportedOperationException.class, () -> FerriteRecipes.add(transmute));
