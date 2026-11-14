@@ -168,7 +168,9 @@ impl EntityIndex {
         self.player_slots.get(&uuid).map(Vec::as_slice)
     }
 
-    /// Records a player's slot reading (used by `publish_player_slots` and by tests).
+    /// Records a player's slot reading for tests. Production reads go through
+    /// `publish_player_slots`, which writes the map directly.
+    #[cfg(test)]
     pub fn set_player_slots(&mut self, uuid: Uuid, held: Vec<(i16, u16)>) {
         self.player_slots.insert(uuid, held);
     }
