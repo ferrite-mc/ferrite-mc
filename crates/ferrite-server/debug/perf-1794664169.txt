@@ -1,4 +1,4 @@
 # Ferrite tick profile
-seconds: 0.028
+seconds: 0.039
 ticks: 0
 ticks_per_second: 0.00

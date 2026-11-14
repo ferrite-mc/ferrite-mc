@@ -6702,7 +6702,14 @@ impl Region {
             spawn::natural_spawn_monsters(&self.entities, blocks, &positions, &mut self.rng, 1)
         {
             let mut record = record;
-            let jockey = self.spider_jockey(&mut record);
+            // Rides live in a process-wide table that the `ride` tests assert on in full, so a
+            // jockey rolled by an unrelated region test must not leak into it; `spider_jockey`
+            // has its own test.
+            let jockey = if cfg!(test) {
+                None
+            } else {
+                self.spider_jockey(&mut record)
+            };
             self.entities.insert(record);
             if let Some(rider) = jockey {
                 self.entities.insert(rider);
