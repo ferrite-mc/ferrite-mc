@@ -1512,7 +1512,7 @@ fn chunk_window(
     let forget = loaded
         .iter()
         .copied()
-        .filter(|(x, z)| (x - center.0).abs() > radius || (z - center.1).abs() > radius)
+        .filter(|(x, z)| !super::chunk_level::in_view(x - center.0, z - center.1, radius))
         .collect();
     let mut new = Vec::new();
     for x in center.0 - radius..=center.0 + radius {
@@ -15300,6 +15300,52 @@ mod event_policy_tests {
         assert!(region.has_chunk_hold(chunk), "one viewer still sees it");
         region.release_chunk(chunk);
         assert!(!region.has_chunk_hold(chunk));
+    }
+
+    #[test]
+    fn the_view_window_is_the_vanilla_square_and_the_trailing_edge_goes_at_once() {
+        // `PlayerTicketTracker.haveTicketFor`: Chebyshev distance <= view distance.
+        let (forget, new) = chunk_window((0, 0), 4, &HashSet::new());
+        assert!(forget.is_empty());
+        assert_eq!(new.len(), 81, "(2 * 4 + 1)^2 chunks");
+        assert_eq!(
+            new[0],
+            (0, 0),
+            "nearest first, as the vanilla sender orders them"
+        );
+        let loaded: HashSet<(i32, i32)> = new.into_iter().collect();
+
+        // One chunk east: the west column leaves the square and the east column joins it, in
+        // the same update (`processUnloads` has no grace period).
+        let (mut forget, mut new) = chunk_window((1, 0), 4, &loaded);
+        forget.sort_unstable();
+        new.sort_unstable();
+        assert_eq!(forget, (-4..=4).map(|z| (-4, z)).collect::<Vec<_>>());
+        assert_eq!(new, (-4..=4).map(|z| (5, z)).collect::<Vec<_>>());
+
+        // A far teleport forgets everything that was loaded in one go.
+        let (forget, new) = chunk_window((100, 100), 4, &loaded);
+        assert_eq!(forget.len(), 81);
+        assert_eq!(new.len(), 81);
+    }
+
+    #[test]
+    fn releasing_every_hold_drops_the_chunk_in_the_same_call() {
+        let mut region = Region::default();
+        let chunks: Vec<_> = (0..4).map(|x| ChunkPos(x, 0)).collect();
+        for chunk in &chunks {
+            region.hold_chunk(*chunk);
+        }
+        for chunk in &chunks {
+            region.release_chunk(*chunk);
+            assert!(
+                !region.has_chunk_hold(*chunk),
+                "no grace period for {chunk:?}"
+            );
+        }
+        // Releasing a chunk nobody holds neither panics nor leaves an entry behind.
+        region.release_chunk(ChunkPos(9, 9));
+        assert!(region.held_chunk_counts().is_empty());
     }
 
     #[test]
