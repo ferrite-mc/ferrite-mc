@@ -57,21 +57,26 @@ server-side only.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
   hold their fuse out to seven blocks and skeletons strafe. Pathfinding and goal selection are
   still to be audited against vanilla for each affected mob; do not claim full parity.
-- Dragon: strafing, the perched scanning/attacking/flaming subphases, the purple teleport beam,
-  and the automatic 2400-tick gateway beam are implemented (`docs/end-dimension.md`). Remaining:
-  verify the subphase timings against the 26.3 jar, refuse gateway teleports while the beam
-  cooldown runs, and widen the outer-island search radius; real-client visuals remain unverified.
+- Dragon: the strafe phase, the gateway creation beam, the 2400-tick automatic beam and the
+  perched subphases are implemented. The perched timings were checked against the 26.3 jar
+  (scan 20×10, 25/100 ticks, roar 40, one cloud at tick 10 per 200-tick flame, four flames then
+  takeoff). Left: the give-up charge and attack turn, the outer-island radius and the
+  guarded-spike choice (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
-  bottle, wind charge, splash and lingering potion are in (`ferrite-entity/src/arrow.rs`), and the
-  fishing bobber is implemented (`ferrite-entity/src/bobber.rs`). A lingering cloud still applies
-  its effects to players (`potion::PotionCloud`) without sending an area-effect-cloud entity to
-  clients, so it is invisible, and mobs are not affected.
-- Shoulder parrot is bookkeeping only (`set/get/releaseShoulderEntity*`): no entity, no display.
+  bottle, wind charge, splash and lingering potion, and the fishing bobber are in
+  (`ferrite-entity/src/{arrow,bobber,potion}.rs`). A lingering cloud inserts a visible
+  `area_effect_cloud` entity and applies its effects to players **and** mobs; the cloud follows
+  region split/merge. Bobber casting, biting, hooking and reeling have region tests.
+- Shoulder parrot is a real state: the parrot entity is removed when picked up, its colour is
+  synched through player metadata, it survives reconnects in a sidecar save, and releasing it
+  recreates the parrot entity. Client rendering is unverified.
 - Structure entities: `Structure#getEntities()` returns the captured entities and non-empty
   `EntityTransformer` lists are applied at the transformed position (`CapturedStructure.java`).
   The default world, nether and end publish entity NBT under their own world ids
   (`plugins.rs::world_id`), so capture is no longer runtime-world-only.
-- Metadata breadth per entity type, attribute packets, passengers/vehicles beyond `/ride`.
+- Metadata breadth per entity type. Default attributes are now sent when a viewer starts
+  tracking a living entity; passengers on pairing start and the remaining per-type metadata are
+  still missing (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
 ## 3. Plugin API breadth
 

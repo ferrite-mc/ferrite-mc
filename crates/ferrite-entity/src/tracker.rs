@@ -22,9 +22,9 @@ use ferrite_math::Vec3;
 use ferrite_protocol::{
     Packet, VarInt, encode_packet,
     packets::play::{
-        AddEntity, EntityHeadRotation, EntityMove, EntityMoveRotation, EntityRotation,
-        EntityTeleport, RemoveEntities, SetEntityData, SetEntityLink, SetEntityMotion,
-        SetEquipment, TeleportEntity, UpdateMobEffect,
+        AddEntity, AttributeSnapshot, EntityHeadRotation, EntityMove, EntityMoveRotation,
+        EntityRotation, EntityTeleport, RemoveEntities, SetEntityData, SetEntityLink,
+        SetEntityMotion, SetEquipment, TeleportEntity, UpdateAttributes, UpdateMobEffect,
     },
     types::LpVec3,
 };
@@ -295,6 +295,18 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             }),
                         );
                     }
+                    // Vanilla `ServerEntity.sendPairingData` sends a living entity's syncable
+                    // attributes before its equipment.
+                    let attributes = default_attributes(data);
+                    if !attributes.is_empty() {
+                        sink(
+                            viewer.key,
+                            &encode(&UpdateAttributes {
+                                entity_id: VarInt(data.id),
+                                attributes,
+                            }),
+                        );
+                    }
                     // A viewer that starts tracking later still needs the entity's active
                     // effects; the trader's night invisibility is one of them.
                     for effect in data.effects.iter() {
@@ -395,6 +407,32 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
         send_changes(data, pos, vel, &mut flags, info, &present, sink);
         *store.flags_mut(key).unwrap() = flags;
     }
+}
+
+/// The syncable default attributes of a living entity. An equine's rolled movement speed and
+/// jump strength replace the type's defaults, as `AbstractHorse.randomizeAttributes` does.
+fn default_attributes(data: &crate::store::EntityData) -> Vec<AttributeSnapshot> {
+    let Some(state) = data.mob else {
+        return Vec::new();
+    };
+    ferrite_data::entity_props::get(data.kind)
+        .attributes
+        .iter()
+        .filter_map(|(name, base)| {
+            let attribute = ferrite_data::registries::id("minecraft:attribute", name)?;
+            let short = name.strip_prefix("minecraft:").unwrap_or(name);
+            let value = match short {
+                "movement_speed" if state.speed > 0.0 => f64::from(state.speed),
+                "jump_strength" if state.jump > 0.0 => f64::from(state.jump),
+                _ => *base,
+            };
+            Some(AttributeSnapshot {
+                attribute: VarInt(attribute),
+                base: value,
+                modifiers: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 /// Vanilla `ServerEntity.sendChanges`.
@@ -703,6 +741,59 @@ mod tests {
         // A short view distance caps the range; walking out of it removes the entity.
         let viewers = [viewer(near, 8.0, 48.0, 2, &chunks)];
         assert_eq!(ids(&tick(&mut store, &viewers)), [RemoveEntities::ID]);
+    }
+
+    #[test]
+    fn a_living_entity_sends_its_default_attributes_when_a_viewer_starts_tracking() {
+        let mut store = EntityStore::default();
+        let zombie = crate::mob::new_mob(
+            crate::mob::MobKind::Zombie,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut crate::Rng::new(1),
+        );
+        let entity_id = zombie.data.id;
+        store.insert(zombie);
+        let chunks = HashSet::from([(0, 0)]);
+        let viewers = [viewer((Uuid::from_u128(1), 0), 8.0, 8.0, 10, &chunks)];
+        let packets = tick(&mut store, &viewers);
+        let update = packets
+            .iter()
+            .find(|p| p.1 == UpdateAttributes::ID)
+            .expect("a living entity sends its attributes");
+        let update = UpdateAttributes::decode(&mut update.2.as_slice()).unwrap();
+        assert_eq!(update.entity_id.0, entity_id);
+        let health = update
+            .attributes
+            .iter()
+            .find(|attribute| {
+                Some(attribute.attribute.0)
+                    == ferrite_data::registries::id("minecraft:attribute", "minecraft:max_health")
+            })
+            .expect("max health");
+        assert!(
+            (health.base - 20.0).abs() < 1e-9,
+            "zombie health: {}",
+            health.base
+        );
+        assert!(
+            update
+                .attributes
+                .iter()
+                .any(|attribute| Some(attribute.attribute.0)
+                    == ferrite_data::registries::id(
+                        "minecraft:attribute",
+                        "minecraft:movement_speed"
+                    )),
+            "movement speed is synched"
+        );
+        // Items have no attributes, so they send no attribute packet.
+        let mut store = EntityStore::default();
+        spawn(&mut store, Vec3::new(8.0, 64.0, 8.0));
+        assert!(
+            tick(&mut store, &viewers)
+                .iter()
+                .all(|p| p.1 != UpdateAttributes::ID)
+        );
     }
 
     #[test]

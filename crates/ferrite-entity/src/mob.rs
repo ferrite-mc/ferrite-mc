@@ -26,6 +26,9 @@ pub const WOLF_ANGER_TICKS: u16 = 400;
 pub const ENDERMAN_ANGER_TICKS: u16 = 600;
 /// Ticks a passive mob flees after being hurt (vanilla panic goal duration is 100-200).
 pub const PANIC_TICKS: u16 = 100;
+/// Vanilla `Chicken` waits 6000 to 11999 ticks between eggs.
+pub const CHICKEN_EGG_MIN: u32 = 6000;
+pub const CHICKEN_EGG_SPAN: i32 = 6000;
 
 /// The mobs this server knows how to simulate: the first passive animals and the hostile
 /// monsters of the overworld.
@@ -290,6 +293,8 @@ pub struct MobState {
     pub dragon_phase: crate::dragon::DragonPhase,
     /// Ticks spent in [`Self::dragon_phase`].
     pub dragon_phase_ticks: u32,
+    /// Flaming phases the perched dragon has finished (`DragonSittingFlamingPhase.flameCount`).
+    pub perch_flames: u8,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -308,6 +313,8 @@ pub struct MobState {
     pub swell: u16,
     /// Ticks until the skeleton's next arrow.
     pub bow_timer: u16,
+    /// Ticks until a chicken lays its next egg (`Chicken.eggTime`); zero for other kinds.
+    pub egg_time: u32,
     /// Path waypoints as block positions (`PathNavigation.getPath`).
     pub path: [[i32; 3]; crate::path::MAX_PATH],
     pub path_len: u8,
@@ -370,6 +377,7 @@ impl MobState {
             wander_timer: 0,
             dragon_phase: crate::dragon::DragonPhase::Holding,
             dragon_phase_ticks: 0,
+            perch_flames: 0,
             wander_yaw: 0.0,
             moving: false,
             target: None,
@@ -379,6 +387,7 @@ impl MobState {
             panic_from: None,
             swell: 0,
             bow_timer: 0,
+            egg_time: 0,
             path: [[0; 3]; crate::path::MAX_PATH],
             path_len: 0,
             path_index: 0,
@@ -433,6 +442,11 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     );
     data.yaw = rng.next_f32() * 360.0;
     data.mob = Some(MobState::new(kind));
+    if kind == MobKind::Chicken
+        && let Some(mob) = data.mob.as_mut()
+    {
+        mob.egg_time = CHICKEN_EGG_MIN + rng.next_int(CHICKEN_EGG_SPAN) as u32;
+    }
     if kind.is_animal()
         && let Some(state) = data.mob.as_ref()
     {

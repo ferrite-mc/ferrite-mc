@@ -702,6 +702,12 @@ impl GatewayBeam {
         self.cooldown > 0
     }
 
+    /// Vanilla `EndGatewayBlock.entityInside` refuses a teleport only while the purple beam's
+    /// cooldown runs; the creation beam does not block it.
+    pub const fn accepts_teleport(&self) -> bool {
+        !self.is_cooling_down()
+    }
+
     /// Vanilla `serverTick`: advances the age, runs the beam down, and starts a beam when the
     /// age reaches a multiple of 2400 while none is running. `true` on the tick the beam starts.
     pub fn tick(&mut self) -> bool {
@@ -895,6 +901,21 @@ mod tests {
         assert_eq!(highest_solid(|_| Some(0)), None);
         assert_eq!(podium_floor(|_| Some(0)), Some(63));
         assert_eq!(highest_solid(|y| Some(u32::from(y <= 70))), Some(70));
+    }
+
+    #[test]
+    fn a_gateway_refuses_teleports_while_its_cooldown_runs() {
+        let mut beam = GatewayBeam::new(GATEWAY_SPAWN_TICKS);
+        assert!(beam.accepts_teleport(), "an open gateway takes a player");
+        assert!(beam.trigger());
+        assert!(
+            !beam.accepts_teleport(),
+            "the purple beam blocks the next trip"
+        );
+        for _ in 0..GATEWAY_BEAM_TICKS {
+            beam.tick();
+        }
+        assert!(beam.accepts_teleport(), "the cooldown finished");
     }
 
     #[test]
