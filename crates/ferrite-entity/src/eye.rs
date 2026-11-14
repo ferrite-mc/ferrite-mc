@@ -62,24 +62,26 @@ pub fn aim(from: Vec3, target: Vec3) -> Vec3 {
     }
 }
 
-/// One tick of the velocity (vanilla `EyeOfEnder.tick`).
-pub fn steer(pos: Vec3, vel: Vec3, target: Vec3) -> Vec3 {
-    let (dx, dz) = (target.x - pos.x, target.z - pos.z);
-    let horizontal = (dx * dx + dz * dz).sqrt();
-    let angle = dz.atan2(dx);
+/// One tick of motion (vanilla `EyeOfEnder.tick` + `updateDeltaMovement`): the eye first moves by
+/// its current velocity, and the new velocity is then computed from the *new* position.
+/// Returns `(new position, new velocity)`.
+pub fn step(pos: Vec3, vel: Vec3, target: Vec3) -> (Vec3, Vec3) {
+    let next = Vec3::new(pos.x + vel.x, pos.y + vel.y, pos.z + vel.z);
+    let (dx, dz) = (target.x - next.x, target.z - next.z);
+    let distance = (dx * dx + dz * dz).sqrt();
     let current = (vel.x * vel.x + vel.z * vel.z).sqrt();
-    let mut speed = current + (horizontal - current) * 0.0025;
+    // `Mth.lerp(0.0025, horizontal speed, distance)`.
+    let mut speed = current + (distance - current) * 0.0025;
     let mut y = vel.y;
-    if horizontal < 1.0 {
+    if distance < 1.0 {
         speed *= 0.8;
         y *= 0.8;
     }
+    // Vanilla compares `newPos.y - delta.y` (the old height) with the target's.
     let up = if pos.y < target.y { 1.0 } else { -1.0 };
-    Vec3::new(
-        angle.cos() * speed,
-        y + (up - y) * 0.015,
-        angle.sin() * speed,
-    )
+    let scale = if distance > 0.0 { speed / distance } else { 0.0 };
+    let vel = Vec3::new(dx * scale, y + (up - y) * 0.015, dz * scale);
+    (next, vel)
 }
 
 /// A finished eye.
@@ -141,9 +143,9 @@ pub fn tick_eyes(store: &mut EntityStore) -> Vec<Ended> {
             continue;
         }
         let pos = store.pos(key).unwrap_or_default();
-        let vel = steer(pos, store.vel(key).unwrap_or_default(), target);
+        let (next, vel) = step(pos, store.vel(key).unwrap_or_default(), target);
         store.set_vel(key, vel);
-        store.set_pos(key, Vec3::new(pos.x + vel.x, pos.y + vel.y, pos.z + vel.z));
+        store.set_pos(key, next);
         let data = store.data_mut(key).unwrap();
         data.tick_count += 1;
         let state = data.eye.as_mut().unwrap();
@@ -195,6 +197,25 @@ mod tests {
         assert_eq!(tick, LIFETIME + 1);
         assert_eq!(found.drops, survives);
         assert!(found.pos.x > 0.5, "it moved toward +x: {:?}", found.pos);
+    }
+
+    /// Regression: the eye moved by the velocity it had just computed, one tick ahead of vanilla,
+    /// which moves by the old velocity and steers from the new position.
+    #[test]
+    fn the_eye_moves_by_its_old_velocity_then_steers_from_the_new_position() {
+        let pos = Vec3::new(0.0, 70.0, 0.0);
+        let vel = Vec3::new(0.5, 0.0, 0.0);
+        let target = Vec3::new(10.0, 60.0, 0.0);
+        let (next, new_vel) = step(pos, vel, target);
+        assert_eq!(next, Vec3::new(0.5, 70.0, 0.0));
+        // lerp(0.0025, 0.5, 9.5) = 0.5225, along +x; the target is below, so y eases toward -1.
+        assert!((new_vel.x - 0.5225).abs() < 1e-9, "{new_vel:?}");
+        assert!((new_vel.y + 0.015).abs() < 1e-9, "{new_vel:?}");
+        assert_eq!(new_vel.z, 0.0);
+        // Within a block of the target both the horizontal speed and the climb are damped by 0.8.
+        let (_, near) = step(Vec3::new(9.2, 60.0, 0.0), Vec3::new(0.0, 0.5, 0.0), target);
+        // The old height (60) is not below the target's (60), so it eases toward -1.
+        assert!((near.y - (0.4 + (-1.0 - 0.4) * 0.015)).abs() < 1e-9, "{near:?}");
     }
 
     #[test]
