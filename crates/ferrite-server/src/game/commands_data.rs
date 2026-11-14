@@ -1151,4 +1151,78 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("nope"), "{error}");
     }
+
+    /// The provider arguments are real tree nodes: the int and float registries differ, a
+    /// provider is required, and `block`/`entity`/`default` each take both kinds.
+    #[test]
+    fn compute_provider_arguments_are_tree_nodes() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        let run = |command: &str| tree.execute(command, source.clone());
+        for command in [
+            "data modify storage p a set compute default integer 5",
+            "data modify storage p a set compute default float 5.5",
+            "data modify storage p a set compute default integer {type:\"minecraft:div\",left:8,right:2}",
+        ] {
+            run(command).unwrap_or_else(|error| panic!("{command}: {error}"));
+        }
+        // Missing provider, unknown kind and an unknown registry id are refused.
+        assert!(run("data modify storage p a set compute default integer").is_err());
+        assert!(run("data modify storage p a set compute default long 5").is_err());
+        // An int provider takes whole numbers only; a float provider takes both.
+        assert!(run("data modify storage p a set compute default integer 5.5").is_err());
+        assert!(run("data modify storage p a set compute default integer minecraft:nope").is_err());
+        // A provider with no value in this context is vanilla's `commands.compute.failed`.
+        let error =
+            run("data modify storage p a set compute default integer {type:\"minecraft:nope\"}")
+                .unwrap_err();
+        assert!(error.to_string().contains("nope"), "{error}");
+        let state = source.state.lock().unwrap();
+        let text = snbt::format(state.storage.get("minecraft:p").unwrap());
+        assert_eq!(text, "{a:4}", "the last accepted command wrote an int");
+    }
+
+    /// `data modify block ... compute block <pos>`: the provider reads the block at `<pos>` and the
+    /// evaluated number lands in the block entity's NBT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modify_block_entity_with_a_computed_value() {
+        let tree = super::super::commands::dispatcher();
+        let (mut source, mut received) = source();
+        let world = crate::game::anvil::AnvilChunkSource::new_memory();
+        while world.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let state = |name: &str| u32::from(ferrite_data::blocks::default_state(name).unwrap());
+        world
+            .set_block(2, 200, 0, state("minecraft:furnace"))
+            .unwrap();
+        world
+            .set_block(3, 200, 0, state("minecraft:stone"))
+            .unwrap();
+        world
+            .update_block_entity(2, 200, 0, |entity| {
+                *entity = Some(ferrite_world::BlockEntity {
+                    type_id: 0,
+                    data: Compound::new(),
+                });
+                (true, ())
+            })
+            .unwrap();
+        source.world = Some(world.clone());
+        let provider = r#"{type:"minecraft:conditional",condition:{type:"minecraft:match_block",blocks:["minecraft:furnace"]},on_true:200,on_false:1}"#;
+        for (at, path) in [(2, "BurnTime"), (3, "Other")] {
+            tree.execute(
+                &format!("data modify block 2 200 0 {path} set compute block {at} 200 0 integer {provider}"),
+                source.clone(),
+            )
+            .unwrap();
+            let Some(Action::Data(command)) = received.recv().await else {
+                panic!("expected a block data action");
+            };
+            apply_block(Some(world.as_ref()), &command).unwrap();
+        }
+        let data = world.block_entity(2, 200, 0).unwrap().data;
+        assert_eq!(data.get("BurnTime"), Some(&Tag::Int(200)), "{data:?}");
+        assert_eq!(data.get("Other"), Some(&Tag::Int(1)), "{data:?}");
+    }
 }

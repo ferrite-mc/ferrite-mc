@@ -136,7 +136,14 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 - `/data`: entity data covers players only (a non-player entity is a blocker: the snapshot does
   not carry NBT). `data modify ... compute block|entity|default float|integer <provider>` evaluates
   the provider (id or inline SNBT) via `commands_late::provider_value`; test
-  `modify_compute_stores_the_provider_value`. `data get` numeric rules follow
+  `modify_compute_stores_the_provider_value`. Checked 2026-11-14: the provider arguments are tree
+  nodes (`minecraft:context_int_provider`/`context_float_provider`, no allow-list entry remains),
+  a bare number is a constant (an int provider takes whole numbers only; this used to fail as
+  `Unknown ID: minecraft:5`), and every form is evaluated in tests (`every_provider_form_evaluates`:
+  constant, conditional, div, number_dispatcher, weighted_list, match_block with `state`,
+  inverted, all_of, any_of; `the_entity_context_gives_providers_type_and_position` covers
+  `entity_properties`), plus `compute_provider_arguments_are_tree_nodes` and the block-entity
+  end-to-end `modify_block_entity_with_a_computed_value`. `data get` numeric rules follow
   vanilla's `getData`/`getNumeric` as remembered; the `%.2f` scale rendering is unverified.
 - `/scoreboard`: `objectives modify displayautoupdate|numberformat` and `players display
   name|numberformat` store their state (`MoreState`), send vanilla's feedback and resend

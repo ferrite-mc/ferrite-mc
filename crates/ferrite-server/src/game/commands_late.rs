@@ -293,6 +293,18 @@ fn facts_of(entity: &super::selectors::SelectedEntity) -> EntityFacts {
 /// or an inline SNBT/JSON compound.
 fn provider_json(raw: &str, kind: &str) -> Result<Value, CommandError> {
     let raw = raw.trim();
+    // A bare number is a constant provider (an int provider takes whole numbers only).
+    if kind == "context_int_provider"
+        && let Ok(value) = raw.parse::<i64>()
+    {
+        return Ok(Value::from(value));
+    }
+    if kind == "context_float_provider"
+        && let Ok(value) = raw.parse::<f64>()
+        && value.is_finite()
+    {
+        return Ok(Value::from(value));
+    }
     if raw.starts_with('{') {
         let tag = ferrite_nbt::snbt::parse(raw)
             .map_err(|error| CommandError::failed(format!("Invalid provider: {error}")))?;
@@ -751,6 +763,86 @@ mod tests {
         let weighted =
             r#"{"type":"minecraft:weighted_list","distribution":[{"data":1,"weight":1}]}"#;
         assert_eq!(run(weighted, kind, None), Some(1.0));
+    }
+
+    /// Every provider form `/compute` and `data modify ... compute` accept, int and float.
+    #[test]
+    fn every_provider_form_evaluates() {
+        for kind in ["context_int_provider", "context_float_provider"] {
+            // constant, with and without the wrapper object
+            assert_eq!(run("3", kind, None), Some(3.0));
+            assert_eq!(
+                run(r#"{"type":"minecraft:constant","value":4}"#, kind, None),
+                Some(4.0)
+            );
+            // conditional on a block, with the vanilla `state` property filter
+            let conditional = r#"{"type":"minecraft:conditional","condition":{
+                "type":"minecraft:match_block","blocks":"minecraft:furnace","state":{"lit":"true"}},
+                "on_true":10,"on_false":20}"#;
+            let lit = Context {
+                block: Some((
+                    "minecraft:furnace".into(),
+                    vec![("lit".into(), "true".into())],
+                )),
+                ..Context::default()
+            };
+            let unlit = Context {
+                block: Some((
+                    "minecraft:furnace".into(),
+                    vec![("lit".into(), "false".into())],
+                )),
+                ..Context::default()
+            };
+            let eval = |json: &str, ctx: &Context, roll: u64| {
+                let mut rng = move |bound: u64| roll % bound;
+                evaluate(&serde_json::from_str(json).unwrap(), kind, ctx, &mut rng, 0)
+            };
+            assert_eq!(eval(conditional, &lit, 0), Some(10.0));
+            assert_eq!(eval(conditional, &unlit, 0), Some(20.0));
+            assert_eq!(eval(conditional, &Context::default(), 0), Some(20.0));
+            // div, including vanilla-style division by zero giving 0 rather than a failure
+            let div =
+                |l: &str, r: &str| format!(r#"{{"type":"minecraft:div","left":{l},"right":{r}}}"#);
+            assert_eq!(eval(&div("9", "3"), &lit, 0), Some(3.0));
+            assert_eq!(eval(&div("1", "0"), &lit, 0), Some(0.0));
+            // number_dispatcher: the first matching case wins, `default` otherwise
+            let dispatcher = r#"{"type":"minecraft:number_dispatcher","cases":[
+                {"condition":{"type":"minecraft:match_block","blocks":["minecraft:stone"]},"value":1},
+                {"condition":{"type":"minecraft:match_block","blocks":["minecraft:furnace"]},"value":2}],
+                "default":9}"#;
+            assert_eq!(eval(dispatcher, &lit, 0), Some(2.0));
+            assert_eq!(eval(dispatcher, &Context::default(), 0), Some(9.0));
+            // weighted_list: the roll picks the entry whose weight range holds it
+            let weighted = r#"{"type":"minecraft:weighted_list","distribution":[
+                {"data":5,"weight":1},{"data":6,"weight":3}]}"#;
+            assert_eq!(eval(weighted, &lit, 0), Some(5.0));
+            assert_eq!(eval(weighted, &lit, 1), Some(6.0));
+            assert_eq!(eval(weighted, &lit, 3), Some(6.0));
+            let empty = r#"{"type":"minecraft:weighted_list","distribution":[]}"#;
+            assert_eq!(eval(empty, &lit, 0), None);
+            // inverted, all_of and any_of nest and combine
+            let combined = |condition: &str| {
+                format!(
+                    r#"{{"type":"minecraft:conditional","condition":{condition},"on_true":1,"on_false":0}}"#
+                )
+            };
+            let furnace = r#"{"type":"minecraft:match_block","blocks":["minecraft:furnace"]}"#;
+            let stone = r#"{"type":"minecraft:match_block","blocks":["minecraft:stone"]}"#;
+            let inverted = combined(&format!(
+                r#"{{"type":"minecraft:inverted","term":{stone}}}"#
+            ));
+            assert_eq!(eval(&inverted, &lit, 0), Some(1.0));
+            let all = combined(&format!(
+                r#"{{"type":"minecraft:all_of","terms":[{furnace},{stone}]}}"#
+            ));
+            assert_eq!(eval(&all, &lit, 0), Some(0.0));
+            let any = combined(&format!(
+                r#"{{"type":"minecraft:any_of","terms":[{stone},{furnace}]}}"#
+            ));
+            assert_eq!(eval(&any, &lit, 0), Some(1.0));
+            // an unknown provider type has no value (the command reports compute.failed)
+            assert_eq!(eval(r#"{"type":"minecraft:nope"}"#, &lit, 0), None);
+        }
     }
 
     #[test]
