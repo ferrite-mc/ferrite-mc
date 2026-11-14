@@ -166,6 +166,181 @@ fn leaves_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
     }
 }
 
+/// Vanilla `VineBlock` (26.3 jar) random tick. One try in four picks a random direction. A
+/// horizontal face spreads onto a full support or grows down by copying random faces; `up`
+/// either attaches to the block above or, when that cell is empty, spreads a random subset of
+/// the current faces upward. `spread_vines` is not modelled; the vanilla default is true.
+fn vine_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    if rng.next_int(4) != 0 {
+        return;
+    }
+    const DIRECTIONS: [((i32, i32, i32), &str); 6] = [
+        ((0, -1, 0), "down"),
+        ((0, 1, 0), "up"),
+        ((0, 0, -1), "north"),
+        ((0, 0, 1), "south"),
+        ((-1, 0, 0), "west"),
+        ((1, 0, 0), "east"),
+    ];
+    let ((dx, dy, dz), dir) = DIRECTIONS[rng.next_int(6) as usize];
+    if dir == "down" {
+        if p.1 <= MIN_WORLD_Y {
+            return;
+        }
+        let below = (p.0, p.1 - 1, p.2);
+        let below_state = world.block(below);
+        if named(below_state, "air") || named(below_state, "vine") {
+            let source = if named(below_state, "air") {
+                default_block("vine")
+            } else {
+                below_state
+            };
+            let copied = vine_copy_random_faces(state, source, rng);
+            if copied != source && vine_has_horizontal(copied) {
+                world.set_block(below, copied);
+            }
+        }
+        return;
+    }
+    if dir == "up" {
+        if p.1 >= MAX_WORLD_Y {
+            return;
+        }
+        if vine_supports(world, (p.0, p.1 + 1, p.2)) {
+            if let Some(next) = with_property(state, "up", "true") {
+                world.set_block(p, next);
+            }
+            return;
+        }
+        let above = (p.0, p.1 + 1, p.2);
+        if named(world.block(above), "air") && vine_can_spread(world, p) {
+            let mut next = default_block("vine");
+            for (face, (fx, fz)) in VINE_HORIZONTAL {
+                let neighbour = (above.0 + fx, above.1, above.2 + fz);
+                if (rng.next_int(2) == 0 || !vine_supports(world, neighbour))
+                    && let Some(cleared) = with_property(next, face, "false")
+                {
+                    next = cleared;
+                }
+            }
+            if vine_has_horizontal(next) {
+                world.set_block(above, next);
+            }
+        }
+        return;
+    }
+    if property(state, dir, "true") || !vine_can_spread(world, p) {
+        return;
+    }
+    let target = (p.0 + dx, p.1 + dy, p.2 + dz);
+    if !named(world.block(target), "air") {
+        if vine_supports(world, target)
+            && let Some(next) = with_property(state, dir, "true")
+        {
+            world.set_block(p, next);
+        }
+        return;
+    }
+    let (clock, counter) = vine_clockwise(dir);
+    let (cdx, cdz) = vine_delta(clock);
+    let (ccdx, ccdz) = vine_delta(counter);
+    let has_clock = property(state, clock, "true");
+    let has_counter = property(state, counter, "true");
+    if has_clock && vine_supports(world, (target.0 + cdx, target.1, target.2 + cdz)) {
+        if let Some(next) = with_property(default_block("vine"), clock, "true") {
+            world.set_block(target, next);
+        }
+    } else if has_counter && vine_supports(world, (target.0 + ccdx, target.1, target.2 + ccdz)) {
+        if let Some(next) = with_property(default_block("vine"), counter, "true") {
+            world.set_block(target, next);
+        }
+    } else if rng.next_f32() < 0.05
+        && vine_supports(world, (target.0, target.1 + 1, target.2))
+        && let Some(next) = with_property(default_block("vine"), "up", "true")
+    {
+        world.set_block(target, next);
+    }
+}
+
+const VINE_HORIZONTAL: [(&str, (i32, i32)); 4] = [
+    ("north", (0, -1)),
+    ("east", (1, 0)),
+    ("south", (0, 1)),
+    ("west", (-1, 0)),
+];
+const MIN_WORLD_Y: i32 = -64;
+const MAX_WORLD_Y: i32 = 319;
+
+fn vine_has_horizontal(state: u32) -> bool {
+    VINE_HORIZONTAL
+        .iter()
+        .any(|(face, _)| property(state, face, "true"))
+}
+
+fn vine_copy_random_faces(from: u32, to: u32, rng: &mut Rng) -> u32 {
+    let mut out = to;
+    for (face, _) in VINE_HORIZONTAL {
+        if rng.next_int(2) == 0
+            && property(from, face, "true")
+            && let Some(next) = with_property(out, face, "true")
+        {
+            out = next;
+        }
+    }
+    out
+}
+
+fn vine_can_spread(world: &dyn RandomWorld, p: Pos) -> bool {
+    let mut count = 0;
+    for dx in -4..=4 {
+        for dy in -1..=1 {
+            for dz in -4..=4 {
+                if named(world.block((p.0 + dx, p.1 + dy, p.2 + dz)), "vine") {
+                    count += 1;
+                    if count > 4 {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The subset of vanilla `MultifaceBlock.canAttachTo` this block model can answer: a full
+/// collision/occlusion block supports a vine face. Slabs, stairs and fences are not modelled.
+fn vine_supports(world: &dyn RandomWorld, p: Pos) -> bool {
+    let state = world.block(p);
+    if named(state, "air") || named(state, "vine") {
+        return false;
+    }
+    let Ok(state) = u16::try_from(state) else {
+        return false;
+    };
+    let props = ferrite_data::block_props::get(state);
+    props.full_collision || props.full_occlusion
+}
+
+fn vine_clockwise(face: &str) -> (&'static str, &'static str) {
+    match face {
+        "north" => ("east", "west"),
+        "east" => ("south", "north"),
+        "south" => ("west", "east"),
+        "west" => ("north", "south"),
+        _ => ("north", "south"),
+    }
+}
+
+fn vine_delta(face: &str) -> (i32, i32) {
+    match face {
+        "north" => (0, -1),
+        "east" => (1, 0),
+        "south" => (0, 1),
+        "west" => (-1, 0),
+        _ => (0, 0),
+    }
+}
+
 fn property_value(state: u32, key: &str) -> Option<&'static str> {
     state_name(state)?
         .1
@@ -353,39 +528,80 @@ fn stalk_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
     }
 }
 
-/// Vanilla `BambooStalkBlock.randomTick`: only a stage-0 stalk grows. The 26.3 state report has
-/// bamboo ages 0 and 1, so age 1 places a new stalk above and resets the age; a column is capped
-/// at sixteen blocks.
-fn bamboo_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
-    if property(state, "stage", "1") {
+/// Vanilla `BambooStalkBlock.randomTick` (26.3 jar): only a stage-0 stalk tries, one in three,
+/// into an empty lit cell, and only below the 16-block cap. `growBamboo` places the new tip with
+/// the leaves and stage that the height and the two blocks below it select.
+fn bamboo_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    if property(state, "stage", "1") || rng.next_int(3) != 0 {
         return;
     }
     let above = (p.0, p.1 + 1, p.2);
-    if !named(world.block(above), "air") {
+    if !named(world.block(above), "air") || world.brightness(above) < 9 {
         return;
     }
-    let height = column_height(world, p, &["bamboo", "bamboo_sapling"], 16);
+    let height = column_height(world, p, &["bamboo"], 16);
     if height >= 16 {
         return;
     }
-    if age(state) >= 1 {
-        // The vanilla default state of bamboo is the stage-1 shoot; a stalk that random ticks
-        // must be stage 0, or it would never grow.
-        if let Some(stalk) = bamboo_stalk(0) {
-            world.set_block(above, stalk);
+    grow_bamboo(world, p, state, rng, height);
+}
+
+/// Vanilla `BambooStalkBlock.growBamboo`: the new tip's `leaves` is `large` when the stalk below
+/// already has leaves, `small` when it is the first leafy tip, and `none` at the base. A second
+/// leafy tip rewrites the two blocks below to `small`/`none` so the leaves stay on the top pair.
+fn grow_bamboo(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng, height: u32) {
+    let below_pos = (p.0, p.1 - 1, p.2);
+    let below2_pos = (p.0, p.1 - 2, p.2);
+    let below = world.block(below_pos);
+    let below2 = world.block(below2_pos);
+    let mut leaves = "none";
+    if height >= 1 {
+        if named(below, "bamboo") && !property(below, "leaves", "none") {
+            leaves = "large";
+            if named(below2, "bamboo") {
+                if let Some(small) = with_property(below, "leaves", "small") {
+                    world.set_block(below_pos, small);
+                }
+                if let Some(none) = with_property(below2, "leaves", "none") {
+                    world.set_block(below2_pos, none);
+                }
+            }
+        } else {
+            leaves = "small";
         }
-        if let Some(reset) = with_age(state, 0) {
-            world.set_block(p, reset);
-        }
-    } else if let Some(next) = with_age(state, age(state) + 1) {
-        world.set_block(p, next);
+    }
+    let age = if property(state, "age", "1") || named(below2, "bamboo") {
+        1
+    } else {
+        0
+    };
+    let stage = if (height >= 11 && rng.next_f32() < 0.25) || height == 15 {
+        1
+    } else {
+        0
+    };
+    if let Some(next) = bamboo_state(age, leaves, stage) {
+        world.set_block((p.0, p.1 + 1, p.2), next);
     }
 }
 
-fn bamboo_stalk(age: u32) -> Option<u32> {
+fn bamboo_state(age: u32, leaves: &str, stage: u32) -> Option<u32> {
     let age = age.to_string();
-    ferrite_data::blocks::state_id("bamboo", &[("age", age.as_str()), ("stage", "0")])
-        .map(u32::from)
+    let stage = stage.to_string();
+    ferrite_data::blocks::state_id(
+        "bamboo",
+        &[
+            ("age", age.as_str()),
+            ("leaves", leaves),
+            ("stage", stage.as_str()),
+        ],
+    )
+    .map(u32::from)
+}
+
+#[cfg(test)]
+fn bamboo_stalk(age: u32) -> Option<u32> {
+    bamboo_state(age, "none", 0)
 }
 
 /// Number of blocks in the column below `p` (including `p`) that are one of `names`.
@@ -501,13 +717,17 @@ fn pitcher_crop_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut 
         world.set_block(p, lower);
     }
     let next_age = next.to_string();
-    if next >= 3
-        && let Some(upper) = ferrite_data::blocks::state_id(
-            "pitcher_crop",
-            &[("age", next_age.as_str()), ("half", "upper")],
-        )
-    {
-        world.set_block((p.0, p.1 + 1, p.2), u32::from(upper));
+    if next >= 3 {
+        let above = (p.0, p.1 + 1, p.2);
+        let above_state = world.block(above);
+        if (named(above_state, "air") || named(above_state, "pitcher_crop"))
+            && let Some(upper) = ferrite_data::blocks::state_id(
+                "pitcher_crop",
+                &[("age", next_age.as_str()), ("half", "upper")],
+            )
+        {
+            world.set_block(above, u32::from(upper));
+        }
     }
 }
 
@@ -550,6 +770,8 @@ fn handlers() -> &'static HashMap<u32, Handler> {
                     stem_tick
                 } else if named(state, "pitcher_crop") {
                     pitcher_crop_tick
+                } else if named(state, "vine") {
+                    vine_tick
                 } else if state_name(state).is_some_and(|(name, _)| {
                     ferrite_data::tags::contains("block", "minecraft:saplings", name)
                 }) {
@@ -912,24 +1134,56 @@ mod tests {
         grid.set_block(p, bamboo_stalk(0).unwrap());
         let mut rng = Rng::new(1);
         let mut top = 0;
-        for _ in 0..400 {
+        // Vanilla tries once in three, so 400 calls are not enough for 15 growth steps.
+        for _ in 0..4000 {
             while named(grid.block((0, top + 1, 0)), "bamboo") {
                 top += 1;
             }
             let state = grid.block((0, top, 0));
             bamboo_tick(&mut grid, (0, top, 0), state, &mut rng);
         }
-        assert_eq!(column_height(&grid, (0, top, 0), &["bamboo"], 20), 16);
+        let height = column_height(&grid, (0, top, 0), &["bamboo"], 20);
+        // `growBamboo` gives a 25% chance of stage 1 at heights 11..=14, so a particular stalk
+        // may stop before 16; the hard cap is still 16.
+        assert!((11..=16).contains(&height), "bamboo height: {height}");
+        assert!(
+            property(grid.block((0, top, 0)), "stage", "1"),
+            "the stalk stopped only because its tip reached stage 1"
+        );
         // A stage-1 stalk is a finished shoot and is not grown by random ticks.
         let full = ferrite_data::blocks::state_id(
             "bamboo",
             &[("age", "0"), ("leaves", "large"), ("stage", "1")],
         )
         .unwrap();
-        let high = top + 4;
+        let high = 20;
         grid.set_block((0, high, 0), u32::from(full));
         bamboo_tick(&mut grid, (0, high, 0), u32::from(full), &mut rng);
         assert_eq!(grid.block((0, high + 1, 0)), super::tests::state("air"));
+        // The hard cap: a stage-0 tip at height 16 cannot place a seventeenth block.
+        let mut capped = growth_grid();
+        for y in 0..16 {
+            capped.set_block((0, y, 0), bamboo_stalk(0).unwrap());
+        }
+        let tip = capped.block((0, 15, 0));
+        bamboo_tick(&mut capped, (0, 15, 0), tip, &mut rng);
+        assert_eq!(capped.block((0, 16, 0)), super::tests::state("air"));
+    }
+
+    #[test]
+    fn bamboo_leaves_move_to_the_new_tip() {
+        let mut grid = growth_grid();
+        let mut rng = Rng::new(4);
+        let base = bamboo_state(0, "none", 0).unwrap();
+        let small = bamboo_state(0, "small", 0).unwrap();
+        let tip = bamboo_state(0, "none", 0).unwrap();
+        grid.set_block((0, 0, 0), base);
+        grid.set_block((0, 1, 0), small);
+        grid.set_block((0, 2, 0), tip);
+        grow_bamboo(&mut grid, (0, 2, 0), tip, &mut rng, 3);
+        assert!(property(grid.block((0, 3, 0)), "leaves", "large"));
+        assert!(property(grid.block((0, 1, 0)), "leaves", "small"));
+        assert!(property(grid.block((0, 0, 0)), "leaves", "none"));
     }
 
     #[test]
@@ -1006,6 +1260,30 @@ mod tests {
     }
 
     #[test]
+    fn a_vine_spreads_down_a_wall_and_keeps_its_face() {
+        let mut grid = growth_grid();
+        let p = (0, 0, 0);
+        let vine = u32::from(
+            ferrite_data::blocks::state_id("vine", &[("north", "true")]).expect("vanilla vine"),
+        );
+        grid.set_block(p, vine);
+        grid.set_block((0, 0, -1), state("stone"));
+        let mut rng = Rng::new(2);
+        for _ in 0..5000 {
+            let current = grid.block(p);
+            vine_tick(&mut grid, p, current, &mut rng);
+            if named(grid.block((0, -1, 0)), "vine") {
+                break;
+            }
+        }
+        let below = grid.block((0, -1, 0));
+        assert!(named(below, "vine"), "the vine did not grow down");
+        assert!(property(below, "north", "true"), "the copied face was lost");
+        assert!(vine_supports(&grid, (0, 0, -1)));
+        assert!(!vine_supports(&grid, (0, 1, 0)));
+    }
+
+    #[test]
     fn a_sapling_advances_one_stage_in_light() {
         let mut grid = growth_grid();
         let p = (0, 0, 0);
@@ -1035,5 +1313,9 @@ mod tests {
         ] {
             assert!(handlers().contains_key(&state), "no handler for {state}");
         }
+        assert!(
+            handlers().contains_key(&state("vine")),
+            "vine random ticks are registered"
+        );
     }
 }

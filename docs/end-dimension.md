@@ -182,10 +182,10 @@ What works, how it is built, and what is still missing.
 
 ## Remaining gaps
 
-- **Perched gaps.** The timings above are jar-checked, but vanilla's scanning dragon can charge
-  a player within 150 blocks when it gives up instead of always taking off, and its attack turns
-  toward the player; neither is modelled. The breath cloud is placed below the perch rather than
-  at the head's aim point. The dragon smashes every block in its body except
+- **Perched gaps.** The perched timings, scan give-up charge and charge slope/recovery are now
+  jar-checked against 26.3 (see the current section above). Remaining approximations are the head
+  position used for the breath aim, the flat 3 magic damage instead of the cloud's mob effect, and
+  unverified client motion. The dragon smashes every block in its body except
   `#minecraft:dragon_immune`.
 - **Gateway beam.** A gateway now refuses a teleport while its 40-tick purple-beam cooldown
   runs, like `EndGatewayBlock.entityInside`; the creation beam does not block it. The 200-tick
