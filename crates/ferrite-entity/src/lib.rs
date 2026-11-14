@@ -45,6 +45,7 @@ pub mod sheep;
 pub mod shoulder;
 pub mod spawn;
 mod store;
+pub mod sun;
 pub mod tame;
 pub mod tnt;
 pub mod tracker;

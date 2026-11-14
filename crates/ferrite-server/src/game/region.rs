@@ -6395,6 +6395,14 @@ impl Region {
             hard: ctx.state.lock().unwrap().difficulty == 3,
             gazes: super::targeting::gazes(),
             raining: ctx.raining,
+            // Daylight only exists in the overworld; the Nether and End have none.
+            monsters_burn: ctx.dimension == super::Dimension::Overworld,
+            griefing: ctx
+                .rules
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_bool("mob_griefing")
+                .unwrap_or(true),
         };
         let targets: Vec<_> = players
             .iter()
@@ -6524,6 +6532,10 @@ impl Region {
                         .push(ferrite_entity::dragon::BreathCloud::perched(pos));
                 }
                 ai::MobEvent::EatBlock { at, grass } => self.eat_block(ctx, at, grass),
+                ai::MobEvent::BreakDoor {
+                    at, broken: true, ..
+                } => self.break_door(ctx, at),
+                ai::MobEvent::BreakDoor { .. } => {}
                 ai::MobEvent::Hiss { at } => self.play_sound_near(
                     at,
                     ferrite_entity::creeper::HISS_SOUND,
@@ -8167,6 +8179,43 @@ impl Region {
             }
         }
         true
+    }
+
+    /// `BreakDoorGoal.tick` on its last tick: both halves of the wooden door vanish without a
+    /// drop (`removeBlock`), with the zombie's door-breaking sound. The crack-stage packets
+    /// (`destroyBlockProgress`) are not sent.
+    fn break_door(&mut self, ctx: &TickContext, lower: [i32; 3]) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let is_door = |at: [i32; 3]| {
+            source
+                .block(at[0], at[1], at[2])
+                .and_then(|state| u16::try_from(state).ok())
+                .is_some_and(|state| ferrite_entity::sun::is_closed_wooden_door(Some(state)))
+        };
+        let upper = [lower[0], lower[1] + 1, lower[2]];
+        let mut removed = Vec::new();
+        if is_door(lower) {
+            removed.push((lower, 0));
+        }
+        if is_door(upper) {
+            removed.push((upper, 0));
+        }
+        if removed.is_empty() {
+            return;
+        }
+        self.place_blocks(ctx, &removed);
+        self.play_sound_near(
+            ferrite_math::Vec3::new(
+                f64::from(lower[0]) + 0.5,
+                f64::from(lower[1]) + 0.5,
+                f64::from(lower[2]) + 0.5,
+            ),
+            "minecraft:entity.zombie.break_wooden_door",
+            1.0,
+            1.0,
+        );
     }
 
     /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
@@ -14622,6 +14671,31 @@ mod tests {
             &slots,
         );
         state
+    }
+
+    /// A zombie that finishes chewing a closed wooden door removes both halves; an open door or
+    /// an iron door stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_broken_door_loses_both_halves() {
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let door = |name: &str, half: &str| {
+            let default = ferrite_data::blocks::default_state(name).unwrap();
+            ferrite_data::blocks::state_id(name, &[("half", half)]).unwrap_or(default)
+        };
+        let lower = u32::from(door("minecraft:oak_door", "lower"));
+        let upper = u32::from(door("minecraft:oak_door", "upper"));
+        source.set_block(4, 65, 4, lower).unwrap();
+        source.set_block(4, 66, 4, upper).unwrap();
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_door").unwrap());
+        source.set_block(6, 65, 4, iron).unwrap();
+        region.break_door(&ctx, [4, 65, 4]);
+        assert_eq!(source.block(4, 65, 4), Some(0));
+        assert_eq!(source.block(4, 66, 4), Some(0));
+        region.break_door(&ctx, [6, 65, 4]);
+        assert_eq!(source.block(6, 65, 4), Some(iron));
     }
 
     /// An exploding shulker box (every colour, and the undyed one) drops one item that carries

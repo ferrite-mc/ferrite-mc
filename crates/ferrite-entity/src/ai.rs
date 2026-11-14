@@ -395,6 +395,13 @@ pub enum MobEvent {
     Explode { center: Vec3, power: f32 },
     /// Two animals bred; the baby is already in the store.
     Bred(crate::breed::Bred),
+    /// A zombie is chewing on the door at `at` (its lower half): `progress` is the 0..=9 crack
+    /// stage, `broken` is set on the tick the door goes.
+    BreakDoor {
+        at: [i32; 3],
+        progress: u8,
+        broken: bool,
+    },
     /// A creeper's fuse started: the region plays the hiss at `at`
     /// (`crate::creeper::HISS_SOUND`).
     Hiss { at: Vec3 },
@@ -578,6 +585,10 @@ pub struct MobRules {
     /// Where players look and whether they wear a carved pumpkin, for the enderman stare.
     /// Players without an entry are not looking at anything.
     pub gazes: std::collections::HashMap<Uuid, crate::enderman::Gaze>,
+    /// Whether sunlight burns monsters here (the `monsters_burn` environment attribute).
+    pub monsters_burn: bool,
+    /// `mobGriefing`: zombies only break doors when it is on.
+    pub griefing: bool,
     /// Whether it is raining (endermen are hurt by rain under open sky).
     pub raining: bool,
     /// Creative and spectator players: seen by every goal except hostile target selection.
@@ -604,6 +615,8 @@ pub fn tick_full(
         hard,
         gazes,
         raining,
+        monsters_burn,
+        griefing,
     } = rules;
     let bow_cooldown = if *hard {
         SKELETON_COOLDOWN_HARD
@@ -699,6 +712,8 @@ pub fn tick_full(
             }
         }
 
+        // `Mob.aiStep`: sun-sensitive monsters catch fire in daylight.
+        crate::sun::tick_sun(store, key, blocks, *monsters_burn, *raining, rng);
         if kind == MobKind::Enderman {
             // `EndermanLookForPlayerGoal`: a calm enderman angers at a player who stares at it.
             if mob::state(store, key).is_some_and(|s| s.anger == 0) {
@@ -842,6 +857,27 @@ pub fn tick_full(
                         }
                     }
                     MobKind::Zombie | MobKind::Spider | MobKind::Enderman => {
+                        if kind == MobKind::Zombie {
+                            match crate::sun::tick_break_door(
+                                store, key, blocks, target.pos, *hard, *griefing,
+                            ) {
+                                crate::sun::DoorStep::Idle | crate::sun::DoorStep::Chewing => {}
+                                crate::sun::DoorStep::Breaking { at, progress } => {
+                                    events.push(MobEvent::BreakDoor {
+                                        at,
+                                        progress,
+                                        broken: false,
+                                    });
+                                }
+                                crate::sun::DoorStep::Broken { at } => {
+                                    events.push(MobEvent::BreakDoor {
+                                        at,
+                                        progress: 10,
+                                        broken: true,
+                                    });
+                                }
+                            }
+                        }
                         if horizontal <= kind.attack_reach() {
                             let ready = mob::state(store, key)
                                 .is_some_and(|state| state.attack_cooldown == 0);

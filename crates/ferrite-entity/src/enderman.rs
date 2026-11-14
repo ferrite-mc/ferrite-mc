@@ -524,7 +524,18 @@ mod tests {
             let key = spawn(&mut store, Vec3::new(0.5, 64.0, 0.5));
             let mut rng = Rng::new(2);
             for _ in 0..60 {
-                ai::tick_full(&mut store, world, &[], &rain, &[], &[], &mut rng);
+                ai::tick_full(
+                    &mut store,
+                    world,
+                    &[Target {
+                        uuid: PLAYER,
+                        pos: Vec3::new(90.5, 64.0, 0.5),
+                    }],
+                    &rain,
+                    &[],
+                    &[],
+                    &mut rng,
+                );
             }
             mob::state(&store, key).unwrap().health < MobKind::Enderman.max_health()
         };

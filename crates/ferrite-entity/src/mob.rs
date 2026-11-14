@@ -309,6 +309,11 @@ pub struct MobState {
     pub sheared: bool,
     /// Ticks left in a sheep's `EatBlockGoal`; zero when it is not eating.
     pub eat_timer: u8,
+    /// Whether a zombie may break doors (`Zombie.canBreakDoors`).
+    pub can_break_doors: bool,
+    /// The door a zombie is chewing on, and for how many ticks (`BreakDoorGoal.breakTime`).
+    pub door_pos: Option<[i32; 3]>,
+    pub door_ticks: u16,
     /// Whether a creeper is charged by lightning (`Creeper.DATA_IS_POWERED`).
     pub powered: bool,
     /// The creeper's synched swell direction: `1` while the fuse burns, `-1` otherwise.
@@ -409,6 +414,9 @@ impl MobState {
             wool_color: 0,
             sheared: false,
             eat_timer: 0,
+            can_break_doors: false,
+            door_pos: None,
+            door_ticks: 0,
             powered: false,
             swell_dir: -1,
             stare_time: 0,
@@ -494,6 +502,11 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     }
     if kind == MobKind::Creeper {
         crate::creeper::define_metadata(&mut data.metadata);
+    }
+    if kind == MobKind::Zombie
+        && let Some(state) = data.mob.as_mut()
+    {
+        state.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
     }
     if kind == MobKind::Sheep
         && let Some(state) = data.mob.as_mut()
