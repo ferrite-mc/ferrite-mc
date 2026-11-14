@@ -61,6 +61,11 @@ extractor records push reactions and block-entity capability for every state in
 `vanilla/26.3/generated/ferrite/piston_states.json`; existing vanilla extractions need to be
 regenerated with `python tools/fetch_vanilla.py`.
 
+Server-side coverage of the remaining test list is complete: the restart-during-overlay test above, the region
+split/merge tests (including a moving block crossing a section boundary and a late tracker receiving its overlay),
+the animation progression/replacement tests and the cross-boundary retraction test. What remains is real-client
+resolver/animation parity, which cannot be checked in this environment.
+
 Focused coverage includes the twelve/thirteen-block limit, immovable and block-entity refusals,
 `PUSH` extension/retraction, slime/honey branching, glazed terracotta, sticky pull and push-only
 targets, head removal, collision-shape entity clearance, animation progression and replacement,

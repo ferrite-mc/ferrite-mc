@@ -315,6 +315,217 @@ fn cocoa_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
         world.set_block(p, next);
     }
 }
+/// The same block state with one property changed (`BlockState.setValue`).
+fn with_property(state: u32, key: &str, value: &'static str) -> Option<u32> {
+    let (name, properties) = state_name(state)?;
+    let properties: Vec<(&str, &str)> = properties
+        .iter()
+        .map(|&(name, old)| {
+            if name == key {
+                (name, value)
+            } else {
+                (name, old)
+            }
+        })
+        .collect();
+    ferrite_data::blocks::state_id(name, &properties).map(u32::from)
+}
+
+/// Vanilla `SugarCaneBlock.randomTick` / `CactusBlock.randomTick`: every random tick advances the
+/// age by one, and age 15 places a new block above and resets the age to zero. Both stop at a
+/// column of three.
+fn stalk_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
+    let above = (p.0, p.1 + 1, p.2);
+    if !named(world.block(above), "air") {
+        return;
+    }
+    let height = column_height(world, p, &[short_name(state).unwrap_or("")], 3);
+    if height >= 3 {
+        return;
+    }
+    if age(state) == 15 {
+        world.set_block(above, default_block(short_name(state).unwrap_or("")));
+        if let Some(reset) = with_age(state, 0) {
+            world.set_block(p, reset);
+        }
+    } else if let Some(next) = with_age(state, age(state) + 1) {
+        world.set_block(p, next);
+    }
+}
+
+/// Vanilla `BambooStalkBlock.randomTick`: only a stage-0 stalk grows. The 26.3 state report has
+/// bamboo ages 0 and 1, so age 1 places a new stalk above and resets the age; a column is capped
+/// at sixteen blocks.
+fn bamboo_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
+    if property(state, "stage", "1") {
+        return;
+    }
+    let above = (p.0, p.1 + 1, p.2);
+    if !named(world.block(above), "air") {
+        return;
+    }
+    let height = column_height(world, p, &["bamboo", "bamboo_sapling"], 16);
+    if height >= 16 {
+        return;
+    }
+    if age(state) >= 1 {
+        // The vanilla default state of bamboo is the stage-1 shoot; a stalk that random ticks
+        // must be stage 0, or it would never grow.
+        if let Some(stalk) = bamboo_stalk(0) {
+            world.set_block(above, stalk);
+        }
+        if let Some(reset) = with_age(state, 0) {
+            world.set_block(p, reset);
+        }
+    } else if let Some(next) = with_age(state, age(state) + 1) {
+        world.set_block(p, next);
+    }
+}
+
+fn bamboo_stalk(age: u32) -> Option<u32> {
+    let age = age.to_string();
+    ferrite_data::blocks::state_id("bamboo", &[("age", age.as_str()), ("stage", "0")])
+        .map(u32::from)
+}
+
+/// Number of blocks in the column below `p` (including `p`) that are one of `names`.
+fn column_height(world: &dyn RandomWorld, p: Pos, names: &[&str], limit: u32) -> u32 {
+    let mut height = 1;
+    while height < limit {
+        let below = (p.0, p.1 - height as i32, p.2);
+        if names.iter().any(|&name| named(world.block(below), name)) {
+            height += 1;
+        } else {
+            break;
+        }
+    }
+    height
+}
+
+/// Vanilla `KelpBlock` / `GrowingPlantHeadBlock.randomTick`: one in ten random ticks grows the
+/// head into a body block and places a new head in the water above. The column is capped at 25.
+fn kelp_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    if rng.next_int(10) != 0 {
+        return;
+    }
+    let above = (p.0, p.1 + 1, p.2);
+    if !named(world.block(above), "water") {
+        return;
+    }
+    if column_height(world, p, &["kelp", "kelp_plant"], 25) >= 25 {
+        return;
+    }
+    world.set_block(p, default_block("kelp_plant"));
+    let next_age = (age(state) + 1).min(25).to_string();
+    if let Some(head) = ferrite_data::blocks::state_id("kelp", &[("age", next_age.as_str())]) {
+        world.set_block(above, u32::from(head));
+    }
+}
+
+/// Vanilla `StemBlock.randomTick`. While the stem is young it uses the crop growth speed; at age
+/// seven it tries to put its fruit on one horizontal neighbour standing on farmland or a dirt
+/// block, and turns into the attached stem facing that neighbour.
+fn stem_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    let Some(name) = short_name(state) else {
+        return;
+    };
+    if world.brightness(p) < 9 {
+        return;
+    }
+    let speed = growth_speed(world, p, name);
+    if rng.next_int((25.0 / speed) as i32 + 1) != 0 {
+        return;
+    }
+    let current = age(state);
+    if current < 7 {
+        if let Some(next) = with_age(state, current + 1) {
+            world.set_block(p, next);
+        }
+        return;
+    }
+    // `Direction.Plane.HORIZONTAL.getRandomDirection`: north, east, south, west.
+    let directions = [
+        ((0, 0, -1), "north"),
+        ((1, 0, 0), "east"),
+        ((0, 0, 1), "south"),
+        ((-1, 0, 0), "west"),
+    ];
+    let ((dx, _, dz), facing) = directions[rng.next_int(4) as usize];
+    let target = (p.0 + dx, p.1, p.2 + dz);
+    if !named(world.block(target), "air") {
+        return;
+    }
+    let below = (target.0, target.1 - 1, target.2);
+    if ![
+        "farmland",
+        "dirt",
+        "coarse_dirt",
+        "rooted_dirt",
+        "moss_block",
+        "grass_block",
+    ]
+    .iter()
+    .any(|&floor| named(world.block(below), floor))
+    {
+        return;
+    }
+    let (fruit, attached) = if name == "melon_stem" {
+        ("melon", "attached_melon_stem")
+    } else if name == "pumpkin_stem" {
+        ("pumpkin", "attached_pumpkin_stem")
+    } else {
+        return;
+    };
+    world.set_block(target, default_block(fruit));
+    if let Some(stem) = ferrite_data::blocks::state_id(attached, &[("facing", facing)]) {
+        world.set_block(p, u32::from(stem));
+    }
+}
+
+/// Vanilla `PitcherCropBlock.randomTick`: a lower half younger than four grows with the crop
+/// growth speed, and from age three puts the matching upper half above it. Pitcher crop states
+/// 0..=2 exist only as a lower half; 3 and 4 are a lower and an upper half.
+fn pitcher_crop_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    if property(state, "half", "upper") || age(state) >= 4 {
+        return;
+    }
+    if world.brightness(p) < 9 {
+        return;
+    }
+    let speed = growth_speed(world, p, "pitcher_crop");
+    if rng.next_int((25.0 / speed) as i32 + 1) != 0 {
+        return;
+    }
+    let next = age(state) + 1;
+    if let Some(lower) = with_age(state, next) {
+        world.set_block(p, lower);
+    }
+    let next_age = next.to_string();
+    if next >= 3
+        && let Some(upper) = ferrite_data::blocks::state_id(
+            "pitcher_crop",
+            &[("age", next_age.as_str()), ("half", "upper")],
+        )
+    {
+        world.set_block((p.0, p.1 + 1, p.2), u32::from(upper));
+    }
+}
+
+/// Vanilla `SaplingBlock.randomTick`: with light at the cell above and one chance in seven the
+/// sapling advances from stage 0 to stage 1. The tree itself comes from the worldgen feature set,
+/// which this lane does not own; a stage-1 sapling is the state vanilla leaves behind after a
+/// failed growth attempt, so it is correct until that feature exists.
+fn sapling_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    if world.brightness((p.0, p.1 + 1, p.2)) < 9 || rng.next_int(7) != 0 {
+        return;
+    }
+    if property(state, "stage", "0")
+        && let Some(next) = with_property(state, "stage", "1")
+    {
+        world.set_block(p, next);
+    }
+}
+
 fn handlers() -> &'static HashMap<u32, Handler> {
     static TABLE: OnceLock<HashMap<u32, Handler>> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -329,6 +540,20 @@ fn handlers() -> &'static HashMap<u32, Handler> {
                     grass_tick
                 } else if state_name(state).is_some_and(|(n, _)| n.ends_with("_leaves")) {
                     leaves_tick
+                } else if named(state, "sugar_cane") || named(state, "cactus") {
+                    stalk_tick
+                } else if named(state, "bamboo") {
+                    bamboo_tick
+                } else if named(state, "kelp") {
+                    kelp_tick
+                } else if named(state, "melon_stem") || named(state, "pumpkin_stem") {
+                    stem_tick
+                } else if named(state, "pitcher_crop") {
+                    pitcher_crop_tick
+                } else if state_name(state).is_some_and(|(name, _)| {
+                    ferrite_data::tags::contains("block", "minecraft:saplings", name)
+                }) {
+                    sapling_tick
                 } else if short_name(state).and_then(crop_max_age).is_some() {
                     crop_tick
                 } else if named(state, "nether_wart") {
@@ -640,5 +865,175 @@ mod tests {
         grid.set_block(p, state);
         leaves_tick(&mut grid, p, state, &mut rng);
         assert_eq!(grid.block(p), super::tests::state("air"));
+    }
+
+    fn growth_grid() -> Grid {
+        Grid {
+            light: 15,
+            ..Grid::default()
+        }
+    }
+
+    #[test]
+    fn sugar_cane_and_cactus_grow_one_block_per_sixteen_ticks_and_stop_at_three() {
+        for name in ["sugar_cane", "cactus"] {
+            let mut grid = growth_grid();
+            let p = (0, 0, 0);
+            grid.set_block(p, block_state(name, 0));
+            let mut rng = Rng::new(1);
+            // Random ticks reach every stalk; each age-15 top places one block above and
+            // resets, so sixteen ticks per block.
+            let mut top = 0;
+            for _ in 0..80 {
+                while named(grid.block((0, top + 1, 0)), name) {
+                    top += 1;
+                }
+                let state = grid.block((0, top, 0));
+                stalk_tick(&mut grid, (0, top, 0), state, &mut rng);
+            }
+            assert_eq!(column_height(&grid, (0, top, 0), &[name], 4), 3, "{name}");
+            let landed = top;
+            for _ in 0..80 {
+                while named(grid.block((0, top + 1, 0)), name) {
+                    top += 1;
+                }
+                let state = grid.block((0, top, 0));
+                stalk_tick(&mut grid, (0, top, 0), state, &mut rng);
+            }
+            assert_eq!(top, landed, "{name} capped");
+            assert_eq!(column_height(&grid, (0, top, 0), &[name], 4), 3, "{name}");
+        }
+    }
+
+    #[test]
+    fn bamboo_grows_to_sixteen_and_ignores_a_stage_one_top() {
+        let mut grid = growth_grid();
+        let p = (0, 0, 0);
+        grid.set_block(p, bamboo_stalk(0).unwrap());
+        let mut rng = Rng::new(1);
+        let mut top = 0;
+        for _ in 0..400 {
+            while named(grid.block((0, top + 1, 0)), "bamboo") {
+                top += 1;
+            }
+            let state = grid.block((0, top, 0));
+            bamboo_tick(&mut grid, (0, top, 0), state, &mut rng);
+        }
+        assert_eq!(column_height(&grid, (0, top, 0), &["bamboo"], 20), 16);
+        // A stage-1 stalk is a finished shoot and is not grown by random ticks.
+        let full = ferrite_data::blocks::state_id(
+            "bamboo",
+            &[("age", "0"), ("leaves", "large"), ("stage", "1")],
+        )
+        .unwrap();
+        let high = top + 4;
+        grid.set_block((0, high, 0), u32::from(full));
+        bamboo_tick(&mut grid, (0, high, 0), u32::from(full), &mut rng);
+        assert_eq!(grid.block((0, high + 1, 0)), super::tests::state("air"));
+    }
+
+    #[test]
+    fn kelp_grows_a_body_block_and_a_new_head_in_water() {
+        let mut grid = growth_grid();
+        let water = state("water");
+        let mut rng = Rng::new(4);
+        grid.set_block((0, 0, 0), block_state("kelp", 0));
+        let mut y = 0;
+        for _ in 0..20_000 {
+            let head = grid.block((0, y, 0));
+            if !named(head, "kelp") {
+                break;
+            }
+            grid.set_block((0, y + 1, 0), water);
+            kelp_tick(&mut grid, (0, y, 0), head, &mut rng);
+            if named(grid.block((0, y, 0)), "kelp_plant") {
+                y += 1;
+            }
+        }
+        assert!(y >= 3, "kelp grew only {y} blocks");
+        assert!(y < 25, "kelp exceeded the vanilla height cap: {y}");
+        assert!(named(grid.block((0, y, 0)), "kelp"));
+        assert!(named(grid.block((0, y - 1, 0)), "kelp_plant"));
+    }
+
+    #[test]
+    fn a_mature_stem_places_its_fruit_on_a_dirt_neighbour() {
+        let mut grid = growth_grid();
+        let p = (0, 0, 0);
+        grid.set_block(p, block_state("melon_stem", 0));
+        for (x, z) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            grid.set_block((x, -1, z), state("farmland"));
+        }
+        let mut rng = Rng::new(9);
+        for _ in 0..20_000 {
+            let stem = grid.block(p);
+            if !named(stem, "melon_stem") {
+                break;
+            }
+            stem_tick(&mut grid, p, stem, &mut rng);
+        }
+        let fruit = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .into_iter()
+            .find(|&(x, z)| named(grid.block((x, 0, z)), "melon"));
+        assert!(fruit.is_some(), "the stem never placed a melon");
+        let attached = grid.block(p);
+        assert!(named(attached, "attached_melon_stem"), "{attached}");
+        assert!(property_value(attached, "facing").is_some());
+    }
+
+    #[test]
+    fn a_pitcher_crop_grows_a_matching_upper_half() {
+        let mut grid = growth_grid();
+        let p = (0, 0, 0);
+        let lower =
+            ferrite_data::blocks::state_id("pitcher_crop", &[("age", "0"), ("half", "lower")])
+                .unwrap();
+        grid.set_block(p, u32::from(lower));
+        grid.set_block((0, -1, 0), state("farmland"));
+        let mut rng = Rng::new(2);
+        for _ in 0..20_000 {
+            let state = grid.block(p);
+            if age(state) >= 4 {
+                break;
+            }
+            pitcher_crop_tick(&mut grid, p, state, &mut rng);
+        }
+        assert_eq!(age(grid.block(p)), 4);
+        let upper = grid.block((0, 1, 0));
+        assert!(named(upper, "pitcher_crop"), "{upper}");
+        assert!(property(upper, "half", "upper"));
+        assert_eq!(age(upper), 4, "both halves carry the same age");
+    }
+
+    #[test]
+    fn a_sapling_advances_one_stage_in_light() {
+        let mut grid = growth_grid();
+        let p = (0, 0, 0);
+        let sapling = state("oak_sapling");
+        grid.set_block(p, sapling);
+        let mut rng = Rng::new(3);
+        for _ in 0..1000 {
+            let state = grid.block(p);
+            if property(state, "stage", "1") {
+                break;
+            }
+            sapling_tick(&mut grid, p, state, &mut rng);
+        }
+        assert!(property(grid.block(p), "stage", "1"));
+        for state in [
+            block_state("sugar_cane", 0),
+            block_state("cactus", 0),
+            bamboo_stalk(0).unwrap(),
+            block_state("kelp", 0),
+            block_state("melon_stem", 0),
+            block_state("pumpkin_stem", 0),
+            u32::from(
+                ferrite_data::blocks::state_id("pitcher_crop", &[("age", "0"), ("half", "lower")])
+                    .unwrap(),
+            ),
+            sapling,
+        ] {
+            assert!(handlers().contains_key(&state), "no handler for {state}");
+        }
     }
 }

@@ -111,9 +111,10 @@ pub fn block_for(fluid: FluidState) -> u32 {
 
 /// Whether a block state is a standalone vanilla `LiquidBlock` (`water` or `lava`).
 ///
-/// Waterlogged containers also report a source fluid state, but they are not liquid blocks:
-/// vanilla never schedules a fluid tick for them and `FlowingFluid` never spreads from them.
-/// Callers that schedule or tick fluid must use this instead of [`fluid_state`].
+/// Waterlogged containers also report a source fluid state, but they are not standalone liquid
+/// blocks: callers that decide whether a cell holds a placeable liquid source must use this
+/// instead of [`fluid_state`]. (A waterlogged block can still be given a fluid tick by
+/// `SimpleWaterloggedBlock.placeLiquid`; that path is handled by `FluidTicks::changed`.)
 pub fn is_liquid_block(state: u32) -> bool {
     let Ok(id) = u16::try_from(state) else {
         return false;

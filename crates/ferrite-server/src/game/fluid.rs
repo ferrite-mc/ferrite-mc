@@ -315,8 +315,28 @@ mod tests {
         // The sending region saw air; the destination changed before its message arrived.
         let expected = source.block(16, 65, 0).unwrap();
         source.set_block(16, 65, 0, stone).unwrap();
-        east.apply_fluid_place(&source, &tracking, (16, 65, 0), expected, water);
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        east.apply_fluid_place(&source, &tracking, signals, (16, 65, 0), expected, water);
         assert_eq!(source.block(16, 65, 0), Some(stone));
+    }
+
+    #[tokio::test]
+    async fn a_handed_off_water_washes_a_plant_and_drops_its_loot() {
+        let source = two_loaded_chunks().await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let sapling = u32::from(ferrite_data::blocks::default_state("oak_sapling").unwrap());
+        let water = u32::from(ferrite_data::blocks::default_state("water").unwrap());
+        source.set_block(16, 66, 1, sapling).unwrap();
+        let mut east = super::super::region::Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        east.apply_fluid_place(&source, &tracking, signals, (16, 66, 1), sapling, water);
+        assert_eq!(source.block(16, 66, 1), Some(water));
+        assert_eq!(
+            east.entities.len(),
+            1,
+            "the owner that applied the hand-off also drops the washed sapling"
+        );
     }
 
     /// Same region: one region holds both chunks, so water crosses the chunk border directly.
@@ -364,7 +384,8 @@ mod tests {
 
         let mut east = super::super::region::Region::default();
         east.hold_chunk(ChunkPos(1, 0));
-        east.apply_fluid_place(&source, &tracking, (16, 65, 0), air, state);
+        let (place_signals, _place_rx) = tokio::sync::mpsc::unbounded_channel();
+        east.apply_fluid_place(&source, &tracking, place_signals, (16, 65, 0), air, state);
         assert_eq!(source.block(16, 65, 0), Some(state));
         let (signals, _unused) = tokio::sync::mpsc::unbounded_channel();
         for _ in 0..30 {

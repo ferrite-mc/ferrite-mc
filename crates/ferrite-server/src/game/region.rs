@@ -1365,6 +1365,10 @@ pub struct Region {
     /// Monotonic per-region tick counter, the `LastExecution` clock command blocks use.
     tick_clock: i64,
     held_chunks: HashMap<ChunkPos, usize>,
+    /// Chunks held for the first time this tick; their borders get the wake-up pass vanilla runs
+    /// when a chunk becomes readable, so fluid and support rules that stopped at the chunk edge
+    /// resume instead of staying frozen.
+    pending_chunk_loads: Vec<ChunkPos>,
     /// Tick monitor slot, assigned by the game loop on this region's first tick.
     pub profile_slot: Option<u32>,
     /// Scope tree attached by the game loop; `None` until the first tick.
@@ -1385,6 +1389,7 @@ impl RegionData for Region {
         for (chunk, count) in other.held_chunks {
             *self.held_chunks.entry(chunk).or_default() += count;
         }
+        self.pending_chunk_loads.extend(other.pending_chunk_loads);
         self.gravity.merge(other.gravity);
         self.fire.merge(other.fire);
         self.buttons.merge(other.buttons);
@@ -1495,6 +1500,7 @@ impl RegionData for Region {
             }),
             tick_clock: self.tick_clock,
             held_chunks: HashMap::new(),
+            pending_chunk_loads: Vec::new(),
             profile_slot: None,
             timings: self.timings.clone(),
             published_entities: HashSet::new(),
@@ -1526,6 +1532,12 @@ impl RegionData for Region {
                 .held_chunks
                 .insert(c, self.held_chunks.remove(&c).unwrap());
         }
+        let (moved_pending, staying_pending): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.pending_chunk_loads)
+                .into_iter()
+                .partition(|c| sections.contains(&SectionPos(c.0 >> 4, c.1 >> 4)));
+        self.pending_chunk_loads = staying_pending;
+        result.pending_chunk_loads = moved_pending;
         self.fluid_ticks
             .transfer_to(&mut result.fluid_ticks, |(x, _, z)| {
                 sections.contains(&SectionPos(
@@ -5601,7 +5613,11 @@ pub(super) fn apply_trade_sync(
 
 impl Region {
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
+        let first = !self.held_chunks.contains_key(&chunk);
         *self.held_chunks.entry(chunk).or_default() += 1;
+        if first && !self.pending_chunk_loads.contains(&chunk) {
+            self.pending_chunk_loads.push(chunk);
+        }
     }
     /// Drops one viewer's hold; the chunk leaves the region when the last one goes.
     pub fn release_chunk(&mut self, chunk: ChunkPos) {
@@ -5609,6 +5625,7 @@ impl Region {
             *count -= 1;
             if *count == 0 {
                 self.held_chunks.remove(&chunk);
+                self.pending_chunk_loads.retain(|&pending| pending != chunk);
             }
         }
     }
@@ -5618,6 +5635,175 @@ impl Region {
     }
     pub fn has_chunk_hold(&self, chunk: ChunkPos) -> bool {
         self.held_chunks.contains_key(&chunk)
+    }
+
+    /// The wake-up pass for chunks that were held since the last tick. A fluid that reached an
+    /// unloaded chunk edge stopped there (`FluidWorld::owns` and the unloaded read-as-stone rule);
+    /// once both sides are loaded it is scheduled again, and a support rule that could only see
+    /// the unloaded side as sturdy is re-validated. Only border cells that actually hold fluid,
+    /// a gravity block or a block whose `canSurvive` now fails are queued, so a full chunk load
+    /// does not enqueue an update for every block on the seam.
+    /// Currently test-only: the tick-loop call is disabled until the join-time scan is made
+    /// chunk-direct (see `docs/world-interaction-audit.md`).
+    #[cfg(test)]
+    pub fn wake_loaded_chunks(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        signals: UnboundedSender<Signal>,
+    ) {
+        let mut pending = std::mem::take(&mut self.pending_chunk_loads);
+        if pending.is_empty() {
+            return;
+        }
+        // A join loads many chunks at once. Keep the work per tick bounded; the rest stays queued
+        // and gets the same wake-up a few ticks later.
+        const CHUNKS_PER_TICK: usize = 1;
+        if pending.len() > CHUNKS_PER_TICK {
+            self.pending_chunk_loads = pending.split_off(CHUNKS_PER_TICK);
+        }
+        let dimension = source.dimension();
+        let air = u32::from(ferrite_data::blocks::default_state("air").expect("vanilla air"));
+        // A section made only of full opaque blocks cannot hold a fluid, a support-dependent
+        // block or a gravity block, so its 16 layers cannot need a border wake. This keeps the
+        // pass proportional to the surface, not to the full build height.
+        let interesting = |state: u32| {
+            u16::try_from(state).ok().is_some_and(|state| {
+                let name = ferrite_data::blocks::state(state).map(|(name, _)| name);
+                // Cave and void air are separate states and are not full blocks; without this
+                // check every underground cave section would look interesting.
+                !matches!(
+                    name,
+                    Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+                ) && (ferrite_data::block_props::get(state).fluid.is_some()
+                    || !ferrite_data::block_props::get(state).can_occlude
+                    || super::gravity::is_gravity(state))
+            })
+        };
+        let _ = air;
+        for chunk in pending {
+            if !self.held_chunks.contains_key(&chunk) {
+                continue;
+            }
+            // Only sections that hold a fluid, a non-full block or a gravity block can need a
+            // wake. Check the inside chunk and each neighbour separately instead of building one
+            // bounding box: deep water plus a surface plant would otherwise make the scan cover
+            // the whole build height.
+            let mask = |chunk: &ferrite_world::Chunk| {
+                let min = chunk.min_y();
+                let bits: Vec<bool> = chunk
+                    .sections()
+                    .iter()
+                    .map(|section| {
+                        section
+                            .blocks()
+                            .palette()
+                            .iter()
+                            .any(|&state| interesting(state))
+                    })
+                    .collect();
+                (min, bits)
+            };
+            let Some((min_y, inside_mask)) = source.with_loaded_chunk(chunk.0, chunk.1, mask)
+            else {
+                continue;
+            };
+            if inside_mask.is_empty() {
+                continue;
+            }
+            let (x0, z0) = (chunk.0 * 16, chunk.1 * 16);
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                for t in 0..16 {
+                    let (x, z) = if dx != 0 {
+                        (if dx > 0 { x0 + 15 } else { x0 }, z0 + t)
+                    } else {
+                        (x0 + t, if dz > 0 { z0 + 15 } else { z0 })
+                    };
+                    let (ox, oz) = (x + dx, z + dz);
+                    let outside_chunk = ChunkPos(ox.div_euclid(16), oz.div_euclid(16));
+                    if outside_chunk == chunk {
+                        continue;
+                    }
+                    let outside_mask = source
+                        .with_loaded_chunk(outside_chunk.0, outside_chunk.1, mask)
+                        .map(|(_, bits)| bits)
+                        .unwrap_or_default();
+                    for (index, inside_interesting) in inside_mask.iter().enumerate() {
+                        if !*inside_interesting
+                            && !outside_mask.get(index).copied().unwrap_or(false)
+                        {
+                            continue;
+                        }
+                        let base = min_y + index as i32 * 16;
+                        for y in base..base + 16 {
+                            let Some(inside_state) = source.block(x, y, z) else {
+                                continue;
+                            };
+                            let Some(outside_state) = source.block(ox, y, oz) else {
+                                // Still unloaded: nothing has become readable on that side.
+                                continue;
+                            };
+                            if inside_state == air && outside_state == air {
+                                continue;
+                            }
+                            // Only fluid that could not move because the other side was unloaded
+                            // needs a wake. An ocean border with water on both sides does not.
+                            if ferrite_fluid::is_liquid_block(inside_state)
+                                && ferrite_fluid::can_hold_fluid(
+                                    outside_state,
+                                    ferrite_fluid::fluid_state(inside_state).kind,
+                                )
+                            {
+                                self.schedule_fluid((x, y, z));
+                            }
+                            if ferrite_fluid::is_liquid_block(outside_state)
+                                && ferrite_fluid::can_hold_fluid(
+                                    inside_state,
+                                    ferrite_fluid::fluid_state(outside_state).kind,
+                                )
+                            {
+                                if self.held_chunks.contains_key(&outside_chunk) {
+                                    self.schedule_fluid((ox, y, oz));
+                                } else {
+                                    let _ = signals.send(Signal::FluidChange {
+                                        dimension,
+                                        x: ox,
+                                        y,
+                                        z: oz,
+                                    });
+                                }
+                            }
+                            let inside_u16 = u16::try_from(inside_state).ok();
+                            let outside_u16 = u16::try_from(outside_state).ok();
+                            if inside_u16.is_some_and(|state| {
+                                !super::neighbors::can_survive(state, [x, y, z], source)
+                            }) {
+                                // The block is ours; the unreadable side is now readable and failed
+                                // its support test. Re-validate it without forwarding the origin.
+                                self.updates.remote_changed([ox, y, oz]);
+                            }
+                            if outside_u16.is_some_and(|state| {
+                                !super::neighbors::can_survive(state, [ox, y, oz], source)
+                            }) {
+                                if self.held_chunks.contains_key(&outside_chunk) {
+                                    self.updates.block_changed([x, y, z]);
+                                } else {
+                                    let _ = signals.send(Signal::NeighborUpdate {
+                                        dimension,
+                                        origin: [x, y, z],
+                                        target: [ox, y, oz],
+                                    });
+                                }
+                            }
+                            if inside_u16.is_some_and(super::gravity::is_gravity)
+                                || outside_u16.is_some_and(super::gravity::is_gravity)
+                            {
+                                self.schedule_gravity(source, &[[x, y, z], [ox, y, oz]]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     /// Knocks the entity with `uuid` away from `source`, for a hit another region's shield
     /// blocked. Does nothing when the entity has since left this region.
@@ -5734,11 +5920,56 @@ impl Region {
             water_conversion,
             lava_conversion,
         )
-        .with_signals(signals);
+        .with_signals(signals.clone());
         self.fluid_ticks.advance(&mut world);
         let washed = std::mem::take(&mut world.washed);
-        for (pos, state) in washed {
-            self.spawn_block_drops(source, pos, state);
+        // Only blocks water actually destroyed need a shape pass. Queueing a neighbour pass for
+        // every water level change would turn an ocean border into an update storm on every
+        // flowing-water tick.
+        for (pos, _) in &washed {
+            self.updates.block_changed(*pos);
+        }
+        let mut removed = Vec::new();
+        self.updates.apply(&mut world, &mut removed);
+        drop(world);
+        for (pos, state) in &washed {
+            self.spawn_block_drops(source, *pos, *state);
+        }
+        for (pos, state) in &removed {
+            self.spawn_block_drops(source, *pos, *state);
+            let _ = signals.send(Signal::FluidChange {
+                dimension: source.dimension(),
+                x: pos[0],
+                y: pos[1],
+                z: pos[2],
+            });
+        }
+        if !washed.is_empty() || !removed.is_empty() {
+            let mut changed: Vec<[i32; 3]> = washed.iter().map(|(pos, _)| *pos).collect();
+            changed.extend(removed.iter().map(|(pos, _)| *pos));
+            // Redstone beside a destroyed block needs its own wake; the fluid signal only
+            // schedules fluid ticks. The world loop routes this to the component's owner.
+            let positions = changed
+                .iter()
+                .flat_map(|&pos| {
+                    [
+                        (0, 0, 0),
+                        (1, 0, 0),
+                        (-1, 0, 0),
+                        (0, 1, 0),
+                        (0, -1, 0),
+                        (0, 0, 1),
+                        (0, 0, -1),
+                    ]
+                    .into_iter()
+                    .map(move |(dx, dy, dz)| ([pos[0] + dx, pos[1] + dy, pos[2] + dz], pos))
+                })
+                .collect();
+            let _ = signals.send(Signal::RedstoneChange {
+                dimension: source.dimension(),
+                positions,
+            });
+            self.schedule_gravity(source, &changed);
         }
     }
 
@@ -5748,6 +5979,7 @@ impl Region {
         &mut self,
         source: &super::anvil::AnvilChunkSource,
         tracking: &Tracking,
+        signals: UnboundedSender<Signal>,
         (x, y, z): (i32, i32, i32),
         expected: u32,
         state: u32,
@@ -5765,6 +5997,17 @@ impl Region {
         if let Err(error) = source.compare_set_block(x, y, z, Some(old), state) {
             tracing::warn!(x, y, z, %error, "handed-off fluid block update failed");
             return;
+        }
+        let origin = [x, y, z];
+        // `WaterFluid.beforeDestroyingBlock`: the owner that applies the handed-off placement
+        // also produces the loot of the plant, torch or rail the water replaced.
+        if let Ok(old_id) = u16::try_from(old)
+            && ferrite_fluid::is_liquid_block(state)
+            && ferrite_fluid::fluid_state(state).kind == ferrite_fluid::FluidKind::Water
+            && ferrite_fluid::fluid_state(old).kind == ferrite_fluid::FluidKind::Empty
+            && ferrite_data::blocks::state(old_id).is_some_and(|(name, _)| !name.ends_with("air"))
+        {
+            self.spawn_block_drops(source, origin, old_id);
         }
         let update = BlockUpdate {
             location: ferrite_protocol::types::BlockPos::new(x, y, z).pack(),
@@ -5792,6 +6035,48 @@ impl Region {
             };
             self.schedule_fluid((x, y, z));
         }
+        // The owner now runs the same neighbour pass a local `setBlock` would, including
+        // forwarding the cells on its own border to the regions that own them.
+        self.updates.block_changed(origin);
+        let mut removed = Vec::new();
+        {
+            let mut world =
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, tracking)
+                    .with_signals(signals.clone());
+            self.updates.apply(&mut world, &mut removed);
+        }
+        for (pos, removed_state) in &removed {
+            self.spawn_block_drops(source, *pos, *removed_state);
+            let _ = signals.send(Signal::FluidChange {
+                dimension: source.dimension(),
+                x: pos[0],
+                y: pos[1],
+                z: pos[2],
+            });
+        }
+        let mut changed = vec![origin];
+        changed.extend(removed.iter().map(|(pos, _)| *pos));
+        self.schedule_gravity(source, &changed);
+        let positions = changed
+            .iter()
+            .flat_map(|&pos| {
+                [
+                    (0, 0, 0),
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ]
+                .into_iter()
+                .map(move |(dx, dy, dz)| ([pos[0] + dx, pos[1] + dy, pos[2] + dz], pos))
+            })
+            .collect();
+        let _ = signals.send(Signal::RedstoneChange {
+            dimension: source.dimension(),
+            positions,
+        });
     }
 
     /// Re-evaluates redstone around a change another region made at the boundary.
@@ -15177,6 +15462,102 @@ mod neighbor_ownership_tests {
             hooks: None,
         };
         (ctx, receiver)
+    }
+
+    /// Same region: the water reached the edge of its chunk while the east chunk was unloaded
+    /// and stopped. Holding that chunk must schedule the border water again so it flows on.
+    #[tokio::test]
+    async fn a_chunk_that_loads_later_resumes_water_stopped_at_the_seam() {
+        let source = loaded(&[(0, 0)]).await;
+        let (water, stone, air) = (id("water"), id("stone"), id("air"));
+        for x in 12..=15 {
+            source.set_block(x, 64, 0, stone).unwrap();
+            source.set_block(x, 65, 0, air).unwrap();
+        }
+        source.set_block(15, 65, 0, water).unwrap();
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        region.wake_loaded_chunks(&source, signals);
+        assert_eq!(source.block(16, 65, 0), None, "east chunk is unloaded");
+
+        loop {
+            if let Some(result) = source.get(1, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        source.set_block(16, 64, 0, stone).unwrap();
+        source.set_block(16, 65, 0, air).unwrap();
+        region.hold_chunk(ChunkPos(1, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        region.wake_loaded_chunks(&source, signals.clone());
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        for _ in 0..4 {
+            region.tick_fluids(&source, &tracking, signals.clone(), true, false);
+        }
+        assert_eq!(
+            ferrite_fluid::fluid_state(source.block(16, 65, 0).unwrap()).kind,
+            ferrite_fluid::FluidKind::Water,
+            "the resumed border water crossed into the newly loaded chunk"
+        );
+    }
+
+    /// Same region: a wall torch in the chunk that loads had its support in the chunk that was
+    /// unloaded while it was written. The unreadable side used to count as sturdy; loading the
+    /// other chunk must re-validate the torch and remove it.
+    #[tokio::test]
+    async fn a_chunk_that_loads_later_breaks_a_torch_whose_support_is_air() {
+        let source = loaded(&[(0, 0)]).await;
+        loop {
+            if let Some(result) = source.get(1, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        source.set_block(15, 64, 0, id("air")).unwrap();
+        source.set_block(16, 64, 0, wall_torch()).unwrap();
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        region.wake_loaded_chunks(&source, signals);
+        region.hold_chunk(ChunkPos(1, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        region.wake_loaded_chunks(&source, signals.clone());
+
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut world =
+            RegionFluidWorld::new(&source, &region.held_chunks, &tracking).with_signals(signals);
+        let mut removed = Vec::new();
+        region.updates.apply(&mut world, &mut removed);
+        assert!(
+            removed.iter().any(|(pos, _)| *pos == [16, 64, 0]),
+            "the torch is not re-validated: {removed:?}"
+        );
+        assert_eq!(source.block(16, 64, 0), Some(id("air")));
+    }
+
+    /// Cross region: the newly loaded chunk is the east region's, and the water that stopped at
+    /// its edge belongs to the west region. The east load hands a fluid wake to the west owner.
+    #[tokio::test]
+    async fn a_late_chunk_wakes_water_owned_by_the_other_region_at_the_seam() {
+        let source = loaded(&[(0, 0), (1, 0)]).await;
+        source.set_block(15, 65, 0, id("water")).unwrap();
+        let mut east = Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        east.wake_loaded_chunks(&source, signals);
+        let mut woken = false;
+        while let Ok(signal) = received.try_recv() {
+            if let Signal::FluidChange { x, y, z, .. } = signal
+                && (x, y, z) == (15, 65, 0)
+            {
+                woken = true;
+            }
+        }
+        assert!(woken, "the west owner was not woken for its border water");
     }
 
     /// A stack of gravity blocks falls one block per two ticks: the block above a vacated cell
