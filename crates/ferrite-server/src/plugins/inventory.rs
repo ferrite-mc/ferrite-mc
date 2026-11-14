@@ -61,6 +61,12 @@ pub fn parse_item_meta(payload: &str) -> Option<ferrite_plugin::ItemMetaSpec> {
         Some(book) if !book.is_empty() => Some(item_book(book)?),
         _ => None,
     };
+    // The extra component field is optional too, so payloads written before it existed still
+    // decode. A present but unreadable field refuses the whole call.
+    let extra = match fields.next() {
+        Some(extra) if !extra.is_empty() => Some(item_components(extra)?),
+        _ => None,
+    };
     Some(ferrite_plugin::ItemMetaSpec {
         name,
         lore,
@@ -71,7 +77,31 @@ pub fn parse_item_meta(payload: &str) -> Option<ferrite_plugin::ItemMetaSpec> {
         flags,
         custom_data,
         book,
+        extra,
     })
+}
+
+/// The most bytes an extra-component payload may take; it comes from plugin code and is parsed
+/// before it reaches the game loop.
+const MAX_EXTRA_COMPONENTS: usize = 262_144;
+
+/// Decodes the extra-component field: an SNBT compound keyed by component name, each value in
+/// the 26.3 NBT shape of that component. Unknown names are refused rather than stored under an
+/// id the client would not understand.
+fn item_components(snbt: &str) -> Option<ferrite_nbt::Compound> {
+    if snbt.len() > MAX_EXTRA_COMPONENTS {
+        return None;
+    }
+    let ferrite_nbt::Tag::Compound(entries) = ferrite_nbt::snbt::parse(snbt).ok()? else {
+        return None;
+    };
+    for key in entries.keys() {
+        let name = key.strip_prefix("minecraft:").unwrap_or(key.as_str());
+        if name.is_empty() || name.starts_with('!') || ferrite_item::component_id(name).is_none() {
+            return None;
+        }
+    }
+    Some(entries)
 }
 
 /// The command behind an inventory call, or `None` when it is not one this module handles
@@ -164,6 +194,7 @@ pub fn inventory_command(call: &HostCall) -> Option<PlayerCommand> {
                 flags: meta.flags,
                 custom_data: meta.custom_data,
                 book: meta.book,
+                extra: meta.extra,
             })
         }
         "setItemMapId(int,int)" => Some(PlayerCommand::ItemMapId {
@@ -939,7 +970,44 @@ mod tests {
                     data
                 }),
                 book: None,
+                extra: None,
             })
+        );
+    }
+
+    #[test]
+    fn extra_components_arrive_in_their_26_3_shape() {
+        let call = |extra: &str| HostCall {
+            owner: "Player".into(),
+            subject: PLAYER.into(),
+            method: "setItemMeta(int,String)".into(),
+            args: vec![
+                "2".into(),
+                ["", "", "", "0", "", "0", "", "", "", extra].join(&FIELD.to_string()),
+            ],
+        };
+        let Some(PlayerCommand::ItemMeta { extra, .. }) = inventory_command(&call(
+            r#"{"minecraft:max_stack_size":16,"minecraft:enchantment_glint_override":1b}"#,
+        )) else {
+            panic!("extra components were refused");
+        };
+        let extra = extra.expect("the extra field arrived");
+        assert_eq!(
+            extra.get("minecraft:max_stack_size"),
+            Some(&ferrite_nbt::Tag::Int(16))
+        );
+        assert_eq!(
+            extra.get("minecraft:enchantment_glint_override"),
+            Some(&ferrite_nbt::Tag::Byte(1))
+        );
+        // An unknown component name is refused instead of being stored under an invented id.
+        assert_eq!(
+            inventory_command(&call(r#"{"ferrite:not_a_component":1}"#)),
+            None
+        );
+        assert_eq!(
+            inventory_command(&call(r#"{"minecraft:not_a_component":1}"#)),
+            None
         );
     }
 

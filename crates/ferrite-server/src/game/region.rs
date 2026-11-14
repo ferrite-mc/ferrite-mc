@@ -315,6 +315,7 @@ pub enum Command {
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
         book: Option<ferrite_plugin::BookFields>,
+        extra: Option<ferrite_nbt::Compound>,
     },
     /// A plugin pointed the filled map in a slot at a saved map.
     ItemMapId {
@@ -518,6 +519,7 @@ pub(super) struct ItemMetaFields {
     pub flags: Vec<String>,
     pub custom_data: Option<ferrite_nbt::Compound>,
     pub book: Option<ferrite_plugin::BookFields>,
+    pub extra: Option<ferrite_nbt::Compound>,
 }
 
 /// Maps Bukkit item flags to the components hidden by `minecraft:tooltip_display`.
@@ -565,6 +567,7 @@ pub(super) fn with_meta_spec(
             flags: meta.flags.clone(),
             custom_data: meta.custom_data.clone(),
             book: meta.book.clone(),
+            extra: meta.extra.clone(),
         },
     )
 }
@@ -588,6 +591,20 @@ pub(super) fn with_meta(
         ids::CUSTOM_DATA,
         ids::WRITABLE_BOOK_CONTENT,
         ids::WRITTEN_BOOK_CONTENT,
+        ids::ITEM_NAME,
+        ids::ENCHANTMENT_GLINT_OVERRIDE,
+        ids::MAX_STACK_SIZE,
+        ids::MAX_DAMAGE,
+        ids::RARITY,
+        ids::ITEM_MODEL,
+        ids::TOOLTIP_STYLE,
+        ids::USE_REMAINDER,
+        ids::ATTRIBUTE_MODIFIERS,
+        ids::POTION_CONTENTS,
+        ids::BANNER_PATTERNS,
+        ids::FIREWORKS,
+        ids::PROFILE,
+        ids::NOTE_BLOCK_SOUND,
     ] {
         stack.components.remove(id);
     }
@@ -636,6 +653,18 @@ pub(super) fn with_meta(
         && let Some(content) = book_content(item.as_deref(), book)
     {
         put(content);
+    }
+    // Components the Java side had no dedicated field for travel in their 26.3 NBT shape. They
+    // are applied last so an explicit tooltip_display from the meta wins over the flags above.
+    if let Some(extra) = &meta.extra {
+        for (name, tag) in extra {
+            let name = name.strip_prefix("minecraft:").unwrap_or(name.as_str());
+            if let Some(id) = ferrite_item::component_id(name) {
+                stack
+                    .components
+                    .insert(id, ferrite_item::Component::from_nbt(id, tag));
+            }
+        }
     }
     stack
 }
@@ -4709,6 +4738,7 @@ impl Player {
                     flags,
                     custom_data,
                     book,
+                    extra,
                 } => {
                     self.set_item_meta(
                         slot,
@@ -4722,6 +4752,7 @@ impl Player {
                             flags,
                             custom_data,
                             book,
+                            extra,
                         },
                     );
                     continue;
@@ -5165,7 +5196,8 @@ impl Player {
                 ServerboundPlay::ResourcePackResponse(p) => {
                     crate::plugins::facts::set_pack_status(self.uuid, p.action.0);
                     if let Some(plugins) = &self.plugins {
-                        let _ = plugins.resource_pack_status(self.uuid, &self.name, p.id, p.action.0);
+                        let _ =
+                            plugins.resource_pack_status(self.uuid, &self.name, p.id, p.action.0);
                     }
                 }
                 ServerboundPlay::PlayerInput(p) => {
@@ -15024,6 +15056,7 @@ mod worn_stack_tests {
                 data
             }),
             book: None,
+            extra: None,
         };
         let stack = with_meta(ferrite_item::ItemStack::with_count(sword, 1), &meta);
         for id in [
@@ -15082,12 +15115,76 @@ mod worn_stack_tests {
             flags: vec![],
             custom_data: None,
             book: None,
+            extra: None,
         };
         let cleared = with_meta(stack, &bare);
         assert!(
             cleared
                 .components
                 .get(ferrite_item::component_ids::CUSTOM_NAME)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn extra_components_are_applied_and_cleared() {
+        let sword = ferrite_item::item_id("diamond_sword").unwrap();
+        let mut extra = ferrite_nbt::Compound::new();
+        extra.insert("minecraft:max_stack_size".into(), ferrite_nbt::Tag::Int(16));
+        extra.insert(
+            "minecraft:enchantment_glint_override".into(),
+            ferrite_nbt::Tag::Byte(1),
+        );
+        let meta = ItemMetaFields {
+            name: None,
+            lore: Vec::new(),
+            enchants: Vec::new(),
+            unbreakable: false,
+            model: None,
+            repair: 0,
+            flags: Vec::new(),
+            custom_data: None,
+            book: None,
+            extra: Some(extra),
+        };
+        let stack = with_meta(ferrite_item::ItemStack::with_count(sword, 1), &meta);
+        assert_eq!(
+            stack
+                .components
+                .get(ferrite_item::component_ids::MAX_STACK_SIZE),
+            Some(&ferrite_item::Component::MaxStackSize(16))
+        );
+        assert_eq!(
+            stack
+                .components
+                .get(ferrite_item::component_ids::ENCHANTMENT_GLINT_OVERRIDE),
+            Some(&ferrite_item::Component::Opaque(ferrite_nbt::Tag::Byte(1)))
+        );
+        // A later call without the components removes them, so clearing a glint override or a
+        // stack limit in a plugin actually clears it on the stack.
+        let bare = ItemMetaFields {
+            name: None,
+            lore: Vec::new(),
+            enchants: Vec::new(),
+            unbreakable: false,
+            model: None,
+            repair: 0,
+            flags: Vec::new(),
+            custom_data: None,
+            book: None,
+            extra: None,
+        };
+        let cleared = with_meta(stack, &bare);
+        assert!(
+            cleared
+                .components
+                .get(ferrite_item::component_ids::MAX_STACK_SIZE)
+                .is_none()
+        );
+        assert!(
+            cleared
+                .components
+                .get(ferrite_item::component_ids::ENCHANTMENT_GLINT_OVERRIDE)
                 .is_none()
         );
     }
@@ -15112,6 +15209,7 @@ mod worn_stack_tests {
             flags: Vec::new(),
             custom_data: None,
             book: Some(book),
+            extra: None,
         }
     }
 

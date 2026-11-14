@@ -49,7 +49,7 @@ class BookMetaBridgeTest {
 
     private static com.google.gson.JsonObject bookField(String payload) {
         var fields = payload.split("\u001e", -1);
-        assertEquals(9, fields.length, "the book is the ninth field: " + payload);
+        assertEquals(10, fields.length, "the book is the ninth of ten fields: " + payload);
         return com.google.gson.JsonParser.parseString(fields[8]).getAsJsonObject();
     }
 
