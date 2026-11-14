@@ -10,6 +10,8 @@ public class ServerGamePacketListenerImpl {
     private net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket pendingTimes;
     /** NMS container ids mapped to the Bukkit view this connection opened for them. */
     private final java.util.Map<Integer, org.bukkit.inventory.InventoryView> openContainers = new java.util.LinkedHashMap<>();
+    /** The last state id applied for each open container; an older packet is stale and ignored. */
+    private final java.util.Map<Integer, Integer> containerStates = new java.util.HashMap<>();
     private static final int PLAYER_MENU_SLOTS = 36;
     /** Menus the host opens as block-less stations. */
     private static final java.util.Set<String> STATIONS = java.util.Set.of("CRAFTING", "ANVIL", "ENCHANTMENT", "GRINDSTONE", "LOOM", "SMITHING", "STONECUTTER", "CARTOGRAPHY_TABLE");
@@ -53,10 +55,11 @@ public class ServerGamePacketListenerImpl {
         String name = packet.getType().getName();
         if (rows == 0 && name.equals("SHULKER_BOX")) {
             var shulker = org.bukkit.Bukkit.createInventory(null, org.bukkit.event.inventory.InventoryType.SHULKER_BOX, packet.getTitle().getString());
-            if (!openContainers.isEmpty() || !stationContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); stationContainers.clear(); }
+            if (!openContainers.isEmpty() || !stationContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); stationContainers.clear(); containerStates.clear(); }
             var view = target.openInventory(shulker);
             if (view == null) throw new IllegalStateException("Ferrite: the player did not accept NMS container " + id);
             openContainers.put(id, view);
+            containerStates.put(id, 0);
             return;
         }
         if (rows == 0) {
@@ -64,7 +67,7 @@ public class ServerGamePacketListenerImpl {
             // and later content packets for it are refused instead of silently dropped.
             if (!STATIONS.contains(name)) throw new UnsupportedOperationException("Ferrite: not implemented: NMS open screen menu " + name
                 + " (it needs a block entity or entity the packet does not carry; open it with the Player#open* method for that block instead)");
-            if (!openContainers.isEmpty() || !stationContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); stationContainers.clear(); }
+            if (!openContainers.isEmpty() || !stationContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); stationContainers.clear(); containerStates.clear(); }
             var at = target.getLocation();
             switch (name) {
                 case "CRAFTING" -> target.openWorkbench(at, true);
@@ -77,17 +80,20 @@ public class ServerGamePacketListenerImpl {
                 default -> target.openCartographyTable(at, true);
             }
             stationContainers.add(id);
+            containerStates.put(id, 0);
             return;
         }
         var inventory = org.bukkit.Bukkit.createInventory(null, rows * 9, packet.getTitle().getString());
-        if (!openContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); }
+        if (!openContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); containerStates.clear(); }
         var view = target.openInventory(inventory);
         if (view == null) throw new IllegalStateException("Ferrite: the player did not accept NMS container " + id);
         openContainers.put(id, view);
+        containerStates.put(id, 0);
     }
 
     private void setContent(org.bukkit.entity.Player target, net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket packet) {
         var view = container(target, packet.containerId());
+        if (stale(packet.containerId(), packet.stateId())) return;
         int slots = menuSlots(view);
         if (packet.items().size() != slots) throw new IllegalArgumentException("Ferrite: NMS container " + packet.containerId() + " has " + slots + " slots, packet has " + packet.items().size());
         for (int i = 0; i < slots; i++) view.setItem(i, bukkitStack(packet.items().get(i)));
@@ -97,6 +103,7 @@ public class ServerGamePacketListenerImpl {
 
     private void setSlot(org.bukkit.entity.Player target, net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket packet) {
         var view = container(target, packet.getContainerId());
+        if (stale(packet.getContainerId(), packet.getStateId())) return;
         int slot = packet.getSlot();
         if (slot == -1) view.setCursor(bukkitStack(packet.getItem()));
         else {
@@ -107,7 +114,15 @@ public class ServerGamePacketListenerImpl {
         target.updateInventory();
     }
 
+    /** Whether a packet carries a state id older than one already applied for this container. */
+    private boolean stale(int containerId, int stateId) {
+        if (stateId < containerStates.getOrDefault(containerId, 0)) return true;
+        containerStates.put(containerId, stateId);
+        return false;
+    }
+
     private void closeContainer(org.bukkit.entity.Player target, int containerId) {
+        containerStates.remove(containerId);
         if (stationContainers.remove(containerId)) { target.closeInventory(); return; }
         var view = container(target, containerId);
         openContainers.remove(containerId);
