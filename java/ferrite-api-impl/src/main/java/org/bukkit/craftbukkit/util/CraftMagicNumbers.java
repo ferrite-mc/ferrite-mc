@@ -33,6 +33,22 @@ public final class CraftMagicNumbers {
         return material.createBlockData();
     }
 
+    /** The block data of a block material, as CraftBukkit's {@code getBlockData(Material)}. */
+    public static org.bukkit.block.data.BlockData getBlockData(org.bukkit.Material material) { return getDefaultBlockData(material); }
+
+    /** The material of a block data instance. */
+    public static org.bukkit.Material getMaterial(org.bukkit.block.data.BlockData data) { return java.util.Objects.requireNonNull(data, "data").getMaterial(); }
+
+    /** Minecraft 26.3 addresses block states by name and properties, not by a global numeric id. */
+    public static int getBlockStateId(org.bukkit.block.data.BlockData data) {
+        throw new UnsupportedOperationException("Ferrite: Minecraft 26.3 has no global block state ids; address the state by its material and properties instead");
+    }
+
+    /** Ferrite does not publish the numeric vanilla data version for 26.3; the protocol version is the supported identity. */
+    public static int getDataVersion() {
+        throw new UnsupportedOperationException("Ferrite: no numeric data version is published for Minecraft 26.3; use the protocol version instead");
+    }
+
     /** Whether the material is one of the pre-1.13 legacy names. */
     public static boolean isLegacy(org.bukkit.Material material) { return material.isLegacy(); }
 

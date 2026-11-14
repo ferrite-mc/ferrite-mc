@@ -3,7 +3,7 @@ package net.minecraft.world.item;
 /** Item stack as NMS names it; holds a private Bukkit stack so the two views never alias. */
 public final class ItemStack {
     public static final ItemStack EMPTY = new ItemStack(new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR));
-    private final org.bukkit.inventory.ItemStack stack;
+    private org.bukkit.inventory.ItemStack stack;
     private ItemStack(org.bukkit.inventory.ItemStack stack) { this.stack = stack; }
     public static ItemStack of(org.bukkit.inventory.ItemStack stack) { return stack == null ? EMPTY : new ItemStack(stack.clone()); }
     public boolean isEmpty() { return stack.getType().isAir() || stack.getAmount() <= 0; }
@@ -14,5 +14,9 @@ public final class ItemStack {
     public int getMaxStackSize() { return stack.getMaxStackSize(); }
     public ItemStack copy() { return new ItemStack(stack.clone()); }
     public org.bukkit.inventory.ItemStack toBukkit() { return stack.clone(); }
+    /** Replaces the whole backing stack; used by {@code CraftItemStack} mirrors. */
+    public void set(org.bukkit.inventory.ItemStack value) { this.stack = (value == null ? new org.bukkit.inventory.ItemStack(org.bukkit.Material.AIR) : value.clone()); }
+    /** The backing stack itself for a mirror; callers must not keep it past the call. */
+    public org.bukkit.inventory.ItemStack view() { return stack; }
     @Override public String toString() { return getCount() + " " + stack.getType().getKey(); }
 }

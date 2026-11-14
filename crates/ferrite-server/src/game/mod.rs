@@ -3077,6 +3077,7 @@ fn route_plugin_command(
             flags,
             custom_data,
             book,
+            extra,
         } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::ItemMeta {
@@ -3090,6 +3091,7 @@ fn route_plugin_command(
                     flags,
                     custom_data,
                     book,
+                    extra,
                 });
             }
         }

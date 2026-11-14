@@ -1,7 +1,11 @@
 package dev.ferrite.server;
 
+import com.google.common.collect.LinkedHashMultimap;
+import com.google.common.collect.Multimap;
+
 final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
     private net.kyori.adventure.text.Component display;
+    private net.kyori.adventure.text.Component itemName;
     private java.util.List<net.kyori.adventure.text.Component> lore;
     private Integer model;
     private FerriteDataContainer data = new FerriteDataContainer();
@@ -10,7 +14,7 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
     private boolean unbreakable;
     private Integer damage;
     private int repairCost;
-    /** Written and writable books also answer to BookMeta. */
+    /** A written or writable book also answers to BookMeta. */
     private boolean book;
     /** Filled maps also answer to MapMeta. */
     private boolean map;
@@ -22,15 +26,35 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
     private org.bukkit.inventory.meta.BookMeta.Generation generation;
     /** A signed book (`written_book`); a book and quill has pages only. */
     private boolean written;
-    /** Potions and tipped arrows also answer to PotionMeta; enchanted books to EnchantmentStorageMeta. Held on the Java side only: the host wire refuses them. */
+    /** Potions and tipped arrows also answer to PotionMeta; enchanted books to EnchantmentStorageMeta. */
     private boolean potion, storage;
     private org.bukkit.potion.PotionType basePotion;
-    /** Firework rockets also answer to FireworkMeta: flight duration (0..127) and the stars. Held on the Java side; `fireworkBoost` reads them. */
+    /** Firework rockets answer to FireworkMeta: flight duration (0..127) and the stars. */
     private boolean firework;
     private int power;
     private final java.util.List<org.bukkit.FireworkEffect> fireworkEffects = new java.util.ArrayList<>();
-    /** Vanilla components ItemMeta has no field for (fireworks, trim, banner patterns ...), kept as SNBT so equality and matching see them; the host wire refuses any stack that carries one. */
+    private final java.util.List<org.bukkit.potion.PotionEffect> customEffects = new java.util.ArrayList<>();
+    private org.bukkit.Color customPotionColor;
+    /** Banners answer to BannerMeta; heads to SkullMeta. */
+    private boolean banner, skull;
+    private final java.util.List<org.bukkit.block.banner.Pattern> patterns = new java.util.ArrayList<>();
+    private com.destroystokyo.paper.profile.PlayerProfile profile;
+    /** Paper item-meta fields that have no dedicated Bukkit subtype. */
+    private Boolean glint;
+    private Integer maxStackSize, maxDamage;
+    private org.bukkit.inventory.ItemRarity rarity;
+    private org.bukkit.NamespacedKey itemModel, tooltipStyle;
+    private boolean hideTooltip;
+    private org.bukkit.inventory.ItemStack useRemainder;
+    private final java.util.List<AttributeEntry> attributes = new java.util.ArrayList<>();
+    private record AttributeEntry(org.bukkit.attribute.Attribute attribute, org.bukkit.attribute.AttributeModifier modifier) {}
+    /** Vanilla components ItemMeta has no field for, kept as SNBT so equality and matching see them; the host wire refuses any stack that carries one. */
     private final java.util.Map<String, Object> extra = new java.util.TreeMap<>();
+
+    /** The components a plugin wrote through {@code UnsafeValues#modifyItemStack} and this meta only stores. */
+    static java.util.Map<String, Object> components(org.bukkit.inventory.meta.ItemMeta meta) {
+        return java.lang.reflect.Proxy.isProxyClass(meta.getClass()) && java.lang.reflect.Proxy.getInvocationHandler(meta) instanceof FerriteItemMeta m ? java.util.Map.copyOf(m.extra) : java.util.Map.of();
+    }
     /** Keeps a component this meta cannot model; false when {@code meta} is not one of ours. */
     static boolean keepComponent(org.bukkit.inventory.meta.ItemMeta meta, String name, Object value) {
         if (!java.lang.reflect.Proxy.isProxyClass(meta.getClass()) || !(java.lang.reflect.Proxy.getInvocationHandler(meta) instanceof FerriteItemMeta m)) return false;
@@ -42,23 +66,72 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
     /** Vanilla limits: a title is at most 32 characters, a book at most 100 pages, a book and quill page at most 1024. */
     static final int MAX_TITLE = 32, MAX_PAGES = 100, MAX_WRITABLE_PAGE = 1024;
     private static final net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer LEGACY = net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection();
+
     static org.bukkit.inventory.meta.ItemMeta create() { return new FerriteItemMeta().proxy(); }
     static org.bukkit.inventory.meta.ItemMeta create(org.bukkit.Material material) {
         var meta = new FerriteItemMeta();
+        String name = material.name();
         meta.book = material == org.bukkit.Material.WRITTEN_BOOK || material == org.bukkit.Material.WRITABLE_BOOK;
         meta.written = material == org.bukkit.Material.WRITTEN_BOOK;
         meta.map = material == org.bukkit.Material.FILLED_MAP;
         meta.potion = material == org.bukkit.Material.POTION || material == org.bukkit.Material.SPLASH_POTION || material == org.bukkit.Material.LINGERING_POTION || material == org.bukkit.Material.TIPPED_ARROW;
         meta.storage = material == org.bukkit.Material.ENCHANTED_BOOK;
+        meta.banner = name.endsWith("_BANNER");
         meta.firework = material == org.bukkit.Material.FIREWORK_ROCKET;
+        meta.skull = name.endsWith("_HEAD") || name.endsWith("_SKULL");
         return meta.proxy();
     }
-    private org.bukkit.inventory.meta.ItemMeta proxy() { return (org.bukkit.inventory.meta.ItemMeta) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), book ? new Class<?>[]{org.bukkit.inventory.meta.BookMeta.class} : firework ? new Class<?>[]{org.bukkit.inventory.meta.FireworkMeta.class} : map ? new Class<?>[]{org.bukkit.inventory.meta.MapMeta.class} : potion ? new Class<?>[]{org.bukkit.inventory.meta.PotionMeta.class} : storage ? new Class<?>[]{org.bukkit.inventory.meta.EnchantmentStorageMeta.class} : new Class<?>[]{org.bukkit.inventory.meta.ItemMeta.class, org.bukkit.inventory.meta.Damageable.class}, this); }
-    private org.bukkit.inventory.meta.ItemMeta copy() { var c = new FerriteItemMeta(); c.display = display; c.lore = lore == null ? null : java.util.List.copyOf(lore); c.model = model; c.data = data.copy(); c.enchants.putAll(enchants); c.flags.addAll(flags); c.unbreakable = unbreakable; c.damage = damage; c.repairCost = repairCost; c.book = book; c.map = map; c.mapView = mapView; c.mapColor = mapColor; c.scaling = scaling; c.locationName = locationName; c.title = title; c.author = author; c.generation = generation; c.written = written; c.potion = potion; c.extra.putAll(extra); c.storage = storage; c.basePotion = basePotion; c.firework = firework; c.power = power; c.fireworkEffects.addAll(fireworkEffects); c.stored.putAll(stored); c.pages.addAll(pages); return c.proxy(); }
+    private org.bukkit.inventory.meta.ItemMeta proxy() {
+        var interfaces = new java.util.ArrayList<Class<?>>();
+        interfaces.add(org.bukkit.inventory.meta.ItemMeta.class);
+        // Every meta subinterface narrows clone() to itself, so a proxy may implement at most one
+        // of them: mixing them makes ProxyGenerator reject the incompatible clone() returns.
+        if (book) interfaces.add(org.bukkit.inventory.meta.BookMeta.class);
+        else if (map) interfaces.add(org.bukkit.inventory.meta.MapMeta.class);
+        else if (potion) interfaces.add(org.bukkit.inventory.meta.PotionMeta.class);
+        else if (storage) interfaces.add(org.bukkit.inventory.meta.EnchantmentStorageMeta.class);
+        else if (banner) interfaces.add(org.bukkit.inventory.meta.BannerMeta.class);
+        else if (firework) interfaces.add(org.bukkit.inventory.meta.FireworkMeta.class);
+        else if (skull) interfaces.add(org.bukkit.inventory.meta.SkullMeta.class);
+        else interfaces.add(org.bukkit.inventory.meta.Damageable.class);
+        return (org.bukkit.inventory.meta.ItemMeta) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), interfaces.toArray(Class<?>[]::new), this);
+    }
+
+    /** Repair cost access that does not require the proxy to also implement the conflicting Repairable. */
+    static int repairCost(org.bukkit.inventory.meta.ItemMeta meta) {
+        if (java.lang.reflect.Proxy.isProxyClass(meta.getClass()) && java.lang.reflect.Proxy.getInvocationHandler(meta) instanceof FerriteItemMeta m) return m.repairCost;
+        return meta instanceof org.bukkit.inventory.meta.Repairable r ? r.getRepairCost() : 0;
+    }
+
+    static void setRepairCost(org.bukkit.inventory.meta.ItemMeta meta, int cost) {
+        if (java.lang.reflect.Proxy.isProxyClass(meta.getClass()) && java.lang.reflect.Proxy.getInvocationHandler(meta) instanceof FerriteItemMeta m) { m.repairCost = cost; return; }
+        if (meta instanceof org.bukkit.inventory.meta.Repairable r) r.setRepairCost(cost);
+    }
+    private org.bukkit.inventory.meta.ItemMeta copy() {
+        var c = new FerriteItemMeta();
+        c.display = display; c.itemName = itemName; c.lore = lore == null ? null : java.util.List.copyOf(lore); c.model = model; c.data = data.copy();
+        c.enchants.putAll(enchants); c.flags.addAll(flags); c.unbreakable = unbreakable; c.damage = damage; c.repairCost = repairCost;
+        c.book = book; c.map = map; c.mapView = mapView; c.mapColor = mapColor; c.scaling = scaling; c.locationName = locationName;
+        c.title = title; c.author = author; c.generation = generation; c.written = written; c.potion = potion; c.extra.putAll(extra);
+        c.storage = storage; c.basePotion = basePotion; c.stored.putAll(stored); c.pages.addAll(pages);
+        c.customEffects.addAll(customEffects); c.customPotionColor = customPotionColor; c.banner = banner; c.firework = firework; c.skull = skull;
+        c.patterns.addAll(patterns); c.fireworkEffects.addAll(fireworkEffects); c.power = power; c.profile = profile;
+        c.glint = glint; c.maxStackSize = maxStackSize; c.maxDamage = maxDamage; c.rarity = rarity; c.itemModel = itemModel;
+        c.tooltipStyle = tooltipStyle; c.hideTooltip = hideTooltip; c.useRemainder = useRemainder; c.attributes.addAll(attributes);
+        return c.proxy();
+    }
     private boolean sameAs(FerriteItemMeta o) {
-        return java.util.Objects.equals(display, o.display) && java.util.Objects.equals(lore, o.lore) && java.util.Objects.equals(model, o.model)
+        return java.util.Objects.equals(display, o.display) && java.util.Objects.equals(itemName, o.itemName) && java.util.Objects.equals(lore, o.lore) && java.util.Objects.equals(model, o.model)
             && enchants.equals(o.enchants) && flags.equals(o.flags) && unbreakable == o.unbreakable
-            && java.util.Objects.equals(damage == null ? 0 : damage, o.damage == null ? 0 : o.damage) && repairCost == o.repairCost && java.util.Objects.equals(title, o.title) && java.util.Objects.equals(author, o.author) && generation == o.generation && pages.equals(o.pages) && basePotion == o.basePotion && extra.equals(o.extra) && stored.equals(o.stored) && firework == o.firework && power == o.power && fireworkEffects.equals(o.fireworkEffects) && data.sameAs(o.data);
+            && java.util.Objects.equals(damage == null ? 0 : damage, o.damage == null ? 0 : o.damage) && repairCost == o.repairCost
+            && java.util.Objects.equals(title, o.title) && java.util.Objects.equals(author, o.author) && generation == o.generation
+            && pages.equals(o.pages) && basePotion == o.basePotion && extra.equals(o.extra) && stored.equals(o.stored) && data.sameAs(o.data)
+            && firework == o.firework && power == o.power && fireworkEffects.equals(o.fireworkEffects)
+            && customEffects.equals(o.customEffects) && java.util.Objects.equals(customPotionColor, o.customPotionColor)
+            && patterns.equals(o.patterns) && java.util.Objects.equals(profile, o.profile) && java.util.Objects.equals(glint, o.glint)
+            && java.util.Objects.equals(maxStackSize, o.maxStackSize) && java.util.Objects.equals(maxDamage, o.maxDamage)
+            && rarity == o.rarity && java.util.Objects.equals(itemModel, o.itemModel) && java.util.Objects.equals(tooltipStyle, o.tooltipStyle)
+            && hideTooltip == o.hideTooltip && java.util.Objects.equals(useRemainder, o.useRemainder) && attributes.equals(o.attributes);
     }
     /** A page past the 100th is dropped, and a book and quill page is cut to 1024 characters, as Paper does. */
     private void addPage(net.kyori.adventure.text.Component page) {
@@ -68,6 +141,28 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
             if (text.length() > MAX_WRITABLE_PAGE) page = LEGACY.deserialize(text.substring(0, MAX_WRITABLE_PAGE));
         }
         pages.add(page);
+    }
+    private static String slotName(org.bukkit.inventory.EquipmentSlotGroup group) {
+        if (group == null) return "any";
+        if (group == org.bukkit.inventory.EquipmentSlotGroup.MAINHAND) return "mainhand";
+        if (group == org.bukkit.inventory.EquipmentSlotGroup.OFFHAND) return "offhand";
+        if (group == org.bukkit.inventory.EquipmentSlotGroup.FEET) return "feet";
+        if (group == org.bukkit.inventory.EquipmentSlotGroup.LEGS) return "legs";
+        if (group == org.bukkit.inventory.EquipmentSlotGroup.CHEST) return "chest";
+        if (group == org.bukkit.inventory.EquipmentSlotGroup.HEAD) return "head";
+        return group.toString();
+    }
+    private Multimap<org.bukkit.attribute.Attribute, org.bukkit.attribute.AttributeModifier> attributeMap(org.bukkit.inventory.EquipmentSlot slot, org.bukkit.attribute.Attribute only) {
+        var out = LinkedHashMultimap.<org.bukkit.attribute.Attribute, org.bukkit.attribute.AttributeModifier>create();
+        for (var entry : attributes) {
+            if (only != null && entry.attribute() != only) continue;
+            if (slot != null) {
+                var group = entry.modifier().getSlotGroup();
+                if (group != null ? !group.test(slot) : entry.modifier().getSlot() != slot) continue;
+            }
+            out.put(entry.attribute(), entry.modifier());
+        }
+        return out;
     }
     @SuppressWarnings("unchecked") public Object invoke(Object self, java.lang.reflect.Method method, Object[] args) {
         return switch (method.getName()) {
@@ -79,6 +174,8 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
             case "lore" -> { if (args == null || args.length == 0) yield lore == null ? null : java.util.List.copyOf(lore); lore = args[0] == null ? null : java.util.List.copyOf((java.util.List<net.kyori.adventure.text.Component>) args[0]); yield null; }
             case "getLore" -> lore == null ? null : lore.stream().map(LEGACY::serialize).toList();
             case "setLore" -> { lore = args[0] == null ? null : ((java.util.List<String>) args[0]).stream().<net.kyori.adventure.text.Component>map(LEGACY::deserialize).toList(); yield null; }
+            case "itemName" -> { if (args == null || args.length == 0) yield itemName; itemName = (net.kyori.adventure.text.Component) args[0]; yield null; }
+            case "hasItemName" -> itemName != null;
             case "hasCustomModelData" -> model != null;
             case "getCustomModelData" -> { if (model == null) throw new IllegalStateException("No custom model data"); yield model; }
             case "setCustomModelData" -> { model = (Integer) args[0]; yield null; }
@@ -95,19 +192,69 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
             case "removeItemFlags" -> { for (var flag : (org.bukkit.inventory.ItemFlag[]) args[0]) flags.remove(flag); yield null; }
             case "getItemFlags" -> java.util.Set.copyOf(flags);
             case "hasItemFlag" -> flags.contains(args[0]);
+            case "isHideTooltip" -> hideTooltip;
+            case "setHideTooltip" -> { hideTooltip = (boolean) args[0]; yield null; }
             case "isUnbreakable" -> unbreakable;
             case "setUnbreakable" -> { unbreakable = (boolean) args[0]; yield null; }
-            case "hasDamage" -> damage != null && damage > 0;
+            case "hasDamage", "hasDamageValue" -> damage != null && damage > 0;
             case "getDamage" -> damage == null ? 0 : damage;
             case "setDamage" -> { damage = (int) args[0]; yield null; }
+            case "resetDamage" -> { damage = null; yield null; }
+            case "hasMaxDamage" -> maxDamage != null;
+            case "getMaxDamage" -> maxDamage == null ? 0 : maxDamage;
+            case "setMaxDamage" -> { maxDamage = (Integer) args[0]; yield null; }
+            case "hasEnchantmentGlintOverride" -> glint != null;
+            case "getEnchantmentGlintOverride" -> glint;
+            case "setEnchantmentGlintOverride" -> { glint = (Boolean) args[0]; yield null; }
+            case "hasMaxStackSize" -> maxStackSize != null;
+            case "getMaxStackSize" -> maxStackSize == null ? (extra.get("material_max_stack") instanceof Integer i ? i : 64) : maxStackSize;
+            case "setMaxStackSize" -> { maxStackSize = (Integer) args[0]; yield null; }
+            case "hasRarity" -> rarity != null;
+            case "getRarity" -> rarity == null ? org.bukkit.inventory.ItemRarity.COMMON : rarity;
+            case "setRarity" -> { rarity = (org.bukkit.inventory.ItemRarity) args[0]; yield null; }
+            case "hasItemModel" -> itemModel != null;
+            case "getItemModel" -> itemModel;
+            case "setItemModel" -> { itemModel = (org.bukkit.NamespacedKey) args[0]; yield null; }
+            case "hasTooltipStyle" -> tooltipStyle != null;
+            case "getTooltipStyle" -> tooltipStyle;
+            case "setTooltipStyle" -> { tooltipStyle = (org.bukkit.NamespacedKey) args[0]; yield null; }
+            case "hasUseRemainder" -> useRemainder != null;
+            case "getUseRemainder" -> useRemainder == null ? null : useRemainder.clone();
+            case "setUseRemainder" -> { useRemainder = args[0] == null ? null : ((org.bukkit.inventory.ItemStack) args[0]).clone(); yield null; }
+            case "hasAttributeModifiers" -> !attributes.isEmpty();
+            case "getAttributeModifiers" -> {
+                if (args == null || args.length == 0) yield attributeMap(null, null);
+                if (args[0] instanceof org.bukkit.inventory.EquipmentSlot slot) yield attributeMap(slot, null);
+                var only = (org.bukkit.attribute.Attribute) args[0];
+                yield java.util.List.copyOf(attributeMap(null, only).get(only));
+            }
+            case "addAttributeModifier" -> {
+                var attribute = (org.bukkit.attribute.Attribute) args[0];
+                var modifier = (org.bukkit.attribute.AttributeModifier) args[1];
+                var entry = new AttributeEntry(attribute, modifier);
+                if (attributes.contains(entry)) yield false;
+                attributes.add(entry); yield true;
+            }
+            case "setAttributeModifiers" -> {
+                attributes.clear();
+                for (var entry : ((Multimap<org.bukkit.attribute.Attribute, org.bukkit.attribute.AttributeModifier>) args[0]).entries()) attributes.add(new AttributeEntry(entry.getKey(), entry.getValue()));
+                yield null;
+            }
+            case "removeAttributeModifier" -> {
+                int before = attributes.size();
+                if (args[0] instanceof org.bukkit.attribute.Attribute attribute && args.length == 1) attributes.removeIf(entry -> entry.attribute() == attribute);
+                else if (args[0] instanceof org.bukkit.inventory.EquipmentSlot slot && args.length == 1) attributes.removeIf(entry -> { var group = entry.modifier().getSlotGroup(); return group != null ? group.test(slot) : entry.modifier().getSlot() == slot; });
+                else attributes.remove(new AttributeEntry((org.bukkit.attribute.Attribute) args[0], (org.bukkit.attribute.AttributeModifier) args[1]));
+                yield attributes.size() != before;
+            }
             case "hasMapView", "hasMapId" -> mapView != null;
             case "getMapView" -> mapView;
             case "setMapView" -> { mapView = (org.bukkit.map.MapView) args[0]; yield null; }
             case "getMapId" -> { if (mapView == null) throw new IllegalStateException("No map id"); yield mapView.getId(); }
             case "setMapId" -> { mapView = org.bukkit.Bukkit.getMap((int) args[0]); yield null; }
-            case "hasColor" -> mapColor != null;
-            case "getColor" -> mapColor;
-            case "setColor" -> { mapColor = (org.bukkit.Color) args[0]; yield null; }
+            case "hasColor" -> method.getDeclaringClass() == org.bukkit.inventory.meta.PotionMeta.class ? customPotionColor != null : mapColor != null;
+            case "getColor" -> method.getDeclaringClass() == org.bukkit.inventory.meta.PotionMeta.class ? customPotionColor : mapColor;
+            case "setColor" -> { if (method.getDeclaringClass() == org.bukkit.inventory.meta.PotionMeta.class) customPotionColor = (org.bukkit.Color) args[0]; else mapColor = (org.bukkit.Color) args[0]; yield null; }
             case "isScaling" -> scaling;
             case "setScaling" -> { scaling = (boolean) args[0]; yield null; }
             case "hasLocationName" -> locationName != null;
@@ -133,8 +280,7 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
             case "pages" -> {
                 if (args == null || args.length == 0) yield java.util.List.copyOf(pages);
                 var next = args[0] instanceof java.util.List<?> l ? (java.util.List<net.kyori.adventure.text.Component>) l : java.util.List.of((net.kyori.adventure.text.Component[]) args[0]);
-                pages.clear();
-                for (var page : next) addPage(page);
+                pages.clear(); for (var page : next) addPage(page);
                 yield method.getReturnType().isInstance(self) ? self : null;
             }
             case "addPages" -> { for (var page : (Object[]) args[0]) addPage(page instanceof String text ? LEGACY.deserialize(text) : (net.kyori.adventure.text.Component) page); yield null; }
@@ -164,8 +310,13 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
             case "hasBasePotionType" -> basePotion != null;
             case "getBasePotionType" -> basePotion;
             case "setBasePotionType" -> { basePotion = (org.bukkit.potion.PotionType) args[0]; yield null; }
-            case "hasCustomEffects" -> false;
-            case "getCustomEffects" -> java.util.List.of();
+            case "hasCustomEffects" -> !customEffects.isEmpty();
+            case "getCustomEffects" -> java.util.List.copyOf(customEffects);
+            case "addCustomEffect" -> { var effect = (org.bukkit.potion.PotionEffect) args[0]; boolean overwrite = (boolean) args[1]; boolean changed = false; for (int i = 0; i < customEffects.size(); i++) if (customEffects.get(i).getType() == effect.getType()) { if (overwrite) { customEffects.set(i, effect); changed = true; } yield changed; } customEffects.add(effect); yield true; }
+            case "removeCustomEffect" -> { var type = (org.bukkit.potion.PotionEffectType) args[0]; yield customEffects.removeIf(effect -> effect.getType() == type); }
+            case "clearCustomEffects" -> { boolean any = !customEffects.isEmpty(); customEffects.clear(); yield any; }
+            case "hasCustomColor" -> customPotionColor != null;
+            case "clearCustomColor" -> { boolean any = customPotionColor != null; customPotionColor = null; yield any; }
             case "hasStoredEnchants" -> !stored.isEmpty();
             case "getStoredEnchants" -> java.util.Map.copyOf(stored);
             case "hasStoredEnchant" -> stored.containsKey((org.bukkit.enchantments.Enchantment) args[0]);
@@ -175,7 +326,25 @@ final class FerriteItemMeta implements java.lang.reflect.InvocationHandler {
             case "hasRepairCost" -> repairCost > 0;
             case "getRepairCost" -> repairCost;
             case "setRepairCost" -> { repairCost = (int) args[0]; yield null; }
-            case "hashCode" -> java.util.Objects.hash(display, lore, model, enchants, flags, unbreakable, damage, repairCost);
+            case "getPatterns" -> java.util.List.copyOf(patterns);
+            case "setPatterns" -> { patterns.clear(); patterns.addAll((java.util.List<org.bukkit.block.banner.Pattern>) args[0]); yield null; }
+            case "addPattern" -> { patterns.add((org.bukkit.block.banner.Pattern) args[0]); yield null; }
+            case "getPattern" -> patterns.get((int) args[0]);
+            case "removePattern" -> patterns.remove((int) args[0]);
+            case "setPattern" -> { patterns.set((int) args[0], (org.bukkit.block.banner.Pattern) args[1]); yield null; }
+            case "numberOfPatterns" -> patterns.size();
+            case "hasOwner" -> profile != null;
+            case "getOwner" -> profile == null ? null : profile.getName();
+            case "setOwner" -> { String name = args[0] == null ? null : args[0].toString(); if (name == null) yield false; profile = new FerriteProfile(null, name); yield true; }
+            case "setOwningPlayer" -> { var owner = (org.bukkit.OfflinePlayer) args[0]; if (owner == null) { profile = null; yield false; } profile = new FerriteProfile(owner.getUniqueId(), owner.getName()); yield true; }
+            case "getOwningPlayer" -> profile == null || profile.getUniqueId() == null ? (profile == null || profile.getName() == null ? null : org.bukkit.Bukkit.getOfflinePlayer(profile.getName())) : org.bukkit.Bukkit.getOfflinePlayer(profile.getUniqueId());
+            case "getPlayerProfile" -> profile;
+            case "setPlayerProfile" -> { profile = (com.destroystokyo.paper.profile.PlayerProfile) args[0]; yield null; }
+            case "getOwnerProfile" -> profile;
+            case "setOwnerProfile" -> { profile = (com.destroystokyo.paper.profile.PlayerProfile) args[0]; yield null; }
+            case "getNoteBlockSound" -> extra.get("note_block_sound");
+            case "setNoteBlockSound" -> { if (args[0] == null) extra.remove("note_block_sound"); else extra.put("note_block_sound", args[0].toString()); yield null; }
+            case "hashCode" -> java.util.Objects.hash(display, lore, model, enchants, flags, unbreakable, damage, repairCost, maxStackSize, maxDamage, glint, rarity);
             case "equals" -> self == args[0] || (args[0] != null && java.lang.reflect.Proxy.isProxyClass(args[0].getClass()) && java.lang.reflect.Proxy.getInvocationHandler(args[0]) instanceof FerriteItemMeta o && sameAs(o));
             case "toString" -> "FerriteItemMeta{" + (display == null ? "" : "name=" + display + ", ") + "enchants=" + enchants + ", flags=" + flags + "}";
             default -> HostBridge.dispatch("ItemMeta", "", method, args);

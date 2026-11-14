@@ -87,6 +87,16 @@ class NmsInventoryPacketsTest {
         connection.send(new ClientboundContainerSetSlotPacket(7, 3, -1, ItemStack.of(bukkit(org.bukkit.Material.APPLE, 1))));
         assertEquals(org.bukkit.Material.APPLE, view.getCursor().getType());
 
+        // Packets that arrive out of order with an older state id are stale, not applied.
+        List<ItemStack> staleContents = new ArrayList<>(Collections.nCopies(27 + 36, ItemStack.EMPTY));
+        staleContents.set(0, ItemStack.of(bukkit(org.bukkit.Material.COAL, 9)));
+        connection.send(new ClientboundContainerSetContentPacket(7, 1, staleContents, ItemStack.EMPTY));
+        assertEquals(org.bukkit.Material.DIAMOND, view.getTopInventory().getItem(0).getType());
+        assertEquals(3, view.getTopInventory().getItem(0).getAmount());
+        connection.send(new ClientboundContainerSetSlotPacket(7, 1, 1, ItemStack.of(bukkit(org.bukkit.Material.IRON_INGOT, 2))));
+        assertEquals(org.bukkit.Material.GOLD_INGOT, view.getTopInventory().getItem(1).getType());
+        assertEquals(4, view.getTopInventory().getItem(1).getAmount());
+
         connection.send(new ClientboundContainerClosePacket(7));
         assertTrue(calls.stream().anyMatch(call -> call.contains("|closeInventory(Reason)|UNKNOWN")), calls.toString());
         assertNotSame(view, player.getOpenInventory());

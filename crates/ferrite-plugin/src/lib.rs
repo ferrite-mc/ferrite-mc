@@ -254,6 +254,10 @@ pub struct ItemMetaSpec {
     pub flags: Vec<String>,
     pub custom_data: Option<ferrite_nbt::Compound>,
     pub book: Option<BookFields>,
+    /// Components beyond the dedicated fields, keyed by full component name and carried in
+    /// their 26.3 NBT shape (attributes, potion contents, glint override, limits, rarity, item
+    /// model, tooltip style, use remainder, banner patterns, fireworks, profile, map colour).
+    pub extra: Option<ferrite_nbt::Compound>,
 }
 /// The book a plugin writes onto a writable or written book (Bukkit `BookMeta`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -663,6 +667,7 @@ pub enum PlayerCommand {
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
         book: Option<BookFields>,
+        extra: Option<ferrite_nbt::Compound>,
     },
     /// Points the filled map in a slot at saved map `id` (Bukkit `MapMeta#setMapView`).
     ItemMapId {

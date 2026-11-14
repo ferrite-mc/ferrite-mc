@@ -1190,6 +1190,7 @@ mod tests {
             flags: Vec::new(),
             custom_data: None,
             book: None,
+            extra: None,
         }
     }
 
