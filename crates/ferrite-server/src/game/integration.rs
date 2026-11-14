@@ -5149,6 +5149,71 @@ async fn plugin_save_and_load_data_round_trip_a_live_player() {
     server.abort();
 }
 
+/// The data file keeps health, hunger and experience, and `Player#loadData` applies them to the
+/// live player and tells the client (`set_health`, `set_experience`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_load_data_restores_health_hunger_and_experience() {
+    use ferrite_protocol::packets::play::{SetExperience, SetHealth};
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let player = ferrite_net::offline_uuid("VitalsPlayer");
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            plugin_commands: Some(rx),
+            playerdata: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "VitalsPlayer").await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.send(ferrite_plugin::PlayerCommand::PlayerData {
+        player,
+        load: false,
+    })
+    .unwrap();
+    let file = dir.path().join(format!("{player}.json"));
+    for _ in 0..200 {
+        if file.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).expect("saveData wrote the file")).unwrap();
+    assert_eq!(saved["vitals"]["health"], 20.0, "a fresh player is saved at full health");
+    assert_eq!(saved["vitals"]["food"], 20);
+    // A hurt, hungry player with some experience, as another process might have saved them.
+    saved["vitals"] = serde_json::json!({
+        "health": 6.0, "absorption": 0.0, "food": 4, "saturation": 1.0,
+        "exhaustion": 0.5, "xp_level": 2, "xp_progress": 0.5, "xp_total": 16
+    });
+    std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
+    tx.send(ferrite_plugin::PlayerCommand::PlayerData { player, load: true })
+        .unwrap();
+    let body = bot.until(SetExperience::ID).await;
+    let xp = SetExperience::decode(&mut body.as_slice()).unwrap();
+    assert_eq!((xp.level.0, xp.total.0, xp.progress), (2, 16, 0.5));
+    let body = bot.until(SetHealth::ID).await;
+    let health = SetHealth::decode(&mut body.as_slice()).unwrap();
+    assert_eq!((health.health, health.food.0), (6.0, 4));
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clear_give_and_xp_commands_act_on_a_bot_session() {
     use ferrite_protocol::packets::play::SetExperience;

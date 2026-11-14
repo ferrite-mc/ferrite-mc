@@ -14,8 +14,50 @@ use ferrite_item::ItemStack;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// What vanilla keeps in a player's data file besides position and inventory: `Health`,
+/// `AbsorptionAmount`, `foodLevel`, `foodSaturationLevel`, `foodExhaustionLevel`, `XpLevel`,
+/// `XpP` and `XpTotal`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Vitals {
+    pub health: f32,
+    #[serde(default)]
+    pub absorption: f32,
+    pub food: i32,
+    pub saturation: f32,
+    #[serde(default)]
+    pub exhaustion: f32,
+    pub xp_level: i32,
+    pub xp_progress: f32,
+    pub xp_total: i32,
+}
+
+impl Vitals {
+    /// The values clamped to what the game allows, or `None` for a save that is dead (health
+    /// zero or less) or not a number: a dead save is not brought back as a corpse.
+    pub fn sanitized(&self, max_health: f32) -> Option<Self> {
+        if !self.health.is_finite() || self.health <= 0.0 || !max_health.is_finite() {
+            return None;
+        }
+        let food = self.food.clamp(0, 20);
+        let finite = |value: f32, max: f32| if value.is_finite() { value.clamp(0.0, max) } else { 0.0 };
+        Some(Self {
+            health: self.health.min(max_health),
+            absorption: finite(self.absorption, 1024.0),
+            food,
+            saturation: finite(self.saturation, food as f32),
+            exhaustion: finite(self.exhaustion, 40.0),
+            xp_level: self.xp_level.clamp(0, 21_863),
+            xp_progress: finite(self.xp_progress, 1.0),
+            xp_total: self.xp_total.max(0),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Saved {
+    /// Health, hunger and experience; absent in older saves, which keep the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vitals: Option<Vitals>,
     pub pos: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
@@ -125,7 +167,15 @@ impl Saved {
             items,
             selected: inventory.selected_slot() as u8,
             inventory: Vec::new(),
+            vitals: None,
         }
+    }
+
+    /// Records health, hunger and experience.
+    #[must_use]
+    pub fn with_vitals(mut self, vitals: Vitals) -> Self {
+        self.vitals = Some(vitals);
+        self
     }
 
     /// Records the plugin runtime world the player is in, so a rejoin restores it.
@@ -239,6 +289,60 @@ mod tests {
             .duration_since(first)
             .unwrap_or_default();
         assert!(age < std::time::Duration::from_secs(60));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `Player#loadData` and joining restore health, hunger and experience; older saves and
+    /// dead or corrupt ones leave the defaults alone.
+    #[test]
+    fn vitals_round_trip_and_bad_ones_are_not_applied() {
+        let dir = temp_dir("vitals");
+        let uuid = Uuid::from_u128(12);
+        let base = Saved::capture(
+            [0.0, 64.0, 0.0],
+            0.0,
+            0.0,
+            0,
+            crate::game::Dimension::Overworld,
+            false,
+            &PlayerInventory::new(),
+        );
+        assert_eq!(base.vitals, None);
+        let vitals = Vitals {
+            health: 7.5,
+            absorption: 2.0,
+            food: 9,
+            saturation: 3.0,
+            exhaustion: 1.5,
+            xp_level: 30,
+            xp_progress: 0.25,
+            xp_total: 1395,
+        };
+        save_to(&dir, &uuid, &base.clone().with_vitals(vitals.clone())).unwrap();
+        let loaded = load_from(&dir, &uuid).unwrap().vitals.unwrap();
+        assert_eq!(loaded, vitals);
+        assert_eq!(loaded.sanitized(20.0), Some(vitals.clone()));
+        // Too much of everything is clamped; the health cannot exceed the maximum.
+        let wild = Vitals {
+            health: 50.0,
+            food: 99,
+            saturation: 99.0,
+            exhaustion: 99.0,
+            xp_progress: 4.0,
+            xp_level: -3,
+            xp_total: -1,
+            ..vitals.clone()
+        };
+        let fixed = wild.sanitized(20.0).unwrap();
+        assert_eq!((fixed.health, fixed.food, fixed.saturation), (20.0, 20, 20.0));
+        assert_eq!((fixed.exhaustion, fixed.xp_progress), (40.0, 1.0));
+        assert_eq!((fixed.xp_level, fixed.xp_total), (0, 0));
+        for health in [0.0, -1.0, f32::NAN] {
+            assert_eq!(Vitals { health, ..vitals.clone() }.sanitized(20.0), None, "{health}");
+        }
+        // An older save has no vitals key at all.
+        let json = serde_json::to_value(&base).unwrap();
+        assert!(json.get("vitals").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

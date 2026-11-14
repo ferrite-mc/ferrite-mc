@@ -936,7 +936,8 @@ impl Player {
                     super::WorldId::Vanilla(_) => None,
                 })
                 .riding(super::ride::vehicle_of(self.uuid))
-                .with_enchant_seed(self.enchant_seed),
+                .with_enchant_seed(self.enchant_seed)
+                .with_vitals(self.vitals()),
             )
         {
             tracing::error!(%error, "failed to save player data");

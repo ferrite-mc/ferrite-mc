@@ -1802,6 +1802,9 @@ impl Player {
                 value: saved.gamemode as f32,
             },
         );
+        if let Some(vitals) = &saved.vitals {
+            self.apply_vitals(vitals);
+        }
         let same_world = saved.world
             == match self.world_id {
                 super::WorldId::Runtime(id) => Some(id),
@@ -1820,6 +1823,55 @@ impl Player {
             return true;
         }
         false
+    }
+
+    /// Health, hunger and experience as the data file keeps them.
+    pub fn vitals(&self) -> super::playerdata::Vitals {
+        super::playerdata::Vitals {
+            health: self.survival.health,
+            absorption: self.survival.absorption,
+            food: self.survival.food.food,
+            saturation: self.survival.food.saturation,
+            exhaustion: self.survival.food.exhaustion,
+            xp_level: self.experience_level,
+            xp_progress: self.experience_progress,
+            xp_total: self.experience_total,
+        }
+    }
+
+    /// Puts saved health, hunger and experience back and tells the client. A dead or corrupt
+    /// save is ignored (the player is alive now and stays alive); a dead player is not changed.
+    pub fn apply_vitals(&mut self, vitals: &super::playerdata::Vitals) {
+        if self.survival.dead {
+            return;
+        }
+        let Some(vitals) = vitals.sanitized(self.survival.max_health) else {
+            return;
+        };
+        self.survival.health = vitals.health;
+        self.survival.absorption = vitals.absorption;
+        self.survival.food.food = vitals.food;
+        self.survival.food.saturation = vitals.saturation;
+        self.survival.food.exhaustion = vitals.exhaustion;
+        self.experience_level = vitals.xp_level;
+        self.experience_progress = vitals.xp_progress;
+        self.experience_total = vitals.xp_total;
+        send(
+            self,
+            &SetHealth {
+                health: self.survival.health,
+                food: VarInt(self.survival.food.food),
+                saturation: self.survival.food.saturation,
+            },
+        );
+        send(
+            self,
+            &SetExperience {
+                progress: self.experience_progress,
+                level: VarInt(self.experience_level),
+                total: VarInt(self.experience_total),
+            },
+        );
     }
 
     /// Records the client's on-ground flag; landing ends fall-flying.
