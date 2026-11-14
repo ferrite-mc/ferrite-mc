@@ -143,10 +143,19 @@ class PlayerTileUpdateTest {
                 new Case(org.bukkit.block.BrewingStand.class, Material.BREWING_STAND, "minecraft:brewing_stand", 5),
                 new Case(org.bukkit.block.Crafter.class, Material.CRAFTER, "minecraft:crafter", 9))) {
             calls.clear();
-            var container = tile(c.api(), c.type(), inventory(9, java.util.Map.of(c.size() - 1, new ItemStack(Material.STONE, 3))), java.util.Map.of());
+            var extra = new java.util.HashMap<String, Object>();
+            if (c.api() == org.bukkit.block.Crafter.class) {
+                extra.put("getCraftingTicks", 0);
+                extra.put("isTriggered", false);
+                extra.put("isSlotDisabled", (java.util.function.IntFunction<Boolean>) slot -> false);
+            }
+            var container = tile(c.api(), c.type(), inventory(9, java.util.Map.of(c.size() - 1, new ItemStack(Material.STONE, 3))), extra);
             player.sendBlockUpdate(at(), container);
             assertEquals(c.entity(), calls.get(0)[4], c.type().name());
-            assertEquals("item," + (c.size() - 1) + ",minecraft:stone,3", calls.get(0)[5], c.type().name());
+            if (c.api() == org.bukkit.block.Crafter.class)
+                assertTrue(calls.get(0)[5].contains("item," + (c.size() - 1) + ",minecraft:stone,3"), calls.get(0)[5]);
+            else
+                assertEquals("item," + (c.size() - 1) + ",minecraft:stone,3", calls.get(0)[5], c.type().name());
         }
     }
 
@@ -206,10 +215,82 @@ class PlayerTileUpdateTest {
     }
 
     @Test void unmodelledFamiliesAreRefusedBeforeTheHost() {
-        var beacon = tile(org.bukkit.block.Beacon.class, Material.BEACON, null, java.util.Map.of());
-        var error = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), beacon));
-        assertTrue(error.getMessage().contains("BEACON") && error.getMessage().contains("no other block entity model"), error.getMessage());
+        var spawner = tile(org.bukkit.block.TrialSpawner.class, Material.TRIAL_SPAWNER, null, java.util.Map.of());
+        var error = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), spawner));
+        assertTrue(error.getMessage().contains("TRIAL_SPAWNER") && error.getMessage().contains("no other block entity model"), error.getMessage());
         assertTrue(calls.isEmpty(), "nothing reaches the host: " + calls.size());
+        // Families whose 26.3 update tag carries no state a plugin can read are refused with the reason.
+        for (var tile : java.util.List.of(
+                tile(org.bukkit.block.Bell.class, Material.BELL, null, java.util.Map.of()),
+                tile(org.bukkit.block.Comparator.class, Material.COMPARATOR, null, java.util.Map.of()))) {
+            var refused = assertThrows(UnsupportedOperationException.class, () -> player.sendBlockUpdate(at(), tile));
+            assertTrue(refused.getMessage().contains("has nothing to send"), refused.getMessage());
+        }
+        assertTrue(calls.isEmpty());
+    }
+
+    @Test void beaconEnchantingShriekerAndGatewaySendTheirSavedFields() {
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Beacon.class, Material.BEACON, null,
+            java.util.Map.of("customName", net.kyori.adventure.text.Component.text("Beacon"))));
+        assertEquals("minecraft:beacon", calls.get(0)[4]);
+        assertEquals("put,CustomName,\"Beacon\"", calls.get(0)[5], "a beacon update tag is saveCustomOnly");
+        calls.clear();
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.EnchantingTable.class, Material.ENCHANTING_TABLE, null,
+            java.util.Map.of("customName", net.kyori.adventure.text.Component.text("Table"))));
+        assertEquals("minecraft:enchanting_table", calls.get(0)[4]);
+        assertEquals("put,CustomName,\"Table\"", calls.get(0)[5]);
+        calls.clear();
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.SculkShrieker.class, Material.SCULK_SHRIEKER, null,
+            java.util.Map.of("getWarningLevel", 2)));
+        assertEquals("minecraft:sculk_shrieker", calls.get(0)[4]);
+        assertEquals("put,warning_level,2", calls.get(0)[5]);
+        calls.clear();
+        var gateway = new java.util.HashMap<String, Object>();
+        gateway.put("getAge", 90L);
+        gateway.put("isExactTeleport", true);
+        gateway.put("getExitLocation", new org.bukkit.Location(player.getWorld(), 1, 64, -2));
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.EndGateway.class, Material.END_GATEWAY, null, gateway));
+        assertEquals("minecraft:end_gateway", calls.get(0)[4]);
+        var entries = java.util.Arrays.asList(calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+        assertTrue(entries.containsAll(java.util.List.of("put,Age,90", "put,ExactTeleport,true", "exit,1,64,-2")), entries.toString());
+    }
+
+    @Test void decoratedPotCrafterShelfAndBrushableKeepTheirExtraState() {
+        var pot = tile(org.bukkit.block.DecoratedPot.class, Material.DECORATED_POT,
+            inventory(9, java.util.Map.of(0, new ItemStack(Material.DIAMOND))),
+            java.util.Map.of("getSherds", java.util.Map.of(
+                org.bukkit.block.DecoratedPot.Side.BACK, Material.ANGLER_POTTERY_SHERD,
+                org.bukkit.block.DecoratedPot.Side.FRONT, Material.SKULL_POTTERY_SHERD)));
+        player.sendBlockUpdate(at(), pot);
+        assertEquals("minecraft:decorated_pot", calls.get(0)[4]);
+        var potEntries = java.util.Arrays.asList(calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+        assertTrue(potEntries.contains("item,0,minecraft:diamond,1"), potEntries.toString());
+        assertTrue(potEntries.contains("sherd,back,minecraft:angler_pottery_sherd"), potEntries.toString());
+        assertTrue(potEntries.contains("sherd,front,minecraft:skull_pottery_sherd"), potEntries.toString());
+        calls.clear();
+
+        var crafterMap = new java.util.HashMap<String, Object>();
+        crafterMap.put("getCraftingTicks", 30);
+        crafterMap.put("isTriggered", true);
+        crafterMap.put("isSlotDisabled", (java.util.function.IntFunction<Boolean>) slot -> slot == 3);
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Crafter.class, Material.CRAFTER, inventory(9, java.util.Map.of()), crafterMap));
+        assertEquals("minecraft:crafter", calls.get(0)[4]);
+        var crafterEntries = java.util.Arrays.asList(calls.get(0)[5].split(String.valueOf(HostBridge.ITEM)));
+        assertTrue(crafterEntries.contains("put,crafting_ticks_remaining,30"), crafterEntries.toString());
+        assertTrue(crafterEntries.contains("put,triggered,true"), crafterEntries.toString());
+        assertTrue(crafterEntries.contains("disabled,3"), crafterEntries.toString());
+        calls.clear();
+
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.Shelf.class, Material.OAK_SHELF,
+            inventory(9, java.util.Map.of(2, new ItemStack(Material.BOOK))), java.util.Map.of()));
+        assertEquals("minecraft:shelf", calls.get(0)[4]);
+        assertEquals("item,2,minecraft:book,1", calls.get(0)[5]);
+        calls.clear();
+
+        player.sendBlockUpdate(at(), tile(org.bukkit.block.BrushableBlock.class, Material.SUSPICIOUS_SAND, null,
+            java.util.Map.of("getItem", new ItemStack(Material.EMERALD))));
+        assertEquals("minecraft:brushable_block", calls.get(0)[4]);
+        assertEquals("item,0,minecraft:emerald,1", calls.get(0)[5]);
     }
 
     @Test void aStackWithMetadataSendsItAsAHexEncodedMetaEntry() {

@@ -12,7 +12,7 @@ use ferrite_nbt::{Compound, List, Tag};
 use ferrite_plugin::PluginPacket;
 
 /// `(block entity type, slot count, has furnace timers)`.
-const FAMILIES: [(&str, usize, bool); 14] = [
+const FAMILIES: [(&str, usize, bool); 17] = [
     ("minecraft:chest", 27, false),
     ("minecraft:trapped_chest", 27, false),
     ("minecraft:barrel", 27, false),
@@ -27,13 +27,19 @@ const FAMILIES: [(&str, usize, bool); 14] = [
     ("minecraft:crafter", 9, false),
     ("minecraft:campfire", 4, false),
     ("minecraft:chiseled_bookshelf", 6, false),
+    ("minecraft:decorated_pot", 1, false),
+    ("minecraft:brushable_block", 1, false),
+    ("minecraft:shelf", 3, false),
 ];
 
 /// Block entities whose single stack is saved under its own key instead of `Items`
-/// (`JukeboxBlockEntity` `RecordItem`, `LecternBlockEntity` `Book`).
-const KEYED_STACK: [(&str, &str); 2] = [
+/// (`JukeboxBlockEntity` `RecordItem`, `LecternBlockEntity` `Book`, `DecoratedPotBlockEntity`
+/// and `BrushableBlockEntity` both `item`).
+const KEYED_STACK: [(&str, &str); 4] = [
     ("minecraft:jukebox", "RecordItem"),
     ("minecraft:lectern", "Book"),
+    ("minecraft:decorated_pot", "item"),
+    ("minecraft:brushable_block", "item"),
 ];
 
 /// How a `put` value is typed in the block entity's saved form.
@@ -54,12 +60,28 @@ const STRUCTURE_MODES: &[&str] = &["save", "load", "corner", "data"];
 
 /// The keys a snapshot may set on a block entity type, with the type each is saved as. The names
 /// and types come from the 26.3 server's `saveAdditional` of each block entity.
-const SETTINGS: [(&str, &[(&str, Kind)]); 8] = [
+const SETTINGS: [(&str, &[(&str, Kind)]); 13] = [
     (
         "minecraft:jukebox",
         &[("ticks_since_song_started", Kind::Long)],
     ),
     ("minecraft:lectern", &[("Page", Kind::Int)]),
+    // `BeaconBlockEntity.getUpdateTag` is `saveCustomOnly`: the effects are server-side data and
+    // are not part of the update tag the client is sent.
+    ("minecraft:beacon", &[("CustomName", Kind::Text)]),
+    ("minecraft:enchanting_table", &[("CustomName", Kind::Text)]),
+    ("minecraft:sculk_shrieker", &[("warning_level", Kind::Int)]),
+    (
+        "minecraft:end_gateway",
+        &[("Age", Kind::Long), ("ExactTeleport", Kind::Bool)],
+    ),
+    (
+        "minecraft:crafter",
+        &[
+            ("crafting_ticks_remaining", Kind::Int),
+            ("triggered", Kind::Bool),
+        ],
+    ),
     (
         "minecraft:command_block",
         &[
@@ -143,6 +165,11 @@ fn typed(kind: Kind, value: &str) -> Option<Tag> {
         Kind::Choice(allowed) => Tag::String(allowed.contains(&value).then(|| value.to_owned())?),
     })
 }
+
+/// The four `PotDecorations` order slots; vanilla's `sherds` list has exactly these entries.
+const POT_SIDES: [&str; 4] = ["back", "left", "right", "front"];
+/// `PotDecorations.CODEC` uses `minecraft:brick` for an empty side.
+const DEFAULT_SHERD: &str = "minecraft:brick";
 
 /// Vanilla's `minecraft:banner_pattern` entries (`data/minecraft/banner_pattern`), without namespace.
 const BANNER_PATTERNS: [&str; 43] = [
@@ -245,16 +272,17 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
         .iter()
         .find(|(name, _)| *name == entity)
         .map(|(_, keys)| *keys);
-    let (size, furnace) = if banner || skull || (settings.is_some() && !keyed) {
+    // A family may also carry settings (the crafter does); settings alone mean no item slots.
+    let family = FAMILIES.iter().find(|(name, ..)| *name == entity).copied();
+    let (size, furnace) = if banner || skull {
         (0, false)
+    } else if let Some((_, size, furnace)) = family {
+        (size, furnace)
     } else if keyed {
         (1, false)
     } else {
-        let (_, size, furnace) = FAMILIES
-            .iter()
-            .find(|(name, ..)| *name == entity)
-            .copied()?;
-        (size, furnace)
+        // A settings-only block entity (`command_block`, `beacon`, ...).
+        settings.map(|_| (0, false))?
     };
     let mut patterns: Vec<(String, String)> = Vec::new();
     let mut profile = None;
@@ -263,6 +291,9 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
     let mut metas: Vec<(u8, ferrite_plugin::ItemMetaSpec)> = Vec::new();
     let mut timers = None;
     let mut extra = Compound::new();
+    let mut exit = None;
+    let mut sherds: Vec<Option<String>> = vec![None; POT_SIDES.len()];
+    let mut disabled: Vec<i32> = Vec::new();
     for entry in entries.split(separator).filter(|e| !e.is_empty()) {
         // `put,<key>,<value>`: the value may hold commas (a command), so it takes the rest.
         if let Some(rest) = entry.strip_prefix("put,") {
@@ -372,6 +403,34 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
                     (!signature.is_empty()).then(|| signature.to_owned()),
                 ));
             }
+            // `TheEndGatewayBlockEntity.saveAdditional`: `exit_portal` is an X/Y/Z compound.
+            "exit" if entity == "minecraft:end_gateway" && exit.is_none() => {
+                let mut coordinate = || -> Option<i32> { parts.next()?.parse().ok() };
+                let at = [coordinate()?, coordinate()?, coordinate()?];
+                if parts.next().is_some() {
+                    return None;
+                }
+                exit = Some(at);
+            }
+            // `DecoratedPotBlockEntity.saveAdditional`: `sherds` in PotDecorations order.
+            "sherd" if entity == "minecraft:decorated_pot" => {
+                let side = parts.next()?;
+                let material = parts.next()?;
+                let index = POT_SIDES.iter().position(|name| *name == side)?;
+                if parts.next().is_some() || sherds[index].is_some() {
+                    return None;
+                }
+                ferrite_item::item_id(material)?;
+                sherds[index] = Some(material.to_owned());
+            }
+            // `CrafterBlockEntity.saveAdditional`: `disabled_slots` is an int array.
+            "disabled" if entity == "minecraft:crafter" => {
+                let slot: i32 = parts.next()?.parse().ok().filter(|s| (0..9).contains(s))?;
+                if parts.next().is_some() || disabled.contains(&slot) {
+                    return None;
+                }
+                disabled.push(slot);
+            }
             "furnace" if furnace && timers.is_none() => {
                 let mut value =
                     || -> Option<i16> { parts.next()?.parse().ok().filter(|v| *v >= 0) };
@@ -391,6 +450,25 @@ pub fn packet(pos: [i32; 3], entity: &str, entries: &str, separator: char) -> Op
         return None;
     }
     items.sort_by_key(|(slot, ..)| *slot);
+    if let Some(at) = exit {
+        let mut portal = Compound::new();
+        portal.insert("X".into(), Tag::Int(at[0]));
+        portal.insert("Y".into(), Tag::Int(at[1]));
+        portal.insert("Z".into(), Tag::Int(at[2]));
+        extra.insert("exit_portal".into(), Tag::Compound(portal));
+    }
+    if sherds.iter().flatten().count() > 0 {
+        // A side with no sherd is `minecraft:brick`, exactly as `PotDecorations` defaults it.
+        let list: Vec<String> = sherds
+            .iter()
+            .map(|sherd| sherd.clone().unwrap_or_else(|| DEFAULT_SHERD.to_owned()))
+            .collect();
+        extra.insert("sherds".into(), Tag::List(List::String(list)));
+    }
+    if !disabled.is_empty() {
+        disabled.sort_unstable();
+        extra.insert("disabled_slots".into(), Tag::IntArray(disabled));
+    }
     Some(PluginPacket::TileUpdate {
         pos,
         entity: entity.to_owned(),
@@ -484,7 +562,8 @@ pub fn nbt(entity: &str, tile: &TileData<'_>, with_meta: MetaApplier<'_>) -> Com
         return data;
     }
     let keyed = KEYED_STACK.iter().find(|(name, _)| *name == entity);
-    if keyed.is_none() && SETTINGS.iter().any(|(name, _)| *name == entity) {
+    let container = FAMILIES.iter().any(|(name, ..)| *name == entity);
+    if keyed.is_none() && !container && SETTINGS.iter().any(|(name, _)| *name == entity) {
         return data;
     }
     let list = items
@@ -584,7 +663,7 @@ mod tests {
     fn invalid_snapshots_are_rejected_not_repaired() {
         let bad = |entity: &str, entries: &[&str]| packet([0, 0, 0], entity, &join(entries), SEP);
         // Unmodelled family, and a family that does not match the entries.
-        assert_eq!(bad("minecraft:beacon", &[]), None);
+        assert_eq!(bad("minecraft:trial_spawner", &[]), None);
         assert_eq!(bad("minecraft:banner", &["item,0,minecraft:stone,1"]), None);
         assert_eq!(
             bad("minecraft:banner", &["pattern,minecraft:nope,red"]),
@@ -1037,6 +1116,136 @@ mod tests {
                 [0, 0, 0],
                 "minecraft:lectern",
                 "item,1,minecraft:stone,1",
+                SEP
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_remaining_saved_block_entity_fields_match_their_vanilla_tags() {
+        // `DecoratedPotBlockEntity`: `sherds` is four PotDecorations slots and `item` is keyed.
+        let pot = nbt_of(
+            "minecraft:decorated_pot",
+            &[
+                "item,0,minecraft:diamond,1",
+                "sherd,back,minecraft:angler_pottery_sherd",
+                "sherd,front,minecraft:skull_pottery_sherd",
+            ],
+        );
+        assert!(matches!(pot.get("item"), Some(Tag::Compound(_))));
+        let Some(Tag::List(List::String(sherds))) = pot.get("sherds") else {
+            panic!("a sherds string list: {pot:?}");
+        };
+        assert_eq!(
+            sherds,
+            &[
+                "minecraft:angler_pottery_sherd".to_owned(),
+                "minecraft:brick".to_owned(),
+                "minecraft:brick".to_owned(),
+                "minecraft:skull_pottery_sherd".to_owned()
+            ]
+        );
+        // A pot with no sherds omits the key, as `PotDecorations.EMPTY` does.
+        assert_eq!(nbt_of("minecraft:decorated_pot", &[]).get("sherds"), None);
+
+        // `CrafterBlockEntity`: timers, trigger and the disabled-slot int array.
+        let crafter = nbt_of(
+            "minecraft:crafter",
+            &[
+                "item,0,minecraft:stone,1",
+                "put,crafting_ticks_remaining,30",
+                "put,triggered,true",
+                "disabled,7",
+                "disabled,2",
+            ],
+        );
+        assert_eq!(crafter.get("crafting_ticks_remaining"), Some(&Tag::Int(30)));
+        assert_eq!(crafter.get("triggered"), Some(&Tag::Byte(1)));
+        assert_eq!(
+            crafter.get("disabled_slots"),
+            Some(&Tag::IntArray(vec![2, 7]))
+        );
+
+        // `ShelfBlockEntity`: three items under `Items`.
+        let shelf = nbt_of("minecraft:shelf", &["item,2,minecraft:book,1"]);
+        assert!(
+            matches!(shelf.get("Items"), Some(Tag::List(List::Compound(list))) if list.len() == 1)
+        );
+
+        // `BrushableBlockEntity`: the hidden item under `item`.
+        let brushable = nbt_of("minecraft:brushable_block", &["item,0,minecraft:emerald,1"]);
+        assert!(matches!(brushable.get("item"), Some(Tag::Compound(_))));
+
+        // `BeaconBlockEntity.getUpdateTag` saves the custom name only.
+        let beacon = nbt_of(
+            "minecraft:beacon",
+            &["put,CustomName,{\"text\":\"Beacon\"}"],
+        );
+        assert_eq!(
+            beacon.get("CustomName"),
+            Some(&Tag::String("{\"text\":\"Beacon\"}".into()))
+        );
+        assert_eq!(beacon.get("primary_effect"), None);
+        assert_eq!(
+            nbt_of(
+                "minecraft:enchanting_table",
+                &["put,CustomName,{\"text\":\"Table\"}"]
+            )
+            .get("CustomName"),
+            Some(&Tag::String("{\"text\":\"Table\"}".into()))
+        );
+
+        // `SculkShriekerBlockEntity`.
+        assert_eq!(
+            nbt_of("minecraft:sculk_shrieker", &["put,warning_level,2"]).get("warning_level"),
+            Some(&Tag::Int(2))
+        );
+
+        // `TheEndGatewayBlockEntity`: `exit_portal` is an X/Y/Z compound.
+        let gateway = nbt_of(
+            "minecraft:end_gateway",
+            &["put,Age,90", "put,ExactTeleport,true", "exit,1,64,-2"],
+        );
+        assert_eq!(gateway.get("Age"), Some(&Tag::Long(90)));
+        assert_eq!(gateway.get("ExactTeleport"), Some(&Tag::Byte(1)));
+        let Some(Tag::Compound(exit)) = gateway.get("exit_portal") else {
+            panic!("exit_portal compound: {gateway:?}");
+        };
+        assert_eq!(exit.get("X"), Some(&Tag::Int(1)));
+        assert_eq!(exit.get("Y"), Some(&Tag::Int(64)));
+        assert_eq!(exit.get("Z"), Some(&Tag::Int(-2)));
+
+        // Bad sides, duplicate sides, out-of-range slots and a fourth shelf stack are refused.
+        for (entity, entry) in [
+            ("minecraft:decorated_pot", "sherd,side,minecraft:brick"),
+            (
+                "minecraft:decorated_pot",
+                "sherd,back,minecraft:not_an_item",
+            ),
+            ("minecraft:crafter", "disabled,9"),
+            ("minecraft:end_gateway", "exit,1,2"),
+        ] {
+            assert_eq!(
+                packet([0, 0, 0], entity, entry, SEP),
+                None,
+                "{entity} {entry}"
+            );
+        }
+        assert_eq!(
+            packet(
+                [0, 0, 0],
+                "minecraft:decorated_pot",
+                &join(&["sherd,back,minecraft:brick", "sherd,back,minecraft:brick",]),
+                SEP
+            ),
+            None
+        );
+        assert_eq!(
+            packet(
+                [0, 0, 0],
+                "minecraft:shelf",
+                "item,3,minecraft:stone,1",
                 SEP
             ),
             None

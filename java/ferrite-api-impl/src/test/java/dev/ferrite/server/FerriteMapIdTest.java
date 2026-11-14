@@ -72,6 +72,41 @@ class FerriteMapIdTest {
         assertTrue(calls.contains("setItemMapId(int,int)[2,9]"), calls.toString());
     }
 
+    @Test void aCanvasReadsSavedBasePixelsAndSendsHiddenCursorAndStyledCaption() {
+        final byte[] base = new byte[128 * 128];
+        base[0] = 44;
+        HostBridge.transport = (owner, subject, method, args) -> {
+            if (method.startsWith("allocateMap")) return "7";
+            if (method.equals("mapColors(int)")) return java.util.Base64.getEncoder().encodeToString(base);
+            return "";
+        };
+        try {
+            var view = (FerriteMapView) server.createMap(world);
+            view.addRenderer(new org.bukkit.map.MapRenderer() {
+                @Override public void render(MapView map, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player viewer) {
+                    assertEquals(44, canvas.getBasePixel(0, 0));
+                    assertEquals(org.bukkit.map.MapPalette.getColor((byte) 44), canvas.getBasePixelColor(0, 0));
+                    assertNull(canvas.getBasePixelColor(1, 0), "palette 0 is transparent");
+                    canvas.setPixel(1, 1, (byte) 9);
+                    var cursors = new org.bukkit.map.MapCursorCollection();
+                    cursors.addCursor(1, 2, (byte) 3)
+                        .caption(net.kyori.adventure.text.Component.text("Spawn", net.kyori.adventure.text.format.NamedTextColor.RED));
+                    var hidden = cursors.addCursor(4, 5, (byte) 6);
+                    hidden.setVisible(false);
+                    canvas.setCursors(cursors);
+                }
+            });
+            var rendered = view.render(player);
+            assertEquals(9, rendered.pixels()[128 + 1]);
+            var entries = rendered.decorations().split(String.valueOf(HostBridge.ITEM));
+            assertEquals(1, entries.length, "the invisible cursor is omitted: 26.3 has no wire visibility bit");
+            var fields = entries[0].split(String.valueOf('\u001e'));
+            assertEquals(6, fields.length);
+            assertEquals("2", fields[4], "a styled caption travels as component NBT");
+            assertNotEquals("", fields[5]);
+        } finally { HostBridge.transport = null; }
+    }
+
     @Test void viewsWithoutAHostStillGetDistinctLocalIds() {
         var a = server.createMap(world);
         var b = server.createMap(world);

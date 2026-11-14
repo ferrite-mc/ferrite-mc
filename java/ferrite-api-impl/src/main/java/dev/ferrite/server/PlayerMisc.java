@@ -449,6 +449,29 @@ public abstract class PlayerMisc extends PlayerStubs {
         }
     }
 
+    /** The custom name a block entity's update tag carries, as its component JSON (`CustomName`). */
+    private static void addTileName(org.bukkit.block.TileState tileState, java.util.List<String> entries) {
+        if (!(tileState instanceof org.bukkit.Nameable nameable)) return;
+        var name = nameable.customName();
+        if (name != null) entries.add("put,CustomName," + net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson().serialize(name));
+    }
+
+    /**
+     * Settings of the container families whose block entity also saves state beside `Items`:
+     * a decorated pot's sherds, a crafter's timers and disabled slots. Appended after the items.
+     */
+    private static void containerSettings(org.bukkit.block.TileState tileState, java.util.List<String> entries) {
+        if (tileState instanceof org.bukkit.block.DecoratedPot pot) {
+            // `PotDecorations.CODEC` saves four sides in this order, `minecraft:brick` for none.
+            for (var entry : pot.getSherds().entrySet())
+                entries.add("sherd," + entry.getKey().name().toLowerCase(java.util.Locale.ROOT) + "," + entry.getValue().getKey());
+        } else if (tileState instanceof org.bukkit.block.Crafter crafter) {
+            entries.add("put,crafting_ticks_remaining," + crafter.getCraftingTicks());
+            entries.add("put,triggered," + crafter.isTriggered());
+            for (int slot = 0; slot < 9; slot++) if (crafter.isSlotDisabled(slot)) entries.add("disabled," + slot);
+        }
+    }
+
     /** The snapshot entries of the block entities that have no plain item container, or null for any other state. */
     private String tileSettings(org.bukkit.block.TileState tileState, java.util.List<String> entries) {
         if (tileState instanceof org.bukkit.block.Jukebox jukebox) {
@@ -504,6 +527,31 @@ public abstract class PlayerMisc extends PlayerStubs {
             entries.add("put,seed," + structure.getSeed());
             return "minecraft:structure_block";
         }
+        if (tileState instanceof org.bukkit.block.EnchantingTable) {
+            addTileName(tileState, entries);
+            return "minecraft:enchanting_table";
+        }
+        if (tileState instanceof org.bukkit.block.Beacon) {
+            // `BeaconBlockEntity.getUpdateTag` is `saveCustomOnly`: the effects are server-side data,
+            // so only the custom name is part of the tag vanilla sends.
+            addTileName(tileState, entries);
+            return "minecraft:beacon";
+        }
+        if (tileState instanceof org.bukkit.block.SculkShrieker shrieker) {
+            entries.add("put,warning_level," + shrieker.getWarningLevel());
+            return "minecraft:sculk_shrieker";
+        }
+        if (tileState instanceof org.bukkit.block.EndGateway gateway) {
+            entries.add("put,Age," + gateway.getAge());
+            entries.add("put,ExactTeleport," + gateway.isExactTeleport());
+            var exit = gateway.getExitLocation();
+            if (exit != null) entries.add("exit," + exit.getBlockX() + "," + exit.getBlockY() + "," + exit.getBlockZ());
+            return "minecraft:end_gateway";
+        }
+        if (tileState instanceof org.bukkit.block.BrushableBlock brushable) {
+            addTileItem(entries, 0, brushable.getItem());
+            return "minecraft:brushable_block";
+        }
         return null;
     }
 
@@ -555,7 +603,11 @@ public abstract class PlayerMisc extends PlayerStubs {
             return;
         }
         if (tileState instanceof org.bukkit.block.Bed)
-            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") has nothing to send: 26.3 beds have no block entity, the colour is part of the block");
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") has nothing to send: 26.3 has no BedBlockEntity (the class is absent from the 26.3 server jar), the colour and facing are block state");
+        if (tileState instanceof org.bukkit.block.Bell)
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") has nothing to send: vanilla's BellBlockEntity has no saveAdditional (ringing ticks are transient), so no update tag carries them");
+        if (tileState instanceof org.bukkit.block.Comparator)
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") has nothing to send: Bukkit's Comparator tile state exposes no output signal; read the block's redstone state instead");
         var settings = new java.util.ArrayList<String>();
         var special = tileSettings(tileState, settings);
         if (special != null) {
@@ -576,10 +628,12 @@ public abstract class PlayerMisc extends PlayerStubs {
             case CRAFTER -> "minecraft:crafter";
             case CAMPFIRE, SOUL_CAMPFIRE -> "minecraft:campfire";
             case CHISELED_BOOKSHELF -> "minecraft:chiseled_bookshelf";
-            default -> type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
+            default -> tileState instanceof org.bukkit.block.DecoratedPot ? "minecraft:decorated_pot"
+                : tileState instanceof org.bukkit.block.Shelf ? "minecraft:shelf"
+                : type.name().endsWith("SHULKER_BOX") ? "minecraft:shulker_box" : null;
         };
         if (entity == null)
-            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models signs, banners, skulls, containers (chest, barrel, shulker box, furnaces, dispenser, dropper, hopper, brewing stand, crafter, campfire, chiseled bookshelf), jukebox, lectern, command block, spawner, beehive, sculk sensors and structure block as tile entities, and has no other block entity model to encode");
+            throw new UnsupportedOperationException("Ferrite: Player#sendBlockUpdate(" + type + ") is not implemented: the host models signs, banners, skulls, containers (chest, barrel, shulker box, furnaces, dispenser, dropper, hopper, brewing stand, crafter, campfire, chiseled bookshelf, decorated pot, brushable block, shelf), jukebox, lectern, command block, spawner, beehive, sculk sensors/shrieker, beacon, enchanting table, end gateway and structure block as tile entities, and has no other block entity model to encode");
         int size;
         java.util.function.IntFunction<org.bukkit.inventory.ItemStack> stackAt;
         if (tileState instanceof org.bukkit.block.Campfire campfire) { size = campfire.getSize(); stackAt = campfire::getItem; }
@@ -592,6 +646,7 @@ public abstract class PlayerMisc extends PlayerStubs {
             // Bukkit exposes the remaining burn time but not the fuel's total, so the total is sent as 0.
             entries.add("furnace," + furnace.getBurnTime() + ",0," + furnace.getCookTime() + "," + furnace.getCookTimeTotal());
         }
+        containerSettings(tileState, entries);
         HostBridge.callVoid("Player", getUniqueId(), "sendTileSnapshot(Location,String,List)", loc, entity, entries);
     }
     @Override public void sendSignChange(org.bukkit.Location loc, String[] lines, org.bukkit.DyeColor dyeColor, boolean hasGlowingText) {

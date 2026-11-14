@@ -18,4 +18,12 @@ public class LivingEntity extends Entity {
     public int getArrowCount() { return living.getArrowsInBody(); }
     public boolean hasEffect(String key) { var type = org.bukkit.Registry.POTION_EFFECT_TYPE.get(org.bukkit.NamespacedKey.fromString(key)); return type != null && living.hasPotionEffect(type); }
     public boolean removeAllEffects() { boolean had = !living.getActivePotionEffects().isEmpty(); living.clearActivePotionEffects(); return had; }
+    /** The item in an NMS equipment slot; the stack is a detached copy. */
+    public net.minecraft.world.item.ItemStack getItemBySlot(net.minecraft.world.entity.EquipmentSlot slot) {
+        return net.minecraft.world.item.ItemStack.of(living.getEquipment().getItem(java.util.Objects.requireNonNull(slot, "slot").bukkit()));
+    }
+    public void setItemSlot(net.minecraft.world.entity.EquipmentSlot slot, net.minecraft.world.item.ItemStack stack) {
+        living.getEquipment().setItem(java.util.Objects.requireNonNull(slot, "slot").bukkit(),
+                stack == null ? null : stack.toBukkit());
+    }
 }

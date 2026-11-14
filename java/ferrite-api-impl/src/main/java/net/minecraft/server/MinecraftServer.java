@@ -15,7 +15,7 @@ public class MinecraftServer {
     public int getPort() { return server().getPort(); }
     public java.util.List<net.minecraft.server.level.ServerLevel> getAllLevels() {
         java.util.List<net.minecraft.server.level.ServerLevel> list = new java.util.ArrayList<>();
-        for (org.bukkit.World w : server().getWorlds()) list.add(new net.minecraft.server.level.ServerLevel(w));
+        for (org.bukkit.World w : server().getWorlds()) list.add(net.minecraft.server.level.ServerLevel.forWorld(w));
         return list;
     }
 }

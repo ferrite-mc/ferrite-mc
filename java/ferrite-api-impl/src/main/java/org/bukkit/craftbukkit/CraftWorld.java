@@ -14,8 +14,8 @@ public class CraftWorld {
     public CraftWorld(org.bukkit.World world) { this.world = java.util.Objects.requireNonNull(world, "world"); }
 
     public org.bukkit.World getWorld() { return world; }
-    /** The NMS level for this world. */
-    public net.minecraft.server.level.ServerLevel getHandle() { return new net.minecraft.server.level.ServerLevel(world); }
+    /** The NMS level for this world; the same cached handle every caller of this world gets. */
+    public net.minecraft.server.level.ServerLevel getHandle() { return net.minecraft.server.level.ServerLevel.forWorld(world); }
     public java.util.UUID getUID() { return world.getUID(); }
     public String getName() { return world.getName(); }
     public org.bukkit.Location getSpawnLocation() { return world.getSpawnLocation(); }

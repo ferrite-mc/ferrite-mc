@@ -389,6 +389,36 @@ mod tests {
     }
 
     #[test]
+    fn nether_and_end_entities_are_listed_under_their_own_world_ids() {
+        for dimension in [Dimension::Nether, Dimension::End] {
+            let uuid = Uuid::new_v4();
+            let mut store = EntityStore::new(3);
+            store.insert(zombie(uuid));
+            let mut owned = std::collections::HashSet::new();
+            super::super::facts::publish_entities(&mut owned, &store, dimension);
+            let reply = ask(crate::plugins::world_id(dimension), ["0", "-1", "0", "-1"])
+                .unwrap_or_else(|| panic!("{dimension:?} answers"));
+            let fields = reply
+                .split(HOST_ITEM_SEPARATOR)
+                .map(|record| record.split(FIELD).map(str::to_owned).collect::<Vec<_>>())
+                .find(|fields| fields.get(6) == Some(&uuid.to_string()))
+                .unwrap_or_else(|| panic!("{dimension:?} lists its entity: {reply:?}"));
+            assert_eq!(fields.len(), 13, "{fields:?}");
+            assert_ne!(
+                fields[12], HOST_NULL,
+                "{dimension:?} has saved NBT for capture"
+            );
+            let empty = EntityStore::new(3);
+            super::super::facts::publish_entities(&mut owned, &empty, dimension);
+            assert!(
+                !ask(crate::plugins::world_id(dimension), ["0", "-1", "0", "-1"])
+                    .expect("still answers")
+                    .contains(&uuid.to_string())
+            );
+        }
+    }
+
+    #[test]
     fn the_default_world_lists_its_entities_with_cached_nbt() {
         let uuid = Uuid::new_v4();
         let mut store = EntityStore::new(3);

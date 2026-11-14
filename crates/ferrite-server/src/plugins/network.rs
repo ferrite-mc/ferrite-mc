@@ -766,7 +766,14 @@ mod tests {
                 &[&location("4", "65", "-3"), entity, ""],
             ))
         };
-        assert_eq!(refused("minecraft:beacon"), None);
+        // A beacon now carries its CustomName through the tile-settings path.
+        match refused("minecraft:beacon") {
+            Some(PlayerCommand::Packet {
+                packet: PluginPacket::TileUpdate { entity, .. },
+                ..
+            }) => assert_eq!(entity, "minecraft:beacon"),
+            other => panic!("beacon settings are accepted: {other:?}"),
+        }
         assert_eq!(refused("minecraft:sign_but_not_here"), None);
     }
 
@@ -967,7 +974,13 @@ mod tests {
                 ..
             }) = packet(call(
                 method,
-                &[id, "https://example.com/p.zip", &hash, "\u{a7}6Pick me", "true"],
+                &[
+                    id,
+                    "https://example.com/p.zip",
+                    &hash,
+                    "\u{a7}6Pick me",
+                    "true",
+                ],
             ))
             else {
                 panic!("{method}");
