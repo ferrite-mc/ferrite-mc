@@ -5611,6 +5611,18 @@ pub(super) fn apply_trade_sync(
     }
 }
 
+/// The fixed `(x, z)` of a chunk face: the coordinate that is set is the edge, the other walks.
+type Face = (Option<u8>, Option<u8>);
+
+/// What the seam wake pass needs to know about one block state.
+#[derive(Clone, Copy, Default)]
+struct SeamInfo {
+    interesting: bool,
+    fluid: bool,
+    gravity: bool,
+    wall: bool,
+}
+
 impl Region {
     pub fn hold_chunk(&mut self, chunk: ChunkPos) {
         let first = !self.held_chunks.contains_key(&chunk);
@@ -5643,9 +5655,9 @@ impl Region {
     /// the unloaded side as sturdy is re-validated. Only border cells that actually hold fluid,
     /// a gravity block or a block whose `canSurvive` now fails are queued, so a full chunk load
     /// does not enqueue an update for every block on the seam.
-    /// Currently test-only: the tick-loop call is disabled until the join-time scan is made
-    /// chunk-direct (see `docs/world-interaction-audit.md`).
-    #[cfg(test)]
+    /// Runs from `Region::tick`, one chunk per tick. The seam faces are read straight from the
+    /// chunks' paletted containers and only the sections whose palettes hold something that can
+    /// need a wake are visited (`docs/world-interaction-audit.md` has the measured cost).
     pub fn wake_loaded_chunks(
         &mut self,
         source: &super::anvil::AnvilChunkSource,
@@ -5661,50 +5673,69 @@ impl Region {
         if pending.len() > CHUNKS_PER_TICK {
             self.pending_chunk_loads = pending.split_off(CHUNKS_PER_TICK);
         }
-        let dimension = source.dimension();
-        let air = u32::from(ferrite_data::blocks::default_state("air").expect("vanilla air"));
-        // A section made only of full opaque blocks cannot hold a fluid, a support-dependent
-        // block or a gravity block, so its 16 layers cannot need a border wake. This keeps the
-        // pass proportional to the surface, not to the full build height.
-        let interesting = |state: u32| {
-            u16::try_from(state).ok().is_some_and(|state| {
-                let name = ferrite_data::blocks::state(state).map(|(name, _)| name);
-                // Cave and void air are separate states and are not full blocks; without this
-                // check every underground cave section would look interesting.
-                !matches!(
-                    name,
-                    Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
-                ) && (ferrite_data::block_props::get(state).fluid.is_some()
-                    || !ferrite_data::block_props::get(state).can_occlude
-                    || super::gravity::is_gravity(state))
-            })
+        // What the seam pass needs to know about a state, looked up once per distinct state:
+        // the block-name based queries are far dearer than the palette reads around them.
+        let info_cache: std::cell::RefCell<Vec<Option<SeamInfo>>> =
+            std::cell::RefCell::new(vec![None; 1 << 16]);
+        let info = |state: u32| -> SeamInfo {
+            if let Some(Some(known)) = info_cache.borrow().get(state as usize) {
+                return *known;
+            }
+            let answer = u16::try_from(state)
+                .ok()
+                .map_or(SeamInfo::default(), |small| {
+                    let name = ferrite_data::blocks::state(small).map(|(name, _)| name);
+                    let props = ferrite_data::block_props::get(small);
+                    let fluid = props.fluid.is_some();
+                    let gravity = super::gravity::is_gravity(small);
+                    // Cave and void air are separate states and are not full blocks; without this
+                    // check every underground cave section would look interesting.
+                    let air = matches!(
+                        name,
+                        Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+                    );
+                    SeamInfo {
+                        interesting: !air && (fluid || !props.can_occlude || gravity),
+                        fluid,
+                        gravity,
+                        // The support rules that read a horizontal neighbour
+                        // (`neighbors::wall_support`: wall torches, wall signs, wall buttons)
+                        // belong to states with a `facing`; every other rule reads only the
+                        // block's own column, which a seam cannot change.
+                        wall: ferrite_data::blocks::state(small).is_some_and(|(_, props)| {
+                            props.iter().any(|(name, _)| *name == "facing")
+                        }),
+                    }
+                });
+            if let Some(slot) = info_cache.borrow_mut().get_mut(state as usize) {
+                *slot = Some(answer);
+            }
+            answer
         };
-        let _ = air;
+        let interesting = |state: u32| info(state).interesting;
         for chunk in pending {
             if !self.held_chunks.contains_key(&chunk) {
                 continue;
             }
-            // Only sections that hold a fluid, a non-full block or a gravity block can need a
-            // wake. Check the inside chunk and each neighbour separately instead of building one
-            // bounding box: deep water plus a surface plant would otherwise make the scan cover
-            // the whole build height.
-            let mask = |chunk: &ferrite_world::Chunk| {
-                let min = chunk.min_y();
-                let bits: Vec<bool> = chunk
-                    .sections()
-                    .iter()
-                    .map(|section| {
-                        section
-                            .blocks()
-                            .palette()
-                            .iter()
-                            .any(|&state| interesting(state))
-                    })
-                    .collect();
-                (min, bits)
+            // Which sections of a chunk hold a fluid, a non-full block or a gravity block,
+            // read from the section palettes alone (one lock per chunk).
+            let mask = |at: ChunkPos| {
+                source.with_loaded_chunk(at.0, at.1, |chunk| {
+                    let bits: Vec<bool> = chunk
+                        .sections()
+                        .iter()
+                        .map(|section| {
+                            section
+                                .blocks()
+                                .palette()
+                                .iter()
+                                .any(|&state| interesting(state))
+                        })
+                        .collect();
+                    (chunk.min_y(), bits)
+                })
             };
-            let Some((min_y, inside_mask)) = source.with_loaded_chunk(chunk.0, chunk.1, mask)
-            else {
+            let Some((min_y, inside_mask)) = mask(chunk) else {
                 continue;
             };
             if inside_mask.is_empty() {
@@ -5712,97 +5743,164 @@ impl Region {
             }
             let (x0, z0) = (chunk.0 * 16, chunk.1 * 16);
             for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                for t in 0..16 {
-                    let (x, z) = if dx != 0 {
-                        (if dx > 0 { x0 + 15 } else { x0 }, z0 + t)
-                    } else {
-                        (x0 + t, if dz > 0 { z0 + 15 } else { z0 })
-                    };
-                    let (ox, oz) = (x + dx, z + dz);
-                    let outside_chunk = ChunkPos(ox.div_euclid(16), oz.div_euclid(16));
-                    if outside_chunk == chunk {
-                        continue;
-                    }
-                    let outside_mask = source
-                        .with_loaded_chunk(outside_chunk.0, outside_chunk.1, mask)
-                        .map(|(_, bits)| bits)
-                        .unwrap_or_default();
-                    for (index, inside_interesting) in inside_mask.iter().enumerate() {
-                        if !*inside_interesting
-                            && !outside_mask.get(index).copied().unwrap_or(false)
-                        {
-                            continue;
+                let outside_chunk = ChunkPos(chunk.0 + dx, chunk.1 + dz);
+                // Still unloaded: nothing has become readable on that side.
+                let Some((_, outside_mask)) = mask(outside_chunk) else {
+                    continue;
+                };
+                // The sections where either side could need a wake.
+                let sections: Vec<usize> = (0..inside_mask.len())
+                    .filter(|&index| {
+                        inside_mask[index] || outside_mask.get(index).copied().unwrap_or(false)
+                    })
+                    .collect();
+                if sections.is_empty() {
+                    continue;
+                }
+                // The two faces of the seam, read straight from the chunks' paletted containers
+                // (one lock each) instead of one `source.block` call per cell. `face[t][y]`
+                // walks along the seam, then up the section.
+                let (inside_face, outside_face): (Face, Face) = match (dx, dz) {
+                    (1, 0) => ((Some(15), None), (Some(0), None)),
+                    (-1, 0) => ((Some(0), None), (Some(15), None)),
+                    (0, 1) => ((None, Some(15)), (None, Some(0))),
+                    _ => ((None, Some(0)), (None, Some(15))),
+                };
+                let read = |at: ChunkPos, fixed: (Option<u8>, Option<u8>)| {
+                    source.with_loaded_chunk(at.0, at.1, |chunk| {
+                        let mut cells: Vec<u32> = Vec::with_capacity(sections.len() * 256);
+                        for &index in &sections {
+                            let base = min_y + index as i32 * 16;
+                            for t in 0..16u8 {
+                                let (x, z) = (fixed.0.unwrap_or(t), fixed.1.unwrap_or(t));
+                                for y in base..base + 16 {
+                                    cells.push(chunk.block(x, y, z).unwrap_or(u32::MAX));
+                                }
+                            }
                         }
-                        let base = min_y + index as i32 * 16;
+                        cells
+                    })
+                };
+                let (Some(inside_cells), Some(outside_cells)) =
+                    (read(chunk, inside_face), read(outside_chunk, outside_face))
+                else {
+                    continue;
+                };
+                let mut cell = 0;
+                for &index in &sections {
+                    let base = min_y + index as i32 * 16;
+                    for t in 0..16i32 {
+                        let (x, z) = if dx != 0 {
+                            (if dx > 0 { x0 + 15 } else { x0 }, z0 + t)
+                        } else {
+                            (x0 + t, if dz > 0 { z0 + 15 } else { z0 })
+                        };
+                        let (ox, oz) = (x + dx, z + dz);
                         for y in base..base + 16 {
-                            let Some(inside_state) = source.block(x, y, z) else {
-                                continue;
-                            };
-                            let Some(outside_state) = source.block(ox, y, oz) else {
-                                // Still unloaded: nothing has become readable on that side.
-                                continue;
-                            };
-                            if inside_state == air && outside_state == air {
+                            let (inside_state, outside_state) =
+                                (inside_cells[cell], outside_cells[cell]);
+                            cell += 1;
+                            if inside_state == u32::MAX || outside_state == u32::MAX {
                                 continue;
                             }
-                            // Only fluid that could not move because the other side was unloaded
-                            // needs a wake. An ocean border with water on both sides does not.
-                            if ferrite_fluid::is_liquid_block(inside_state)
-                                && ferrite_fluid::can_hold_fluid(
-                                    outside_state,
-                                    ferrite_fluid::fluid_state(inside_state).kind,
-                                )
-                            {
-                                self.schedule_fluid((x, y, z));
+                            // A pair of full blocks (or air) cannot need a fluid, support or
+                            // gravity wake; this keeps the pass on the surface.
+                            if !interesting(inside_state) && !interesting(outside_state) {
+                                continue;
                             }
-                            if ferrite_fluid::is_liquid_block(outside_state)
-                                && ferrite_fluid::can_hold_fluid(
-                                    inside_state,
-                                    ferrite_fluid::fluid_state(outside_state).kind,
-                                )
-                            {
-                                if self.held_chunks.contains_key(&outside_chunk) {
-                                    self.schedule_fluid((ox, y, oz));
-                                } else {
-                                    let _ = signals.send(Signal::FluidChange {
-                                        dimension,
-                                        x: ox,
-                                        y,
-                                        z: oz,
-                                    });
-                                }
-                            }
-                            let inside_u16 = u16::try_from(inside_state).ok();
-                            let outside_u16 = u16::try_from(outside_state).ok();
-                            if inside_u16.is_some_and(|state| {
-                                !super::neighbors::can_survive(state, [x, y, z], source)
-                            }) {
-                                // The block is ours; the unreadable side is now readable and failed
-                                // its support test. Re-validate it without forwarding the origin.
-                                self.updates.remote_changed([ox, y, oz]);
-                            }
-                            if outside_u16.is_some_and(|state| {
-                                !super::neighbors::can_survive(state, [ox, y, oz], source)
-                            }) {
-                                if self.held_chunks.contains_key(&outside_chunk) {
-                                    self.updates.block_changed([x, y, z]);
-                                } else {
-                                    let _ = signals.send(Signal::NeighborUpdate {
-                                        dimension,
-                                        origin: [x, y, z],
-                                        target: [ox, y, oz],
-                                    });
-                                }
-                            }
-                            if inside_u16.is_some_and(super::gravity::is_gravity)
-                                || outside_u16.is_some_and(super::gravity::is_gravity)
-                            {
-                                self.schedule_gravity(source, &[[x, y, z], [ox, y, oz]]);
-                            }
+                            self.wake_seam_cell(
+                                source,
+                                &signals,
+                                outside_chunk,
+                                ([x, y, z], inside_state),
+                                ([ox, y, oz], outside_state),
+                                (info(inside_state), info(outside_state)),
+                            );
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// The wake-up for one pair of cells that touch across a chunk seam: `inside` is in a
+    /// chunk this region just took, `outside` is across the seam in `outside_chunk`.
+    fn wake_seam_cell(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        signals: &UnboundedSender<Signal>,
+        outside_chunk: ChunkPos,
+        inside: ([i32; 3], u32),
+        outside: ([i32; 3], u32),
+        (inside_info, outside_info): (SeamInfo, SeamInfo),
+    ) {
+        let dimension = source.dimension();
+        let ([x, y, z], inside_state) = inside;
+        let ([ox, _, oz], outside_state) = outside;
+        // Only fluid that could not move because the other side was unloaded needs a wake. An
+        // ocean border with the same fluid on both sides was generated settled and does not
+        // (that case alone is what made the join-time scan schedule 130k ticks).
+        let same_fluid = inside_info.fluid
+            && outside_info.fluid
+            && ferrite_fluid::is_liquid_block(inside_state)
+            && ferrite_fluid::is_liquid_block(outside_state)
+            && ferrite_fluid::fluid_state(inside_state).kind
+                == ferrite_fluid::fluid_state(outside_state).kind;
+        if !same_fluid
+            && inside_info.fluid
+            && ferrite_fluid::is_liquid_block(inside_state)
+            && ferrite_fluid::can_hold_fluid(
+                outside_state,
+                ferrite_fluid::fluid_state(inside_state).kind,
+            )
+        {
+            self.schedule_fluid((x, y, z));
+        }
+        if !same_fluid
+            && outside_info.fluid
+            && ferrite_fluid::is_liquid_block(outside_state)
+            && ferrite_fluid::can_hold_fluid(
+                inside_state,
+                ferrite_fluid::fluid_state(outside_state).kind,
+            )
+        {
+            if self.held_chunks.contains_key(&outside_chunk) {
+                self.schedule_fluid((ox, y, oz));
+            } else {
+                let _ = signals.send(Signal::FluidChange {
+                    dimension,
+                    x: ox,
+                    y,
+                    z: oz,
+                });
+            }
+        }
+        let inside_u16 = u16::try_from(inside_state).ok();
+        let outside_u16 = u16::try_from(outside_state).ok();
+        if inside_info.wall
+            && inside_u16
+                .is_some_and(|state| !super::neighbors::can_survive(state, [x, y, z], source))
+        {
+            // The block is ours; the unreadable side is now readable and failed its support
+            // test. Re-validate it without forwarding the origin.
+            self.updates.remote_changed([ox, y, oz]);
+        }
+        if outside_info.wall
+            && outside_u16
+                .is_some_and(|state| !super::neighbors::can_survive(state, [ox, y, oz], source))
+        {
+            if self.held_chunks.contains_key(&outside_chunk) {
+                self.updates.block_changed([x, y, z]);
+            } else {
+                let _ = signals.send(Signal::NeighborUpdate {
+                    dimension,
+                    origin: [x, y, z],
+                    target: [ox, y, oz],
+                });
+            }
+        }
+        if inside_info.gravity || outside_info.gravity {
+            self.schedule_gravity(source, &[[x, y, z], [ox, y, oz]]);
         }
     }
     /// Knocks the entity with `uuid` away from `source`, for a hit another region's shield
@@ -6359,6 +6457,16 @@ impl Region {
             .collect();
         for p in self.players.values() {
             super::targeting::publish(p.uuid, p.gamemode);
+            // Endermen anywhere read where this player looks, and whether a carved pumpkin
+            // hides them.
+            super::targeting::publish_gaze(
+                p.uuid,
+                ferrite_entity::enderman::Gaze {
+                    look: ferrite_entity::combat::look_vector(p.yaw, p.pitch),
+                    pumpkin: p.inventory.get(ferrite_inventory::HEAD).name()
+                        == Some("minecraft:carved_pumpkin"),
+                },
+            );
         }
         let mut players: HashMap<Uuid, ferrite_math::Vec3> = ctx
             .positions
@@ -6383,6 +6491,16 @@ impl Region {
             untargetable: super::targeting::untargetable(),
             // Vanilla `Difficulty.HARD` is 3.
             hard: ctx.state.lock().unwrap().difficulty == 3,
+            gazes: super::targeting::gazes(),
+            raining: ctx.raining,
+            // Daylight only exists in the overworld; the Nether and End have none.
+            monsters_burn: ctx.dimension == super::Dimension::Overworld,
+            griefing: ctx
+                .rules
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_bool("mob_griefing")
+                .unwrap_or(true),
         };
         let targets: Vec<_> = players
             .iter()
@@ -6481,9 +6599,47 @@ impl Region {
                         None,
                     ));
                 }
-                ai::MobEvent::Breath { pos } => self
-                    .breath_clouds
-                    .push(ferrite_entity::dragon::BreathCloud::perched(pos)),
+                ai::MobEvent::Breath { pos } => {
+                    // The event carries the head's aim point; the cloud forms on the ground
+                    // below it, found by walking down through air.
+                    let pos = ctx.source.as_deref().map_or(pos, |source| {
+                        ferrite_math::Vec3::new(
+                            pos.x,
+                            ferrite_entity::dragon::breath_floor(pos.y, 0, |y| {
+                                source
+                                    .block(pos.x.floor() as i32, y, pos.z.floor() as i32)
+                                    .is_none_or(|state| {
+                                        state == 0
+                                            || u16::try_from(state)
+                                                .ok()
+                                                .and_then(ferrite_data::blocks::state)
+                                                .is_some_and(|(name, _)| {
+                                                    matches!(
+                                                        name,
+                                                        "minecraft:air"
+                                                            | "minecraft:cave_air"
+                                                            | "minecraft:void_air"
+                                                    )
+                                                })
+                                    })
+                            }),
+                            pos.z,
+                        )
+                    });
+                    self.breath_clouds
+                        .push(ferrite_entity::dragon::BreathCloud::perched(pos));
+                }
+                ai::MobEvent::EatBlock { at, grass } => self.eat_block(ctx, at, grass),
+                ai::MobEvent::BreakDoor {
+                    at, broken: true, ..
+                } => self.break_door(ctx, at),
+                ai::MobEvent::BreakDoor { .. } => {}
+                ai::MobEvent::Hiss { at } => self.play_sound_near(
+                    at,
+                    ferrite_entity::creeper::HISS_SOUND,
+                    ferrite_entity::creeper::HISS_VOLUME,
+                    ferrite_entity::creeper::HISS_PITCH,
+                ),
                 ai::MobEvent::Status { key, status } => self.broadcast_status(ctx, key, status),
                 ai::MobEvent::Bred(bred) => {
                     // Vanilla gives 1-7 experience points to the breeding and counts it for the
@@ -6545,7 +6701,19 @@ impl Region {
         for record in
             spawn::natural_spawn_monsters(&self.entities, blocks, &positions, &mut self.rng, 1)
         {
+            let mut record = record;
+            // Rides live in a process-wide table that the `ride` tests assert on in full, so a
+            // jockey rolled by an unrelated region test must not leak into it; `spider_jockey`
+            // has its own test.
+            let jockey = if cfg!(test) {
+                None
+            } else {
+                self.spider_jockey(&mut record)
+            };
             self.entities.insert(record);
+            if let Some(rider) = jockey {
+                self.entities.insert(rider);
+            }
         }
         // Mobs that died this tick drop their entity loot table once (vanilla
         // `LivingEntity.dropFromLootTable`). The entity itself stays in the store until the
@@ -6571,6 +6739,11 @@ impl Region {
             })
             .collect();
         for (key, kind, pos, baby, killer, burning) in dead {
+            // A sheep's table picks its wool by colour and sheared state.
+            let facts = mob::state(&self.entities, key)
+                .filter(|s| s.kind == MobKind::Sheep)
+                .map(ferrite_entity::sheep::loot_properties)
+                .unwrap_or_default();
             if let Some(killer) = killer {
                 super::recipe_unlock::KILLS
                     .lock()
@@ -6620,7 +6793,7 @@ impl Region {
             let drops = if baby {
                 Vec::new()
             } else {
-                super::drops::mob_drops_by(kind, &mut self.rng, killer, burning)
+                super::drops::mob_drops_with(kind, &mut self.rng, killer, burning, &facts)
             };
             for stack in drops
                 .into_iter()
@@ -8012,6 +8185,9 @@ impl Region {
                 if self.use_trader(uuid, key) {
                     continue;
                 }
+                if self.use_shears_on_sheep(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
                 if sneaking
                     && ferrite_entity::mob::state(&self.entities, key)
@@ -8065,6 +8241,204 @@ impl Region {
                     p.inventory.set(slot, held.copy_with_count(held.count - 1));
                 }
             }
+        }
+    }
+
+    /// Vanilla `Sheep.mobInteract` with shears: a ready sheep drops one to three wool of its
+    /// colour from `shearing/sheep`, becomes sheared and wears the shears by one; a lamb or an
+    /// already sheared sheep consumes the click and does nothing. Not modelled: the
+    /// `GameEvent.SHEAR` vibration and plugin shear events.
+    fn use_shears_on_sheep(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:shears" {
+            return false;
+        }
+        match self.shear_sheep(key) {
+            None => return false,
+            Some(false) => return true,
+            Some(true) => {}
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, "minecraft:entity.sheep.shear", 1.0, 1.0);
+        }
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&player)
+        {
+            let stack = p.inventory.get(slot).clone();
+            let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage);
+            let damage = stack.damage() + 1;
+            let worn = match max {
+                Some(max) if damage >= max => Some(ferrite_item::ItemStack::default()),
+                _ => worn_stack(stack, damage),
+            };
+            if let Some(worn) = worn {
+                p.inventory.set(slot, worn);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// `BreakDoorGoal.tick` on its last tick: both halves of the wooden door vanish without a
+    /// drop (`removeBlock`), with the zombie's door-breaking sound. The crack-stage packets
+    /// (`destroyBlockProgress`) are not sent.
+    fn break_door(&mut self, ctx: &TickContext, lower: [i32; 3]) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let is_door = |at: [i32; 3]| {
+            source
+                .block(at[0], at[1], at[2])
+                .and_then(|state| u16::try_from(state).ok())
+                .is_some_and(|state| ferrite_entity::sun::is_closed_wooden_door(Some(state)))
+        };
+        let upper = [lower[0], lower[1] + 1, lower[2]];
+        let mut removed = Vec::new();
+        if is_door(lower) {
+            removed.push((lower, 0));
+        }
+        if is_door(upper) {
+            removed.push((upper, 0));
+        }
+        if removed.is_empty() {
+            return;
+        }
+        self.place_blocks(ctx, &removed);
+        self.play_sound_near(
+            ferrite_math::Vec3::new(
+                f64::from(lower[0]) + 0.5,
+                f64::from(lower[1]) + 0.5,
+                f64::from(lower[2]) + 0.5,
+            ),
+            "minecraft:entity.zombie.break_wooden_door",
+            1.0,
+            1.0,
+        );
+    }
+
+    /// `Spider.finalizeSpawn`: one natural spider in a hundred comes with a skeleton riding it.
+    /// Seats the skeleton (through [`super::ride`], which keeps it on the spider) and returns its
+    /// record for the caller to insert next to the spider; the spider is marked as carrying a
+    /// rider so it stops leaping.
+    fn spider_jockey(
+        &mut self,
+        spider: &mut ferrite_entity::EntityRecord,
+    ) -> Option<ferrite_entity::EntityRecord> {
+        let is_spider = spider
+            .data
+            .mob
+            .as_ref()
+            .is_some_and(|state| state.kind == MobKind::Spider);
+        if !is_spider || !ferrite_entity::spider::jockey_roll(&mut self.rng) {
+            return None;
+        }
+        let rider = mob::new_mob(MobKind::Skeleton, spider.pos, &mut self.rng);
+        super::ride::mount_in(
+            rider.data.uuid,
+            spider.data.uuid,
+            false,
+            Some("minecraft:spider"),
+        )
+        .ok()?;
+        if let Some(state) = spider.data.mob.as_mut() {
+            state.has_rider = true;
+        }
+        Some(rider)
+    }
+
+    /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
+    /// drops; grass becomes dirt), not the sheep's `ate()`, which the AI already did.
+    fn eat_block(&mut self, ctx: &TickContext, at: [i32; 3], grass: bool) {
+        let griefing = ctx
+            .rules
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_bool("mob_griefing")
+            .unwrap_or(true);
+        if !griefing {
+            return;
+        }
+        let state = if grass {
+            ferrite_data::blocks::default_state("minecraft:dirt")
+        } else {
+            Some(0)
+        };
+        if let Some(state) = state {
+            self.place_blocks(ctx, &[(at, state)]);
+        }
+    }
+
+    /// The world half of shearing: `None` when `key` is not a sheep, `Some(false)` when it is a
+    /// lamb or already sheared (the click is consumed), `Some(true)` when it was sheared and its
+    /// wool was dropped.
+    fn shear_sheep(&mut self, key: ferrite_entity::EntityKey) -> Option<bool> {
+        let state = mob::state(&self.entities, key).copied()?;
+        if state.kind != MobKind::Sheep {
+            return None;
+        }
+        let facts = ferrite_entity::sheep::loot_properties(&state);
+        if ferrite_entity::sheep::shear(&mut self.entities, key).is_none() {
+            return Some(false);
+        }
+        let pos = self.entities.pos(key)?;
+        for stack in super::drops::shearing_drops(&facts, &mut self.rng) {
+            // `Sheep.shear` spawns each wool on its own, a block above the feet, with a little
+            // extra push on top of the item's own random toss.
+            for _ in 0..stack.count {
+                let mut one = stack.clone();
+                one.count = 1;
+                let vel = ferrite_math::Vec3::new(
+                    f64::from(self.rng.next_f32() * 0.2 - 0.1)
+                        + f64::from((self.rng.next_f32() - self.rng.next_f32()) * 0.1),
+                    0.2 + f64::from(self.rng.next_f32() * 0.05),
+                    f64::from(self.rng.next_f32() * 0.2 - 0.1)
+                        + f64::from((self.rng.next_f32() - self.rng.next_f32()) * 0.1),
+                );
+                let at = ferrite_math::Vec3::new(pos.x, pos.y + 1.0, pos.z);
+                let record = item::new_item_stack(at, vel, &one, &mut self.rng);
+                self.entities.insert(record);
+            }
+        }
+        Some(true)
+    }
+
+    /// Plays a sound event at `pos` for every player of this region within 16 blocks.
+    fn play_sound_near(&self, pos: ferrite_math::Vec3, name: &str, volume: f32, pitch: f32) {
+        let Some(sound) = ferrite_data::registries::id("minecraft:sound_event", name) else {
+            return;
+        };
+        for p in self.players.values() {
+            let dx = p.pos[0] - pos.x;
+            let dz = p.pos[2] - pos.z;
+            if dx * dx + dz * dz > 256.0 {
+                continue;
+            }
+            send(
+                p,
+                &SoundEffect {
+                    sound: super::commands_extras::sound_holder(sound),
+                    // `SoundSource.PLAYERS`.
+                    source: VarInt(7),
+                    x: (pos.x * 8.0) as i32,
+                    y: (pos.y * 8.0) as i32,
+                    z: (pos.z * 8.0) as i32,
+                    volume,
+                    pitch,
+                    seed: 0,
+                },
+            );
         }
     }
 
@@ -9267,6 +9641,8 @@ impl Region {
             let mut victims = Vec::new();
             for key in near {
                 if mob::is_mob(&self.entities, key) {
+                    // `Creeper.thunderHit`: a bolt charges a creeper (and hurts it all the same).
+                    ferrite_entity::creeper::thunder_hit(&mut self.entities, key);
                     mob::hurt(&mut self.entities, key, 5.0, None);
                     if let Some(state) = mob::state(&self.entities, key) {
                         victims.push(state.kind.name().to_owned());
@@ -11386,6 +11762,11 @@ impl Region {
         for pos in &button_changed {
             self.updates.block_changed(*pos);
         }
+        // A chunk this region just took may have fluid, support or gravity cells that were
+        // stopped at its edge while the neighbour was unloaded.
+        if let Some(source) = ctx.source.as_deref() {
+            self.wake_loaded_chunks(source, ctx.signals.clone());
+        }
         let mut changed = self.tick_block_updates(ctx);
         changed.extend(button_changed);
         stage!("vaults");
@@ -12459,6 +12840,78 @@ mod tests {
     }
 
     #[test]
+    fn an_enderman_is_angered_by_a_stare_from_a_player_in_another_region() {
+        let ctx = tick_context();
+        let player = Uuid::from_u128(0xe1de_0001);
+        let (outbound, _receiver) = OutboundSender::channel(4096);
+        ctx.tracking.lock().unwrap().insert(
+            player,
+            (
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+                HashSet::new(),
+                outbound,
+            ),
+        );
+        // The player belongs to another region: this region sees only the shared position
+        // snapshot and the gaze that region published.
+        let feet = [0.5, 65.0, 0.5];
+        ctx.positions.lock().unwrap().insert(player, feet);
+        let mut region = Region::default();
+        let enderman = region.entities.insert(mob::new_mob(
+            MobKind::Enderman,
+            ferrite_math::Vec3::new(10.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        let eye = region.entities.pos(enderman).unwrap()
+            + ferrite_math::Vec3::new(0.0, f64::from(MobKind::Enderman.props().eye_height), 0.0);
+        let look = (eye
+            - ferrite_entity::combat::eye_position(ferrite_math::Vec3::new(
+                feet[0], feet[1], feet[2],
+            )))
+        .normalize();
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        super::super::targeting::publish_gaze(
+            player,
+            ferrite_entity::enderman::Gaze {
+                look,
+                pumpkin: false,
+            },
+        );
+        for _ in 0..2_000 {
+            region.tick_mobs(&ctx, &blocks);
+            if mob::state(&region.entities, enderman).unwrap().target == Some(player) {
+                break;
+            }
+        }
+        assert_eq!(
+            mob::state(&region.entities, enderman).unwrap().target,
+            Some(player),
+            "a stare from another region must anger it"
+        );
+        // The same player under a carved pumpkin is not noticed.
+        let calm = region.entities.insert(mob::new_mob(
+            MobKind::Enderman,
+            ferrite_math::Vec3::new(10.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        super::super::targeting::publish_gaze(
+            player,
+            ferrite_entity::enderman::Gaze {
+                look,
+                pumpkin: true,
+            },
+        );
+        for _ in 0..1_000 {
+            region.tick_mobs(&ctx, &blocks);
+        }
+        assert_eq!(mob::state(&region.entities, calm).unwrap().target, None);
+        super::super::targeting::forget(player);
+    }
+
+    #[test]
     fn a_cross_region_target_survives_a_region_split_and_merge() {
         let ctx = tick_context();
         let player = Uuid::from_u128(0x1235);
@@ -13442,6 +13895,119 @@ mod tests {
         assert_eq!(dropped_gear(&region).len(), 2, "gear drops exactly once");
     }
 
+    fn sheep_region() -> (Region, ferrite_entity::EntityKey) {
+        let mut region = Region::default();
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::Sheep,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        ferrite_entity::sheep::set_color(&mut region.entities, key, 11);
+        (region, key)
+    }
+
+    #[test]
+    fn shearing_a_sheep_drops_its_coloured_wool_and_a_second_shear_drops_nothing() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        let (mut region, key) = sheep_region();
+        assert_eq!(region.shear_sheep(key), Some(true));
+        let wool = dropped_items(&region);
+        assert!((1..=3).contains(&wool.len()), "{wool:?}");
+        assert!(wool.iter().all(|name| *name == "minecraft:blue_wool"));
+        assert!(mob::state(&region.entities, key).unwrap().sheared);
+        let before = region.entities.keys().len();
+        assert_eq!(region.shear_sheep(key), Some(false));
+        assert_eq!(region.entities.keys().len(), before, "nothing more dropped");
+    }
+
+    #[test]
+    fn a_lamb_is_not_sheared_and_a_cow_is_not_a_sheep() {
+        let (mut region, key) = sheep_region();
+        mob::state_mut(&mut region.entities, key).unwrap().age = -500;
+        assert_eq!(region.shear_sheep(key), Some(false));
+        assert!(!mob::state(&region.entities, key).unwrap().sheared);
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(4.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        assert_eq!(region.shear_sheep(cow), None);
+    }
+
+    #[test]
+    fn a_dead_sheep_drops_wool_of_its_colour_unless_it_was_sheared() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        for (sheared, expect_wool) in [(false, true), (true, false)] {
+            let (mut region, key) = sheep_region();
+            region.hold_chunk(ChunkPos(0, 0));
+            {
+                let state = mob::state_mut(&mut region.entities, key).unwrap();
+                state.sheared = sheared;
+                state.health = 0.0;
+                state.last_killer = Some(Uuid::from_u128(5));
+            }
+            region.tick(&tick_context());
+            let drops = dropped_items(&region);
+            assert_eq!(
+                drops.contains(&"minecraft:blue_wool"),
+                expect_wool,
+                "sheared {sheared}: {drops:?}"
+            );
+        }
+    }
+
+    fn eat_context(
+        source: &Arc<super::super::anvil::AnvilChunkSource>,
+        griefing: bool,
+    ) -> TickContext {
+        let mut ctx = tick_context();
+        ctx.source = Some(Arc::clone(source));
+        if !griefing {
+            ctx.rules
+                .lock()
+                .unwrap()
+                .set("mob_griefing", "false")
+                .unwrap();
+        }
+        ctx
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_eaten_grass_block_becomes_dirt_and_a_plant_disappears() {
+        let source = loaded_source().await;
+        let grass =
+            u32::from(ferrite_data::blocks::default_state("minecraft:grass_block").unwrap());
+        let plant =
+            u32::from(ferrite_data::blocks::default_state("minecraft:short_grass").unwrap());
+        source.set_block(2, 63, 2, grass).unwrap();
+        source.set_block(4, 64, 4, plant).unwrap();
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.eat_block(&ctx, [2, 63, 2], true);
+        region.eat_block(&ctx, [4, 64, 4], false);
+        let dirt = u32::from(ferrite_data::blocks::default_state("minecraft:dirt").unwrap());
+        assert_eq!(source.block(2, 63, 2), Some(dirt));
+        assert_eq!(source.block(4, 64, 4), Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mob_griefing_off_leaves_the_eaten_block_alone() {
+        let source = loaded_source().await;
+        let grass =
+            u32::from(ferrite_data::blocks::default_state("minecraft:grass_block").unwrap());
+        source.set_block(2, 63, 2, grass).unwrap();
+        let ctx = eat_context(&source, false);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.eat_block(&ctx, [2, 63, 2], true);
+        assert_eq!(source.block(2, 63, 2), Some(grass));
+    }
+
     #[test]
     fn a_horse_mounted_with_ride_is_steered_by_its_player_rider() {
         let mut region = Region::default();
@@ -14250,6 +14816,58 @@ mod tests {
             &slots,
         );
         state
+    }
+
+    /// A spider that rolls the one-in-a-hundred jockey gets a skeleton seated on it, and stops
+    /// leaping; every other spawn gets no rider.
+    #[test]
+    fn a_jockey_spider_gets_a_seated_skeleton() {
+        let mut region = Region::default();
+        let _turn = super::super::ride::test_turn();
+        let mut jockeys = 0;
+        for _ in 0..4_000 {
+            let mut spider = mob::new_mob(
+                MobKind::Spider,
+                ferrite_math::Vec3::new(0.5, 65.0, 0.5),
+                &mut region.rng,
+            );
+            let uuid = spider.data.uuid;
+            if let Some(rider) = region.spider_jockey(&mut spider) {
+                jockeys += 1;
+                assert_eq!(rider.data.mob.as_ref().unwrap().kind, MobKind::Skeleton);
+                assert!(spider.data.mob.as_ref().unwrap().has_rider);
+                assert_eq!(super::super::ride::vehicle_of(rider.data.uuid), Some(uuid));
+                super::super::ride::forget(rider.data.uuid);
+            } else {
+                assert!(!spider.data.mob.as_ref().unwrap().has_rider);
+            }
+        }
+        assert!((15..70).contains(&jockeys), "{jockeys} jockeys in 4000");
+    }
+
+    /// A zombie that finishes chewing a closed wooden door removes both halves; an open door or
+    /// an iron door stays.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_broken_door_loses_both_halves() {
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let door = |name: &str, half: &str| {
+            let default = ferrite_data::blocks::default_state(name).unwrap();
+            ferrite_data::blocks::state_id(name, &[("half", half)]).unwrap_or(default)
+        };
+        let lower = u32::from(door("minecraft:oak_door", "lower"));
+        let upper = u32::from(door("minecraft:oak_door", "upper"));
+        source.set_block(4, 65, 4, lower).unwrap();
+        source.set_block(4, 66, 4, upper).unwrap();
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_door").unwrap());
+        source.set_block(6, 65, 4, iron).unwrap();
+        region.break_door(&ctx, [4, 65, 4]);
+        assert_eq!(source.block(4, 65, 4), Some(0));
+        assert_eq!(source.block(4, 66, 4), Some(0));
+        region.break_door(&ctx, [6, 65, 4]);
+        assert_eq!(source.block(6, 65, 4), Some(iron));
     }
 
     /// An exploding shulker box (every colour, and the undyed one) drops one item that carries
@@ -15464,6 +16082,56 @@ mod neighbor_ownership_tests {
         (ctx, receiver)
     }
 
+    /// The join-time footprint of the wake pass on the real fixture world: every chunk of a
+    /// view-distance-5 square around the spawn is held at once, as when a player joins, and the
+    /// pass runs until its queue is empty. Prints the total and the per-chunk cost
+    /// (`cargo test -p ferrite-server wake_cost -- --nocapture`); it needs the extracted fixture
+    /// world, so it is skipped when `vanilla/` is absent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wake_cost_on_the_fixture_world_join_footprint() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = root.join("vanilla/26.3/fixture-world/world");
+        let Ok(registry) =
+            ferrite_world::RuntimeRegistry::load(root.join("vanilla/26.3/generated"))
+        else {
+            return;
+        };
+        let Ok(spawn) = super::super::anvil::read_spawn(&path) else {
+            return;
+        };
+        let source = AnvilChunkSource::new(path, registry);
+        let (cx, cz) = (spawn[0].div_euclid(16), spawn[2].div_euclid(16));
+        let mut region = Region::default();
+        let mut loaded_chunks = 0;
+        for x in cx - 5..=cx + 5 {
+            for z in cz - 5..=cz + 5 {
+                for _ in 0..500 {
+                    match source.get(x, z, 0) {
+                        Some(Ok(_)) => {
+                            loaded_chunks += 1;
+                            region.hold_chunk(ChunkPos(x, z));
+                            break;
+                        }
+                        Some(Err(_)) => break,
+                        None => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+                    }
+                }
+            }
+        }
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let mut passes = 0;
+        while !region.pending_chunk_loads.is_empty() {
+            region.wake_loaded_chunks(&source, signals.clone());
+            passes += 1;
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "wake pass: {loaded_chunks} chunks, {passes} passes, {elapsed:?} total, {:?} per chunk",
+            elapsed / loaded_chunks.max(1)
+        );
+    }
+
     /// Same region: the water reached the edge of its chunk while the east chunk was unloaded
     /// and stopped. Holding that chunk must schedule the border water again so it flows on.
     #[tokio::test]
@@ -15501,6 +16169,43 @@ mod neighbor_ownership_tests {
             ferrite_fluid::fluid_state(source.block(16, 65, 0).unwrap()).kind,
             ferrite_fluid::FluidKind::Water,
             "the resumed border water crossed into the newly loaded chunk"
+        );
+    }
+
+    /// The wake pass runs from `Region::tick` itself: with no direct call, holding the east chunk
+    /// after the water stopped at the seam is enough for the water to flow across.
+    #[tokio::test]
+    async fn the_tick_loop_wakes_water_at_a_seam_when_a_chunk_is_held_later() {
+        let source = loaded(&[(0, 0)]).await;
+        let (water, stone, air) = (id("water"), id("stone"), id("air"));
+        for x in 12..=15 {
+            source.set_block(x, 64, 0, stone).unwrap();
+            source.set_block(x, 65, 0, air).unwrap();
+        }
+        source.set_block(15, 65, 0, water).unwrap();
+        let (ctx, _rx) = gravity_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        region.tick(&ctx);
+        loop {
+            if let Some(result) = source.get(1, 0, 0) {
+                result.unwrap();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        source.set_block(16, 64, 0, stone).unwrap();
+        source.set_block(16, 65, 0, air).unwrap();
+        region.hold_chunk(ChunkPos(1, 0));
+        for _ in 0..8 {
+            // The world loop ticks fluids after the region tick (`game/mod.rs`).
+            region.tick(&ctx);
+            region.tick_fluids(&source, &ctx.tracking, ctx.signals.clone(), true, false);
+        }
+        assert_eq!(
+            ferrite_fluid::fluid_state(source.block(16, 65, 0).unwrap()).kind,
+            ferrite_fluid::FluidKind::Water,
+            "the tick loop did not resume the border water"
         );
     }
 

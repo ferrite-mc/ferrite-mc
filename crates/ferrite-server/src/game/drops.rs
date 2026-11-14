@@ -306,6 +306,7 @@ pub fn mob_drops(
     mob_drops_by(kind, rng, Some(uuid::Uuid::nil()), false)
 }
 
+#[cfg(test)]
 /// [`mob_drops`] for a kill by `killer` (a player, with their held weapon's looting and
 /// enchantments) or no player at all, of a mob that is `burning`.
 pub fn mob_drops_by(
@@ -313,6 +314,18 @@ pub fn mob_drops_by(
     rng: &mut ferrite_entity::Rng,
     killer: Option<uuid::Uuid>,
     burning: bool,
+) -> Vec<ItemStack> {
+    mob_drops_with(kind, rng, killer, burning, &[])
+}
+
+/// [`mob_drops_by`] for a mob whose loot table reads more facts about it, such as a sheep's
+/// colour (`components/minecraft:sheep/color`) and `type_specific/sheep/sheared`.
+pub fn mob_drops_with(
+    kind: ferrite_entity::mob::MobKind,
+    rng: &mut ferrite_entity::Rng,
+    killer: Option<uuid::Uuid>,
+    burning: bool,
+    properties: &[(String, String)],
 ) -> Vec<ItemStack> {
     let Some(table) = tables().and_then(|tables| tables.get(kind.loot_table())) else {
         return Vec::new();
@@ -337,6 +350,7 @@ pub fn mob_drops_by(
         this_entity: Some(ferrite_loot::EntityFacts {
             entity_type: format!("minecraft:{}", kind.name().trim_start_matches("minecraft:")),
             on_fire: burning,
+            properties: properties.iter().cloned().collect(),
             ..Default::default()
         }),
         damage_source: Some(ferrite_loot::DamageFacts {
@@ -353,6 +367,34 @@ pub fn mob_drops_by(
         .filter_map(|(item, count)| {
             let item_id = ferrite_data::registries::id("minecraft:item", &item)?;
             (count > 0).then_some(ItemStack { count, item_id })
+        })
+        .collect()
+}
+
+/// Rolls the `shearing/sheep` loot table for a sheep with `properties` (see
+/// `ferrite_entity::sheep::loot_properties`): one to three wool of its colour.
+pub fn shearing_drops(
+    properties: &[(String, String)],
+    rng: &mut ferrite_entity::Rng,
+) -> Vec<ferrite_item::ItemStack> {
+    let Some(table) = tables().and_then(|tables| tables.get("minecraft:shearing/sheep")) else {
+        return Vec::new();
+    };
+    let context = LootContext {
+        this_entity: Some(ferrite_loot::EntityFacts {
+            entity_type: "minecraft:sheep".to_owned(),
+            properties: properties.iter().cloned().collect(),
+            ..Default::default()
+        }),
+        host: Some(default_host()),
+        ..LootContext::default()
+    };
+    table
+        .roll(&context, &mut LootRng(rng))
+        .into_iter()
+        .filter_map(|(item, count)| {
+            let id = ferrite_item::item_id(&item)?;
+            (count > 0).then(|| ferrite_item::ItemStack::with_count(id, count))
         })
         .collect()
 }
@@ -395,6 +437,59 @@ mod tests {
 
     fn item_id(name: &str) -> i32 {
         ferrite_data::registries::id("minecraft:item", name).unwrap()
+    }
+
+    fn sheep_facts(color: &str, sheared: bool) -> Vec<(String, String)> {
+        vec![
+            (
+                "components/minecraft:sheep/color".to_owned(),
+                color.to_owned(),
+            ),
+            (
+                "type_specific/sheep/sheared".to_owned(),
+                sheared.to_string(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn shearing_a_sheep_rolls_one_to_three_wool_of_its_colour() {
+        if tables().is_none() {
+            return;
+        }
+        let mut rng = ferrite_entity::Rng::new(4);
+        let wool = ferrite_item::item_id("minecraft:blue_wool").unwrap();
+        let mut counts = std::collections::BTreeSet::new();
+        for _ in 0..60 {
+            let drops = shearing_drops(&sheep_facts("blue", false), &mut rng);
+            let total: i32 = drops
+                .iter()
+                .inspect(|stack| assert_eq!(stack.item, wool, "wrong colour"))
+                .map(|stack| stack.count)
+                .sum();
+            counts.insert(total);
+        }
+        assert_eq!(counts, [1, 2, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn a_dead_sheep_drops_wool_of_its_colour_and_a_sheared_one_none() {
+        if tables().is_none() {
+            return;
+        }
+        let mut rng = ferrite_entity::Rng::new(4);
+        let kind = ferrite_entity::mob::MobKind::Sheep;
+        let player = Some(uuid::Uuid::from_u128(1));
+        let red = item_id("minecraft:red_wool");
+        let wool_of = |facts: &[(String, String)], rng: &mut ferrite_entity::Rng| {
+            (0..30)
+                .flat_map(|_| mob_drops_with(kind, rng, player, false, facts))
+                .filter(|stack| stack.item_id == red)
+                .count()
+        };
+        assert!(wool_of(&sheep_facts("red", false), &mut rng) > 0);
+        assert_eq!(wool_of(&sheep_facts("red", true), &mut rng), 0);
+        assert_eq!(wool_of(&sheep_facts("blue", false), &mut rng), 0);
     }
 
     #[test]

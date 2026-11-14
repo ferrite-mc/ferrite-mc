@@ -295,6 +295,41 @@ pub struct MobState {
     pub dragon_phase_ticks: u32,
     /// Flaming phases the perched dragon has finished (`DragonSittingFlamingPhase.flameCount`).
     pub perch_flames: u8,
+    /// Where a charging dragon is headed, fixed when the charge started
+    /// (`DragonChargePlayerPhase.targetLocation`). Not saved: a charge without a target aborts to
+    /// the holding pattern, as vanilla does.
+    pub dragon_charge_target: Option<ferrite_math::Vec3>,
+    /// Ticks since the charge reached its target (`timeSinceCharge`); zero while still flying.
+    pub dragon_charge_recovery: u32,
+    /// The scanning dragon's yaw rate (`EnderDragon.yRotA`).
+    pub dragon_yaw_rate: f32,
+    /// A sheep's wool colour, the `DyeColor` id (`Sheep.DATA_WOOL_ID`).
+    pub wool_color: u8,
+    /// Whether a sheep has been sheared and not yet eaten grass.
+    pub sheared: bool,
+    /// Ticks left in a sheep's `EatBlockGoal`; zero when it is not eating.
+    pub eat_timer: u8,
+    /// Whether a zombie may break doors (`Zombie.canBreakDoors`).
+    pub can_break_doors: bool,
+    /// The door a zombie is chewing on, and for how many ticks (`BreakDoorGoal.breakTime`).
+    pub door_pos: Option<[i32; 3]>,
+    pub door_ticks: u16,
+    /// The shaded spot a burning skeleton is running to (`FleeSunGoal.wantedX/Y/Z`).
+    pub shade_pos: Option<[i32; 3]>,
+    /// Whether a spider carries a skeleton jockey (`hasControllingPassenger`), which stops its
+    /// leap. Set by the region that mounts the jockey.
+    pub has_rider: bool,
+    /// Whether a creeper is charged by lightning (`Creeper.DATA_IS_POWERED`).
+    pub powered: bool,
+    /// The creeper's synched swell direction: `1` while the fuse burns, `-1` otherwise.
+    pub swell_dir: i8,
+    /// Ticks an enderman has been stared at by `stare_target` (`aggroTime`); zero when calm.
+    pub stare_time: u8,
+    pub stare_target: Option<uuid::Uuid>,
+    /// Whether anything ever stared at this enderman (`DATA_STARED_AT`).
+    pub stared_at: bool,
+    /// The block state an enderman carries (`DATA_CARRY_STATE`); kept and saved, not synched.
+    pub carried: Option<u16>,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -378,6 +413,23 @@ impl MobState {
             dragon_phase: crate::dragon::DragonPhase::Holding,
             dragon_phase_ticks: 0,
             perch_flames: 0,
+            dragon_charge_target: None,
+            dragon_charge_recovery: 0,
+            dragon_yaw_rate: 0.0,
+            wool_color: 0,
+            sheared: false,
+            eat_timer: 0,
+            can_break_doors: false,
+            door_pos: None,
+            door_ticks: 0,
+            shade_pos: None,
+            has_rider: false,
+            powered: false,
+            swell_dir: -1,
+            stare_time: 0,
+            stare_target: None,
+            stared_at: false,
+            carried: None,
             wander_yaw: 0.0,
             moving: false,
             target: None,
@@ -451,6 +503,27 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         && let Some(state) = data.mob.as_ref()
     {
         crate::breed::define_metadata(&mut data.metadata, state);
+    }
+    if kind == MobKind::Enderman {
+        crate::enderman::define_metadata(&mut data.metadata);
+    }
+    if kind == MobKind::Creeper {
+        crate::creeper::define_metadata(&mut data.metadata);
+    }
+    if kind == MobKind::Spider {
+        crate::spider::define_metadata(&mut data.metadata);
+    }
+    if kind == MobKind::Zombie
+        && let Some(state) = data.mob.as_mut()
+    {
+        state.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
+    }
+    if kind == MobKind::Sheep
+        && let Some(state) = data.mob.as_mut()
+    {
+        // `Sheep.finalizeSpawn` rolls the colour.
+        state.wool_color = crate::sheep::random_color(rng);
+        crate::sheep::define_metadata(&mut data.metadata, state);
     }
     if kind.is_tameable()
         && let Some(state) = data.mob.as_ref()

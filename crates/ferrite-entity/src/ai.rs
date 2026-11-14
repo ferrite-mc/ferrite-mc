@@ -395,6 +395,19 @@ pub enum MobEvent {
     Explode { center: Vec3, power: f32 },
     /// Two animals bred; the baby is already in the store.
     Bred(crate::breed::Bred),
+    /// A zombie is chewing on the door at `at` (its lower half): `progress` is the 0..=9 crack
+    /// stage, `broken` is set on the tick the door goes.
+    BreakDoor {
+        at: [i32; 3],
+        progress: u8,
+        broken: bool,
+    },
+    /// A creeper's fuse started: the region plays the hiss at `at`
+    /// (`crate::creeper::HISS_SOUND`).
+    Hiss { at: Vec3 },
+    /// A sheep ate at `at`: the region turns a grass block into dirt (`grass`) or removes the
+    /// plant (`!grass`) when `mobGriefing` allows it.
+    EatBlock { at: [i32; 3], grass: bool },
     /// An entity event for the players tracking `key` (hearts, smoke).
     Status { key: crate::EntityKey, status: u8 },
 }
@@ -569,6 +582,15 @@ pub fn tick_with_owner_attacks_and_holders(
 /// World rules the mob goals read.
 #[derive(Debug, Default)]
 pub struct MobRules {
+    /// Where players look and whether they wear a carved pumpkin, for the enderman stare.
+    /// Players without an entry are not looking at anything.
+    pub gazes: std::collections::HashMap<Uuid, crate::enderman::Gaze>,
+    /// Whether sunlight burns monsters here (the `monsters_burn` environment attribute).
+    pub monsters_burn: bool,
+    /// `mobGriefing`: zombies only break doors when it is on.
+    pub griefing: bool,
+    /// Whether it is raining (endermen are hurt by rain under open sky).
+    pub raining: bool,
     /// Creative and spectator players: seen by every goal except hostile target selection.
     pub untargetable: std::collections::HashSet<Uuid>,
     /// Hard difficulty (skeletons shoot twice as often).
@@ -588,7 +610,14 @@ pub fn tick_full(
     holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
 ) -> Vec<MobEvent> {
-    let MobRules { untargetable, hard } = rules;
+    let MobRules {
+        untargetable,
+        hard,
+        gazes,
+        raining,
+        monsters_burn,
+        griefing,
+    } = rules;
     let bow_cooldown = if *hard {
         SKELETON_COOLDOWN_HARD
     } else {
@@ -649,6 +678,10 @@ pub fn tick_full(
             }
         }
         let mut directed = false;
+        let mut eating = false;
+        if kind == MobKind::Sheep {
+            eating = crate::sheep::tick_eat(store, key, blocks, rng, &mut events);
+        }
         if kind == MobKind::EnderDragon {
             crate::dragon::fly(store, key, players, rng, &mut events);
             continue;
@@ -679,6 +712,39 @@ pub fn tick_full(
             }
         }
 
+        // `Mob.aiStep`: sun-sensitive monsters catch fire in daylight.
+        crate::sun::tick_sun(store, key, blocks, *monsters_burn, *raining, rng);
+        if kind == MobKind::Enderman {
+            // `EndermanLookForPlayerGoal`: a calm enderman angers at a player who stares at it.
+            if mob::state(store, key).is_some_and(|s| s.anger == 0) {
+                let candidates: Vec<crate::enderman::Candidate> = hostile_targets
+                    .iter()
+                    .filter_map(|target| {
+                        gazes
+                            .get(&target.uuid)
+                            .map(|gaze| crate::enderman::Candidate {
+                                uuid: target.uuid,
+                                pos: target.pos,
+                                gaze: *gaze,
+                            })
+                    })
+                    .collect();
+                crate::enderman::tick_stare(store, key, blocks, &candidates, rng);
+            }
+            // `isSensitiveToWater`: one point of drowning damage a tick in water or rain, and
+            // nine hurts in ten teleport it away.
+            if crate::enderman::in_water_or_rain(store, key, blocks, *raining)
+                && matches!(
+                    mob::hurt(store, key, crate::enderman::WATER_DAMAGE, None),
+                    Some(mob::Hurt::Survived { .. })
+                )
+                && rng.next_int(10) != 0
+            {
+                let at = store.pos(key).unwrap_or_default();
+                blink(store, key, blocks, at, rng);
+            }
+            crate::enderman::sync(store, key);
+        }
         if kind.is_hostile() {
             let (current, calm) =
                 mob::state(store, key).map_or((None, false), |s| (s.target, s.anger == 0));
@@ -717,6 +783,8 @@ pub fn tick_full(
                 match kind {
                     MobKind::Creeper => {
                         let mut explode = false;
+                        let mut hiss = false;
+                        let mut power = CREEPER_POWER;
                         if let Some(state) = mob::state_mut(store, key) {
                             // `SwellGoal`: ignite inside three blocks, then keep swelling until
                             // the target is more than seven blocks away.
@@ -726,20 +794,29 @@ pub fn tick_full(
                                 CREEPER_TRIGGER_DISTANCE
                             };
                             if horizontal <= reach && (target.pos.y - start.y).abs() <= 2.0 {
+                                // `Creeper.tick`: the fuse hisses as the swell leaves zero.
+                                hiss = state.swell == 0;
                                 state.swell = state.swell.saturating_add(1);
+                                state.swell_dir = 1;
                                 explode = state.swell >= CREEPER_SWELL_TICKS;
                             } else {
                                 state.swell = state.swell.saturating_sub(1);
+                                state.swell_dir = -1;
                             }
+                            power = crate::creeper::explosion_power(state.powered);
+                        }
+                        if hiss {
+                            events.push(MobEvent::Hiss { at: start });
                         }
                         if explode {
                             events.push(MobEvent::Explode {
                                 center: Vec3::new(start.x, start.y + 0.5, start.z),
-                                power: CREEPER_POWER,
+                                power,
                             });
                             mob::kill(store, key);
                             continue;
                         }
+                        crate::creeper::sync(store, key);
                     }
                     MobKind::Skeleton => {
                         let eye_height = f64::from(kind.props().eye_height);
@@ -780,6 +857,44 @@ pub fn tick_full(
                         }
                     }
                     MobKind::Zombie | MobKind::Spider | MobKind::Enderman => {
+                        if kind == MobKind::Spider {
+                            // `LeapAtTargetGoal(0.4)`: pounce from two to four blocks away.
+                            let dy = target.pos.y - start.y;
+                            let has_rider = mob::state(store, key).is_some_and(|s| s.has_rider);
+                            if crate::spider::can_leap(
+                                dx * dx + dy * dy + dz * dz,
+                                was_on_ground,
+                                has_rider,
+                            ) && crate::spider::leap_roll(rng)
+                            {
+                                let vel = store.vel(key).unwrap_or_default();
+                                store.set_vel(
+                                    key,
+                                    crate::spider::leap_velocity(vel, start, target.pos),
+                                );
+                            }
+                        }
+                        if kind == MobKind::Zombie {
+                            match crate::sun::tick_break_door(
+                                store, key, blocks, target.pos, *hard, *griefing,
+                            ) {
+                                crate::sun::DoorStep::Idle | crate::sun::DoorStep::Chewing => {}
+                                crate::sun::DoorStep::Breaking { at, progress } => {
+                                    events.push(MobEvent::BreakDoor {
+                                        at,
+                                        progress,
+                                        broken: false,
+                                    });
+                                }
+                                crate::sun::DoorStep::Broken { at } => {
+                                    events.push(MobEvent::BreakDoor {
+                                        at,
+                                        progress: 10,
+                                        broken: true,
+                                    });
+                                }
+                            }
+                        }
                         if horizontal <= kind.attack_reach() {
                             let ready = mob::state(store, key)
                                 .is_some_and(|state| state.attack_cooldown == 0);
@@ -796,6 +911,11 @@ pub fn tick_full(
                             }
                         } else {
                             walking = follow_path(store, key, blocks, start, target.pos);
+                            // `WallClimberNavigation` heads straight for the target; the grid
+                            // A* finding no way round a wall stands in for "must climb it".
+                            if kind == MobKind::Spider && walking.is_none() {
+                                walking = Some(yaw);
+                            }
                             speed = chase_speed(store, key);
                         }
                         // Enderman basics: blink to a nearby walkable spot now and then.
@@ -805,8 +925,31 @@ pub fn tick_full(
                     }
                     _ => {}
                 }
+            } else if kind == MobKind::Creeper {
+                // No target: `Creeper.tick` keeps adding the swell direction (-1), so a fuse
+                // that lost its target winds down instead of staying lit.
+                if let Some(state) = mob::state_mut(store, key) {
+                    state.swell_dir = -1;
+                    state.swell = state.swell.saturating_sub(1);
+                }
+                crate::creeper::sync(store, key);
             } else if kind == MobKind::Enderman && rng.next_int(200) == 0 {
                 blink(store, key, blocks, start, rng);
+            } else if kind == MobKind::Skeleton
+                && let Some(shade) = crate::sun::tick_flee_sun(store, key, blocks, start, rng)
+            {
+                // `FleeSunGoal`: run for the shade at normal speed.
+                walking = follow_path(
+                    store,
+                    key,
+                    blocks,
+                    start,
+                    Vec3::new(
+                        f64::from(shade[0]) + 0.5,
+                        f64::from(shade[1]),
+                        f64::from(shade[2]) + 0.5,
+                    ),
+                );
             }
         } else {
             // Passive goals: flee when hurt, otherwise wander; look at a nearby player.
@@ -986,6 +1129,11 @@ pub fn tick_full(
             }
         }
 
+        // `EatBlockGoal` holds MOVE, LOOK and JUMP: an eating sheep stands and looks down.
+        if eating {
+            walking = None;
+            look = None;
+        }
         // Villagers stay within sight of home and refuse to walk into water or lava. A
         // scheduled destination (workstation, bed or bell) is allowed outside the home radius.
         if kind == MobKind::Villager {
@@ -1049,8 +1197,18 @@ pub fn tick_full(
         if !was_on_ground {
             vel.y -= GRAVITY;
         }
+        // `Spider` climbs a wall it is pushed against (the collision of the last move).
+        if kind == MobKind::Spider && flags.has(Flags::HORIZONTAL_COLLISION) {
+            vel.y = crate::spider::climb_velocity(vel.y, walking.is_some());
+        }
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
+        if kind == MobKind::Spider {
+            let climbing = store
+                .flags(key)
+                .is_some_and(|flags| flags.has(Flags::HORIZONTAL_COLLISION));
+            crate::spider::set_climbing(store, key, climbing);
+        }
 
         // Vertical drag and the friction of the block the mob now stands on.
         let on_ground = store
@@ -1456,7 +1614,7 @@ mod tests {
         let creative = target(0.5, 0.5);
         let hidden = MobRules {
             untargetable: [creative.uuid].into(),
-            hard: false,
+            ..Default::default()
         };
         let mut rng = Rng::new(2);
         let mut hits = 0;
@@ -2024,8 +2182,8 @@ mod tests {
             ));
             let mut rng = Rng::new(4);
             let rules = MobRules {
-                untargetable: Default::default(),
                 hard,
+                ..Default::default()
             };
             let player = target(0.5, 0.5);
             let mut ticks = Vec::new();
