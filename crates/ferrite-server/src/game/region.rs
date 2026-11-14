@@ -8844,6 +8844,21 @@ impl Region {
                 self.breath_clouds
                     .push(ferrite_entity::dragon::BreathCloud::fireball(landing.pos));
             }
+            // Vanilla shulker bullet: 4 damage to what it hits (no homing here).
+            if landing.kind == arrow::Kind::ShulkerBullet {
+                let at = landing.pos;
+                let reach = ferrite_math::AABB::new(
+                    at.x - 1.0,
+                    at.y - 1.0,
+                    at.z - 1.0,
+                    at.x + 1.0,
+                    at.y + 1.0,
+                    at.z + 1.0,
+                );
+                for key in self.entities.query_vec(reach) {
+                    mob::hurt(&mut self.entities, key, 4.0, Some(at));
+                }
+            }
             // Vanilla small fireball: 5 damage to what it hits.
             if landing.kind == arrow::Kind::SmallFireball {
                 let at = landing.pos;
