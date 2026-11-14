@@ -8,6 +8,8 @@
 //! * `Server.updateMap(int,String,int,int,int,boolean,boolean,boolean)` — id, dimension key,
 //!   scale, centre x, centre z, tracking, unlimited tracking, locked. Replies with an empty
 //!   string. Pixels, banners and frames of the saved map are kept.
+//! * `Server.mapColors(int)` — id. Replies with the base64 of the 128x128 palette bytes, which is
+//!   what `MapCanvas#getBasePixel` reads (vanilla `CraftMapCanvas` reads the saved map's colours).
 
 use std::sync::Arc;
 
@@ -17,7 +19,7 @@ use crate::game::map::{MAP_COLORS, MAX_SCALE, MapStore, SavedMap};
 
 /// The reply for a map host call on the primary store, or `None` for any other call.
 pub fn answer(call: &HostCall) -> Option<String> {
-    if call.owner != "Server" || !matches!(call.name(), "allocateMap" | "updateMap") {
+    if call.owner != "Server" || !matches!(call.name(), "allocateMap" | "updateMap" | "mapColors") {
         return None;
     }
     let store = crate::game::primary_map_store()?;
@@ -63,6 +65,15 @@ fn answer_in(store: &Arc<MapStore>, call: &HostCall) -> Option<String> {
             store.save(id, map).ok()?;
             Some(String::new())
         }
+        "mapColors(int)" => {
+            use base64::Engine as _;
+            let [id] = call.args.as_slice() else {
+                return None;
+            };
+            let id: i32 = id.parse().ok()?;
+            let map = store.get(id).ok()??;
+            Some(base64::engine::general_purpose::STANDARD.encode(&map.colors))
+        }
         _ => None,
     }
 }
@@ -88,6 +99,7 @@ mod tests {
 
     const ALLOCATE: &str = "allocateMap(String,int,int,int,boolean,boolean)";
     const UPDATE: &str = "updateMap(int,String,int,int,int,boolean,boolean,boolean)";
+    const COLORS: &str = "mapColors(int)";
 
     #[test]
     fn allocating_creates_a_persisted_map_with_the_requested_settings() {
@@ -143,6 +155,28 @@ mod tests {
         assert_eq!((saved.scale, saved.x_center, saved.z_center), (4, 10, 20));
         assert!(!saved.tracking_position && saved.unlimited_tracking && saved.locked);
         assert_eq!(saved.colors[7], 12);
+    }
+
+    #[test]
+    fn the_saved_colours_are_what_a_canvas_reads_as_base_pixels() {
+        use base64::Engine as _;
+        let (_dir, store) = store();
+        let mut map = SavedMap::fresh(0.0, 0.0, 0, true, false, "minecraft:overworld");
+        map.colors[0] = 4;
+        map.colors[MAP_COLORS - 1] = 0x7f;
+        let id = store.allocate(map).unwrap();
+        let reply = answer_in(&store, &call(COLORS, &[&id.to_string()])).expect("the colours");
+        let colors = base64::engine::general_purpose::STANDARD
+            .decode(reply)
+            .unwrap();
+        assert_eq!(colors.len(), MAP_COLORS);
+        assert_eq!((colors[0], colors[MAP_COLORS - 1]), (4, 0x7f));
+        assert_eq!(
+            answer_in(&store, &call(COLORS, &["99"])),
+            None,
+            "unknown map"
+        );
+        assert_eq!(answer_in(&store, &call(COLORS, &["no"])), None, "bad id");
     }
 
     #[test]

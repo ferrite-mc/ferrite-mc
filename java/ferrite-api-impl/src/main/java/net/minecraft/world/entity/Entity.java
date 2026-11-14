@@ -14,7 +14,19 @@ public class Entity {
     public float getXRot() { return bukkit.getLocation().getPitch(); }
     public net.minecraft.world.phys.Vec3 position() { var l = bukkit.getLocation(); return new net.minecraft.world.phys.Vec3(l.getX(), l.getY(), l.getZ()); }
     public net.minecraft.core.BlockPos blockPosition() { var l = bukkit.getLocation(); return new net.minecraft.core.BlockPos(l.getBlockX(), l.getBlockY(), l.getBlockZ()); }
-    public net.minecraft.world.level.Level level() { return new net.minecraft.server.level.ServerLevel(bukkit.getWorld()); }
+    public net.minecraft.world.level.Level level() { return net.minecraft.server.level.ServerLevel.forWorld(bukkit.getWorld()); }
+    public net.minecraft.world.phys.Vec3 getPosition() { return position(); }
+    public int getBlockX() { return bukkit.getLocation().getBlockX(); }
+    public int getBlockY() { return bukkit.getLocation().getBlockY(); }
+    public int getBlockZ() { return bukkit.getLocation().getBlockZ(); }
+    public float getEyeHeight() { return (float) (getEyeY() - getY()); }
+    public boolean isInvisible() { return bukkit.isInvisible(); }
+    public void setInvisible(boolean value) { bukkit.setInvisible(value); }
+    public boolean isGlowing() { return bukkit.isGlowing(); }
+    public void setGlowing(boolean value) { bukkit.setGlowing(value); }
+    public float getFallDistance() { return bukkit.getFallDistance(); }
+    public void setFallDistance(float value) { bukkit.setFallDistance(value); }
+    public void setCustomName(net.minecraft.network.chat.Component name) { bukkit.customName(name == null ? null : name.adventure()); }
     public net.minecraft.network.chat.Component getName() { return net.minecraft.network.chat.Component.literal(bukkit.getName()); }
     public net.minecraft.network.chat.Component getDisplayName() { return net.minecraft.network.chat.Component.literal(bukkit.getName()); }
     public boolean isAlive() { return !bukkit.isDead(); }

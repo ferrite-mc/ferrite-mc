@@ -80,6 +80,8 @@ final class FerriteMapView implements org.bukkit.map.MapView {
     @SuppressWarnings("deprecation")
     Rendered render(org.bukkit.entity.Player viewer) {
         final byte[] pixels = new byte[128 * 128];
+        // Vanilla's CraftMapCanvas#getBasePixel reads the saved map's own colour array.
+        final byte[] base = baseColors();
         final var cursors = new org.bukkit.map.MapCursorCollection();
         final var view = this;
         var canvas = (org.bukkit.map.MapCanvas) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.map.MapCanvas.class}, (self, method, args) -> {
@@ -93,10 +95,10 @@ final class FerriteMapView implements org.bukkit.map.MapView {
                 }
                 case "setPixel": { int x = (int) args[0], y = (int) args[1]; if (x >= 0 && y >= 0 && x < 128 && y < 128) pixels[y * 128 + x] = (byte) args[2]; return null; }
                 case "getPixel": { int x = (int) args[0], y = (int) args[1]; return x >= 0 && y >= 0 && x < 128 && y < 128 ? pixels[y * 128 + x] : (byte) 0; }
-                case "getBasePixel": return (byte) 0;
+                case "getBasePixel": { int x = (int) args[0], y = (int) args[1]; return x >= 0 && y >= 0 && x < 128 && y < 128 ? base[y * 128 + x] : (byte) 0; }
                 case "setPixelColor": { int x = (int) args[0], y = (int) args[1]; if (x >= 0 && y >= 0 && x < 128 && y < 128) pixels[y * 128 + x] = args[2] == null ? 0 : org.bukkit.map.MapPalette.matchColor((java.awt.Color) args[2]); return null; }
                 case "getPixelColor": { int x = (int) args[0], y = (int) args[1]; if (x < 0 || y < 0 || x >= 128 || y >= 128) return null; byte b = pixels[y * 128 + x]; return b == 0 ? null : org.bukkit.map.MapPalette.getColor(b); }
-                case "getBasePixelColor": return org.bukkit.map.MapPalette.getColor((byte) 0);
+                case "getBasePixelColor": { int x = (int) args[0], y = (int) args[1]; if (x < 0 || y < 0 || x >= 128 || y >= 128) return null; byte b = base[y * 128 + x]; return b == 0 ? null : org.bukkit.map.MapPalette.getColor(b); }
                 case "drawImage": {
                     int ox = (int) args[0], oy = (int) args[1];
                     var image = (java.awt.Image) args[2];
@@ -134,6 +136,15 @@ final class FerriteMapView implements org.bukkit.map.MapView {
         });
         for (var renderer : renderers) renderer.render(this, canvas, viewer);
         return new Rendered(pixels, encodeCursors(cursors));
+    }
+
+    /** The saved map's palette bytes; zeroes when this view has no host-backed map (unit tests). */
+    private byte[] baseColors() {
+        if (!hosted) return new byte[128 * 128];
+        try {
+            byte[] colors = (byte[]) HostBridge.call("Server", "server", "mapColors(int)", byte[].class, id);
+            return colors != null && colors.length == 128 * 128 ? colors : new byte[128 * 128];
+        } catch (UnsupportedOperationException noHost) { return new byte[128 * 128]; }
     }
 
     /**

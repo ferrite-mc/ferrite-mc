@@ -78,20 +78,20 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 
 | API | 소유자 | 왜 지금 구현할 수 없는가 | 필요한 선행 작업 |
 |---|---|---|---|
-| `EntityFactory#createEntitySnapshot` | `ferrite-server/src/plugins/snapshot.rs` + `FerriteEntitySnapshot` | 구현됨. 호스트가 SNBT를 파싱해 타입·위치·UUID·체력·속도·이름을 반환하고, 저장 NBT 스냅샷은 런타임 월드에서 재생성한다. | 기본 월드·네더·엔드는 비플레이어 엔티티의 저장 NBT 조회를 제공하지 않아 구조물 캡처 대상에서 제외된다. |
-| `Structure#getEntities`, `Structure#place(..., EntityTransformer)` | `CapturedStructure` + `ferrite-server/src/plugins/snapshot.rs` | 런타임 월드에서 `ferriteEntities`로 비플레이어 엔티티 NBT를 캡처하고, 변환기 호출 뒤 `ferriteSpawnSnapshot`으로 재생성한다. | 기본 월드·네더·엔드는 저장 NBT 경계가 없어 엔티티 목록이 비어 있을 수 있다. |
+| `EntityFactory#createEntitySnapshot` | `ferrite-server/src/plugins/snapshot.rs` + `FerriteEntitySnapshot` | 구현됨. 호스트가 SNBT를 파싱해 타입·위치·UUID·체력·속도·이름을 반환하고, 저장 NBT 스냅샷은 런타임 월드에서 재생성한다. | 기본 월드·네더·엔드도 `plugins::world_id`로 같은 NBT 게시 경로를 쓴다(2026-11-14). |
+| `Structure#getEntities`, `Structure#place(..., EntityTransformer)` | `CapturedStructure` + `ferrite-server/src/plugins/snapshot.rs` | 런타임 월드에서 `ferriteEntities`로 비플레이어 엔티티 NBT를 캡처하고, 변환기 호출 뒤 `ferriteSpawnSnapshot`으로 재생성한다. | 세 차원의 목록은 `plugins::world_id`로 게시되며, 런타임 월드와 같은 `ferriteSpawnSnapshot` 경계를 쓴다. |
 
 ### 구조물 엔티티 경계 검증
 
-> 2026-11-12 코드 대조: 런타임 월드의 비플레이어 엔티티는 `facts::EntityFact`(NBT 포함,
-> `World#ferriteEntities`)로 읽고 `ferriteSpawnSnapshot`으로 재생성한다. 기본 월드·네더·엔드는
-> 저장 NBT 경계가 없어 구조물 엔티티 캡처/재생성 대상에서 제외된다. 따라서 아래 선행 작업은
-> 완료되었고, 남은 일은 세 차원에 대한 안전한 저장 NBT 경계를 추가하는 것이다.
+> 2026-11-14 코드 대조: 런타임 월드와 기본 월드·네더·엔드의 비플레이어 엔티티는
+> `facts::EntityFact`(NBT 포함, `World#ferriteEntities`)로 읽고 `ferriteSpawnSnapshot`으로
+> 재생성한다. 세 차원은 `plugins::world_id`(기본 `default_world_id`, 네더 `2`, 엔드 `3`)로
+> 게시되므로 구조물 엔티티 캡처/재생성이 차원에 관계없이 같은 경계를 쓴다.
 
 1. **완료:** 호스트가 런타임 월드의 구조물 청크 범위에서 UUID·타입·위치·회전·NBT를 읽는다.
 2. **완료:** `CapturedStructure`가 `fill(..., true)` 결과를 보관하고 구조물 API로 노출한다.
 3. **완료:** `EntityTransformer`를 최종 위치에서 호출하고, 허용된 엔티티를 변환된 위치에
-   저장 NBT로 재생성한다. 기본 월드·네더·엔드의 NBT 경계를 추가하는 것이 후속 작업이다.
+   저장 NBT로 재생성한다. 기본 월드·네더·엔드의 NBT도 같은 경로로 게시된다.
 
 ## `FerriteWorld`의 `UnsupportedOperationException` 16곳 (2026-11-12, W6, 기준 `b50f8d9`)
 

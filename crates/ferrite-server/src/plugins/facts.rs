@@ -257,15 +257,15 @@ pub fn publish_entities(
 ) {
     use crate::game::WorldId;
     let world_id = world_id.into();
+    // Every dimension has a stable Bukkit world id, including the nether and end, so structure
+    // capture and `World#getEntities` work outside the overworld too.
     let world = match world_id {
-        WorldId::Vanilla(Dimension::Overworld) => Some(ferrite_plugin::default_world_id()),
-        WorldId::Vanilla(_) => None,
+        WorldId::Vanilla(dimension) => Some(crate::plugins::world_id(dimension)),
         WorldId::Runtime(id) => Some(id),
     };
-    let with_nbt = matches!(
-        world_id,
-        WorldId::Runtime(_) | WorldId::Vanilla(Dimension::Overworld)
-    );
+    // Entity NBT is dimension-neutral; the overworld is throttled below only because serializing a
+    // busy world every publish is expensive.
+    let with_nbt = true;
     let throttled = matches!(world_id, WorldId::Vanilla(Dimension::Overworld));
     let mut registry = entity_registry().lock().unwrap();
     let mut cached: HashMap<Uuid, (Option<String>, u8)> = HashMap::new();
@@ -829,7 +829,8 @@ pub fn answer(call: &HostCall) -> Option<String> {
     }
     if call.method == "getVirtualHost()" {
         // `host:port` as the client typed it; Java builds the unresolved address.
-        return ferrite_net::settings::virtual_host(player).map(|(host, port)| format!("{host}:{port}"));
+        return ferrite_net::settings::virtual_host(player)
+            .map(|(host, port)| format!("{host}:{port}"));
     }
     if call.method == "getClientBrandName()" {
         return ferrite_net::settings::brand(player);

@@ -82,20 +82,38 @@ public final class FerriteUnsafe implements UnsafeValues {
     @Override public byte[] processClass(PluginDescriptionFile description, String path, byte[] data) { return data; }
 
     @Override public Advancement loadAdvancement(Key key, String data, boolean replace) {
-        return (Advancement) HostBridge.call("UnsafeValues", "unsafe", "loadAdvancement(Key,String,boolean)", Advancement.class, key, data, replace);
+        throw advancementRegistration("loadAdvancement");
     }
 
     @Override public List<Advancement> loadAdvancements(Map<Key, String> data, boolean replace) {
-        return (List<Advancement>) HostBridge.call("UnsafeValues", "unsafe", "loadAdvancements(Map,boolean)", List.class, data, replace);
+        throw advancementRegistration("loadAdvancements");
     }
 
-    @Override public boolean removeAdvancement(NamespacedKey key) { return HostBridge.callBoolean("UnsafeValues", "unsafe", "removeAdvancement(NamespacedKey)", key); }
+    @Override public boolean removeAdvancement(NamespacedKey key) { throw advancementRegistration("removeAdvancement"); }
+
+    /**
+     * Advancements are generated from the 26.3 data pack into Rust and published read-only to
+     * plugins; the host has no route that would register a new advancement or its progress.
+     */
+    private static UnsupportedOperationException advancementRegistration(String member) {
+        return new UnsupportedOperationException("Ferrite: UnsafeValues#" + member
+ + " is not implemented: the host loads advancements only from the vanilla data pack and has no"
+            + " runtime advancement-registration route, so a Java-side entry would never reach player"
+            + " progress. Ship the advancement as a data pack, run Server#reloadData, then read it with"
+            + " Server#getAdvancement and award progress through Player#getAdvancementProgress");
+    }
 
     @Override public PotionType.InternalPotionData getInternalPotionData(NamespacedKey key) {
         return FerritePotionTypeData.get(key);
     }
 
-    @Override public String get(Class<?> type, String key) { return (String) HostBridge.call("UnsafeValues", "unsafe", "get(Class,String)", String.class, type, key); }
+    @Override public String get(Class<?> type, String key) {
+        java.util.Objects.requireNonNull(type, "type");
+        throw new UnsupportedOperationException("Ferrite: UnsafeValues#get(" + type.getName() + ", String)"
+                + " is not implemented: it exposes CraftBukkit's internal class/key table, which the"
+                + " server does not have. Use the typed API instead: Registry for keyed values,"
+                + " Server#getAdvancement for advancements, and Material/Bukkit.createBlockData for blocks");
+    }
 
     @SuppressWarnings("unchecked")
     @Override public <B extends org.bukkit.Keyed> B get(RegistryKey<B> registry, NamespacedKey key) {
@@ -106,25 +124,51 @@ public final class FerriteUnsafe implements UnsafeValues {
         return apiVersion == null || apiVersion.equals("26.3") || LEGACY_API_VERSIONS.contains(apiVersion);
     }
 
-    @Override public JsonObject serializeItemAsJson(ItemStack item) { return (JsonObject) HostBridge.call("UnsafeValues", "unsafe", "serializeItemAsJson(ItemStack)", JsonObject.class, item); }
+    @Override public JsonObject serializeItemAsJson(ItemStack item) {
+        throw new UnsupportedOperationException("Ferrite: UnsafeValues#serializeItemAsJson is not"
+                + " implemented: the item component JSON is written by the Rust item code and there is no"
+                + " host route for it. Use ItemStack#serialize (map form) with"
+                + " UnsafeValues#deserializeStack, which round-trips through the Bukkit item registry");
+    }
 
-    @Override public ItemStack deserializeItemFromJson(JsonObject data) { return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "deserializeItemFromJson(JsonObject)", ItemStack.class, data); }
+    @Override public ItemStack deserializeItemFromJson(JsonObject data) {
+        throw new UnsupportedOperationException("Ferrite: UnsafeValues#deserializeItemFromJson is not"
+                + " implemented: the host has no item-component JSON route. Use"
+                + " UnsafeValues#deserializeStack with the map from ItemStack#serialize");
+    }
 
     @Override public byte[] serializeEntity(Entity entity, EntitySerializationFlag... flags) {
-        return (byte[]) HostBridge.call("UnsafeValues", "unsafe", "serializeEntity(Entity,)", byte[].class, entity, flags);
+        throw new UnsupportedOperationException("Ferrite: UnsafeValues#serializeEntity is not"
+                + " implemented: entity NBT is captured by the Rust snapshot boundary, and the host has no"
+                + " route that would return it here. Use Server#getEntityFactory()#createEntitySnapshot or"
+                + " the entity's PersistentDataContainer for plugin-owned data");
     }
 
     @Override public Entity deserializeEntity(byte[] data, org.bukkit.World world, boolean uniqueId, boolean intoWorld) {
-        return (Entity) HostBridge.call("UnsafeValues", "unsafe", "deserializeEntity(byte[],World,boolean,boolean)", Entity.class, data, world, uniqueId, intoWorld);
+        throw new UnsupportedOperationException("Ferrite: UnsafeValues#deserializeEntity is not"
+                + " implemented: the host creates entities from its own snapshot format, not arbitrary NBT."
+                + " Use EntitySnapshot#createEntity or World#spawnEntity with an EntityType");
     }
 
-    @Override public int nextEntityId(org.bukkit.World world) { return HostBridge.callInt("UnsafeValues", "unsafe", "nextEntityId(World)", world); }
+    @Override public int nextEntityId(org.bukkit.World world) {
+        throw new UnsupportedOperationException("Ferrite: UnsafeValues#nextEntityId is not implemented:"
+                + " protocol entity ids are allocated by the owning region when the entity spawns, so no"
+                + " public pre-spawn id exists. Spawn the entity and use Entity#getEntityId");
+    }
 
     @Override public String getMainLevelName() { return "world"; }
 
     @Override public int getProtocolVersion() { return PROTOCOL_VERSION; }
 
-    @Override public ItemStack deserializeStack(Map<String, Object> args) { return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "deserializeStack(Map)", ItemStack.class, args); }
+    @Override public ItemStack deserializeStack(Map<String, Object> args) { return ItemStack.deserialize(args); }
 
-    @Override public ItemStack deserializeItemHover(HoverEvent.ShowItem item) { return (ItemStack) HostBridge.call("UnsafeValues", "unsafe", "deserializeItemHover(ShowItem)", ItemStack.class, item); }
+    @Override public ItemStack deserializeItemHover(HoverEvent.ShowItem item) {
+        java.util.Objects.requireNonNull(item, "item");
+        if (item.nbt() != null) throw new UnsupportedOperationException(
+                "Ferrite: UnsafeValues#deserializeItemHover cannot carry ShowItem component NBT; use the"
+                + " ItemStack the hover event was created from, or ItemStack#deserializeBytes");
+        var material = Material.matchMaterial(item.item().asString());
+        if (material == null) throw new IllegalArgumentException("Unknown item key: " + item.item().asString());
+        return new ItemStack(material, item.count());
+    }
 }

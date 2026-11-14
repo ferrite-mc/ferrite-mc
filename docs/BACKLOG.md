@@ -64,8 +64,10 @@ server-side only.
   entity is sent to clients, so it is invisible, and it affects players only, like the splash
   potion; mobs are not affected. Missing: fishing bobber.
 - Shoulder parrot is bookkeeping only (`set/get/releaseShoulderEntity*`): no entity, no display.
-- Structure entities: `Structure#getEntities()` returns the captured entities; non-empty
-  `EntityTransformer` lists are still refused (`CapturedStructure.java`, `FerriteTemplate.java`).
+- Structure entities: `Structure#getEntities()` returns the captured entities and non-empty
+  `EntityTransformer` lists are applied at the transformed position (`CapturedStructure.java`).
+  The default world, nether and end publish entity NBT under their own world ids
+  (`plugins.rs::world_id`), so capture is no longer runtime-world-only.
 - Metadata breadth per entity type, attribute packets, passengers/vehicles beyond `/ride`.
 
 ## 3. Plugin API breadth
