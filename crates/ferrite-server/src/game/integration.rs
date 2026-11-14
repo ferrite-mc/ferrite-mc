@@ -5084,6 +5084,71 @@ async fn plugin_visual_experience_uses_live_level_without_changing_it() {
     server.abort();
 }
 
+/// `Player#saveData` writes the data file for a player who stays online, and `Player#loadData`
+/// puts the saved position back (a position sync reaches the client).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_save_and_load_data_round_trip_a_live_player() {
+    use ferrite_protocol::packets::play::PositionSync;
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let player = ferrite_net::offline_uuid("DataPlayer");
+    let world = World::start_configured(
+        None,
+        [0, 65, 0],
+        super::WorldSettings {
+            plugin_commands: Some(rx),
+            playerdata: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    let mut bot = Bot::join(addr, "DataPlayer").await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.send(ferrite_plugin::PlayerCommand::PlayerData {
+        player,
+        load: false,
+    })
+    .unwrap();
+    let file = dir.path().join(format!("{player}.json"));
+    for _ in 0..200 {
+        if file.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(file.exists(), "saveData did not write {}", file.display());
+    bot.send(&MovePosition {
+        x: 7.5,
+        y: 65.0,
+        z: 0.5,
+        flags: 1,
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.send(ferrite_plugin::PlayerCommand::PlayerData { player, load: true })
+        .unwrap();
+    let body = bot.until(PositionSync::ID).await;
+    let sync = PositionSync::decode(&mut body.as_slice()).unwrap();
+    assert!(
+        (sync.x - 0.5).abs() < 1e-9,
+        "loadData restored x = {}",
+        sync.x
+    );
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clear_give_and_xp_commands_act_on_a_bot_session() {
     use ferrite_protocol::packets::play::SetExperience;

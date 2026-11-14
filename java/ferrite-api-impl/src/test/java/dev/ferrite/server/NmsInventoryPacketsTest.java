@@ -97,8 +97,11 @@ class NmsInventoryPacketsTest {
         var connection = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().connection;
 
         var unsupportedMenu = assertThrows(UnsupportedOperationException.class,
-                () -> connection.send(new ClientboundOpenScreenPacket(8, MenuType.CRAFTING, Component.literal("Craft"))));
-        assertTrue(unsupportedMenu.getMessage().contains("CRAFTING"), unsupportedMenu.getMessage());
+                () -> connection.send(new ClientboundOpenScreenPacket(8, MenuType.HOPPER, Component.literal("Hopper"))));
+        assertTrue(unsupportedMenu.getMessage().contains("HOPPER"), unsupportedMenu.getMessage());
+
+        connection.send(new ClientboundOpenScreenPacket(5, MenuType.SHULKER_BOX, Component.literal("Box")));
+        connection.send(new ClientboundContainerClosePacket(5));
 
         assertThrows(IllegalArgumentException.class,
                 () -> connection.send(new ClientboundOpenScreenPacket(0, MenuType.GENERIC_9x1, Component.literal("Bad"))));

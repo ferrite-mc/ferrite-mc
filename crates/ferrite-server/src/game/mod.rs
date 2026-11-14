@@ -48,6 +48,7 @@ mod command_block;
 mod commands;
 mod dimension;
 mod end_fight;
+pub(crate) mod end_fight_view;
 mod end_frame;
 mod equine_chest;
 mod jukebox;
@@ -3300,6 +3301,15 @@ fn route_plugin_command(
                     .lock()
                     .unwrap()
                     .push_back(Command::PluginFireworkBoost { flight, explosions });
+            }
+        }
+        PlayerCommand::PlayerData { player, load } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox.lock().unwrap().push_back(if load {
+                    Command::PluginLoadData
+                } else {
+                    Command::PluginSaveData
+                });
             }
         }
         PlayerCommand::OpenStation { player, station } => {

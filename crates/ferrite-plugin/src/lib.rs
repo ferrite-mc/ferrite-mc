@@ -884,6 +884,12 @@ pub enum PlayerCommand {
         player: uuid::Uuid,
         velocity: [f64; 3],
     },
+    /// `Player#saveData` (`load: false`) and `Player#loadData` (`load: true`): write the player's
+    /// data file, or read it back over the live player.
+    PlayerData {
+        player: uuid::Uuid,
+        load: bool,
+    },
     /// `Player#fireworkBoost`: launches a rocket attached to the gliding player.
     FireworkBoost {
         player: uuid::Uuid,

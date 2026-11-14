@@ -184,6 +184,10 @@ pub enum Command {
     PluginVelocity {
         velocity: [f64; 3],
     },
+    /// A plugin's `Player#saveData`.
+    PluginSaveData,
+    /// A plugin's `Player#loadData`: the saved inventory, game mode and (in the same world) position.
+    PluginLoadData,
     /// A plugin's `Player#fireworkBoost`: a rocket attached to the gliding player.
     PluginFireworkBoost {
         flight: u8,
@@ -1757,6 +1761,55 @@ fn add_trader_xp(entities: &mut EntityStore, trader: Uuid, xp: i32) {
 }
 
 impl Player {
+    /// `Player#loadData`: reads the data file over the live player. The inventory, selected slot
+    /// and game mode always apply; the position only when the file was saved in this world, so a
+    /// player is never moved across worlds without the usual transfer. Nothing happens when
+    /// there is no file. Returns whether the position changed.
+    fn load_player_data(&mut self) -> bool {
+        let Some(saved) = self
+            .playerdata
+            .as_deref()
+            .and_then(|dir| super::playerdata::load_from(dir, &self.uuid))
+        else {
+            return false;
+        };
+        self.close_container();
+        self.inventory = saved.inventory();
+        self.init_inventory_menu();
+        send(
+            self,
+            &SetHeldSlot {
+                slot: VarInt(self.inventory.selected_slot() as i32),
+            },
+        );
+        self.gamemode = saved.gamemode;
+        send(
+            self,
+            &GameEvent {
+                event: 3,
+                value: saved.gamemode as f32,
+            },
+        );
+        let same_world = saved.world
+            == match self.world_id {
+                super::WorldId::Runtime(id) => Some(id),
+                super::WorldId::Vanilla(_) => None,
+            }
+            && saved.dimension() == self.dimension;
+        let movable = saved
+            .pos
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= 30_000_000.0);
+        if same_world && movable {
+            self.pos = saved.pos;
+            self.yaw = saved.yaw;
+            self.pitch = saved.pitch;
+            self.teleport();
+            return true;
+        }
+        false
+    }
+
     /// Records the client's on-ground flag; landing ends fall-flying.
     fn set_ground(&mut self, ground: bool) {
         self.ground = ground;
@@ -4199,6 +4252,14 @@ impl Player {
                     );
                     continue;
                 }
+                Command::PluginSaveData => {
+                    self.save_player_data();
+                    continue;
+                }
+                Command::PluginLoadData => {
+                    changed |= self.load_player_data();
+                    continue;
+                }
                 Command::PluginFireworkBoost { flight, explosions } => {
                     if crate::plugins::facts::is_gliding(self.uuid) {
                         self.firework_launches.push((flight, explosions));
@@ -6127,6 +6188,7 @@ impl Region {
                 }
             }
         }
+        self.apply_plugin_fight_requests(ctx);
         self.repair_end_structures(ctx);
         self.run_end_fight(ctx);
         let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
@@ -6147,6 +6209,7 @@ impl Region {
                     .copied()
                     .ne(fight.crystals.iter().copied())
         });
+        crate::plugins::dragon::publish(fight.snapshot());
         let now = fight.saved();
         if fight.started
             && (stage.is_none() || stage_changed || crystals_changed)
@@ -6156,6 +6219,28 @@ impl Region {
                 tracing::warn!("could not save the dragon fight: {error:#}");
             }
             fight.on_disk = Some(now);
+        }
+    }
+
+    /// Applies what plugins asked of the fight through `World#getEnderDragonBattle`.
+    fn apply_plugin_fight_requests(&mut self, ctx: &TickContext) {
+        let requests = crate::plugins::dragon::take_requests();
+        if requests.is_empty() {
+            return;
+        }
+        let floor = ctx
+            .source
+            .as_deref()
+            .and_then(|source| super::end_fight::podium_floor(|y| source.block(0, y, 0)));
+        let mut podiums = Vec::new();
+        {
+            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
+            for request in requests {
+                podiums.extend(state.more.end_fight.apply(request, floor));
+            }
+        }
+        for (level, active) in podiums {
+            self.place_blocks(ctx, &super::end_fight::podium_blocks([0, level, 0], active));
         }
     }
 
@@ -8740,11 +8825,16 @@ impl Region {
         let mut fires: Vec<[i32; 3]> = Vec::new();
         for landing in arrow::tick_thrown(&mut self.entities, &blocks, &players) {
             // Vanilla large fireball: a power-1 explosion that sets fires.
-            if landing.kind == arrow::Kind::Fireball {
+            if matches!(
+                landing.kind,
+                arrow::Kind::Fireball | arrow::Kind::WitherSkull
+            ) {
+                // A wither skull explodes with power 1 and starts no fires.
+                let fire = landing.kind == arrow::Kind::Fireball;
                 self.plugin_explosions.push((
                     [landing.pos.x, landing.pos.y, landing.pos.z],
                     1.0,
-                    true,
+                    fire,
                     true,
                 ));
             }

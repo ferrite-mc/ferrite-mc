@@ -8,6 +8,7 @@ pub mod chunks;
 mod climate;
 mod cooldown;
 mod craft;
+pub mod dragon;
 mod extra;
 pub mod facts;
 mod inventory;
@@ -230,6 +231,9 @@ impl PluginBridge {
                                 return Some(reply);
                             }
                             if let Some(reply) = loot::answer(call) {
+                                return Some(reply);
+                            }
+                            if let Some(reply) = dragon::answer(call) {
                                 return Some(reply);
                             }
                             if let Some(reply) = craft::answer(call) {
@@ -1031,7 +1035,6 @@ pub fn host_action(call: &ferrite_plugin::HostCall) -> Option<HostAction> {
                 })
                 .filter(|_| player.is_some())
         }
-        ("Player", "saveData()") => console("save-all".into(), ""),
         ("Server", "reload()" | "reloadData()") => console("reload".into(), ""),
         ("World", "setGameRuleValue(String,String)") => console(rules::set_line(call)?, "true"),
         ("World", method) if method.starts_with("border") => {
@@ -1363,10 +1366,6 @@ mod tests {
                 &[&bed, "true"]
             )),
             Some(format!("spawnpoint {id} 10 64 -4"))
-        );
-        assert_eq!(
-            line(call("Player", id, "saveData()", &[])),
-            Some("save-all".into())
         );
         assert_eq!(
             line(call("World", &world, "setStorm(boolean)", &["true"])),

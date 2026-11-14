@@ -21,6 +21,12 @@ pub fn motion_command(call: &HostCall) -> Option<PlayerCommand> {
         return None;
     }
     let player = Uuid::parse_str(&call.subject).ok()?;
+    if let "saveData()" | "loadData()" = call.method.as_str() {
+        return Some(PlayerCommand::PlayerData {
+            player,
+            load: call.method == "loadData()",
+        });
+    }
     if call.method == "fireworkBoost(int,int)" {
         let flight: u8 = call
             .args
@@ -125,5 +131,15 @@ mod tests {
         ));
         assert!(motion_command(&call("fireworkBoost(int,int)", &["-1", "0"])).is_none());
         assert!(motion_command(&call("fireworkBoost(int,int)", &["1", "999"])).is_none());
+    }
+
+    #[test]
+    fn save_and_load_data_become_player_data_commands() {
+        for (method, load) in [("saveData()", false), ("loadData()", true)] {
+            assert!(matches!(
+                motion_command(&call(method, &[])),
+                Some(PlayerCommand::PlayerData { load: l, .. }) if l == load
+            ));
+        }
     }
 }

@@ -114,6 +114,8 @@ pub enum Kind {
     SmallFireball,
     /// `minecraft:dragon_fireball`: flies straight; the region leaves a breath cloud where it lands.
     DragonFireball,
+    /// `minecraft:wither_skull`: flies straight and explodes where it lands.
+    WitherSkull,
     /// `minecraft:trident`: flies like an arrow for 8 damage; the region drops the item where it ends.
     Trident,
     /// `minecraft:llama_spit`: flies like an arrow for 1 damage.
@@ -140,6 +142,7 @@ impl Kind {
             Self::Fireball => "fireball",
             Self::SmallFireball => "small_fireball",
             Self::DragonFireball => "dragon_fireball",
+            Self::WitherSkull => "wither_skull",
             Self::Trident => "trident",
             Self::LlamaSpit => "llama_spit",
             Self::ExperienceBottle => "experience_bottle",
@@ -158,6 +161,7 @@ impl Kind {
             "ender_pearl" => Some(Self::EnderPearl),
             "fireball" => Some(Self::Fireball),
             "small_fireball" => Some(Self::SmallFireball),
+            "wither_skull" => Some(Self::WitherSkull),
             "experience_bottle" => Some(Self::ExperienceBottle),
             "wind_charge" => Some(Self::WindCharge),
             "breeze_wind_charge" => Some(Self::BreezeWindCharge),
@@ -189,6 +193,7 @@ pub fn kind_of(data: &EntityData) -> Option<Kind> {
         Kind::Fireball,
         Kind::SmallFireball,
         Kind::DragonFireball,
+        Kind::WitherSkull,
         Kind::Trident,
         Kind::LlamaSpit,
         Kind::ExperienceBottle,
@@ -282,7 +287,7 @@ pub fn tick_thrown(
         // A fireball and a wind charge keep their speed and ignore gravity; a thrown bottle
         // falls faster than a snowball; the rest arc like thrown items.
         match kind {
-            Kind::Fireball | Kind::SmallFireball | Kind::DragonFireball => {}
+            Kind::Fireball | Kind::SmallFireball | Kind::DragonFireball | Kind::WitherSkull => {}
             Kind::WindCharge | Kind::BreezeWindCharge => {
                 vel.x *= DRAG;
                 vel.z *= DRAG;
@@ -666,6 +671,32 @@ mod tests {
             store.flags(charge).unwrap().has(Flags::REMOVED),
             "a wind charge expires after 100 ticks"
         );
+    }
+
+    #[test]
+    fn a_wither_skull_flies_straight_and_lands_on_a_block() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let skull = store.insert(new_thrown(
+            Kind::WitherSkull,
+            Vec3::new(0.5, 70.0, 0.5),
+            Vec3::new(0.0, -2.0, 0.0),
+            None,
+        ));
+        assert_eq!(
+            Kind::thrown_from_name("wither_skull"),
+            Some(Kind::WitherSkull)
+        );
+        assert_eq!(kind_of(store.data(skull).unwrap()), Some(Kind::WitherSkull));
+        let mut landed = Vec::new();
+        for _ in 0..10 {
+            landed = tick_thrown(&mut store, &world, &[]);
+            if !landed.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].kind, Kind::WitherSkull);
     }
 
     #[test]

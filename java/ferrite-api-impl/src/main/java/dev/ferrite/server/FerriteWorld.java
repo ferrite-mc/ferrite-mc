@@ -288,6 +288,11 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
         }
         return total;
     }
+    private FerriteDragonBattle dragonBattle;
+    private synchronized FerriteDragonBattle dragonBattle() {
+        if (dragonBattle == null) dragonBattle = new FerriteDragonBattle(proxy);
+        return dragonBattle;
+    }
     private void pushVoidDamage() {
         HostBridge.call("World", id, "setVoidDamage(boolean,float,double)", String.class,
             voidDamageEnabled, voidDamageAmount, voidDamageOffset);
@@ -906,7 +911,8 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
                 yield null;
             }
             case "getFeatureFlags", "getListeningPluginChannels" -> java.util.Set.of();
-            case "getGenerator", "getBiomeProvider", "getEnderDragonBattle" -> null;
+            case "getGenerator", "getBiomeProvider" -> null;
+            case "getEnderDragonBattle" -> environment() == org.bukkit.World.Environment.THE_END ? dragonBattle() : null;
             case "locateNearestBiome", "locateNearestStructure", "hasStructureAt" -> locate(method, args);
             case "getStructures" -> structures(args);
             default -> NONE;

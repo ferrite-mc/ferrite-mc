@@ -11,6 +11,9 @@ public class ServerGamePacketListenerImpl {
     /** NMS container ids mapped to the Bukkit view this connection opened for them. */
     private final java.util.Map<Integer, org.bukkit.inventory.InventoryView> openContainers = new java.util.LinkedHashMap<>();
     private static final int PLAYER_MENU_SLOTS = 36;
+    /** Menus the host opens as block-less stations. */
+    private static final java.util.Set<String> STATIONS = java.util.Set.of("CRAFTING", "ANVIL", "ENCHANTMENT", "GRINDSTONE", "LOOM", "SMITHING", "STONECUTTER", "CARTOGRAPHY_TABLE");
+    private final java.util.Set<Integer> stationContainers = new java.util.HashSet<>();
     public ServerGamePacketListenerImpl(net.minecraft.server.level.ServerPlayer player) { this.player = player; }
     public net.minecraft.server.level.ServerPlayer getPlayer() { return player; }
     public void send(net.minecraft.network.protocol.Packet<?> packet) {
@@ -47,7 +50,35 @@ public class ServerGamePacketListenerImpl {
         int id = packet.getContainerId();
         if (id <= 0) throw new IllegalArgumentException("Ferrite: invalid NMS container id " + id);
         int rows = packet.getType().getChestRows();
-        if (rows == 0) throw new UnsupportedOperationException("Ferrite: not implemented: NMS open screen menu " + packet.getType().getName());
+        String name = packet.getType().getName();
+        if (rows == 0 && name.equals("SHULKER_BOX")) {
+            var shulker = org.bukkit.Bukkit.createInventory(null, org.bukkit.event.inventory.InventoryType.SHULKER_BOX, packet.getTitle().getString());
+            if (!openContainers.isEmpty() || !stationContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); stationContainers.clear(); }
+            var view = target.openInventory(shulker);
+            if (view == null) throw new IllegalStateException("Ferrite: the player did not accept NMS container " + id);
+            openContainers.put(id, view);
+            return;
+        }
+        if (rows == 0) {
+            // Crafting-style screens have no contents the server owns: the client drives them, so the host opens the station itself
+            // and later content packets for it are refused instead of silently dropped.
+            if (!STATIONS.contains(name)) throw new UnsupportedOperationException("Ferrite: not implemented: NMS open screen menu " + name
+                + " (it needs a block entity or entity the packet does not carry; open it with the Player#open* method for that block instead)");
+            if (!openContainers.isEmpty() || !stationContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); stationContainers.clear(); }
+            var at = target.getLocation();
+            switch (name) {
+                case "CRAFTING" -> target.openWorkbench(at, true);
+                case "ANVIL" -> target.openAnvil(at, true);
+                case "ENCHANTMENT" -> target.openEnchanting(at, true);
+                case "GRINDSTONE" -> target.openGrindstone(at, true);
+                case "LOOM" -> target.openLoom(at, true);
+                case "SMITHING" -> target.openSmithingTable(at, true);
+                case "STONECUTTER" -> target.openStonecutter(at, true);
+                default -> target.openCartographyTable(at, true);
+            }
+            stationContainers.add(id);
+            return;
+        }
         var inventory = org.bukkit.Bukkit.createInventory(null, rows * 9, packet.getTitle().getString());
         if (!openContainers.isEmpty()) { target.closeInventory(); openContainers.clear(); }
         var view = target.openInventory(inventory);
@@ -77,12 +108,14 @@ public class ServerGamePacketListenerImpl {
     }
 
     private void closeContainer(org.bukkit.entity.Player target, int containerId) {
+        if (stationContainers.remove(containerId)) { target.closeInventory(); return; }
         var view = container(target, containerId);
         openContainers.remove(containerId);
         target.closeInventory();
     }
 
     private org.bukkit.inventory.InventoryView container(org.bukkit.entity.Player target, int containerId) {
+        if (stationContainers.contains(containerId)) throw new UnsupportedOperationException("Ferrite: NMS container " + containerId + " is a crafting-style screen the client drives; its contents cannot be set from a packet");
         var view = openContainers.get(containerId);
         if (view == null) throw new IllegalStateException("Ferrite: NMS container " + containerId + " is not open");
         if (target.getOpenInventory() != view) {
