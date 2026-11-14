@@ -88,33 +88,86 @@ pub fn parse(json: &str) -> Book {
     book
 }
 
+/// What the client's recipe book knows of the recipes plugins added: the display ids handed out
+/// (stable per recipe id and never reused, so a removed recipe's id is not recycled) and the bare
+/// displays of the recipes that exist now.
+#[derive(Default)]
+struct PluginDisplays {
+    next: i32,
+    index: HashMap<String, i32>,
+    current: HashMap<i32, (String, Vec<u8>)>,
+}
+
+fn plugin_displays() -> std::sync::MutexGuard<'static, PluginDisplays> {
+    static DISPLAYS: OnceLock<std::sync::Mutex<PluginDisplays>> = OnceLock::new();
+    DISPLAYS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The recipe display id of a plugin recipe, allocated above every vanilla one on first use.
+pub fn plugin_display_index(id: &str) -> i32 {
+    let mut displays = plugin_displays();
+    if let Some(index) = displays.index.get(id) {
+        return *index;
+    }
+    if displays.next == 0 {
+        displays.next = book()
+            .recipes
+            .values()
+            .flat_map(|recipe| recipe.displays.iter().map(|display| display.index))
+            .max()
+            .unwrap_or(0)
+            + 1;
+    }
+    let index = displays.next;
+    displays.next += 1;
+    displays.index.insert(id.to_owned(), index);
+    index
+}
+
 /// The recipe id a recipe-book click (`place_recipe`) names by display id.
-pub fn recipe_of_display(index: i32) -> Option<&'static str> {
+pub fn recipe_of_display(index: i32) -> Option<String> {
+    if let Some((id, _)) = plugin_displays().current.get(&index) {
+        return Some(id.clone());
+    }
     book()
         .recipes
         .iter()
         .find(|(_, recipe)| recipe.displays.iter().any(|d| d.index == index))
-        .map(|(id, _)| id.as_str())
+        .map(|(id, _)| id.clone())
 }
 
 /// `place_ghost_recipe`: shows the recipe in the crafting grid when the ingredients are missing.
 pub fn ghost_packet(window: i32, index: i32) -> Option<Vec<u8>> {
-    let display = book()
-        .recipes
-        .values()
-        .flat_map(|recipe| &recipe.displays)
-        .find(|display| display.index == index)
-        .map(|display| &display.display)
-        .filter(|display| !display.is_empty())?;
+    let plugin = plugin_displays()
+        .current
+        .get(&index)
+        .map(|(_, d)| d.clone());
+    let display = match plugin {
+        Some(display) => display,
+        None => book()
+            .recipes
+            .values()
+            .flat_map(|recipe| &recipe.displays)
+            .find(|display| display.index == index)
+            .map(|display| display.display.clone())?,
+    };
+    if display.is_empty() {
+        return None;
+    }
     Some(packet(PLACE_GHOST_RECIPE, |out| {
         VarInt(window).encode(out);
-        out.extend_from_slice(display);
+        out.extend_from_slice(&display);
     }))
 }
 
-/// Whether the recipe a `place_recipe` click names is one the player has unlocked.
+/// Whether the recipe a `place_recipe` click names is one the player has unlocked. The recipes a
+/// plugin added are in every player's book.
 pub fn display_is_unlocked(unlocked: &BTreeSet<String>, index: i32) -> bool {
-    recipe_of_display(index).is_some_and(|id| unlocked.contains(id))
+    plugin_displays().current.contains_key(&index)
+        || recipe_of_display(index).is_some_and(|id| unlocked.contains(&id))
 }
 
 fn book() -> &'static Book {
@@ -150,14 +203,24 @@ pub fn add_packet(book: &Book, entries: &[(&str, bool)], replace: bool) -> Vec<u
 
 /// Like [`add_packet`] with `(recipe, notify, highlight)` entries; a highlighted recipe shows
 /// the "new" marker in the client's book until the client reports it seen.
+#[cfg(test)]
 pub fn add_packet_highlighted(
     book: &Book,
     entries: &[(&str, bool, bool)],
     replace: bool,
 ) -> Vec<u8> {
+    add_packet_in(&|id| book.recipes.get(id), entries, replace)
+}
+
+/// [`add_packet_highlighted`] over any way of finding a recipe by id.
+fn add_packet_in<'a>(
+    find: &dyn Fn(&str) -> Option<&'a Recipe>,
+    entries: &[(&str, bool, bool)],
+    replace: bool,
+) -> Vec<u8> {
     let mut wires: Vec<Vec<u8>> = Vec::new();
     for (id, notify, highlight) in entries {
-        let Some(recipe) = book.recipes.get(*id) else {
+        let Some(recipe) = find(id) else {
             continue;
         };
         for display in &recipe.displays {
@@ -182,10 +245,15 @@ pub fn add_packet_highlighted(
     })
 }
 
+#[cfg(test)]
 pub fn remove_packet(book: &Book, ids: &[&str]) -> Vec<u8> {
+    remove_packet_in(&|id| book.recipes.get(id), ids)
+}
+
+fn remove_packet_in<'a>(find: &dyn Fn(&str) -> Option<&'a Recipe>, ids: &[&str]) -> Vec<u8> {
     let indexes: Vec<i32> = ids
         .iter()
-        .filter_map(|id| book.recipes.get(*id))
+        .filter_map(|id| find(id))
         .flat_map(|r| r.displays.iter().map(|d| d.index))
         .collect();
     packet(RECIPE_BOOK_REMOVE, |out| {
@@ -281,7 +349,7 @@ pub fn mark_seen(uuid: Uuid, display: i32, persist: Option<&Path>) -> bool {
     };
     let changed = highlights()
         .get_mut(&uuid)
-        .is_some_and(|set| set.remove(id));
+        .is_some_and(|set| set.remove(&id));
     if changed && let Some(dir) = persist {
         save_highlight(dir, &uuid);
     }
@@ -291,9 +359,61 @@ pub fn mark_seen(uuid: Uuid, display: i32, persist: Option<&Path>) -> bool {
 #[derive(Default)]
 pub struct RecipeSync {
     sent: HashMap<Uuid, BTreeSet<String>>,
+    /// Whether this sync also carries what plugins changed (`Server#addRecipe` and friends).
+    /// The game loop's does; a plain `default()` leaves the vanilla book alone.
+    plugins: bool,
+    /// The recipe-set revision each player's client was last told about.
+    sent_revision: HashMap<Uuid, u64>,
+    view: Option<super::crafting::PluginBookView>,
+    /// Every plugin recipe this sync has encoded, removed ones included: telling a client to
+    /// forget a recipe needs the display ids it was given.
+    known: BTreeMap<String, Recipe>,
 }
 
 impl RecipeSync {
+    /// A sync that also shows plugin recipes in the book and drops the vanilla ones a plugin removed.
+    pub fn with_plugin_recipes() -> Self {
+        Self {
+            plugins: true,
+            ..Self::default()
+        }
+    }
+
+    /// Re-encodes what plugins changed when the recipe set has a new revision.
+    fn refresh_view(&mut self, base_update: &[u8]) {
+        let revision = super::crafting::plugin_recipe_revision();
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.revision == revision)
+        {
+            return;
+        }
+        let Some(view) =
+            super::crafting::plugin_book_view(base_update, &mut |id| plugin_display_index(id))
+        else {
+            return;
+        };
+        let mut current = HashMap::new();
+        for (id, encoded) in &view.entries {
+            let index = plugin_display_index(id);
+            current.insert(index, (id.clone(), encoded.display.clone()));
+            self.known.insert(
+                id.clone(),
+                Recipe {
+                    notify: false,
+                    displays: vec![Display {
+                        index,
+                        wire: encoded.wire.clone(),
+                        display: encoded.display.clone(),
+                    }],
+                },
+            );
+        }
+        plugin_displays().current = current;
+        self.view = Some(view);
+    }
+
     pub fn sync(
         &mut self,
         online: &HashMap<Uuid, OnlinePlayer>,
@@ -310,16 +430,51 @@ impl RecipeSync {
             }
             keep
         });
+        self.sent_revision
+            .retain(|uuid, _| online.contains_key(uuid));
         let book = book();
         if book.recipes.is_empty() {
             return Vec::new();
         }
+        if self.plugins {
+            self.refresh_view(&book.update);
+        }
+        let Self {
+            sent,
+            sent_revision,
+            view,
+            known,
+            ..
+        } = self;
+        let revision = view.as_ref().map_or(0, |view| view.revision);
+        let no_hidden = std::collections::HashSet::new();
+        let hidden = view.as_ref().map_or(&no_hidden, |view| &view.hidden);
+        let plugin_ids: Vec<&str> = view
+            .iter()
+            .flat_map(|view| view.entries.iter().map(|(id, _)| id.as_str()))
+            .collect();
+        // A changed recipe set (a plugin recipe, a hidden vanilla one) comes with its own
+        // `update_recipes`; before any change the client gets the vanilla body.
+        let update_body = view
+            .as_ref()
+            .filter(|view| view.revision > 0)
+            .and_then(|view| view.update.as_deref())
+            .unwrap_or(&book.update);
+        let find = |id: &str| book.recipes.get(id).or_else(|| known.get(id));
         let empty = BTreeSet::new();
         let mut out = Vec::new();
         for uuid in online.keys() {
-            let have = owned.get(uuid).unwrap_or(&empty);
-            let previous = self.sent.get(uuid);
-            if previous.is_some_and(|old| old == have) {
+            let owned_set = owned.get(uuid).unwrap_or(&empty);
+            let mut have: BTreeSet<String> = owned_set
+                .iter()
+                .filter(|id| !hidden.contains(*id))
+                .cloned()
+                .collect();
+            have.extend(plugin_ids.iter().map(|id| (*id).to_owned()));
+            let previous = sent.get(uuid);
+            if previous.is_some_and(|old| *old == have)
+                && sent_revision.get(uuid).copied().unwrap_or(0) == revision
+            {
                 continue;
             }
             match previous {
@@ -334,7 +489,7 @@ impl RecipeSync {
                     }
                     out.push((
                         *uuid,
-                        packet(UPDATE_RECIPES, |o| o.extend_from_slice(&book.update)),
+                        packet(UPDATE_RECIPES, |o| o.extend_from_slice(update_body)),
                     ));
                     out.push((
                         *uuid,
@@ -345,17 +500,25 @@ impl RecipeSync {
                         .iter()
                         .map(|id| (id.as_str(), false, marked.contains(id)))
                         .collect();
-                    out.push((*uuid, add_packet_highlighted(book, &all, true)));
+                    out.push((*uuid, add_packet_in(&find, &all, true)));
                 }
                 Some(old) => {
                     if let Some(dir) = persist {
-                        save(dir, uuid, have);
+                        save(dir, uuid, owned_set);
                     }
+                    if sent_revision.get(uuid).copied().unwrap_or(0) != revision {
+                        out.push((
+                            *uuid,
+                            packet(UPDATE_RECIPES, |o| o.extend_from_slice(update_body)),
+                        ));
+                    }
+                    // A recipe a plugin replaced under the same id keeps its display id: tell the
+                    // client to forget the old entry before the new one arrives.
+                    let removed: Vec<&str> = old.difference(&have).map(String::as_str).collect();
                     let added: Vec<(&str, bool, bool)> = have
                         .difference(old)
                         .map(|id| (id.as_str(), true, true))
                         .collect();
-                    let removed: Vec<&str> = old.difference(have).map(String::as_str).collect();
                     {
                         // `ServerRecipeBook.addRecipes` highlights what it adds, `remove` clears it.
                         let mut all = highlights();
@@ -368,15 +531,16 @@ impl RecipeSync {
                     if let Some(dir) = persist {
                         save_highlight(dir, uuid);
                     }
-                    if !added.is_empty() {
-                        out.push((*uuid, add_packet_highlighted(book, &added, false)));
-                    }
                     if !removed.is_empty() {
-                        out.push((*uuid, remove_packet(book, &removed)));
+                        out.push((*uuid, remove_packet_in(&find, &removed)));
+                    }
+                    if !added.is_empty() {
+                        out.push((*uuid, add_packet_in(&find, &added, false)));
                     }
                 }
             }
-            self.sent.insert(*uuid, have.clone());
+            sent.insert(*uuid, have);
+            sent_revision.insert(*uuid, revision);
         }
         out
     }
@@ -412,8 +576,8 @@ mod tests {
         let Some(id) = recipe_of_display(0) else {
             return;
         };
-        let index = book().recipes[id].displays[0].index;
-        assert!(display_is_unlocked(&BTreeSet::from([id.to_owned()]), index));
+        let index = book().recipes[&id].displays[0].index;
+        assert!(display_is_unlocked(&BTreeSet::from([id.clone()]), index));
         assert!(!display_is_unlocked(&BTreeSet::new(), index));
         let ghost = ghost_packet(5, index).expect("a real recipe has a display");
         assert_eq!(&ghost[..2], &[PLACE_GHOST_RECIPE as u8, 5]);
@@ -577,5 +741,174 @@ mod tests {
             owned.clear();
             assert_eq!(sync.sync(&online, &owned, &BTreeMap::new(), None).len(), 1);
         }
+    }
+
+    fn one_player() -> (Uuid, HashMap<Uuid, OnlinePlayer>) {
+        let uuid = Uuid::from_u128(2);
+        let (outbound, _) = ferrite_net::game::OutboundSender::channel(1 << 10);
+        let mut online = HashMap::new();
+        online.insert(
+            uuid,
+            OnlinePlayer {
+                name: String::new(),
+                entity: 0,
+                outbound,
+                pos: [0.0; 3],
+                yaw: 0.0,
+                pitch: 0.0,
+                dimension: crate::game::Dimension::Overworld,
+                view: 10,
+            },
+        );
+        (uuid, online)
+    }
+
+    /// A packet id and body of an outbound packet.
+    fn split(bytes: &[u8]) -> (i32, &[u8]) {
+        let mut rest = bytes;
+        let id = <VarInt as ferrite_protocol::Decode>::decode(&mut rest)
+            .unwrap()
+            .0;
+        (id, rest)
+    }
+
+    /// The display ids a `recipe_book_add` or `recipe_book_remove` body lists.
+    fn add_indexes(body: &[u8]) -> Vec<i32> {
+        let mut rest = body;
+        let count = <VarInt as ferrite_protocol::Decode>::decode(&mut rest)
+            .unwrap()
+            .0;
+        // Only the first index of each entry is read; entries are told apart by walking the
+        // plugin displays this test knows, so decode just the leading varint of the first one.
+        assert!(count >= 1);
+        vec![
+            <VarInt as ferrite_protocol::Decode>::decode(&mut rest)
+                .unwrap()
+                .0,
+        ]
+    }
+
+    #[test]
+    fn a_plugin_recipe_reaches_the_clients_book_and_leaves_it_when_removed() {
+        if book().recipes.is_empty() {
+            return;
+        }
+        let _guard = crate::game::crafting_overlay_lock();
+        crate::game::reset_recipes();
+        let (uuid, online) = one_player();
+        let mut sync = RecipeSync::with_plugin_recipes();
+        let owned = BTreeMap::new();
+        let setup = sync.sync(&online, &owned, &BTreeMap::new(), None);
+        assert_eq!(
+            setup.len(),
+            3,
+            "update_recipes, settings and the (empty) book"
+        );
+        let plain_update = setup[0].1.clone();
+
+        // A furnace recipe a plugin adds: the client is sent a new `update_recipes` (the furnace
+        // input set and nothing else changes shape) and a `recipe_book_add` with its display.
+        let json = r#"{"type":"minecraft:smelting","ingredient":"minecraft:gravel","result":{"id":"minecraft:glass"},"experience":1.0,"cookingtime":50}"#;
+        assert_eq!(
+            crate::game::add_plugin_recipe("plugin:book_glass", json, None, 0),
+            Ok(true)
+        );
+        let added = sync.sync(&online, &owned, &BTreeMap::new(), None);
+        let ids: Vec<i32> = added.iter().map(|(_, bytes)| split(bytes).0).collect();
+        assert_eq!(ids, [UPDATE_RECIPES, RECIPE_BOOK_ADD], "{ids:?}");
+        assert_ne!(added[0].1, plain_update, "gravel is now a furnace input");
+        let index = plugin_display_index("plugin:book_glass");
+        assert!(
+            index
+                > book()
+                    .recipes
+                    .values()
+                    .flat_map(|r| r.displays.iter().map(|d| d.index))
+                    .max()
+                    .unwrap()
+        );
+        assert_eq!(add_indexes(split(&added[1].1).1), [index]);
+        assert_eq!(
+            recipe_of_display(index).as_deref(),
+            Some("plugin:book_glass")
+        );
+        // The client can place it: a plugin recipe is in every player's book.
+        assert!(display_is_unlocked(&BTreeSet::new(), index));
+        assert!(ghost_packet(3, index).is_some());
+        assert!(
+            sync.sync(&online, &owned, &BTreeMap::new(), None)
+                .is_empty(),
+            "nothing changed"
+        );
+
+        // A vanilla recipe a plugin removes leaves the book of a player who had it.
+        let stick = "minecraft:stick".to_owned();
+        let owned = BTreeMap::from([(uuid, BTreeSet::from([stick.clone()]))]);
+        let with_stick = sync.sync(&online, &owned, &BTreeMap::new(), None);
+        assert_eq!(with_stick.len(), 1);
+        assert!(crate::game::remove_recipe("minecraft:stick"));
+        let hidden = sync.sync(&online, &owned, &BTreeMap::new(), None);
+        let kinds: Vec<i32> = hidden.iter().map(|(_, bytes)| split(bytes).0).collect();
+        assert_eq!(kinds, [UPDATE_RECIPES, RECIPE_BOOK_REMOVE], "{kinds:?}");
+
+        // Removing the plugin recipe sends its display id back in a `recipe_book_remove`.
+        assert!(crate::game::remove_recipe("plugin:book_glass"));
+        let gone = sync.sync(&online, &owned, &BTreeMap::new(), None);
+        let removal = gone
+            .iter()
+            .find(|(_, bytes)| split(bytes).0 == RECIPE_BOOK_REMOVE)
+            .expect("a removal");
+        let body = split(&removal.1).1;
+        assert_eq!(body[0], 1, "one display");
+        assert_eq!(
+            <VarInt as ferrite_protocol::Decode>::decode(&mut &body[1..])
+                .unwrap()
+                .0,
+            index
+        );
+        assert!(
+            recipe_of_display(index).is_none(),
+            "the id no longer names a recipe"
+        );
+        assert!(!display_is_unlocked(&BTreeSet::new(), index));
+
+        // A reset brings the vanilla recipe back into the book and the vanilla update body back.
+        crate::game::reset_recipes();
+        let reset = sync.sync(&online, &owned, &BTreeMap::new(), None);
+        let kinds: Vec<i32> = reset.iter().map(|(_, bytes)| split(bytes).0).collect();
+        assert!(kinds.contains(&RECIPE_BOOK_ADD), "{kinds:?}");
+        assert_eq!(reset[0].1, plain_update);
+    }
+
+    #[test]
+    fn a_player_who_joins_later_is_sent_the_plugin_recipes_with_the_first_book() {
+        if book().recipes.is_empty() {
+            return;
+        }
+        let _guard = crate::game::crafting_overlay_lock();
+        crate::game::reset_recipes();
+        let json = r#"{"type":"minecraft:stonecutting","ingredient":"minecraft:dirt","result":{"id":"minecraft:stick","count":2}}"#;
+        assert_eq!(
+            crate::game::add_plugin_recipe("plugin:book_cut", json, None, 0),
+            Ok(true)
+        );
+        let (_, online) = one_player();
+        let mut sync = RecipeSync::with_plugin_recipes();
+        let first = sync.sync(&online, &BTreeMap::new(), &BTreeMap::new(), None);
+        let kinds: Vec<i32> = first.iter().map(|(_, bytes)| split(bytes).0).collect();
+        assert_eq!(
+            kinds,
+            [UPDATE_RECIPES, RECIPE_BOOK_SETTINGS, RECIPE_BOOK_ADD]
+        );
+        let index = plugin_display_index("plugin:book_cut");
+        assert_eq!(add_indexes(split(&first[2].1).1), [index]);
+        // A plain sync (not the game loop's) leaves the vanilla book alone.
+        let mut plain = RecipeSync::default();
+        let first = plain.sync(&online, &BTreeMap::new(), &BTreeMap::new(), None);
+        assert_eq!(
+            first[0].1.len(),
+            packet(UPDATE_RECIPES, |o| o.extend_from_slice(&book().update)).len()
+        );
+        crate::game::reset_recipes();
     }
 }

@@ -7,6 +7,7 @@ mod enchant_table;
 mod offload;
 mod recipe_packets;
 mod recipe_unlock;
+mod recipe_wire;
 pub(crate) mod ride;
 mod slot_ops;
 mod structure_template;
@@ -86,7 +87,11 @@ mod container;
 mod crafting;
 mod damage_source;
 pub use crafting::match_for_plugin as match_crafting_for_plugin;
-pub use crafting::{add_plugin_recipe, clear_recipes, remove_recipe, reset_recipes};
+#[cfg(test)]
+pub(crate) use crafting::overlay_lock as crafting_overlay_lock;
+pub use crafting::{
+    add_plugin_recipe, campfire_recipe, clear_recipes, remove_recipe, reset_recipes,
+};
 mod dispenser;
 pub(crate) mod drops;
 mod entity_index;
@@ -2044,7 +2049,7 @@ async fn run(
     };
     let recipe_worker = {
         let dir = settings.playerdata.clone();
-        let mut sync = recipe_packets::RecipeSync::default();
+        let mut sync = recipe_packets::RecipeSync::with_plugin_recipes();
         offload::Latest::spawn(
             "ferrite-recipes",
             move |(online, owned, flags): RecipeSnapshot| {

@@ -3263,7 +3263,10 @@ fn grindstone_result(left: &ItemStack, right: &ItemStack, crafter: &dyn Crafter)
     if !left.is_same_item(right) {
         return ItemStack::empty();
     }
-    let max = left.max_damage().unwrap_or(0).max(right.max_damage().unwrap_or(0));
+    let max = left
+        .max_damage()
+        .unwrap_or(0)
+        .max(right.max_damage().unwrap_or(0));
     let remaining = (max - left.damage()) + (max - right.damage()) + max * 5 / 100;
     let mut count = 1;
     if !left.is_damageable() {
@@ -3274,7 +3277,8 @@ fn grindstone_result(left: &ItemStack, right: &ItemStack, crafter: &dyn Crafter)
     }
     let mut out = left.copy_with_count(count);
     if left.is_damageable() {
-        out.components.insert(ids::MAX_DAMAGE, Component::MaxDamage(max));
+        out.components
+            .insert(ids::MAX_DAMAGE, Component::MaxDamage(max));
         out.components
             .insert(ids::DAMAGE, Component::Damage((max - remaining).max(0)));
     }

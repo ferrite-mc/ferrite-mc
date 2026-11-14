@@ -232,9 +232,8 @@ mod tests {
     #[test]
     fn doors_and_gates_face_the_look_while_diodes_face_back_at_the_player() {
         let facing_of = |item: &str, yaw: f32| {
-            let item =
-                ferrite_data::registries::id("minecraft:item", &format!("minecraft:{item}"))
-                    .unwrap();
+            let item = ferrite_data::registries::id("minecraft:item", &format!("minecraft:{item}"))
+                .unwrap();
             let state = placement_state(item, 1, 0.5, yaw, 0).unwrap();
             let (_, props) = ferrite_data::blocks::state(state).unwrap();
             props.iter().find(|(k, _)| *k == "facing").unwrap().1
@@ -242,7 +241,11 @@ mod tests {
         // Yaw 0 looks south, yaw 90 looks west.
         assert_eq!(facing_of("oak_door", 0.0), "south");
         assert_eq!(facing_of("oak_fence_gate", 90.0), "west");
-        assert_eq!(facing_of("repeater", 0.0), "north", "`DiodeBlock` faces the player");
+        assert_eq!(
+            facing_of("repeater", 0.0),
+            "north",
+            "`DiodeBlock` faces the player"
+        );
         assert_eq!(facing_of("comparator", 90.0), "east");
     }
     #[test]

@@ -24,6 +24,9 @@ class BootstrapTest {
     }
     static final class ChildListener extends ParentListener {}
     @Test void paperOnlyLoadsAndOneFailingFileDoesNotStopTheOthers() throws Exception {
+        // Enabling announces PluginEnableEvent, and events are built against the global server.
+        System.setProperty("ferrite.native", "false");
+        Bootstrap.startServer();
         var jar = java.nio.file.Files.createTempFile("ferrite-paper", ".jar");
         try (var input = new java.util.jar.JarFile(System.getProperty("test.dependency.jar")); var output = new java.util.jar.JarOutputStream(java.nio.file.Files.newOutputStream(jar))) {
             var entries = input.entries();
@@ -409,6 +412,8 @@ class BootstrapTest {
         Bootstrap.shutdown();
         assertTrue(Bukkit.getServer().isStopping());
         assertFalse(Bukkit.getServer().isTickingWorlds());
+        // The proxy world has no key(); other classes sharing the server must not meet it.
+        ferrite.unregisterWorld(worldId);
         assertFalse(Bukkit.getPluginManager().isPluginEnabled("FerriteTest"));
         assertTrue(log.contains("FerriteTest disabled"));
         Bootstrap.tick();

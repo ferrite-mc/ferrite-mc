@@ -184,6 +184,8 @@
 
 ## 7. Paper/Bukkit 생명주기와 스케줄러
 
+> 상태(2026-11-14): 구현·거부 항목과 테스트는 §10.6의 표, 남은 한계는 §10.6 끝의 목록.
+
 - `LifecycleEvents` 전체를 구현한다. 현재 동작하는 `COMMANDS` 외 bootstrap-only
   이벤트도 호스트 초기화 순서와 plugin bootstrap을 추가해 연결한다.
 - plugin.yml의 help 토픽과 ignored plugins를 `HelpMap`에 로드한다.
@@ -231,7 +233,7 @@
 | `sendBlockUpdate`: 머리 프로필 properties(텍스처) | `property,<이름>,<값>,<서명>` 항목 → `ResolvableProfile.properties` (개수·길이 상한은 바닐라 값) | Rust `a_skull_carries_its_texture_properties...`, Java `aSkullSendsItsProfileTextures...` |
 | `World#spawn`(모든 overload), `createEntity`, `addEntity` | `FerriteWorld` — 클래스 → `EntityType`(정확히 한 타입이 그 클래스일 때만, `Monster`처럼 여럿이 공유하면 `IllegalArgumentException`), 기존 `spawnEntity` 호스트 라우트 재사용. `createEntity`가 만든 핸들만 `addEntity`로 넣을 수 있다. consumer는 생성 뒤 라이브 핸들에 불린다(Bukkit은 직전). 스폰 사유·`randomizeData`는 효과가 없고 `CreatureSpawnEvent`는 쏘지 않는다 | `FerriteWorldHostTest#spawnMaps...`, `#createEntityKeeps...` |
 | `World#createExplosion`(모든 overload) | Java가 `(Location, power, fire, breakBlocks)`로 정규화(출처 엔티티는 위치가 없을 때 중심만 정한다) → `PlayerCommand::Explosion{world,..}` → 기본 월드 또는 런타임 월드의 소유 리전. 다른 월드의 위치는 `IllegalArgumentException` | Java `#everyExplosionOverload...`, Rust `blasts::tests::a_runtime_world_gets_its_own_explosion` |
-| `Server#addRecipe`/`removeRecipe`/`clearRecipes`/`resetRecipes` | `FerriteRecipes`가 `ShapedRecipe`/`ShapelessRecipe`(`MaterialChoice`만)를 바닐라 레시피 JSON으로 호스트에 보냄 → `game/crafting.rs` 오버레이(바닐라 먼저, 제거된 id는 건너뜀, 그다음 플러그인 레시피) → `ferrite-recipe::match_crafting_in`. `ExactChoice`와 메타가 있는 결과는 `UnsupportedOperationException`. 제작 메뉴 결과에 반영되며, 클라이언트 레시피북·자동 채우기에는 나오지 않는다 | Rust `crafting::tests::a_plugin_recipe_crafts_until_it_is_removed`·`removing_a_vanilla_recipe...`·`clearing_hides...`, `plugins::craft::tests::adding_and_removing...`, `ferrite-recipe` `runtime_recipes_match...`, Java `PluginRecipeHostTest` |
+| `Server#addRecipe`/`removeRecipe`/`clearRecipes`/`resetRecipes` | `FerriteRecipes`가 성형·비성형·`FurnaceRecipe`/`BlastingRecipe`/`SmokingRecipe`/`CampfireRecipe`·`StonecuttingRecipe`·`SmithingTransformRecipe`/`SmithingTrimRecipe`를 바닐라 레시피 JSON(+결과 메타·내구도)으로 호스트에 보냄 → `game/crafting.rs` 오버레이(바닐라 먼저, 제거된 id는 건너뜀, 그다음 플러그인 레시피) → `ferrite-recipe` 매칭. 클라이언트 레시피북·자동 채우기에도 나온다(§10.6). `ExactChoice`/`PredicateChoice`·`TransmuteRecipe`·특수 제작은 이유와 대체 API를 담은 예외 | §10.6 표 |
 | `sendBlockUpdate`: 스냅샷 아이템의 `ItemMeta` | `ItemMetaWire`(인벤토리 슬롯과 같은 직렬화) → `meta,<슬롯>,<hex>` → `with_meta` | Rust `a_stack_in_the_snapshot_can_carry_metadata`, Java `aStackWithMetadataSends...` |
 | Paper 부트스트래퍼 `DATAPACK_DISCOVERY` | `FerriteBootstrap` — `paper-plugin.yml`의 `bootstrapper`를 플러그인 생성 전에 실행, 데이터팩을 `<월드>/datapacks/<플러그인>-<id>`로 복사. `TAGS` 등 다른 라이프사이클 이벤트는 이유를 밝히고 거부 | Java `FerriteBootstrapTest` |
 | `help.yml` | `FerriteHelpMap(server, File)` — `ignore-plugins`, `amended-topics`, `index-topics` | Java `ApiSurfaceTest` |
@@ -270,8 +272,7 @@
   `getWorldPath`는 기본 월드만 된다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API(26.3 build 227)에
   존재하지 않아 구현 대상이 아니다.
 - **블록 엔티티:** 위 표의 종류는 구현했다. 그 밖의 `sendBlockUpdate` 대상은 `UnsupportedOperationException`을 유지한다.
-- **레시피(§7):** 조리·대장간·석재 절단 레시피는 런타임에 추가할 수 없다(Java 목록에만 남는다). 결과 아이템의 메타,
-  `ExactChoice`, 클라이언트 레시피북 표시는 없다.
+- **레시피(§7):** §10.6에 구현/거부 표와 한계를 옮겼다(모닥불 레시피는 일치만 하고 호스트에 모닥불 요리가 없음, `smithing_trim`은 클라이언트 레시피북에 안 나옴, `ExactChoice`는 거부).
 - **투사체 종류:** `launchProjectile(Firework)`는 구현했다(호스트 폭죽이 눈 위치에서 위로 난다, 속도 인자 무시). `launchProjectile(BreezeWindCharge)`도 구현했다(`Kind::BreezeWindCharge`, 일반 바람 구슬과 같은 비행·폭발). `launchProjectile(WitherSkull)`도 구현했다(직선 비행, 닿으면 위력 1 폭발, 불은 없음). `launchProjectile(ShulkerBullet)`도 구현했다(유도 없이 직선, 닿은 몹에 4 피해, 공중 부양 효과 없음). `launchProjectile(SpectralArrow)`도 구현했다(화살처럼 날고 맞은 몹이 10초간 발광). 눈 엔더·낚싯찌는 `launchProjectile`에 없다. `World#getEnderDragonBattle`은 End 월드에서 `FerriteDragonBattle`을 돌려준다(호스트가 틱마다 올리는 전투 스냅샷을 읽고, 변경은 큐에 넣어 End 리전의 다음 틱에 적용 — 플레이어가 End에 있을 때만 움직인다. 보스바는 분리된 객체, `resetCrystals`(스파이크 크리스털을 지우고 배치 패스가 전부 다시 놓음)와 `spawnNewGateway(Position)`(그 자리에 관문을 열고, 바닐라처럼 개수는 올리지 않음)도 구현했다, 이름이 `_the_end`로 끝나는 런타임 월드도 같은 호스트 전투를 본다).
 - **`Player#loadData`/`saveData`:** `PlayerCommand::PlayerData` → 리전 `Command::PluginLoadData/PluginSaveData`. load는 저장 파일의 인벤토리·선택 슬롯·게임 모드를 적용하고, 같은 월드에서 저장된 파일이면 위치도 되돌린다(월드가 다르면 위치는 건드리지 않는다). 체력·허기·경험치는 저장 파일 형식에 없어 되돌리지 않는다.
 - **NMS 메뉴(§2.4):** 상자 계열과 `SHULKER_BOX`는 그대로 열고, 작업대·모루·마법부여·숫돌·베틀·대장간·석재 절단기·지도 제작대는 호스트 스테이션으로 연다(내용 패킷은 명시적 예외). 호퍼·발사기·화로·양조기·신호기·교탁·상인·크래프터는 구체적인 이유와 대체 API를 담은 예외를 유지한다.
@@ -279,7 +280,7 @@
 - **NMS 엔티티·월드 핸들(§2.2/2.5):** `net.minecraft.world.entity.Entity`는 이제 델타 이동(`getDeltaMovement/setDeltaMovement`), `setPos/teleportTo`, 회전, 지면·불·물 상태, 크기, 커스텀 이름, 스코어보드 태그, 승객·탑승 관계(`getPassengers/getVehicle/startRiding/stopRiding`)를 Bukkit 호출로 읽고 쓴다(Entity.of로 플레이어/생명체 래퍼 선택). `LivingEntity`는 흡수 체력·수면·활강·아이템 사용·박힌 화살·효과 확인, `ServerLevel`은 시드·스폰·차원 키·엔티티 목록·UUID 조회, `Vec3`는 벡터 연산을 갖는다. 모두 Bukkit(→호스트 라우트)을 거치므로 리전 소유권을 우회하지 않는다. 테스트 `NmsEntityHandleTest`. 직접 NMS 필드 접근(`entityData`, 속성 맵 등)은 노출하지 않는다.
 - **눈 엔더·낚싯찌:** 눈 엔더는 `ferrite-entity::eye`(80틱 비행, 5분의 4는 아이템으로 떨어지고 나머지는 부서짐, 목표가 12칸 밖이면 12칸 앞·8칸 위로 조준)와 리전 `tick_eyes`(생성 직후 `locate_structure("minecraft:stronghold", …, 100)`로 목표 탐색, 없으면 즉시 부서짐)로 동작하고, 공중에서 눈을 쓰면 던져지며(`EnderEyeItem.use`), `World#spawnEntity(EYE_OF_ENDER)`도 된다. 속도식(`lerp(0.0025,…)`)은 바닐라 `EyeOfEnder.tick`을 기억에 의존해 옮긴 근사다. 낚싯찌는 호스트에 이미 있던 `bobber`를 플러그인이 `launchProjectile(FishHook)`로 던질 수 있게 연결했다(이미 찌가 있으면 무시). `launchProjectile(FishHook)`은 Java가 정한 UUID를 호스트가 찌에 붙여, 핸들(`FISHING_BOBBER`)을 돌려준다(이미 찌가 나가 있으면 호스트가 무시하므로 그 핸들은 실체가 없다).
 - **§8 바닐라 대조(모루):** 바닐라 `AnvilMenu.createResult`와 대조해 세 가지를 고쳤다 — 같은 아이템 합치기 보너스는 최대 내구도의 12%(5%였음), 이름만 바꾸는 경우 비용은 39에서 멈추고 수리 비용(`RepairCost`)을 올리지 않는다, 창작 모드(무한 재료)는 40레벨 상한이 없다(`Menu::set_infinite_materials`). 테스트 `anvil_rename_only_keeps_the_repair_cost_and_creative_lifts_the_cap`. 유체 경계·레드스톤·청크 언로드 흐름·이웃 갱신 순서·작물 성장·중력 블록 연쇄·마법부여대·지도/세공대 결과는 이번에 대조하지 못했다(로컬 서버 jar를 `javap`로 읽을 수는 있지만 항목마다 바이트코드를 따라가야 해서 시간이 들었다).
-- **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 그 밖의 Paper 생명주기·스케줄러(§7), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다.
+- **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다. §7은 §10.6.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
 
 
@@ -326,3 +327,50 @@
   - **숫돌 경험치** — `GrindstoneMenu$4.onTake`: 이제 `ExperienceOrb.award`처럼 블록 중심에 오브 엔티티로 떨어뜨리고 `levelEvent(1042)`를 보낸다(블록 없이 연 숫돌은 `ContainerLevelAccess.NULL`처럼 지급 없음). 테스트 `grindstone_experience_is_half_the_minimum_costs_rounded_up`, `stonecutter_grindstone_enchanting_smithing_and_loom_work`.
   - **영역 경계** — 전원이 두 칸 거리의 도체를 거쳐 다른 영역 블록에 닿을 때도 그 영역을 깨우고, 깨움에 변경 출처를 실어 경계 너머를 보는 관찰자가 펄스를 낸다(`Wake`). 반대편이 스스로 바꾼 블록은 이쪽을 다시 깨우지만, 받은 깨움은 출처로 돌려보내지 않는다. 테스트 `boundary_circuits_wake_the_other_region`, `a_repeater_next_to_the_boundary_reacts_and_wakes_back`.
 - **남은 한계(레드스톤):** 감지 레일의 `powered`와 트립와이어·갈고리의 상태 전이를 만드는 쪽(광산 수레 엔티티, 트립와이어 줄 검사)이 Ferrite에 없어 출력 규칙만 맞췄고 상태는 직접 설정해야 켜진다. 아이템 액자는 배치 로직이 없어 `item_frame` 엔티티가 있을 때만 읽는다. 함정 상자 열람자는 그 영역이 가진 플레이어만 센다(경계 건너편에서 같은 상자를 연 경우 못 셈). 분산 틱 큐의 `UPDATE_LIMIT`(4096 고정)과 `RepeaterBlock` 외 `DiodeBlock` 하위 클래스의 우선순위 미세 차이는 그대로다. 한 영역이 다른 영역 블록을 직접 쓰지는 않으며, 두 영역이 서로 깨우는 방식으로만 수렴한다(§10.2).
+
+### 10.6 §7 생명주기·레시피·스케줄러 (2026-11-14, 브랜치 `yxshadxw/plugin-api-lifecycle`)
+
+| §7 항목 | 결과 | 위치 | 테스트 | 이유·대체 API |
+|---|---|---|---|---|
+| 부트스트래퍼의 `COMMANDS` 핸들러 | 구현 | `FerriteBootstrap#handOver`, `FerriteLifecycleManager#adopt` | `PaperLifecycleIntegrationTest.aBootstrapperCommandsHandlerIsHandedToThePluginFiresInitialAndReloadAndGoesOnDisable` | 플러그인 객체가 생기면 넘겨 INITIAL/RELOAD로 발화, disable 때 명령과 함께 제거 |
+| `TAGS`(`pre_flatten/…`, `post_flatten/…`) | 거부 | `FerriteBootstrap` | `FerriteBootstrapTest`(태그 거부 메시지) | 태그는 호스트 시작 때 데이터 팩에서 읽고 이후 고정. 대체: `DATAPACK_DISCOVERY`로 데이터 팩을 제공 |
+| 그 밖의 부트스트랩 이벤트 | 거부(원래대로) | `FerriteBootstrap`, `FerriteLifecycleManager` | `FerriteLifecycleTest.bootstrapOnlyEventsAreRefusedBecauseTheyCouldNeverFire` | 호스트가 발화할 수 없는 이벤트는 등록 시점에 이유와 함께 예외 |
+| `PluginEnableEvent`/`PluginDisableEvent` | 구현 | `FerritePluginManager` | `...pluginEnableAndDisableEventsAreDeliveredWhileTheSubjectIsStillEnabledOnDisable`, `...disablingEverythingDisablesInReverseOrderAndAnnouncesEachPlugin` | 비활성 이벤트는 대상이 아직 enabled일 때 전달 |
+| 비활성 플러그인의 리스너/태스크 등록 | 구현(`IllegalPluginAccessException`) | `FerritePluginManager#requireEnabled`, `FerriteScheduler` | `...registeringListenersWhileNotEnabledIsRefusedAndAReenableDoesNotDuplicateHandlers`, `...schedulingWhileDisabledIsRefusedButAlreadyCancelledTasksStayCancelled` | `onDisable` 안에서도 거부(Paper와 같음) |
+| disable 시 정리(리스너·서비스·태스크) | 구현 | `FerritePluginManager#releasePlugin` | `...disablingAPluginCancelsItsBukkitGlobalRegionEntityAndAsyncTasks`, `...servicesAClosingPluginRegisteredAreRemovedWithIt`, `...shutdownCancelsEveryPluginTaskAndForgetsTheCommands` | Bukkit·global·region·entity·async 전부 취소, 재활성 시 핸들러 중복 없음 |
+| 태스크 예외 | 구현 | `FerriteAsyncScheduler`, `FerriteRegionScheduler`, `FerriteEntitySchedulers` | `...aFailingRepeatingTaskIsLoggedAndKeepsItsSchedule` | 예외는 SEVERE로 기록하고 반복 태스크는 계속 돈다 |
+| `getActiveWorkers` | 구현 | `FerriteScheduler.AsyncTask` | `...aRunningAsyncTaskShowsUpAsAWorkerUntilItEnds` | 실행 중인 비동기 태스크와 그 스레드 |
+| event priority·`ignoreCancelled` | 검증 | `FerritePluginManager#callEvent` | `...eventHandlersRunLowestToMonitorAndIgnoreCancelledSkipsAfterACancel` | 실제 컴파일한 플러그인 jar |
+| `reloadData` 경계 | 검증 | `FerriteServer#reloadData` | 위 부트스트래퍼 테스트(RELOAD 재발화, 중복 없음) | 호스트 호출 자체는 단위 테스트에서 호출할 수 없어 발화 부분만 직접 호출 |
+| 조리/석재 절단/대장간 레시피 추가·삭제 | 구현 | `FerriteRecipes`, `game/crafting.rs`, `plugins/craft.rs` | 아래 레시피 표 | |
+| 레시피 결과 메타 | 구현 | `FerriteRecipes`(`ItemMetaWire`), `PluginRecipes::dress` | `a_crafting_result_keeps_its_name_lore_enchantments_and_wear`, `PluginRecipeHostTest` | 이름·로어·인챈트·내구도 |
+| `ExactChoice` | 거부 | `FerriteRecipes#ingredient` | `PluginRecipeHostTest`(거부 이유) | 26.3 `Ingredient`는 `HolderSet<Item>`이라 컴포넌트 조건이 없다(`javap`로 확인). 대체: `MaterialChoice` + 결과 슬롯의 `InventoryClickEvent`에서 메타 검사. Ferrite에는 `PrepareItemCraftEvent`/`CraftItemEvent`가 없다 |
+| `PredicateChoice`, `TransmuteRecipe`, 특수 제작 | 거부 | `FerriteRecipes`, `add_plugin_recipe` | `PluginRecipeHostTest`, `transmute_and_special_recipes_are_refused_and_bad_json_says_why` | 데이터가 아니라 코드인 레시피. 대체: `MaterialChoice`나 이벤트 |
+| 클라이언트 레시피북·자동 채우기 | 구현 | `game/recipe_wire.rs`, `recipe_packets.rs` | `a_plugin_recipe_reaches_the_clients_book_and_leaves_it_when_removed`, `a_player_who_joins_later_is_sent_the_plugin_recipes_with_the_first_book`, 바닐라 전 레시피 바이트 대조 테스트 | 성형·비성형·화로류·석재 절단·대장간 변형 |
+
+레시피 종류별 테스트(추가 / 삭제 / 일치 / 결과 메타):
+
+| 종류 | 테스트 |
+|---|---|
+| 성형·비성형 | `a_plugin_recipe_crafts_until_it_is_removed`, `a_crafting_result_keeps_its_name_lore_enchantments_and_wear` |
+| 화로·용광로·훈연기 | `furnace_blast_furnace_and_smoker_recipes_are_added_matched_dressed_and_removed`, `removing_a_vanilla_smelting_recipe_stops_the_furnace_and_a_reset_restores_it`, `runtime_cooking_recipes_match_by_kind_and_stonecutting_lists_every_option` |
+| 모닥불 | `a_campfire_recipe_is_added_matched_and_removed` |
+| 석재 절단 | `stonecutter_recipes_are_added_listed_dressed_and_removed` |
+| 대장간 변형·장식 | `smithing_recipes_are_added_matched_and_keep_the_base_components`, `a_smithing_trim_recipe_from_a_plugin_trims_with_its_own_pattern`, `a_netherite_upgrade_keeps_the_enchantments_of_the_diamond_tool` |
+| 호스트 호출 | `plugins::craft::tests::add_recipe_takes_any_kind_with_its_result_metadata_and_refuses_what_it_cannot_read` |
+
+**남은 것과 한계**
+
+고친 것: 대장간 변형이 베이스의 컴포넌트(인챈트 등)를 버리던 것(바닐라 `TransmuteRecipe.createWithOriginalComponents`와 같게), 비활성 플러그인의 리스너 등록, disable 뒤 남던 리스너·서비스, 예외로 끝나던 반복 태스크, 재활성 시 핸들러 중복.
+
+고칠 수 없거나 고치지 않은 것:
+- 모닥불 레시피는 `Server#getRecipe`와 일치 조회만 된다. 호스트에는 모닥불 블록 엔티티 요리 자체가 없다.
+- `smithing_trim`·`TransmuteRecipe`·특수 제작은 서버 쪽에서만 일치하고 클라이언트 레시피북에는 안 나온다(장식 표시에 장식 패턴 레지스트리 id가 필요).
+- 플러그인 레시피는 모든 플레이어의 레시피북에 나온다. Java `discoverRecipe`는 호스트에 연결돼 있지 않다.
+- 태그와 아이템이 섞인 재료의 표시 순서는 바닐라 태그 파일 순서와 다르다(집합 의미는 같고 클라이언트는 순서에 둔감).
+- 같은 재료의 바닐라 레시피가 플러그인 레시피보다 먼저 일치한다.
+- `ExactChoice`/`PredicateChoice`/`TAGS`는 설계상 거부(위 표).
+- `BrewingRecipe`(`PotionMix`)는 Java 목록에만 남고 호스트 양조대는 바닐라 표를 쓴다.
+- Folia 방식 region/entity/async 스케줄러는 비활성 플러그인에도 예외를 던지지 않는다(Bukkit 스케줄러만 던진다). 이미 취소된 태스크가 되는 것은 같다.
+- 실제 클라이언트로 레시피북 패킷을 확인하지 못했다(바닐라 레시피 바이트와의 대조까지).
+- `cargo clippy --workspace --all-targets -- -D warnings`는 `plugin-new` 병합 뒤 경고 없이 통과한다(`game/chunk_level.rs`는 T3b의 `cfg_attr`, `redstone.rs::rail_chain`은 `needless_late_init` 허용).

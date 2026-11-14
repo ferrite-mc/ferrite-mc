@@ -41,6 +41,7 @@ final class FerritePluginManager extends PluginManagerStubs {
     public synchronized void registerEvents(org.bukkit.event.Listener listener, Plugin owner) {
         java.util.Objects.requireNonNull(listener, "listener");
         requireLoaded(owner);
+        requireEnabled(owner, listener);
         Set<String> seen = new HashSet<>();
         for (Class<?> type = listener.getClass(); type != null; type = type.getSuperclass()) for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
             if (method.isBridge() || method.isSynthetic() || !seen.add(method.getName() + java.util.Arrays.toString(method.getParameterTypes()))) continue;
@@ -65,6 +66,7 @@ final class FerritePluginManager extends PluginManagerStubs {
         java.util.Objects.requireNonNull(priority, "priority");
         java.util.Objects.requireNonNull(executor, "executor");
         requireLoaded(plugin);
+        requireEnabled(plugin, listener);
         try {
             var method = java.lang.invoke.MethodHandles.lookup().findVirtual(EventExecutor.class, "execute", java.lang.invoke.MethodType.methodType(void.class, org.bukkit.event.Listener.class, org.bukkit.event.Event.class)).bindTo(executor).bindTo(listener);
             handlers.add(new Handler(type, priority, ignoreCancelled, plugin, method));
@@ -94,18 +96,36 @@ final class FerritePluginManager extends PluginManagerStubs {
         java.util.Objects.requireNonNull(plugin, "plugin");
         if (!(plugin instanceof JavaPlugin javaPlugin) || !plugins.contains(javaPlugin)) throw new IllegalArgumentException("Plugin is not loaded: " + plugin.getName());
     }
+    /** Bukkit's {@code SimplePluginManager}: a plugin that is not enabled (not yet, or already disabled, even inside its own {@code onDisable}) cannot register listeners. */
+    private void requireEnabled(Plugin plugin, Object what) {
+        if (!plugin.isEnabled()) throw new IllegalPluginAccessException("Plugin attempted to register " + what + " while not enabled");
+    }
     @Override public void enablePlugin(Plugin plugin) {
         java.util.Objects.requireNonNull(plugin, "plugin");
         if (!(plugin instanceof JavaPlugin javaPlugin) || !plugins.contains(javaPlugin)) throw new IllegalArgumentException("Plugin is not loaded: " + plugin.getName());
-        if (!plugin.isEnabled()) javaPlugin.setEnabled(true);
+        if (!plugin.isEnabled()) { javaPlugin.setEnabled(true); if (plugin.isEnabled()) callEvent(new org.bukkit.event.server.PluginEnableEvent(plugin)); }
     }
+    /** What Bukkit's {@code SimplePluginManager.disablePlugin} drops with a plugin: its listeners, services and tasks. */
+    private void releasePlugin(Plugin plugin) {
+        server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);
+        server.getServicesManager().unregisterAll(plugin);
+        unregisterListeners(plugin);
+    }
+    /** {@code HandlerList.unregisterAll(plugin)}: a re-enabled plugin registers its listeners again and must not get them twice. */
+    synchronized void unregisterListeners(Plugin plugin) { handlers.removeIf(handler -> handler.owner() == plugin); }
+    /** Number of event handlers a plugin has registered. */
+    synchronized int handlerCount(Plugin plugin) { return (int) handlers.stream().filter(handler -> handler.owner() == plugin).count(); }
     @Override public void disablePlugin(Plugin plugin) {
         java.util.Objects.requireNonNull(plugin, "plugin");
         if (!(plugin instanceof JavaPlugin javaPlugin) || !plugins.contains(javaPlugin)) throw new IllegalArgumentException("Plugin is not loaded: " + plugin.getName());
         if (!plugin.isEnabled()) return;
-        javaPlugin.setEnabled(false);
-        FerriteLifecycleManager.dispose(plugin);
-        server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);
+        // Bukkit announces the disable while the plugin is still enabled, so its own listeners and its dependants see it.
+        callEvent(new org.bukkit.event.server.PluginDisableEvent(plugin));
+        try { javaPlugin.setEnabled(false); }
+        finally {
+            FerriteLifecycleManager.dispose(plugin);
+            releasePlugin(plugin);
+        }
     }
     @Override public void clearPlugins() { disablePlugins(); }
     @Override public boolean useTimings() { return false; }
@@ -163,13 +183,15 @@ final class FerritePluginManager extends PluginManagerStubs {
                 loadedName = desc.getName().toLowerCase(Locale.ROOT);
                 loaders.put(desc.getName().toLowerCase(Locale.ROOT), loader);
                 for (String alias : desc.getProvidedPlugins()) loaders.putIfAbsent(alias.toLowerCase(Locale.ROOT), loader);
+                FerriteBootstrap bootstrap = null;
                 if (paper && metadata.get("bootstrapper") instanceof String bootstrapper) {
                     java.nio.file.Path world = null;
                     try { world = server.getWorlds().isEmpty() ? null : server.getWorlds().get(0).getWorldPath(); } catch (UnsupportedOperationException unsaved) { /* in-memory world */ }
-                    FerriteBootstrap.run(bootstrapper, loader, desc, file.toPath(), new File(server.pluginsFolder == null ? "plugins" : server.pluginsFolder, desc.getName()).toPath(), world);
+                    bootstrap = FerriteBootstrap.run(bootstrapper, loader, desc, file.toPath(), new File(server.pluginsFolder == null ? "plugins" : server.pluginsFolder, desc.getName()).toPath(), world);
                 }
                 JavaPlugin plugin = Class.forName(desc.getMain(), true, loader).asSubclass(JavaPlugin.class).getDeclaredConstructor().newInstance();
                 loadedPlugin = plugin;
+                if (bootstrap != null) bootstrap.handOver(plugin);
                 plugins.add(plugin); regionAware.put(plugin, aware); server.registerCommands(plugin); plugin.onLoad();
                 List<org.bukkit.permissions.Permission> declared = new ArrayList<>();
                 for (org.bukkit.permissions.Permission permission : desc.getPermissions()) {
@@ -193,7 +215,7 @@ final class FerritePluginManager extends PluginManagerStubs {
                 }
             }
             for (JavaPlugin plugin : List.copyOf(plugins)) {
-                try { plugin.setEnabled(true); }
+                try { plugin.setEnabled(true); if (plugin.isEnabled()) callEvent(new org.bukkit.event.server.PluginEnableEvent(plugin)); }
                 catch (Throwable failure) {
                     plugin.getLogger().log(java.util.logging.Level.SEVERE, "Error occurred while enabling " + plugin.getName(), failure);
                     try { plugin.setEnabled(false); } catch (Throwable ignored) { /* half-enabled */ }
@@ -209,10 +231,14 @@ final class FerritePluginManager extends PluginManagerStubs {
     public void disablePlugins() {
         for (int i = plugins.size() - 1; i >= 0; i--) {
             JavaPlugin plugin = plugins.get(i);
-            try { plugin.setEnabled(false); }
+            try {
+                if (plugin.isEnabled()) callEvent(new org.bukkit.event.server.PluginDisableEvent(plugin));
+                plugin.setEnabled(false);
+            }
             catch (Throwable e) { plugin.getLogger().log(java.util.logging.Level.SEVERE, "Plugin disable failed", e); }
             finally {
                 server.scheduler.cancelTasks(plugin); server.regionScheduler.cancelTasks(plugin); server.asyncScheduler.cancelTasks(plugin); server.entitySchedulers.cancelTasks(plugin);
+                server.getServicesManager().unregisterAll(plugin);
                 for (org.bukkit.permissions.Permission permission : declaredPermissions.getOrDefault(plugin, List.of())) removePermission(permission.getName());
             }
         }

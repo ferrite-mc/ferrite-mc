@@ -752,7 +752,7 @@ impl Player {
         }
         let width = menu.grid().len().isqrt();
         let Some(layout) = super::recipe_packets::recipe_of_display(p.display_id.0)
-            .and_then(|id| crafter().recipe_layout(id, width))
+            .and_then(|id| crafter().recipe_layout(&id, width))
         else {
             return;
         };

@@ -307,8 +307,18 @@ fn a_grindstone_follows_vanilla_compute_result() {
     assert_eq!(merged.damage(), 250 - (10 + 10 + 12));
     assert_eq!(merged.count, 1);
     // Different items, or a stack of two, produce nothing.
-    assert_eq!(grind(item("iron_sword", 1), item("diamond_sword", 1)).1, empty());
-    assert_eq!(grind(grind_item("iron_sword", &[("minecraft:sharpness", 1)]).copy_with_count(2), empty()).1, empty());
+    assert_eq!(
+        grind(item("iron_sword", 1), item("diamond_sword", 1)).1,
+        empty()
+    );
+    assert_eq!(
+        grind(
+            grind_item("iron_sword", &[("minecraft:sharpness", 1)]).copy_with_count(2),
+            empty()
+        )
+        .1,
+        empty()
+    );
     // Curses survive and set the repair cost they leave behind.
     let (_, cursed) = grind(
         grind_item(
@@ -317,17 +327,24 @@ fn a_grindstone_follows_vanilla_compute_result() {
         ),
         empty(),
     );
-    let Some(Component::Enchantments(left)) = cursed.effective_component(component_ids::ENCHANTMENTS)
+    let Some(Component::Enchantments(left)) =
+        cursed.effective_component(component_ids::ENCHANTMENTS)
     else {
         panic!("the curse stays on the sword");
     };
-    assert_eq!(left.levels.keys().collect::<Vec<_>>(), ["minecraft:binding_curse"]);
+    assert_eq!(
+        left.levels.keys().collect::<Vec<_>>(),
+        ["minecraft:binding_curse"]
+    );
     assert_eq!(
         cursed.effective_component(component_ids::REPAIR_COST),
         Some(Component::RepairCost(1))
     );
     // An enchanted book without curses turns back into a book.
-    let (_, book) = grind(grind_item("enchanted_book", &[("minecraft:sharpness", 2)]), empty());
+    let (_, book) = grind(
+        grind_item("enchanted_book", &[("minecraft:sharpness", 2)]),
+        empty(),
+    );
     assert_eq!(book.name(), Some("minecraft:book"));
 }
 
@@ -344,7 +361,10 @@ fn grindstone_experience_is_half_the_minimum_costs_rounded_up() {
     assert!(!result.is_empty());
     let mut p = Clicker::new(&mut f.inv, false, &StationCrafter);
     f.menu.clicked(&mut p, 2, 0, Pickup);
-    assert_eq!(p.block_xp, 7, "ceil((12 + 1) / 2) with the deterministic test roll of 0");
+    assert_eq!(
+        p.block_xp, 7,
+        "ceil((12 + 1) / 2) with the deterministic test roll of 0"
+    );
 }
 
 #[test]

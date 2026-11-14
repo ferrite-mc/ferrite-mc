@@ -24,8 +24,10 @@ import org.bukkit.plugin.Plugin;
  *
  * <p>The only plugin-owned lifecycle event this host can fire is {@code LifecycleEvents.COMMANDS}: it is fired once with
  * cause {@code INITIAL} after every plugin has been enabled and again with {@code RELOAD} on {@code Server#reloadData}.
- * The other event types the API declares are owned by {@code BootstrapContext} (tags, datapack discovery); the host does
- * not run {@code PluginBootstrap}, so nothing can ever fire them and they are not registrable.
+ * The other event types the API declares are owned by {@code BootstrapContext}: {@code DATAPACK_DISCOVERY} runs from
+ * {@link FerriteBootstrap}, a {@code COMMANDS} handler registered there is handed to this manager once the plugin exists
+ * ({@link #adopt}), and {@code TAGS} is refused (see {@link FerriteBootstrap}). A plugin-owned manager refuses the
+ * bootstrap-only ones: they could never fire after the bootstrap phase.
  *
  * <p>Handlers run ordered by monitor flag (monitors last), then priority (ascending), then registration order, across
  * all plugins. A handler that throws is logged and the next one still runs. Registration is only legal while
@@ -77,6 +79,17 @@ public final class FerriteLifecycleManager implements LifecycleEventManager<Plug
         var name = config.eventType().name();
         if (!COMMANDS.equals(name))
             throw new UnsupportedOperationException("Ferrite: lifecycle event '" + name + "' can never fire: it belongs to the plugin bootstrap phase, which the host does not run (only 'commands' is supported)");
+        registrations.add(new Registration(name, config.eventPriority(), config.isMonitorHandler(), SEQUENCE.incrementAndGet(), config.eventHandler()));
+    }
+
+    /**
+     * Takes over a {@code COMMANDS} handler the plugin's bootstrapper registered before the plugin existed. Paper keeps
+     * those in the same manager as the ones registered during {@code onEnable}, so ordering and removal on disable are
+     * shared; the enable window does not apply because bootstrap runs before it.
+     */
+    void adopt(Configuration config) {
+        var name = config.eventType().name();
+        if (!COMMANDS.equals(name)) throw new IllegalArgumentException("Ferrite: only 'commands' handlers move from the bootstrapper to the plugin, not '" + name + "'");
         registrations.add(new Registration(name, config.eventPriority(), config.isMonitorHandler(), SEQUENCE.incrementAndGet(), config.eventHandler()));
     }
 

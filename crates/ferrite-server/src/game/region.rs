@@ -9619,8 +9619,9 @@ impl Region {
                 .set_item_frames(&item_frame_outputs(&self.entities));
         }
         if self.redstone.has_chests() || self.players.values().any(|p| p.menus.open_at.is_some()) {
-            self.redstone
-                .set_chest_viewers(&trapped_chest_viewers(self.players.values().map(|p| &p.menus)));
+            self.redstone.set_chest_viewers(&trapped_chest_viewers(
+                self.players.values().map(|p| &p.menus),
+            ));
         }
         self.redstone.tick(&mut world, &[]);
         let actions = self.redstone.take_piston_actions(&world);
@@ -15096,7 +15097,11 @@ pub(crate) fn item_frame_outputs(
             _ => 0,
         };
         out.push((
-            [at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32],
+            [
+                at.x.floor() as i32,
+                at.y.floor() as i32,
+                at.z.floor() as i32,
+            ],
             facing,
             strength,
         ));
@@ -15506,7 +15511,13 @@ mod redstone_inputs_tests {
     use super::*;
     use ferrite_protocol::packets::play::{ItemStack as WireStack, MetaValue};
 
-    fn frame(store: &mut ferrite_entity::EntityStore, at: [f64; 3], spawn_data: i32, rotation: i32, filled: bool) {
+    fn frame(
+        store: &mut ferrite_entity::EntityStore,
+        at: [f64; 3],
+        spawn_data: i32,
+        rotation: i32,
+        filled: bool,
+    ) {
         let kind = ferrite_data::entity_props::by_name("minecraft:item_frame")
             .unwrap()
             .id;
@@ -15569,7 +15580,11 @@ mod redstone_inputs_tests {
             }));
             menus
         };
-        let viewers = [open("minecraft:trapped_chest"), open("minecraft:trapped_chest"), open("minecraft:chest")];
+        let viewers = [
+            open("minecraft:trapped_chest"),
+            open("minecraft:trapped_chest"),
+            open("minecraft:chest"),
+        ];
         let counts = trapped_chest_viewers(viewers.iter());
         assert_eq!(counts[&[0, 64, 0]], 2);
         assert_eq!(counts[&[1, 64, 0]], 2);
