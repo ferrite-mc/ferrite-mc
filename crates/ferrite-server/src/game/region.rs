@@ -3781,7 +3781,7 @@ impl Player {
     /// Vanilla `Entity.handleNetherPortal`/`ServerPlayer.changeDimension`: after four seconds
     /// in a portal block, find the paired dimension's portal (searching 128 blocks, creating
     /// a frame when none exists) and travel there.
-    fn tick_portal(&mut self) {
+    fn tick_portal(&mut self, gateway_blocked: bool) {
         self.portal_cooldown = self.portal_cooldown.saturating_sub(1);
         if self.survival.dead {
             self.portal_ticks = 0;
@@ -3844,6 +3844,11 @@ impl Player {
             return;
         }
         let gateway = inside.is_some_and(super::portal::is_end_gateway);
+        // Vanilla `TheEndGatewayBlockEntity.teleportEntity` refuses while the creation beam is
+        // still playing or the purple beam is cooling down.
+        if gateway && gateway_blocked {
+            return;
+        }
         if self.portal_pending.is_none() {
             self.portal_ticks += 1;
             // A gateway works at once; the portals make you wait.
@@ -6162,6 +6167,18 @@ impl Region {
                     let record = arrow::new_arrow(from, vel, damage, None, &mut self.rng);
                     self.entities.insert(record);
                 }
+                ai::MobEvent::LayEgg { at } => {
+                    // Vanilla `Chicken.spawnAtLocation(new ItemStack(Items.EGG))`.
+                    if let Some(stack) = ferrite_item::ItemStack::from_name("minecraft:egg") {
+                        let record = item::new_item_stack(
+                            at,
+                            ferrite_math::Vec3::new(0.0, 0.2, 0.0),
+                            &stack,
+                            &mut self.rng,
+                        );
+                        self.entities.insert(record);
+                    }
+                }
                 ai::MobEvent::Spit { from, direction } => {
                     let vel = ferrite_math::Vec3::new(
                         direction.x * 1.5,
@@ -6551,6 +6568,15 @@ impl Region {
             (at[0].div_euclid(16), at[2].div_euclid(16)),
             &packet(&event),
         );
+    }
+
+    /// Whether a gateway at `at` would take a player this tick. Vanilla refuses while the
+    /// creation beam plays and while the purple beam cools down; a gateway whose chunk has no
+    /// runtime clock yet is ready.
+    pub fn gateway_accepts_teleport(&self, at: [i32; 3]) -> bool {
+        self.gateway_beams
+            .get(&at)
+            .is_none_or(super::end_fight::GatewayBeam::accepts_teleport)
     }
 
     /// A player teleported through the gateway at `at`: start its purple beam unless one runs.
@@ -10961,7 +10987,12 @@ impl Region {
                 }
             };
             if updated {
-                p.tick_portal();
+                let gateway_blocked = !self.gateway_accepts_teleport([
+                    p.pos[0].floor() as i32,
+                    p.pos[1].floor() as i32,
+                    p.pos[2].floor() as i32,
+                ]);
+                p.tick_portal(gateway_blocked);
             }
             if updated {
                 p.survival_tick(&blocks, &rules);
@@ -12142,6 +12173,90 @@ mod tests {
         assert!(region.entities.flags(zombie).unwrap().has(Flags::REMOVED));
     }
 
+    #[test]
+    fn a_cross_region_target_survives_a_region_split_and_merge() {
+        let ctx = tick_context();
+        let player = Uuid::from_u128(0x1235);
+        let (outbound, _receiver) = OutboundSender::channel(4096);
+        ctx.tracking.lock().unwrap().insert(
+            player,
+            (
+                super::super::WorldId::Vanilla(super::super::Dimension::Overworld),
+                HashSet::new(),
+                outbound,
+            ),
+        );
+        ctx.positions
+            .lock()
+            .unwrap()
+            .insert(player, [129.0, 65.0, 0.5]);
+        let mut region = Region::default();
+        let zombie = region.entities.insert(mob::new_mob(
+            MobKind::Zombie,
+            ferrite_math::Vec3::new(127.0, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_mobs(&ctx, &blocks);
+        let zombie_uuid = region.entities.data(zombie).unwrap().uuid;
+        assert_eq!(
+            mob::state(&region.entities, zombie).unwrap().target,
+            Some(player)
+        );
+        // A split and a merge reinsert entities, so find the mob by UUID rather than by key.
+        let target_of = |entities: &ferrite_entity::EntityStore| -> Option<Uuid> {
+            entities.keys().iter().copied().find_map(|key| {
+                let data = entities.data(key)?;
+                if data.uuid != zombie_uuid {
+                    return None;
+                }
+                mob::state(entities, key).and_then(|state| state.target)
+            })
+        };
+
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(
+            region.entities.keys().is_empty(),
+            "the mob moved with its section"
+        );
+        taken.tick_mobs(&ctx, &blocks);
+        assert_eq!(
+            target_of(&taken.entities),
+            Some(player),
+            "the target is kept by the region that owns the mob"
+        );
+        region.merge(taken);
+        region.tick_mobs(&ctx, &blocks);
+        assert_eq!(
+            target_of(&region.entities),
+            Some(player),
+            "and survives the merge back"
+        );
+    }
+
+    #[test]
+    fn a_chicken_lay_egg_event_spawns_an_egg_item() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let chicken = region.entities.insert(mob::new_mob(
+            MobKind::Chicken,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, chicken)
+            .unwrap()
+            .egg_time = 1;
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_mobs(&ctx, &blocks);
+        assert_eq!(dropped_items(&region), ["minecraft:egg"]);
+    }
+
     /// A tick context whose signal receiver the test keeps.
     fn listening_context() -> (
         TickContext,
@@ -12948,6 +13063,26 @@ mod tests {
         // A second player stepping through while the beam runs does not start another.
         region.gateway_teleported(&ctx, at);
         assert!(block_events(&mut viewer).is_empty());
+    }
+
+    #[test]
+    fn a_gateway_refuses_teleports_while_its_beam_runs() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let at = [3, 75, 4];
+        assert!(
+            region.gateway_accepts_teleport(at),
+            "a fresh gateway is ready"
+        );
+        region.gateway_teleported(&ctx, at);
+        assert!(
+            !region.gateway_accepts_teleport(at),
+            "the purple beam blocks the next trip"
+        );
+        assert!(
+            region.gateway_accepts_teleport([4, 75, 4]),
+            "another gateway is unaffected"
+        );
     }
 
     #[test]

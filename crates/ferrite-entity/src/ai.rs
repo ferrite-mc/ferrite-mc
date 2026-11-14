@@ -50,6 +50,12 @@ pub const SKELETON_ARROW_DAMAGE: f32 = 2.0;
 pub const SKELETON_COOLDOWN: u16 = 40;
 /// `RangedBowAttackGoal` shoots every 20 ticks on Hard, every 40 otherwise.
 pub const SKELETON_COOLDOWN_HARD: u16 = 20;
+/// Vanilla `AbstractSkeleton.performRangedAttack`: `14 - difficulty * 4` inaccuracy. Normal and
+/// easy are not distinguished here, so both use Normal's 6; Hard uses 2.
+pub const SKELETON_INACCURACY: f64 = 6.0;
+pub const SKELETON_INACCURACY_HARD: f64 = 2.0;
+/// Vanilla baby zombies move 1.5x as fast (`Zombie.SPEED_MODIFIER_BABY`).
+pub const BABY_ZOMBIE_SPEED: f64 = 1.5;
 /// Ticks between melee hits.
 pub const MELEE_COOLDOWN: u16 = 20;
 /// How often a hostile mob recomputes its path.
@@ -375,6 +381,8 @@ pub enum MobEvent {
         direction: Vec3,
         damage: f32,
     },
+    /// An adult chicken laid an egg at `at`.
+    LayEgg { at: Vec3 },
     /// A lead stretched too far and snapped.
     LeashBroke { key: crate::EntityKey },
     /// A llama spits at a player.
@@ -586,6 +594,11 @@ pub fn tick_full(
     } else {
         SKELETON_COOLDOWN
     };
+    let bow_inaccuracy = if *hard {
+        SKELETON_INACCURACY_HARD
+    } else {
+        SKELETON_INACCURACY
+    };
     let mut events = Vec::new();
     let hostile_targets: std::borrow::Cow<'_, [Target]> = if untargetable.is_empty() {
         std::borrow::Cow::Borrowed(players)
@@ -613,6 +626,23 @@ pub fn tick_full(
         };
         if kind.is_animal() {
             crate::breed::tick_age(store, key);
+            // Vanilla `Chicken.aiStep`: an adult lays an egg every 6000 to 11999 ticks.
+            if kind == MobKind::Chicken {
+                let mut lay = false;
+                if let Some(state) = mob::state_mut(store, key)
+                    && state.age >= 0
+                {
+                    state.egg_time = state.egg_time.saturating_sub(1);
+                    if state.egg_time == 0 {
+                        state.egg_time =
+                            mob::CHICKEN_EGG_MIN + rng.next_int(mob::CHICKEN_EGG_SPAN) as u32;
+                        lay = true;
+                    }
+                }
+                if lay && let Some(at) = store.pos(key) {
+                    events.push(MobEvent::LayEgg { at });
+                }
+            }
             // Vanilla `Animal.aiStep`: hearts every half second while in love (event 18).
             if mob::state(store, key).is_some_and(|s| s.love > 0 && s.love % 10 == 0) {
                 events.push(MobEvent::Status { key, status: 18 });
@@ -740,7 +770,7 @@ pub fn tick_full(
                                 );
                                 events.push(MobEvent::Arrow {
                                     from,
-                                    direction: (to - from).normalize(),
+                                    direction: arrow_direction(from, to, bow_inaccuracy, rng),
                                     damage: SKELETON_ARROW_DAMAGE,
                                 });
                                 if let Some(state) = mob::state_mut(store, key) {
@@ -766,7 +796,7 @@ pub fn tick_full(
                             }
                         } else {
                             walking = follow_path(store, key, blocks, start, target.pos);
-                            speed = CHASE_ACCELERATION;
+                            speed = chase_speed(store, key);
                         }
                         // Enderman basics: blink to a nearby walkable spot now and then.
                         if kind == MobKind::Enderman && rng.next_int(400) == 0 {
@@ -1062,6 +1092,25 @@ const VILLAGER_SPEED: f64 = 0.8;
 
 fn panic_of(store: &EntityStore, key: crate::EntityKey) -> u16 {
     mob::state(store, key).map_or(0, |state| state.panic)
+}
+
+/// Chase acceleration for `key`: baby zombies move half again as fast as adults.
+fn chase_speed(store: &EntityStore, key: crate::EntityKey) -> f64 {
+    let baby =
+        mob::state(store, key).is_some_and(|state| state.kind == MobKind::Zombie && state.age < 0);
+    CHASE_ACCELERATION * if baby { BABY_ZOMBIE_SPEED } else { 1.0 }
+}
+
+/// Vanilla `Projectile.shoot`: the aim direction plus a Gaussian spread of
+/// `0.0075 * inaccuracy` on each axis.
+fn arrow_direction(from: Vec3, to: Vec3, inaccuracy: f64, rng: &mut Rng) -> Vec3 {
+    let aim = (to - from).normalize();
+    let spread = 0.0075 * inaccuracy;
+    aim + Vec3::new(
+        rng.next_gaussian() * spread,
+        rng.next_gaussian() * spread,
+        rng.next_gaussian() * spread,
+    )
 }
 
 /// Recomputes and follows the block path towards `target`, returning the yaw to walk along.
@@ -2290,6 +2339,94 @@ mod tests {
         assert!(
             (x - 0.5).abs() < 3.0,
             "strafing does not close the distance"
+        );
+    }
+
+    #[test]
+    fn an_adult_chicken_lays_an_egg_but_a_baby_does_not() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let chicken = store.insert(new_mob(
+            MobKind::Chicken,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        mob::state_mut(&mut store, chicken).unwrap().egg_time = 2;
+        let mut rng = Rng::new(2);
+        let mut laid = 0;
+        for _ in 0..2 {
+            laid += tick_with(&mut store, &world, &[], &mut rng)
+                .iter()
+                .filter(|event| matches!(event, MobEvent::LayEgg { .. }))
+                .count();
+        }
+        assert_eq!(laid, 1, "one egg when the timer runs out");
+        assert!(
+            mob::state(&store, chicken).unwrap().egg_time >= mob::CHICKEN_EGG_MIN,
+            "the timer restarts for the next egg"
+        );
+
+        let baby = store.insert(new_mob(
+            MobKind::Chicken,
+            Vec3::new(3.5, 64.0, 0.5),
+            &mut Rng::new(3),
+        ));
+        {
+            let state = mob::state_mut(&mut store, baby).unwrap();
+            state.age = -6000;
+            state.egg_time = 1;
+        }
+        let events = tick_with(&mut store, &world, &[], &mut rng);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, MobEvent::LayEgg { .. })),
+            "a baby chicken never lays"
+        );
+    }
+
+    #[test]
+    fn a_baby_zombie_chases_faster_than_an_adult() {
+        let mut store = EntityStore::default();
+        let adult = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(1),
+        ));
+        let baby = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(0.5, 64.0, 2.5),
+            &mut Rng::new(2),
+        ));
+        mob::state_mut(&mut store, baby).unwrap().age = -6000;
+        assert_eq!(chase_speed(&store, adult), CHASE_ACCELERATION);
+        assert!(
+            (chase_speed(&store, baby) - CHASE_ACCELERATION * BABY_ZOMBIE_SPEED).abs() < 1e-9,
+            "the baby gets the vanilla speed modifier"
+        );
+    }
+
+    #[test]
+    fn skeleton_arrows_spread_less_on_hard() {
+        let from = Vec3::new(0.5, 64.0, 0.5);
+        let to = Vec3::new(20.5, 65.62, 0.5);
+        let aim = (to - from).normalize();
+        let mean_deviation = |inaccuracy: f64, seed: u64| {
+            let mut rng = Rng::new(seed);
+            let mut total = 0.0;
+            let runs = 200;
+            for _ in 0..runs {
+                total += (arrow_direction(from, to, inaccuracy, &mut rng) - aim).length();
+            }
+            total / f64::from(runs)
+        };
+        let normal = mean_deviation(SKELETON_INACCURACY, 7);
+        let hard = mean_deviation(SKELETON_INACCURACY_HARD, 8);
+        assert!(normal > 0.001, "normal shots are not perfect: {normal}");
+        assert!(hard > 0.0, "hard shots still spread a little: {hard}");
+        assert!(
+            hard < normal * 0.6,
+            "hard is more accurate: normal {normal}, hard {hard}"
         );
     }
 

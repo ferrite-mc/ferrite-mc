@@ -610,6 +610,7 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             "DragonPhaseTicks".into(),
             Tag::Int(mob.dragon_phase_ticks as i32),
         );
+        c.insert("PerchFlames".into(), Tag::Int(i32::from(mob.perch_flames)));
         c.insert("Age".into(), Tag::Int(mob.age));
         if let Some(owner) = mob.owner {
             c.insert("Owner".into(), Tag::IntArray(uuid_words(owner)));
@@ -650,6 +651,9 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("Panic".into(), Tag::Short(mob.panic as i16));
         c.insert("Swell".into(), Tag::Short(mob.swell as i16));
         c.insert("BowTimer".into(), Tag::Short(mob.bow_timer as i16));
+        if mob.kind == MobKind::Chicken {
+            c.insert("EggLayTime".into(), Tag::Int(mob.egg_time as i32));
+        }
         if let Some(target) = mob.target {
             c.insert("Target".into(), Tag::IntArray(uuid_words(target)));
         }
@@ -772,6 +776,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                     _ => DragonPhase::Holding,
                 };
                 mob.dragon_phase_ticks = int(c, "DragonPhaseTicks").unwrap_or(0).max(0) as u32;
+                mob.perch_flames = int(c, "PerchFlames").unwrap_or(0).clamp(0, 255) as u8;
                 mob.wander_yaw = float(c, "WanderYaw").unwrap_or(0.0);
                 mob.moving = boolean(c, "Moving");
                 mob.attack_cooldown = int(c, "AttackCooldown")
@@ -780,6 +785,9 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.panic = int(c, "Panic").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
                 mob.swell = int(c, "Swell").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
                 mob.bow_timer = int(c, "BowTimer").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
+                mob.egg_time = int(c, "EggLayTime")
+                    .unwrap_or(ferrite_entity::mob::CHICKEN_EGG_MIN as i32)
+                    .max(0) as u32;
                 mob.target = uuid_field(c, "Target");
                 mob.age = int(c, "Age").unwrap_or(0);
                 mob.love = int(c, "InLove").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;

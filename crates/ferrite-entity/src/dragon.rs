@@ -164,11 +164,15 @@ pub const PERCH_SPOT: Vec3 = Vec3::new(0.0, 68.0, 0.0);
 pub const SCAN_IDLE_TICKS: u32 = 100;
 pub const SCAN_ATTACK_DELAY: u32 = 25;
 pub const SCAN_RANGE: f64 = 20.0;
+/// Vanilla's scan box is 20 blocks horizontally and 10 blocks vertically.
+pub const SCAN_RANGE_Y: f64 = 10.0;
 pub const ATTACK_TICKS: u32 = 40;
+/// One flaming phase lasts 200 ticks and creates a single cloud after a 10-tick warm-up.
+/// Vanilla then returns to scanning unless four flaming phases finished, in which case it takes
+/// off (`DragonSittingFlamingPhase` FLAME_DURATION, WARMUP_TIME and SITTING_FLAME_ATTACKS_COUNT).
 pub const FLAME_TICKS: u32 = 200;
-pub const FLAME_ATTACKS: u32 = 4;
-/// Ticks between the breath clouds of one flaming phase.
-pub const FLAME_INTERVAL: u32 = FLAME_TICKS / FLAME_ATTACKS;
+pub const FLAME_ATTACKS: u8 = 4;
+pub const FLAME_WARMUP_TICKS: u32 = 10;
 /// The distance to the circling path at which takeoff ends.
 pub const TAKEOFF_REACH: f64 = 4.0;
 /// Vanilla `DragonStrafePlayerPhase`: the dragon flies around the selected player and fires a
@@ -474,23 +478,31 @@ pub fn fly(
     rng: &mut Rng,
     events: &mut Vec<MobEvent>,
 ) {
-    let (age, mut phase, mut phase_ticks, mut attack_cooldown, mut bow_timer, saved_target) =
-        match mob::state_mut(store, key) {
-            Some(state) => {
-                state.wander_timer = state.wander_timer.wrapping_add(1);
-                state.attack_cooldown = state.attack_cooldown.saturating_sub(1);
-                state.bow_timer = state.bow_timer.saturating_sub(1);
-                (
-                    state.wander_timer,
-                    state.dragon_phase,
-                    state.dragon_phase_ticks.saturating_add(1),
-                    state.attack_cooldown,
-                    state.bow_timer,
-                    state.target,
-                )
-            }
-            None => return,
-        };
+    let (
+        age,
+        mut phase,
+        mut phase_ticks,
+        mut attack_cooldown,
+        mut bow_timer,
+        saved_target,
+        mut perch_flames,
+    ) = match mob::state_mut(store, key) {
+        Some(state) => {
+            state.wander_timer = state.wander_timer.wrapping_add(1);
+            state.attack_cooldown = state.attack_cooldown.saturating_sub(1);
+            state.bow_timer = state.bow_timer.saturating_sub(1);
+            (
+                state.wander_timer,
+                state.dragon_phase,
+                state.dragon_phase_ticks.saturating_add(1),
+                state.attack_cooldown,
+                state.bow_timer,
+                state.target,
+                state.perch_flames,
+            )
+        }
+        None => return,
+    };
     let previous = store.pos(key).unwrap_or_default();
     let selected = select_target(players, previous, saved_target);
     let charge_target = selected
@@ -512,7 +524,10 @@ pub fn fly(
             rng.next_int(bound) as u32,
             selected.is_some(),
         ) {
-            HoldingDecision::Land => phase = DragonPhase::LandingApproach,
+            HoldingDecision::Land => {
+                phase = DragonPhase::LandingApproach;
+                perch_flames = 0;
+            }
             HoldingDecision::Strafe => phase = DragonPhase::Strafe,
             HoldingDecision::Hold => {}
         }
@@ -587,9 +602,12 @@ pub fn fly(
         // Scanning: a player in range for more than `SCAN_ATTACK_DELAY` ticks starts the attack;
         // with nobody near, the dragon gives up after `SCAN_IDLE_TICKS`.
         DragonPhase::Perched => {
-            let near = players
-                .iter()
-                .any(|target| target.pos.distance_to_sqr(pos) <= SCAN_RANGE * SCAN_RANGE);
+            let near = players.iter().any(|target| {
+                let dx = target.pos.x - pos.x;
+                let dz = target.pos.z - pos.z;
+                dx * dx + dz * dz <= SCAN_RANGE * SCAN_RANGE
+                    && (target.pos.y - pos.y).abs() <= SCAN_RANGE_Y
+            });
             if near && phase_ticks > SCAN_ATTACK_DELAY {
                 phase = DragonPhase::PerchAttacking;
                 phase_ticks = 0;
@@ -601,15 +619,22 @@ pub fn fly(
         DragonPhase::PerchAttacking if phase_ticks >= ATTACK_TICKS => {
             phase = DragonPhase::PerchFlaming;
             phase_ticks = 0;
+            // `DragonSittingFlamingPhase.begin` counts the flaming phase.
+            perch_flames = perch_flames.saturating_add(1);
         }
         DragonPhase::PerchFlaming => {
-            if phase_ticks.is_multiple_of(FLAME_INTERVAL) {
+            if phase_ticks == FLAME_WARMUP_TICKS {
                 events.push(MobEvent::Breath {
                     pos: Vec3::new(pos.x, PERCH_SPOT.y - 3.0, pos.z),
                 });
             }
             if phase_ticks >= FLAME_TICKS {
-                phase = DragonPhase::Perched;
+                // Four flaming phases end the perch; fewer go back to scanning.
+                phase = if perch_flames >= FLAME_ATTACKS {
+                    DragonPhase::Takeoff
+                } else {
+                    DragonPhase::Perched
+                };
                 phase_ticks = 0;
             }
         }
@@ -675,6 +700,7 @@ pub fn fly(
         state.bow_timer = bow_timer;
         state.dragon_phase = phase;
         state.dragon_phase_ticks = phase_ticks;
+        state.perch_flames = perch_flames;
     }
 }
 
@@ -1122,23 +1148,56 @@ mod tests {
     }
 
     #[test]
-    fn flaming_breathes_four_clouds_on_every_50th_tick_then_scans_again() {
+    fn a_flaming_phase_breathes_once_after_ten_ticks_then_scans_again() {
         let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
+        mob::state_mut(&mut store, key).unwrap().perch_flames = 1;
         let breaths = run(&mut store, key, &mut rng, &near_player(), FLAME_TICKS - 1);
         assert_eq!(phase_of(&store, key), DragonPhase::PerchFlaming, "tick 199");
-        let last = run(&mut store, key, &mut rng, &near_player(), 1);
+        run(&mut store, key, &mut rng, &near_player(), 1);
         assert_eq!(
             phase_of(&store, key),
             DragonPhase::Perched,
             "tick 200 scans again"
         );
         assert_eq!(mob::state(&store, key).unwrap().dragon_phase_ticks, 0);
-        let all: Vec<u32> = breaths
-            .into_iter()
-            .chain(last.into_iter().map(|_| 200))
-            .collect();
-        assert_eq!(all, vec![50, 100, 150, 200]);
-        assert_eq!(all.len() as u32, FLAME_ATTACKS);
+        assert_eq!(breaths, vec![FLAME_WARMUP_TICKS]);
+        assert_eq!(
+            mob::state(&store, key).unwrap().perch_flames,
+            1,
+            "the flaming phase is counted"
+        );
+    }
+
+    #[test]
+    fn four_flaming_phases_end_the_perch_with_takeoff() {
+        let (mut store, key, mut rng) = perched(DragonPhase::PerchAttacking);
+        mob::state_mut(&mut store, key).unwrap().perch_flames = FLAME_ATTACKS - 1;
+        run(&mut store, key, &mut rng, &near_player(), ATTACK_TICKS);
+        assert_eq!(phase_of(&store, key), DragonPhase::PerchFlaming);
+        assert_eq!(
+            mob::state(&store, key).unwrap().perch_flames,
+            FLAME_ATTACKS,
+            "the fourth flaming phase is counted"
+        );
+        run(&mut store, key, &mut rng, &near_player(), FLAME_TICKS);
+        assert_eq!(
+            phase_of(&store, key),
+            DragonPhase::Takeoff,
+            "four flames end the perch"
+        );
+    }
+
+    #[test]
+    fn a_player_above_the_scan_box_does_not_start_an_attack() {
+        let above = [Target {
+            uuid: uuid::Uuid::from_u128(33),
+            pos: PERCH_SPOT + Vec3::new(0.0, SCAN_RANGE_Y + 1.0, 0.0),
+        }];
+        let (mut store, key, mut rng) = perched(DragonPhase::Perched);
+        run(&mut store, key, &mut rng, &above, SCAN_IDLE_TICKS - 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::Perched);
+        run(&mut store, key, &mut rng, &above, 1);
+        assert_eq!(phase_of(&store, key), DragonPhase::Takeoff);
     }
 
     #[test]

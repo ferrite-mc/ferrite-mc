@@ -51,6 +51,13 @@ impl Rng {
     pub fn next_int(&mut self, bound: i32) -> i32 {
         (self.next_u64() % bound.max(1) as u64) as i32
     }
+
+    /// Standard normal, by the Box-Muller transform (vanilla `Random.nextGaussian`).
+    pub fn next_gaussian(&mut self) -> f64 {
+        let u1 = self.next_f64().max(f64::MIN_POSITIVE);
+        let u2 = self.next_f64();
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
 }
 
 #[cfg(test)]

@@ -31,11 +31,14 @@ What works, how it is built, and what is still missing.
     a unit test.
   - The landing cycle is `Holding` -> `LandingApproach` -> perched -> `Takeoff` -> `Holding`.
     The perch has three subphases (`DragonPhase::Perched` is the scanning one, so older saves
-    still load): **scanning** takes off after 100 ticks when no player is within 20 blocks, and
-    starts the attack once a player has been in range for more than 25 ticks; **attacking** roars
-    for 40 ticks; **flaming** lasts 200 ticks with four breath clouds, on ticks 50, 100, 150 and
-    200, then goes back to scanning. Every transition tick is pinned by a unit test in
-    `dragon.rs`, and each subphase and its timer survive a save.
+    still load): **scanning** checks a 20×10 block box, takes off after 100 ticks when no player
+    is inside it, and starts the attack once a player has been in it for more than 25 ticks;
+    **attacking** roars for 40 ticks; **flaming** lasts 200 ticks, creates one breath cloud on
+    tick 10, then scans again. After four flaming phases the dragon takes off instead. These
+    timings and counts were checked against `DragonSittingScanningPhase`,
+    `DragonSittingAttackingPhase` and `DragonSittingFlamingPhase` in the 26.3 jar. Every
+    transition tick is pinned by a unit test in `dragon.rs`, and each subphase, its timer and the
+    flame count survive a save.
   - On death the podium turns into the exit portal, a dragon egg appears on the pillar on the
     first kill only, and 12000 experience drops.
 - **Respawning the dragon.** Four end crystals in the cells three blocks from the centre start
@@ -100,21 +103,22 @@ What works, how it is built, and what is still missing.
 
 ## Remaining gaps
 
-- **Perched subphase timings are from memory.** Scanning 100/25 ticks, attacking 40, flaming
-  200 with four clouds, and the 20 block scan range were written from recollection of vanilla's
-  sitting phases and are not checked against the 26.3 jar. Vanilla's scanning dragon may also
-  charge a player when it gives up instead of always taking off, and its attack turns toward the
-  player; neither is modelled. The dragon smashes every block in its body except
+- **Perched gaps.** The timings above are jar-checked, but vanilla's scanning dragon can charge
+  a player within 150 blocks when it gives up instead of always taking off, and its attack turns
+  toward the player; neither is modelled. The breath cloud is placed below the perch rather than
+  at the head's aim point. The dragon smashes every block in its body except
   `#minecraft:dragon_immune`.
-- **Gateway beam.** The purple beam is not gated like vanilla: vanilla refuses to teleport an
-  entity while the beam cooldown runs, here a second player can still step through. The beam
-  clock restarts from the stored age after a restart and is idle when nobody is in the End. The
-  event id and the 2400 and 40 tick values are from memory of `TheEndGatewayBlockEntity`; the
-  client rendering of the purple beam is unverified (see below).
+- **Gateway beam.** A gateway now refuses a teleport while its 40-tick purple-beam cooldown
+  runs, like `EndGatewayBlock.entityInside`; the creation beam does not block it. The 200-tick
+  spawn, 40-tick cooldown and 2400-tick attention interval were checked against
+  `TheEndGatewayBlockEntity` in the 26.3 jar. The runtime clock still restarts from the stored
+  age after a restart and is idle when nobody is in the End, and the client rendering of the
+  purple beam is unverified (see below).
 - **Outer islands.** A gateway landing searches up to 16 blocks around the point 1024 blocks out
   for the nearest loaded column with ground and two air above; an all-void 3x3 chunk area cancels
-  the trip instead of dropping the player into the void. The search radius is smaller than
-  vanilla's.
+  the trip instead of dropping the player into the void. Vanilla `findExitPosition` uses
+  `findTallestBlock(..., 5, ...)`, so Ferrite's 16-block radius is larger, not smaller as this
+  file previously said.
 - **Guarded-spike choice.** The cage pair follows the two shortest loaded spike tops. On a host
   terrain without vanilla's spike podiums the choice can differ from the generated world's
   shuffled sizes.
