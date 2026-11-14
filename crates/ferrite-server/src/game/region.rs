@@ -11488,6 +11488,27 @@ impl Region {
 
     /// Runs the entity tracker against this region's players.
     fn track_entities(&mut self, ctx: &TickContext) {
+        // Vanilla sends a vehicle's passenger list in `ServerEntity.sendPairingData`. The ride
+        // table is keyed by UUID; publish the network ids on the tracker state before pairing.
+        let mut ids: HashMap<Uuid, i32> = self
+            .players
+            .iter()
+            .map(|(uuid, player)| (*uuid, player.entity))
+            .collect();
+        let keys = self.entities.keys().to_vec();
+        for &key in &keys {
+            if let Some(data) = self.entities.data(key) {
+                ids.insert(data.uuid, data.id);
+            }
+        }
+        for &key in &keys {
+            if let Some(data) = self.entities.data_mut(key) {
+                data.tracker.passengers = super::ride::passengers_of(data.uuid)
+                    .into_iter()
+                    .filter_map(|rider| ids.get(&rider).copied())
+                    .collect();
+            }
+        }
         let viewers: Vec<_> = self
             .players
             .values()

@@ -24,7 +24,8 @@ use ferrite_protocol::{
     packets::play::{
         AddEntity, AttributeSnapshot, EntityHeadRotation, EntityMove, EntityMoveRotation,
         EntityRotation, EntityTeleport, RemoveEntities, SetEntityData, SetEntityLink,
-        SetEntityMotion, SetEquipment, TeleportEntity, UpdateAttributes, UpdateMobEffect,
+        SetEntityMotion, SetEquipment, SetPassengers, TeleportEntity, UpdateAttributes,
+        UpdateMobEffect,
     },
     types::LpVec3,
 };
@@ -121,6 +122,9 @@ pub struct TrackerState {
     tick_count: u32,
     teleport_delay: u32,
     was_on_ground: bool,
+    /// Passenger network ids published by the owning region for `sendPairingData`. The ride
+    /// table is keyed by UUID; the region resolves these each tick.
+    pub passengers: Vec<i32>,
 }
 
 impl TrackerState {
@@ -356,6 +360,21 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                                 }),
                             );
                         }
+                    }
+                    if !data.tracker.passengers.is_empty() {
+                        sink(
+                            viewer.key,
+                            &encode(&SetPassengers {
+                                vehicle: VarInt(data.id),
+                                passengers: data
+                                    .tracker
+                                    .passengers
+                                    .iter()
+                                    .copied()
+                                    .map(VarInt)
+                                    .collect(),
+                            }),
+                        );
                     }
                     started.push(viewer.key);
                 }
@@ -793,6 +812,32 @@ mod tests {
             tick(&mut store, &viewers)
                 .iter()
                 .all(|p| p.1 != UpdateAttributes::ID)
+        );
+    }
+
+    #[test]
+    fn a_vehicle_sends_its_passengers_when_a_viewer_starts_tracking() {
+        let mut store = EntityStore::default();
+        let mut vehicle = crate::mob::new_mob(
+            crate::mob::MobKind::Zombie,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut crate::Rng::new(1),
+        );
+        let vehicle_id = vehicle.data.id;
+        vehicle.data.tracker.passengers = vec![77];
+        store.insert(vehicle);
+        let chunks = HashSet::from([(0, 0)]);
+        let viewers = [viewer((Uuid::from_u128(1), 0), 8.0, 8.0, 10, &chunks)];
+        let packets = tick(&mut store, &viewers);
+        let packet = packets
+            .iter()
+            .find(|p| p.1 == SetPassengers::ID)
+            .expect("a paired vehicle sends its passengers");
+        let decoded = SetPassengers::decode(&mut packet.2.as_slice()).unwrap();
+        assert_eq!(decoded.vehicle.0, vehicle_id);
+        assert_eq!(
+            decoded.passengers.iter().map(|id| id.0).collect::<Vec<_>>(),
+            vec![77]
         );
     }
 

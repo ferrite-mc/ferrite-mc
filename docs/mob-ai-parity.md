@@ -66,7 +66,7 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 | chicken/cow/pig | no chicken jockey, no pig riding, milking only through the existing interaction path | `Chicken` jockey and `Pig` saddle goals are not modelled |
 | sheep | warm/cold biome colours, plugin shear and dye events | `SheepColorSpawnRules`, `SheepDyeWoolEvent` | absent: no biome at spawn in the entity crate; plugin events are out of scope |
 | all | pathfinding is a block-grid A* with a 32-node cap, not `GroundPathNavigation` | long detours, doors and water are approximated |
-| attributes | default attributes now sent when a viewer starts tracking; equipment/passengers on pairing still incomplete | vanilla `ServerEntity.sendPairingData` sends attributes, equipment and passengers |
+| attributes/equipment/passengers | default attributes, horse saddle/body equipment and vehicle passenger lists are sent when a viewer starts tracking; a generic mob equipment model and the enderman carried-block metadata are still absent | vanilla `ServerEntity.sendPairingData` sends attributes, equipment, passengers and the leash |
 | client | no real 26.3 client was used | visuals, animations and sounds are unverified |
 
 ## Fixed in this lane (2026-11-14)
@@ -75,6 +75,10 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 - Skeleton shot spread, Normal/Hard inaccuracy.
 - Baby zombie chase speed.
 - Living-entity default attributes on tracking start (including a horse's rolled speed/jump).
+- `ServerEntity.sendPairingData` now also sends the horse saddle/body equipment and a vehicle's passenger
+  list; the region publishes passenger network ids from the ride table each tick. Test
+  `a_vehicle_sends_its_passengers_when_a_viewer_starts_tracking`. A generic equipment model (a skeleton's
+  bow, armour on other mobs) and the enderman carried-block wire value remain open; no client rendering is claimed.
 - End gateway teleport refusal while the purple beam cools down; the 200/40/2400 constants
   were confirmed from `TheEndGatewayBlockEntity` in the jar.
 - Dragon perched timings confirmed from the jar and corrected: scan box 20×10, attack 40,
