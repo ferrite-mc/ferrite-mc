@@ -4,6 +4,11 @@ import java.util.function.Consumer;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 final class FerriteGlobalScheduler implements GlobalRegionScheduler {
+    /** Paper's global scheduler refuses a disabled plugin, including one inside its own {@code onDisable}. */
+    private static void requireEnabled(Plugin plugin) {
+        java.util.Objects.requireNonNull(plugin, "Plugin cannot be null");
+        if (!plugin.isEnabled()) throw new org.bukkit.plugin.IllegalPluginAccessException("Plugin attempted to register task while disabled");
+    }
     private final FerriteScheduler scheduler;
     FerriteGlobalScheduler(FerriteScheduler scheduler) { this.scheduler = scheduler; }
     private final class Task implements ScheduledTask {
@@ -19,6 +24,7 @@ final class FerriteGlobalScheduler implements GlobalRegionScheduler {
         public ExecutionState getExecutionState() { return delegate.isCancelled() && !finished ? ExecutionState.CANCELLED : finished ? ExecutionState.FINISHED : ExecutionState.IDLE; }
     }
     private ScheduledTask schedule(Plugin plugin, Consumer<ScheduledTask> action, long delay, long period) {
+        requireEnabled(plugin);
         Task task = new Task(plugin, period != 0);
         task.delegate = period == 0 ? scheduler.runTaskLater(plugin, () -> { action.accept(task); task.finished = true; }, delay) : scheduler.runTaskTimer(plugin, () -> action.accept(task), delay, period);
         return task;
