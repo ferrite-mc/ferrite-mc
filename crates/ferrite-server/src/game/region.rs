@@ -1147,6 +1147,8 @@ pub struct Player {
     pub eye_throws: Vec<[f64; 3]>,
     /// A plugin asked for a fishing bobber (`launchProjectile(FishHook)`).
     pub bobber_cast: Option<Option<Uuid>>,
+    /// Vanilla `Player.enchantmentSeed` (`XpSeed`): fixes the enchanting table's offers until the player enchants.
+    pub enchant_seed: i32,
     /// Cells where this player placed end crystals this tick.
     pub crystals: Vec<[i32; 3]>,
     /// Fire this player lit this tick; the region schedules `FireBlock` ticks for it.
@@ -9319,6 +9321,50 @@ impl Region {
         }
     }
 
+    /// Vanilla `ConcretePowderBlock.updateShape`/`getStateForPlacement`: powder that touches
+    /// water (or sits in it) becomes concrete. Checks the changed blocks and their neighbors.
+    fn solidify_powder(&mut self, ctx: &TickContext, changed: &[[i32; 3]]) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let block = |pos: [i32; 3]| {
+            source
+                .block(pos[0], pos[1], pos[2])
+                .and_then(|s| u16::try_from(s).ok())
+        };
+        let mut hardened = Vec::new();
+        for &pos in changed {
+            for (dx, dy, dz) in [
+                (0, 0, 0),
+                (1, 0, 0),
+                (-1, 0, 0),
+                (0, 1, 0),
+                (0, -1, 0),
+                (0, 0, 1),
+                (0, 0, -1),
+            ] {
+                let target = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
+                if !self.held_chunks.contains_key(&ChunkPos(
+                    target[0].div_euclid(16),
+                    target[2].div_euclid(16),
+                )) {
+                    continue;
+                }
+                let Some(state) = block(target) else {
+                    continue;
+                };
+                if let Some(concrete) = super::gravity::solidified(state, target, block) {
+                    hardened.push((target, concrete));
+                }
+            }
+        }
+        hardened.sort_unstable();
+        hardened.dedup();
+        if !hardened.is_empty() {
+            self.place_blocks(ctx, &hardened);
+        }
+    }
+
     /// Runs due gravity checks, then the neighbor updates of the blocks they removed.
     fn tick_gravity(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
@@ -9540,6 +9586,24 @@ impl Region {
         }
         self.moving_pistons.advance();
         self.redstone.blocks_changed(&mut world, changed);
+        if self.redstone.has_plates() || !self.entities.keys().is_empty() {
+            let occupants = self
+                .entities
+                .keys()
+                .iter()
+                .filter_map(|&key| {
+                    let at = self.entities.pos(key)?;
+                    let data = self.entities.data(key)?;
+                    Some(super::redstone::Occupant {
+                        pos: [at.x, at.y, at.z],
+                        half: data.width / 2.0,
+                        height: data.height,
+                        living: data.mob.is_some(),
+                    })
+                })
+                .collect();
+            self.redstone.set_occupants(occupants);
+        }
         self.redstone.tick(&mut world, &players);
         let actions = self.redstone.take_piston_actions(&world);
         let mut piston_changes = Vec::new();
@@ -10875,9 +10939,11 @@ impl Region {
             }
             changed.extend(fire_changed);
         }
+        let remote = std::mem::take(&mut self.remote_changes);
+        self.solidify_powder(ctx, &changed);
+        self.solidify_powder(ctx, &remote);
         if let Some(source) = ctx.source.as_deref() {
             self.schedule_gravity(source, &changed);
-            let remote = std::mem::take(&mut self.remote_changes);
             self.schedule_gravity(source, &remote);
         }
         stage!("gravity-redstone");

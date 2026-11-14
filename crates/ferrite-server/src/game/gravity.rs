@@ -34,7 +34,60 @@ pub fn is_gravity(state: u16) -> bool {
             | "anvil"
             | "chipped_anvil"
             | "damaged_anvil"
+            | "dragon_egg"
     ) || name.ends_with("_concrete_powder")
+}
+
+/// Vanilla `ConcretePowderBlock.canSolidify`: the state holds water.
+fn holds_water(state: u16) -> bool {
+    ferrite_fluid::fluid_state(u32::from(state)).kind == ferrite_fluid::FluidKind::Water
+}
+
+/// The concrete a powder block at `at` turns into, vanilla `ConcretePowderBlock.shouldSolidify`:
+/// the block itself holds water, or a side or the top touches water that does not sit behind a
+/// sturdy face (the underside only counts when the powder's own cell is wet).
+pub fn solidified(
+    state: u16,
+    at: [i32; 3],
+    block: impl Fn([i32; 3]) -> Option<u16>,
+) -> Option<u16> {
+    use ferrite_math::Direction;
+    let (name, _) = ferrite_data::blocks::state(state)?;
+    let concrete = name.strip_suffix("_powder")?;
+    let target = ferrite_data::blocks::default_state(concrete)?;
+    let own_wet = holds_water(state);
+    let wet = own_wet
+        || [
+            Direction::West,
+            Direction::East,
+            Direction::Down,
+            Direction::Up,
+            Direction::North,
+            Direction::South,
+        ]
+        .into_iter()
+        .any(|direction| {
+            if direction == Direction::Down && !own_wet {
+                return false;
+            }
+            let (dx, dy, dz) = direction.step();
+            let Some(neighbor) = block([at[0] + dx, at[1] + dy, at[2] + dz]) else {
+                return false;
+            };
+            if !holds_water(neighbor) {
+                return false;
+            }
+            let face = match direction.opposite() {
+                Direction::West => 0,
+                Direction::East => 1,
+                Direction::Down => 2,
+                Direction::Up => 3,
+                Direction::North => 4,
+                Direction::South => 5,
+            };
+            ferrite_data::block_props::face_occlusion(neighbor, face).is_empty()
+        });
+    wet.then_some(target)
 }
 
 /// Vanilla `FallingBlock.isFree`: `isAir() || is(FIRE) || liquid() || canBeReplaced()`.
@@ -189,6 +242,7 @@ mod tests {
             "damaged_anvil",
             "white_concrete_powder",
             "black_concrete_powder",
+            "dragon_egg",
         ] {
             assert!(is_gravity(state(name)), "{name}");
         }
@@ -200,6 +254,40 @@ mod tests {
         assert!(is_free(Some(state("fire"))));
         assert!(!is_free(Some(state("stone"))));
         assert!(!is_free(None));
+    }
+
+    #[test]
+    fn concrete_powder_solidifies_beside_water_but_not_behind_a_sturdy_face() {
+        let powder = state("red_concrete_powder");
+        let at = [0, 64, 0];
+        let air = state("air");
+        let water = state("water");
+        let stone = state("stone");
+        let world = |wet: Option<[i32; 3]>| {
+            move |pos: [i32; 3]| Some(if Some(pos) == wet { water } else { air })
+        };
+        let concrete = ferrite_data::blocks::default_state("red_concrete").unwrap();
+        assert_eq!(
+            solidified(powder, at, world(None)),
+            None,
+            "dry powder stays"
+        );
+        assert_eq!(
+            solidified(powder, at, world(Some([1, 64, 0]))),
+            Some(concrete)
+        );
+        assert_eq!(
+            solidified(powder, at, world(Some([0, 65, 0]))),
+            Some(concrete)
+        );
+        assert_eq!(
+            solidified(powder, at, world(Some([0, 63, 0]))),
+            None,
+            "water under dry powder does not count"
+        );
+        assert_eq!(solidified(stone, at, world(Some([1, 64, 0]))), None);
+        // Waterlogged powder cannot exist, but a wet cell is a wet cell.
+        assert_eq!(solidified(powder, at, |_| Some(stone)), None);
     }
 
     /// Vanilla `isFree` includes `canBeReplaced()`: sand falls through grass and snow layers.

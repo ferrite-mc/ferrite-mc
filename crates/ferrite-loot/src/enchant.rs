@@ -129,6 +129,26 @@ fn candidates<'a>(data: &'a GameData, options: &Option<Vec<String>>) -> Vec<&'a 
         .collect()
 }
 
+/// `EnchantmentHelper.selectEnchantment` over the `#minecraft:in_enchanting_table` enchantments
+/// (what an enchanting table offers): `(enchantment id, level)` pairs, empty when none apply.
+pub(crate) fn for_table(
+    data: &GameData,
+    item: &str,
+    enchantability: i32,
+    levels: i32,
+    rng: &mut impl Rng,
+) -> Vec<(String, i32)> {
+    let options = Some(data.resolve_ids(
+        "enchantment",
+        &serde_json::Value::String("#minecraft:in_enchanting_table".into()),
+    ));
+    let candidates = candidates(data, &options);
+    select(rng, enchantability, levels, item, &candidates)
+        .into_iter()
+        .map(|(enchantment, level)| (enchantment.id.clone(), level))
+        .collect()
+}
+
 /// `enchant_with_levels`: enchants as the enchanting table would at `levels`.
 pub(crate) fn with_levels(
     stack: &mut LootStack,

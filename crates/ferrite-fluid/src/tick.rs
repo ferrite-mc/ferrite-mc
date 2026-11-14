@@ -50,8 +50,19 @@ pub struct FluidTicks {
     seq: u64,
     queue: BinaryHeap<Reverse<(u64, u64, Position)>>,
     pending: HashMap<Position, (u64, u64)>,
+    /// State of the generator behind `LavaFluid.getSpreadDelay`'s one-in-four roll.
+    rolls: u64,
 }
 impl FluidTicks {
+    /// `RandomSource.nextInt(4)`: a splitmix64 step, since only the odds matter here.
+    fn roll_four(&mut self) -> u64 {
+        self.rolls = self.rolls.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rolls;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)) % 4
+    }
+
     pub fn schedule(&mut self, pos: Position, delay: u64) {
         let due = self.now.saturating_add(delay);
         if self.pending.contains_key(&pos) {
@@ -129,6 +140,30 @@ impl FluidTicks {
             }
         }
     }
+    /// Whether `LavaFluid.getSpreadDelay` stretches the delay: both states hold lava, neither is
+    /// falling, the new level is higher, and the one-in-four roll misses.
+    fn lava_grew(
+        &mut self,
+        world: &impl FluidWorld,
+        pos: Position,
+        old: FluidState,
+        new: FluidState,
+    ) -> bool {
+        let both_lava = old.kind == FluidKind::Lava && new.kind == FluidKind::Lava;
+        if !both_lava || old.falling || new.falling {
+            return false;
+        }
+        // `FluidState.getHeight`: a full block when the same fluid is above, else amount / 9.
+        let above = offset(pos, (0, 1, 0)).map(|up| fluid_state(block(world, up)).kind);
+        let height = |state: FluidState| {
+            if above == Some(state.kind) {
+                1.0
+            } else {
+                f32::from(state.amount) / 9.0
+            }
+        };
+        height(new) > height(old) && self.roll_four() != 0
+    }
     fn put(&mut self, world: &mut impl FluidWorld, pos: Position, state: FluidState) {
         let old = block(world, pos);
         // `SimpleWaterloggedBlock.placeLiquid` accepts source water only.
@@ -175,7 +210,15 @@ impl FluidTicks {
                 world.lava_conversion(),
             );
             if next != current {
+                let grew = self.lava_grew(world, pos, current, next);
                 self.put(world, pos, next);
+                if grew {
+                    // `LavaFluid.getSpreadDelay`: a rising lava level reacts four times slower
+                    // three times out of four.
+                    self.pending.remove(&pos);
+                    let slow = u64::from(tick_delay(FluidKind::Lava, world.ultrawarm())) * 4;
+                    self.schedule(pos, slow);
+                }
                 current = next;
             }
         }
@@ -380,5 +423,20 @@ impl FluidTicks {
             }
         }
         best
+    }
+}
+
+#[cfg(test)]
+mod lava_delay_tests {
+    use super::*;
+
+    #[test]
+    fn the_one_in_four_roll_covers_all_four_outcomes() {
+        let mut ticks = FluidTicks::default();
+        let mut seen = [0u32; 4];
+        for _ in 0..4000 {
+            seen[ticks.roll_four() as usize] += 1;
+        }
+        assert!(seen.iter().all(|&n| n > 800), "{seen:?}");
     }
 }

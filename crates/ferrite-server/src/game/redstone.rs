@@ -287,6 +287,9 @@ fn direct_signal(state: u16, analog: Option<u8>) -> u8 {
         }
         Some("comparator") => analog.unwrap_or(0),
         Some("target" | "daylight_detector") => property_u8(state, "power").unwrap_or(0),
+        Some("light_weighted_pressure_plate" | "heavy_weighted_pressure_plate") => {
+            property_u8(state, "power").unwrap_or(0)
+        }
         Some("redstone_wire") => property_u8(state, "power").unwrap_or(0),
         Some(name)
             if (name.ends_with("_button") || name.ends_with("_pressure_plate"))
@@ -537,8 +540,52 @@ enum Kind {
 }
 
 /// One region's redstone state: scheduled ticks, dirty blocks and the wire work list.
+/// Something standing on a pressure plate (vanilla `BasePressurePlateBlock.getEntityCount`
+/// counts entities whose box meets the plate's touch box).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Occupant {
+    /// Feet position.
+    pub pos: [f64; 3],
+    /// Half the box width, and its height.
+    pub half: f64,
+    pub height: f64,
+    /// A `LivingEntity` (stone plates ignore everything else).
+    pub living: bool,
+}
+
+impl Occupant {
+    /// A player's box: 0.6 wide, 1.8 tall.
+    pub fn player(pos: [f64; 3]) -> Self {
+        Self {
+            pos,
+            half: 0.3,
+            height: 1.8,
+            living: true,
+        }
+    }
+
+    /// `BasePressurePlateBlock.TOUCH_AABB` (14 px wide, 4 px tall) moved to `plate`.
+    fn touches(&self, plate: [i32; 3]) -> bool {
+        let (px, py, pz) = (
+            f64::from(plate[0]),
+            f64::from(plate[1]),
+            f64::from(plate[2]),
+        );
+        self.pos[0] + self.half > px + 0.0625
+            && self.pos[0] - self.half < px + 0.9375
+            && self.pos[2] + self.half > pz + 0.0625
+            && self.pos[2] - self.half < pz + 0.9375
+            && self.pos[1] + self.height > py
+            && self.pos[1] < py + 0.25
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Redstone {
+    /// Entities other than players this tick (set by the region before [`Redstone::tick`]).
+    occupants: Vec<Occupant>,
+    /// When a pressed plate looks again (`getPressedTime` after the last check).
+    plate_due: HashMap<[i32; 3], u64>,
     clock: u64,
     scheduled: HashMap<([i32; 3], Kind), u64>,
     dirty: VecDeque<[i32; 3]>,
@@ -610,7 +657,12 @@ impl Redstone {
         self.clock = self.clock.wrapping_add(1);
         // `BasePressurePlateBlock.entityInside`: plates loaded from disk are found from the
         // player's feet block, not only when a neighbour changes.
-        for player in players {
+        let standing: Vec<[f64; 3]> = players
+            .iter()
+            .copied()
+            .chain(self.occupants.iter().map(|o| o.pos))
+            .collect();
+        for player in &standing {
             for dy in [0.0, -1.0] {
                 let pos = [
                     player[0].floor() as i32,
@@ -1130,7 +1182,15 @@ impl Redstone {
         }
     }
 
+    /// Vanilla `BasePressurePlateBlock`: a released plate presses as soon as something touches it
+    /// (`entityInside`); a pressed one looks again only when its scheduled tick comes up, 20 ticks
+    /// after the last look (10 for weighted plates), and keeps looking while it is occupied.
     fn tick_plates(&mut self, world: &mut impl RedstoneWorld, players: &[[f64; 3]]) {
+        let occupants: Vec<Occupant> = players
+            .iter()
+            .map(|&pos| Occupant::player(pos))
+            .chain(self.occupants.iter().copied())
+            .collect();
         let plates: Vec<_> = self.plates.iter().copied().collect();
         for pos in plates {
             let Some(state) = world.block(pos) else {
@@ -1138,27 +1198,75 @@ impl Redstone {
             };
             if !is_pressure_plate(state) {
                 self.plates.remove(&pos);
+                self.plate_due.remove(&pos);
                 continue;
             }
-            let (x, y, z) = (f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2]));
-            // `BasePressurePlateBlock` entity AABB: the plate's footprint, feet at its y.
-            let pressed = players.iter().any(|p| {
-                p[0] >= x
-                    && p[0] < x + 1.0
-                    && p[2] >= z
-                    && p[2] < z + 1.0
-                    && p[1] >= y - 0.5
-                    && p[1] < y + 1.0
-            });
-            if pressed != property_bool(state, "powered")
-                && let Some(next) = with_properties(
-                    state,
-                    &[("powered", if pressed { "true" } else { "false" })],
-                )
-            {
-                self.write(world, pos, next);
+            let Some(plate) = name(state) else {
+                continue;
+            };
+            let weighted_max = match plate {
+                "light_weighted_pressure_plate" => Some(15),
+                "heavy_weighted_pressure_plate" => Some(150),
+                _ => None,
+            };
+            let current = if weighted_max.is_some() {
+                property_u8(state, "power").unwrap_or(0)
+            } else if property_bool(state, "powered") {
+                15
+            } else {
+                0
+            };
+            let looks = current == 0
+                || self
+                    .plate_due
+                    .get(&pos)
+                    .is_none_or(|due| *due <= self.clock);
+            if !looks {
+                continue;
+            }
+            // Stone and blackstone plates sense living entities only.
+            let living_only =
+                plate.starts_with("stone_") || plate.starts_with("polished_blackstone_");
+            let count = occupants
+                .iter()
+                .filter(|o| (!living_only || o.living) && o.touches(pos))
+                .count();
+            let signal = match weighted_max {
+                Some(max) if count > 0 => {
+                    let held = count.min(max) as f32;
+                    (held / max as f32 * 15.0).ceil() as u8
+                }
+                Some(_) => 0,
+                None => u8::from(count > 0) * 15,
+            };
+            if signal != current {
+                let changes: [(&str, String); 1] = if weighted_max.is_some() {
+                    [("power", signal.to_string())]
+                } else {
+                    [("powered", (signal > 0).to_string())]
+                };
+                let refs = [(changes[0].0, changes[0].1.as_str())];
+                if let Some(next) = with_properties(state, &refs) {
+                    self.write(world, pos, next);
+                }
+            }
+            if signal > 0 {
+                let time = if weighted_max.is_some() { 10 } else { 20 };
+                self.plate_due.insert(pos, self.clock + time);
+            } else {
+                self.plate_due.remove(&pos);
             }
         }
+    }
+
+    /// Entities other than players for this tick's pressure plates.
+    pub fn set_occupants(&mut self, occupants: Vec<Occupant>) {
+        self.occupants = occupants;
+    }
+
+    /// Whether any pressure plate is being watched, so the region can skip gathering entities.
+    pub fn has_plates(&self) -> bool {
+        !self.plates.is_empty()
     }
 
     /// Keep tick data with the half of the region that still owns it (`RegionData::split`).
@@ -1178,6 +1286,14 @@ impl Redstone {
         self.wires.retain(|pos| {
             if keep(pos[0], pos[2]) {
                 out.wires.insert(*pos);
+                false
+            } else {
+                true
+            }
+        });
+        self.plate_due.retain(|pos, due| {
+            if keep(pos[0], pos[2]) {
+                out.plate_due.insert(*pos, *due);
                 false
             } else {
                 true
@@ -1241,6 +1357,7 @@ impl Redstone {
         self.wires.extend(other.wires);
         self.analog.extend(other.analog);
         self.plates.extend(other.plates);
+        self.plate_due.extend(other.plate_due);
         self.daylights.extend(other.daylights);
         self.primed.extend(other.primed);
         for (pos, mut toggles) in other.toggles {
@@ -1711,8 +1828,66 @@ mod tests {
         assert_eq!(property(grid.state([4, 64, 0]), "power"), Some("12"));
         assert_eq!(property(grid.state([6, 64, 0]), "power"), Some("3"));
 
+        // A pressed plate looks again only 20 ticks after the last look (`getPressedTime`).
+        for _ in 0..19 {
+            redstone.tick(&mut grid, &[]);
+            assert!(property_bool(grid.state([0, 64, 0]), "powered"));
+        }
         redstone.tick(&mut grid, &[]);
         assert!(!property_bool(grid.state([0, 64, 0]), "powered"));
+    }
+
+    #[test]
+    fn plates_sense_items_by_material_and_weighted_plates_count_entities() {
+        let item = Occupant {
+            pos: [0.5, 64.0, 0.5],
+            half: 0.125,
+            height: 0.25,
+            living: false,
+        };
+        let mut grid = Grid::new();
+        grid.add(
+            [0, 64, 0],
+            make("stone_pressure_plate", &[("powered", "false")]),
+        );
+        grid.add(
+            [2, 64, 0],
+            make("oak_pressure_plate", &[("powered", "false")]),
+        );
+        grid.add(
+            [4, 64, 0],
+            make("light_weighted_pressure_plate", &[("power", "0")]),
+        );
+        grid.add(
+            [6, 64, 0],
+            make("heavy_weighted_pressure_plate", &[("power", "0")]),
+        );
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0], [2, 64, 0], [4, 64, 0], [6, 64, 0]]);
+        let at = |x: f64| Occupant {
+            pos: [x + 0.5, 64.0, 0.5],
+            ..item
+        };
+        redstone.set_occupants(vec![at(0.0), at(2.0), at(4.0), at(4.0), at(6.0), at(6.0)]);
+        redstone.tick(&mut grid, &[]);
+        assert!(
+            !property_bool(grid.state([0, 64, 0]), "powered"),
+            "stone ignores items"
+        );
+        assert!(
+            property_bool(grid.state([2, 64, 0]), "powered"),
+            "wood senses items"
+        );
+        assert_eq!(
+            property(grid.state([4, 64, 0]), "power"),
+            Some("2"),
+            "two items on gold: ceil(2 / 15 * 15)"
+        );
+        assert_eq!(
+            property(grid.state([6, 64, 0]), "power"),
+            Some("1"),
+            "two items on iron: ceil(2 / 150 * 15)"
+        );
     }
 
     #[test]

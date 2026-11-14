@@ -655,9 +655,64 @@ impl Remote {
     }
 }
 
+/// One enchanting-table button: the level cost shown on it and the clue about its enchantment
+/// (a registry id, `-1` when there is none, and its level).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EnchantOffer {
+    pub cost: i32,
+    pub clue: i32,
+    pub clue_level: i32,
+}
+
+/// Where the enchanting table gets its randomness and data (the enchantment registry lives
+/// outside this crate). Both calls are pure for a given `seed`, as in vanilla where the menu
+/// re-seeds its random source before each.
+pub trait EnchantTable: Send + std::marker::Sync + std::fmt::Debug {
+    /// `EnchantmentMenu.slotsChanged`: the three buttons for `item` next to `bookshelves`
+    /// power blocks (costs, then the clue picked from each button's enchantment list).
+    fn offers(&self, item: &ItemStack, bookshelves: i32, seed: i32) -> [EnchantOffer; 3];
+    /// `EnchantmentMenu.getEnchantmentList`: the `(enchantment id, level)` pairs button `slot`
+    /// applies when its cost is `cost`.
+    fn enchantments(
+        &self,
+        item: &ItemStack,
+        slot: usize,
+        cost: i32,
+        seed: i32,
+    ) -> Vec<(String, i32)>;
+}
+
+#[derive(Clone, Default)]
+struct EnchantingState {
+    table: Option<std::sync::Arc<dyn EnchantTable>>,
+    bookshelves: i32,
+    seed: i32,
+    offers: [EnchantOffer; 3],
+}
+
+impl std::fmt::Debug for EnchantingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnchantingState")
+            .field("bookshelves", &self.bookshelves)
+            .field("seed", &self.seed)
+            .field("offers", &self.offers)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for EnchantingState {
+    fn eq(&self, other: &Self) -> bool {
+        self.bookshelves == other.bookshelves
+            && self.seed == other.seed
+            && self.offers == other.offers
+    }
+}
+
 /// An open container menu (vanilla `AbstractContainerMenu`).
 #[derive(Clone, Debug)]
 pub struct Menu {
+    /// The enchanting table's offers and the numbers they come from.
+    enchanting: EnchantingState,
     container_id: i32,
     kind: MenuKind,
     slots: Vec<SlotDef>,
@@ -753,7 +808,7 @@ impl Menu {
         let data_len = match kind {
             MenuKind::Furnace(_) => FURNACE_DATA_SLOTS,
             MenuKind::Anvil => 1,
-            MenuKind::Enchanting => 4,
+            MenuKind::Enchanting => 10,
             MenuKind::Stonecutter | MenuKind::Loom => 1,
             MenuKind::BrewingStand => BREWING_DATA_SLOTS,
             MenuKind::Beacon => BEACON_DATA_SLOTS,
@@ -776,6 +831,14 @@ impl Menu {
             rename: String::new(),
             anvil_cost: 0,
             infinite_materials: false,
+            enchanting: EnchantingState {
+                offers: [EnchantOffer {
+                    cost: 0,
+                    clue: -1,
+                    clue_level: -1,
+                }; 3],
+                ..Default::default()
+            },
             stonecutting: Vec::new(),
             stonecutting_index: 0,
             loom_pattern: 0,
@@ -1309,17 +1372,18 @@ impl Menu {
                 self.data[0] = self.anvil_cost;
             }
             MenuKind::Enchanting => {
-                if self.data.len() < 4 {
-                    self.data.resize(4, 0);
-                    self.remote_data.resize(4, i32::MIN);
+                if self.data.len() < 10 {
+                    self.data.resize(10, 0);
+                    self.remote_data.resize(10, i32::MIN);
                 }
-                let costs = if self.container[0].is_empty() {
-                    [0, 0, 0]
-                } else {
-                    [1, 2, 3]
-                };
-                self.data[..3].copy_from_slice(&costs);
-                self.data[3] = 0;
+                self.refresh_offers();
+                let state = &self.enchanting;
+                for (i, offer) in state.offers.iter().enumerate() {
+                    self.data[i] = offer.cost;
+                    self.data[4 + i] = offer.clue;
+                    self.data[7 + i] = offer.clue_level;
+                }
+                self.data[3] = state.seed;
             }
             MenuKind::Stonecutter => {
                 if self.data.is_empty() {
@@ -1492,56 +1556,103 @@ impl Menu {
         self.sync_data();
     }
 
-    /// Vanilla `EnchantmentMenu.clickMenuButton`: applies the chosen enchantment and consumes
-    /// its lapis. Returns the experience levels the server should spend.
-    fn enchant(&mut self, choice: i32) -> Option<i32> {
+    /// Points the menu at the data behind an enchanting table: the power blocks around it and
+    /// the player's enchantment seed (vanilla `EnchantmentMenu.enchantmentSeed`).
+    pub fn set_enchanting(
+        &mut self,
+        table: std::sync::Arc<dyn EnchantTable>,
+        bookshelves: i32,
+        seed: i32,
+    ) {
+        self.enchanting.table = Some(table);
+        self.enchanting.bookshelves = bookshelves;
+        self.enchanting.seed = seed;
+        self.sync_data();
+    }
+
+    /// The seed the menu offers from; it changes after every enchant (vanilla
+    /// `Player.onEnchantmentPerformed`) and the player keeps it for the next table.
+    pub fn enchanting_seed(&self) -> i32 {
+        self.enchanting.seed
+    }
+
+    /// Vanilla `EnchantmentMenu.slotsChanged`: no button without an enchantable item.
+    fn refresh_offers(&mut self) {
+        let none = EnchantOffer {
+            cost: 0,
+            clue: -1,
+            clue_level: -1,
+        };
+        let item = &self.container[0];
+        self.enchanting.offers = match &self.enchanting.table {
+            Some(table) if !item.is_empty() && enchantable(item) => {
+                table.offers(item, self.enchanting.bookshelves, self.enchanting.seed)
+            }
+            _ => [none; 3],
+        };
+    }
+
+    /// Vanilla `EnchantmentMenu.clickMenuButton`: applies button `choice`'s enchantments and
+    /// consumes `choice + 1` lapis. The caller has checked the player's levels against
+    /// [`Menu::enchant_cost`]. Returns the levels to spend (`choice + 1`, not the displayed cost)
+    /// and sets a fresh seed from `next_seed`.
+    fn enchant(&mut self, choice: i32, next_seed: i32) -> Option<i32> {
         if !(0..3).contains(&choice) {
             return None;
         }
+        let slot = choice as usize;
         let item = self.container[0].clone();
-        if item.is_empty() {
+        let cost = self.enchanting.offers[slot].cost;
+        let needed = choice + 1;
+        if item.is_empty() || cost <= 0 {
             return None;
         }
-        let cost = choice + 1;
-        if self.container[1].count < cost {
+        if !self.infinite_materials && self.container[1].count < needed {
             return None;
         }
-        let name = item.name()?.strip_prefix("minecraft:").unwrap_or_default();
-        let enchantment = if name.ends_with("_sword") {
-            "minecraft:sharpness"
-        } else if name.ends_with("_pickaxe")
-            || name.ends_with("_axe")
-            || name.ends_with("_shovel")
-            || name.ends_with("_hoe")
-        {
-            "minecraft:efficiency"
-        } else if name.ends_with("_helmet")
-            || name.ends_with("_chestplate")
-            || name.ends_with("_leggings")
-            || name.ends_with("_boots")
-        {
-            "minecraft:protection"
-        } else if name == "bow" {
-            "minecraft:power"
-        } else if name == "fishing_rod" {
-            "minecraft:luck_of_the_sea"
+        let table = self.enchanting.table.clone()?;
+        let list = table.enchantments(&item, slot, cost, self.enchanting.seed);
+        if list.is_empty() {
+            return None;
+        }
+        let mut out = item;
+        if out.name() == Some("minecraft:book") {
+            out = ItemStack {
+                item: ferrite_item::item_id("minecraft:enchanted_book")?,
+                ..out
+            };
+        }
+        let stored = out.name() == Some("minecraft:enchanted_book");
+        let id = if stored {
+            ids::STORED_ENCHANTMENTS
         } else {
-            "minecraft:unbreaking"
+            ids::ENCHANTMENTS
         };
-        let mut enchantments = match item.effective_component(ids::ENCHANTMENTS) {
-            Some(Component::Enchantments(enchantments)) => enchantments,
+        let mut enchantments = match out.effective_component(id) {
+            Some(Component::Enchantments(e)) | Some(Component::StoredEnchantments(e)) => e,
             _ => Enchantments::new(),
         };
-        enchantments.set(enchantment, cost);
-        let mut out = item;
-        out.components
-            .insert(ids::ENCHANTMENTS, Component::Enchantments(enchantments));
+        for (name, level) in list {
+            let keep = enchantments.level(&name).unwrap_or(0).max(level);
+            enchantments.set(&name, keep);
+        }
+        out.components.insert(
+            id,
+            if stored {
+                Component::StoredEnchantments(enchantments)
+            } else {
+                Component::Enchantments(enchantments)
+            },
+        );
         self.container[0] = out;
-        let mut lapis = self.container[1].clone();
-        lapis.count -= cost;
-        self.container[1] = normalize(lapis);
+        if !self.infinite_materials {
+            let mut lapis = self.container[1].clone();
+            lapis.count -= needed;
+            self.container[1] = normalize(lapis);
+        }
+        self.enchanting.seed = next_seed;
         self.sync_data();
-        Some(cost)
+        Some(needed)
     }
 
     /// Vanilla `AnvilMenu.createResult`: renames, combines two damaged copies of one item, or
@@ -2874,6 +2985,10 @@ impl Menu {
     /// Vanilla `broadcastChanges`: a `container_set_slot` (with a fresh state id) for every slot
     /// the client shows differently, then `set_cursor_item` if the cursor differs.
     pub fn broadcast_changes(&mut self, inventory: &PlayerInventory) -> Vec<Sync> {
+        // The table's buttons follow the item in its slot (vanilla `slotsChanged`).
+        if self.kind == MenuKind::Enchanting {
+            self.sync_data();
+        }
         let mut out = Vec::new();
         for slot in 0..self.slots.len() {
             let item = self.slot(inventory, slot).clone();
@@ -2940,9 +3055,9 @@ impl Menu {
 
     /// Vanilla `AbstractContainerMenu.clickMenuButton`: an enchant choice, stonecutter recipe or
     /// loom pattern. Returns the experience levels the click spends.
-    pub fn button_click(&mut self, button: i32) -> Option<i32> {
+    pub fn button_click(&mut self, button: i32, next_seed: i32) -> Option<i32> {
         match self.kind {
-            MenuKind::Enchanting => self.enchant(button),
+            MenuKind::Enchanting => self.enchant(button, next_seed),
             MenuKind::Stonecutter => {
                 if button >= 0 && (button as usize) < self.stonecutting.len() {
                     self.stonecutting_index = button as usize;
@@ -2965,16 +3080,14 @@ impl Menu {
         &self.rename
     }
 
-    /// The level cost of an enchanting-table choice (vanilla `EnchantmentMenu.getEnchantmentLevel`).
+    /// The levels a player needs for an enchanting-table choice (vanilla `EnchantmentMenu.clickMenuButton`
+    /// wants `choice + 1` and at least the displayed cost); `0` when the button offers nothing.
     pub fn enchant_cost(&self, choice: i32) -> i32 {
         if self.kind != MenuKind::Enchanting || !(0..3).contains(&choice) {
             return 0;
         }
-        if self.container[0].is_empty() {
-            0
-        } else {
-            choice + 1
-        }
+        let cost = self.enchanting.offers[choice as usize].cost;
+        if cost <= 0 { 0 } else { cost.max(choice + 1) }
     }
 
     /// Vanilla `transferState`: adopts what the client was last sent for the inventory slots
@@ -3156,4 +3269,16 @@ fn normalize(stack: ItemStack) -> ItemStack {
     } else {
         stack
     }
+}
+
+/// Whether the item has a `minecraft:enchantable` component (vanilla `ItemStack.isEnchantable`:
+/// that, and no enchantments yet).
+fn enchantable(stack: &ItemStack) -> bool {
+    let has = ferrite_item::default_components(stack.item)
+        .is_some_and(|c| c.contains_key(&ids::ENCHANTABLE));
+    let enchanted = matches!(
+        stack.effective_component(ids::ENCHANTMENTS),
+        Some(Component::Enchantments(e)) if !e.is_empty()
+    );
+    has && !enchanted
 }

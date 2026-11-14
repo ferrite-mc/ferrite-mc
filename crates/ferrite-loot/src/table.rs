@@ -109,6 +109,18 @@ pub struct LootTables {
 }
 
 impl LootTables {
+    /// The enchantments an enchanting table applies to `item` (vanilla
+    /// `EnchantmentHelper.selectEnchantment` over `#minecraft:in_enchanting_table`).
+    pub fn enchanting_table_list(
+        &self,
+        item: &str,
+        enchantability: i32,
+        levels: i32,
+        rng: &mut impl Rng,
+    ) -> Vec<(String, i32)> {
+        crate::enchant::for_table(&self.definitions.data, item, enchantability, levels, rng)
+    }
+
     /// Loads every table below a generated loot directory.
     ///
     /// `path` may be the `loot_table` directory itself, the namespace directory

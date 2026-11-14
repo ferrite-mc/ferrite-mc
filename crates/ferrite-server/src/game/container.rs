@@ -552,7 +552,11 @@ impl Player {
                 return;
             }
         }
-        let spent = menu.button_click(p.button.0);
+        let fresh = uuid::Uuid::new_v4().as_u128() as i32;
+        let spent = menu.button_click(p.button.0, fresh);
+        if spent.is_some() && menu.kind() == ferrite_inventory::MenuKind::Enchanting {
+            self.enchant_seed = menu.enchanting_seed();
+        }
         let out = menu.broadcast_changes(&self.inventory);
         emit(self, out);
         if let Some(spent) = spent {
@@ -1017,7 +1021,11 @@ impl Player {
         let (make, title): (fn(i32) -> Menu, &str) = match station {
             "workbench" => (Menu::crafting, "container.crafting"),
             "anvil" => (Menu::anvil, "container.anvil"),
-            "enchanting" => (Menu::enchanting, "container.enchant"),
+            "enchanting" => {
+                self.open_enchanting(0, "minecraft:enchanting_table", None);
+                self.grant_infinite_materials();
+                return;
+            }
             "grindstone" => (Menu::grindstone, "container.grindstone_title"),
             "stonecutter" => (Menu::stonecutter, "container.stonecutter"),
             "smithing" => (Menu::smithing, "container.upgrade"),
@@ -1026,6 +1034,24 @@ impl Player {
             _ => return,
         };
         self.open_menu(make, title, None);
+        self.grant_infinite_materials();
+    }
+
+    /// Opens an enchanting table's menu with the buttons the player's seed and the `shelves`
+    /// around the table give (`at` is the table; a plugin's table has none).
+    fn open_enchanting(&mut self, shelves: i32, block: &'static str, at: Option<[i32; 3]>) {
+        let seed = self.enchant_seed;
+        let table: std::sync::Arc<dyn ferrite_inventory::EnchantTable> =
+            std::sync::Arc::new(super::enchant_table::VanillaEnchantTable);
+        self.open_menu(
+            move |id| {
+                let mut menu = Menu::enchanting(id);
+                menu.set_enchanting(table, shelves, seed);
+                menu
+            },
+            "container.enchant",
+            at.map(|at| OpenAt::Block(at, block)),
+        );
         self.grant_infinite_materials();
     }
 
@@ -1479,12 +1505,16 @@ impl Player {
             );
             return true;
         }
-        let station = match block_name(&source, [pos.x, pos.y, pos.z]) {
-            Some("minecraft:enchanting_table") => Some((
-                Menu::enchanting as fn(i32) -> Menu,
-                "container.enchant",
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:enchanting_table") {
+            let shelves = super::enchant_table::bookshelves(&source, [pos.x, pos.y, pos.z]);
+            self.open_enchanting(
+                shelves,
                 "minecraft:enchanting_table",
-            )),
+                Some([pos.x, pos.y, pos.z]),
+            );
+            return true;
+        }
+        let station = match block_name(&source, [pos.x, pos.y, pos.z]) {
             Some("minecraft:grindstone") => Some((
                 Menu::grindstone as fn(i32) -> Menu,
                 "container.grindstone_title",

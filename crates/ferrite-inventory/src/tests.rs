@@ -2,8 +2,8 @@ use ferrite_item::{Component, Enchantments, HashedSlot, ItemStack, component_ids
 
 use crate::{
     ClickInput::{self, *},
-    Clicker, CookingOutput, Crafter, EnchantRules, FurnaceKind, Menu, NoCrafting, PlayerInventory,
-    SLOT_OUTSIDE, Sync, is_shulker_box,
+    Clicker, CookingOutput, Crafter, EnchantOffer, EnchantRules, EnchantTable, FurnaceKind, Menu,
+    NoCrafting, PlayerInventory, SLOT_OUTSIDE, Sync, is_shulker_box,
 };
 
 fn item(name: &str, count: i32) -> ItemStack {
@@ -291,22 +291,68 @@ fn stonecutter_grindstone_enchanting_smithing_and_loom_work() {
     assert!(p.xp >= 2.0);
     assert_eq!(f.slot(0), empty());
 
-    // Enchanting costs one lapis and one level per choice.
+    // Enchanting: a table decides the buttons; a click costs `choice + 1` lapis and levels.
+    #[derive(Debug)]
+    struct Fixed;
+    impl EnchantTable for Fixed {
+        fn offers(&self, _: &ItemStack, shelves: i32, _: i32) -> [EnchantOffer; 3] {
+            [
+                EnchantOffer {
+                    cost: 2 + shelves,
+                    clue: 7,
+                    clue_level: 1,
+                },
+                EnchantOffer {
+                    cost: 9,
+                    clue: 3,
+                    clue_level: 2,
+                },
+                EnchantOffer {
+                    cost: 0,
+                    clue: -1,
+                    clue_level: -1,
+                },
+            ]
+        }
+        fn enchantments(&self, _: &ItemStack, slot: usize, _: i32, _: i32) -> Vec<(String, i32)> {
+            vec![("minecraft:sharpness".into(), slot as i32 + 2)]
+        }
+    }
     let mut f = Fixture::new(Menu::enchanting(5));
+    f.menu.set_enchanting(std::sync::Arc::new(Fixed), 3, 77);
     f.menu
         .set_slot(&mut f.inv, &StationCrafter, 0, item("diamond_sword", 1));
     f.menu
         .set_slot(&mut f.inv, &StationCrafter, 1, item("lapis_lazuli", 3));
-    assert_eq!(f.menu.enchant_cost(1), 2);
-    assert_eq!(f.menu.button_click(1), Some(2));
-    assert_eq!(f.menu.data_value(0), 1);
+    f.menu.broadcast_changes(&f.inv);
+    assert_eq!(f.menu.data_value(0), 5, "the cost comes from the table");
+    assert_eq!(f.menu.data_value(3), 77, "the seed is sent");
+    assert_eq!(f.menu.data_value(4), 7);
+    assert_eq!(f.menu.enchant_cost(1), 9);
+    assert_eq!(
+        f.menu.enchant_cost(2),
+        0,
+        "a button without an offer cannot be used"
+    );
+    assert_eq!(f.menu.button_click(2, 1), None);
+    assert_eq!(f.menu.button_click(1, 123), Some(2));
+    assert_eq!(
+        f.menu.enchanting_seed(),
+        123,
+        "the seed changes after enchanting"
+    );
     match f.slot(0).effective_component(component_ids::ENCHANTMENTS) {
         Some(Component::Enchantments(enchantments)) => {
-            assert_eq!(enchantments.level("minecraft:sharpness"), Some(2))
+            assert_eq!(enchantments.level("minecraft:sharpness"), Some(3))
         }
         other => panic!("no enchantments: {other:?}"),
     }
     assert_eq!(f.slot(1), item("lapis_lazuli", 1));
+    assert_eq!(
+        f.menu.enchant_cost(0),
+        0,
+        "an enchanted item offers nothing"
+    );
 
     let mut f = Fixture::new(Menu::smithing(6));
     f.menu.set_slot(

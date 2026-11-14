@@ -294,3 +294,15 @@
 - **계약 변경:** 이전에는 한 파일이 실패하면 로드된 플러그인을 모두 되돌렸다. 이제는 실패한 파일만 건너뛴다(`BootstrapTest.paperOnlyLoadsAndOneFailingFileDoesNotStopTheOthers`).
 
 - **§8 바닐라 대조(작물 성장):** `CropBlock.getGrowthSpeed`/`randomTick` 바이트코드(`nextInt((int)(25/속도)+1)`, 농지 1.0·젖은 농지 3.0·이웃 1/4, 같은 작물이 직각 두 쪽 또는 대각선에 있으면 1/2)와 `random_tick.rs`를 대조했고 `grows_crops` 태그(농지뿐)까지 일치한다. 고칠 것은 없었다. 유체·레드스톤·청크 언로드·이웃 갱신 순서·중력 블록 연쇄·마법부여대·지도/세공대는 여전히 대조하지 못했다.
+
+### 10.5 §8 바닐라 대조 결과 (2026-11-14)
+
+서버 jar를 `javap -c`로 읽어 구현과 대조했다. 고친 것과 확인만 한 것, 못 한 것을 구분한다.
+
+- **마법부여대(고침):** 이전 구현은 아이템 종류마다 마법부여 하나를 고정하고 비용을 `선택 번호 + 1`로 정해 둔 자리표시자였다. 이제 `EnchantmentMenu`/`EnchantmentHelper`를 따른다: 책장 개수(`EnchantingTableBlock.BOOKSHELF_OFFSETS`, 사이 칸이 `#replaceable`일 때만), 플레이어별 시드(`Player.enchant_seed`, 마법부여 후 바뀜), 버튼 비용(`getEnchantmentCost`), 마법부여 가능도(`minecraft:enchantable`)로 정한 힘, 가중치 선택과 배타 집합(`ferrite-loot`의 `selectEnchantment`), 책은 마법부여된 책으로 바뀌고 목록 한 개가 빠짐, 단서(클라이언트 레지스트리 순서의 마법부여 id)와 단서 레벨, 라피스 `선택+1`개와 레벨 `선택+1` 소모(창작 모드는 무한). 테스트 `enchant_table::tests`, 인벤토리 `stonecutter_grindstone_enchanting_...`. 한계: 난수는 `java.util.Random`이지만 바닐라의 난수 원본과 같지 않아 같은 시드가 바닐라와 같은 버튼을 내지는 않는다. 시드는 플레이어 데이터(`XpSeed`)에 저장하지 않아 서버를 다시 켜면 바뀐다. 책장은 메뉴를 열 때 한 번 센다(열려 있는 동안 책장을 놓거나 부수면 반영되지 않는다).
+- **중력 블록(고침):** `FallingBlock`을 상속하는 클래스를 jar에서 전부 찾았다. `dragon_egg`(`DragonEggBlock`)가 빠져 있어 추가했다. 콘크리트 가루는 물에 닿아도 굳지 않았다 — `ConcretePowderBlock.shouldSolidify`(자기 칸이 젖었거나, 아래를 뺀 다섯 방향의 물이 단단한 면 뒤에 있지 않음)를 구현했다. 떨어지는 도중 물에 들어가는 경우는 착지 후 블록 변경으로만 굳는다.
+- **유체(고침):** 물·용암의 틱 지연(5, 용암 30/지옥 10)·퍼짐 거리·감쇠는 일치한다. `LavaFluid.getSpreadDelay`의 난수(용암 높이가 오르면 4분의 3 확률로 지연 4배)가 빠져 있어 구현했다. 나머지 `FlowingFluid`(경사 거리 탐색 등)는 상수만 대조했다.
+- **레드스톤(고침):** 횃불 탄화(160틱)·창문(60틱 8회)·버튼(20/30틱)·관찰자·대상 블록의 지연은 일치한다. 압력판은 플레이어만 감지하고 즉시 풀렸다 — 이제 모든 엔티티를 감지하고(돌·검은돌 판은 생명체만), 눌리면 20틱(가중판 10틱) 뒤에야 다시 보며, 가중판(`power`)은 엔티티 수에 비례한 출력을 낸다(경철 150, 금 15). 테스트 `plates_sense_items_by_material_and_weighted_plates_count_entities`. 한계: 엔티티 상자는 폭·높이만 쓰고 회전·자세는 무시한다.
+- **이웃 갱신 순서(확인만):** `SHAPE_ORDER`가 `Block.UPDATE_SHAPE_ORDER`(서·동·하·상·북·남)와 같다.
+- **작물 성장·지도 제작대(확인만):** 바이트코드와 일치한다(§10.3).
+- **청크 언로드 흐름(못 함):** 티켓 레벨·언로드 지연 구조가 달라 항목별 대조를 하지 못했다.
