@@ -268,6 +268,10 @@ impl MobKind {
     }
 }
 
+/// Vanilla `EquipmentSlot` values used by `set_equipment`.
+pub const MAIN_HAND: u8 = 0;
+pub const EQUIPMENT_SLOTS: usize = 6;
+
 /// Living state of a mob; travels with the entity across region hand-offs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobState {
@@ -346,6 +350,9 @@ pub struct MobState {
     pub panic_from: Option<Vec3>,
     /// Creeper swell counter (`Creeper.swell`).
     pub swell: u16,
+    /// Held and worn item ids in vanilla `EquipmentSlot` order: main hand, off hand, feet,
+    /// legs, chest, head. Zero means empty. Skeleton bows are the only default equipment.
+    pub equipment: [u16; EQUIPMENT_SLOTS],
     /// Ticks until the skeleton's next arrow.
     pub bow_timer: u16,
     /// Ticks until a chicken lays its next egg (`Chicken.eggTime`); zero for other kinds.
@@ -438,6 +445,13 @@ impl MobState {
             panic: 0,
             panic_from: None,
             swell: 0,
+            equipment: if kind == MobKind::Skeleton {
+                let mut equipment = [0; EQUIPMENT_SLOTS];
+                equipment[MAIN_HAND as usize] = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
+                equipment
+            } else {
+                [0; EQUIPMENT_SLOTS]
+            },
             bow_timer: 0,
             egg_time: 0,
             path: [[0; 3]; crate::path::MAX_PATH],

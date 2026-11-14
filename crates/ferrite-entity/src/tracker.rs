@@ -351,6 +351,28 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                                 }),
                             );
                         }
+                        // A skeleton's bow is the only equipment Ferrite gives a mob by
+                        // default; a viewer that starts tracking later still needs it.
+                        let equipment: Vec<(u8, ferrite_item::ItemStack)> = state
+                            .equipment
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(slot, &item)| {
+                                (item != 0).then_some((
+                                    slot as u8,
+                                    ferrite_item::ItemStack::with_count(item, 1),
+                                ))
+                            })
+                            .collect();
+                        if !equipment.is_empty() {
+                            sink(
+                                viewer.key,
+                                &encode(&SetEquipment {
+                                    entity_id: VarInt(data.id),
+                                    slots: equipment,
+                                }),
+                            );
+                        }
                         if let Some((_, holder)) = state.leash {
                             sink(
                                 viewer.key,
@@ -813,6 +835,35 @@ mod tests {
                 .iter()
                 .all(|p| p.1 != UpdateAttributes::ID)
         );
+    }
+
+    #[test]
+    fn a_skeleton_pairs_with_its_bow_in_the_main_hand() {
+        let mut store = EntityStore::default();
+        let skeleton = crate::mob::new_mob(
+            crate::mob::MobKind::Skeleton,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut crate::Rng::new(1),
+        );
+        let id = skeleton.data.id;
+        store.insert(skeleton);
+        let chunks = HashSet::from([(0, 0)]);
+        let viewers = [viewer((Uuid::from_u128(1), 0), 8.0, 8.0, 10, &chunks)];
+        let packets = tick(&mut store, &viewers);
+        let packet = packets
+            .iter()
+            .find(|p| p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+            .expect("a skeleton pairs with its bow");
+        let decoded =
+            SetEquipment::<ferrite_item::ItemStack>::decode(&mut packet.2.as_slice()).unwrap();
+        assert_eq!(decoded.entity_id.0, id);
+        assert_eq!(decoded.slots.len(), 1);
+        assert_eq!(decoded.slots[0].0, crate::mob::MAIN_HAND);
+        assert_eq!(
+            decoded.slots[0].1.item,
+            ferrite_item::item_id("minecraft:bow").unwrap()
+        );
+        assert_eq!(decoded.slots[0].1.count, 1);
     }
 
     #[test]
