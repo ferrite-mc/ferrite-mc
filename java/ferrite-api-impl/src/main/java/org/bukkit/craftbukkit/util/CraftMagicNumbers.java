@@ -1,11 +1,12 @@
 package org.bukkit.craftbukkit.util;
 
 /**
- * The Bukkit-typed half of CraftBukkit's {@code CraftMagicNumbers}. Its NMS-typed conversions
- * ({@code getBlock(Material)}, {@code getItem(Material)}, ...) cannot exist without
- * {@code net.minecraft} block/item classes, so they stay absent; everything expressible through
- * the Bukkit registries is answered from the 26.3 data and unknown values fail loudly instead of
- * becoming air.
+ * The CraftBukkit compatibility conversions backed by Ferrite's 26.3 registries.
+ *
+ * <p>Bukkit- and NMS-typed lookups agree on the same registry identity: a material, its
+ * {@code net.minecraft.world.level.block.Block}/{@code net.minecraft.world.item.Item} wrapper,
+ * and its block state all come from the generated vanilla data. Unknown values fail loudly
+ * instead of becoming air, and values that have no 26.3 representation are refused explicitly.
  */
 public final class CraftMagicNumbers {
     private CraftMagicNumbers() {}
@@ -39,15 +40,52 @@ public final class CraftMagicNumbers {
     /** The material of a block data instance. */
     public static org.bukkit.Material getMaterial(org.bukkit.block.data.BlockData data) { return java.util.Objects.requireNonNull(data, "data").getMaterial(); }
 
-    /** Minecraft 26.3 addresses block states by name and properties, not by a global numeric id. */
-    public static int getBlockStateId(org.bukkit.block.data.BlockData data) {
-        throw new UnsupportedOperationException("Ferrite: Minecraft 26.3 has no global block state ids; address the state by its material and properties instead");
+    /** The NMS block wrapper of a block material. */
+    public static net.minecraft.world.level.block.Block getBlock(org.bukkit.Material material) {
+        java.util.Objects.requireNonNull(material, "material");
+        if (!material.isBlock()) throw new IllegalArgumentException(material + " is not a block");
+        return new net.minecraft.world.level.block.Block(material);
     }
 
-    /** Ferrite does not publish the numeric vanilla data version for 26.3; the protocol version is the supported identity. */
-    public static int getDataVersion() {
-        throw new UnsupportedOperationException("Ferrite: no numeric data version is published for Minecraft 26.3; use the protocol version instead");
+    /** The NMS item wrapper of an item material. */
+    public static net.minecraft.world.item.Item getItem(org.bukkit.Material material) {
+        java.util.Objects.requireNonNull(material, "material");
+        if (!material.isItem()) throw new IllegalArgumentException(material + " is not an item");
+        return new net.minecraft.world.item.Item(material);
     }
+
+    /** The NMS block state for a Bukkit block data value. */
+    public static net.minecraft.world.level.block.state.BlockState getBlockState(org.bukkit.block.data.BlockData data) {
+        return new net.minecraft.world.level.block.state.BlockState(java.util.Objects.requireNonNull(data, "data"));
+    }
+
+    /** The material of an NMS block wrapper. */
+    public static org.bukkit.Material getMaterial(net.minecraft.world.level.block.Block block) {
+        return java.util.Objects.requireNonNull(block, "block").getBukkitMaterial();
+    }
+
+    /** The material of an NMS item wrapper. */
+    public static org.bukkit.Material getMaterial(net.minecraft.world.item.Item item) {
+        return java.util.Objects.requireNonNull(item, "item").getBukkitMaterial();
+    }
+
+    /** The material of an NMS block state. */
+    public static org.bukkit.Material getMaterial(net.minecraft.world.level.block.state.BlockState state) {
+        return java.util.Objects.requireNonNull(state, "state").getBukkitMaterial();
+    }
+
+    /** The 26.3 global block-state id used by level events, from the generated block table. */
+    public static int getBlockStateId(org.bukkit.block.data.BlockData data) {
+        return dev.ferrite.server.FerriteUnsafe.blockStateId(data);
+    }
+
+    /** The 26.3 global block-state id of an NMS block state. */
+    public static int getBlockStateId(net.minecraft.world.level.block.state.BlockState state) {
+        return getBlockStateId(java.util.Objects.requireNonNull(state, "state").getBukkitBlockData());
+    }
+
+    /** The numeric data version of the 26.3 data pack. */
+    public static int getDataVersion() { return INSTANCE.getDataVersion(); }
 
     /** Whether the material is one of the pre-1.13 legacy names. */
     public static boolean isLegacy(org.bukkit.Material material) { return material.isLegacy(); }

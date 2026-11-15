@@ -99,6 +99,17 @@ pub fn world_query(terrain: &dyn ChunkGenerator, call: &HostCall) -> Option<Stri
                 .collect();
             Some(lines.join("\n"))
         }
+        "getStructurePieces(String,int,int)" => {
+            let key = arg(0).filter(|key| is_resource_key(key))?;
+            let pieces = terrain
+                .structure_pieces(dimension, key, int(1)?, int(2)?)
+                .ok()?;
+            let lines: Vec<String> = pieces
+                .iter()
+                .map(|b| format!("{} {} {} {} {} {}", b[0], b[1], b[2], b[3], b[4], b[5]))
+                .collect();
+            Some(lines.join("\n"))
+        }
         "getBiomeKey(int,int,int)" => terrain.biome_at(dimension, int(0)?, int(1)?, int(2)?).ok(),
         _ => None,
     }
@@ -243,6 +254,19 @@ mod tests {
                 Vec::new()
             })
         }
+        fn structure_pieces(
+            &self,
+            _: Dimension,
+            id: &str,
+            _: i32,
+            _: i32,
+        ) -> anyhow::Result<Vec<[i32; 6]>> {
+            Ok(if id == "minecraft:village_plains" {
+                vec![[0, 60, 0, 20, 75, 20], [2, 60, 2, 5, 64, 5]]
+            } else {
+                Vec::new()
+            })
+        }
         fn structure_at(
             &self,
             _: Dimension,
@@ -359,6 +383,26 @@ mod tests {
         );
         assert_eq!(
             world_query(&Fake, &call("getStructureStarts(int,int)", &["5", "5"])),
+            Some(String::new())
+        );
+        assert_eq!(
+            world_query(
+                &Fake,
+                &call(
+                    "getStructurePieces(String,int,int)",
+                    &["minecraft:village_plains", "0", "0"]
+                )
+            ),
+            Some("0 60 0 20 75 20\n2 60 2 5 64 5".to_owned())
+        );
+        assert_eq!(
+            world_query(
+                &Fake,
+                &call(
+                    "getStructurePieces(String,int,int)",
+                    &["minecraft:mansion", "0", "0"]
+                )
+            ),
             Some(String::new())
         );
         assert_eq!(

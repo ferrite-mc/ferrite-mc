@@ -1097,25 +1097,55 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             if (structure == null || (only != null && !only.equals(structure))) continue;
             var box = new org.bukkit.util.BoundingBox(Integer.parseInt(f[1]), Integer.parseInt(f[2]), Integer.parseInt(f[3]),
                 Integer.parseInt(f[4]) + 1, Integer.parseInt(f[5]) + 1, Integer.parseInt(f[6]) + 1);
-            found.add(new Generated(structure, box));
+            found.add(new Generated(structure, box, cx, cz));
         }
         return found;
     }
 
-    /** A structure start; the individual pieces are not reported by the host. */
-    private record Generated(org.bukkit.generator.structure.Structure structure, org.bukkit.util.BoundingBox box)
-            implements org.bukkit.generator.structure.GeneratedStructure {
+    /** A structure start; its pieces are read from the host on first use. */
+    private final class Generated implements org.bukkit.generator.structure.GeneratedStructure {
+        private final org.bukkit.generator.structure.Structure structure;
+        private final org.bukkit.util.BoundingBox box;
+        private final int chunkX, chunkZ;
+        private volatile java.util.List<org.bukkit.generator.structure.StructurePiece> pieces;
+
+        private Generated(org.bukkit.generator.structure.Structure structure, org.bukkit.util.BoundingBox box, int chunkX, int chunkZ) {
+            this.structure = structure;
+            this.box = box;
+            this.chunkX = chunkX;
+            this.chunkZ = chunkZ;
+        }
         @Override public org.bukkit.generator.structure.Structure getStructure() { return structure; }
         @Override public org.bukkit.util.BoundingBox getBoundingBox() { return box; }
         /**
-         * The host reports a structure start's bounding box only (`getStructureStarts(int,int)` answers
-         * `id minX minY minZ maxX maxY maxZ`); the jar's `StructureStart#getPieces` is not carried over the bridge.
-         * An empty list would claim the structure has no pieces, so this refuses instead.
+         * `getStructurePieces(id, chunkX, chunkZ)` answers `minX minY minZ maxX maxY maxZ` per piece.
+         * The host computes it from the same `StructureStart` as the bounding box; no host answer is an
+         * explicit failure rather than an empty piece list.
          */
         @Override public java.util.Collection<org.bukkit.generator.structure.StructurePiece> getPieces() {
-            throw new UnsupportedOperationException("Ferrite: GeneratedStructure#getPieces is not available: the world generation host reports a structure start's bounding box, not its pieces");
+            var cached = pieces;
+            if (cached != null) return cached;
+            var reply = (String) HostBridge.call("World", id, "getStructurePieces(String,int,int)", String.class,
+                structure.getKey().toString(), chunkX, chunkZ);
+            if (reply == null) throw new UnsupportedOperationException("Ferrite: the world generation host did not report the structure's pieces");
+            var parsed = new java.util.ArrayList<org.bukkit.generator.structure.StructurePiece>();
+            if (!reply.isEmpty()) for (var line : reply.split("\n")) {
+                var f = line.split(" ");
+                if (f.length != 6) continue;
+                parsed.add(new Piece(new org.bukkit.util.BoundingBox(
+                    Integer.parseInt(f[0]), Integer.parseInt(f[1]), Integer.parseInt(f[2]),
+                    Integer.parseInt(f[3]) + 1, Integer.parseInt(f[4]) + 1, Integer.parseInt(f[5]) + 1)));
+            }
+            cached = java.util.List.copyOf(parsed);
+            pieces = cached;
+            return cached;
         }
         @Override public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() { return new FerriteDataContainer(); }
+    }
+
+    /** One piece of a structure start. */
+    private record Piece(org.bukkit.util.BoundingBox box) implements org.bukkit.generator.structure.StructurePiece {
+        @Override public org.bukkit.util.BoundingBox getBoundingBox() { return box; }
     }
 
     /** The sampling intervals of the host's biome search (`Host.locateBiome`), equal to Paper's defaults. */

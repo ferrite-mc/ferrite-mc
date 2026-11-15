@@ -24,7 +24,7 @@
   흐름 방향/높이는 이웃 블록이 필요해 `UnsupportedOperationException`. JUnit `FerriteFluidDataTest`(6개). `Block#getState`가
   호스트에 없어 `World#getBlockState`는 고치지 않고 열린 채로 둔다.
 - **한계로 확정(코드 변경 없음, 테스트 존재).** POI `IS_OCCUPIED`는 티켓을 잡는 AI가 없어 빈 결과(`PlayerExtrasTest`);
-  `GeneratedStructure#getPieces`와 `locateNearestBiome` 임의 간격은 정밀한 거부(`WorldSearchTest`). EULA 게이트 월드젠 테스트는
+  `locateNearestBiome` 임의 간격은 정밀한 거부(`WorldSearchTest`). EULA 게이트 월드젠 테스트는
   실행하지 않았다. 실제 클라이언트로 확인한 것은 없다.
 
 ## 2026-11-14 — claude-api (Lane B4): 플러그인 한계 점검
@@ -46,16 +46,15 @@
   `false`를 돌려준다(`PlayerExtrasTest.connectionForwardsToThePlayer`, `postEffectsMirrorTheListAndDeduplicate`).
 - **`World#getWorldPath`(런타임 월드).** 이미 구현: 카탈로그가 월드를 만들 때 저장 디렉터리를 등록하고
   (`set_world_path`), 메모리 월드는 빈 답이라 Java가 거부한다(Rust `chunks.rs` 테스트, `PlayerExtrasTest`).
-- **고침: `GeneratedStructure#getPieces`.** 예전에는 빈 목록을 돌려줘 "조각이 없는 구조물"이라고 말하고 있었다.
-  호스트는 구조물 시작의 경계 상자만 보고하므로(`getStructureStarts(int,int)` → `id minX minY minZ maxX maxY maxZ`)
-  이제 `UnsupportedOperationException`("bounding box, not its pieces")을 던진다. JUnit
-  `WorldSearchTest.aStructureStartHasABoundingBoxButNoPieces`.
+- **구현: `GeneratedStructure#getPieces`.** 호스트 op 11 `structure pieces`가
+  `StructureStart#getPieces()`의 `minX minY minZ maxX maxY maxZ`를 한 줄씩 보고하고, Java는 이를
+  `StructurePiece` 목록으로 감싼다. JUnit `WorldSearchTest.aStructureStartReportsItsBoundingBoxAndPieces`.
 - **고침: `locateNearestBiome` 간격 인자.** 호스트는 `findClosestBiome3d(..., 32, 64)`로 고정되어 있다(`Host.locateBiome`;
   Paper의 `locateNearestBiome(Location,int,Biome...)` 기본값과 같다). 이전 문서의 "y=64·8블록 간격 근사"는 틀린
   서술이다. 명시한 `horizontalInterval`/`verticalInterval`이 32/64가 아니면 조용히 무시하는 대신 호스트 호출 전에
   거부한다. 비권장 `(Location, Biome, int[, int])` 형식의 step은 계속 검색 정밀도에만 쓰이는 근사로 두었다.
   JUnit `WorldSearchTest.biomeSearchIntervalsOtherThanTheHostsAreRefusedNotIgnored`.
-- **열어 둔 것.** 구조물 조각(`getPieces`)과 임의 interval은 JVM 월드젠 호스트(`java/ferrite-worldgen-host`)를 고쳐야 하고,
+- **열어 둔 것.** `locateNearestBiome`의 임의 interval은 JVM 월드젠 호스트(`java/ferrite-worldgen-host`)의 고정 32/64 간격 때문에
   그 호스트 테스트는 `FERRITE_TEST_ACCEPT_EULA`(Mojang EULA 수락)가 필요해 이 작업에서는 실행하지 않았다.
   POI `IS_OCCUPIED`는 티켓을 잡는 AI가 없어 계속 빈 결과다.
 
@@ -106,7 +105,7 @@ CMI가 동작한다고 말할 수 없다.
   인챈트·커스텀 모델·맵 id·`custom_data` PDC를 복원한다. 지원하지 않는 컴포넌트는 JVM 뷰에
   반영되지 않지만 Rust 인벤토리에는 남는다. `FerriteItemNbtTest`가 JNI 메서드와 디코드를
   확인한다.
-- **검증:** Java 전체 `./gradlew test` 성공, Rust server lib 1237개·`plugin_lifecycle` 5개·
+- **검증:** Java 전체 `./gradlew test` 성공, Rust server lib 1238개·`plugin_lifecycle` 5개·
   `plugin_command_world` 2개·`ferrite-plugin` 통합 1개 통과, fmt/clippy 통과. 실제 클라이언트는 아니다.
 
 ## 2026-11-13 — plugins-z (호스트 데이터, 블록 엔티티, 호환 증명)
@@ -127,7 +126,9 @@ CMI가 동작한다고 말할 수 없다.
   당시에는 `Chunk#getChunkSnapshot(boolean,boolean,boolean)`이 "not implemented"였으나,
   2026-11-15에 호스트 캡처 경로로 구현됐다(`World#getEmptyChunkSnapshot`도 계속 동작).
 - **테스트 도구:** `plugin_command_world`도 `plugin_lifecycle`처럼 Windows에서 `gradlew.bat`을 cmd로 실행한다(Windows에서 실행해 보지는 않았다).
-- **NMS는 그대로:** `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`는 `NoSuchMethodError`.
+- **NMS 경계:** `CraftItemStack.asNMSCopy`/`asBukkitCopy`와 `CraftWorld#getHandle`은
+  클린룸 NMS 래퍼로 구현되어 있다. `CraftMagicNumbers`는 Bukkit/NMS block/item/state 변환,
+  전역 블록 상태 id와 data version 5023을 제공한다. NMS 전용 필드는 없다.
 
 ## 2026-11-09 — fb-plugin (InventoryDragEvent + Server 경계 정리)
 
@@ -145,11 +146,11 @@ CMI가 동작한다고 말할 수 없다.
   구현되어 있음을 확인하고 JUnit `serverSurfaceImplementsTheBoundedCallsAndDocumentsTheRest`로
   고정했다. `createWorld`/`unloadWorld`와 `EntityFactory#createEntitySnapshot`도 구현되어 있다.
 - **구조물 엔티티 경계 확인.** `Structure#getEntities`, `fill(..., true)`, `EntityTransformer`,
-  스냅샷 재생성은 런타임 월드에서 구현되어 있다. 기본 월드·네더·엔드는 호스트가 저장 NBT를
-  제공하지 않아 구조물 엔티티 캡처/재생성 대상에서 제외된다.
-- **Paper/NMS 전체 호환이 아니다.** `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
-  `CraftMagicNumbers`는 계속 `NoSuchMethodError`이고, 실제 클라이언트로 드래그 화면을 확인한
-  것은 아니다.
+  스냅샷 재생성은 기본 월드·네더·엔드·런타임 월드 모두 구현되어 있다. 기본 월드의 NBT 캐시는
+  최대 1초 지날 수 있다.
+- **Paper/NMS 전체 호환이 아니다.** `CraftItemStack.asNMSCopy`/`asBukkitCopy`,
+  `CraftWorld#getHandle`, `CraftMagicNumbers`의 block/item/state 변환은 구현했지만 NMS 전용
+  필드·메서드는 남아 있다. 실제 클라이언트로 드래그 화면을 확인한 것은 아니다.
 
 ## 2026-11-08 — fb-32 (Bukkit 보스바 연결 + 스텁 인벤토리)
 
@@ -165,9 +166,10 @@ CMI가 동작한다고 말할 수 없다.
   2026-11-08 프로브 기준 Player 106, Server 5, World 61개가 호스트 없이 실패했고, 이 중 상당수는
   실제 Rust 호스트(`facts.rs`, `network.rs`, `extra.rs`)가 답한다. 실제 서버 기준 남은 경로는
   `plugin-api-stubs.md`의 "남은 명시적 미지원 경로" 표와 아래 "오늘 못한 것"을 따른다.
-- **Paper/NMS 호환 전체가 완료된 것은 아니다.** NMS-타입 `CraftItemStack.asNMSCopy`,
-  `CraftWorld#getHandle`, `CraftMagicNumbers`는 계속 의도적 미지원이며, 기본 월드·네더·엔드의
-  비플레이어 엔티티 NBT 경계도 아직 없다.
+- **Paper/NMS 호환 전체가 완료된 것은 아니다.** NMS-타입 `CraftItemStack.asNMSCopy`/
+  `asBukkitCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`의 block/item/state 변환은
+  구현했지만 NMS 전용 필드·메서드는 남아 있다. 기본 월드·네더·엔드의 비플레이어 엔티티 NBT
+  경계는 이후 구현됐다.
 
 ## 2026-11-08 — fb-32 후속 (advancement/potion/timed bans)
 
@@ -240,7 +242,7 @@ CMI가 동작한다고 말할 수 없다.
 - **장부만 있는 것:** 어깨 앵무새(`set/get/releaseShoulderEntity*`는 Java에서 기억만 하고 게임엔 앵무새도, 클라이언트 표시도 없다).
 - **마지막에 붙인 것:** 큰 화염구(직선 비행, 닿는 곳에서 불 붙는 위력 1 폭발), `findLightningRod/Target`(불러온 열의 맨 위 블록만 보고 128칸 안에서 가장 가까운 피뢰침을 찾는다), `sendBlockUpdate`는 표지판·상자·통·셜커 상자·화로류(그 밖의 타일 상태는 `UnsupportedOperationException`).
 - **아이템 메타:** `PlayerInventory.setItem` 등이 이름·로어·인챈트·불괴·커스텀 모델 데이터·수리 비용·내구도를 실제 슬롯 컴포넌트로 보낸다(`setItemMeta`). 아이템 PDC는 `BYTE`·`SHORT`·`INTEGER`·`LONG`·`FLOAT`·`DOUBLE`·`BOOLEAN`·`STRING`·`BYTE_ARRAY`·`INTEGER_ARRAY`·`LONG_ARRAY`를 키와 타입을 보존해 `minecraft:custom_data`로 보내고, `serializeToBytes`/`readFromBytes`도 지원한다. 아이템 플래그는 `minecraft:tooltip_display`로 보내며 `HIDE_ADDITIONAL_TOOLTIP`은 26.3에 개별 컴포넌트가 없어 전체 툴팁 숨김으로 근사한다. 컨테이너/리스트 PDC 타입과 책 같은 나머지 메타는 조용히 버리지 않고 `UnsupportedOperationException`. 실제 클라이언트 렌더링은 미검증.
-- **월드젠 쪽:** `World#getStructures(x,z[,Structure])` 구현됨(호스트 op 10 `structure starts` → `getStructureStarts(int,int)` → `GeneratedStructure`, 조각(`getPieces`)은 호스트가 경계 상자만 보고해 빈 목록 대신 명시적으로 거부함). `createExplorerMap`(Server 3개)은 가장 가까운 구조물을 호스트로 찾아 그 중심의 `MapView`가 달린 FILLED_MAP을 돌려준다(못 찾으면 null). 지형 렌더링과 마커 커서는 없고, 맵 연결(`MapMeta`)은 Java 쪽 메타에만 있어 Rust 아이템(material+amount)로는 전달되지 않는다.
+- **월드젠 쪽:** `World#getStructures(x,z[,Structure])` 구현됨(호스트 op 10 `structure starts` → `getStructureStarts(int,int)` → `GeneratedStructure`, 조각은 op 11 `structure pieces` → `getPieces()`). `createExplorerMap`(Server 3개)은 가장 가까운 구조물을 호스트로 찾아 그 중심의 `MapView`가 달린 FILLED_MAP을 돌려준다(못 찾으면 null). 지형 렌더링과 마커 커서는 없고, 맵 연결(`MapMeta`)은 Java 쪽 메타에만 있어 Rust 아이템(material+amount)로는 전달되지 않는다.
   `World#locateNearestBiome`, `locateNearestStructure`(Structure/StructureType/deprecated), `hasStructureAt`, `Registry.STRUCTURE`는 vanilla 월드젠 호스트에 연결됐고 차원 경계를 따른다. 구조물 시작은 기본·네더·엔드·런타임 월드에서 동작한다. `locateNearestBiome`은 호스트 고정 32/64 간격(Paper 기본값)을 쓰고, 다른 interval 인자는 조용히 무시하지 않고 거부한다. 호스트가 없으면 "not implemented"를 던진다(호스트 실행 검증은 EULA 때문에 개발자 로컬에서만 가능).
   POI 검색은 로드된 청크의 실제 블록 상태를 스캔하며 기본·네더·엔드·런타임 월드의 로드된 청크 목록을 쓴다. POI 저장 형식(`poi/r.x.z.mca`의 `Sections`/`Records`/`free_tickets`, `PoiSection$Packed`의 `Valid`/`Records`)은 확인했지만 Ferrite가 POI 파일을 쓰지 않아 저장소를 읽지 않는다. `IS_OCCUPIED`는 티켓을 잡는 AI가 없어 빈 결과, `HAS_SPACE`는 같은 타입 중 공간이 있는 POI만 반환한다. 블록 속성은 호스트의 전체 상태 문자열로 구분한다(침대 머리/발 포함).
 - **청크:** `unloadChunk`는 서버가 홀더 없는 청크를 스스로 내리므로 "이미 내려가 있으면 true, 플레이어·스폰이 잡고 있으면 false"로 답한다(강제 언로드는 없음).
@@ -268,7 +270,7 @@ CMI가 동작한다고 말할 수 없다.
 - **`RegistryAccess`**: `block`/`item`/`menu`/`entity_type`의 `size`·`stream`·`iterator`가 호스트로 가서 실패하던 것을 생성 키 목록으로 고쳤고,
   `villager_profession`·`point_of_interest_type`·`villager_type`·`data_component_type`·`particle_type`·`potion`과 데이터 기반 21개(`trim_*`, `*_variant`,
   `jukebox_song`, `banner_pattern`, `decorated_pot_pattern`, `painting_variant`, `instrument`, `sulfur_cube_archetype`, `dialog`)를 새로 연결했다.
-  `game_rule`·`memory_module_type`만 명시적 `UnsupportedOperationException`이다. 검증: `FerriteRegistryBackingTest`(생성기와 별개로 센 개수 대조).
+  `game_rule` 59개와 `memory_module_type` 중 Bukkit이 노출하는 45개 `MemoryKey` 상수가 조회된다. 내부 70개는 Bukkit 값 타입이 없어 노출하지 않는다. 검증: `FerriteRegistryBackingTest`(생성기와 별개로 센 개수 대조).
   이 줄의 값 객체(예: `Wolf.Variant`) 속성은 여전히 키 신원뿐이다. 속성을 읽으면 호스트 브리지로 간다.
 
 - **`Player#playEffect` 데이터**: `FerriteEffectData`가 바닐라 26.3 서버의 `levelEvent` 호출 지점(`javap`로 확인)에 맞춰 인코딩한다.
@@ -293,8 +295,8 @@ CMI가 동작한다고 말할 수 없다.
   1-인자 `broadcastSlotBreak`,
   `broadcastHurtAnimation(Collection)`, `playPickupItemAnimation(Item,int)`. 규칙과 한계는
   `docs/plugin-api-stubs.md`의 "런타임 월드와 플레이어 동작" 표.
-- **여전히 미구현:** Paper 전체 호환은 아니며, 기본 월드·네더·엔드의 비플레이어 엔티티 NBT
-  구조물 경계, 지도 제작대, 삼지창 투사체 등은 계속 제한된다.
+- **당시 미구현(이후 구현):** Paper 전체 호환은 아니었다. 당시 기본 월드·네더·엔드의 엔티티 NBT,
+  지도 제작대, 삼지창 투사체가 제한됐고, 현재는 모두 코드 경로와 테스트가 있다.
 
 ## 다음 단계 제안
 

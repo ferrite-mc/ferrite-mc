@@ -159,15 +159,18 @@ class FerriteRegistryBackingTest {
         assertEquals(8, org.bukkit.Registry.INSTRUMENT.stream().map(org.bukkit.MusicInstrument::getKey).collect(Collectors.toSet()).size());
     }
 
-    @Test void registriesWithoutGeneratedValueDataFailExplicitly() {
+    @Test void gameRulesAndMemoryKeysResolveWithoutInventingValues() {
         var gameRules = registry(RegistryKey.GAME_RULE);
         assertEquals(59, gameRules.size());
         assertNotNull(gameRules.get(NamespacedKey.minecraft("advance_time")));
         assertNull(gameRules.get(NamespacedKey.minecraft("unknown_rule")));
         var memory = registry(RegistryKey.MEMORY_MODULE_TYPE);
-        var memoryError = assertThrows(UnsupportedOperationException.class, memory::keyStream);
-        assertTrue(memoryError.getMessage().contains("minecraft:memory_module_type") && memoryError.getMessage().contains("private constructor"),
-                memoryError.getMessage());
+        assertEquals(org.bukkit.entity.memory.MemoryKey.values().size(), memory.size());
+        assertSame(org.bukkit.entity.memory.MemoryKey.HOME, memory.get(org.bukkit.entity.memory.MemoryKey.HOME.getKey()));
+        assertNull(memory.get(NamespacedKey.minecraft("unknown_memory")));
+        // Paper's static field is a NotARegistry shim; it must still answer the same values.
+        assertEquals(memory.size(), org.bukkit.Registry.MEMORY_MODULE_TYPE.size());
+        assertSame(org.bukkit.entity.memory.MemoryKey.HOME, org.bukkit.Registry.MEMORY_MODULE_TYPE.get(org.bukkit.entity.memory.MemoryKey.HOME.getKey()));
         var unknownClass = RegistryAccess.registryAccess().getRegistry(org.bukkit.Keyed.class);
         var classError = assertThrows(UnsupportedOperationException.class, unknownClass::size);
         assertTrue(classError.getMessage().contains("org.bukkit.Keyed"), classError.getMessage());

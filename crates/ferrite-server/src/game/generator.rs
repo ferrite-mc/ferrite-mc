@@ -105,6 +105,18 @@ pub trait ChunkGenerator: Send + Sync {
         anyhow::bail!("this generator has no structures")
     }
 
+    /// The pieces of structure `id` that start in a chunk, as inclusive bounds
+    /// `[minX, minY, minZ, maxX, maxY, maxZ]`.
+    fn structure_pieces(
+        &self,
+        _dimension: super::Dimension,
+        _id: &str,
+        _chunk_x: i32,
+        _chunk_z: i32,
+    ) -> anyhow::Result<Vec<[i32; 6]>> {
+        anyhow::bail!("this generator has no structure pieces")
+    }
+
     /// Whether a piece of structure `id` covers the block.
     fn structure_at(
         &self,

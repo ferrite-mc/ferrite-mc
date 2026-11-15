@@ -188,11 +188,16 @@ class WorldSearchTest {
         assertEquals(1, sent.size(), "a refused search never reaches the host");
     }
 
-    @Test void aStructureStartHasABoundingBoxButNoPieces() {
-        HostBridge.transport = (owner, subject, method, args) -> "minecraft:village_plains 0 60 0 20 75 20";
+    @Test void aStructureStartReportsItsBoundingBoxAndPieces() {
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "getStructureStarts(int,int)" -> "minecraft:village_plains 0 60 0 20 75 20";
+            case "getStructurePieces(String,int,int)" -> "0 60 0 20 75 20\n2 60 2 5 64 5";
+            default -> null;
+        };
         var start = world.getStructures(0, 0).iterator().next();
         assertEquals(21, (int) start.getBoundingBox().getWidthX());
-        var e = assertThrows(UnsupportedOperationException.class, start::getPieces);
-        assertTrue(e.getMessage().contains("bounding box, not its pieces"), e.getMessage());
+        var pieces = start.getPieces();
+        assertEquals(2, pieces.size());
+        assertEquals(21, (int) pieces.iterator().next().getBoundingBox().getWidthX());
     }
 }

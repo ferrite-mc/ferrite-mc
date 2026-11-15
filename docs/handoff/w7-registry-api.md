@@ -70,7 +70,7 @@ The installed `ArmorTrim.equals` compares material/pattern by reference (`javap 
 | Legacy translation getter on literal description | Component getter works; translation getter throws UnsupportedOperationException because the component has no translation key. |
 | Tags and registry mutation/builders | Existing explicit host behavior retained. No empty tag collections or successful mutation placeholders added. Host exceptions propagate. |
 | game_rule | Remains explicitly unavailable. Report lists **59 keys/IDs**, not value defaults. Installed GameRule.getType()/getDefaultValue() require real typed defaults; GameRules constants resolve through Registry.GAME_RULE (not independent ready-made values). commands.json cannot supply defaults. No fabricated true/0 values. World get/set bridge belongs to remote world API worker. |
-| memory_module_type | Remains explicitly unavailable. Report lists **115 keys/IDs**; installed final MemoryKey exposes **45 typed constants**, a private `(NamespacedKey, Class<T>)` constructor, and no contract for the other 70 value types. Returning just 45 would conceal incomplete full-registry enumeration. Existing constants need no new registry implementation. Entity memory mutation belongs to remote entity API worker. Error text now explains the typed-subset limitation. |
+| memory_module_type | Implemented for the **45 typed constants** the installed `MemoryKey` exposes. The report lists **115 keys/IDs**, but the other 70 have no Bukkit value type or constructor contract; only the representable constants are published by `FerriteRegistryAccess.memoryKeyRegistry`, and an internal key returns null rather than a fabricated value. Entity memory mutation remains outside this lane. |
 | Other W6 registries audited, unchanged | Villager Profession/Type (OldEnum), Banner PatternType (OldEnum/getIdentifier), POI is(BlockData)/hasOccupants, DataComponentType.isPersistent, DialogLike, Biome/Attribute/Sound properties. Runtime/legacy properties not represented by their current JSON/reports remain explicit host failures. Data-driven scope here does not assign speculative legacy banner identifiers, POI occupancy, persistence flags, dialog runtime behavior, or remote-owned attributes. |
 | Existing specialized registries | Structure.getStructureType, Enchantment, PotionEffectType, DamageType, GameEvent, block/item/menu/particle/potion and StructureType implementations retained; no broad parity claim. Item, attributes, and runtime operations remain under their assigned lanes. |
 
@@ -102,7 +102,7 @@ $env:JAVA_HOME = 'C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot'
 
 ## Shared integration hunks
 
-1. `FerriteRegistryAccess.java`: only identity factory selection for six data-backed/OldEnum kinds, and MemoryKey refusal explanation. No other registry dispatch branches edited.
+1. `FerriteRegistryAccess.java`: identity factory selection for six data-backed/OldEnum kinds, plus the MemoryKey registry over the 45 Bukkit constants. No other registry dispatch branches edited.
 2. `tools/generate_registry_keys.py`: four lines add synchronized DATA_DRIVEN ID output using existing canonical keys. No build.gradle/root manifest changes.
 3. Existing `FerriteMusicInstrument.java`: replaced private duplicate file parsing with the shared lane-specific validated snapshot reader.
 4. New lane-only helpers `FerriteRegistryValueData` and `FerriteRegistryValueProperties`, plus `RegistryValuePropertiesTest` and this handoff.

@@ -35,6 +35,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
     static java.util.Set<String> poiTypeKeys() { return java.util.Set.copyOf(KEYS.get("point_of_interest_type")); }
     @SuppressWarnings("unchecked") @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(Class<T> type) {
         if (type == org.bukkit.GameRule.class) return cast(cached("game_rule", FerriteRegistryAccess::gameRuleRegistry));
+        if (type == org.bukkit.entity.memory.MemoryKey.class) return cast(cached("memory_module_type", FerriteRegistryAccess::memoryKeyRegistry));
         if (type == org.bukkit.block.BlockType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.BLOCK);
         if (type == org.bukkit.inventory.ItemType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.ITEM);
         if (type == org.bukkit.inventory.MenuType.class) return (org.bukkit.Registry<T>) getRegistry(io.papermc.paper.registry.RegistryKey.MENU);
@@ -56,6 +57,7 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
     }
     @Override public <T extends org.bukkit.Keyed> org.bukkit.Registry<T> getRegistry(io.papermc.paper.registry.RegistryKey<T> type) {
         if (type.equals(io.papermc.paper.registry.RegistryKey.GAME_RULE)) return cast(cached("game_rule", FerriteRegistryAccess::gameRuleRegistry));
+        if (type.equals(io.papermc.paper.registry.RegistryKey.MEMORY_MODULE_TYPE)) return cast(cached("memory_module_type", FerriteRegistryAccess::memoryKeyRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.MENU)) return cast(cached("menu", FerriteRegistryAccess::menuRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.BLOCK)) return cast(cached("block", FerriteRegistryAccess::blockRegistry));
         if (type.equals(io.papermc.paper.registry.RegistryKey.ITEM)) return cast(cached("item", FerriteRegistryAccess::itemRegistry));
@@ -422,6 +424,23 @@ public final class FerriteRegistryAccess implements io.papermc.paper.registry.Re
             case "entity_place", "lightning_strike", "teleport" -> 14;
             case "entity_die", "explode" -> 15;
             default -> 0;
+        };
+    }
+    /**
+     * Bukkit exposes 45 typed {@link org.bukkit.entity.memory.MemoryKey} constants; the generated
+     * 26.3 registry also has internal memory modules for which Bukkit has no value type. Only the
+     * representable constants are published, and an internal key is absent rather than guessed.
+     */
+    private static org.bukkit.Registry<org.bukkit.entity.memory.MemoryKey<?>> memoryKeyRegistry() {
+        return new BaseRegistry<>("memory_module_type") {
+            private final java.util.Map<org.bukkit.NamespacedKey, org.bukkit.entity.memory.MemoryKey<?>> entries =
+                    org.bukkit.entity.memory.MemoryKey.values().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
+                            org.bukkit.entity.memory.MemoryKey::getKey, key -> key));
+            @Override public org.bukkit.entity.memory.MemoryKey<?> get(org.bukkit.NamespacedKey key) { return entries.get(key); }
+            @Override public java.util.stream.Stream<org.bukkit.NamespacedKey> keyStream() { return entries.keySet().stream().sorted(); }
+            @Override public java.util.stream.Stream<org.bukkit.entity.memory.MemoryKey<?>> stream() { return keyStream().map(this::get); }
+            @Override public int size() { return entries.size(); }
+            @Override public java.util.Iterator<org.bukkit.entity.memory.MemoryKey<?>> iterator() { return stream().iterator(); }
         };
     }
     private static org.bukkit.Registry<org.bukkit.GameRule<?>> gameRuleRegistry() {

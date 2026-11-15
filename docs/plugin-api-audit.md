@@ -41,6 +41,14 @@ worldquery.rs`가 한 시점에 다음을 읽는다.
 기존처럼 전부 공기인 빈 스냅샷을 만든다. `ChunkData#getBiome`은 `createChunkData` 버퍼에 청크
 좌표가 없어 계속 `UnsupportedOperationException`이다(가짜 PLAINS를 만들지 않는다).
 
+### 구조물 조각
+
+`World#getStructures`가 만든 `GeneratedStructure#getPieces`는 호스트 op 11
+`getStructurePieces(id, chunkX, chunkZ)`를 호출해 `StructureStart#getPieces()`의 경계 상자를
+읽는다. 호스트가 없으면 빈 목록 대신 `UnsupportedOperationException`이다. JUnit
+`WorldSearchTest.aStructureStartReportsItsBoundingBoxAndPieces`가 두 조각의 경계를 확인한다.
+실제 26.3 클라이언트에서의 구조물 표시는 여전히 미검증이다.
+
 ### 인벤토리 스냅샷 NBT
 
 접속 시 `PlayerSnapshot.inventory_data`가 슬롯별 26.3 아이템 저장 NBT를 base64로 전달한다.
@@ -61,37 +69,44 @@ worldquery.rs`가 한 시점에 다음을 읽는다.
 
 ### 그 밖에 코드와 일치함을 확인한 경계
 
-- `GameRule`: 59개 규칙을 데이터 기반으로 제공한다. `MemoryKey`만 값 타입/private 생성자 때문에
-  거부한다.
+- `GameRule`: 59개 규칙을 데이터 기반으로 제공한다. `MemoryKey`는 Bukkit이 노출하는 45개
+  타입 상수를 레지스트리로 제공하고, Bukkit 값 타입이 없는 내부 70개는 노출하지 않는다.
 - `Chunk#getChunkSnapshot`과 별개로 `MapCanvas`, 구조물 엔티티, `sendBlockUpdate`의 지원 범위는
   각각 `FerriteMapView`, `CapturedStructure`/`snapshot.rs`, `plugins/tile_update.rs`가 소유한다.
 - `Player#sendBlockUpdate`: 표지판, 상자·통·셜커 상자·화로 계열, 배너 패턴, 머리 이름/UUID·
   텍스처 속성·`note_block_sound`. 모델이 없는 침대·종·비교기 등은 명시적으로 거부한다.
 - 삼지창: `Player#launchProjectile(Trident)`가 실제 삼지창 엔티티를 만들고 비행 종료 시
   아이템으로 떨어뜨린다. 물약 콜백의 내용물 변경은 여전히 지원하지 않는다.
-- 지도 제작대(`openCartographyTable`)는 지도 저장소/`idcounts`/타입된 지도 데이터 컴포넌트가
-  없어 메뉴 자체를 거부한다.
+- 지도 제작대(`openCartographyTable`)는 `plugins/inventory.rs`에서 `cartography` 메뉴를 열고,
+  축소·잠금·복제는 `game/map_menu.rs`가 지도 저장소를 통해 처리한다. 관련 Rust 단위 테스트
+  5개가 있고 실제 클라이언트 화면은 미검증이다.
 
 ## 3. 남은 명시적 미지원
 
-- 기본 월드·네더·엔드의 비플레이어 엔티티 저장 NBT 경계. 구조물 엔티티 캡처/재생성은 런타임
-  월드에서만 가능하다.
-- `MemoryKey` 레지스트리, `ChunkData#getBiome`.
+- 기본 월드의 비플레이어 엔티티 NBT는 최대 1초 지난 캐시일 수 있다. 네더·엔드·런타임 월드는
+  현재 스냅샷을 게시하며, 구조물 엔티티 캡처/재생성은 네 차원 모두 같은
+  `ferriteEntities`/`ferriteSpawnSnapshot` 경계를 쓴다.
+- `ChunkData#getBiome`(좌표 없는 생성 버퍼)과 `MemoryKey` 115개 중 Bukkit 타입이 없는 70개.
 - 지원 표에 없는 아이템 메타와 일부 PDC 컨테이너/리스트 타입.
 - 런타임 월드의 커스텀 `WorldCreator#generator`, `generateStructures(false)`, 일부
   `WorldType`/환경. 현재 `NORMAL`, `NETHER`, `THE_END`만 허용한다.
-- NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
-  `CraftMagicNumbers`)와 Paper 전체 생명주기 API. 가짜 구현을 넣지 않는다.
+- `CraftItemStack.asNMSCopy`/`asBukkitCopy`와 `CraftWorld#getHandle`은 클린룸 NMS 래퍼로
+  제공한다. `CraftMagicNumbers`는 Bukkit/NMS block·item·state 변환, 전역 블록 상태 id,
+  data version 5023을 제공한다. NMS 전용 필드·메서드와 Paper 전체 생명주기 API는 가짜
+  구현 없이 열어 둔다.
 - `vanillaBiomeProvider()`는 컴파일 대상 Paper API에 없어 계속 열려 있다. 나무 생성·청크 상태·
   타일 수·월드 경로·보이드 피해·구조물 검색은 호스트/Java 경로가 있다.
 
 ## 4. 검증과 한계
 
-- **통과:** Java 전체 `./gradlew test` (`BUILD SUCCESSFUL`), Rust `ferrite-server` lib 1237개,
+- **통과 (2026-11-15 재검증):** Java 전체 `./gradlew test --rerun-tasks` (`BUILD SUCCESSFUL`),
+  Rust 전체 `cargo test --workspace --no-fail-fast`, `ferrite-server` lib 1238개,
   `plugin_lifecycle` 5개, `plugin_command_world` 2개, `ferrite-plugin` 통합 1개,
-  `cargo clippy -p ferrite-server -p ferrite-plugin --all-targets -- -D warnings`,
-  `cargo fmt --all --check`.
-- **집중 확인:** `FerriteItemNbtTest`, `FerriteChunkSnapshotTest`,
-  `plugin_lifecycle::typical_plugin_...`, Rust 인벤토리 NBT 보존 테스트.
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`.
+  빛 픽스처는 `python tools/make_fixture_world.py`로 재생성한 뒤 전체 테스트를 다시 통과했다.
+- **집중 확인:** `WorldSearchTest.aStructureStartReportsItsBoundingBoxAndPieces`,
+  `FerriteItemNbtTest`, `FerriteChunkSnapshotTest`, `CraftMagicNumbersTest`,
+  `FerriteRegistryBackingTest`, `plugin_lifecycle::typical_plugin_...`, Rust 구조물 조각
+  파싱·월드젠 테스트, 인벤토리 NBT 보존 테스트.
 - **미검증:** 실제 26.3 클라이언트의 청크 스냅샷/인벤토리 표시, EULA가 설정된 외부 실행 환경,
   CMI 등 대형 플러그인의 전체 부팅. 이 문서는 그 범위를 통과했다고 주장하지 않는다.

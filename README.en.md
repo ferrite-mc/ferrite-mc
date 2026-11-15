@@ -60,8 +60,8 @@ method (`vanillaBiomeProvider`) are actually open respectively.
 - POI search scans loaded chunks in every dimension. With no AI that claims POI tickets,
   `IS_OCCUPIED` is always empty and `HAS_SPACE` filters by type. `locateNearestBiome` uses the
   host's fixed 32-block horizontal / 64-block vertical sampling (Paper's defaults); explicit
-  other intervals are refused rather than ignored, and `getPieces` is refused because the host
-  reports only a bounding box. `getWorldPath` works for the default and saved runtime worlds
+  other intervals are refused rather than ignored, and `getPieces` reads each piece's bounding
+  box from host op 11. `getWorldPath` works for the default and saved runtime worlds
   (memory-only worlds are refused); `getFluidData`, `spawnAt`, and `vanillaBiomeProvider` are
   absent from the compiled Paper API.
 - Runtime worlds accept `NORMAL`, `NETHER`, and `THE_END`, and persist the environment and seed
@@ -85,8 +85,8 @@ method (`vanillaBiomeProvider`) are actually open respectively.
 - `Player#breakBlock`, player-permission `Player#chat("/command")`, `Player#performCommand`,
   slot-break/hurt/pickup animations.
 - 41 registry views, `PotionEffectType`, `playEffect`, and all six player equipment slots.
-  Only `GameRule` and `MemoryKey` registries are rejected because generated data lacks the
-  required value-type/default metadata.
+  The `GameRule` and `MemoryKey` registries are data-backed; `MemoryKey` publishes the 45
+  typed constants Bukkit exposes, not the internal modules that have no Bukkit value type.
 - Shulker-box menus (27 slots, no nesting, contents spill on break), anvil enchantment merging,
   cartography tables and the persistent map store (zoom, lock, clone, restart persistence),
   `World#spawnArrow`, and `World#getInfiniburn`.
@@ -94,7 +94,7 @@ method (`vanillaBiomeProvider`) are actually open respectively.
   skull profiles.
 - `Player#launchProjectile`: arrows, snowballs, eggs, ender pearls, experience bottles, potions,
   wind charges, fireballs, and tridents.
-- Structure block/block-entity capture and placement, transforms, and runtime-world non-player
+- Structure block/block-entity capture and placement, transforms, and all-dimension non-player
   entity snapshots with `EntityTransformer`; `EntityFactory#createEntitySnapshot` has an SNBT
   host path.
 
@@ -103,11 +103,11 @@ method (`vanillaBiomeProvider`) are actually open respectively.
 - Projectile types unknown to the host. Potion callback content mutation is also unsupported.
   (Trident launches are now implemented; see above.)
 - Some `MapCanvas` methods, translated map cursor captions, and hidden cursor transfer.
-- Entity snapshots and `EntityTransformer` work for runtime worlds; default Overworld, Nether,
-  and End non-player entities lack a saved-NBT boundary and are excluded from capture/recreation.
+- Entity snapshots and `EntityTransformer` work for the default Overworld, Nether, End, and
+  runtime worlds; the default world's cached NBT can be up to one second old.
 - Unsupported item metadata/PDC container types, tile states with no host model,
-  `ChunkData#getBiome`, some `BlockData`, and NMS/Unsafe APIs. `Chunk#getChunkSnapshot` and
-  skull texture/sound updates are implemented.
+  `ChunkData#getBiome`, and some `BlockData`. `Chunk#getChunkSnapshot`, skull texture/sound
+  updates, the NMS item/block/state conversions and `CraftWorld#getHandle` are implemented.
 
 See [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md), [`docs/plugin-stubs-status.md`](docs/plugin-stubs-status.md),
 and [`docs/plugin-api-audit.md`](docs/plugin-api-audit.md) for method-level ownership, evidence,

@@ -240,7 +240,8 @@
 | 지도 커서 스타일 캡션 | `ferrite-nbt::read_network_prefix`, `NetworkText{Plain,Rich}`, `MapCaption`; 캡션 모드 `0/1/2` (**Java가 `0/1`을 보내는데 Rust가 bool로 읽던 잠재 버그도 수정**) | Rust `styled_and_numeric_caption_modes_are_parsed`·play.rs 왕복, Java `styledMapCaptionsTravelAsComponentNbt` |
 | `sendBlockUpdate`: 주크박스·교탁·명령 블록·스포너·스컬크 센서·벌집·구조물 블록 | `tile_update.rs` `SETTINGS`/`KEYED_STACK` (키는 로컬 `server-26.3.jar`를 `javap`로 읽어 확인). 침대는 26.3에 블록 엔티티가 없어 `UnsupportedOperationException` | Rust `tile_update` 테스트, Java `PlayerTileUpdateTest` |
 | 기본 월드 엔티티 스냅샷 | `facts::publish_entities`가 오버월드도 SNBT 저장(20틱 주기) → `CapturedStructure`/`getStructures` | Rust facts·snapshot 테스트 |
-| `CraftMagicNumbers` | `INSTANCE`, `getMaterial`(모르는 키는 예외), `getKey`, `getDefaultBlockData`, `isLegacy`, `fromLegacy` | Java `BootstrapTest` |
+| `CraftMagicNumbers` | `INSTANCE`, `getMaterial`(모르는 키는 예외), `getKey`, `getDefaultBlockData`, `getBlock`/`getItem`/`getBlockState`, 전역 `getBlockStateId`, `getDataVersion`(5023), `isLegacy`, `fromLegacy`; NMS 래퍼는 `net.minecraft.world.level.block.Block`, `net.minecraft.world.item.Item`, `BlockState` | Java `CraftMagicNumbersTest`, `BootstrapTest` |
+| `Registry.MEMORY_MODULE_TYPE` | Bukkit이 노출하는 45개 `MemoryKey` 상수만 게시하고, 내부 70개는 값 타입이 없어 제외 | Java `FerriteRegistryBackingTest` |
 | `World#setVoidDamage…`, `Player#getConnection`/`postEffects`, `World#getWorldPath`, POI 검색, 블록 엔티티 수 | §10.2 아래·10.3 참고 | Java `PlayerExtrasTest`, Rust `craft::tests::void_rules...` |
 | `Player#fireworkBoost` | 호스트에 폭죽 엔티티 추가(`ferrite-entity::firework`: 수명 `10*비행+rand(6)+rand(7)`, 비행 중 `×1.15, +0.04`, 블록 충돌·수명 종료 시 상태 17 폭발, 별이 있으면 반경 5칸에 `5+2*별` 피해). 활강 상태는 `START_FALL_FLYING`부터 착지까지 추적(`isGliding()`)하고, 붙은 폭죽은 매 틱 시선 방향으로 `SetEntityMotion`을 보낸다. `World#spawn`의 `firework_rocket`도 지원 | Rust `firework::tests::*`, `motion::tests::a_firework_boost...`, `facts::tests::gliding_follows_the_registry` |
 
@@ -288,7 +289,7 @@
 - **NMS 엔티티·월드 핸들(§2.2/2.5):** `net.minecraft.world.entity.Entity`는 이제 델타 이동(`getDeltaMovement/setDeltaMovement`), `setPos/teleportTo`, 회전, 지면·불·물 상태, 크기, 커스텀 이름, 스코어보드 태그, 승객·탑승 관계(`getPassengers/getVehicle/startRiding/stopRiding`)를 Bukkit 호출로 읽고 쓴다(Entity.of로 플레이어/생명체 래퍼 선택). `LivingEntity`는 흡수 체력·수면·활강·아이템 사용·박힌 화살·효과 확인, `ServerLevel`은 시드·스폰·차원 키·엔티티 목록·UUID 조회, `Vec3`는 벡터 연산을 갖는다. 모두 Bukkit(→호스트 라우트)을 거치므로 리전 소유권을 우회하지 않는다. 테스트 `NmsEntityHandleTest`. 직접 NMS 필드 접근(`entityData`, 속성 맵 등)은 노출하지 않는다.
 - **눈 엔더·낚싯찌:** 눈 엔더는 `ferrite-entity::eye`(80틱 비행, 5분의 4는 아이템으로 떨어지고 나머지는 부서짐, 목표가 12칸 밖이면 12칸 앞·8칸 위로 조준)와 리전 `tick_eyes`(생성 직후 `locate_structure("minecraft:stronghold", …, 100)`로 목표 탐색, 없으면 즉시 부서짐)로 동작하고, 공중에서 눈을 쓰면 던져지며(`EnderEyeItem.use`), `World#spawnEntity(EYE_OF_ENDER)`도 된다. 이동식은 바닐라 `EyeOfEnder.tick`/`updateDeltaMovement` 바이트코드와 대조해 고쳤다(§10.7: 이전 속도로 먼저 움직이고 새 위치에서 속도를 구한다). 낚싯찌는 호스트에 이미 있던 `bobber`를 플러그인이 `launchProjectile(FishHook)`로 던질 수 있게 연결했다(이미 찌가 있으면 무시). `launchProjectile(FishHook)`은 Java가 정한 UUID를 호스트가 찌에 붙여, 핸들(`FISHING_BOBBER`)을 돌려준다(이미 찌가 나가 있으면 호스트가 무시하므로 그 핸들은 실체가 없다).
 - **§8 바닐라 대조(모루):** 바닐라 `AnvilMenu.createResult`와 대조해 세 가지를 고쳤다 — 같은 아이템 합치기 보너스는 최대 내구도의 12%(5%였음), 이름만 바꾸는 경우 비용은 39에서 멈추고 수리 비용(`RepairCost`)을 올리지 않는다, 창작 모드(무한 재료)는 40레벨 상한이 없다(`Menu::set_infinite_materials`). 테스트 `anvil_rename_only_keeps_the_repair_cost_and_creative_lifts_the_cap`. 유체 경계·레드스톤·청크 언로드 흐름·이웃 갱신 순서·작물 성장·중력 블록 연쇄·마법부여대·지도/세공대 결과는 이번에 대조하지 못했다(로컬 서버 jar를 `javap`로 읽을 수는 있지만 항목마다 바이트코드를 따라가야 해서 시간이 들었다).
-- **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 게임 상호작용 검증(§8):** 이 세션에서 손대지 않았다. §7은 §10.6.
+- **NMS 내부 연결(§2), 맵/구조물/엔티티(§6), 게임 상호작용 검증(§8):** §2.1/2.3의 Bukkit-expressible item/block/state 변환은 구현·테스트했다. NMS 전용 필드와 §2.4/2.5의 나머지, §6/§8은 이 세션에서 손대지 않았다. §7은 §10.6.
 - 실제 26.3 클라이언트 검증(§8)은 하지 못했다. 위 항목은 단위 테스트와 호스트 라우트 테스트까지만 확인했다.
 
 

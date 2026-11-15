@@ -29,6 +29,7 @@ const OP_LOCATE_BIOME: u8 = 5;
 const OP_LOCATE_STRUCTURE: u8 = 6;
 const OP_STRUCTURE_AT: u8 = 7;
 const OP_STRUCTURE_STARTS: u8 = 10;
+const OP_STRUCTURE_PIECES: u8 = 11;
 const OP_PLACE: u8 = 8;
 const OP_LOCATE_POI: u8 = 9;
 const START_TIMEOUT: Duration = Duration::from_secs(180);
@@ -433,6 +434,17 @@ impl ChunkGenerator for VanillaGenerator {
         Ok(parse_starts(&String::from_utf8_lossy(&reply)))
     }
 
+    fn structure_pieces(
+        &self,
+        dimension: Dimension,
+        id: &str,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> anyhow::Result<Vec<[i32; 6]>> {
+        let reply = self.request(OP_STRUCTURE_PIECES, dimension, chunk_x, chunk_z, id)?;
+        Ok(parse_bounds(&String::from_utf8_lossy(&reply)))
+    }
+
     fn structure_at(
         &self,
         dimension: Dimension,
@@ -476,6 +488,20 @@ fn parse_starts(text: &str) -> Vec<super::generator::StructureStart> {
                 *slot = fields.next()?.parse().ok()?;
             }
             fields.next().is_none().then_some((id, bounds))
+        })
+        .collect()
+}
+
+/// Parses `minX minY minZ maxX maxY maxZ` lines, skipping malformed ones.
+fn parse_bounds(text: &str) -> Vec<[i32; 6]> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let mut bounds = [0; 6];
+            for slot in &mut bounds {
+                *slot = fields.next()?.parse().ok()?;
+            }
+            fields.next().is_none().then_some(bounds)
         })
         .collect()
 }
@@ -584,6 +610,14 @@ mod tests {
                 "minecraft:village_plains".to_owned(),
                 [0, 60, 0, 20, 75, 20]
             )]
+        );
+    }
+
+    #[test]
+    fn structure_pieces_are_parsed_and_malformed_lines_skipped() {
+        assert_eq!(
+            super::parse_bounds("0 60 0 20 75 20\n2 60 2 5 64 5\nbroken 1 2\n1 2 3 4 5 6 7\n"),
+            vec![[0, 60, 0, 20, 75, 20], [2, 60, 2, 5, 64, 5]]
         );
     }
 

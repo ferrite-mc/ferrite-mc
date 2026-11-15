@@ -95,8 +95,9 @@ server-side only.
   chunk: it succeeds after unload and returns false while a player or `/forceload` holds it.
 - Ender pearls now route cross-region landings through the world loop to the owner's region. A
   landing after the player changes dimension is ignored.
-- NMS-typed CraftBukkit methods (`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
-  `CraftMagicNumbers`) stay `NoSuchMethodError` by design.
+- `CraftItemStack.asNMSCopy`/`asBukkitCopy` and `CraftWorld#getHandle` are implemented on the
+  clean-room NMS wrappers. `CraftMagicNumbers` covers Bukkit and NMS block/item/state
+  conversions, global block-state ids and the 5023 data version; NMS-only fields remain absent.
 - Block snapshots are opt-in, so `Block#getType` for arbitrary coordinates throws.
 
 ### Plugin lane status (verified against code 2026-11-15; not verified with a real client)

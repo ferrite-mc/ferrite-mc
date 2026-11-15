@@ -175,13 +175,13 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | HostBridge 반환 변환 | `HostBridge#call`의 미지원 반환 타입 | Java 브리지 |
 | BlockData | `BlockData#<미지원 메서드>` (재질별) | Java `FerriteBlockData` |
 | 청크 데이터 | `ChunkData#getBiome` | 좌표 없는 생성 버퍼는 바이옴을 알 수 없어 명시적으로 거부한다. `ChunkSnapshot#contains(Biome)`는 이미 호스트의 4×4×4 바이옴 셀을 조회한다. `Chunk#getChunkSnapshot`은 2026-11-15부터 블록·조명·바이옴·높이를 호스트에서 캡처하고, `World#getEmptyChunkSnapshot`은 공기를 돌려준다. |
-| 포션/인챈트/레지스트리 | `Enchantment` 속성, `RegistryAccess` 중 `GameRule`(`game_rule`)과 `MemoryKey`(`memory_module_type`)만 미지원 — 생성된 보고서에 값 타입·기본값이 없고 `MemoryKey` 생성자가 private이라 `UnsupportedOperationException("Ferrite: registry minecraft:... is not available: ...")`로 거부한다. 그 밖의 `RegistryKey` 레지스트리 41개는 생성 데이터로 `size`/`keyStream`/`stream`/`iterator`/`get`이 동작한다(내장 레지스트리는 `registries.json`, 데이터 기반 레지스트리 21개는 `data/minecraft/<이름>/*.json`, `Particle`/`PotionType`은 enum 상수를 키로 색인, `MusicInstrument`는 `instrument/*.json`의 `use_duration`·`range`·`sound_event`·`description`을 읽는다). 레지스트리 태그(`hasTag`/`getTag`/`getTags`)는 그대로이며 `Server#getTags`(`FerriteTags`)만 실제 데이터를 쓴다. Rust 호스트에는 레지스트리 호출이 없다. (`PotionEffectType`은 구현됨: 색·카테고리·attribute는 `FerritePotionEffectData` 표, `getId`는 생성된 `registries.json`의 protocol id, `getAttributeModifierAmount`는 바닐라 `amount*(amplifier+1)`, `isEnabledByFeature`는 26.3에서 required feature를 쓰는 효과가 없어 항상 true, `getDurationModifier`는 26.3 `MobEffect`에 해당 필드가 없어 1.0) | `ferrite-data` 데이터/호스트 |
+| 포션/인챈트/레지스트리 | `Enchantment` 속성, `GameRule`(`game_rule`) 59개, `MemoryKey`(`memory_module_type`) 중 Bukkit이 노출하는 45개는 생성 데이터/상수로 조회된다. 26.3 내부 `memory_module_type` 115개 중 Bukkit 값 타입이 없는 70개는 노출하지 않는다(가짜 타입을 만들지 않음). 그 밖의 `RegistryKey` 레지스트리 41개는 생성 데이터로 `size`/`keyStream`/`stream`/`iterator`/`get`이 동작한다(내장 레지스트리는 `registries.json`, 데이터 기반 레지스트리 21개는 `data/minecraft/<이름>/*.json`, `Particle`/`PotionType`은 enum 상수를 키로 색인, `MusicInstrument`는 `instrument/*.json`의 `use_duration`·`range`·`sound_event`·`description`을 읽는다). 레지스트리 태그(`hasTag`/`getTag`/`getTags`)는 그대로이며 `Server#getTags`(`FerriteTags`)만 실제 데이터를 쓴다. Rust 호스트에는 레지스트리 호출이 없다. (`PotionEffectType`은 구현됨: 색·카테고리·attribute는 `FerritePotionEffectData` 표, `getId`는 생성된 `registries.json`의 protocol id, `getAttributeModifierAmount`는 바닐라 `amount*(amplifier+1)`, `isEnabledByFeature`는 26.3에서 required feature를 쓰는 효과가 없어 항상 true, `getDurationModifier`는 26.3 `MobEffect`에 해당 필드가 없어 1.0) | `ferrite-data` 데이터/호스트 |
 | 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Java `FerriteLoot` — 생성 데이터팩의 `loot_table`/`predicate`/`tags`를 읽고 `FerriteItemStack`/`FerriteItemMeta`로 스택을 만든다. luck·bonus rolls·looting·killer/this_entity를 반영하고, `enchant_randomly`의 최대 레벨/호환성은 호스트의 `Enchantment` 응답을 쓴다(호스트가 없으면 1레벨/호환으로 폴백). 폭발 반경·블록 엔티티 데이터·미모델링 컴포넌트는 불투명 처리한다. |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
-| NMS/Unsafe | `UnsafeValues`의 NMS 의존 멤버, `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` | 의도적 미지원 (가짜 구현 금지); 계속 `NoSuchMethodError` |
+| NMS/Unsafe | NMS 전용 필드(`UnsafeValues`의 내부 테이블, 직접 필드 접근 등) | `CraftItemStack.asNMSCopy`/`asBukkitCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`의 block/item/state·전역 state id·data version 변환은 클린룸 래퍼로 구현. NMS 전용 필드는 가짜로 만들지 않고 명시적으로 거부 |
 | 투사체/타일/장비/효과 | `Player#launchProjectile(Trident)` — 위력 2.5로 `launchThrown(TRIDENT)`를 호스트에 보내 리전이 소유자·속도·기본 삼지창 아이템을 가진 실제 삼지창 엔티티를 만들고 비행이 끝나면 아이템으로 떨어뜨림(눈덩이·달걀·진주·경험치 병·투척/잔류 물약·바람 구슬·화염구는 구현됨, 물약 내용물은 호출에 실을 수 없어 콜백의 `setItem`은 거부). `sendBlockUpdate`: 표지판 + 호스트가 모델링한 상자·함정 상자·통·셜커 상자·화로 계열은 해당 플레이어에게만 `ClientboundBlockEntityDataPacket`(Items, 화로는 타이머)으로 전송; 배너(`patterns`: `BannerBlockEntity.saveAdditional`)와 머리(`profile`: `ResolvableProfile$Partial`의 `name`/`id`/`properties`와 `note_block_sound`)도 보내며(`tile_update.rs`, 단위 테스트 + JUnit `PlayerTileUpdateTest`), 스컬 custom name·배너 이름 등 그 밖의 모델 없는 `TileState`와 메타데이터가 있는 아이템은 `UnsupportedOperationException`(월드는 바뀌지 않음). `Player#playEffect`는 데이터 종류별로 구현: Boolean(`COMPOSTER_FILL_ATTEMPT`·`VAULT_*` 1/0, `ENDER_DRAGON_BREATH` 1/-1), Integer·Number(그대로), `Color`(불투명 ARGB), `Axis`(ordinal), `BlockFace`(`WHITE_SMOKE_SHOOT`만, `Direction#get3DDataValue`), `BlockData`(전역 블록 상태 id, `block-states.tsv`). 거부: `RECORD_PLAY`의 `JukeboxSong`(데이터 기반 레지스트리 id가 생성 보고서에 없음), `SMOKE_SHOOT`·`DESTROY_PROGRESS*`(바닐라 서버 호출 지점을 못 찾음), `EXTINGUISH`·`TRIAL_SPAWNER_*`의 Boolean(고정값/인코딩 입자만 보여 매핑 미확인) — 원시 int 오버로드는 항상 가능. 장비: 플레이어의 슬롯 6개(HAND·OFF_HAND·FEET·LEGS·CHEST·HEAD)는 모두 연결, `BODY`·`SADDLE`은 바닐라 `Player#canUseSlot`이 false라 `UnsupportedOperationException`. | Rust 호스트/프로토콜 |
 | 아이템 메타 | `PlayerInventory#setItem`이 지원하지 않는 메타, 미지원 장비 슬롯 | `ferrite-item` 컴포넌트 |
-| 엔티티 조회 | `World#getEntities*`는 플레이어와 호스트가 게시한 비플레이어 엔티티를 합친다. | `FerriteWorld#hostEntities` → `facts::world_entities`; 제거·월드 필터 회귀 테스트가 있다. 기본 월드의 구조물 엔티티 NBT 경계는 별도 잔여 작업이다. |
+| 엔티티 조회 | `World#getEntities*`는 플레이어와 호스트가 게시한 비플레이어 엔티티를 합친다. | `FerriteWorld#hostEntities` → `facts::world_entities`; 제거·월드 필터 회귀 테스트가 있다. 기본 월드·네더·엔드·런타임 월드 모두 `ferriteEntities`/`ferriteSpawnSnapshot` 경계를 쓰며 기본 월드 NBT는 최대 1초 지연될 수 있다. |
 | 월드젠 호스트 | `locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE` | vanilla 월드젠 호스트 (EULA 때문에 개발자 로컬만) |
 
 ## 스텁 카탈로그 분류 (2026-11-14 재생성, claude-api / Lane B) — 역사 기록
@@ -219,9 +219,11 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 - **POI `Occupancy.IS_OCCUPIED` — 의도한 빈 결과, 테스트로 고정.** 티켓을 잡는 AI가 없어 점유된 POI가 없다. `HAS_SPACE`는
   점유자를 받는 모든 타입이고 `IS_OCCUPIED`는 항상 빈 목록/`null`이다(`FerriteWorld` 주석, `PlayerExtrasTest`의 `locateNearestPoi`/
   `locateAllPoiInRange` 단언). 티켓을 지어내지 않았다.
-- **`Structure#getPieces`와 임의 `locateNearestBiome` 간격 — 정밀한 거부 유지.** JUnit `WorldSearchTest.aStructureStartHasABoundingBoxButNoPieces`,
-  `biomeSearchIntervalsOtherThanTheHostsAreRefusedNotIgnored`. 월드젠 호스트 테스트는 EULA가 필요해 실행하지 않았다.
-- **NMS 타입 CraftBukkit 메서드**는 이 목록에 없고 계속 `NoSuchMethodError`다. EULA는 수락하지 않았다.
+- **`Structure#getPieces` 구현, 임의 `locateNearestBiome` 간격 — 정밀한 거부 유지.** `getPieces`는
+  호스트 op 11에서 조각 경계를 읽는다(`WorldSearchTest.aStructureStartReportsItsBoundingBoxAndPieces`).
+  임의 interval은 `WorldSearchTest.biomeSearchIntervalsOtherThanTheHostsAreRefusedNotIgnored`로 거부한다.
+  월드젠 호스트 테스트는 EULA가 필요해 실행하지 않았다.
+- **NMS 타입 CraftBukkit 메서드** 중 `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers#getBlock/getItem/getBlockState/getBlockStateId/getDataVersion`은 구현되어 있다. NMS 전용 필드는 클린룸 래퍼에 없으며, EULA는 수락하지 않았다.
 
 > 아래 2026-11-13 절은 기록으로 남긴 것이며, 숫자(Player 12 / World 14)와 "정말 열려 있는" 목록은 위 표로 대체됐다.
 
@@ -261,4 +263,4 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 ### 주의
 
 - 위 숫자는 이 환경에서 재생성한 프로브의 결과이며, "답한다"로 분류된 항목이 모든 인자 조합에서 동작한다는 뜻이 아니다.
-- NMS 계열(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`)은 이 목록에 없고 의도적으로 `NoSuchMethodError`다.
+- NMS 계열 중 `CraftItemStack.asNMSCopy`/`asBukkitCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`의 Bukkit/NMS block/item/state 변환은 구현되어 있다. NMS 전용 필드·메서드는 이 목록에 없고 명시적으로 실패한다.

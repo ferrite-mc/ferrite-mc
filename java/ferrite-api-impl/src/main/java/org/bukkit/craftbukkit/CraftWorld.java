@@ -3,9 +3,10 @@ package org.bukkit.craftbukkit;
 /**
  * CraftBukkit compatibility shell for plugins compiled against a real server.
  *
- * <p>Ferrite has no {@code net.minecraft} classes, so methods whose signatures mention NMS types
- * cannot exist here; a plugin calling them gets {@link NoSuchMethodError} while the class itself
- * loads. This wrapper is deliberately not a {@link org.bukkit.World}: the live world is a Ferrite
+ * <p>Signatures that plugins commonly reach through NMS are backed by the small
+ * {@code net.minecraft} wrapper layer ({@link #getHandle()}, block states, entities and chunks);
+ * NMS-only fields with no Bukkit equivalent stay absent instead of exposing a second mutable
+ * world. This wrapper is deliberately not a {@link org.bukkit.World}: the live world is a Ferrite
  * implementation, so a cast to this type would fail in CraftBukkit too.
  */
 public class CraftWorld {

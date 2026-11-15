@@ -8,7 +8,7 @@ import org.bukkit.craftbukkit.util.CraftMagicNumbers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-/** CraftMagicNumbers answers the Bukkit-expressible conversions and refuses the ones 26.3 has no value for. */
+/** CraftMagicNumbers answers every 26.3 conversion, and values with no form fail explicitly. */
 class CraftMagicNumbersTest {
     @BeforeAll static void start() {
         System.setProperty("ferrite.native", "false");
@@ -26,10 +26,32 @@ class CraftMagicNumbersTest {
         assertThrows(IllegalArgumentException.class, () -> CraftMagicNumbers.getDefaultBlockData(Material.DIAMOND));
     }
 
-    @Test void valuesWithoutA26_3FormFailExplicitly() {
-        var data = CraftMagicNumbers.getDefaultBlockData(Material.STONE);
-        var missing = assertThrows(UnsupportedOperationException.class, () -> CraftMagicNumbers.getBlockStateId(data));
-        assertTrue(missing.getMessage().contains("block state"), missing.getMessage());
-        assertThrows(UnsupportedOperationException.class, CraftMagicNumbers::getDataVersion);
+    @Test void nmsBlockItemAndStateConversionsUseTheSameIdentity() {
+        var block = CraftMagicNumbers.getBlock(Material.STONE);
+        assertSame(Material.STONE, block.getBukkitMaterial());
+        assertSame(Material.STONE, CraftMagicNumbers.getMaterial(block));
+
+        var item = CraftMagicNumbers.getItem(Material.DIAMOND);
+        assertSame(Material.DIAMOND, item.getBukkitMaterial());
+        assertSame(Material.DIAMOND, CraftMagicNumbers.getMaterial(item));
+        assertEquals(Material.DIAMOND.getMaxStackSize(), item.getDefaultMaxStackSize());
+        assertSame(Material.DIAMOND, item.getDefaultInstance().toBukkit().getType());
+
+        var data = CraftMagicNumbers.getDefaultBlockData(Material.OAK_STAIRS);
+        var state = CraftMagicNumbers.getBlockState(data);
+        assertEquals(data.getAsString(), state.getBukkitBlockData().getAsString());
+        assertSame(Material.OAK_STAIRS, CraftMagicNumbers.getMaterial(state));
+
+        assertThrows(IllegalArgumentException.class, () -> CraftMagicNumbers.getBlock(Material.DIAMOND));
+        assertThrows(IllegalArgumentException.class, () -> CraftMagicNumbers.getItem(Material.WATER));
+    }
+
+    @Test void blockStateIdsAndDataVersionComeFromThe26_3Data() {
+        assertEquals(1, CraftMagicNumbers.getBlockStateId(CraftMagicNumbers.getDefaultBlockData(Material.STONE)));
+        var stairs = org.bukkit.Bukkit.createBlockData(
+                "minecraft:oak_stairs[facing=north,half=top,shape=straight,waterlogged=true]");
+        assertEquals(5463, CraftMagicNumbers.getBlockStateId(stairs));
+        assertEquals(5463, CraftMagicNumbers.getBlockStateId(CraftMagicNumbers.getBlockState(stairs)));
+        assertEquals(5023, CraftMagicNumbers.getDataVersion());
     }
 }

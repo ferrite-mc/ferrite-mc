@@ -71,6 +71,6 @@ python tools/extract_gamerules.py vanilla/26.3 java/ferrite-api-impl/build/gamer
 3. build.gradle.kts: append a dedicated generateGameRules task/resource root and test reference property; existing registry task unchanged. Requires the already-fetched official bundled jar/lib (same prerequisite as current extraction).
 4. InternalBridge: only legacyGameRuleBridge's Java delegate changed. Do not replace unrelated remote workers' bridge edits.
 5. Bootstrap.startServer: only the documented registry pre-initialization call before plugins. Preserve any independent lifecycle edits.
-6. Existing refusal test now asserts supported GAME_RULE coverage; MemoryKey/unknown registries still explicitly fail. PR #13 also edits MemoryKey wording, so retain both test contracts if resolving nearby hunks.
+6. Existing test asserts supported GAME_RULE coverage; MemoryKey now publishes the 45 Bukkit constants, and unknown registries still fail explicitly. PR #13 also edits MemoryKey wording, so retain both test contracts if resolving nearby hunks.
 
 Continue the finite queue in `local-plugin-api-queue.md`; coordinator owns integration/merge/release.

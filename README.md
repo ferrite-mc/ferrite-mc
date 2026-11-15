@@ -64,7 +64,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 - 수면: `Player#sleep(Location,boolean)`(침대 검증, 점유 확인, 차원별 폭발 처리). 엔드: `getEnderDragonBattle`의 `resetCrystals`, `spawnNewGateway(Position)`.
 - `World#createExplosion`(모든 overload, 다른 월드는 거부), `World#spawn`·`createEntity`·`addEntity`(클래스→엔티티 타입 매핑, 모호하면 거부), `getChunksAtAsync`, `Player#getSentChunkKeys`.
 - `sendBlockUpdate`: 디스펜서·드롭퍼·호퍼·양조기·크래프터·모닥불·장식된 책장·주크박스·교탁·명령 블록·스포너·스컬크 센서·벌집·구조물 블록 등 블록 엔티티와 머리 텍스처 속성·`note_block_sound`, 아이템 메타 스냅샷.
-- 지도 커서 스타일 캡션(`styled`/`numeric` 모드 0·1·2), `CraftMagicNumbers`(`getMaterial`, `getKey`, `getDefaultBlockData`, `isLegacy`, `fromLegacy`).
+- 지도 커서 스타일 캡션(`styled`/`numeric` 모드 0·1·2), `CraftMagicNumbers`(`getMaterial`, `getKey`, `getDefaultBlockData`, `getBlock`, `getItem`, `getBlockState`, `getBlockStateId`, `getDataVersion`, `isLegacy`, `fromLegacy`), `CraftItemStack.asNMSCopy`/`asBukkitCopy`, `CraftWorld#getHandle`. `Registry.MEMORY_MODULE_TYPE`은 Bukkit이 노출하는 45개 `MemoryKey` 상수를 반환한다.
 - `Player#loadData`/`saveData`의 인벤토리·선택 슬롯·게임 모드 적용(체력·허기·경험치는 되돌리지 않음), 기본 월드 엔티티 스냅샷과 `CapturedStructure`/`getStructures`.
 - `NmsEntityHandle`: 위치·속도·회전·상태·승객/차량 등을 Bukkit 호출을 거쳐 읽고 쓴다(리전 소유권을 우회하지 않음).
 - Worldgen/World API: POI 검색이 기본·네더·엔드·런타임 월드에서 로드된 청크의 실제 블록 상태를 본다(단, POI 티켓을 잡는 AI가 없어 `IS_OCCUPIED`는 비어 있다). 구조물 시작·`hasStructureAt`·`locateNearestStructure`의 `Structure`/`StructureType`/deprecated overload, `locateNearestBiome`, `setBiome`(오버월드·네더·엔드), 서버 전역 게임룰, 런타임 월드 환경 저장을 구현했다.
@@ -77,7 +77,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 **한계와 남은 것 (지시서 §10.3)**
 
 - `Player`: 폭죽 생성 뒤 `setItem`/`setFireworkMeta`/`setAttachedTo` 호출, 폭죽 색·모양 표시, 붙은 폭죽 가속의 근사, `getConnection`의 `reenterConfiguration`/`sendReportDetails`, `postEffects`로 바꾼 상태의 반영 한계.
-- `World`: POI 검색은 POI 저장소 대신 로드된 청크의 블록 상태를 스캔한다(네더·엔드·런타임 월드 포함). POI 티켓을 점유하는 AI가 없어 `IS_OCCUPIED`는 항상 빈 결과이고 `HAS_SPACE`는 해당 타입 중 공간이 있는 POI만 돌려준다. `locateNearestBiome`은 호스트 고정 32/64 간격(Paper 기본값)을 쓰며, 다른 `horizontalInterval`/`verticalInterval`은 조용히 무시하지 않고 거부한다. 구조물 조각(`getPieces`)은 호스트가 경계 상자만 보고하므로 빈 목록 대신 거부한다. `getWorldPath`는 기본 월드와 저장 디렉터리가 있는 런타임 월드에서 동작하고 메모리 월드는 거부한다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API에 없다.
+- `World`: POI 검색은 POI 저장소 대신 로드된 청크의 블록 상태를 스캔한다(네더·엔드·런타임 월드 포함). POI 티켓을 점유하는 AI가 없어 `IS_OCCUPIED`는 항상 빈 결과이고 `HAS_SPACE`는 해당 타입 중 공간이 있는 POI만 돌려준다.  `locateNearestBiome`은 호스트 고정 32/64 간격(Paper 기본값)을 쓰며, 다른 `horizontalInterval`/`verticalInterval`은 조용히 무시하지 않고 거부한다. 구조물 조각(`getPieces`)은 호스트 op 11에서 각 조각의 경계를 읽어 돌려준다. `getWorldPath`는 기본 월드와 저장 디렉터리가 있는 런타임 월드에서 동작하고 메모리 월드는 거부한다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API에 없다.
 - `ChunkData#getBiome`은 계속 거부한다. `Chunk#getChunkSnapshot`은 2026-11-15에 호스트 캡처로 구현됐다.
 - `sendBlockUpdate`: 침대는 26.3에 블록 엔티티가 없어 거부한다. 목록 밖 대상은 `UnsupportedOperationException`.
 - 레시피: 런타임 추가는 shaped/shapeless, 화로 계열·모닥불·석재 절단, 대장장이 transform/trim을 지원한다. transmute·`crafting_special_*`·`ExactChoice`/`PredicateChoice`, 결과 아이템 메타, 클라이언트 레시피북 표시는 지원하지 않는다.
@@ -98,17 +98,18 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
   패킷 API가 실제 리전 명령 또는 클라이언트 패킷으로 연결된다.
 - `RegistryAccess`의 데이터 기반 레지스트리, `PotionEffectType`, `playEffect`, 플레이어
   장비 슬롯 6개, 보스바·스코어보드·팀·태그·레시피·맵 API를 구현하고 테스트한다.
-- 구조물의 블록·블록 엔티티 캡처/배치, 회전·반전·무결성·`BlockTransformer`, 런타임
-  월드의 비플레이어 엔티티 스냅샷과 `EntityTransformer` 배치를 지원한다.
+- 구조물의 블록·블록 엔티티 캡처/배치, 회전·반전·무결성·`BlockTransformer`, 기본
+  월드·네더·엔드·런타임 월드의 비플레이어 엔티티 스냅샷과 `EntityTransformer` 배치를 지원한다.
 
 **아직 미지원이거나 제한이 있는 것**
 
-- 구조물 엔티티 스냅샷 열거는 **런타임 월드만** NBT를 제공한다. 기본 오버월드와
-  네더·엔드의 비플레이어 엔티티는 NBT 기반 구조물 캡처/재생성 대상에서 제외된다(T7 작업 대상).
+- 구조물 엔티티 스냅샷 열거는 기본 월드·네더·엔드·런타임 월드 모두 NBT를 제공한다.
+  기본 월드의 캐시는 최대 1초 늦을 수 있다.
 - 아이템 메타 중 지원 표에 없는 타입과 지원하지 않는 PDC 타입은 명시적 오류를 낸다.
-- `RegistryAccess`의 `GameRule`·`MemoryKey` 값 객체 중 생성 데이터에 타입·기본값이 없는 항목.
-- NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers` 일부)와
-  Paper 전체 생명주기 API(§2, §7). 전체 목록과 진행 상태는 지시서 §10.3을 본다.
+- `RegistryAccess`의 `MemoryKey` 115개 중 Bukkit 타입이 없는 70개 내부 모듈. Bukkit이 노출하는 45개는 레지스트리에서 조회된다.
+- NMS/Unsafe 전체 호환은 아니다. `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
+  `CraftMagicNumbers`의 Bukkit/NMS 래퍼 변환은 제공하지만 NMS 전용 필드·메서드와
+  Paper 전체 생명주기 API(§2, §7)는 남아 있다. 전체 목록은 지시서 §10.3을 본다.
 - 런타임 월드 생성: `NORMAL`, `NETHER`, `THE_END` 환경과 seed를 `level.dat`의 `Data.FerriteDimension`/`Data.WorldGenSettings.seed`에 저장하고 재오픈한다. 커스텀 `WorldCreator#generator`, `generateStructures(false)`, `WorldType`(NORMAL 외), `biomeProvider`, `CUSTOM` 환경은 명시적 `UnsupportedOperationException`으로 거부한다(호스트 월드젠이 커스텀 생성기·구조물 생성 토글·바이옴 소스를 바꾸는 훅을 노출하지 않는다).
 
 상세한 메서드별 소유자·근거·테스트는 [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md),

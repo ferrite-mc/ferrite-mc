@@ -66,6 +66,11 @@ public final class FerriteUnsafe implements UnsafeValues {
 
     @Override public int getDataVersion() { return DATA_VERSION; }
 
+    /** The 26.3 global block-state id used by level events, from the generated block table. */
+    public static int blockStateId(BlockData data) {
+        return FerriteBlockStates.stateId(java.util.Objects.requireNonNull(data, "data").getAsString());
+    }
+
     @Override public ItemStack modifyItemStack(ItemStack stack, String arguments) {
         java.util.Objects.requireNonNull(stack, "stack");
         java.util.Objects.requireNonNull(arguments, "arguments");
