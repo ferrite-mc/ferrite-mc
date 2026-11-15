@@ -4,7 +4,8 @@
 //! Chunk state (`isChunkLoaded`, `isChunkGenerated`, `loadChunk`) is answered here for every
 //! world except the default one, whose loaded set `chunks` tracks.
 
-use ferrite_plugin::{HOST_NULL, Heightmap, HostCall};
+use ferrite_plugin::{ChunkSnapshot, HOST_NULL, Heightmap, HostCall};
+use std::fmt::Write as _;
 
 /// The reply to a heightmap or light query, or `None` for another call.
 pub fn answer(call: &HostCall) -> Option<String> {
@@ -27,6 +28,10 @@ fn answer_with_view(
         return None;
     }
     let reply = match (call.method.as_str(), call.args.as_slice()) {
+        ("getChunkSnapshot(int,int)", [x, z]) => (|| {
+            let snapshot = view?.chunk_snapshot(world?, x.parse().ok()?, z.parse().ok()?)?;
+            Some(encode_chunk_snapshot(&snapshot))
+        })(),
         ("getHighestBlockYAt(int,int,HeightMap)", [x, z, kind]) => (|| {
             let kind = Heightmap::from_bukkit(kind)?;
             view?
@@ -56,6 +61,54 @@ fn answer_with_view(
         _ => return None,
     };
     Some(reply.unwrap_or_else(|| HOST_NULL.to_owned()))
+}
+
+/// Encodes a chunk snapshot as newline-delimited fields, with one palette entry per line and
+/// comma-separated indexes. Light values are one hex digit each. Java's
+/// `FerriteChunkSnapshot.capture` is the only decoder, so both sides must change together.
+fn encode_chunk_snapshot(snapshot: &ChunkSnapshot) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "1");
+    let _ = writeln!(out, "{}", snapshot.min_y);
+    let _ = writeln!(out, "{}", snapshot.max_y);
+    let _ = writeln!(out, "{}", snapshot.block_palette.len());
+    for state in &snapshot.block_palette {
+        let _ = writeln!(out, "{state}");
+    }
+    let _ = writeln!(out, "{}", snapshot.blocks.len());
+    for (index, state) in snapshot.blocks.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{state}");
+    }
+    out.push('\n');
+    for light in [&snapshot.sky_light, &snapshot.block_light] {
+        for value in light.iter().copied() {
+            out.push(char::from_digit(u32::from(value), 16).unwrap_or('0'));
+        }
+        out.push('\n');
+    }
+    let _ = writeln!(out, "{}", snapshot.biome_palette.len());
+    for biome in &snapshot.biome_palette {
+        let _ = writeln!(out, "{biome}");
+    }
+    let _ = writeln!(out, "{}", snapshot.biomes.len());
+    for (index, biome) in snapshot.biomes.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{biome}");
+    }
+    out.push('\n');
+    let _ = writeln!(out, "{}", snapshot.highest.len());
+    for (index, height) in snapshot.highest.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{height}");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -356,6 +409,41 @@ mod tests {
             &["0", "0"],
         );
         assert_eq!(answer_with_view(&default, Some(&*view)), None);
+    }
+
+    #[tokio::test]
+    async fn chunk_snapshot_captures_blocks_light_biomes_and_heights() {
+        let world = Uuid::from_u128(0x80);
+        let source = AnvilChunkSource::new_memory_dimension(None, Dimension::Overworld);
+        assert!(source.ensure_chunk_loaded(0, 0, LOAD));
+        source
+            .set_block(1, 70, 1, state("minecraft:stone"))
+            .unwrap();
+        let view = crate::plugins::world_view_for_sources([(world, source)]);
+        let snapshot = view.chunk_snapshot(world, 0, 0).expect("snapshot");
+        let index = |x: i32, y: i32, z: i32| {
+            (((y + 64) * 16 + z) * 16 + x) as usize
+        };
+
+        assert_eq!(snapshot.min_y, -64);
+        assert_eq!(snapshot.max_y, 320);
+        assert_eq!(snapshot.blocks.len(), 384 * 256);
+        assert_eq!(
+            snapshot.block_palette[snapshot.blocks[index(1, 70, 1)] as usize],
+            "minecraft:stone"
+        );
+        assert_eq!(
+            snapshot.block_palette[snapshot.blocks[index(0, 65, 0)] as usize],
+            "minecraft:air"
+        );
+        assert_eq!(snapshot.sky_light[index(0, 65, 0)], 15);
+        assert_eq!(snapshot.block_light[index(0, 65, 0)], 0);
+        assert_eq!(snapshot.highest[0], 64);
+        assert_eq!(snapshot.highest[17], 70);
+        assert_eq!(
+            snapshot.biome_palette[snapshot.biomes[32 * 16] as usize],
+            "minecraft:plains"
+        );
     }
 
     fn vanilla_root() -> Option<std::path::PathBuf> {

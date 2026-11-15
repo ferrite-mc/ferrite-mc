@@ -267,6 +267,39 @@ mod tests {
     }
 
     #[test]
+    fn plugin_inventory_snapshot_keeps_components_in_nbt() {
+        let mut inventory = ferrite_inventory::PlayerInventory::new();
+        let mut sword = ferrite_item::ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        sword.components.insert(
+            ferrite_item::component_ids::DAMAGE,
+            ferrite_item::Component::Damage(7),
+        );
+        inventory.set(0, sword);
+        let (items, data) = plugin_inventory_snapshot(&inventory);
+        assert_eq!(items.len(), ferrite_inventory::SIZE);
+        assert_eq!(data.len(), ferrite_inventory::SIZE);
+        assert_eq!(
+            items[0].as_ref().map(|item| (item.material.as_str(), item.amount)),
+            Some(("minecraft:diamond_sword", 1))
+        );
+        assert!(items[1..].iter().all(Option::is_none));
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            data[0].as_ref().expect("the sword has NBT"),
+        )
+        .unwrap();
+        let (_, tag) = ferrite_nbt::binary::read_named(&bytes).unwrap();
+        let ferrite_nbt::Tag::Compound(root) = tag else {
+            panic!("item stack root is a compound");
+        };
+        let decoded = ferrite_item::ItemStack::from_nbt(&root).unwrap();
+        assert_eq!(
+            decoded.effective_component(ferrite_item::component_ids::DAMAGE),
+            Some(ferrite_item::Component::Damage(7))
+        );
+    }
+
+    #[test]
     fn crystal_from_a_runtime_world_player_lands_in_that_world() {
         let (worlds, runtime) = two_world_fixture();
         let vanilla = WorldId::Vanilla(Dimension::Overworld);
@@ -1215,6 +1248,43 @@ fn plugin_location(
         yaw,
         pitch,
     }
+}
+
+/// The join snapshot a plugin sees: material/amount for every stack, plus the exact NBT save
+/// form when it can be encoded. The JVM uses the NBT form for `Player#getInventory` so item
+/// components are not lost at the host boundary.
+fn plugin_inventory_snapshot(
+    inventory: &ferrite_inventory::PlayerInventory,
+) -> (
+    Vec<Option<ferrite_plugin::ItemSnapshot>>,
+    Vec<Option<String>>,
+) {
+    let mut items = Vec::with_capacity(ferrite_inventory::SIZE);
+    let mut data = Vec::with_capacity(ferrite_inventory::SIZE);
+    for slot in 0..ferrite_inventory::SIZE {
+        let stack = inventory.get(slot);
+        if stack.is_empty() {
+            items.push(None);
+            data.push(None);
+            continue;
+        }
+        let material = stack.name().unwrap_or("minecraft:air").to_owned();
+        items.push(Some(ferrite_plugin::ItemSnapshot {
+            material,
+            amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
+        }));
+        let encoded = stack
+            .to_nbt()
+            .ok()
+            .and_then(|nbt| {
+                ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(nbt)).ok()
+            })
+            .map(|bytes| {
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+            });
+        data.push(encoded);
+    }
+    (items, data)
 }
 #[derive(Debug, Clone)]
 pub struct Operator {
@@ -2458,6 +2528,7 @@ async fn run(
                    let seed = command_state.lock().unwrap().seed;
                    let start_chunk = ChunkPos((start_pos[0].floor() as i32).div_euclid(16), (start_pos[2].floor() as i32).div_euclid(16));
                    let start_inventory = container::restore(saved.as_ref());
+                   let (plugin_inventory, plugin_inventory_data) = plugin_inventory_snapshot(&start_inventory);
                    let start_source = saved_runtime.map_or_else(|| dimensions.source(start_dimension).clone(), |d| Arc::clone(&d.source));
                    permissions.insert(uuid, permission);
                    let entity=ferrite_entity::allocate_id();
