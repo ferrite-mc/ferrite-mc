@@ -85,13 +85,45 @@ class FerriteChunkDataTest {
         assertThrows(NullPointerException.class, () -> table.populateLoot(new java.util.Random(), null));
     }
 
-    @Test void aChunkSnapshotRefusesBlockDataInsteadOfInventingEmptyTerrain() {
-        var chunk = org.bukkit.Bukkit.getWorld("chunkdata").getChunkAt(0, 0);
-        var snapshot = chunk.getChunkSnapshot(true, true, false);
-        var refused = assertThrows(UnsupportedOperationException.class, () -> snapshot.getBlockType(0, 64, 0));
-        assertTrue(refused.getMessage().contains("does not capture block"), refused.getMessage());
-        // World#getEmptyChunkSnapshot still reports its known-empty state.
-        assertEquals(Material.AIR, org.bukkit.Bukkit.getWorld("chunkdata").getEmptyChunkSnapshot(0, 0, false, false).getBlockType(0, 64, 0));
+    /** A full-size host snapshot with stone at (0, 64, 0) and open sky above it. */
+    private static String packedSnapshot() {
+        int count = (320 - -64) * 256;
+        int[] blocks = new int[count];
+        blocks[((64 - -64) * 16) * 16] = 1;
+        int[] biomes = new int[((320 - -64) / 4) * 16];
+        int[] heights = new int[256];
+        java.util.Arrays.fill(heights, -64);
+        heights[0] = 64;
+        return "1\n-64\n320\n2\nminecraft:air\nminecraft:stone\n" + count + "\n" + join(blocks)
+                + "\n" + "f".repeat(count) + "\n" + "0".repeat(count) + "\n1\nminecraft:plains\n"
+                + biomes.length + "\n" + join(biomes) + "\n256\n" + join(heights) + "\n";
+    }
+
+    private static String join(int[] values) {
+        var out = new StringBuilder();
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) out.append(',');
+            out.append(values[i]);
+        }
+        return out.toString();
+    }
+
+    @Test void chunkSnapshotReadsTheHostAndKeepsBlockData() {
+        var previous = HostBridge.transport;
+        HostBridge.transport = (owner, subject, method, args) ->
+                method.equals("getChunkSnapshot(int,int)") ? packedSnapshot() : null;
+        try {
+            var snapshot = org.bukkit.Bukkit.getWorld("chunkdata").getChunkAt(0, 0).getChunkSnapshot(true, true, true);
+            assertEquals(Material.STONE, snapshot.getBlockType(0, 64, 0));
+            assertEquals(Material.AIR, snapshot.getBlockType(1, 64, 0));
+            assertEquals(15, snapshot.getBlockSkyLight(1, 64, 0));
+            assertEquals(64, snapshot.getHighestBlockYAt(0, 0));
+            assertEquals(org.bukkit.block.Biome.PLAINS, snapshot.getBiome(0, 64, 0));
+            // World#getEmptyChunkSnapshot still reports its known-empty state.
+            assertEquals(Material.AIR, org.bukkit.Bukkit.getWorld("chunkdata").getEmptyChunkSnapshot(0, 0, false, false).getBlockType(0, 64, 0));
+        } finally {
+            HostBridge.transport = previous;
+        }
     }
 
     @Test void chunkStateComesFromTheHost() {

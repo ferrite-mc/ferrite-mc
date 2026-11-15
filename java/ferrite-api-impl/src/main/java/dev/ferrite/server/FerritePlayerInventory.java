@@ -12,7 +12,7 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
         var type = java.util.Objects.requireNonNull(org.bukkit.Material.matchMaterial(material), "unknown material");
         items[slot] = new org.bukkit.inventory.ItemStack(type, amount);
     }
-    private org.bukkit.inventory.ItemStack read(int slot) { var item = items[slot]; return item == null ? null : item.clone(); }
+    private synchronized org.bukkit.inventory.ItemStack read(int slot) { var item = items[slot]; return item == null ? null : item.clone(); }
     private void write(int slot, org.bukkit.inventory.ItemStack item) {
         var wire = ItemMetaWire.of(item);
         int damage = wire.damage();
@@ -24,7 +24,7 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
         if (damage > 0) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemDamage(int,int)", slot, damage);
         if (meta != null) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemMeta(int,String)", slot, meta);
         if (mapId != null) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemMapId(int,int)", slot, mapId);
-        items[slot] = item == null ? null : item.clone();
+        synchronized (this) { items[slot] = item == null ? null : item.clone(); }
     }
     /** An inventory index, or the index an equipment slot lives at (0 main hand, 36 boots .. 39 helmet, 40 off hand). */
     private static int slotOf(Object slot) {

@@ -663,16 +663,91 @@ impl SourceWorldView {
 /// How long a plugin read waits for a chunk that has to be loaded first.
 const CHUNK_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The namespaced state string for a block-state id, with sorted properties.
+fn block_state_name(state: u16) -> Option<String> {
+    ferrite_data::blocks::state(state).map(|(name, props)| {
+        if props.is_empty() {
+            return name.to_owned();
+        }
+        let props: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        format!("{name}[{}]", props.join(","))
+    })
+}
+
 impl ferrite_plugin::WorldView for SourceWorldView {
     fn block(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String> {
         let source = self.source_with_chunk(world, x, z)?;
-        let state = u16::try_from(source.block(x, y, z)?).ok()?;
-        ferrite_data::blocks::state(state).map(|(name, props)| {
-            if props.is_empty() {
-                return name.to_owned();
+        block_state_name(u16::try_from(source.block(x, y, z)?).ok()?)
+    }
+    fn chunk_snapshot(
+        &self,
+        world: uuid::Uuid,
+        x: i32,
+        z: i32,
+    ) -> Option<ferrite_plugin::ChunkSnapshot> {
+        let source = self.source_with_chunk(world, x << 4, z << 4)?;
+        let content = source.chunk_content(x, z)?;
+        if content.sky_light.len() != content.blocks.len()
+            || content.block_light.len() != content.blocks.len()
+        {
+            return None;
+        }
+
+        // Convert the unique block states once instead of formatting all 98k positions.
+        let mut block_palette: Vec<String> = Vec::new();
+        let mut block_ids = HashMap::new();
+        let mut blocks = Vec::with_capacity(content.blocks.len());
+        let mut highest = vec![content.min_y; 256];
+        for (index, state) in content.blocks.iter().copied().enumerate() {
+            let palette = match block_ids.get(&state) {
+                Some(palette) => *palette,
+                None => {
+                    let palette = u16::try_from(block_palette.len()).ok()?;
+                    block_palette.push(block_state_name(state)?);
+                    block_ids.insert(state, palette);
+                    palette
+                }
+            };
+            blocks.push(palette);
+            if !ferrite_data::block_props::get(state).is_air {
+                highest[index % 256] = content.min_y + (index / 256) as i32;
             }
-            let props: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            format!("{name}[{}]", props.join(","))
+        }
+
+        // Biomes are stored per 4x4x4 cell; sample the first block of each cell.
+        let cells = content.max_y - content.min_y;
+        let mut biome_palette: Vec<String> = Vec::new();
+        let mut biome_ids = HashMap::new();
+        let mut biome_indexes = Vec::with_capacity((cells / 4 * 16) as usize);
+        for cell_y in 0..cells / 4 {
+            let y = content.min_y + cell_y * 4;
+            for cell_z in 0..4 {
+                for cell_x in 0..4 {
+                    let key = source.biome_name((x << 4) + cell_x * 4, y, (z << 4) + cell_z * 4)?;
+                    let palette = match biome_ids.get(&key) {
+                        Some(palette) => *palette,
+                        None => {
+                            let palette = u16::try_from(biome_palette.len()).ok()?;
+                            biome_palette.push(key.clone());
+                            biome_ids.insert(key, palette);
+                            palette
+                        }
+                    };
+                    biome_indexes.push(palette);
+                }
+            }
+        }
+
+        Some(ferrite_plugin::ChunkSnapshot {
+            min_y: content.min_y,
+            max_y: content.max_y,
+            block_palette,
+            blocks,
+            sky_light: content.sky_light,
+            block_light: content.block_light,
+            biome_palette,
+            biomes: biome_indexes,
+            highest,
         })
     }
     fn sky_light(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<u8> {

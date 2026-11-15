@@ -197,6 +197,7 @@ fn plugin_lifecycle() {
             material: "minecraft:stone".into(),
             amount: 3,
         })],
+        inventory_data: Vec::new(),
         location: PlayerLocation {
             world: world_id,
             x: 1.0,
@@ -216,6 +217,7 @@ fn plugin_lifecycle() {
         food: 20,
         mode: GameMode::Survival,
         inventory: Vec::new(),
+        inventory_data: Vec::new(),
         location: PlayerLocation {
             world: world_id,
             x: 1.0,
@@ -440,6 +442,7 @@ fn plugin_lifecycle() {
         food: 20,
         mode: GameMode::Survival,
         inventory: Vec::new(),
+        inventory_data: Vec::new(),
         location: PlayerLocation {
             world: world_id,
             x: 1.0,
@@ -465,6 +468,7 @@ fn plugin_lifecycle() {
         food: 20,
         mode: GameMode::Survival,
         inventory: Vec::new(),
+        inventory_data: Vec::new(),
         location: PlayerLocation {
             world: world_id,
             x: 1.0,

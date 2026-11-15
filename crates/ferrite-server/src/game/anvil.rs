@@ -189,6 +189,17 @@ enum Lookup {
     Loading,
 }
 
+/// Block and light contents of one chunk, captured under the cache lock so a plugin snapshot
+/// cannot observe half of a concurrent edit.
+pub struct ChunkContent {
+    pub min_y: i32,
+    pub max_y: i32,
+    /// Block states ordered `y`, then `z`, then `x`.
+    pub blocks: Vec<u16>,
+    pub sky_light: Vec<u8>,
+    pub block_light: Vec<u8>,
+}
+
 pub struct AnvilChunkSource {
     path: Option<PathBuf>,
     registry: Arc<RuntimeRegistry>,
@@ -290,6 +301,65 @@ impl AnvilChunkSource {
     }
     pub fn dimension(&self) -> Dimension {
         self.dimension
+    }
+    /// Copy every block and light value of a resident chunk. The lock is held for the whole
+    /// copy, so the result is one coherent state rather than a mix of before and after edits.
+    pub fn chunk_content(&self, cx: i32, cz: i32) -> Option<ChunkContent> {
+        let cache = self.cache.lock().unwrap();
+        let (chunk, light) = if let Some(dirty) = cache.dirty.get(&(cx, cz)) {
+            (&dirty.chunk, &dirty.light)
+        } else {
+            let column = cache.ready_column(cx, cz)?;
+            (&column.chunk, &column.light)
+        };
+        let min_y = self.dimension.min_y();
+        let max_y = min_y + self.dimension.height();
+        let mut blocks = Vec::with_capacity((self.dimension.height() * 256) as usize);
+        let mut highest = [min_y; 256];
+        for y in min_y..max_y {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let state = u16::try_from(chunk.block(x, y, z)?).ok()?;
+                    if !ferrite_data::block_props::get(state).is_air {
+                        highest[z as usize * 16 + x as usize] = y;
+                    }
+                    blocks.push(state);
+                }
+            }
+        }
+        let mut sky_light = Vec::with_capacity(blocks.len());
+        let mut block_light = Vec::with_capacity(blocks.len());
+        for y in min_y..max_y {
+            let section = usize::try_from(y.div_euclid(16) - min_y.div_euclid(16)).ok()?;
+            for z in 0..16 {
+                for x in 0..16 {
+                    let index = (y.rem_euclid(16) as usize * 256) + (z as usize * 16) + x as usize;
+                    let sky = match light.sky.get(section) {
+                        Some(LightSection::Data(data)) => {
+                            (data[index / 2] >> ((index % 2) * 4)) & 15
+                        }
+                        // A chunk without stored sky light falls back to an open-sky scan:
+                        // everything above the highest non-air block sees the sky.
+                        _ => u8::from(y > highest[z as usize * 16 + x as usize]) * 15,
+                    };
+                    let block = match light.block.get(section) {
+                        Some(LightSection::Data(data)) => {
+                            (data[index / 2] >> ((index % 2) * 4)) & 15
+                        }
+                        _ => 0,
+                    };
+                    sky_light.push(sky);
+                    block_light.push(block);
+                }
+            }
+        }
+        Some(ChunkContent {
+            min_y,
+            max_y,
+            blocks,
+            sky_light,
+            block_light,
+        })
     }
     /// The independently ticking world this source belongs to.
     pub fn world_id(&self) -> super::WorldId {
@@ -1526,9 +1596,14 @@ fn apply_light(tag: &mut Tag, light: &LightData, dimension: Dimension) -> anyhow
 
 fn flat_chunk(
     registry: &RuntimeRegistry,
-    biome: i32,
+    _biome: i32,
     dimension: Dimension,
 ) -> anyhow::Result<Chunk> {
+    // The flat test world has no biome source; its generated column is plains regardless of
+    // the cache hint a caller used.
+    let biome = registry
+        .biome_id("minecraft:plains")
+        .ok_or_else(|| anyhow::anyhow!("missing minecraft:plains"))?;
     let state = |name: &str| {
         registry
             .block_id(name, &Default::default())
@@ -1540,7 +1615,7 @@ fn flat_chunk(
         dimension.min_y(),
         dimension.height() as u32,
         air,
-        biome as u32,
+        biome,
         registry.block_bits(),
         registry.biome_bits(),
     )?;

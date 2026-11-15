@@ -164,14 +164,11 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getChunkSnapshot" -> {
                 var world = (org.bukkit.World) proxy;
                 var key = world.getKey();
-                // Bukkit's three flags control optional snapshot data; the host-backed snapshot
-                // exposes biome data only, so its block and light queries are refused with that reason.
-                yield FerriteChunkSnapshot.ofChunk(
-                    x, z, name, id.toString(),
-                    net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()),
-                    world.getMinHeight(), world.getMaxHeight(),
-                    hostLong("getFullTime()", time), (boolean) args[1]
-                );
+                String packed = (String) HostBridge.call("World", id, "getChunkSnapshot(int,int)", String.class, x, z);
+                yield FerriteChunkSnapshot.capture(x, z, name, id.toString(),
+                        net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()),
+                        world.getMinHeight(), world.getMaxHeight(), hostLong("getFullTime()", time),
+                        (boolean) args[0], (boolean) args[1], (boolean) args[2], packed);
             }
             case "hashCode" -> java.util.Objects.hash(id, x, z);
             case "equals" -> self == args[0];
@@ -216,7 +213,10 @@ final class FerriteWorld implements java.lang.reflect.InvocationHandler {
             case "getEmptyChunkSnapshot" -> {
                 var world = (org.bukkit.World) proxy;
                 var key = world.getKey();
-                yield new FerriteChunkSnapshot((int) args[0], (int) args[1], name, id.toString(), net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()), world.getMinHeight(), world.getMaxHeight(), hostLong("getFullTime()", time), (boolean) args[3]);
+                yield FerriteChunkSnapshot.empty((int) args[0], (int) args[1], name, id.toString(),
+                        net.kyori.adventure.key.Key.key(key.getNamespace(), key.getKey()),
+                        world.getMinHeight(), world.getMaxHeight(), hostLong("getFullTime()", time),
+                        (boolean) args[2], (boolean) args[3]);
             }
             case "getChunkAt" -> { if (args.length == 1 && args[0] instanceof org.bukkit.Location l) yield chunk(l.getBlockX() >> 4, l.getBlockZ() >> 4); yield chunk((int) args[0], (int) args[1]); }
             case "getPlayers" -> playersHere();
