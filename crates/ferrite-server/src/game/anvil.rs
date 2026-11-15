@@ -804,11 +804,18 @@ impl AnvilChunkSource {
         timeout: std::time::Duration,
     ) -> bool {
         let deadline = std::time::Instant::now() + timeout;
+        // A flat source generates its biome cells from the requested variant. Plugin reads
+        // have no client biome id, so use plains rather than registry id 0 (badlands).
+        let biome = self
+            .registry
+            .biome_id("minecraft:plains")
+            .and_then(|id| i32::try_from(id).ok())
+            .unwrap_or(0);
         loop {
             if self.with_loaded_chunk(x, z, |_| ()).is_some() {
                 return true;
             }
-            self.prefetch(x, z, 0);
+            self.prefetch(x, z, biome);
             if self.with_loaded_chunk(x, z, |_| ()).is_some() {
                 return true;
             }
