@@ -99,16 +99,20 @@ server-side only.
   `CraftMagicNumbers`) stay `NoSuchMethodError` by design.
 - Block snapshots are opt-in, so `Block#getType` for arbitrary coordinates throws.
 
-### Plugin lane status (verified against code 2026-11-13; not verified with a real client)
+### Plugin lane status (verified against code 2026-11-15; not verified with a real client)
+
+현재 카탈로그는 Player 90, Server 4, World 57이며 실제로 열린 것은 Player 0, Server 0,
+World 1(`vanillaBiomeProvider`)이다.
 
 | # | Item | Status | Evidence |
 |---|---|---|---|
 | 1 | Runtime world: persist/restore player world, join snapshot, crystal routing, immediate world after dimension change | done | `container.rs` writes `PlayerData::in_world`; join inserts `player_worlds` before `plugin_location`; `Signal::ChangeDimension` calls `update_player_location` right after `player_worlds.insert` (that handler is inside the coordinator loop and has no isolated test; only the helpers are tested); tests `playerdata` in_world round trip, `plugin_location_reports_the_players_current_world`, `crystal_from_a_runtime_world_player_lands_in_that_world` |
 | 2 | `Player#breakBlock`, `chat`, 1-arg `broadcastSlotBreak`, `broadcastHurtAnimation`, `playPickupItemAnimation` | done | Java `PlayerMisc`/`PlayerSight` + stubs; host `plugins/playerops.rs`, `broadcast.rs`, `network.rs`; JUnit `PlayerActionsTest`, host tests in those modules |
 | 3a | `Player#sendBlockUpdate` beyond signs | done for containers, furnaces, banners (`patterns`) and skulls (profile name/uuid/properties and `note_block_sound`) | `tile_update.rs` + `PlayerTileUpdateTest`; a skull custom name, a banner name and other unmodelled tile state are refused with `UnsupportedOperationException`; not verified with a real client |
-| 3c | `ChunkSnapshot#contains(Biome)`, `ChunkData#getBiome` | snapshot done, `ChunkData#getBiome` refuses | snapshot reads `Native.biomeAt` (checked by `typical_plugin_...`); the `createChunkData` buffer has no chunk coordinates, so it no longer invents PLAINS |
+| 3c | `Chunk#getChunkSnapshot`, `ChunkSnapshot#contains(Biome)`, `ChunkData#getBiome` | snapshot done, `ChunkData#getBiome` refuses | `worldquery.rs` captures block states, sky/block light, 4×4×4 biomes and highest blocks; `FerriteChunkSnapshotTest` and `plugin_lifecycle::typical_plugin_...` verify the JVM path. The `createChunkData` buffer has no chunk coordinates, so it still refuses biomes instead of inventing PLAINS |
 | 3d | `locateNearestBiome`/`locateNearestStructure`/`hasStructureAt` | done, real-jar tested | `vanilla_host.rs::plugin_world_queries_are_answered_by_the_real_jar`; unverified: other dimensions, `findUnexplored`, structure tags |
-| 3e | Compatibility proof | `typical patterns` | PDC, inventory GUI, scoreboard, title, action bar, sound, config, permission, health all run through the real JVM host (`plugin_lifecycle::typical_plugin_...`); `Chunk#getChunkSnapshot(...)` answers biome queries and refuses block/light queries with the reason (use `World#getEmptyChunkSnapshot` for a known-empty snapshot) |
+| 3e | Compatibility proof | `typical patterns` | PDC, inventory GUI, scoreboard, title, action bar, sound, config, permission, health all run through the real JVM host (`plugin_lifecycle::typical_plugin_...`); `Chunk#getChunkSnapshot(...)` now returns a captured snapshot in the same test |
+| 3f | Join inventory components | done | `plugin_inventory_snapshot` sends base64 item save NBT in `PlayerSnapshot.inventory_data`; `Bootstrap.setInventorySnapshotNbt` decodes it through `FerriteItemNbt`; Rust `plugin_inventory_snapshot_keeps_components_in_nbt` and Java `FerriteItemNbtTest` cover damage, name and PDC |
 | 3b | `Player#playEffect` data types | done for confirmed call sites | `FerriteEffectData.java` (Number, Boolean for 4 events, Color, Axis, BlockData, BlockFace for `WHITE_SMOKE_SHOOT`); `JukeboxSong` and other Booleans/BlockFaces refused: registry ids of data-driven registries are not in the generated reports |
 | 4 | Cartography table and map store | done | `game/map_menu.rs`, `game/map.rs` `MapStore::allocate`, tests listed in `plugin-stubs-status.md` |
 | 5 | Paper lifecycle manager | done for `LifecycleEvents.COMMANDS` | `FerriteLifecycleManager`, `FerriteLifecycleTest`; bootstrap-only events refused (host does not run `PluginBootstrap`) |

@@ -5,7 +5,7 @@
 A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading and aims to run Bukkit/Spigot/Paper/Folia plugins on an embedded JVM.
 
 - **Target**: Minecraft Java **26.3**, protocol **777**
-- **Status (2026-11-14)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
+- **Status (2026-11-15)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
 - **License**: GPL-3.0-or-later
 
 > **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩과 Bukkit/Paper 플러그인을 위한 내장 JVM을 갖추고 있습니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
@@ -23,12 +23,14 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 
 The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls surface as `UnsupportedOperationException("Ferrite: not implemented: …")` or an explicit `NoSuchMethodError`. Large plugins such as EssentialsX and plugins that depend on NMS do not work across all paths yet.
 
-### Plugin API status (code cross-check: 2026-11-14)
+### Plugin API status (code cross-check: 2026-11-15)
 
 This status compares the Java implementations, Rust host dispatchers, and regression tests on
 `main`. Hostless JUnit probe failures are not equivalent to server-side missing implementations:
 the report distinguishes real host paths from deliberate rejection paths. Item-level detail is in
 [`docs/plugin-api-completion-directive.md`](docs/plugin-api-completion-directive.md) §10.
+The current probe catalog is Player 90, Server 4, World 57; after host/Java handling, 0, 0 and 1
+method (`vanillaBiomeProvider`) are actually open respectively.
 
 **Newly implemented since 2026-11-12** (details in the directive §10.1, §10.5, and §10.7)
 
@@ -39,6 +41,10 @@ the report distinguishes real host paths from deliberate rejection paths. Item-l
 - Gravity blocks and fluids: `dragon_egg`, concrete powder solidification, landing in water mid-fall,
   lava spread delay; pressure plates sense every entity with vanilla re-trigger delay and weighted output.
 - Chunks: clamp of the client's requested view distance; out-of-view chunks saved and unloaded at once.
+- `Chunk#getChunkSnapshot`: the host captures block states, sky/block light, 4×4×4 biomes and
+  per-column heights. `ChunkData#getBiome` still refuses because its buffer has no chunk coordinates.
+- Player inventory snapshots carry 26.3 item save NBT alongside material/amount; the JVM
+  restores supported names, lore, damage, durability, enchantments, custom model data and PDC.
 - Plugin loading: one failing plugin no longer stops the others.
 - `Player#startRiptideAttack`, `sleep`, `fireworkBoost`, `canCriticalAttack`, `getSentChunkKeys`,
   `launchProjectile` for trident, snowball, egg, pearl, bottle, potion, wind charge, fireball,
@@ -99,9 +105,9 @@ the report distinguishes real host paths from deliberate rejection paths. Item-l
 - Some `MapCanvas` methods, translated map cursor captions, and hidden cursor transfer.
 - Entity snapshots and `EntityTransformer` work for runtime worlds; default Overworld, Nether,
   and End non-player entities lack a saved-NBT boundary and are excluded from capture/recreation.
-- Unsupported item metadata/PDC container types, unmodelled tile states such as note-block
-  sounds and skull texture properties, `ChunkData#getBiome`, `Chunk#getChunkSnapshot`, some
-  `BlockData`, and NMS/Unsafe APIs.
+- Unsupported item metadata/PDC container types, tile states with no host model,
+  `ChunkData#getBiome`, some `BlockData`, and NMS/Unsafe APIs. `Chunk#getChunkSnapshot` and
+  skull texture/sound updates are implemented.
 
 See [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md), [`docs/plugin-stubs-status.md`](docs/plugin-stubs-status.md),
 and [`docs/plugin-api-audit.md`](docs/plugin-api-audit.md) for method-level ownership, evidence,
@@ -175,7 +181,7 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 
 - Remaining game/plugin work: dragon charge/breath approximations and the outer-island search radius,
   non-player entity NBT boundaries for the default/Nether/End worlds, remaining tile states,
-  `ChunkData#getBiome`/`Chunk#getChunkSnapshot`/`WorldCreator` options, and broader
+  `ChunkData#getBiome`/`WorldCreator` options, and broader
   Paper/Bukkit/NMS compatibility.
 - Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, vault/trade UI, and plugin behavior on an integrated server.
 - Optimization references: [server optimization mods](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),

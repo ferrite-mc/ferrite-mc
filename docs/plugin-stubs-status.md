@@ -18,7 +18,7 @@
 
 - **카탈로그 재생성.** `./gradlew test --no-daemon --console=plain`(`java/ferrite-api-impl`, JUnit 446개 통과)로 다시 만들었다.
   `player-missing` 90줄, `server-missing` 4줄, `world-missing` 58줄. 이름이 호스트/Java에 있는지로 분류하면 Player 0, Server 0,
-  World 2(`getBlockState(int,int,int)`, `vanillaBiomeProvider()`)만 정말 열려 있다. 이전의 "Player 12 / World 14"는 낡은 수치이며
+  World 1(`vanillaBiomeProvider()`)만 정말 열려 있다. 이전의 "Player 12 / World 14"는 낡은 수치이며
   `plugin-api-stubs.md`의 2026-11-14 분류 절이 대체한다. 이름 단위 분류라 인자 조합별 완전성은 검증하지 않았다.
 - **구현: `World#getFluidData`.** 블록의 바닐라 상태 문자열에서 유체 종류·원천 여부·양·낙하 여부를 만든다(`FerriteFluidData`).
   흐름 방향/높이는 이웃 블록이 필요해 `UnsupportedOperationException`. JUnit `FerriteFluidDataTest`(6개). `Block#getState`가
@@ -89,6 +89,26 @@
 단위 테스트(Rust, JUnit)도 있다.
 CMI가 동작한다고 말할 수 없다.
 
+## 2026-11-15 — plugins-z (청크 스냅샷·인벤토리 NBT 대조)
+
+실제 26.3 클라이언트 화면과 EULA 환경은 확인하지 않았다. 코드·JUnit·실제 JVM 호스트 테스트로
+확인한 범위다.
+
+- **스텁 카탈로그 재생성:** Player 90(처리 90, 열림 0), Server 4(처리 4, 열림 0),
+  World 57(처리 56, 열림 1). 남은 World 메서드는 `vanillaBiomeProvider()` 하나다. 정확한
+  목록은 [`plugin-api-stubs.md`](plugin-api-stubs.md)의 2026-11-15 절에 있다.
+- **`Chunk#getChunkSnapshot` 구현:** 호스트가 블록 상태·하늘/블록 조명·4×4×4 바이옴·열별
+  최고 높이를 캡처하고 JVM이 이를 `ChunkSnapshot`으로 읽는다. 2026-11-13의 "여전히
+  not implemented"는 더 이상 사실이 아니다. `ChunkData#getBiome`은 청크 좌표가 없는 버퍼라
+  계속 명시적으로 거부한다.
+- **인벤토리 NBT 복원:** 접속 스냅샷에 슬롯별 26.3 저장 NBT를 base64로 싣고,
+  `Bootstrap.setInventorySnapshotNbt`가 `FerriteItemNbt`로 이름·로어·피해·수리비·불괴·
+  인챈트·커스텀 모델·맵 id·`custom_data` PDC를 복원한다. 지원하지 않는 컴포넌트는 JVM 뷰에
+  반영되지 않지만 Rust 인벤토리에는 남는다. `FerriteItemNbtTest`가 JNI 메서드와 디코드를
+  확인한다.
+- **검증:** Java 전체 `./gradlew test` 성공, Rust server lib 1237개·`plugin_lifecycle` 5개·
+  `plugin_command_world` 2개·`ferrite-plugin` 통합 1개 통과, fmt/clippy 통과. 실제 클라이언트는 아니다.
+
 ## 2026-11-13 — plugins-z (호스트 데이터, 블록 엔티티, 호환 증명)
 
 실제 클라이언트로 확인한 것은 없다. 아래는 코드와 테스트, 서버 jar(`javap`)로 확인했다.
@@ -103,8 +123,9 @@ CMI가 동작한다고 말할 수 없다.
   구조물 시작, `hasStructureAt`를 확인한다(`FERRITE_TEST_ACCEPT_EULA=true`, `tools/build_worldgen_host.py` 필요).
 - **스텁 카탈로그:** `docs/plugin-api-stubs.md`의 2026-11-14 분류 절을 따른다(Player 0, World 2가 정말 열려 있음; 이전 12/14는 낡은 수치).
 - **호환 증명:** `/typical patterns`가 PDC, 인벤토리 GUI, 스코어보드, 타이틀, 액션바, 사운드, 설정, 권한, 체력을 실제 JVM 호스트와
-  봇 클라이언트로 돌리고, 던진 호출이 하나라도 있으면 테스트가 실패한다. 이번 실행에서는 모두 통과했다. 여전히 던지는 호출:
-  `Chunk#getChunkSnapshot(boolean,boolean,boolean)` ("not implemented"; `World#getEmptyChunkSnapshot`은 동작).
+  봇 클라이언트로 돌리고, 던진 호출이 하나라도 있으면 테스트가 실패한다. 이번 실행에서는 모두 통과했다.
+  당시에는 `Chunk#getChunkSnapshot(boolean,boolean,boolean)`이 "not implemented"였으나,
+  2026-11-15에 호스트 캡처 경로로 구현됐다(`World#getEmptyChunkSnapshot`도 계속 동작).
 - **테스트 도구:** `plugin_command_world`도 `plugin_lifecycle`처럼 Windows에서 `gradlew.bat`을 cmd로 실행한다(Windows에서 실행해 보지는 않았다).
 - **NMS는 그대로:** `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`는 `NoSuchMethodError`.
 

@@ -1,4 +1,4 @@
-# 플러그인 API 남은 스텁 인벤토리 (2026-11-09, fb-plugin)
+# 플러그인 API 남은 스텁 인벤토리 (2026-11-15, plugins-z)
 
 > **2026-11-14:** 이 파일은 메서드별 근거와 명시적 거부 경로를 보존한다. 현재 요약은
 > `docs/plugin-stubs-status.md`와 `docs/BACKLOG.md`를 따르고, 아래 생성 프로브 수치는
@@ -22,7 +22,38 @@ cd java/ferrite-api-impl
 JAVA_HOME="C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot" ./gradlew test --no-daemon --console=plain
 ```
 
-## 생성된 프로브 (2026-11-08 실행 결과)
+## 현재 카탈로그 (2026-11-15 재생성, plugins-z)
+
+`cd java/ferrite-api-impl && ./gradlew test --no-daemon --console=plain`으로 다시 만든 결과다.
+호스트 없이 기본 인자로 호출한 폴백 프로브이므로, 아래 "답함"은 같은 이름의 Rust/Java
+처리 경로가 있다는 뜻이며 모든 인자 조합의 성공을 증명하지는 않는다.
+
+| 파일 | 줄 수 | 호스트/Java가 답함 | 실제로 열려 있음 |
+|---|---:|---:|---:|
+| `stubs.txt` / `player-unoverridden.txt` | 192 | — | — |
+| `player-missing.txt` | 90 | 90 | 0 |
+| `server-missing.txt` | 4 | 4 | 0 |
+| `world-missing.txt` | 57 | 56 | 1 |
+
+### 실제로 열려 있는 World 메서드 (1)
+
+- `vanillaBiomeProvider()`
+
+`Player#loadData()`는 `game/playerdata.rs`와 `motion.rs`의 호스트 경로가 있고, Server의 4개
+폴백 호출도 모두 기존 호스트/Java 경로가 받는다. 나무 생성·청크 상태·타일 수·월드 경로·
+보이드 피해·구조물 검색도 호스트/Java 경로가 있다.
+
+### 이번 대조에서 닫은 경로
+
+- **`Chunk#getChunkSnapshot`:** 호스트가 블록 상태·하늘/블록 조명·4×4×4 바이옴·열별 최고
+  높이를 한 시점에 캡처해 JVM `ChunkSnapshot`으로 보낸다. `FerriteChunkSnapshotTest`와
+  `plugin_lifecycle::typical_plugin_...`가 실제 JVM 호스트 경로를 확인한다.
+- **인벤토리 NBT:** `PlayerSnapshot.inventory_data`가 슬롯별 26.3 저장 NBT(base64)를 싣고,
+  `Bootstrap.setInventorySnapshotNbt`/`clearInventorySnapshot`이 JVM 인벤토리에 반영한다.
+  `FerriteItemNbt`는 이름·로어·피해·수리비·불괴·인챈트·커스텀 모델·맵 id·`custom_data` PDC를
+  복원한다. 지원하지 않는 컴포넌트는 Rust 아이템에 남지만 JVM 뷰에는 반영되지 않는다.
+
+## 생성된 프로브 (2026-11-08 실행 결과, 역사 기록)
 
 | 파일 | 줄 수 | 의미 |
 |---|---:|---|
@@ -143,7 +174,7 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | 아이템 핸들 | `DroppedItem#<미지원 Item 메서드>` | Java 핸들 |
 | HostBridge 반환 변환 | `HostBridge#call`의 미지원 반환 타입 | Java 브리지 |
 | BlockData | `BlockData#<미지원 메서드>` (재질별) | Java `FerriteBlockData` |
-| 청크 데이터 | `ChunkData#getBiome` | 좌표 없는 생성 버퍼는 바이옴을 알 수 없어 명시적으로 거부한다. `ChunkSnapshot#contains(Biome)`는 이미 호스트의 4×4×4 바이옴 셀을 조회한다. `Chunk#getChunkSnapshot`의 블록/조명 질의는 청크 전체를 복사하지 않아 명시적으로 거부하고, `World#getEmptyChunkSnapshot`만 공기를 돌려준다. |
+| 청크 데이터 | `ChunkData#getBiome` | 좌표 없는 생성 버퍼는 바이옴을 알 수 없어 명시적으로 거부한다. `ChunkSnapshot#contains(Biome)`는 이미 호스트의 4×4×4 바이옴 셀을 조회한다. `Chunk#getChunkSnapshot`은 2026-11-15부터 블록·조명·바이옴·높이를 호스트에서 캡처하고, `World#getEmptyChunkSnapshot`은 공기를 돌려준다. |
 | 포션/인챈트/레지스트리 | `Enchantment` 속성, `RegistryAccess` 중 `GameRule`(`game_rule`)과 `MemoryKey`(`memory_module_type`)만 미지원 — 생성된 보고서에 값 타입·기본값이 없고 `MemoryKey` 생성자가 private이라 `UnsupportedOperationException("Ferrite: registry minecraft:... is not available: ...")`로 거부한다. 그 밖의 `RegistryKey` 레지스트리 41개는 생성 데이터로 `size`/`keyStream`/`stream`/`iterator`/`get`이 동작한다(내장 레지스트리는 `registries.json`, 데이터 기반 레지스트리 21개는 `data/minecraft/<이름>/*.json`, `Particle`/`PotionType`은 enum 상수를 키로 색인, `MusicInstrument`는 `instrument/*.json`의 `use_duration`·`range`·`sound_event`·`description`을 읽는다). 레지스트리 태그(`hasTag`/`getTag`/`getTags`)는 그대로이며 `Server#getTags`(`FerriteTags`)만 실제 데이터를 쓴다. Rust 호스트에는 레지스트리 호출이 없다. (`PotionEffectType`은 구현됨: 색·카테고리·attribute는 `FerritePotionEffectData` 표, `getId`는 생성된 `registries.json`의 protocol id, `getAttributeModifierAmount`는 바닐라 `amount*(amplifier+1)`, `isEnabledByFeature`는 26.3에서 required feature를 쓰는 효과가 없어 항상 true, `getDurationModifier`는 26.3 `MobEffect`에 해당 필드가 없어 1.0) | `ferrite-data` 데이터/호스트 |
 | 루트 테이블 | `LootTable#populateLoot`, `fillInventory` | Java `FerriteLoot` — 생성 데이터팩의 `loot_table`/`predicate`/`tags`를 읽고 `FerriteItemStack`/`FerriteItemMeta`로 스택을 만든다. luck·bonus rolls·looting·killer/this_entity를 반영하고, `enchant_randomly`의 최대 레벨/호환성은 호스트의 `Enchantment` 응답을 쓴다(호스트가 없으면 1레벨/호환으로 폴백). 폭발 반경·블록 엔티티 데이터·미모델링 컴포넌트는 불투명 처리한다. |
 | 구조물 | `StructureManager#<미지원>`, `Template#<미지원>`, `Structure#getStructureType` | 구조물 월드젠 호스트 |
@@ -153,7 +184,9 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 | 엔티티 조회 | `World#getEntities*`는 플레이어와 호스트가 게시한 비플레이어 엔티티를 합친다. | `FerriteWorld#hostEntities` → `facts::world_entities`; 제거·월드 필터 회귀 테스트가 있다. 기본 월드의 구조물 엔티티 NBT 경계는 별도 잔여 작업이다. |
 | 월드젠 호스트 | `locateNearestBiome`, `locateNearestStructure`, `hasStructureAt`, `Registry.STRUCTURE` | vanilla 월드젠 호스트 (EULA 때문에 개발자 로컬만) |
 
-## 스텁 카탈로그 분류 (2026-11-14 재생성, claude-api / Lane B)
+## 스텁 카탈로그 분류 (2026-11-14 재생성, claude-api / Lane B) — 역사 기록
+
+> 2026-11-15 재생성 결과는 위 절을 따른다. 아래 90/4/58(열림 0/0/1)은 그 시점의 기록이다.
 
 `cd java/ferrite-api-impl && ./gradlew test --no-daemon --console=plain`을 이 작업에서 다시 돌려 `build/catalog/*.txt`를 만들었다
 (JUnit 446개 통과; 실제 클라이언트로 확인한 것은 없다). 분류 방법은 아래 2026-11-13 절과 같다: `ferrite.native=false`에서
@@ -193,6 +226,7 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 > 아래 2026-11-13 절은 기록으로 남긴 것이며, 숫자(Player 12 / World 14)와 "정말 열려 있는" 목록은 위 표로 대체됐다.
 
 ## 스텁 카탈로그 분류 (2026-11-13 재생성, plugins-z) — 대체됨
+
 
 `cd java/ferrite-api-impl && ./gradlew test --no-daemon --console=plain`이 `build/catalog/*.txt`를 다시 만든다.
 이 목록은 `ferrite.native=false`에서 기본 인자로 호출해 "not implemented"가 난 메서드이므로, 아래 기준으로 분류했다.

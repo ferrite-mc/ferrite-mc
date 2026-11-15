@@ -101,6 +101,8 @@ public final class Bootstrap {
         if (resolved != null) player.updateLocation(new org.bukkit.Location(resolved, x, y, z, yaw, pitch));
     }
     public static void setInventorySnapshot(String player, int slot, String material, int amount) { ((FerritePlayer) java.util.Objects.requireNonNull(server.getPlayer(java.util.UUID.fromString(player)))).inventorySnapshot(slot, material, amount); }
+    public static void setInventorySnapshotNbt(String player, int slot, String data) { ((FerritePlayer) java.util.Objects.requireNonNull(server.getPlayer(java.util.UUID.fromString(player)))).inventorySnapshotNbt(slot, data); }
+    public static void clearInventorySnapshot(String player, int slot) { ((FerritePlayer) java.util.Objects.requireNonNull(server.getPlayer(java.util.UUID.fromString(player)))).clearInventorySnapshot(slot); }
     public static void registerOfflinePlayer(String id, String name, boolean operator) { server.registerOfflinePlayer(java.util.UUID.fromString(id), name, operator); }
     public static boolean isPluginEnabled(String name) { return server.getPluginManager().isPluginEnabled(name); }
     public static boolean dispatchCommand(String sender, String line) {

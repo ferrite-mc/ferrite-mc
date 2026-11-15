@@ -6,7 +6,7 @@ Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레
 Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **상태 (2026-11-14)**: 생존·게임 시스템과 플러그인 API 일부를 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속과 전체 플러그인 생태계 호환은 아직 검증하지 않았습니다.**
+- **상태 (2026-11-15)**: 생존·게임 시스템과 플러그인 API 일부를 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속과 전체 플러그인 생태계 호환은 아직 검증하지 않았습니다.**
 - **라이선스**: GPL-3.0-or-later
 
 > **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
@@ -29,13 +29,15 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 `UnsupportedOperationException("Ferrite: not implemented: …")` 또는 명시적인 `NoSuchMethodError`로
 드러납니다. EssentialsX 같은 대형 플러그인의 모든 경로와 NMS 의존 플러그인은 아직 동작하지 않습니다.
 
-### 플러그인 API 현황 (코드 대조: 2026-11-14)
+### 플러그인 API 현황 (코드 대조: 2026-11-15)
 
 `java/ferrite-api-impl`, `crates/ferrite-server/src/plugins`, 게임 루프와 회귀 테스트를
 대조한 결과다. 호스트가 없는 JUnit 폴백 프로브의 `not implemented` 목록은 실제 서버
 미구현 목록과 같지 않다. 아래는 호출 가능 여부가 아니라 **게임 상태·패킷·저장에 실제
 효과가 있는지**를 기준으로 분류했다. 항목별 상세는 지시서
 [`docs/plugin-api-completion-directive.md`](docs/plugin-api-completion-directive.md) §10을 본다.
+현재 폴백 카탈로그는 Player 90, Server 4, World 57이며, 호스트/Java 경로를 제외하고
+실제로 열린 것은 Player 0, Server 0, World 1(`vanillaBiomeProvider`)이다.
 
 **구현되어 테스트로 고정된 범위**
 
@@ -51,6 +53,10 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 - 중력 블록·유체·레드스톤: `dragon_egg` 추가, 콘크리트 가루 굳음 규칙, 떨어지는 도중 물에 들어간 착지, 용암 지연 난수,
   압력판의 엔티티 감지와 가중판 출력. 작물 성장은 바닐라와 일치함을 확인했다.
 - 청크: 접속 때 클라이언트가 요청한 뷰 거리를 `clamp(요청, 2, 서버)`로 적용하고, 뷰 사각형 밖 청크는 즉시 저장·언로드한다.
+- `Chunk#getChunkSnapshot`: 호스트가 블록 상태·하늘/블록 조명·4×4×4 바이옴·열별 최고
+  높이를 한 시점에 캡처한다. `ChunkData#getBiome`은 청크 좌표가 없어 계속 명시적으로 거부한다.
+- 인벤토리 스냅샷은 material/amount와 함께 26.3 아이템 저장 NBT를 전달한다. JVM은
+  이름·로어·피해·내구도·인챈트·커스텀 모델 데이터·PDC 등 지원 컴포넌트를 복원한다.
 - 플러그인 로딩: 플러그인 하나가 로드·활성화에 실패해도 나머지는 계속 로드한다. Vault, EssentialsX, PlaceholderAPI,
   BlueMap, Multiverse-Core, AuthMe, DiscordSRV, SkinsRestorer, ChestShop, Skript 등은 로드·활성화를 확인했다(기능 동작은 아님).
 - Paper 부트스트래퍼 `DATAPACK_DISCOVERY`, `help.yml`(`HelpMap`), 레시피 추가·삭제(제작 메뉴에 반영, 클라이언트 레시피북에는 나오지 않음).
@@ -72,6 +78,7 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - `Player`: 폭죽 생성 뒤 `setItem`/`setFireworkMeta`/`setAttachedTo` 호출, 폭죽 색·모양 표시, 붙은 폭죽 가속의 근사, `getConnection`의 `reenterConfiguration`/`sendReportDetails`, `postEffects`로 바꾼 상태의 반영 한계.
 - `World`: POI 검색은 POI 저장소 대신 로드된 청크의 블록 상태를 스캔한다(네더·엔드·런타임 월드 포함). POI 티켓을 점유하는 AI가 없어 `IS_OCCUPIED`는 항상 빈 결과이고 `HAS_SPACE`는 해당 타입 중 공간이 있는 POI만 돌려준다. `locateNearestBiome`은 호스트 고정 32/64 간격(Paper 기본값)을 쓰며, 다른 `horizontalInterval`/`verticalInterval`은 조용히 무시하지 않고 거부한다. 구조물 조각(`getPieces`)은 호스트가 경계 상자만 보고하므로 빈 목록 대신 거부한다. `getWorldPath`는 기본 월드와 저장 디렉터리가 있는 런타임 월드에서 동작하고 메모리 월드는 거부한다. `getFluidData`, `spawnAt`, `vanillaBiomeProvider`는 컴파일 대상 Paper API에 없다.
+- `ChunkData#getBiome`은 계속 거부한다. `Chunk#getChunkSnapshot`은 2026-11-15에 호스트 캡처로 구현됐다.
 - `sendBlockUpdate`: 침대는 26.3에 블록 엔티티가 없어 거부한다. 목록 밖 대상은 `UnsupportedOperationException`.
 - 레시피: 런타임 추가는 shaped/shapeless, 화로 계열·모닥불·석재 절단, 대장장이 transform/trim을 지원한다. transmute·`crafting_special_*`·`ExactChoice`/`PredicateChoice`, 결과 아이템 메타, 클라이언트 레시피북 표시는 지원하지 않는다.
 - NMS 메뉴: 호퍼·발사기·화로·양조기·신호기·교탁·상인·크래프터는 의도적 거부(이유와 대체 API는 지시서 §10.3).
@@ -194,7 +201,7 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 ## 해야 할 일
 
 - 남은 게임·플러그인 작업: 드래곤 돌진·화염구 숨결의 근사, 기본 월드·
-  네더·엔드의 비플레이어 엔티티 NBT 경계, 삼지창, Paper/Bukkit 및 NMS
+  네더·엔드의 비플레이어 엔티티 NBT 경계, Paper/Bukkit 및 NMS
   호환 범위 확대.
 - 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
   피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI, 플러그인 동작을 통합 서버에서 확인.

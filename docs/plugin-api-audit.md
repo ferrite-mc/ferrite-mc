@@ -1,132 +1,97 @@
-# 플러그인 API 감사 (2026-11-12, W6 플러그인 API 레인)
+# 플러그인 API 감사 (2026-11-15, plugins-z)
 
-기준: 브랜치 `w6-bukkit-api`. 이 문서는 `docs/plugin-api-stubs.md`/`plugin-stubs-status.md`와 함께 읽는다.
+Bukkit/Paper 플러그인 API를 실제 Rust 호스트, Java 구현, 게임 루프, 저장 형식과 대조한 기록이다.
+**실제 26.3 클라이언트 화면, EULA 동의 환경, 외부 대형 플러그인 부팅은 검증하지 않았다.**
+따라서 “API가 응답한다”와 “바닐라/Paper와 화면·동작이 완전히 같다”를 구분한다.
 
-## 방법과 한계
+## 1. 재생성 결과
 
-1. `./gradlew test`가 만드는 `build/catalog/*-missing.txt`(호스트 없이 호출해 "not implemented"가 난 메서드)를 뽑았다:
-   Player 102, World 71, Server 4.
-2. 각 서명 문자열이 Rust 크레이트(`crates/**/*.rs`)에 정확히 나오는지 문자열 일치로 걸렀다. **이 걸러내기는 휴리스틱이다**:
-   Rust가 `starts_with("createExplosion(")`처럼 접두사로 받거나 Java가 다른 서명으로 호출하는 메서드는
-   "호스트 처리기 없음"으로 잘못 분류될 수 있다. 아래 목록은 "확인 필요 후보"이지 확정된 미구현이 아니다.
-3. Java 쪽 의도적 거부 `UnsupportedOperationException`은 114곳이며 대부분 이유가 적힌 정밀 거부다(파일별 개수는 맨 아래).
+`java/ferrite-api-impl`에서 `./gradlew test --no-daemon --console=plain`을 실행해
+`build/catalog/*.txt`를 다시 만들었다. 이 파일들은 `ferrite.native=false`에서 기본 인자로
+호출한 폴백 프로브이며, 같은 이름의 Rust/Java 경로가 있는지는 별도로 문자열·서명을 대조했다.
 
-## 이 레인에서 구현한 항목
+| 카탈로그 | 줄 수 | 호스트/Java 경로 있음 | 실제로 열림 |
+|---|---:|---:|---:|
+| Player | 90 | 90 | 0 |
+| Server | 4 | 4 | 0 |
+| World | 57 | 56 | 1 |
+| `stubs.txt` / `player-unoverridden.txt` | 192 | — | — |
 
-| 항목 | 커밋 | 테스트 |
-|---|---|---|
-| `InventoryType.SHULKER_BOX` 플러그인 인벤토리 열기 (`OpenInventory.shulker`) | `7c642e6` | Rust `opens_a_plugin_shulker_box_inventory_as_a_shulker_menu`, Java `aPluginShulkerBoxInventoryIsSentToTheHostAsAShulkerBox` |
-| 서버 lib 테스트 11개 실패 | (코드 변경 없음) | 원인: 워크트리에 gitignore된 `vanilla/26.3/fixture-world`가 없었음. 심볼릭 링크 후 11개 모두 통과 |
-| `World#spawnArrow(Location,Vector,float,float,Class)` | `0a147eb` | `spawnArrowShootsAlongTheNormalisedDirectionAtTheGivenSpeed` |
-| `World#getInfiniburn` (차원 타입의 `infiniburn` 블록 태그) | `0a147eb` | `infiniburnIsTheDimensionTypesBlockTag` |
+Player와 Server에는 호스트/Java 경로가 없는 메서드가 없다. World에서 남은 것은
+`vanillaBiomeProvider()` 하나다(컴파일 대상 Paper API에 없어 호출 자체가 드물다).
 
-## 남은 Player 후보 (호스트 처리기 문자열 없음)
+이 분류는 이름 기준이므로 “경로가 있다”가 모든 오버로드·인자 조합의 성공을 뜻하지 않는다.
+실제 서버에서 효과가 확인된 경로는 아래처럼 회귀 테스트가 있는 것에 한정한다.
 
-```
-addResourcePack(UUID,String,byte[],String,boolean)
-canCriticalAttack(Entity)
-copy()
-copy(Location)
-fireworkBoost(ItemStack)
-getAsString()
-getConnection()
-getSentChunkKeys()
-loadData()
-postEffects()
-setResourcePack(UUID,String,byte[],Component,boolean)
-setResourcePack(UUID,String,byte[],String,boolean)
-sleep(Location,boolean)
-spawnAt(Location,SpawnReason)
-spawnParticle(Particle,double,double,double,int,double,double,double,double,double,double,Object,boolean,RandomizationType)
-startRiptideAttack(int,float,ItemStack)
-```
+## 2. 이번에 확인하고 닫은 경로
 
-## 남은 World 후보 (호스트 처리기 문자열 없음)
+### 청크 스냅샷
 
-```
-addEntity(Entity)
-createEntity(Location,Class)
-createExplosion(Entity,Location,float,boolean,boolean,boolean)
-createExplosion(Location,float,boolean,boolean,Entity)
-createExplosion(double,double,double,float,boolean,boolean,Entity)
-findLightningRod(Location)
-findLightningTarget(Location)
-generateTree(Location,Random,TreeType)
-generateTree(Location,Random,TreeType,Consumer)
-generateTree(Location,Random,TreeType,Predicate)
-generateTree(Location,TreeType)
-generateTree(Location,TreeType,BlockChangeDelegate)
-getBlockState(int,int,int)
-getChunkCount()
-getChunkGenerationState(int,int)
-getChunkGenerationStateAsync(int,int)
-getChunksAtAsync(int,int,int,int,boolean,Runnable)
-getFluidData(int,int,int)
-getGameRuleValue(GameRule)
-getLoadedChunks()
-getStructures(int,int)
-getStructures(int,int,Structure)
-getTickableTileEntityCount()
-getTileEntityCount()
-getWorldPath()
-hasStructureAt(Position,Structure)
-isChunkInUse(int,int)
-isVoidDamageEnabled()
-loadChunk(int,int,boolean)
-locateAllPoiInRange(Location,Predicate,int,Occupancy)
-locateNearestBiome(Location,int,int,int,Biome[])
-locateNearestPoi(Location,PoiType,int,Occupancy)
-locateNearestStructure(Location,Structure,int,boolean)
-locateNearestStructure(Location,StructureType,int,boolean)
-setBiome(int,int,Biome)
-spawn(Location,Class,Consumer,SpawnReason)
-spawn(Location,Class,SpawnReason,boolean,Consumer)
-spawn(Location,Class,boolean,Consumer)
-spawnParticle(Particle,List,Player,double,double,double,int,double,double,double,double,double,double,Object,boolean,RandomizationType)
-unloadChunk(int,int,boolean)
-unloadChunkRequest(int,int)
-vanillaBiomeProvider()
-```
+`Chunk#getChunkSnapshot`은 이제 호스트 캡처를 사용한다. `crates/ferrite-server/src/plugins/
+worldquery.rs`가 한 시점에 다음을 읽는다.
 
-Server는 4개가 호스트 없이 실패하지만 모두 Rust 처리기가 있다.
+- 블록 상태(전역 블록 상태 id)
+- 하늘 조명과 블록 조명
+- 4×4×4 바이옴
+- 열별 최고 블록 높이
 
-## Java 쪽 명시적 거부 개수 (파일별)
+`FerriteChunkSnapshot.java`가 이 응답을 파싱하고 `FerriteWorld`의 `Chunk` 뷰가 이를 노출한다.
+`FerriteChunkSnapshotTest`와 실제 서버+JVM 테스트
+`plugin_lifecycle::typical_plugin_...`가 JVM 경로를 확인한다. `World#getEmptyChunkSnapshot`은
+기존처럼 전부 공기인 빈 스냅샷을 만든다. `ChunkData#getBiome`은 `createChunkData` 버퍼에 청크
+좌표가 없어 계속 `UnsupportedOperationException`이다(가짜 PLAINS를 만들지 않는다).
 
-```
-dev/ferrite/server/FerriteWorld.java:17
-dev/ferrite/server/FerriteEnchantmentData.java:12
-dev/ferrite/server/PlayerMisc.java:8
-dev/ferrite/server/CapturedStructure.java:8
-dev/ferrite/server/FerriteServer.java:5
-dev/ferrite/server/DroppedItem.java:5
-dev/ferrite/server/Bootstrap.java:5
-dev/ferrite/server/FerriteMusicInstrument.java:4
-dev/ferrite/server/PlayerExtras.java:3
-dev/ferrite/server/HostBridge.java:3
-dev/ferrite/server/FerriteUnsafe.java:3
-dev/ferrite/server/FerriteStructure.java:3
-dev/ferrite/server/FerritePotionEffectData.java:3
-dev/ferrite/server/FerriteMapView.java:3
-dev/ferrite/server/FerriteEntitySnapshot.java:3
-dev/ferrite/server/FerriteEffectData.java:3
-dev/ferrite/server/StructureEntity.java:2
-dev/ferrite/server/SpawnedEntity.java:2
-dev/ferrite/server/FerriteTemplate.java:2
-dev/ferrite/server/FerriteStructureManager.java:2
-dev/ferrite/server/FerritePlayerInventory.java:2
-dev/ferrite/server/FerritePlayer.java:2
-dev/ferrite/server/FerriteInventoryView.java:2
-dev/ferrite/server/FerriteChunkSnapshot.java:2
-net/minecraft/server/network/ServerGamePacketListenerImpl.java:1
-dev/ferrite/server/WorldEntities.java:1
-dev/ferrite/server/FerriteTags.java:1
-dev/ferrite/server/FerriteRegistryAccess.java:1
-dev/ferrite/server/FerriteProfileBanList.java:1
-dev/ferrite/server/FerritePotionEffectType.java:1
-dev/ferrite/server/FerriteInternalBridge.java:1
-dev/ferrite/server/FerriteEntityFactory.java:1
-dev/ferrite/server/FerriteEnchantment.java:1
-dev/ferrite/server/FerriteDataContainer.java:1
-dev/ferrite/server/FerriteCrafting.java:1
-dev/ferrite/server/FerriteBlockData.java:1
-```
+### 인벤토리 스냅샷 NBT
+
+접속 시 `PlayerSnapshot.inventory_data`가 슬롯별 26.3 아이템 저장 NBT를 base64로 전달한다.
+`Bootstrap.setInventorySnapshotNbt`와 `clearInventorySnapshot`이 JVM 쪽 진입점이며,
+`FerritePlayer`/`FerritePlayerInventory`가 슬롯을 갱신한다. `FerriteItemNbt.java`가 지원하는
+컴포넌트는 다음과 같다.
+
+- `minecraft:custom_name`, `minecraft:lore`
+- `minecraft:damage`, `minecraft:repair_cost`, `minecraft:unbreakable`
+- `minecraft:enchantments`
+- `minecraft:custom_model_data`
+- `minecraft:map_id`
+- `minecraft:custom_data`(PDC)
+
+지원하지 않는 컴포넌트는 Rust 아이템 NBT에는 남지만 JVM `ItemStack` 뷰에는 반영되지 않는다.
+`FerriteItemNbtTest`가 디코드와 JNI 메서드 존재를 확인하고, Rust
+`plugin_inventory_snapshot_keeps_components_in_nbt`가 이름·피해·PDC 보존을 확인한다.
+
+### 그 밖에 코드와 일치함을 확인한 경계
+
+- `GameRule`: 59개 규칙을 데이터 기반으로 제공한다. `MemoryKey`만 값 타입/private 생성자 때문에
+  거부한다.
+- `Chunk#getChunkSnapshot`과 별개로 `MapCanvas`, 구조물 엔티티, `sendBlockUpdate`의 지원 범위는
+  각각 `FerriteMapView`, `CapturedStructure`/`snapshot.rs`, `plugins/tile_update.rs`가 소유한다.
+- `Player#sendBlockUpdate`: 표지판, 상자·통·셜커 상자·화로 계열, 배너 패턴, 머리 이름/UUID·
+  텍스처 속성·`note_block_sound`. 모델이 없는 침대·종·비교기 등은 명시적으로 거부한다.
+- 삼지창: `Player#launchProjectile(Trident)`가 실제 삼지창 엔티티를 만들고 비행 종료 시
+  아이템으로 떨어뜨린다. 물약 콜백의 내용물 변경은 여전히 지원하지 않는다.
+- 지도 제작대(`openCartographyTable`)는 지도 저장소/`idcounts`/타입된 지도 데이터 컴포넌트가
+  없어 메뉴 자체를 거부한다.
+
+## 3. 남은 명시적 미지원
+
+- 기본 월드·네더·엔드의 비플레이어 엔티티 저장 NBT 경계. 구조물 엔티티 캡처/재생성은 런타임
+  월드에서만 가능하다.
+- `MemoryKey` 레지스트리, `ChunkData#getBiome`.
+- 지원 표에 없는 아이템 메타와 일부 PDC 컨테이너/리스트 타입.
+- 런타임 월드의 커스텀 `WorldCreator#generator`, `generateStructures(false)`, 일부
+  `WorldType`/환경. 현재 `NORMAL`, `NETHER`, `THE_END`만 허용한다.
+- NMS/Unsafe 의존 API(`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
+  `CraftMagicNumbers`)와 Paper 전체 생명주기 API. 가짜 구현을 넣지 않는다.
+- `vanillaBiomeProvider()`는 컴파일 대상 Paper API에 없어 계속 열려 있다. 나무 생성·청크 상태·
+  타일 수·월드 경로·보이드 피해·구조물 검색은 호스트/Java 경로가 있다.
+
+## 4. 검증과 한계
+
+- **통과:** Java 전체 `./gradlew test` (`BUILD SUCCESSFUL`), Rust `ferrite-server` lib 1237개,
+  `plugin_lifecycle` 5개, `plugin_command_world` 2개, `ferrite-plugin` 통합 1개,
+  `cargo clippy -p ferrite-server -p ferrite-plugin --all-targets -- -D warnings`,
+  `cargo fmt --all --check`.
+- **집중 확인:** `FerriteItemNbtTest`, `FerriteChunkSnapshotTest`,
+  `plugin_lifecycle::typical_plugin_...`, Rust 인벤토리 NBT 보존 테스트.
+- **미검증:** 실제 26.3 클라이언트의 청크 스냅샷/인벤토리 표시, EULA가 설정된 외부 실행 환경,
+  CMI 등 대형 플러그인의 전체 부팅. 이 문서는 그 범위를 통과했다고 주장하지 않는다.

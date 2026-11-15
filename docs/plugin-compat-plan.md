@@ -4,7 +4,12 @@
 Spigot / Paper / Folia 플러그인과 NMS(`net.minecraft.*`)에 의존하는 플러그인(예: CMI)이 Ferrite에서 동작하는 것.
 기준: "메서드가 호출 가능"이 아니라 **게임에 실제 효과가 반영**되는 것. 구현 여부는 항상 솔직하게 구분해서 보고한다.
 
-## 2. 현재 상태 (main = b671ba9)
+## 2. 현재 상태 (main = bb87ee1, 2026-11-15 재대조)
+
+> 최신 카탈로그는 Player 90, Server 4, World 57이며 호스트/Java 경로를 제외한 실제 열림은
+> Player 0, Server 0, World 1(`vanillaBiomeProvider`)이다. 상세는
+> [`plugin-api-audit.md`](plugin-api-audit.md)를 따른다.
+
 - **라우팅 완료:** Player/Server/Scheduler/PluginManager 등 약 1000개 메서드가 `HostBridge`를 거쳐 Rust로 도달한다. 호스트가 처리하지 않으면 `UnsupportedOperationException("Ferrite: not implemented: Owner#method(types)")`.
 - **Java 쪽 폴백:** 호스트가 `None`이면 `get/is/has` 조회와 한 인자 `set*`는 값만 저장/반환한다(`HostBridge.localProperty`, 기본값 표 `DEFAULTS`). **클라이언트 효과는 없다.**
 - **호스트가 실제 처리하는 것:**
@@ -13,7 +18,7 @@ Spigot / Paper / Folia 플러그인과 NMS(`net.minecraft.*`)에 의존하는 �
   - Player: 포션 add/remove/clear, stopAllSounds, setBedSpawnLocation, 능력치(비행/무적/속도), `damage`(리전 직접 적용), kill, teleport(Entity), lookAt, setRotation, hideTitle, setTitleTimes, sendRawMessage, stopSound, 위치 지정 playSound, spawnParticle(데이터 없는 파티클), showDemoScreen/WinScreen/ElderGuardian, 플레이어별 비
   - 그 외 기존 `Native.*`(채팅, 타이틀, 액션바, 텔레포트, 체력/음식/경험/게임모드, 인벤토리 슬롯, 킥, OP)
 - **NMS 호환 레이어(클린룸):** `java/ferrite-api-impl/src/main/java/net/minecraft/**` — ServerPlayer(`connection`), ServerGamePacketListenerImpl, Component, BlockPos, Vec3, ItemStack, Level/ServerLevel, MinecraftServer, GameProfile. `CraftPlayer.getHandle()`, `CraftWorld.getHandle()`, `CraftServer.getServer()`, `CraftItemStack.asNMSCopy` 연결됨. `connection.send`는 채팅/액션바 패킷만 실제 전송, 나머지는 이름이 적힌 예외.
-- **도구:** `java/ferrite-api-impl/tools/Scan.java`(플러그인 jar가 필요로 하는데 없는 클래스/멤버 목록), `CatalogTest`(라우팅만 되는 메서드를 `build/catalog/stubs.txt`에 기록; 2026-11 기준 Player 530개).
+- **도구:** `java/ferrite-api-impl/tools/Scan.java`(플러그인 jar가 필요로 하는데 없는 클래스/멤버 목록), `CatalogTest`(라우팅만 되는 메서드를 `build/catalog/stubs.txt`에 기록; 2026-11-15 기준 Player 192개).
 
 ## 3. 호출 경로 (코드 위치)
 Java 스텁 → `HostBridge.callX(owner, subject, "name(Types)", args)` → `Native.hostCall`(인자 `\u001f` 구분, 복합값 `\u001d`, null=`\u001bnull`) → JNI `host_call`(`crates/ferrite-plugin/src/lib.rs`) → 핸들러(`crates/ferrite-server/src/plugins.rs`):

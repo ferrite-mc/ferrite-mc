@@ -10,8 +10,10 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
     }
     void setSnapshot(int slot, String material, int amount) {
         var type = java.util.Objects.requireNonNull(org.bukkit.Material.matchMaterial(material), "unknown material");
-        items[slot] = new org.bukkit.inventory.ItemStack(type, amount);
+        synchronized (this) { items[slot] = new org.bukkit.inventory.ItemStack(type, amount); }
     }
+    void setSnapshotNbt(int slot, String data) { synchronized (this) { items[slot] = FerriteItemNbt.decode(data); } }
+    void clearSnapshot(int slot) { synchronized (this) { items[slot] = null; } }
     private synchronized org.bukkit.inventory.ItemStack read(int slot) { var item = items[slot]; return item == null ? null : item.clone(); }
     private void write(int slot, org.bukkit.inventory.ItemStack item) {
         var wire = ItemMetaWire.of(item);
