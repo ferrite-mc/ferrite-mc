@@ -672,6 +672,7 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("Panic".into(), Tag::Short(mob.panic as i16));
         c.insert("Swell".into(), Tag::Short(mob.swell as i16));
         c.insert("BowTimer".into(), Tag::Short(mob.bow_timer as i16));
+        c.insert("Anger".into(), Tag::Short(mob.anger as i16));
         if mob.kind == MobKind::Chicken {
             c.insert("EggLayTime".into(), Tag::Int(mob.egg_time as i32));
         }
@@ -806,6 +807,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.panic = int(c, "Panic").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
                 mob.swell = int(c, "Swell").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
                 mob.bow_timer = int(c, "BowTimer").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
+                mob.anger = int(c, "Anger").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
                 mob.egg_time = int(c, "EggLayTime")
                     .unwrap_or(ferrite_entity::mob::CHICKEN_EGG_MIN as i32)
                     .max(0) as u32;
@@ -1208,6 +1210,25 @@ mod tests {
             data.metadata.get(ferrite_entity::sheep::WOOL_INDEX),
             Some(ferrite_protocol::packets::play::MetaValue::Byte(byte)) if *byte == 11 | 0x10
         ));
+    }
+
+    #[test]
+    fn an_angry_enderman_keeps_its_anger_and_target_across_a_save() {
+        let mut record = mob::new_mob(
+            MobKind::Enderman,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        let target = Uuid::from_u128(0xa11);
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.anger = mob::ENDERMAN_ANGER_TICKS;
+            state.target = Some(target);
+        }
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let state = loaded[0].data.mob.as_ref().unwrap();
+        assert_eq!(state.anger, mob::ENDERMAN_ANGER_TICKS);
+        assert_eq!(state.target, Some(target));
     }
 
     #[test]

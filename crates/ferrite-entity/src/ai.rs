@@ -418,6 +418,9 @@ pub enum MobEvent {
         at: [i32; 3],
         state: u16,
     },
+    /// An enderman blinked from `from` to `to`; the region sends the teleport sound and
+    /// portal particles at the old position.
+    Teleport { from: Vec3, to: Vec3 },
     /// An entity event for the players tracking `key` (hearts, smoke).
     Status { key: crate::EntityKey, status: u8 },
 }
@@ -751,7 +754,9 @@ pub fn tick_full(
                 && rng.next_int(10) != 0
             {
                 let at = store.pos(key).unwrap_or_default();
-                blink(store, key, blocks, at, rng);
+                if let Some((from, to)) = blink(store, key, blocks, at, rng) {
+                    events.push(MobEvent::Teleport { from, to });
+                }
             }
             crate::enderman::sync(store, key);
         }
@@ -929,8 +934,11 @@ pub fn tick_full(
                             speed = chase_speed(store, key);
                         }
                         // Enderman basics: blink to a nearby walkable spot now and then.
-                        if kind == MobKind::Enderman && rng.next_int(400) == 0 {
-                            blink(store, key, blocks, start, rng);
+                        if kind == MobKind::Enderman
+                            && rng.next_int(400) == 0
+                            && let Some((from, to)) = blink(store, key, blocks, start, rng)
+                        {
+                            events.push(MobEvent::Teleport { from, to });
                         }
                     }
                     _ => {}
@@ -958,8 +966,10 @@ pub fn tick_full(
                 {
                     events.push(MobEvent::PlaceCarried { key, at, state });
                 }
-                if rng.next_int(200) == 0 {
-                    blink(store, key, blocks, start, rng);
+                if rng.next_int(200) == 0
+                    && let Some((from, to)) = blink(store, key, blocks, start, rng)
+                {
+                    events.push(MobEvent::Teleport { from, to });
                 }
             } else if kind == MobKind::Skeleton
                 && let Some(shade) = crate::sun::tick_flee_sun(store, key, blocks, start, rng)
@@ -1366,21 +1376,18 @@ fn blink(
     blocks: &impl BlockGetter,
     start: Vec3,
     rng: &mut Rng,
-) {
+) -> Option<(Vec3, Vec3)> {
     for _ in 0..8 {
         let x = start.x.floor() as i32 + rng.next_int(17) - 8;
         let z = start.z.floor() as i32 + rng.next_int(17) - 8;
         let y = start.y.floor() as i32 + rng.next_int(5) - 2;
         if path::start_node(blocks, [x, y, z]) == Some([x, y, z]) {
-            crate::tracker::teleport(
-                store,
-                key,
-                Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5),
-                Vec3::ZERO,
-            );
-            return;
+            let to = Vec3::new(f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5);
+            crate::tracker::teleport(store, key, to, Vec3::ZERO);
+            return Some((start, to));
         }
     }
+    None
 }
 
 #[cfg(test)]
@@ -2456,6 +2463,57 @@ mod tests {
                 .any(|e| matches!(e, MobEvent::Melee { .. }));
         }
         assert!(struck, "a provoked enderman attacks");
+    }
+
+    #[test]
+    fn an_enderman_emits_take_and_teleport_events_through_the_ai_tick() {
+        let mut world = TestWorld::flat(64);
+        // A ring of holdable blocks at the enderman's feet: leave the cell it stands in
+        // empty so the line-of-sight check reaches every candidate.
+        let grass = ferrite_data::blocks::default_state("minecraft:grass_block").unwrap();
+        for x in -2..=2 {
+            for z in -2..=2 {
+                if x != 0 || z != 0 {
+                    world.blocks.insert((x, 64, z), grass);
+                }
+            }
+        }
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Enderman,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(4),
+        ));
+        let rules = MobRules {
+            griefing: true,
+            ..Default::default()
+        };
+        let player = target(8.5, 0.5);
+        let mut rng = Rng::new(9);
+        let mut took = false;
+        let mut teleported = false;
+        for _ in 0..4000 {
+            for event in tick_full(&mut store, &world, &[player], &rules, &[], &[], &mut rng) {
+                match event {
+                    MobEvent::TakeBlock { key: at_key, at } => {
+                        assert_eq!(at_key, key);
+                        assert_eq!(at[1], 64);
+                        assert!(at[0].abs() <= 2 && at[2].abs() <= 2, "{at:?}");
+                        took = true;
+                    }
+                    MobEvent::Teleport { from, to } => {
+                        assert_ne!(from, to);
+                        teleported = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(took, "the AI must report the block it wants to take");
+        assert!(
+            teleported,
+            "the AI must report a blink for the region to animate"
+        );
     }
 
     #[test]

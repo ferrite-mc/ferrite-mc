@@ -246,6 +246,17 @@ public final class Bootstrap {
         synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
         return !event.isCancelled() && event.canBuild();
     }
+    /** Fires Bukkit's {@code EntityChangeBlockEvent}; false means a listener cancelled it. */
+    public static boolean fireEntityChangeBlock(String id, String type, String world, int x, int y, int z, String from, String to) {
+        var entityType = org.bukkit.entity.EntityType.fromName(type);
+        var resolved = server.getWorld(java.util.UUID.fromString(world));
+        if (entityType == null || resolved == null) return true;
+        var entity = FerriteEventObjects.living(java.util.UUID.fromString(id), entityType, new org.bukkit.Location(resolved, x + 0.5, y, z + 0.5), 0.0);
+        var block = FerriteEventObjects.block(resolved, x, y, z, material(from));
+        var event = new org.bukkit.event.entity.EntityChangeBlockEvent(entity, block, material(to).createBlockData());
+        synchronized (LEGACY_LOCK) { server.plugins.callEvent(event); }
+        return !event.isCancelled();
+    }
     /** Fires Bukkit's {@code PlayerCommandPreprocessEvent}; false means a listener cancelled it. */
     public static boolean firePlayerCommand(String id, String name, String message) {
         var event = new org.bukkit.event.player.PlayerCommandPreprocessEvent(ensurePlayer(id, name), message);

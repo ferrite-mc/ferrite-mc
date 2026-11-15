@@ -456,12 +456,21 @@ pub(super) mod tests {
     pub(in crate::game) struct Scripted {
         pub(in crate::game) reply: Option<f64>,
         pub(in crate::game) seen: std::sync::Mutex<Vec<(Uuid, String, String, f64)>>,
+        change_allowed: bool,
     }
     impl Scripted {
         pub(in crate::game) fn new(reply: Option<f64>) -> Self {
             Self {
                 reply,
                 seen: Default::default(),
+                change_allowed: true,
+            }
+        }
+        pub(in crate::game) fn canceling_changes() -> Self {
+            Self {
+                reply: None,
+                seen: Default::default(),
+                change_allowed: false,
             }
         }
     }
@@ -526,6 +535,17 @@ pub(super) mod tests {
             _: &str,
         ) -> Result<PluginCommandResult, ferrite_plugin::Error> {
             Err(ferrite_plugin::Error::InvalidTask)
+        }
+        fn entity_changed_block(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: Uuid,
+            _: BlockPosition,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, ferrite_plugin::Error> {
+            Ok(self.change_allowed)
         }
         fn entity_damaged(
             &self,

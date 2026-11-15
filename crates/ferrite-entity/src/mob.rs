@@ -332,7 +332,7 @@ pub struct MobState {
     pub stare_target: Option<uuid::Uuid>,
     /// Whether anything ever stared at this enderman (`DATA_STARED_AT`).
     pub stared_at: bool,
-    /// The block state an enderman carries (`DATA_CARRY_STATE`); kept and saved, not synched.
+    /// The block state an enderman carries (`DATA_CARRY_STATE`), synced at metadata index 16.
     pub carried: Option<u16>,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,

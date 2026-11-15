@@ -6650,6 +6650,9 @@ impl Region {
                 ai::MobEvent::PlaceCarried { key, at, state } => {
                     self.place_enderman_block(ctx, key, at, state);
                 }
+                ai::MobEvent::Teleport { from, to } => {
+                    self.play_enderman_teleport(ctx, from, to);
+                }
                 ai::MobEvent::BreakDoor {
                     at, broken: true, ..
                 } => self.break_door(ctx, at),
@@ -6755,10 +6758,11 @@ impl Region {
                     mob.age < 0,
                     mob.last_killer,
                     mob.fire > 0,
+                    mob.carried,
                 ))
             })
             .collect();
-        for (key, kind, pos, baby, killer, burning) in dead {
+        for (key, kind, pos, baby, killer, burning, carried) in dead {
             // A sheep's table picks its wool by colour and sheared state.
             let facts = mob::state(&self.entities, key)
                 .filter(|s| s.kind == MobKind::Sheep)
@@ -6810,11 +6814,23 @@ impl Region {
                 self.dragon_died(ctx, pos);
             }
             // A baby animal drops nothing.
-            let drops = if baby {
+            let mut drops = if baby {
                 Vec::new()
             } else {
                 super::drops::mob_drops_with(kind, &mut self.rng, killer, burning, &facts)
             };
+            // `EnderMan.dropCustomDeathLoot` drops the carried block even when the loot table
+            // itself is empty.
+            if kind == MobKind::Enderman
+                && let Some(carried) = carried
+                && let Some((name, _)) = ferrite_data::blocks::state(carried)
+                && let Some(item) = ferrite_item::item_id(name)
+            {
+                drops.push(ferrite_protocol::packets::play::ItemStack {
+                    count: 1,
+                    item_id: i32::from(item),
+                });
+            }
             for stack in drops
                 .into_iter()
                 .chain(gear.into_iter().filter(|s| !s.is_empty()).map(|s| {
@@ -8480,6 +8496,9 @@ impl Region {
         let Some(carried) = ferrite_data::blocks::default_state(name) else {
             return;
         };
+        if !self.entity_change_allowed(ctx, key, at, name, "minecraft:air") {
+            return;
+        }
         self.place_blocks(ctx, &[(at, 0)]);
         if let Some(mob) = mob::state_mut(&mut self.entities, key) {
             mob.carried = Some(carried);
@@ -8551,6 +8570,12 @@ impl Region {
         {
             return;
         }
+        let Some((name, _)) = ferrite_data::blocks::state(state) else {
+            return;
+        };
+        if !self.entity_change_allowed(ctx, key, at, "minecraft:air", name) {
+            return;
+        }
         self.place_blocks(ctx, &[(at, state)]);
         if let Some(mob) = mob::state_mut(&mut self.entities, key) {
             mob.carried = None;
@@ -8592,8 +8617,63 @@ impl Region {
         Some(true)
     }
 
+    /// `EnderMan.teleport`: the old position's teleport sound and 32 portal particles.
+    fn play_enderman_teleport(
+        &self,
+        ctx: &TickContext,
+        from: ferrite_math::Vec3,
+        _to: ferrite_math::Vec3,
+    ) {
+        self.play_sound_near_with_source(
+            from,
+            "minecraft:entity.enderman.teleport",
+            1.0,
+            1.0,
+            5, // SoundSource.HOSTILE
+        );
+        let Some(particle) =
+            ferrite_data::registries::id("minecraft:particle_type", "minecraft:portal")
+        else {
+            return;
+        };
+        let update = packet(&LevelParticles {
+            particle: ferrite_protocol::types::ParticleOptions::new(particle),
+            long_distance: false,
+            always_show: false,
+            x: from.x,
+            y: from.y + 1.0,
+            z: from.z,
+            velocity_x: 0.5,
+            velocity_y: 0.5,
+            velocity_z: 0.5,
+            speed: 0.0,
+            speed_y: 0.0,
+            speed_z: 0.0,
+            count: VarInt(32),
+            randomization: VarInt(0),
+        });
+        let chunk = (
+            (from.x.floor() as i32).div_euclid(16),
+            (from.z.floor() as i32).div_euclid(16),
+        );
+        let tracking = ctx.tracking.lock().unwrap();
+        broadcast_tracked_chunk(&tracking, ctx.world_id, chunk, &update);
+    }
+
     /// Plays a sound event at `pos` for every player of this region within 16 blocks.
     fn play_sound_near(&self, pos: ferrite_math::Vec3, name: &str, volume: f32, pitch: f32) {
+        self.play_sound_near_with_source(pos, name, volume, pitch, 7); // SoundSource.PLAYERS
+    }
+
+    /// [`play_sound_near`] with an explicit `SoundSource` id.
+    fn play_sound_near_with_source(
+        &self,
+        pos: ferrite_math::Vec3,
+        name: &str,
+        volume: f32,
+        pitch: f32,
+        source: i32,
+    ) {
         let Some(sound) = ferrite_data::registries::id("minecraft:sound_event", name) else {
             return;
         };
@@ -8607,8 +8687,7 @@ impl Region {
                 p,
                 &SoundEffect {
                     sound: super::commands_extras::sound_holder(sound),
-                    // `SoundSource.PLAYERS`.
-                    source: VarInt(7),
+                    source: VarInt(source),
                     x: (pos.x * 8.0) as i32,
                     y: (pos.y * 8.0) as i32,
                     z: (pos.z * 8.0) as i32,
@@ -11205,6 +11284,41 @@ impl Region {
             self.spawn_block_drops(source, pos, state);
         }
     }
+    /// Fires Bukkit's `EntityChangeBlockEvent` for a non-player entity before it changes a
+    /// block. A missing bridge allows the change; a failed event follows the configured policy.
+    fn entity_change_allowed(
+        &self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+        at: [i32; 3],
+        from: &str,
+        to: &str,
+    ) -> bool {
+        let Some(data) = self.entities.data(key) else {
+            return true;
+        };
+        let Some(mob) = data.mob.as_ref() else {
+            return true;
+        };
+        let Some((hooks, policy)) = self.damage_hooks(ctx) else {
+            return true;
+        };
+        event_allows(Some(hooks.as_ref()), policy, |plugins| {
+            plugins.entity_changed_block(
+                data.uuid,
+                mob.kind.name(),
+                plugin_world_id(ctx),
+                ferrite_plugin::BlockPosition {
+                    x: at[0],
+                    y: at[1],
+                    z: at[2],
+                },
+                from,
+                to,
+            )
+        })
+    }
+
     /// The plugin bridge for events about non-player entities: the live handle on the tick
     /// context first (it works in a region without players), else a player's own handle.
     fn damage_hooks(
@@ -12982,7 +13096,7 @@ mod tests {
         assert_eq!(villager.offers.len(), 4);
     }
 
-    fn tick_context() -> TickContext {
+    pub(super) fn tick_context() -> TickContext {
         let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
         TickContext {
             signals,
@@ -14170,6 +14284,29 @@ mod tests {
             &mut region.rng,
         ));
         assert_eq!(region.shear_sheep(cow), None);
+    }
+
+    #[test]
+    fn a_dead_enderman_drops_its_carried_block() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let grass = ferrite_data::blocks::default_state("minecraft:grass_block").unwrap();
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::Enderman,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        {
+            let state = mob::state_mut(&mut region.entities, key).unwrap();
+            state.carried = Some(grass);
+            state.health = 0.0;
+        }
+        region.tick(&tick_context());
+        let drops = dropped_items(&region);
+        assert!(
+            drops.contains(&"minecraft:grass_block"),
+            "the carried block is dropped: {drops:?}"
+        );
     }
 
     #[test]
@@ -17182,6 +17319,32 @@ mod event_policy_tests {
         ));
         assert!(!decide(PluginEventPolicy::Allow, Ok(false)));
         assert!(decide(PluginEventPolicy::Deny, Ok(true)));
+    }
+
+    #[test]
+    fn a_cancelled_entity_change_block_stops_the_enderman() {
+        use super::super::explosion::tests::Scripted;
+        let mut region = Region::default();
+        let key = region.entities.insert(mob::new_mob(
+            mob::MobKind::Enderman,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let hooks = Arc::new(Scripted::canceling_changes());
+        let shared = Arc::new(SharedPluginHooks::default());
+        shared.publish(Some(hooks), PluginEventPolicy::Allow);
+        let mut ctx = super::tests::tick_context();
+        ctx.hooks = Some(shared);
+        assert!(
+            !region.entity_change_allowed(
+                &ctx,
+                key,
+                [0, 64, 0],
+                "minecraft:grass_block",
+                "minecraft:air"
+            ),
+            "the listener's cancellation must reach the enderman"
+        );
     }
 
     #[test]

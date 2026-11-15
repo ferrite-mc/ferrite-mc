@@ -34,6 +34,7 @@ pub const PLAYER_INTERACT_EVENT: &str = "org.bukkit.event.player.PlayerInteractE
 pub const BLOCK_BREAK_EVENT: &str = "org.bukkit.event.block.BlockBreakEvent";
 pub const BLOCK_PLACE_EVENT: &str = "org.bukkit.event.block.BlockPlaceEvent";
 pub const BLOCK_EXPLODE_EVENT: &str = "org.bukkit.event.block.BlockExplodeEvent";
+pub const ENTITY_CHANGE_BLOCK_EVENT: &str = "org.bukkit.event.entity.EntityChangeBlockEvent";
 pub const PLAYER_COMMAND_PREPROCESS_EVENT: &str =
     "org.bukkit.event.player.PlayerCommandPreprocessEvent";
 pub const INVENTORY_CLICK_EVENT: &str = "org.bukkit.event.inventory.InventoryClickEvent";
@@ -1196,6 +1197,19 @@ pub trait ServerHooks: Send + Sync {
         placed: &str,
         replaced: &str,
     ) -> Result<bool, Error>;
+    /// Fires Bukkit's `EntityChangeBlockEvent` before a non-player entity changes a block;
+    /// `false` means cancelled. The default allows the change.
+    fn entity_changed_block(
+        &self,
+        _id: uuid::Uuid,
+        _kind: &str,
+        _world: uuid::Uuid,
+        _block: BlockPosition,
+        _from: &str,
+        _to: &str,
+    ) -> Result<bool, Error> {
+        Ok(true)
+    }
     /// Fires Bukkit's `BlockExplodeEvent` for the blocks an explosion would destroy. `None`
     /// leaves the host's list untouched; `Some(list)` is what listeners left (empty = cancelled).
     fn blocks_exploded(
@@ -3241,6 +3255,46 @@ impl PluginHost {
         })?)
     }
 
+    /// Fires Bukkit's `EntityChangeBlockEvent`; no JNI call without a registered listener.
+    pub fn fire_entity_change_block(
+        &self,
+        id: uuid::Uuid,
+        kind: &str,
+        world: uuid::Uuid,
+        block: BlockPosition,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, Error> {
+        if !self.listens_for(ENTITY_CHANGE_BLOCK_EVENT) {
+            return Ok(true);
+        }
+        Ok(self.jvm.with_env(|env| {
+            let id = env.new_string(id.to_string())?;
+            let kind = env.new_string(kind)?;
+            let world = env.new_string(world.to_string())?;
+            let from = env.new_string(from)?;
+            let to = env.new_string(to)?;
+            let allowed = env
+                .call_static_method(
+                    BOOTSTRAP,
+                    "fireEntityChangeBlock",
+                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIILjava/lang/String;Ljava/lang/String;)Z",
+                    &[
+                        JValue::Object(id.as_ref()),
+                        JValue::Object(kind.as_ref()),
+                        JValue::Object(world.as_ref()),
+                        JValue::Int(block.x),
+                        JValue::Int(block.y),
+                        JValue::Int(block.z),
+                        JValue::Object(from.as_ref()),
+                        JValue::Object(to.as_ref()),
+                    ],
+                )?
+                .z()?;
+            Ok(allowed)
+        })?)
+    }
+
     /// Fires Bukkit's `PlayerCommandPreprocessEvent`; no JNI call without a registered listener.
     pub fn fire_player_command(
         &self,
@@ -3868,6 +3922,17 @@ impl ServerHooks for PluginHost {
         replaced: &str,
     ) -> Result<bool, Error> {
         self.fire_block_place(id, name, block, face, placed, replaced)
+    }
+    fn entity_changed_block(
+        &self,
+        id: uuid::Uuid,
+        kind: &str,
+        world: uuid::Uuid,
+        block: BlockPosition,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, Error> {
+        self.fire_entity_change_block(id, kind, world, block, from, to)
     }
     fn blocks_exploded(
         &self,
