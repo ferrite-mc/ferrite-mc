@@ -158,8 +158,11 @@ impl Scheduler {
             .map(|task| task.plugin.as_deref().map(str::to_owned));
         match owner {
             None => CancelOutcome::NotFound,
+            // Host-internal Rust tasks have no plugin owner and must not be reachable from a
+            // plugin's `scheduler.cancel`.
+            Some(None) => CancelOutcome::NotOwner,
             Some(Some(owner)) if owner != plugin => CancelOutcome::NotOwner,
-            Some(_) => {
+            Some(Some(_)) => {
                 inner.tasks.remove(&id.0);
                 CancelOutcome::Cancelled
             }
@@ -196,6 +199,10 @@ impl Scheduler {
     ///
     /// `now` is the tick number this call represents. A task scheduled with delay 0 on tick N
     /// is due at N and therefore runs on tick N+1, the next call.
+    ///
+    /// A task that panics or fails on the Java side is removed without stopping the other due
+    /// tasks. A task cancelled by an earlier task in the same tick is skipped even though it was
+    /// in the due snapshot.
     pub(crate) fn tick(&self, jvm: Option<Jvm>) {
         if self.stopped.load(Ordering::SeqCst) {
             return;
@@ -211,53 +218,64 @@ impl Scheduler {
                 .collect()
         };
         for (id, body, period) in due {
-            let keep = match body {
-                TaskBody::Java { handle, is_async } => {
-                    let Some(jvm) = jvm else {
-                        tracing::error!(task = id, "a Java task is due without a running JVM");
-                        self.finish(id, now, period, false);
-                        continue;
-                    };
-                    let method = if is_async { "runTaskAsync" } else { "runTask" };
-                    match protocol::call_java_long(
-                        jvm,
-                        "dev/ferrite/host/Bootstrap",
-                        method,
-                        handle,
-                    ) {
-                        Ok(response) => match protocol::parse_run_task(&response) {
-                            Ok(RunTaskResponse::Keep) => true,
-                            Ok(RunTaskResponse::Done | RunTaskResponse::Missing) => false,
-                            Ok(RunTaskResponse::Failed(error)) => {
-                                tracing::warn!(task = id, %error, "a plugin task failed");
-                                false
-                            }
-                            Err(error) => {
-                                tracing::warn!(task = id, %error, "invalid plugin task response");
-                                false
-                            }
-                        },
-                        Err(error) => {
-                            tracing::warn!(task = id, %error, "calling a plugin task failed");
+            // A task earlier in this tick may have cancelled this one. Cancellation is
+            // immediate in Bukkit, so do not run a task that is already gone.
+            if !self.is_pending(id) {
+                continue;
+            }
+            let keep = catch_unwind(AssertUnwindSafe(|| self.run_task(id, body, period, jvm)))
+                .unwrap_or_else(|_| {
+                    tracing::error!(task = id, "a scheduled task panicked");
+                    false
+                });
+            self.finish(id, now, period, keep);
+        }
+    }
+
+    fn is_pending(&self, id: u64) -> bool {
+        self.lock().tasks.contains_key(&id)
+    }
+
+    fn run_task(&self, id: u64, body: TaskBody, period: Option<u64>, jvm: Option<Jvm>) -> bool {
+        match body {
+            TaskBody::Java { handle, is_async } => {
+                let Some(jvm) = jvm else {
+                    tracing::error!(task = id, "a Java task is due without a running JVM");
+                    return false;
+                };
+                let method = if is_async { "runTaskAsync" } else { "runTask" };
+                match protocol::call_java_long(jvm, "dev/ferrite/host/Bootstrap", method, handle) {
+                    Ok(response) => match protocol::parse_run_task(&response) {
+                        Ok(RunTaskResponse::Keep) => true,
+                        Ok(RunTaskResponse::Done | RunTaskResponse::Missing) => false,
+                        Ok(RunTaskResponse::Failed(error)) => {
+                            tracing::warn!(task = id, %error, "a plugin task failed");
                             false
                         }
-                    }
-                }
-                TaskBody::Rust(body) => {
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        if let Ok(mut task) = body.lock() {
-                            task();
+                        Err(error) => {
+                            tracing::warn!(task = id, %error, "invalid plugin task response");
+                            false
                         }
-                    }));
-                    if result.is_err() {
-                        tracing::error!(task = id, "a plugin host task panicked");
+                    },
+                    Err(error) => {
+                        tracing::warn!(task = id, %error, "calling a plugin task failed");
                         false
-                    } else {
-                        period.is_some()
                     }
                 }
-            };
-            self.finish(id, now, period, keep);
+            }
+            TaskBody::Rust(body) => {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    if let Ok(mut task) = body.lock() {
+                        task();
+                    }
+                }));
+                if result.is_err() {
+                    tracing::error!(task = id, "a plugin host task panicked");
+                    false
+                } else {
+                    period.is_some()
+                }
+            }
         }
     }
 
@@ -345,5 +363,91 @@ mod tests {
             scheduler.cancel_for_plugin("One", first),
             CancelOutcome::NotFound
         );
+    }
+
+    #[test]
+    fn a_plugin_cannot_cancel_a_host_internal_task() {
+        let scheduler = Scheduler::new();
+        let host = scheduler.schedule_rust(None, 10, None, Box::new(|| {}));
+        assert_eq!(
+            scheduler.cancel_for_plugin("One", host),
+            CancelOutcome::NotOwner,
+            "plugin-owned cancellation must not reach host tasks"
+        );
+        assert!(scheduler.is_pending(host.get()));
+    }
+
+    #[test]
+    fn cancelling_a_due_task_earlier_in_the_tick_skips_it() {
+        let scheduler = Arc::new(Scheduler::new());
+        let ran = Arc::new(AtomicU32::new(0));
+        let target = Arc::new(Mutex::new(None));
+        let weak = Arc::downgrade(&scheduler);
+        let slot = Arc::clone(&target);
+        scheduler.schedule_rust(
+            None,
+            0,
+            None,
+            Box::new(move || {
+                if let (Some(scheduler), Some(id)) = (weak.upgrade(), *slot.lock().unwrap()) {
+                    scheduler.cancel(id);
+                }
+            }),
+        );
+        let ran_by_target = Arc::clone(&ran);
+        let id = scheduler.schedule_rust(
+            None,
+            0,
+            None,
+            Box::new(move || {
+                ran_by_target.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        *target.lock().unwrap() = Some(id);
+
+        run_tick(&scheduler);
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "a cancelled task must not run from the stale due snapshot"
+        );
+    }
+
+    #[test]
+    fn a_panicking_task_does_not_stop_the_rest_of_the_tick() {
+        let scheduler = Scheduler::new();
+        let ran = Arc::new(AtomicU32::new(0));
+        scheduler.schedule_rust(None, 0, None, Box::new(|| panic!("task boom")));
+        let ran_by_next = Arc::clone(&ran);
+        scheduler.schedule_rust(
+            None,
+            0,
+            None,
+            Box::new(move || {
+                ran_by_next.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        run_tick(&scheduler);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_repeating_task_is_gone_after_stop() {
+        let scheduler = Scheduler::new();
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_by_task = Arc::clone(&ran);
+        scheduler.schedule_rust(
+            Some("One".into()),
+            0,
+            Some(1),
+            Box::new(move || {
+                ran_by_task.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        run_tick(&scheduler);
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        scheduler.stop();
+        run_tick(&scheduler);
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "stop drops every task");
     }
 }

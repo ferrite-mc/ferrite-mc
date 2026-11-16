@@ -505,9 +505,7 @@ pub(super) mod tests {
             _: Uuid,
             _: &str,
             _: InteractAction,
-            _: BlockPosition,
-            _: u8,
-            _: &str,
+            _: crate::game::plugin_types::BlockInteract<'_>,
         ) -> Result<bool, crate::game::plugin_types::Error> {
             Err(crate::game::plugin_types::Error::InvalidTask)
         }
@@ -515,8 +513,7 @@ pub(super) mod tests {
             &self,
             _: Uuid,
             _: &str,
-            _: BlockPosition,
-            _: &str,
+            _: crate::game::plugin_types::BlockBreak<'_>,
         ) -> Result<bool, crate::game::plugin_types::Error> {
             Err(crate::game::plugin_types::Error::InvalidTask)
         }
