@@ -3,7 +3,9 @@ package net.minecraft.server.level;
 
 import dev.ferrite.nms.NmsUnsupported;
 import dev.ferrite.nms.host.NmsHostBinding;
+import dev.ferrite.nms.host.NmsHostException;
 import dev.ferrite.nms.host.PlayerSnapshot;
+import dev.ferrite.nms.host.PlayerState;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -61,6 +63,128 @@ public final class ServerPlayer extends Entity {
         return player;
     }
 
+    /** The optional player-state block, or null when the host did not publish one. */
+    public PlayerState playerState() {
+        return player.state();
+    }
+
+    public int ping() {
+        return requirePlayerState("ping").ping();
+    }
+
+    public String locale() {
+        return requirePlayerState("locale").locale();
+    }
+
+    public float saturation() {
+        return requirePlayerState("saturation").saturation();
+    }
+
+    public float exhaustion() {
+        return requirePlayerState("exhaustion").exhaustion();
+    }
+
+    public int experienceLevel() {
+        return requirePlayerState("experienceLevel").level();
+    }
+
+    public float experienceProgress() {
+        return requirePlayerState("experienceProgress").experienceProgress();
+    }
+
+    public int totalExperience() {
+        return requirePlayerState("totalExperience").totalExperience();
+    }
+
+    public float walkSpeed() {
+        return requirePlayerState("walkSpeed").walkSpeed();
+    }
+
+    public float flySpeed() {
+        return requirePlayerState("flySpeed").flySpeed();
+    }
+
+    public boolean mayFly() {
+        return requirePlayerState("mayFly").allowFlight();
+    }
+
+    public boolean isFlying() {
+        return requirePlayerState("isFlying").flying();
+    }
+
+    public boolean isSneaking() {
+        return requirePlayerState("isSneaking").sneaking();
+    }
+
+    public boolean isSprinting() {
+        return requirePlayerState("isSprinting").sprinting();
+    }
+
+    public int getRemainingAir() {
+        return requirePlayerState("getRemainingAir").remainingAir();
+    }
+
+    public int getMaximumAir() {
+        return requirePlayerState("getMaximumAir").maximumAir();
+    }
+
+    /** Bukkit display name; falls back to the scoreboard name when the host omitted one. */
+    public String displayName() {
+        PlayerState state = player.state();
+        return state == null || state.displayName() == null ? getName() : state.displayName();
+    }
+
+    /** Bukkit player-list name; falls back to the scoreboard name when the host omitted one. */
+    public String playerListName() {
+        PlayerState state = player.state();
+        return state == null || state.playerListName() == null ? getName() : state.playerListName();
+    }
+
+    public long playerTime() {
+        return requirePlayerState("playerTime").playerTime();
+    }
+
+    public long playerTimeOffset() {
+        return requirePlayerState("playerTimeOffset").playerTimeOffset();
+    }
+
+    public boolean isPlayerTimeRelative() {
+        return requirePlayerState("isPlayerTimeRelative").playerTimeRelative();
+    }
+
+    /** Whether the host still lists this player as online. */
+    public boolean isOnline() {
+        if (player.entityState() != null && player.entityState().removed()) {
+            return false;
+        }
+        try {
+            NmsHostBinding.require().player(getUUID());
+            return true;
+        } catch (NmsHostException unknown) {
+            if ("unknown_player".equals(unknown.code())) {
+                return false;
+            }
+            throw unknown;
+        }
+    }
+
+    @Override
+    public boolean isValid() {
+        return isOnline();
+    }
+
+    private PlayerState requirePlayerState(String accessor) {
+        PlayerState state = player.state();
+        if (state == null) {
+            throw NmsUnsupported.operation(
+                    "net.minecraft.server.level.ServerPlayer",
+                    accessor,
+                    "the host snapshot did not include PlayerState; publish the optional PlayerState "
+                            + "block from NmsHost.player(UUID) to serve player-state reads");
+        }
+        return state;
+    }
+
     public CompletableFuture<Void> setGameModeAsync(GameMode gameMode) {
         Objects.requireNonNull(gameMode, "gameMode");
         return setGameModeAsync(gameMode.name());
@@ -106,6 +230,67 @@ public final class ServerPlayer extends Entity {
                 "net.minecraft.server.level.ServerPlayer",
                 "setHealth",
                 "synchronous health mutation is not allowed across regions; use setHealthAsync(float)");
+    }
+
+    public void setSaturation(float saturation) {
+        throw playerStateWriteRefused("setSaturation");
+    }
+
+    public void setExhaustion(float exhaustion) {
+        throw playerStateWriteRefused("setExhaustion");
+    }
+
+    public void setExperienceLevel(int level) {
+        throw playerStateWriteRefused("setExperienceLevel");
+    }
+
+    public void setExperienceProgress(float progress) {
+        throw playerStateWriteRefused("setExperienceProgress");
+    }
+
+    public void setTotalExperience(int totalExperience) {
+        throw playerStateWriteRefused("setTotalExperience");
+    }
+
+    public void setWalkSpeed(float speed) {
+        throw playerStateWriteRefused("setWalkSpeed");
+    }
+
+    public void setFlySpeed(float speed) {
+        throw playerStateWriteRefused("setFlySpeed");
+    }
+
+    public void setMayFly(boolean mayFly) {
+        throw playerStateWriteRefused("setMayFly");
+    }
+
+    public void setFlying(boolean flying) {
+        throw playerStateWriteRefused("setFlying");
+    }
+
+    public void setSneaking(boolean sneaking) {
+        throw playerStateWriteRefused("setSneaking");
+    }
+
+    public void setSprinting(boolean sprinting) {
+        throw playerStateWriteRefused("setSprinting");
+    }
+
+    public void setRemainingAir(int air) {
+        throw playerStateWriteRefused("setRemainingAir");
+    }
+
+    public void setMaximumAir(int air) {
+        throw playerStateWriteRefused("setMaximumAir");
+    }
+
+    private static UnsupportedOperationException playerStateWriteRefused(String method) {
+        return NmsUnsupported.operation(
+                "net.minecraft.server.level.ServerPlayer",
+                method,
+                "live player-state mutation is not in NMS surface 2's host write contract; add an "
+                        + "owner-routed host write op and an Async method, or use Lane 2's Bukkit Player "
+                        + "facade for state it owns");
     }
 
     public Object getConnection() {

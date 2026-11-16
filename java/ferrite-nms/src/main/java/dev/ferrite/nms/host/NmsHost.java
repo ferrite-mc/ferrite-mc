@@ -1,6 +1,7 @@
 // Clean-room Ferrite NMS compatibility code for Minecraft 26.3. No Mojang code or assets.
 package dev.ferrite.nms.host;
 
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -42,6 +43,40 @@ public interface NmsHost extends AutoCloseable {
 
     /** Reads an entity. Unknown entity IDs must throw {@link NmsHostException}. */
     EntitySnapshot entity(UUID entityId) throws NmsHostException;
+
+    /**
+     * Lists the non-player entities currently loaded in {@code worldId}.
+     *
+     * <p>The default implementation is an explicit capability refusal so existing host adapters
+     * keep compiling. A host that can enumerate a world must override it; returning an empty list
+     * is not a substitute for implementing it because an empty world and a missing capability are
+     * different answers. Every returned snapshot must belong to {@code worldId}.
+     */
+    default List<EntitySnapshot> entities(UUID worldId) throws NmsHostException {
+        world(worldId);
+        throw new NmsHostException(
+                "unsupported_snapshot",
+                "The attached Ferrite host does not implement world entity listing for "
+                        + worldId
+                        + "; implement NmsHost.entities(UUID) and include the optional EntityState "
+                        + "block to serve the NMS CraftWorld entity surface");
+    }
+
+    /**
+     * Lists the online players currently in {@code worldId}.
+     *
+     * <p>Like {@link #entities(UUID)} this defaults to an explicit capability refusal, and every
+     * returned snapshot must belong to {@code worldId}.
+     */
+    default List<PlayerSnapshot> players(UUID worldId) throws NmsHostException {
+        world(worldId);
+        throw new NmsHostException(
+                "unsupported_snapshot",
+                "The attached Ferrite host does not implement world player listing for "
+                        + worldId
+                        + "; implement NmsHost.players(UUID) and include the optional PlayerState "
+                        + "block to serve the NMS CraftWorld player surface");
+    }
 
     /** Routes a teleport to the entity's owning region. */
     CompletableFuture<Void> teleport(

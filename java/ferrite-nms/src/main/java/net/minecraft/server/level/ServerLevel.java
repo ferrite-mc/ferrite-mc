@@ -3,13 +3,18 @@ package net.minecraft.server.level;
 
 import dev.ferrite.nms.NmsUnsupported;
 import dev.ferrite.nms.host.BlockStateSnapshot;
+import dev.ferrite.nms.host.EntitySnapshot;
 import dev.ferrite.nms.host.NmsHost;
 import dev.ferrite.nms.host.NmsHostBinding;
+import dev.ferrite.nms.host.NmsHostException;
+import dev.ferrite.nms.host.PlayerSnapshot;
 import dev.ferrite.nms.host.WorldSnapshot;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
@@ -91,6 +96,11 @@ public final class ServerLevel {
     }
 
     public BlockState getBlockState(int x, int y, int z) {
+        if (y < snapshot.minY() || y >= snapshot.maxY()) {
+            throw new IllegalArgumentException(
+                    "Block y=" + y + " is outside " + snapshot.name() + " (valid range ["
+                            + snapshot.minY() + ", " + snapshot.maxY() + "))");
+        }
         BlockStateSnapshot state = host().blockState(id, x, y, z);
         Material material = Material.matchMaterial(state.name());
         if (material == null) {
@@ -99,6 +109,81 @@ public final class ServerLevel {
                             + " which has no 26.3 Bukkit material");
         }
         return new BlockState(new Block(material), state.asString(), state.globalId());
+    }
+
+    /**
+     * Reads one loaded entity in this world, or null when the host reports it as unknown.
+     *
+     * <p>The returned snapshot must belong to this world; a host that returns another world's
+     * entity is a contract violation, not a cross-world read.
+     */
+    public Entity getEntity(UUID entityId) {
+        Objects.requireNonNull(entityId, "entityId");
+        EntitySnapshot entity;
+        try {
+            entity = host().entity(entityId);
+        } catch (NmsHostException unknown) {
+            if ("unknown_entity".equals(unknown.code())) {
+                return null;
+            }
+            throw unknown;
+        }
+        requireEntityWorld(entity);
+        return Entity.of(entityId);
+    }
+
+    /** Non-player entities the host reports as loaded in this world. */
+    public List<Entity> getEntities() {
+        List<EntitySnapshot> snapshots = host().entities(id);
+        return snapshots.stream()
+                .map(this::requireEntityWorld)
+                .map(snapshot -> Entity.of(snapshot.id()))
+                .toList();
+    }
+
+    /** Reads one online player in this world, or null when the host reports it as unknown. */
+    public ServerPlayer getPlayer(UUID playerId) {
+        Objects.requireNonNull(playerId, "playerId");
+        PlayerSnapshot player;
+        try {
+            player = host().player(playerId);
+        } catch (NmsHostException unknown) {
+            if ("unknown_player".equals(unknown.code())) {
+                return null;
+            }
+            throw unknown;
+        }
+        requirePlayerWorld(player);
+        return ServerPlayer.of(playerId);
+    }
+
+    /** Online players the host reports as present in this world. */
+    public List<ServerPlayer> getPlayers() {
+        List<PlayerSnapshot> snapshots = host().players(id);
+        return snapshots.stream()
+                .map(this::requirePlayerWorld)
+                .map(snapshot -> ServerPlayer.of(snapshot.id()))
+                .toList();
+    }
+
+    private EntitySnapshot requireEntityWorld(EntitySnapshot entity) {
+        if (!id.equals(entity.worldId())) {
+            throw new NmsHostException(
+                    "wrong_world",
+                    "Entity " + entity.id() + " belongs to world " + entity.worldId()
+                            + ", not " + id + "; a world handle may not widen to another world");
+        }
+        return entity;
+    }
+
+    private PlayerSnapshot requirePlayerWorld(PlayerSnapshot player) {
+        if (!id.equals(player.worldId())) {
+            throw new NmsHostException(
+                    "wrong_world",
+                    "Player " + player.id() + " belongs to world " + player.worldId()
+                            + ", not " + id + "; a world handle may not widen to another world");
+        }
+        return player;
     }
 
     /**
@@ -117,7 +202,18 @@ public final class ServerLevel {
     public CompletableFuture<Void> setBlockAsync(BlockPos pos, BlockState state) {
         Objects.requireNonNull(pos, "pos");
         Objects.requireNonNull(state, "state");
-        return host().setBlockState(id, pos.x, pos.y, pos.z, state.resolveGlobalId());
+        return setBlockAsync(pos.x, pos.y, pos.z, state);
+    }
+
+    /** Coordinate overload of {@link #setBlockAsync(BlockPos, BlockState)}. */
+    public CompletableFuture<Void> setBlockAsync(int x, int y, int z, BlockState state) {
+        Objects.requireNonNull(state, "state");
+        if (y < snapshot.minY() || y >= snapshot.maxY()) {
+            throw new IllegalArgumentException(
+                    "Block y=" + y + " is outside " + snapshot.name() + " (valid range ["
+                            + snapshot.minY() + ", " + snapshot.maxY() + "))");
+        }
+        return host().setBlockState(id, x, y, z, state.resolveGlobalId());
     }
 
     /** The world ID this handle is allowed to touch; it can never widen to another world. */

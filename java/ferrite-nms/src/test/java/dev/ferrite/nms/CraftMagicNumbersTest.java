@@ -3,6 +3,7 @@ package dev.ferrite.nms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -12,8 +13,10 @@ import java.lang.reflect.Proxy;
 import net.minecraft.world.level.block.state.BlockState;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.block.BlockType;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.craftbukkit.util.CraftMagicNumbers;
+import org.bukkit.inventory.ItemType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -78,11 +81,62 @@ class CraftMagicNumbersTest {
     }
 
     @Test
+    void instanceAndTypeConversionsCoverTheRegistrySurface() {
+        assertNotNull(CraftMagicNumbers.INSTANCE);
+
+        ItemType diamond = CraftMagicNumbers.getItemType(Material.DIAMOND);
+        assertNotNull(diamond);
+        assertEquals(Material.DIAMOND, CraftMagicNumbers.getMaterial(diamond));
+
+        BlockType stone = CraftMagicNumbers.getBlockType(Material.STONE);
+        assertNotNull(stone);
+        assertEquals(Material.STONE, CraftMagicNumbers.getMaterial(stone));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> CraftMagicNumbers.getItemType(Material.WATER));
+        assertThrows(IllegalArgumentException.class,
+                () -> CraftMagicNumbers.getBlockType(Material.DIAMOND));
+        assertEquals(5023, CraftMagicNumbers.INSTANCE.getDataVersion());
+    }
+
+    @Test
+    void defaultBlockDataFailsExplicitlyWithoutABukkitServer() {
+        // Paper's Material.createBlockData delegates to Bukkit.getServer(), which unit tests do
+        // not have. Pin that this is a named capability failure, not a fake AIR block.
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> CraftMagicNumbers.getDefaultBlockData(Material.STONE));
+        assertTrue(error.getMessage().contains("BlockData factory"), error.getMessage());
+        assertThrows(IllegalStateException.class,
+                () -> CraftMagicNumbers.getDefaultBlockState(Material.STONE));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> CraftMagicNumbers.getDefaultBlockData(Material.DIAMOND));
+    }
+
+    @Test
+    void blockStateStringsResolveThroughTheSameHostRegistry() {
+        assertEquals(1, CraftMagicNumbers.getBlockStateId("minecraft:stone"));
+        assertThrows(dev.ferrite.nms.host.NmsHostException.class,
+                () -> CraftMagicNumbers.getBlockStateId("minecraft:not_a_state"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CraftMagicNumbers.getBlockStateId("  "));
+    }
+
+    @Test
     void legacyConversionIsExplicitlyRefused() {
         UnsupportedOperationException error = assertThrows(UnsupportedOperationException.class,
                 () -> CraftMagicNumbers.fromLegacy(Material.STONE));
         assertTrue(error.getMessage().contains("CraftMagicNumbers#fromLegacy"), error.getMessage());
         assertTrue(error.getMessage().contains("UnsafeValues"), error.getMessage());
+
+        UnsupportedOperationException dataError = assertThrows(UnsupportedOperationException.class,
+                () -> CraftMagicNumbers.fromLegacy(Material.STONE, (byte) 1));
+        assertTrue(dataError.getMessage().contains("CraftMagicNumbers#fromLegacy"), dataError.getMessage());
+
+        UnsupportedOperationException idError = assertThrows(UnsupportedOperationException.class,
+                () -> CraftMagicNumbers.getMaterial(1));
+        assertTrue(idError.getMessage().contains("CraftMagicNumbers#getMaterial(int)"), idError.getMessage());
+        assertTrue(idError.getMessage().contains("namespaced key"), idError.getMessage());
     }
 
     @Test

@@ -19,7 +19,43 @@ public record EntitySnapshot(
         double velocityY,
         double velocityZ,
         UUID vehicleId,
-        List<UUID> passengers) {
+        List<UUID> passengers,
+        EntityState state) {
+    /**
+     * A snapshot without the optional live-state block. It keeps existing host adapters source
+     * compatible; the state-based accessors refuse explicitly until a host publishes {@code state}.
+     */
+    public EntitySnapshot(
+            UUID id,
+            String typeKey,
+            UUID worldId,
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch,
+            double velocityX,
+            double velocityY,
+            double velocityZ,
+            UUID vehicleId,
+            List<UUID> passengers) {
+        this(
+                id,
+                typeKey,
+                worldId,
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+                velocityX,
+                velocityY,
+                velocityZ,
+                vehicleId,
+                passengers,
+                null);
+    }
+
     public EntitySnapshot {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(typeKey, "typeKey");
@@ -43,5 +79,24 @@ public record EntitySnapshot(
         if (passengers.contains(id)) {
             throw new IllegalArgumentException("entity cannot be its own passenger");
         }
+    }
+
+    /** Returns this snapshot with the optional live-state block attached. */
+    public EntitySnapshot withState(EntityState state) {
+        return new EntitySnapshot(
+                id,
+                typeKey,
+                worldId,
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+                velocityX,
+                velocityY,
+                velocityZ,
+                vehicleId,
+                passengers,
+                state);
     }
 }

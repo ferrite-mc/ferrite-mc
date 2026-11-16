@@ -3,7 +3,9 @@ package net.minecraft.world.entity;
 
 import dev.ferrite.nms.NmsUnsupported;
 import dev.ferrite.nms.host.EntitySnapshot;
+import dev.ferrite.nms.host.EntityState;
 import dev.ferrite.nms.host.NmsHostBinding;
+import dev.ferrite.nms.host.NmsHostException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -90,6 +92,77 @@ public class Entity {
 
     public boolean owns(UUID entityId) {
         return snapshot.id().equals(entityId);
+    }
+
+    /** The optional live-state block, or null when the host did not publish one. */
+    public EntityState entityState() {
+        return snapshot.state();
+    }
+
+    /** The 26.3 network entity id. */
+    public int getId() {
+        return requireState("getId").networkId();
+    }
+
+    /** Whether the host reported this entity as removed. */
+    public boolean isRemoved() {
+        return requireState("isRemoved").removed();
+    }
+
+    public int tickCount() {
+        return requireState("tickCount").ticksLived();
+    }
+
+    public int getFireTicks() {
+        return requireState("getFireTicks").fireTicks();
+    }
+
+    public float getFallDistance() {
+        return requireState("getFallDistance").fallDistance();
+    }
+
+    public boolean onGround() {
+        return requireState("onGround").onGround();
+    }
+
+    public int getPortalCooldown() {
+        return requireState("getPortalCooldown").portalCooldown();
+    }
+
+    /** The Bukkit {@code Pose} name from the host, or null when the host omitted it. */
+    public String poseName() {
+        return requireState("poseName").pose();
+    }
+
+    /**
+     * Live validity: whether the host still knows this entity and has not marked it removed.
+     * An unknown entity is false; any other host failure is propagated.
+     */
+    public boolean isValid() {
+        if (snapshot.state() != null && snapshot.state().removed()) {
+            return false;
+        }
+        try {
+            NmsHostBinding.require().entity(getUUID());
+            return true;
+        } catch (NmsHostException unknown) {
+            if ("unknown_entity".equals(unknown.code())) {
+                return false;
+            }
+            throw unknown;
+        }
+    }
+
+    private EntityState requireState(String accessor) {
+        EntityState state = snapshot.state();
+        if (state == null) {
+            throw NmsUnsupported.operation(
+                    "net.minecraft.world.entity.Entity",
+                    accessor,
+                    "the host snapshot did not include EntityState; publish the optional EntityState "
+                            + "block from NmsHost.entity(UUID) to serve live entity-state reads");
+        }
+        return state;
     }
 
     /** The vehicle this entity rides, or null. */
