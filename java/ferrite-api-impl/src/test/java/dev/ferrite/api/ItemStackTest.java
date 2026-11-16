@@ -146,6 +146,13 @@ class ItemStackTest {
         assertEquals(List.of("first", "second"), sword.getLore());
         sword.lore(List.of(Component.text("adventure")));
         assertEquals(List.of(Component.text("adventure")), sword.lore());
+        sword.setLore(List.of());
+        assertNull(sword.getLore());
+        assertFalse(sword.hasItemMeta());
+        sword.lore(List.of(Component.text("again")));
+        sword.lore(List.of());
+        assertNull(sword.lore());
+        assertFalse(sword.hasItemMeta());
 
         assertThrows(IllegalArgumentException.class, () -> sword.setDurability((short) -1));
         assertThrows(IllegalArgumentException.class, () -> new ItemStack(Material.IRON_SWORD, 1, (short) -1));
