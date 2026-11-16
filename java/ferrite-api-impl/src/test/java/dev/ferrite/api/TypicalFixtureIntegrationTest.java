@@ -71,6 +71,11 @@ class TypicalFixtureIntegrationTest {
                 assertHas(log, "item:tooltip=typicalfixture:ferrite_tooltip");
                 assertHas(log, "item:enchantable=15");
                 assertHas(log, "item:food=6");
+                assertHas(log, "item:hide-tooltip=true");
+                assertHas(log, "item:tool-speed=6.5");
+                assertHas(log, "item:equippable-slot=HEAD");
+                assertHas(log, "item:use-cooldown=2.5");
+                assertHas(log, "item:jukebox-song=minecraft:cat");
                 assertHas(log, "item:nested-pdc=123");
                 assertHas(log, "item:max-stack=8");
                 assertHas(log, "item:pdc=pdc-value");

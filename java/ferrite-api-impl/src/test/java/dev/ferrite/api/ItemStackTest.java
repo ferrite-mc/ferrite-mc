@@ -3,6 +3,7 @@ package dev.ferrite.api;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -332,10 +333,11 @@ class ItemStackTest {
         assertFalse(stack.hasData(unbreakableType));
         assertFalse(stack.getItemMeta().isUnbreakable());
 
-        UnsupportedOperationException cooldownEx =
-                assertThrows(UnsupportedOperationException.class, () -> stack.getData(useCooldownType));
-        assertTrue(cooldownEx.getMessage().contains("DIAMOND_SWORD"), cooldownEx.getMessage());
-        assertTrue(cooldownEx.getMessage().contains("minecraft:use_cooldown"), cooldownEx.getMessage());
+        DataComponentType.Valued<Object> potionContentsType = valued("minecraft:potion_contents");
+        UnsupportedOperationException potionEx =
+                assertThrows(UnsupportedOperationException.class, () -> stack.getData(potionContentsType));
+        assertTrue(potionEx.getMessage().contains("DIAMOND_SWORD"), potionEx.getMessage());
+        assertTrue(potionEx.getMessage().contains("minecraft:potion_contents"), potionEx.getMessage());
 
         UnsupportedOperationException gliderEx =
                 assertThrows(UnsupportedOperationException.class, () -> stack.setData(gliderType));
@@ -394,11 +396,11 @@ class ItemStackTest {
         assertTrue(restored.getItemFlags().isEmpty());
 
         // Unsupported data component interaction still fails explicitly even with flags/unbreakable set.
-        DataComponentType.Valued<Object> tooltipDisplay = valued("minecraft:tooltip_display");
-        UnsupportedOperationException tooltipEx =
-                assertThrows(UnsupportedOperationException.class, () -> stack.getData(tooltipDisplay));
-        assertTrue(tooltipEx.getMessage().contains("NETHERITE_PICKAXE"));
-        assertTrue(tooltipEx.getMessage().contains("minecraft:tooltip_display"));
+        DataComponentType.Valued<Object> fireworks = valued("minecraft:fireworks");
+        UnsupportedOperationException fireworksEx =
+                assertThrows(UnsupportedOperationException.class, () -> stack.getData(fireworks));
+        assertTrue(fireworksEx.getMessage().contains("NETHERITE_PICKAXE"));
+        assertTrue(fireworksEx.getMessage().contains("minecraft:fireworks"));
     }
 
     @Test
@@ -549,8 +551,8 @@ class ItemStackTest {
 
     @Test
     void attributeModifiersSupportCrudCopyIsolationAndExplicitRegistryRefusalOnDeserialize() {
-        Attribute attackDamage = testAttribute("minecraft:attack_damage");
-        Attribute armor = testAttribute("minecraft:armor");
+        Attribute attackDamage = Attribute.ATTACK_DAMAGE;
+        Attribute armor = Attribute.ARMOR;
         AttributeModifier swordDamage = new AttributeModifier(
                 new NamespacedKey("ferrite", "sword_bonus"),
                 5.0,
@@ -600,9 +602,13 @@ class ItemStackTest {
         });
         assertFalse(target.hasItemMeta());
 
-        // Serializing attributes works, and deserializing with empty Registry.ATTRIBUTE fails explicitly.
+        // Serializing attributes and deserializing through Registry.ATTRIBUTE round-trips cleanly.
         Map<String, Object> serialized = stack.serialize();
-        assertThrows(UnsupportedOperationException.class, () -> ItemStack.deserialize(serialized));
+        ItemStack deserialized = ItemStack.deserialize(serialized);
+        assertEquals(stack, deserialized);
+        assertEquals(
+                1,
+                deserialized.getItemMeta().getAttributeModifiers(Attribute.ATTACK_DAMAGE).size());
 
         assertThrows(NullPointerException.class,
                 () -> stack.editMeta(m -> m.addAttributeModifier(null, swordDamage)));
@@ -621,9 +627,9 @@ class ItemStackTest {
         assertTrue(data.getMessage().contains("ItemStack#getData"));
         assertThrows(UnsupportedOperationException.class, stack::serializeAsBytes);
         assertThrows(UnsupportedOperationException.class, stack::getRarity);
-        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().isHideTooltip());
-        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().getTool());
-        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().getEquippable());
+        assertFalse(stack.getItemMeta().isHideTooltip());
+        assertNotNull(stack.getItemMeta().getTool());
+        assertNotNull(stack.getItemMeta().getEquippable());
         assertTrue(stack.getEnchantments().isEmpty());
         // Enchantments resolve from the generated vanilla registry now, so this no longer
         // throws; the deserialized meta carries the level it was given.
@@ -710,5 +716,101 @@ class ItemStackTest {
                 return getKey().toString().compareTo(other.getKey().toString());
             }
         };
+    }
+
+    @Test
+    void toolEquippableUseCooldownJukeboxPlayableAndHideTooltipRoundTripWithIsolation() {
+        ItemStack stack = new ItemStack(Material.DIAMOND_PICKAXE, 1);
+        stack.editMeta(meta -> {
+            meta.setHideTooltip(true);
+
+            var tool = meta.getTool();
+            tool.setDefaultMiningSpeed(8.5f);
+            tool.setDamagePerBlock(2);
+            tool.addRule(Material.STONE, 12.0f, true);
+            meta.setTool(tool);
+
+            var equippable = meta.getEquippable();
+            equippable.setSlot(EquipmentSlot.HEAD);
+            equippable.setModel(new NamespacedKey("ferrite", "miner_helmet"));
+            equippable.setEquipSound(org.bukkit.Sound.ITEM_ARMOR_EQUIP_DIAMOND);
+            equippable.setDispensable(false);
+            equippable.setDamageOnHurt(true);
+            meta.setEquippable(equippable);
+
+            var cooldown = meta.getUseCooldown();
+            cooldown.setCooldownSeconds(1.75f);
+            cooldown.setCooldownGroup(new NamespacedKey("ferrite", "pick_dash"));
+            meta.setUseCooldown(cooldown);
+
+            var jukebox = meta.getJukeboxPlayable();
+            jukebox.setSong(org.bukkit.JukeboxSong.CAT);
+            jukebox.setShowInTooltip(false);
+            meta.setJukeboxPlayable(jukebox);
+        });
+
+        assertTrue(stack.getItemMeta().isHideTooltip());
+        assertTrue(stack.getItemMeta().hasTool());
+        assertEquals(8.5f, stack.getItemMeta().getTool().getDefaultMiningSpeed());
+        assertEquals(2, stack.getItemMeta().getTool().getDamagePerBlock());
+        assertEquals(1, stack.getItemMeta().getTool().getRules().size());
+
+        assertTrue(stack.getItemMeta().hasEquippable());
+        assertEquals(EquipmentSlot.HEAD, stack.getItemMeta().getEquippable().getSlot());
+        assertEquals(new NamespacedKey("ferrite", "miner_helmet"), stack.getItemMeta().getEquippable().getModel());
+        assertEquals(org.bukkit.Sound.ITEM_ARMOR_EQUIP_DIAMOND, stack.getItemMeta().getEquippable().getEquipSound());
+        assertFalse(stack.getItemMeta().getEquippable().isDispensable());
+
+        assertTrue(stack.getItemMeta().hasUseCooldown());
+        assertEquals(1.75f, stack.getItemMeta().getUseCooldown().getCooldownSeconds());
+        assertEquals(new NamespacedKey("ferrite", "pick_dash"), stack.getItemMeta().getUseCooldown().getCooldownGroup());
+
+        assertTrue(stack.getItemMeta().hasJukeboxPlayable());
+        assertEquals(org.bukkit.JukeboxSong.CAT, stack.getItemMeta().getJukeboxPlayable().getSong());
+        assertFalse(stack.getItemMeta().getJukeboxPlayable().isShowInTooltip());
+
+        // Copy isolation: mutating returned component builders does not mutate the stack.
+        var toolSnapshot = stack.getItemMeta().getTool();
+        toolSnapshot.setDefaultMiningSpeed(1.0f);
+        assertEquals(8.5f, stack.getItemMeta().getTool().getDefaultMiningSpeed());
+
+        var cooldownSnapshot = stack.getItemMeta().getUseCooldown();
+        cooldownSnapshot.setCooldownSeconds(99.0f);
+        assertEquals(1.75f, stack.getItemMeta().getUseCooldown().getCooldownSeconds());
+
+        // Serialization round-trip preserves all 5 components.
+        ItemStack restored = ItemStack.deserialize(stack.serialize());
+        assertEquals(stack, restored);
+        assertTrue(restored.getItemMeta().isHideTooltip());
+        assertEquals(8.5f, restored.getItemMeta().getTool().getDefaultMiningSpeed());
+        assertEquals(EquipmentSlot.HEAD, restored.getItemMeta().getEquippable().getSlot());
+        assertEquals(1.75f, restored.getItemMeta().getUseCooldown().getCooldownSeconds());
+        assertEquals(org.bukkit.JukeboxSong.CAT, restored.getItemMeta().getJukeboxPlayable().getSong());
+
+        // DataComponentHolder hasData/getData/unsetData work for these keys.
+        assertTrue(restored.hasData(valued("minecraft:tooltip_display")));
+        assertTrue(restored.hasData(valued("minecraft:tool")));
+        assertTrue(restored.hasData(valued("minecraft:equippable")));
+        assertTrue(restored.hasData(valued("minecraft:use_cooldown")));
+        assertTrue(restored.hasData(valued("minecraft:jukebox_playable")));
+
+        // Invalid inputs fail explicitly.
+        assertThrows(IllegalArgumentException.class,
+                () -> restored.editMeta(m -> m.getUseCooldown().setCooldownSeconds(0.0f)));
+        assertThrows(IllegalArgumentException.class,
+                () -> restored.editMeta(m -> m.getTool().setDamagePerBlock(-1)));
+
+        // Unsupported complex components fail explicitly with component key and item type.
+        for (String key : List.of(
+                "minecraft:potion_contents",
+                "minecraft:fireworks",
+                "minecraft:written_book_content",
+                "minecraft:bundle_contents")) {
+            DataComponentType.Valued<Object> unsupported = valued(key);
+            UnsupportedOperationException ex =
+                    assertThrows(UnsupportedOperationException.class, () -> restored.getData(unsupported));
+            assertTrue(ex.getMessage().contains(key), ex.getMessage());
+            assertTrue(ex.getMessage().contains("DIAMOND_PICKAXE"), ex.getMessage());
+        }
     }
 }

@@ -1,24 +1,44 @@
 package dev.ferrite.api.item;
 
 import com.google.common.collect.Multimap;
+import dev.ferrite.api.registry.FerriteKeySet;
+import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.datacomponent.item.CustomModelData;
 import io.papermc.paper.datacomponent.item.Enchantable;
+import io.papermc.paper.datacomponent.item.Equippable;
 import io.papermc.paper.datacomponent.item.FoodProperties;
 import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemEnchantments;
 import io.papermc.paper.datacomponent.item.ItemLore;
+import io.papermc.paper.datacomponent.item.JukeboxPlayable;
+import io.papermc.paper.datacomponent.item.Tool;
+import io.papermc.paper.datacomponent.item.TooltipDisplay;
+import io.papermc.paper.datacomponent.item.UseCooldown;
 import io.papermc.paper.datacomponent.item.attribute.AttributeModifierDisplay;
+import io.papermc.paper.registry.RegistryKey;
+import io.papermc.paper.registry.set.RegistryKeySet;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.util.TriState;
 import org.bukkit.Color;
+import org.bukkit.JukeboxSong;
+import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeModifier;
+import org.bukkit.block.BlockType;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.EntityType;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.meta.components.ToolComponent;
 
 /**
  * Clean-room immutable value implementations for the Paper {@code DataComponentType} value
@@ -65,6 +85,65 @@ public final class FerriteDataComponents {
             entries.add(new FerriteAttributeModifierEntry(entry.getKey(), entry.getValue()));
         }
         return new FerriteItemAttributeModifiers(entries);
+    }
+
+    public static TooltipDisplay tooltipDisplay(boolean hideTooltip) {
+        return new FerriteTooltipDisplay(hideTooltip, Set.of());
+    }
+
+    public static UseCooldown useCooldown(FerriteUseCooldownComponent component) {
+        return new FerriteUseCooldown(component.getCooldownSeconds(), component.getCooldownGroup());
+    }
+
+    public static JukeboxPlayable jukeboxPlayable(JukeboxSong song) {
+        return new FerriteJukeboxPlayable(song);
+    }
+
+    public static Tool tool(FerriteToolComponent component) {
+        List<Tool.Rule> rules = new ArrayList<>();
+        for (ToolComponent.ToolRule rule : component.getRules()) {
+            List<String> blockKeys = rule.getBlocks().stream()
+                    .map(mat -> mat.getKey().asString())
+                    .toList();
+            TriState correct = rule.isCorrectForDrops() == null
+                    ? TriState.NOT_SET
+                    : TriState.byBoolean(rule.isCorrectForDrops());
+            rules.add(new FerriteToolRuleData(
+                    new FerriteKeySet<>(RegistryKey.BLOCK, blockKeys),
+                    rule.getSpeed(),
+                    correct));
+        }
+        return new FerriteTool(
+                component.getDefaultMiningSpeed(),
+                component.getDamagePerBlock(),
+                rules,
+                true);
+    }
+
+    public static Equippable equippable(FerriteEquippableComponent component) {
+        Collection<EntityType> allowed = component.getAllowedEntities();
+        RegistryKeySet<EntityType> allowedSet = null;
+        if (allowed != null) {
+            List<String> keys = new ArrayList<>(allowed.size());
+            for (EntityType entityType : allowed) {
+                if (entityType != EntityType.UNKNOWN) {
+                    keys.add(entityType.getKey().asString());
+                }
+            }
+            allowedSet = new FerriteKeySet<>(RegistryKey.ENTITY_TYPE, keys);
+        }
+        return new FerriteEquippable(
+                component.getSlot(),
+                component.getEquipSound() == null ? null : component.getEquipSound().getKey(),
+                component.getModel(),
+                component.getCameraOverlay(),
+                allowedSet,
+                component.isDispensable(),
+                component.isSwappable(),
+                component.isDamageOnHurt(),
+                component.isEquipOnInteract(),
+                component.canBeSheared(),
+                component.getShearingSound() == null ? null : component.getShearingSound().getKey());
     }
 
     public record FerriteItemLore(List<Component> lines) implements ItemLore {
@@ -202,6 +281,58 @@ public final class FerriteDataComponents {
 
         public FerriteItemAttributeModifiers {
             modifiers = List.copyOf(Objects.requireNonNull(modifiers, "modifiers"));
+        }
+    }
+
+    public record FerriteTooltipDisplay(
+            boolean hideTooltip, Set<DataComponentType> hiddenComponents)
+            implements TooltipDisplay {
+
+        public FerriteTooltipDisplay {
+            hiddenComponents = Set.copyOf(Objects.requireNonNull(hiddenComponents, "hiddenComponents"));
+        }
+    }
+
+    public record FerriteUseCooldown(float seconds, Key cooldownGroup) implements UseCooldown {
+    }
+
+    public record FerriteJukeboxPlayable(JukeboxSong jukeboxSong) implements JukeboxPlayable {
+    }
+
+    public record FerriteToolRuleData(
+            RegistryKeySet<BlockType> blocks, Float speed, TriState correctForDrops)
+            implements Tool.Rule {
+    }
+
+    public record FerriteTool(
+            float defaultMiningSpeed,
+            int damagePerBlock,
+            List<Tool.Rule> rules,
+            boolean canDestroyBlocksInCreative)
+            implements Tool {
+
+        public FerriteTool {
+            rules = List.copyOf(Objects.requireNonNull(rules, "rules"));
+        }
+    }
+
+    public record FerriteEquippable(
+            EquipmentSlot slot,
+            Key equipSound,
+            Key assetId,
+            Key cameraOverlay,
+            RegistryKeySet<EntityType> allowedEntities,
+            boolean dispensable,
+            boolean swappable,
+            boolean damageOnHurt,
+            boolean equipOnInteract,
+            boolean canBeSheared,
+            Key shearSound)
+            implements Equippable {
+
+        @Override
+        public Equippable.Builder toBuilder() {
+            throw dev.ferrite.api.internal.Unsupported.exception("Equippable#toBuilder");
         }
     }
 }

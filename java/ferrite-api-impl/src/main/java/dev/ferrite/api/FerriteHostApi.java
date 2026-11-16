@@ -1,6 +1,7 @@
 package dev.ferrite.api;
 
 import dev.ferrite.api.entity.FerritePlayer;
+import dev.ferrite.api.inventory.FerriteHostInventoryBridge;
 import dev.ferrite.api.internal.FerriteMainThread;
 import dev.ferrite.api.plugin.FerritePluginClassLoader;
 import dev.ferrite.api.world.FerriteWorld;
@@ -179,6 +180,7 @@ public final class FerriteHostApi implements HostApi {
                             spawn.getY(),
                             spawn.getZ());
                 }
+                FerriteHostInventoryBridge.attach(player);
                 activeRuntime.playerJoined(player);
                 yield EventResult.pass();
             }

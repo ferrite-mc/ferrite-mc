@@ -50,6 +50,7 @@ public final class VanillaData {
     private final Map<String, JsonObject> enchantments;
     private final Map<String, JsonObject> damageTypes;
     private final Map<String, JsonObject> biomes;
+    private final Map<String, JsonObject> jukeboxSongs;
     private final Map<String, List<String>> enchantmentTags;
     private final Map<String, List<String>> itemTags;
     private final Map<String, Set<String>> enchantmentTagValues = new ConcurrentHashMap<>();
@@ -61,6 +62,7 @@ public final class VanillaData {
             Map<String, JsonObject> enchantments,
             Map<String, JsonObject> damageTypes,
             Map<String, JsonObject> biomes,
+            Map<String, JsonObject> jukeboxSongs,
             Map<String, List<String>> enchantmentTags,
             Map<String, List<String>> itemTags) {
         this.root = root;
@@ -68,6 +70,7 @@ public final class VanillaData {
         this.enchantments = enchantments;
         this.damageTypes = damageTypes;
         this.biomes = biomes;
+        this.jukeboxSongs = jukeboxSongs;
         this.enchantmentTags = enchantmentTags;
         this.itemTags = itemTags;
     }
@@ -102,12 +105,14 @@ public final class VanillaData {
                 readDirectory(data.resolve("enchantment")),
                 readDirectory(data.resolve("damage_type")),
                 readDirectory(data.resolve("worldgen/biome")),
+                readDirectory(data.resolve("jukebox_song")),
                 readTags(data.resolve("tags/enchantment")),
                 readTags(data.resolve("tags/item")));
     }
 
     private static VanillaData empty() {
-        return new VanillaData(null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+        return new VanillaData(
+                null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     /** Whether a generated tree was found. */
@@ -130,6 +135,10 @@ public final class VanillaData {
 
     public Map<String, JsonObject> biomes() {
         return this.biomes;
+    }
+
+    public Map<String, JsonObject> jukeboxSongs() {
+        return this.jukeboxSongs;
     }
 
     /** Entries of a {@code reports/registries.json} registry, keyed by namespaced id. */

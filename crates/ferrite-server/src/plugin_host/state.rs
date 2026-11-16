@@ -5,18 +5,27 @@
 //! tick. `world.block_set_async` returning `queued: true` therefore means exactly that: the
 //! write was accepted, not applied.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::game::{AnvilChunkSource, Dimension, DimensionRegistry};
+use base64::Engine as _;
 use ferrite_plugin_host::{
     BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, HostStateProvider,
+    InventorySetAccepted, InventorySlotPatch, PlayerInventorySetRequest, PlayerInventorySnapshot,
     StateError,
 };
+use uuid::Uuid;
 
 /// Maximum accepted-but-not-yet-applied block writes. Overflow is a hard `queue_full` error.
 pub const MAX_PENDING_BLOCK_WRITES: usize = 4096;
+
+/// Maximum accepted-but-not-yet-applied inventory writes. Overflow is a hard `queue_full` error.
+pub const MAX_PENDING_INVENTORY_WRITES: usize = 4096;
+
+/// Shared registry of live player inventories keyed by player UUID.
+pub type PlayerInventoryRegistry = Arc<RwLock<HashMap<Uuid, ferrite_inventory::PlayerInventory>>>;
 
 struct QueuedWrite {
     source: Arc<AnvilChunkSource>,
@@ -27,21 +36,56 @@ struct QueuedWrite {
     expected_state_id: Option<u32>,
 }
 
+struct QueuedInventoryWrite {
+    uuid: Uuid,
+    held_slot: Option<u8>,
+    slots: Vec<(usize, ferrite_item::ItemStack)>,
+}
+
 /// Adapter from the contract-v2 provider seam to Ferrite's actual dimension sources.
 pub struct WorldStateProvider {
     dimensions: Arc<DimensionRegistry>,
+    inventories: PlayerInventoryRegistry,
     pending: Mutex<VecDeque<QueuedWrite>>,
+    pending_inventory: Mutex<VecDeque<QueuedInventoryWrite>>,
     next_request: AtomicU64,
 }
 
 impl WorldStateProvider {
     /// Wraps the world's real dimension registry.
     pub fn new(dimensions: Arc<DimensionRegistry>) -> Self {
+        Self::with_inventories(dimensions, Arc::new(RwLock::new(HashMap::new())))
+    }
+
+    /// Wraps the world's dimension registry and live player inventory registry.
+    pub fn with_inventories(
+        dimensions: Arc<DimensionRegistry>,
+        inventories: PlayerInventoryRegistry,
+    ) -> Self {
         Self {
             dimensions,
+            inventories,
             pending: Mutex::new(VecDeque::new()),
+            pending_inventory: Mutex::new(VecDeque::new()),
             next_request: AtomicU64::new(0),
         }
+    }
+
+    /// Registers or replaces a live player's inventory in this provider.
+    pub fn register_player_inventory(
+        &self,
+        uuid: Uuid,
+        inventory: ferrite_inventory::PlayerInventory,
+    ) {
+        self.inventories
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(uuid, inventory);
+    }
+
+    /// Returns the shared player inventory registry.
+    pub fn inventories(&self) -> &PlayerInventoryRegistry {
+        &self.inventories
     }
 
     fn source(&self, world: &str) -> Result<Arc<AnvilChunkSource>, StateError> {
@@ -114,7 +158,97 @@ impl WorldStateProvider {
                 ),
             }
         }
+        let inv_writes: Vec<QueuedInventoryWrite> = {
+            let mut pending = self
+                .pending_inventory
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending.drain(..).collect()
+        };
+        if !inv_writes.is_empty() {
+            let mut inventories = self
+                .inventories
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for write in inv_writes {
+                let Some(inventory) = inventories.get_mut(&write.uuid) else {
+                    tracing::warn!(uuid = %write.uuid, "queued inventory write skipped: player offline");
+                    continue;
+                };
+                if let Some(held) = write.held_slot {
+                    inventory.selected = usize::from(held.min(8));
+                }
+                for (slot, stack) in write.slots {
+                    inventory.set(slot, stack);
+                }
+            }
+        }
     }
+}
+
+fn encode_slot_patch(stack: &ferrite_item::ItemStack) -> Result<InventorySlotPatch, StateError> {
+    let id = stack
+        .name()
+        .ok_or_else(|| StateError::invalid(format!("unregistered item id {}", stack.item)))?
+        .to_string();
+    let nbt_base64 = if stack.components.is_empty() {
+        None
+    } else {
+        let compound = stack
+            .to_nbt()
+            .map_err(|err| StateError::invalid(format!("item nbt encode error: {err}")))?;
+        let bytes = ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(compound))
+            .map_err(|err| StateError::invalid(format!("item binary nbt error: {err}")))?;
+        Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+    };
+    Ok(InventorySlotPatch {
+        id,
+        count: stack.count,
+        nbt_base64,
+    })
+}
+
+fn decode_slot_patch(patch: &InventorySlotPatch) -> Result<ferrite_item::ItemStack, StateError> {
+    if patch.count <= 0 || patch.count > 99 {
+        return Err(StateError::invalid(format!(
+            "slot count {} out of range 1..=99",
+            patch.count
+        )));
+    }
+    if let Some(encoded) = &patch.nbt_base64 {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|err| StateError::invalid(format!("invalid nbt_base64: {err}")))?;
+        let (_, tag) = ferrite_nbt::binary::read_named(&bytes)
+            .map_err(|err| StateError::invalid(format!("invalid binary nbt: {err}")))?;
+        let ferrite_nbt::Tag::Compound(mut root) = tag else {
+            return Err(StateError::invalid(
+                "item nbt_base64 root tag must be a compound",
+            ));
+        };
+        let mut stack = ferrite_item::ItemStack::from_nbt(&root).map_err(|err| {
+            if err.to_string().contains("unknown") {
+                StateError::unknown_item(&patch.id)
+            } else {
+                StateError::invalid(format!("invalid item nbt: {err}"))
+            }
+        })?;
+        if let Some(expected_id) = stack.name()
+            && expected_id != patch.id
+        {
+            return Err(StateError::invalid(format!(
+                "slot patch id '{}' does not match nbt id '{expected_id}'",
+                patch.id
+            )));
+        }
+        let _ = &mut root;
+        stack.count = patch.count;
+        return Ok(stack);
+    }
+    let mut stack = ferrite_item::ItemStack::from_name(&patch.id)
+        .ok_or_else(|| StateError::unknown_item(&patch.id))?;
+    stack.count = patch.count;
+    Ok(stack)
 }
 
 impl HostStateProvider for WorldStateProvider {
@@ -175,11 +309,94 @@ impl HostStateProvider for WorldStateProvider {
         Ok(self.source(world)?.chunk_resident(x, z))
     }
 
+    fn player_inventory_get(&self, uuid: &str) -> Result<PlayerInventorySnapshot, StateError> {
+        let parsed = Uuid::parse_str(uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {uuid}")))?;
+        let inventories = self
+            .inventories
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let inventory = inventories
+            .get(&parsed)
+            .ok_or_else(|| StateError::player_not_found(uuid))?;
+        let mut slots = BTreeMap::new();
+        for slot in 0..ferrite_inventory::SIZE {
+            let stack = inventory.get(slot);
+            if !stack.is_empty() {
+                slots.insert(slot.to_string(), encode_slot_patch(stack)?);
+            }
+        }
+        Ok(PlayerInventorySnapshot {
+            uuid: parsed.to_string(),
+            held_slot: inventory.selected_slot() as u8,
+            slots,
+        })
+    }
+
+    fn player_inventory_set_async(
+        &self,
+        request: &PlayerInventorySetRequest,
+    ) -> Result<InventorySetAccepted, StateError> {
+        let parsed = Uuid::parse_str(&request.uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {}", request.uuid)))?;
+        {
+            let inventories = self
+                .inventories
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !inventories.contains_key(&parsed) {
+                return Err(StateError::player_not_found(&request.uuid));
+            }
+        }
+        if let Some(held) = request.held_slot
+            && usize::from(held) >= ferrite_inventory::HOTBAR
+        {
+            return Err(StateError::invalid(format!(
+                "held_slot {held} out of range 0..9"
+            )));
+        }
+        let mut decoded_slots = Vec::with_capacity(request.slots.len());
+        for (slot_key, maybe_patch) in &request.slots {
+            let slot: usize = slot_key
+                .parse()
+                .map_err(|_| StateError::invalid(format!("invalid slot index '{slot_key}'")))?;
+            if slot >= ferrite_inventory::SIZE {
+                return Err(StateError::invalid(format!(
+                    "slot {slot} out of range 0..{}",
+                    ferrite_inventory::SIZE
+                )));
+            }
+            let stack = match maybe_patch {
+                Some(patch) => decode_slot_patch(patch)?,
+                None => ferrite_item::ItemStack::empty(),
+            };
+            decoded_slots.push((slot, stack));
+        }
+        let mut pending = self
+            .pending_inventory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= MAX_PENDING_INVENTORY_WRITES {
+            return Err(StateError::queue_full());
+        }
+        pending.push_back(QueuedInventoryWrite {
+            uuid: parsed,
+            held_slot: request.held_slot,
+            slots: decoded_slots,
+        });
+        Ok(InventorySetAccepted {
+            queued: true,
+            request_id: self.next_request.fetch_add(1, Ordering::SeqCst) + 1,
+        })
+    }
+
     fn supported_ops(&self) -> Vec<&'static str> {
         vec![
             "world.block_get",
             "world.block_set_async",
             "world.chunk_loaded",
+            "player.inventory_get",
+            "player.inventory_set_async",
         ]
     }
 
@@ -189,6 +406,10 @@ impl HostStateProvider for WorldStateProvider {
 
     fn shutdown(&self) {
         self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.pending_inventory
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
@@ -286,6 +507,136 @@ mod tests {
                 .unwrap_err()
                 .code,
             "stale_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn player_inventory_get_and_async_set_applies_only_on_tick() {
+        let (provider, _) = provider();
+        let uuid = Uuid::new_v4();
+        let mut inv = ferrite_inventory::PlayerInventory::new();
+        let mut sword = ferrite_item::ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        sword.count = 1;
+        sword.components.insert(
+            ferrite_item::component_ids::DAMAGE,
+            ferrite_item::Component::Damage(12),
+        );
+        inv.set(0, sword);
+        inv.selected = 0;
+        provider.register_player_inventory(uuid, inv);
+
+        let snap = provider
+            .player_inventory_get(&uuid.to_string())
+            .expect("inventory snapshot");
+        assert_eq!(snap.held_slot, 0);
+        let slot0 = snap.slots.get("0").expect("slot 0 present");
+        assert_eq!(slot0.id, "minecraft:diamond_sword");
+        assert_eq!(slot0.count, 1);
+        assert!(slot0.nbt_base64.is_some());
+
+        let mut next_slots = BTreeMap::new();
+        next_slots.insert("0".to_string(), None);
+        next_slots.insert(
+            "40".to_string(),
+            Some(InventorySlotPatch {
+                id: "minecraft:shield".to_string(),
+                count: 1,
+                nbt_base64: slot0.nbt_base64.as_ref().map(|_| {
+                    let mut apple = ferrite_item::ItemStack::from_name("minecraft:shield").unwrap();
+                    apple.components.insert(
+                        ferrite_item::component_ids::UNBREAKABLE,
+                        ferrite_item::Component::Unbreakable,
+                    );
+                    let nbt = apple.to_nbt().unwrap();
+                    let bytes =
+                        ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(nbt))
+                            .unwrap();
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                }),
+            }),
+        );
+        let accepted = provider
+            .player_inventory_set_async(&PlayerInventorySetRequest {
+                uuid: uuid.to_string(),
+                held_slot: Some(3),
+                slots: next_slots,
+            })
+            .expect("inventory write accepted");
+        assert!(accepted.queued);
+
+        // Acceptance is not application.
+        let before_tick = provider.player_inventory_get(&uuid.to_string()).unwrap();
+        assert_eq!(before_tick.held_slot, 0);
+        assert!(before_tick.slots.contains_key("0"));
+        assert!(!before_tick.slots.contains_key("40"));
+
+        provider.tick();
+
+        let after_tick = provider.player_inventory_get(&uuid.to_string()).unwrap();
+        assert_eq!(after_tick.held_slot, 3);
+        assert!(!after_tick.slots.contains_key("0"));
+        let offhand = after_tick.slots.get("40").expect("offhand populated");
+        assert_eq!(offhand.id, "minecraft:shield");
+        assert!(offhand.nbt_base64.is_some());
+    }
+
+    #[tokio::test]
+    async fn player_inventory_errors_are_explicit() {
+        let (provider, _) = provider();
+        let missing = Uuid::new_v4().to_string();
+        assert_eq!(
+            provider.player_inventory_get(&missing).unwrap_err().code,
+            "player_not_found"
+        );
+
+        let uuid = Uuid::new_v4();
+        provider.register_player_inventory(uuid, ferrite_inventory::PlayerInventory::new());
+
+        let mut bad_item = BTreeMap::new();
+        bad_item.insert(
+            "0".to_string(),
+            Some(InventorySlotPatch {
+                id: "minecraft:nonexistent_item_26_3".to_string(),
+                count: 1,
+                nbt_base64: None,
+            }),
+        );
+        assert_eq!(
+            provider
+                .player_inventory_set_async(&PlayerInventorySetRequest {
+                    uuid: uuid.to_string(),
+                    held_slot: None,
+                    slots: bad_item,
+                })
+                .unwrap_err()
+                .code,
+            "unknown_item"
+        );
+
+        let mut bad_slot = BTreeMap::new();
+        bad_slot.insert("99".to_string(), None);
+        assert_eq!(
+            provider
+                .player_inventory_set_async(&PlayerInventorySetRequest {
+                    uuid: uuid.to_string(),
+                    held_slot: None,
+                    slots: bad_slot,
+                })
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+
+        assert_eq!(
+            provider
+                .player_inventory_set_async(&PlayerInventorySetRequest {
+                    uuid: uuid.to_string(),
+                    held_slot: Some(9),
+                    slots: BTreeMap::new(),
+                })
+                .unwrap_err()
+                .code,
+            "invalid_request"
         );
     }
 }

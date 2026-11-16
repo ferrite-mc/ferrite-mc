@@ -2,20 +2,31 @@ package org.bukkit.inventory;
 
 import dev.ferrite.api.item.FerriteCustomModelDataComponent;
 import dev.ferrite.api.item.FerriteDataComponents;
+import dev.ferrite.api.item.FerriteEquippableComponent;
 import dev.ferrite.api.item.FerriteFoodComponent;
 import dev.ferrite.api.item.FerriteItemMeta;
+import dev.ferrite.api.item.FerriteJukeboxPlayableComponent;
 import dev.ferrite.api.item.FerritePersistentDataContainerView;
+import dev.ferrite.api.item.FerriteToolComponent;
+import dev.ferrite.api.item.FerriteUseCooldownComponent;
 import io.papermc.paper.datacomponent.DataComponentBuilder;
 import io.papermc.paper.datacomponent.DataComponentHolder;
 import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.datacomponent.item.CustomModelData;
 import io.papermc.paper.datacomponent.item.Enchantable;
+import io.papermc.paper.datacomponent.item.Equippable;
 import io.papermc.paper.datacomponent.item.FoodProperties;
 import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemEnchantments;
 import io.papermc.paper.datacomponent.item.ItemLore;
+import io.papermc.paper.datacomponent.item.JukeboxPlayable;
+import io.papermc.paper.datacomponent.item.Tool;
+import io.papermc.paper.datacomponent.item.TooltipDisplay;
+import io.papermc.paper.datacomponent.item.UseCooldown;
 import io.papermc.paper.persistence.PersistentDataContainerView;
 import io.papermc.paper.persistence.PersistentDataViewHolder;
+import io.papermc.paper.registry.TypedKey;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -30,16 +41,21 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.event.HoverEventSource;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import org.bukkit.JukeboxSong;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
+import org.bukkit.Sound;
 import org.bukkit.Translatable;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeModifier;
+import org.bukkit.block.BlockType;
 import org.bukkit.configuration.serialization.ConfigurationSerializable;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.EntityType;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.components.ToolComponent;
 import org.bukkit.persistence.PersistentDataContainer;
 
 /**
@@ -77,6 +93,11 @@ public class ItemStack
     private static final String KEY_ENCHANTABLE = "minecraft:enchantable";
     private static final String KEY_FOOD = "minecraft:food";
     private static final String KEY_ATTRIBUTE_MODIFIERS = "minecraft:attribute_modifiers";
+    private static final String KEY_TOOLTIP_DISPLAY = "minecraft:tooltip_display";
+    private static final String KEY_USE_COOLDOWN = "minecraft:use_cooldown";
+    private static final String KEY_JUKEBOX_PLAYABLE = "minecraft:jukebox_playable";
+    private static final String KEY_TOOL = "minecraft:tool";
+    private static final String KEY_EQUIPPABLE = "minecraft:equippable";
 
     private Material type;
     private int amount;
@@ -464,6 +485,27 @@ public class ItemStack
                     ? (T) FerriteDataComponents.attributeModifiers(
                             this.meta.attributeModifiersMap())
                     : null;
+            case KEY_TOOLTIP_DISPLAY -> this.meta.isHideTooltip()
+                    ? (T) FerriteDataComponents.tooltipDisplay(true)
+                    : null;
+            case KEY_USE_COOLDOWN -> this.meta.hasUseCooldown()
+                    ? (T) FerriteDataComponents.useCooldown(
+                            (FerriteUseCooldownComponent) this.meta.getUseCooldown())
+                    : null;
+            case KEY_JUKEBOX_PLAYABLE -> {
+                if (!this.meta.hasJukeboxPlayable()) {
+                    yield null;
+                }
+                JukeboxSong song = this.meta.getJukeboxPlayable().getSong();
+                yield song == null ? null : (T) FerriteDataComponents.jukeboxPlayable(song);
+            }
+            case KEY_TOOL -> this.meta.hasTool()
+                    ? (T) FerriteDataComponents.tool((FerriteToolComponent) this.meta.getTool())
+                    : null;
+            case KEY_EQUIPPABLE -> this.meta.hasEquippable()
+                    ? (T) FerriteDataComponents.equippable(
+                            (FerriteEquippableComponent) this.meta.getEquippable())
+                    : null;
             default -> throw unsupportedComponent(type, "getData");
         };
     }
@@ -495,6 +537,11 @@ public class ItemStack
             case KEY_ENCHANTABLE -> this.meta.hasEnchantable();
             case KEY_FOOD -> this.meta.hasFood();
             case KEY_ATTRIBUTE_MODIFIERS -> this.meta.hasAttributeModifiers();
+            case KEY_TOOLTIP_DISPLAY -> this.meta.isHideTooltip();
+            case KEY_USE_COOLDOWN -> this.meta.hasUseCooldown();
+            case KEY_JUKEBOX_PLAYABLE -> this.meta.hasJukeboxPlayable();
+            case KEY_TOOL -> this.meta.hasTool();
+            case KEY_EQUIPPABLE -> this.meta.hasEquippable();
             default -> throw unsupportedComponent(type, "hasData");
         };
     }
@@ -542,6 +589,21 @@ public class ItemStack
         }
         if (this.meta.hasAttributeModifiers()) {
             types.add(resolveComponentType(KEY_ATTRIBUTE_MODIFIERS));
+        }
+        if (this.meta.isHideTooltip()) {
+            types.add(resolveComponentType(KEY_TOOLTIP_DISPLAY));
+        }
+        if (this.meta.hasUseCooldown()) {
+            types.add(resolveComponentType(KEY_USE_COOLDOWN));
+        }
+        if (this.meta.hasJukeboxPlayable()) {
+            types.add(resolveComponentType(KEY_JUKEBOX_PLAYABLE));
+        }
+        if (this.meta.hasTool()) {
+            types.add(resolveComponentType(KEY_TOOL));
+        }
+        if (this.meta.hasEquippable()) {
+            types.add(resolveComponentType(KEY_EQUIPPABLE));
         }
         return Collections.unmodifiableSet(types);
     }
@@ -610,6 +672,78 @@ public class ItemStack
                     }
                 });
             }
+            case KEY_TOOLTIP_DISPLAY -> {
+                TooltipDisplay display = (TooltipDisplay) value;
+                if (!display.hiddenComponents().isEmpty()) {
+                    throw unsupportedComponent(type, "setData(hiddenComponents)");
+                }
+                editMeta(m -> m.setHideTooltip(display.hideTooltip()));
+            }
+            case KEY_USE_COOLDOWN -> {
+                UseCooldown cooldown = (UseCooldown) value;
+                Key group = cooldown.cooldownGroup();
+                NamespacedKey groupKey = group == null
+                        ? null
+                        : new NamespacedKey(group.namespace(), group.value());
+                editMeta(m -> m.setUseCooldown(
+                        new FerriteUseCooldownComponent(cooldown.seconds(), groupKey)));
+            }
+            case KEY_JUKEBOX_PLAYABLE -> {
+                JukeboxPlayable playable = (JukeboxPlayable) value;
+                editMeta(m -> m.setJukeboxPlayable(
+                        new FerriteJukeboxPlayableComponent(
+                                playable.jukeboxSong().getKey(), true)));
+            }
+            case KEY_TOOL -> {
+                Tool toolData = (Tool) value;
+                FerriteToolComponent comp = new FerriteToolComponent();
+                comp.setDefaultMiningSpeed(toolData.defaultMiningSpeed());
+                comp.setDamagePerBlock(toolData.damagePerBlock());
+                List<ToolComponent.ToolRule> rules = new ArrayList<>();
+                for (Tool.Rule rule : toolData.rules()) {
+                    Set<Material> mats = new LinkedHashSet<>();
+                    for (TypedKey<BlockType> tk : rule.blocks().values()) {
+                        Material mat = Material.matchMaterial(tk.key().asString());
+                        if (mat != null) {
+                            mats.add(mat);
+                        }
+                    }
+                    Boolean correct = rule.correctForDrops().toBoolean();
+                    rules.add(new FerriteToolComponent.FerriteToolRule(
+                            mats, rule.speed(), correct));
+                }
+                comp.setRules(rules);
+                editMeta(m -> m.setTool(comp));
+            }
+            case KEY_EQUIPPABLE -> {
+                Equippable eq = (Equippable) value;
+                FerriteEquippableComponent comp = new FerriteEquippableComponent();
+                comp.setSlot(eq.slot());
+                if (eq.equipSound() != null) {
+                    comp.setEquipSound(Registry.SOUND_EVENT.get(
+                            new NamespacedKey(eq.equipSound().namespace(), eq.equipSound().value())));
+                }
+                if (eq.assetId() != null) {
+                    comp.setModel(new NamespacedKey(eq.assetId().namespace(), eq.assetId().value()));
+                }
+                if (eq.cameraOverlay() != null) {
+                    comp.setCameraOverlay(new NamespacedKey(
+                            eq.cameraOverlay().namespace(), eq.cameraOverlay().value()));
+                }
+                if (eq.allowedEntities() != null) {
+                    comp.setAllowedEntities(eq.allowedEntities().resolve(Registry.ENTITY_TYPE));
+                }
+                comp.setDispensable(eq.dispensable());
+                comp.setSwappable(eq.swappable());
+                comp.setDamageOnHurt(eq.damageOnHurt());
+                comp.setEquipOnInteract(eq.equipOnInteract());
+                comp.setCanBeSheared(eq.canBeSheared());
+                if (eq.shearSound() != null) {
+                    comp.setShearingSound(Registry.SOUND_EVENT.get(
+                            new NamespacedKey(eq.shearSound().namespace(), eq.shearSound().value())));
+                }
+                editMeta(m -> m.setEquippable(comp));
+            }
             default -> throw unsupportedComponent(type, "setData");
         }
     }
@@ -648,6 +782,11 @@ public class ItemStack
             case KEY_ENCHANTABLE -> editMeta(m -> m.setEnchantable(null));
             case KEY_FOOD -> editMeta(m -> m.setFood(null));
             case KEY_ATTRIBUTE_MODIFIERS -> editMeta(m -> m.setAttributeModifiers(null));
+            case KEY_TOOLTIP_DISPLAY -> editMeta(m -> m.setHideTooltip(false));
+            case KEY_USE_COOLDOWN -> editMeta(m -> m.setUseCooldown(null));
+            case KEY_JUKEBOX_PLAYABLE -> editMeta(m -> m.setJukeboxPlayable(null));
+            case KEY_TOOL -> editMeta(m -> m.setTool(null));
+            case KEY_EQUIPPABLE -> editMeta(m -> m.setEquippable(null));
             default -> throw unsupportedComponent(type, "unsetData");
         }
     }
@@ -718,7 +857,12 @@ public class ItemStack
                     KEY_TOOLTIP_STYLE,
                     KEY_ENCHANTABLE,
                     KEY_FOOD,
-                    KEY_ATTRIBUTE_MODIFIERS -> {
+                    KEY_ATTRIBUTE_MODIFIERS,
+                    KEY_TOOLTIP_DISPLAY,
+                    KEY_USE_COOLDOWN,
+                    KEY_JUKEBOX_PLAYABLE,
+                    KEY_TOOL,
+                    KEY_EQUIPPABLE -> {
                 return key;
             }
             default -> throw unsupportedComponent(type, method);
