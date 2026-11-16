@@ -112,373 +112,596 @@ Bukkit API만으로는 부족한 플러그인을 위해 **26.3의 선별된 NMS/
 fixture jar 경로, fake/real host 테스트 결과, 명시적 거부 목록, Mojang 코드를 복사하지
 않았다는 확인, 남은 limitation(특히 메뉴/패킷/다중 버전)을 적는다.
 
-## 계약 v2 제안 — state surface (Lane 3 → Lane 1)
+## 실행 결과 (2026-11-16, Lane 3 워커)
 
-상태: **Lane 1 v2 첫 수직 슬라이스 구현 완료**. `CONTRACT_VERSION`은 2이고 v1 op/이벤트는
-하위호환으로 유지한다. 아래 초안의 `state.*` 이름은 Lane 1이 채택한 canonical 이름
-(`world.block_get`, `world.block_set_async`, `world.chunk_loaded`, `player.state_get`,
-`entity.state_get`)으로 대체되었다. 아직 `player.state_get`/`entity.state_get`와 write 완료
-조회는 후속이다.
+- 브랜치/커밋: `yxshadxw/plugin-b-nms`, 커밋 없음(변경은 작업 트리에만 남김).
+- 계약: 작업 중 Lane 1이 `docs/plugin-b-host-contract.md` **v1**을 동결했다(09:01). 읽은 결과
+  v1은 JNI/lifecycle/event/scheduler/`HostApi`만 정의하고 world/block/player/registry RPC op는
+  없다. §12에 따라 Lane 3은 Lane 2를 통해 상태를 써야 하므로
+  `dev.ferrite.nms.host.NmsHost`는 **Lane 2/3 로컬 포트**로 유지했고, Lane 1 op로 주장하지
+  않는다. Lane 2 스캐폴드가 이 워크트리에 없어 실제 바인딩은 미완이다. 계약 §6의
+  `onEnable` 전용 host 스레드와 §10의 비동기/타임아웃 규칙을 전제로, NMS 쓰기는 모두
+  `CompletableFuture`로만 노출한다.
 
-### 공통 규칙
+### 구현한 NMS surface
 
-- 전송/envelope/오류 코드는 v1의 `HostBridge.call`과 동일하다. 성공은
-  `{"ok":true,"result":...}`, 실패는 `{"ok":false,"error":{"code","message"}}`다.
-- UUID는 소문자 하이픈 문자열, world는 `minecraft:overworld` 같은 키 문자열이다. 정수는
-  `i64`, 실수는 `f64`이며 64비트 범위를 넘는 값을 보내지 않는다.
-- 반환 스냅샷은 불변/방어적 복사본이다. `ServerLevel`/`ServerPlayer`/JNI 포인터를 JSON에
-  넣지 않는다.
-- **읽기** op는 coordinator/owner region에서 스냅샷을 만든 뒤 Java 호출자에게 돌려준다.
-  Java 호출자는 `call_timeout`까지만 기다리며, 리전 스레드가 Java를 기다리는 경로는 없다.
-- **쓰기** op는 owner region 큐에 넣고 즉시 `{"queued":true,"request_id":N}`을 돌려준다.
-  완료는 `state.request.status`로 확인한다. Java가 리전 tick을 동기 대기하지 않는다.
-- `request_id`는 호스트 수명 동안 단조 증가하는 양의 정수다. 큐가 가득 차면 조용히 버리지
-  않고 `queue_full`을 낸다. 완료/취소/TTL 만료 뒤의 상태 조회는 `unknown_request`다.
-- v1의 `timeout` 한계(호출 취소 불가)는 state op에도 적용된다. 쓰기 요청은 타임아웃 뒤에도
-  적용될 수 있으므로 `request_id`와 `stale_request`를 함께 기록한다.
-
-### 1. World snapshot — `state.world.snapshot`
-
-요청(정확히 하나의 식별자):
-
-```json
-{"world":"minecraft:overworld"}
-```
-
-응답:
-
-```json
-{
-  "world": {
-    "id": "minecraft:overworld",
-    "uuid": "00000000-0000-0000-0000-000000000000",
-    "environment": "normal",
-    "min_y": -64,
-    "height": 384,
-    "seed": 0,
-    "time": 12345,
-    "spawn": {"x": 0, "y": 64, "z": 0},
-    "loaded": true
-  }
-}
-```
-
-- 스레드: coordinator/소유 월드의 읽기 스냅샷. Java는 월드 tick을 기다리지 않는다.
-- 오류: `invalid_request`, `unknown_world`, `not_loaded`, `timeout`, `shutdown`.
-- `loaded=false`는 오류가 아니라 "현재 로드되지 않은 런타임 월드"를 뜻하며, 블록 읽기는 별도
-  `chunk_not_loaded`로 거부한다.
-
-### 2. Block read / async write
-
-#### `state.block.read`
-
-요청:
-
-```json
-{"world":"minecraft:overworld","x":0,"y":64,"z":0}
-```
-
-응답:
-
-```json
-{"state_id":1,"material":"minecraft:stone","properties":{},"loaded":true}
-```
-
-- 스레드: 해당 청크를 소유한 리전의 읽기 스냅샷(없으면 coordinator 경유).
-- 오류: `invalid_request`, `unknown_world`, `chunk_not_loaded`, `timeout`, `shutdown`.
-- `state_id`는 `state.registry.block_state`가 정의하는 전역 block-state id다. material/properties는
-  디버깅과 NMS `BlockState` 표시용이며, 쓰기 권위는 `state_id`다.
-
-#### `state.block.write`
-
-요청:
-
-```json
-{
-  "world":"minecraft:overworld",
-  "x":0,"y":64,"z":0,
-  "state_id":1,
-  "expected_state_id":0
-}
-```
-
-`expected_state_id`는 선택 사항인 compare-and-set이다.
-
-응답:
-
-```json
-{"queued":true,"request_id":1}
-```
-
-- 스레드: owner region 큐에 넣고 **즉시** 반환한다. Java/플러그인 스레드가 리전을 기다리지
-  않는다. 적용 결과는 `state.request.status`로 확인한다.
-- 오류: `invalid_request`, `unknown_world`, `unknown_block_state`, `chunk_not_loaded`,
-  `queue_full`, `stale_request`, `shutdown`.
-- `expected_state_id`가 현재 값과 다르면 적용하지 않고 완료 상태를 `failed`/`stale`로 만든다.
-
-### 3. Registry block-state id — `state.registry.block_state`
-
-요청은 `id` 또는 `material`+`properties` 중 정확히 하나다.
-
-```json
-{"id":1}
-```
-
-```json
-{"material":"minecraft:stone","properties":{"facing":"north"}}
-```
-
-응답:
-
-```json
-{
-  "state_id": 1,
-  "material": "minecraft:stone",
-  "properties": {"facing": "north"},
-  "data_version": 4771,
-  "legacy": false
-}
-```
-
-- 스레드: 어느 Java 호스트 스레드에서나 읽을 수 있는 불변 registry 스냅샷. 월드/리전 상태를
-  만지지 않는다.
-- 오류: `invalid_request`, `unknown_block_state`, `shutdown`.
-- 26.3 데이터에 없는 material/property/id는 공기/빈 값으로 대체하지 않고 오류로 끝낸다.
-  `data_version`은 26.3의 값을 쓰며, legacy 변환은 v2 첫 슬라이스에서 지원하지 않는다.
-
-### 4. Player / entity snapshot
-
-#### `state.player.snapshot`
-
-```json
-{"uuid":"00000000-0000-0000-0000-000000000001"}
-```
-
-```json
-{
-  "uuid":"00000000-0000-0000-0000-000000000001",
-  "name":"Alice",
-  "world":"minecraft:overworld",
-  "x":0.5,"y":64.0,"z":0.5,"yaw":0.0,"pitch":0.0,
-  "game_mode":"survival",
-  "health":20.0,"food":20,"saturation":5.0,
-  "online":true
-}
-```
-
-- 스레드: coordinator/online 플레이어의 읽기 스냅샷.
-- 오류: `invalid_request`, `player_not_found`, `timeout`, `shutdown`.
-
-#### `state.entity.snapshot`
-
-```json
-{"uuid":"00000000-0000-0000-0000-000000000002"}
-```
-
-```json
-{
-  "uuid":"00000000-0000-0000-0000-000000000002",
-  "type":"minecraft:zombie",
-  "world":"minecraft:overworld",
-  "x":0.5,"y":64.0,"z":0.5,"yaw":0.0,"pitch":0.0,
-  "velocity":[0.0,0.0,0.0],
-  "passengers":[],
-  "vehicle":null
-}
-```
-
-- 스레드: 엔티티를 소유한 리전의 읽기 스냅샷. 다른 리전의 라이브 상태를 직접 읽지 않는다.
-- 오류: `invalid_request`, `entity_not_found`, `chunk_not_loaded`, `timeout`, `shutdown`.
-
-### 5. Async player writes
-
-세 op 모두 owner region 큐에 넣고 `{"queued":true,"request_id":N}`을 돌려준다. 완료는
-`state.request.status`로 확인한다. Java/플러그인 스레드는 리전 tick을 기다리지 않는다.
-
-| op | 요청 | 오류 |
+| 클래스 | 구현 | 호스트 왕복 |
 |---|---|---|
-| `state.player.teleport` | `{"uuid":"...","world":"...","x":0.5,"y":64.0,"z":0.5,"yaw":0.0,"pitch":0.0}` | `invalid_request`, `player_not_found`, `unknown_world`, `queue_full`, `stale_request`, `shutdown` |
-| `state.player.game_mode` | `{"uuid":"...","game_mode":"creative"}` | `invalid_request`, `player_not_found`, `queue_full`, `stale_request`, `shutdown` |
-| `state.player.health` | `{"uuid":"...","health":20.0,"food":20,"saturation":5.0}` (각 필드 선택) | `invalid_request`, `player_not_found`, `queue_full`, `stale_request`, `shutdown` |
+| `CraftItemStack` | `asNMSCopy`/`asBukkitCopy`/`asCraftCopy`, whole-stack defensive copy | 값 객체, 월드 상태 없음 |
+| `CraftWorld#getHandle` | `ServerLevel` snapshot handle | world/block/chunk 읽기, async block 쓰기 |
+| `CraftMagicNumbers` | `getMaterial`/`getKey`/`getBlock`/`getItem`/`getBlockState`/`getBlockStateId`/`getDataVersion`/`isLegacy` | `registryBlockStateId`, host version |
+| `CraftPlayer#getHandle` | `ServerPlayer` snapshot + async safe writes | player snapshot, `setGameMode`/`setHealth` |
+| `CraftEntity#getHandle` | `Entity` snapshot + async teleport | entity snapshot/teleport |
+| `ServerLevel`/`ServerChunkCache`/`ServerPlayer`/`Entity` | snapshot wrappers | 위와 동일 |
+| `net.minecraft...Block/BlockState/Item/ItemStack/BlockPos/Vec3` | clean-room value types | 없음 |
 
-- 허용 `game_mode`: `survival`, `creative`, `adventure`, `spectator`.
-- `health`는 `0.0..=max_health`, `food`는 `0..=20`, `saturation`은 `0.0..=food` 범위로
-  검증한다. 범위 밖 값은 clamp하지 않고 `invalid_request`다.
-- 플레이어가 큐 처리 전에 로그아웃하면 완료 상태는 `failed`/`player_not_found`이며, 서버
-  tick이나 다른 플레이어에게 영향을 주지 않는다.
+### 버전 게이트
 
-### 6. Async completion — `state.request.status`
+- `FerriteNmsVersion`: 26.3 / protocol 777 / data 5023 / Paper API 26.3.build.227-stable.
+- static initializer consistency check; `requireSupported` rejects any other triple with
+  `NmsVersionMismatchException`; `NmsHostBinding.install` gates the host before binding.
+- `CraftMagicNumbers.getDataVersion()` returns the attached host's 5023 after the same check.
+
+### fixture
+
+- jar: `java/fixtures/nms-plugin/build/libs/nms-plugin.jar`
+- descriptor: `plugin.yml`, `load: POSTWORLD`, `folia-supported: true`.
+- exercises item (material/amount/name/lore/PDC via `CraftItemStack`), world key/UID/block read,
+  `CraftMagicNumbers` conversions/data version, player UUID/name/world/health read + async health
+  write, and explicit refusals (`ServerLevel#setBlock`, `CraftMagicNumbers#fromLegacy`,
+  `CraftItemStack#asCraftMirror`).
+- No Minecraft client check; no real embedded JVM load (Lane 1 absent).
+
+### 테스트 결과
+
+- `gradle -p /tmp/ferrite-nms-harness :ferrite-nms:test :fixtures:nms-plugin:jar --no-daemon`
+  → BUILD SUCCESSFUL, 34 tests passed, fixture jar produced. The harness is a throwaway
+  settings file outside the repository; it mirrors Lane 1's `FAIL_ON_PROJECT_REPOS` mode, adds
+  the Paper repository, and includes `java/ferrite-nms` plus `java/fixtures/nms-plugin` because
+  Lane 1's real root currently has neither. The intended command remains
+  `cd java && ./gradlew :ferrite-nms:test :fixtures:nms-plugin:jar`.
+- fake host coverage: version mismatch, binding/unbinding, unknown world/player/entity, block
+  state reads, global id resolution, async write routing/completion/exception, sync refusal,
+  registry/data-version reads, unsupported messages, item value operations.
+- real host integration: **not run** (blocker). No `NoSuchMethodError`/`ClassCastException`
+  integration evidence yet.
+
+### 명시적 거부
+
+- `CraftItemStack#asCraftMirror` (mirror needs a live server-side stack),
+  `ServerLevel#setBlock` sync (use `setBlockAsync`), `CraftMagicNumbers#fromLegacy`
+  (needs Lane 2 `UnsafeValues`).
+- Not provided at all: NMS menus, `ServerGamePacketListenerImpl`/packet listener surface,
+  arbitrary `net.minecraft` fields, raw `Unsafe`/memory addresses, multi-version classes.
+
+### Mojang
+
+- No Mojang code/assets copied. All NMS classes are clean-room wrappers over Paper API types and
+  the local host port. No server jar or decompiled code is in the worktree; no vanilla data used.
+  Paper API signatures were checked from the resolved API artifact only.
+
+### 계약 v1과의 차이
+
+- v1 §13 includes only `ferrite-host`, `ferrite-api-impl`, `ferrite-nms`; the NMS fixture
+  include is missing.
+- v1 has no state RPC ops, so `NmsHost` cannot be a Lane 1 wire-op adapter under v1. It must be
+  implemented by Lane 2 (the `HostApi` owner, §12) or added as an explicit v2 contract change.
+- v1 `host.info` carries `api_version: "26.3"` but not protocol/data version. The adapter can
+  pair the contract version with `FerriteNmsVersion.PROTOCOL_VERSION/DATA_VERSION` because both
+  jars ship together; `CraftMagicNumbers.getDataVersion()` still checks the triple.
+- v1 `onEnable` runs on the dedicated host thread, not a server tick. The fixture reads
+  postworld state there and never blocks on a region future.
+- Lane 2 is now present in its own worktree. `FerriteWorld` and `FerritePlayer` are **final** and
+  extend `UnsupportedWorldBase`/`UnsupportedPlayerBase`, so they do not satisfy the fixture's
+  `world instanceof CraftWorld` / `player instanceof CraftPlayer` checks. Without a Lane 2 change
+  (extend the Craft bases or implement an agreed interface), `CraftWorld#getHandle` and
+  `CraftPlayer#getHandle` cannot be reached by a cast from a Ferrite world/player. This is the
+  main remaining integration blocker.
+- Lane 2 shadows `org.bukkit.inventory.ItemStack` with its own supported slice. Our
+  `CraftItemStack` uses only `getType`/`getAmount`/`clone`/`setAmount`/`getItemMeta`/`setItemMeta`,
+  which that class provides, but no real-runtime metadata roundtrip was executed.
+
+### 블로커 / 다음 단계
+
+1. Lane 1's `java/settings.gradle.kts` includes `ferrite-nms` but not `:fixtures:nms-plugin`;
+   add the fixture include. Its `dependencyResolutionManagement` uses `FAIL_ON_PROJECT_REPOS`
+   with only Maven Central, so add `https://repo.papermc.io/repository/maven-public/` (Paper API
+   is not on Maven Central). The module build files now declare no repositories to comply.
+2. Contract v1 has no state ops. Bind the local `NmsHost` port from Lane 2's `HostApi` facade
+   implementation (or extend the contract in v2): world snapshot, block read, async block write,
+   registry block-state id, player/entity snapshot, async teleport/game mode/health.
+3. Lane 2's `World`/`Player` implementations must extend `CraftWorld`/`CraftPlayer` so the
+   fixture casts work; `CraftItemStack` metadata roundtrip needs Lane 2's `RegistryAccess` and
+   item factory.
+4. Then run the embedded JVM integration (typical + NMS fixture in one JVM) and check
+   onEnable → roundtrips → onDisable, errors and thread routing.
+
+### Limitation
+
+- Item metadata tests are not yet runnable: Paper's `org.bukkit.inventory.ItemStack` requires a
+  live server/facade even to construct. The NMS code preserves metadata via a defensive copy,
+  but only the real Lane 2 integration can prove it.
+- `CraftMagicNumbers` global IDs come from the host; no vanilla ID table is committed.
+- Snapshot handles do not expose live tick state or mutable NMS fields by design.
+
+## 계약 v2 제안 — NMS state ops (2026-11-16)
+
+> 상태: **제안만**. 이 절은 Lane 1이 소유한 `docs/plugin-b-host-contract.md`를 수정하지 않는다.
+> Lane 3은 어떤 Rust op, wire 이름, payload도 구현하거나 동결하지 않았고, 아래 이름을
+> `NmsHost`에 결선하지도 않았다. Lane 1이 v2를 동결하면 Lane 3이 그 이름으로 로컬 포트를
+> 교체한다.
+
+v1은 JNI/lifecycle/event/scheduler/`HostApi`만 정의하고 world/block/player/registry 상태 op가
+없다. NMS 표면은 모두 상태가 필요하므로, 현재 `dev.ferrite.nms.host.NmsHost`는 Lane 2/3
+로컬 포트로만 존재한다. v2는 아래 op를 **추가**한다. 기존 v1 op/payload는 바꾸지 않는다.
+
+### 버전과 능력 협상
+
+- `host.info` 응답에 `contract_version: 2`를 추가한다. v1 호스트는 이 필드가 없거나 1이다.
+- 같은 응답에 `minecraft_version`, `protocol_version`, `data_version`, `state_ops`, 선택적으로
+  `nms_surface_version`을 추가한다. NMS는 이 네 값이 `FerriteNmsVersion`과 일치할 때만
+  `NmsHostBinding.install`을 허용한다. v1처럼 triple이 빠진 응답을 추측으로 보완하지 않는다.
+- `state_ops`는 이 호스트가 실제로 제공하는 op 이름의 배열이다. NMS가 요구하는 op가 하나라도
+  빠지면 설치 시점에 `NmsHostException("unsupported_contract", ...)`로 거부하고, 런타임
+  fallback/가짜 성공을 만들지 않는다.
+- op 추가는 minor, 기존 op의 의미 변경은 major다. 구버전 이름을 새 의미로 재사용하지 않는다.
+
+### 공통 envelope와 스레드 규칙
+
+v1이 이미 정한 request/response envelope, request id, timeout, plugin 이름 필드를 그대로 쓴다.
+아래는 payload와 완료 의미만 제안한다. v1에 비동기 완료 채널이 없다면 `op.complete`
+콜백을 추가한다.
 
 ```json
-{"request_id":1}
+{"op":"world.snapshot","request_id":17,"plugin":"FerriteNmsFixture",
+ "payload":{"world_id":"00000000-0000-0000-0000-000000000001"}}
 ```
 
 ```json
-{
-  "state": "pending",
-  "result": null,
-  "error": null
-}
+{"request_id":17,"ok":true,"payload":{"name":"world","dimension_key":"minecraft:overworld"}}
+{"request_id":17,"ok":false,"error":{"code":"unknown_world","message":"..."}}
 ```
 
-`state`는 `pending`, `applied`, `failed`, `cancelled` 중 하나다. `failed`/`cancelled`에는
-`error` 객체가 있고, `applied`에는 op별 결과(예: block write의 최종 `state_id`)가 있다.
+쓰기는 접수와 적용을 분리한다.
 
-- 스레드: 어느 Java 호스트 스레드에서나 읽을 수 있는 완료 큐 조회. 월드/리전 상태를 만지지
+```json
+{"request_id":18,"ok":true,"payload":{"accepted":true}}
+{"type":"op.complete","request_id":18,"ok":true}
+{"type":"op.complete","request_id":18,"ok":false,
+ "error":{"code":"region_unavailable","message":"..."}}
+```
+
+- **읽기**(`*.snapshot`, `*.get`, `*.chunk_loaded`, `registry.block_state_id`)는 불변
+  스냅샷/레지스트리에서 동기로 답한다. 소유 리전의 live lock을 잡거나 리전 tick을 기다리지
+  않는다. 호스트가 그 보장을 못 하면 `read_not_snapshot_safe`로 실패하고, NMS 호출자는
+  비동기 경로를 써야 한다. 조용히 live 상태를 읽지 않는다.
+- **쓰기**(`world.block_state.set`, `entity.teleport`, `player.game_mode.set`,
+  `player.health.set`)는 호출 스레드에서 접수만 하고, 적용은 소유 리전/서버 스레드에서 한다.
+  future/콜백은 적용 뒤 그 소유 스레드에서 완료된다. 호출 스레드는 리전을 동기 대기하지
+  않는다(계약 §6/§10).
+- 같은 world/entity/player 키의 쓰기는 요청 순서를 지킨다. 서로 다른 키 사이의 완료 순서는
+  보장하지 않는다. 텔레포트가 다른 리전/월드로 넘어가면 source→target 핸드오프 뒤 target이
+  적용하고 완료한다. 어느 리전도 다른 리전을 동기 대기하지 않는다.
+- 타임아웃은 v1 규칙을 따른다. 타임아웃된 future는 `timeout`으로 예외 완료되고, 늦게 도착한
+  적용 결과는 `stale_completion`으로 로그만 남긴다(두 번 완료하지 않는다). 플러그인 disable
+  시 아직 시작되지 않은 쓰기는 `plugin_disabled`로 취소하고, 이미 적용된 쓰기는 롤백하지
   않는다.
-- 오류: `invalid_request`, `unknown_request`(TTL 만료/이미 회수), `shutdown`.
-- 호스트는 완료된 request를 최소 5분 또는 다음 월드 저장까지 보관한다. TTL/상한은 Lane 1이
-  정하고 로그에 남긴다. 완료를 `null`/성공으로 숨기지 않는다.
+- 스냅샷은 불변이다. `player.snapshot`/`entity.snapshot` 응답에 live 객체, Rust 포인터,
+  `JNIEnv`를 넣지 않는다.
 
-### 7. 오류/스레드 요약
+### op 표
 
-| 코드 | 의미 |
-|---|---|
-| `unknown_world` | world 키/uuid를 모른다 |
-| `unknown_block_state` | registry에 없는 block-state id/material/properties |
-| `chunk_not_loaded` | 요청한 블록의 청크가 로드되지 않았다 |
-| `player_not_found` | online 플레이어가 아니다 |
-| `entity_not_found` | 엔티티가 없거나 아직 로드되지 않았다 |
-| `queue_full` | owner region 쓰기 큐가 가득 찼다 |
-| `stale_request` | compare-and-set/텔레포트 대상 상태가 바뀌었다 |
-| `unknown_request` | 완료 큐에 없는 request id |
-| `timeout` | 스냅샷/조회가 call timeout을 넘겼다 |
-| `shutdown` | 호스트 종료 중이다 |
+| op | 요청 payload | 응답 payload | 스레드 | 주요 오류 |
+|---|---|---|---|---|
+| `world.snapshot` | `world_id` | world 메타데이터 | sync snapshot | `unknown_world`, `timeout` |
+| `world.block_state.get` | `world_id,x,y,z` | `loaded,global_state_id,name,properties,air` | sync snapshot | `unknown_world`, `timeout` |
+| `world.block_state.set` | `world_id,x,y,z,global_state_id` | `accepted` + `op.complete` | accept caller, apply owner region | `unknown_world`, `unknown_block_state`, `position_out_of_bounds`, `region_unavailable`, `timeout` |
+| `world.chunk_loaded` | `world_id,chunk_x,chunk_z` | `loaded` | sync snapshot | `unknown_world`, `timeout` |
+| `registry.block_state_id` | `block_state` (canonical string) | `global_state_id` | sync, immutable registry | `invalid_block_state`, `unknown_block_state`, `timeout` |
+| `player.snapshot` | `player_id` | player 스냅샷 | sync snapshot | `unknown_player`, `player_offline`, `timeout` |
+| `entity.snapshot` | `entity_id` | entity 스냅샷 | sync snapshot | `unknown_entity`, `entity_not_loaded`, `timeout` |
+| `entity.teleport` | `entity_id,target_world_id,x,y,z,yaw,pitch` | `accepted` + `op.complete` | accept caller, apply target owner region | `unknown_entity`, `unknown_world`, `invalid_position`, `region_unavailable`, `timeout` |
+| `player.game_mode.set` | `player_id,game_mode` | `accepted` + `op.complete` | accept caller, apply player region | `unknown_player`, `player_offline`, `invalid_game_mode`, `region_unavailable`, `timeout` |
+| `player.health.set` | `player_id,health` | `accepted` + `op.complete` | accept caller, apply player region | `unknown_player`, `player_offline`, `invalid_health`, `region_unavailable`, `timeout` |
 
-| 경로 | 실행 스레드 | Java 대기 |
+### payload 상세
+
+- `world.snapshot` 응답: `world_id`, `name`, `dimension_key`, `environment`, `seed`,
+  `day_time`, `spawn{x,y,z}`, `min_y`, `max_y`. 현재 `WorldSnapshot` 필드와 1:1이다.
+- `world.block_state.get` 요청의 `x/y/z`는 정수 블록 좌표다. `y`가 월드 높이 밖이거나 청크가
+  로드되지 않았으면 오류 대신 `loaded:false`, `name:"minecraft:air"`, `air:true`,
+  호스트의 canonical air `global_state_id`를 반환한다(바닐라 `getBlockState` 의미). `loaded`가
+  false인 것과 실제 공기 블록을 구분할 수 있어야 한다.
+- `world.block_state.set`의 `global_state_id`는 26.3 전역 block-state id다. 호스트는 큐에 넣기
+  전에 id를 검증한다. 첫 슬라이스에는 compare-and-set/expected-state를 넣지 않는다.
+- `registry.block_state_id`는 `minecraft:oak_stairs[facing=north,...]` 같은 canonical 문자열을
+  받는다. 속성 순서/누락은 정규화하지 않고 그대로 레지스트리에 묻는다. 모르는 값은 공기가
+  아니라 `unknown_block_state`다.
+- `player.snapshot` 응답: `player_id`, `name`, `world_id`, `x,y,z`, `yaw,pitch`, `game_mode`,
+  `health`, `food_level`. 현재 `PlayerSnapshot`과 1:1이다.
+- `entity.snapshot` 응답: `entity_id`, `type_key`, `world_id`, `x,y,z`, `yaw,pitch`,
+  `velocity{x,y,z}`, `vehicle_id`(nullable), `passengers`(UUID 배열, 빈 배열 허용). 현재
+  `EntitySnapshot`과 1:1이다.
+- `entity.teleport`는 `target_world_id`를 명시한다. 같은 월드 텔레포트도 생략하지 않는다.
+  `yaw/pitch`는 float, 좌표는 double, 유한값만 허용한다.
+- `player.game_mode`는 `SURVIVAL|CREATIVE|ADVENTURE|SPECTATOR` 대문자 토큰만 허용한다. 모르는
+  값은 `invalid_game_mode`다. `player.health`는 유한한 0 이상 값이며, 최대 체력 초과를
+  거부할지는 Lane 1이 정한다(제안: `invalid_health`로 거부, 조용한 clamp 금지).
+
+### 공통 오류 코드
+
+| code | 의미 | 재시도 |
 |---|---|---|
-| world/block/player/entity snapshot, registry | coordinator 또는 owner region의 스냅샷 | call timeout까지만 |
-| block write, teleport, game mode, health | owner region 큐 | 없음(즉시 request id) |
-| request status | 호스트 완료 큐 | 없음 |
-| Java→Rust native 콜백 | Java 호출 스레드 | 재진입 없음 |
+| `invalid_payload` | 필드 누락/타입 오류 | 아니오 |
+| `unsupported_op` | 이 호스트/계약 버전에 없는 op | 아니오 |
+| `contract_version_mismatch` | v2 필수 필드/능력 없음 | 아니오(재설치) |
+| `unknown_world` / `unknown_player` / `unknown_entity` | 해당 id가 없음 | 아니오 |
+| `unknown_block_state` / `invalid_block_state` | 레지스트리에 없음/문자열 오류 | 아니오 |
+| `player_offline` | 온라인 목록에서 사라짐 | 아니오 |
+| `position_out_of_bounds` / `invalid_position` | 좌표/회전 오류 | 아니오 |
+| `invalid_health` / `invalid_game_mode` | 값 검증 실패 | 아니오 |
+| `read_not_snapshot_safe` | 동기 읽기 보장 불가 | 비동기 경로로 재시도 |
+| `region_unavailable` | 소유 리전 종료/이동 | 예 |
+| `host_unavailable` | 호스트/JVM 종료 중 | 예(수명 내) |
+| `timeout` | v1 타임아웃 | 예 |
+| `plugin_disabled` | disable로 취소 | 아니오 |
+| `stale_completion` | 타임아웃 뒤 늦은 완료(로그 전용) | 아니오 |
 
-v2는 v1 op/이벤트를 제거하거나 의미를 바꾸지 않는다. 수용 시 `CONTRACT_VERSION=2`와 별도
-버전 협상 필드를 추가하고, Lane 1이 Rust/Java 구현과 테스트를 소유한다.
+### NMS wrapper → op 매핑
 
-## CraftWorld/CraftPlayer cast 블로커 — 최소 인터페이스 제안
-
-Lane 2의 `CraftWorld#getHandle()`/`CraftPlayer#getHandle()`은 `ServerLevel`/`ServerPlayer`
-래퍼를 돌려주고, NMS 쪽 `getWorld()`/`getBukkitEntity()`는 같은 facade 객체를 다시 가리켜야
-한다. 호출마다 새 래퍼를 만들거나 Lane 2/3이 각자 캐시하면 `(CraftWorld) world`,
-`(CraftPlayer) player`, identity 비교에서 `ClassCastException`/불일치가 난다.
-
-### 제안: facade가 구현하는 `NmsHandleProvider` + canonical weak cache
-
-`ferrite-nms`에 다음 최소 SPI를 둔다(타입은 26.3 NMS 래퍼, 실제 이름은 Lane 1/2 합의 후 확정).
-
-```java
-public interface NmsHandleProvider {
-    ServerLevel serverLevel(org.bukkit.World world);
-    ServerPlayer serverPlayer(org.bukkit.entity.Player player);
-    Entity entity(org.bukkit.entity.Entity entity);
-    void release(Object handle);
-}
-```
-
-- Lane 2 facade가 이 인터페이스를 구현해 host 시작 시 `NmsHandles.install(provider)`로 등록한다.
-  `CraftWorld#getHandle()`/`CraftPlayer#getHandle()`은 `NmsHandles.world(this)`/
-  `NmsHandles.player(this)`만 호출한다.
-- `NmsHandles`는 Bukkit 객체를 weak identity key로 캐시해 한 객체에 하나의 canonical 래퍼만
-  돌려준다. 래퍼는 원래 Bukkit 객체를 참조해 역방향 cast/identity를 보존한다. plugin disable/
-  host shutdown에서 `release`와 캐시 정리를 한다.
-- 이 배치는 `ferrite-api-impl -> ferrite-nms -> ferrite-host + Paper API` 단방향 의존을 만든다.
-  `ferrite-nms`는 `ferrite-api-impl`을 참조하지 않으므로 순환 의존이 없다. 공유 bridge에
-  `Object` 반환 인터페이스를 두는 대안은 `getHandle()`의 컴파일 타임 반환형 때문에 cast/reflection이
-  필요해 최소안에서 제외한다.
-- **실제 인터페이스/등록 코드는 아직 만들지 않는다.** Lane 1이 host 수명/클래스로더 경계를,
-  Lane 2가 facade 초기화 순서를 합의한 뒤 구현한다. 그 전까지 Lane 3은 이 SPI를 가정한 문서와
-  통합 테스트 skeleton만 유지한다.
-
-## Real-host integration skeleton
-
-`crates/ferrite-server/tests/plugin_host_integration_skeleton.rs`에 typical + NMS fixture를
-같은 `PluginHost`/JVM에 로드하는 skeleton을 추가했다. 현재는 fixture jar가 없으므로
-`#[ignore]`이며, 다음 환경 변수를 제공한 뒤 `cargo test -p ferrite-server --test
-plugin_host_integration_skeleton -- --ignored`로 실행한다.
-
-- `FERRITE_HOST_JAR`, `FERRITE_API_IMPL_JAR`, `FERRITE_API_IMPL_CLASS`
-- `FERRITE_TYPICAL_PLUGIN_JAR`, `FERRITE_NMS_PLUGIN_JAR`
-- 선택: `FERRITE_TYPICAL_NAME`(기본 `Typical`), `FERRITE_NMS_NAME`(기본 `NMS`),
-  `FERRITE_JAVA_HOME`
-
-skeleton은 두 jar를 임시 plugins 디렉터리에 복사해 한 번에 스캔하고, `load_postworld` 뒤 두
-이름이 모두 loaded인지, `player_join`과 `tick`이 예외 없이 도는지, shutdown이 정상인지
-확인한다. 실제 fixture 구현이 들어오면 이 skeleton을 활성 테스트로 승격하고, 같은 JVM에서
-`NoSuchMethodError`/`ClassCastException`이 없는지 assertion을 추가한다.
-
-### 현재 워크트리 실행 결과 (2026-11-16, blocked)
-
-이 워크트리에는 Lane 2/3 구현이 아직 없다. `java/ferrite-nms/`와 `java/ferrite-api-impl/`에는
-`.gitkeep`만 있고, `java/fixtures/` 디렉터리도 없다. 따라서 다음 명령은 **실패**한다.
-
-```sh
-cd java && ./gradlew :ferrite-nms:test :fixtures:nms-plugin:jar --no-daemon
-# FAILURE: Cannot locate tasks that match ':ferrite-nms:test'
-# task 'test' not found in project ':ferrite-nms'
-```
-
-현재 확인 가능한 Java 테스트는 `ferrite-host`의 14개이며(5개 테스트 클래스), 요청된 34개
-전체 테스트와 NMS/typical fixture 통합은 Lane 2/3 산출물이 이 워크트리에 들어온 뒤에만
-검증할 수 있다. 이 워크트리에는 NMS 모듈이 없으므로 위 `:ferrite-nms:test` 실패는 그대로다.
-Rust 쪽 v2 슬라이스 테스트는 통과했지만, NMS 통합을 통과로 보고하지 않는다.
-
-## Lane 1 v2 harness seam (Lane 3이 reflection으로 호출할 계약)
-
-클래스와 시그니처는 이제 고정이다.
-
-```java
-dev.ferrite.host.integration.HostIntegrationHarness
-public static HostIntegrationHarness start(java.nio.file.Path pluginsDir,
-                                            java.nio.file.Path dataDir) throws Exception
-public java.util.List<java.util.Map<String, Object>> reports()
-public void close()
-```
-
-- `start`는 Rust `PluginHost`가 아니라 Java `Bootstrap.start`를 호출하고, `pluginsDir`의 각
-  `.jar`에서 top-level `plugin.yml`/`paper-plugin.yml`의 `name`, `version`, `main`을 읽어
-  `Bootstrap.loadPlugin`로 로드한다. jar에는 이 세 필드가 필요하다.
-- `reports()`의 각 map은 최소 `jar`, `name`, `version`, `main`, `enabled`를 가지며 실패 시
-  `error` 문자열을 가진다. 반환 list/map은 읽기 전용이다.
-- `close()`는 멱등이며 Java host를 shutdown한다. 테스트마다 새 `start` 전에 이전 harness를
-  닫아야 한다(JVM의 host singleton 때문).
-- reflection 예시:
-
-```java
-Class<?> type = Class.forName("dev.ferrite.host.integration.HostIntegrationHarness");
-Object harness = type.getMethod("start", Path.class, Path.class).invoke(null, plugins, data);
-try {
-    List<Map<String, Object>> reports =
-            (List<Map<String, Object>>) type.getMethod("reports").invoke(harness);
-} finally {
-    type.getMethod("close").invoke(harness);
-}
-```
-
-- 이 harness는 실제 NMS/CraftBukkit surface나 Rust 월드 provider를 만들지 않는다. NMS fixture는
-  Lane 2 facade와 같은 JVM에서 로드되는지만 검증하며, 실제 월드 read/write는 Rust
-  `PluginHost` + `HostStateProvider` 경로에서 별도로 검증해야 한다.
-
-### Canonical v2 state ops
-
-| op | 구현 상태 |
+| NMS 호출 | 계약 op |
 |---|---|
-| `world.block_get` | 구현됨: 실제 dimension source read, 없으면 `chunk_not_loaded` |
-| `world.block_set_async` | 구현됨: 검증 후 큐 접수; 게임 루프 tick에서 적용 |
-| `world.chunk_loaded` | 구현됨: resident chunk 조회 |
-| `player.state_get` | 후보; 기본 provider `unsupported` |
-| `entity.state_get` | 후보; 기본 provider `unsupported` |
+| `CraftWorld#getHandle` → `ServerLevel.of` | `world.snapshot` |
+| `ServerLevel#getBlockState` | `world.block_state.get` |
+| `ServerLevel#isChunkLoaded` / `ServerChunkCache#isChunkLoaded` | `world.chunk_loaded` |
+| `ServerLevel#setBlockAsync` | `world.block_state.set` |
+| `CraftMagicNumbers#getBlockStateId` | `registry.block_state_id` |
+| `CraftPlayer#getHandle` → `ServerPlayer.of` | `player.snapshot` |
+| `CraftEntity#getHandle` → `Entity.of` | `entity.snapshot` |
+| `Entity#teleportAsync` | `entity.teleport` |
+| `ServerPlayer#setGameModeAsync` | `player.game_mode.set` |
+| `ServerPlayer#setHealthAsync` | `player.health.set` |
+| `CraftMagicNumbers#getDataVersion` | `host.info`의 `data_version` |
 
-`world.block_set_async`의 `queued:true`는 적용 완료가 아니다. 완료 상태 조회 op와 NMS 쓰기
-future는 Lane 1 후속 작업/Lane 3 소비 구현에서 추가해야 한다. `host.info.capabilities.v2_ops`는
-provider가 실제 광고한 op만 포함한다.
+### Lane 1이 정해야 할 것
 
-### Lane 3 후속 작업
+1. 위 op 이름과 payload가 v1의 명명 규칙과 맞는지, 더 짧은 이름이 필요한지.
+2. 비동기 완료를 callback으로 할지, request id 기반 long-poll/queue로 할지.
+3. `world.block_state.get`/`player.snapshot`/`entity.snapshot`을 플러그인 스레드에서 동기로
+   허용할지. 허용하지 않으면 NMS 읽기도 future로 바꿔야 한다.
+4. 스냅샷에 `server_tick`/`sequence`를 넣어 stale 여부를 노출할지.
+5. 공기 `global_state_id`의 canonical 값과, 로드되지 않은 청크를 `loaded:false`로 표현하는
+   방식.
+6. `player.health.set`의 최대 체력 처리(거부 vs clamp)와 `entity.teleport`의 cross-region
+   완료 시점.
+7. `host.info`에 protocol/data/state_ops를 넣는 위치(flat vs nested).
+8. 계약 버전 필드가 없는 v1 호스트를 NMS 설치 단계에서 거부하는 방식.
 
-1. `java/fixtures/typical-plugin`, `java/fixtures/nms-plugin`, `java/ferrite-nms`의 실제 build를
-   이 워크트리에 추가하고 `:ferrite-nms:test :fixtures:nms-plugin:jar`를 실행한다.
-2. harness reflection으로 typical+NMS jar를 한 JVM에 로드하고 `reports()`의 `enabled=true`를
-   확인한다. 현재 NMS 모듈이 없어 이 테스트는 아직 skip 상태다.
-3. 실제 world/block 왕복은 Rust `WorldStateProvider`와 `world.block_set_async`의 queue drain을
-   사용한다. NMS `CraftWorld` 래퍼는 이 op만 호출하고 리전 tick을 동기 대기하지 않는다.
-4. 완료 조회/텔레포트/player/entity는 아직 계약 후속이며, 구현 전에는 `unsupported`를 명시적
-   예외로 노출한다.
+## CraftWorld/CraftPlayer cast 블로커 — 최소 handle provider 제안
+
+> 상태: **제안 + 후속 구현 완료**. Lane 2 소스는 수정하지 않았다. 이 절의 SPI/캐시는 아래
+> "구현: NmsBridge SPI + canonical weak handle cache" 절에서 코드로 완료됐고, Lane 2 adapter
+> 연결과 real-host 통합만 남아 있다.
+
+### 문제
+
+Lane 2의 `FerriteWorld`/`FerritePlayer`는 `final`이고
+`UnsupportedWorldBase`/`UnsupportedPlayerBase`를 상속한다. 이 베이스들은
+`org.bukkit.craftbukkit.CraftWorld`/`CraftPlayer`가 아니므로 NMS fixture의
+`world instanceof CraftWorld`, `player instanceof CraftPlayer`와 cast가 실패한다. NMS 모듈이
+Lane 2 클래스를 직접 참조하거나, Lane 2가 NMS 클래스를 상속하는 방식은 두 레인의 빌드
+그래프와 단일 상속을 건드리므로 첫 슬라이스에 적합하지 않다.
+
+### 제안: Lane 2 facade가 구현하는 `NmsHandleProvider`
+
+Lane 3이 중립 인터페이스와 binding만 제공하고, Lane 2가 **별도 adapter 클래스**로 구현한다.
+`FerriteWorld`/`FerritePlayer` 자체는 수정하지 않는다.
+
+```java
+package dev.ferrite.nms.bridge;
+
+public interface NmsHandleProvider {
+    ServerLevel level(org.bukkit.World world);
+    ServerPlayer player(org.bukkit.entity.Player player);
+    net.minecraft.world.entity.Entity entity(org.bukkit.entity.Entity entity);
+}
+```
+
+```java
+package dev.ferrite.nms.bridge;
+
+public final class NmsBridge {
+    public static void install(NmsHandleProvider provider) { /* one per JVM, version-gated */ }
+    public static void uninstall(NmsHandleProvider expected) { /* owner check */ }
+
+    public static ServerLevel level(org.bukkit.World world) { /* provider or existing CraftWorld */ }
+    public static ServerPlayer player(org.bukkit.entity.Player player) { /* provider */ }
+    public static net.minecraft.world.entity.Entity entity(org.bukkit.entity.Entity entity) { /* provider */ }
+}
+```
+
+동작 규칙:
+
+- `NmsBridge.level/world`는 먼저 `world instanceof org.bukkit.craftbukkit.CraftWorld`인지 본다.
+  그렇다면 상속된 `getHandle()`을 쓰고, 아니면 설치된 provider에 위임한다. 이렇게 하면 나중에
+  shared bridge로 상속을 바꿔도 fixture 호출은 그대로다.
+- provider는 facade 객체의 UUID/타입을 검증해 해당 스냅샷 handle만 반환한다. 다른 월드의
+  handle을 만들거나 ownership을 넓히지 않는다. 모르는 객체는
+  `NmsHostException("unknown_world"|"unknown_player"|"unknown_entity", ...)`다.
+- provider는 `NmsHost` snapshot만 사용하고 live Rust 객체/포인터/JNIEnv를 반환하지 않는다.
+  읽기는 즉시, 쓰기는 `CompletableFuture`(소유 리전 완료)다.
+- provider는 thread-safe하고 idempotent해야 한다. Lane 1이 facade 초기화 뒤, POSTWORLD
+  플러그인 enable 전에 설치하고, 모든 플러그인 disable 뒤에 해제한다.
+- 설치 전/해제 후 호출은 명시적 bridge 오류(`NmsBridgeException`)로 실패한다. fallback 없음.
+
+Lane 2 adapter는 대략 다음 형태이며, 기존 world/player 클래스를 상속/수정하지 않는다.
+
+```java
+final class FerriteHandleProvider implements NmsHandleProvider {
+    @Override public ServerLevel level(org.bukkit.World world) {
+        if (!(world instanceof dev.ferrite.api.FerriteWorld ferrite)) {
+            throw new NmsBridgeException("unknown_world", world.getName() + " is not a Ferrite world");
+        }
+        return ServerLevel.of(ferrite.getUID());
+    }
+    // player/entity도 같은 방식으로 facade 타입에서 UUID를 읽는다.
+}
+```
+
+fixture 변경(구현 완료; 정확한 동작은 아래 구현 절 참고):
+
+```java
+ServerLevel level = NmsBridge.level(world);       // ((CraftWorld) world).getHandle() 대신
+ServerPlayer handle = NmsBridge.player(player);   // ((CraftPlayer) player).getHandle() 대신
+```
+
+### 왜 shared bridge를 첫 슬라이스에 쓰지 않는가
+
+`(CraftWorld) world` 자체를 성공시키려면 `FerriteWorld`의 상위 클래스가 결국
+`CraftWorld`여야 한다. 이는 Lane 2의 `UnsupportedWorldBase`/`UnsupportedPlayerBase` 계층과
+`FerriteWorld`/`FerritePlayer`의 단일 상속을 바꾸고, `ferrite-api-impl` → `ferrite-nms`
+빌드 의존을 만든다. 플레이어 쪽은 `UnsupportedEntityBase` 체인까지 재배치해야 해서 첫
+슬라이스의 최소 변경이 아니다. provider는 이 비용 없이 fixture와 플러그인이 쓸 단일 진입점을
+만들고, 나중에 shared bridge를 추가해도 `NmsBridge` 구현만 바꾸면 된다.
+
+**정직한 한계:** provider는 임의의 서드파티 플러그인이 쓰는 `(CraftWorld)`/
+`(CraftPlayer)` cast를 성공시키지 않는다. 그 cast 호환은 별도 shared bridge 단계가 필요하며,
+그때 Lane 2의 베이스 계층 변경과 모듈 의존을 다시 합의해야 한다. 이 제안은 선택된 NMS
+fixture/플러그인의 cast 필요를 없애는 것이지, CraftBukkit 클래스 계층을 흉내내는 것이 아니다.
+
+### Lane 1/2 합의가 필요한 것
+
+1. Lane 2: adapter 클래스의 패키지/이름, facade 타입에서 UUID를 읽는 공개 접근자, 설치 시점.
+2. Lane 1: `NmsBridge.install` 호출 위치(host 초기화 직후, POSTWORLD enable 전),
+   uninstall 시점, host classpath에 `ferrite-nms`가 있는지.
+3. coordinator: `ferrite-api-impl`이 `ferrite-nms`의 bridge 인터페이스에 의존해도 되는지.
+   안 되면 인터페이스만 중립 모듈로 옮긴다.
+4. shared bridge를 지금 할지, provider로 첫 통합을 통과한 뒤로 미룰지.
+
+## real host 통합 테스트 skeleton (2026-11-16)
+
+- 파일: `java/ferrite-nms/src/test/java/dev/ferrite/nms/integration/RealHostIntegrationTest.java`
+- 목적: typical fixture와 NMS fixture를 **같은 임베디드 JVM**에 로드하고, `onEnable` → NMS
+  왕복 → `onDisable`을 확인하는 실제 호스트 테스트의 골격.
+- 현재 동작: Lane 1의 host jar 또는 Lane 2의 typical jar가 없을 때만
+  `Assumptions.assumeTrue`로 **정직하게 skip**한다. NMS fixture jar가 없거나 Lane 1의 harness
+  seam이 없으면 skip하지 않고 assertion failure다. 가짜 성공이나 빈 assertion은 없다. 이
+  워크트리에는 Lane 1의 `java/settings.gradle.kts`, `ferrite-host` jar, Lane 2의
+  `fixtures/typical-plugin` jar가 없으므로 skip이 정상이다.
+- 전제(Lane 1/2가 채워야 함):
+  1. `java/settings.gradle.kts`가 `:ferrite-nms`, `:fixtures:nms-plugin`,
+     `:fixtures:typical-plugin`을 include하고 `https://repo.papermc.io/repository/maven-public/`를
+     추가한다.
+  2. `:ferrite-host`가 `build/libs/ferrite-host*.jar`를 만든다.
+  3. Lane 2가 `fixtures/typical-plugin/build/libs/typical-plugin*.jar`를 만든다.
+  4. Lane 1이 test seam `dev.ferrite.host.integration.HostIntegrationHarness`를 제공한다:
+     `static HostIntegrationHarness start(Path pluginsDir, Path dataDir)`와
+     `Map<String,String> reports()`(plugin 이름 → `"ok"`/오류). 이름/시그니처는 Lane 1이
+     확정할 수 있으며, 그때 skeleton의 reflection 문자열만 맞추면 된다. seam은 fixture를
+     enable하기 전에 Lane 2의 `NmsHandleProvider`를 `NmsBridge.install(provider)`로 설치해야
+     한다. provider가 없으면 NMS fixture가 `provider_not_installed`로 실패하고 report가
+     `"ok"`가 아니므로 이 테스트도 실패한다.
+- skeleton은 jar의 `plugin.yml`/main class를 먼저 검증하고, seam이 있으면 두 jar를 하나의
+  plugins 디렉터리에 넣어 한 번에 start한 뒤 두 report가 모두 `ok`인지 확인한다. seam이
+  없으면 assertion failure로 멈춘다.
+- 실행 명령(합의 뒤): `cd java && ./gradlew :ferrite-nms:test :fixtures:nms-plugin:jar`.
+  이 워크트리의 실제 루트에서는 아직 실행할 수 없다(settings/wrapper 없음).
+
+### 2026-11-16 검증 결과 (통합 준비 후속)
+
+- 실제 루트 명령 `cd java && ./gradlew :ferrite-nms:test :fixtures:nms-plugin:jar`:
+  **실행 불가**, exit 127 — `./gradlew: No such file or directory`. 이 워크트리에는 Lane 1의
+  `java/settings.gradle.kts`/wrapper가 없다. Lane 1이 include와 Paper repository를 고친 뒤
+  같은 명령을 다시 실행해야 한다.
+- 임시 harness `gradle -p /tmp/ferrite-nms-harness :ferrite-nms:test :fixtures:nms-plugin:jar
+  --no-daemon --console=plain` → **BUILD SUCCESSFUL**, 기존 **34 tests passed**, 새
+  `RealHostIntegrationTest` **1 skipped**(위 전제 누락), fixture jar 생성/UP-TO-DATE.
+- `git diff --check` → 출력 없음(clean). 커밋/푸시 없음; 변경은 작업 트리에만 있다.
+- 34개 기존 테스트는 삭제/약화/skip되지 않았다. 새 통합 skeleton만 전제가 없어 skip이며,
+  전제가 채워지면 자동으로 실행된다.
+
+## 구현: NmsBridge SPI + canonical weak handle cache (2026-11-16 후속)
+
+> 상태: **코드/테스트 완료**, 커밋/푸시 없음. Lane 2 소스와 Lane 1 계약 파일은 수정하지 않았다.
+> 계약 v2 state op 제안은 여전히 제안 상태이며 이 구현은 그 op들을 동결하지 않는다.
+
+### 추가 파일
+
+- `java/ferrite-nms/src/main/java/dev/ferrite/nms/bridge/NmsHandleProvider.java`
+- `java/ferrite-nms/src/main/java/dev/ferrite/nms/bridge/NmsBridge.java`
+- `java/ferrite-nms/src/main/java/dev/ferrite/nms/bridge/NmsBridgeException.java`
+- `java/ferrite-nms/src/test/java/dev/ferrite/nms/bridge/NmsBridgeTest.java`
+
+### 공개 SPI 시그니처
+
+```java
+package dev.ferrite.nms.bridge;
+
+public interface NmsHandleProvider {
+    ServerLevel level(org.bukkit.World world);
+    ServerPlayer player(org.bukkit.entity.Player player);
+    net.minecraft.world.entity.Entity entity(org.bukkit.entity.Entity entity);
+}
+
+public final class NmsBridge {
+    public static void install(NmsHandleProvider provider);
+    public static void uninstall(NmsHandleProvider expected);
+    public static void close();
+    public static boolean isInstalled();
+
+    public static ServerLevel level(org.bukkit.World world);
+    public static ServerPlayer player(org.bukkit.entity.Player player);
+    public static net.minecraft.world.entity.Entity entity(org.bukkit.entity.Entity entity);
+}
+
+public final class NmsBridgeException extends RuntimeException {
+    public String code();
+}
+```
+
+`NmsBridgeException.code()` 토큰:
+
+| code | 발생 지점 |
+|---|---|
+| `provider_not_installed` | Ferrite facade를 resolve했지만 provider가 없음. fallback 없음 |
+| `provider_already_installed` | 다른 provider가 설치된 상태에서 `install` |
+| `provider_owner_mismatch` | 다른 provider를 `uninstall(expected)` |
+| `unknown_world` / `unknown_player` / `unknown_entity` | provider가 모르는 facade를 거부 |
+| `unknown_handle` | provider가 null을 반환 |
+| `handle_identity_mismatch` | provider가 요청 facade와 다른 UUID의 handle 반환 |
+| `bridge_uninstalled` | resolve 도중 uninstall/close/replace로 generation이 바뀜 |
+
+provider가 던지는 `NmsHostException`은 wrap하거나 다른 코드로 바꾸지 않고 그대로 전달한다.
+
+### 캐시 semantics
+
+- world/player/entity별 `WeakHashMap` 3개를 둔다. 키는 Bukkit facade 객체이고 **weak**이며,
+  값은 facade를 참조하지 않는 detached snapshot handle이다. 따라서 bridge가 월드/플레이어를
+  붙잡아 메모리에 남기지 않는다. provider도 handle 안에 facade를 넣으면 안 된다.
+- 같은 facade 객체는 reachable한 동안 같은 handle 인스턴스로 resolve된다. 캐시 hit은 provider를
+  다시 호출하지 않는다. `NmsBridge.entity(player)`는 player cache를 사용하므로 player/entity 두
+  진입점이 서로 다른 player handle을 만들지 않는다.
+- `WeakHashMap`은 다음 접근에서 stale entry를 expunge한다. `uninstall`/`close`는 즉시 세 캐시를
+  비운다. 값이 strong인 것은 facade가 살아 있는 동안 canonical handle을 유지하기 위해서이며,
+  facade에 대한 strong reference는 남지 않는다.
+- 키 동등성은 facade의 `equals`/`hashCode`를 따른다. Ferrite facade는 수명 동안 안정적인
+  UUID identity를 제공해야 한다. 같은 UUID를 나타내는 alias가 equals로 묶이면 같은 handle을
+  공유할 수 있으며, bridge가 handle UUID를 검증하므로 다른 월드/플레이어 handle이 섞이지 않는다.
+- 실제 `org.bukkit.craftbukkit.CraftWorld`/`CraftPlayer`/`CraftEntity`는 상속된 `getHandle()`을
+  직접 사용하고 같은 캐시/epoch 규칙을 적용한다. Ferrite facade는 provider 경로를 사용한다.
+  둘 다 아니면 `provider_not_installed`로 실패한다.
+
+### 스레드 semantics
+
+- provider/cache/generation 상태는 하나의 private lock으로 보호한다. provider 호출은 lock 밖에서
+  수행하므로 느린 host snapshot 읽기가 다른 종류의 resolve나 install/uninstall을 막지 않는다.
+- 같은 facade에 대한 concurrent miss는 provider를 두 번 이상 호출할 수 있다. 각 결과를 UUID
+  검증한 뒤 lock 안에서 다시 cache를 확인하고, 먼저 들어간 하나만 canonical로 저장한다. 모든
+  호출자는 그 canonical 인스턴스를 받는다. provider는 thread-safe여야 한다.
+- `install`/`uninstall`/`close`는 generation을 증가시키고 cache를 비운다. resolve는 시작 시점의
+  generation을 기억한다. uninstall/close와 겹친 resolve가 늦게 끝나면
+  `bridge_uninstalled`로 실패하고 새 generation의 cache를 오염시키지 않는다. uninstall 전에
+  cache write/return을 마친 resolve는 uninstall 이전에 linearize된 것으로 보고 handle을 반환할
+  수 있다. 이미 반환된 handle은 detached snapshot이라 uninstall 후에도 읽을 수 있지만, 새 bridge
+  lookup은 다시 install해야 한다.
+- `install`은 한 provider만 허용한다. 같은 인스턴스를 다시 install하는 것은 idempotent no-op,
+  다른 인스턴스는 `provider_already_installed`다. `uninstall(expected)`는 설치된 provider가
+  없으면 no-op, 다른 provider면 `provider_owner_mismatch`로 실패하고 현재 provider를 유지한다.
+  `close()`는 몇 번 호출해도 안전하며 provider-specific close hook은 호출하지 않는다(SPI에 없음).
+
+### Lane 2가 구현할 것
+
+1. `ferrite-api-impl`에 `ferrite-nms` 의존성을 추가한다. 방향은
+   `ferrite-api-impl -> ferrite-nms` 단방향이며, `ferrite-nms`는 Lane 2 구현 클래스를 import하지
+   않는다.
+2. 공개 facade 타입에 대한 adapter에서 `NmsHandleProvider`의 세 메서드를 구현한다. world는
+   `world.getUID()`, player/entity는 `getUniqueId()`로 UUID를 읽고 각각
+   `ServerLevel.of(uuid)`, `ServerPlayer.of(uuid)`, `Entity.of(uuid)`를 반환한다. facade 종류가
+   아니면 `NmsBridgeException("unknown_world"|"unknown_player"|"unknown_entity", ...)`로
+   거부한다.
+3. adapter는 `FerriteWorld`/`FerritePlayer`의 final 상속 계층을 바꾸지 않는다. 별도 클래스로
+   구현하고, facade concrete type이 public이 아니면 bridge가 impl을 참조하지 않도록 public
+   marker/accessor를 Lane 2가 제공한다.
+4. provider는 thread-safe하고 stateless하게 유지한다. facade를 field에 저장하거나 handle에
+   넣지 않는다. bridge가 canonical cache를 소유하므로 provider에 별도 strong cache를 두지 않는다.
+5. `install`/`uninstall`을 resolve 메서드 안에서 호출하지 않는다.
+
+### Lane 1이 할 것
+
+1. `java/settings.gradle.kts`에 `:ferrite-nms`, `:fixtures:nms-plugin`,
+   `:fixtures:typical-plugin`을 include하고 Paper repository
+   (`https://repo.papermc.io/repository/maven-public/`)를 추가한다. host classpath에는
+   `ferrite-nms`와 Lane 2의 provider 구현이 함께 있어야 한다.
+2. host attach/facade 초기화 뒤, POSTWORLD 플러그인 `onEnable` 전에
+   `NmsBridge.install(provider)`를 호출한다. provider가 없거나 설치에 실패하면 startup을
+   실패시킨다. duplicate/wrong-owner 예외를 삼키지 않는다.
+3. 모든 플러그인 `onDisable` 뒤, host 종료 전에 `finally`에서
+   `NmsBridge.uninstall(provider)`를 호출한다. 이어서 `NmsBridge.close()`를 호출해도 된다
+   (idempotent). resolve 도중 uninstall이 발생하면 해당 resolve는 `bridge_uninstalled`로
+   실패하는 것이 정상이다.
+4. embedded integration harness는 fixture를 enable하기 전에 provider를 설치하고, 종료 시
+   uninstall한다. NMS fixture의 report가 `ok`가 아니면 integration test는 실패해야 하며,
+   provider 부재를 skip으로 바꾸지 않는다.
+5. `java/ferrite-nms/build.gradle.kts`의 test task는 이제 `:fixtures:nms-plugin:jar`에 의존한다.
+   따라서 settings에 fixture include가 없으면 `:ferrite-nms:test` configuration부터 실패한다.
+   이는 의도한 Lane 1 blocker다.
+
+### fixture / integration 갱신
+
+- `NmsFixturePlugin`은 `((CraftWorld) world).getHandle()` / `((CraftPlayer) player).getHandle()`
+  cast를 제거하고 `NmsBridge.level(world)` / `NmsBridge.player(player)`를 사용한다. 시작 시
+  `NmsBridge.isInstalled()`를 확인하므로 provider가 없으면 `onEnable`이 명시적으로 실패한다.
+  player가 있으면 `NmsBridge.entity(player) == playerHandle`도 확인해 canonical player handle을
+  검증한다.
+- `RealHostIntegrationTest`는 Lane 1 host jar 또는 Lane 2 typical jar가 없을 때만 skip한다.
+  NMS fixture jar 누락과 Lane 1 harness seam 누락은 assertion failure다. host가 provider를
+  설치하지 않으면 NMS fixture report가 실패하므로 테스트도 실패한다.
+- 여전히 실제 임베디드 JVM 통합은 실행되지 않았다. 이 워크트리에는 Lane 1 host jar/harness와
+  Lane 2 typical jar가 없다.
+
+### 아직 불가능한 것
+
+- `(org.bukkit.craftbukkit.CraftWorld) ferriteWorld`와
+  `(org.bukkit.craftbukkit.entity.CraftPlayer) ferritePlayer` cast는 여전히 실패한다. 이 bridge는
+  선택된 NMS fixture/플러그인이 cast 없이 handle을 얻는 명시적 진입점이며, CraftBukkit 클래스
+  계층을 흉내내지 않는다. 서드파티 플러그인의 cast 호환은 Lane 2의
+  `UnsupportedWorldBase`/`UnsupportedPlayerBase` 계층을 바꾸는 별도 shared-bridge 단계가 필요하다.
+- live entity/player/world 객체, Rust 포인터, `JNIEnv`, 전체 `net.minecraft` 필드는 노출하지 않는다.
+- Lane 2 provider 구현과 real-host 통합 증거는 아직 없다.
+
+### 검증 (2026-11-16)
+
+- 임시 harness:
+  `gradle -p /tmp/ferrite-nms-harness :ferrite-nms:test :fixtures:nms-plugin:jar --no-daemon --console=plain`
+  → **BUILD SUCCESSFUL**. 결과 XML 집계: **tests=47, passed=46, skipped=1, failures=0, errors=0**.
+  기존 34개 테스트는 모두 passed, 새 `NmsBridgeTest` 12개는 모두 passed, `RealHostIntegrationTest`
+  1개만 Lane 1/2 산출물 부재로 skipped.
+- fixture jar `java/fixtures/nms-plugin/build/libs/nms-plugin.jar` 생성/UP-TO-DATE 확인.
+- 실제 루트: `cd java && ./gradlew :ferrite-nms:test :fixtures:nms-plugin:jar --no-daemon`
+  → **exit 127**, `./gradlew: No such file or directory`. Lane 1의 `java/settings.gradle.kts`와
+  wrapper가 이 워크트리에 없어 실행 불가; Lane 1 산출물이 들어온 뒤 같은 명령을 재실행해야 한다.
+- `git diff --check` → clean (exit 0). 이 절 작성 시점에는 커밋/푸시 없음.
+
+## NMS 코어 커밋 및 재검증 (2026-11-16 재개)
+
+- 브랜치: `yxshadxw/plugin-b-nms`
+- NMS 코어 커밋: `279b5ce8558776e4ef6eaf143a4654a82d501e88`
+  (`fix(plugin-nms): keep only CraftBukkit's mirror signature`).
+- 변경 파일은 Lane 3 소유 2개뿐이다: `CraftItemStack.java`, `CraftItemStackTest.java`.
+  `CraftPlayer`, `CraftEntity`, `ServerPlayer`, `EntitySnapshot`, NMS fixture, real-host
+  integration 경로는 변경하지 않았다. Lane 5 baseline 파일은 이전 스냅샷 커밋에 이미 존재하며
+  이 커밋의 diff에는 없다.
+- 수정: CraftBukkit에 없는 `asCraftMirror(org.bukkit.inventory.ItemStack)` overload를 제거했다.
+  이 overload는 `asCraftMirror(null)`을 모호하게 만들 수 있었다. 남은
+  `asCraftMirror(net.minecraft.world.item.ItemStack)`은 계속 명시적
+  `UnsupportedOperationException`을 던지고, 테스트가 public mirror method가 하나뿐임을 고정한다.
+- 코어 전용 테스트: 7개 코어 테스트 클래스에 대해
+  `gradle -p /tmp/ferrite-nms-harness :ferrite-nms:test --rerun-tasks --no-daemon --console=plain --tests ...`
+  → **BUILD SUCCESSFUL**, **tests=39, passed=39, skipped=0, failures=0, errors=0**.
+- 전체 NMS 테스트:
+  `gradle -p /tmp/ferrite-nms-harness :ferrite-nms:test --rerun-tasks --no-daemon --console=plain`
+  → **BUILD SUCCESSFUL**, **tests=48, passed=47, skipped=1, failures=0, errors=0**.
+  skipped 1개는 Lane 1 host/Lane 2 typical jar 부재로 인한 `RealHostIntegrationTest`다.
+- fixture jar는 test task 의존성으로 다시 빌드됐다. `git diff --check` → clean (exit 0).
+- 실제 루트 `cd java && ./gradlew ...`는 여전히 wrapper/settings 부재로 실행 불가(exit 127);
+  위 임시 harness 결과가 이 워크트리의 검증이다.

@@ -1,0 +1,7 @@
+name: FerriteNmsFixture
+version: 0.1.0
+main: dev.ferrite.fixtures.nms.NmsFixturePlugin
+api-version: '26.3'
+load: POSTWORLD
+folia-supported: true
+description: Exercises Ferrite's selected clean-room NMS surface end to end.
