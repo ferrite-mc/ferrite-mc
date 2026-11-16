@@ -39,6 +39,22 @@ class UnsupportedApiTest {
                     player::spigot);
             assertTrue(spigot.getMessage().contains("Player#spigot"));
 
+            UnsupportedOperationException entityScheduler =
+                    assertThrows(UnsupportedOperationException.class,
+                            () -> FerriteContext.withPlugin("UnsupportedPlugin", player::getScheduler));
+            assertTrue(entityScheduler.getMessage().contains("Player#getScheduler"),
+                    entityScheduler.getMessage());
+
+            // Paper plugin commands go through the lifecycle-event API in 26.3. The first
+            // slice deliberately refuses that channel instead of silently dropping the
+            // handler; a plugin must use plugin.yml commands. `LifecycleEvents.*` cannot
+            // initialize without Paper's lifecycle service provider, so exercise the
+            // configuration entry point that Paper's typed overload delegates to.
+            UnsupportedOperationException lifecycle = assertThrows(UnsupportedOperationException.class,
+                    () -> plugin.getLifecycleManager().registerEventHandler(null));
+            assertTrue(lifecycle.getMessage().contains("lifecycle event registration"),
+                    lifecycle.getMessage());
+
             UnsupportedOperationException load = assertThrows(UnsupportedOperationException.class,
                     () -> server.runtime().plugins().loadPlugin(new File("missing.jar")));
             assertTrue(load.getMessage().contains("PluginManager#loadPlugin"));

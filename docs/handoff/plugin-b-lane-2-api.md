@@ -252,3 +252,7 @@ limitation(특히 이벤트 지연, region scheduler, PDC/컴포넌트 범위)�
   - `TypicalFixtureIntegrationTest`: `world:name` 로그는 time/uid를 포함하므로 prefix
     검사, `preprocess:`는 명령 dispatch 뒤에 prefix 검사.
   - fixture/이벤트 테스트는 실제 Bukkit 동작에 맞춰 assertion 메시지만 보강.
+  - `UnsupportedApiTest`: `LifecycleEvents.COMMANDS`는 Paper lifecycle service provider가
+    없으면 static 초기화에 실패한다. facade가 구현한 configuration overload
+    (`registerEventHandler(null)`)로 명시적 거부를 검증해, 테스트 환경 문제와 facade
+    거부 동작을 분리했다.

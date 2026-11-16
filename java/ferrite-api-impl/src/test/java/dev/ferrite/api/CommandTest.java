@@ -1,6 +1,7 @@
 package dev.ferrite.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -13,6 +14,8 @@ import org.bukkit.GameMode;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.permissions.Permission;
+import org.bukkit.permissions.PermissionDefault;
 import org.junit.jupiter.api.Test;
 
 class CommandTest {
@@ -42,6 +45,12 @@ class CommandTest {
             assertNotNull(server.runtime().server().getPluginCommand("test-hello"));
             assertNotNull(server.runtime().server().getPluginCommand("CommandPlugin:test-hello"));
             assertNotNull(server.runtime().server().getPluginCommand("th"));
+
+            Permission hello = server.runtime().plugins().getPermission("TEST.HELLO");
+            assertNotNull(hello, "plugin.yml permissions must be registered");
+            assertEquals(PermissionDefault.OP, hello.getDefault());
+            assertTrue(server.runtime().plugins().getDefaultPermissions(true).contains(hello));
+            assertFalse(server.runtime().plugins().getDefaultPermissions(false).contains(hello));
 
             assertTrue(server.onMain(() -> server.runtime().commandDispatcher()
                     .dispatch(server.runtime().consoleSender(), "/test-hello Console")));
