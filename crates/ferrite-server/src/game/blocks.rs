@@ -194,7 +194,6 @@ fn lie_in_bed(player: &mut Player, head: [i32; 3], foot: [i32; 3]) {
     }
     player.sleeping = Some(foot);
     super::recipe_unlock::push_event(player.uuid, super::recipe_unlock::Event::SleptInBed);
-    crate::plugins::facts::set_sleeping(player.uuid, true);
     player.spawn = Some(foot);
 }
 
@@ -864,7 +863,6 @@ pub fn wake(player: &mut Player) {
     let Some(pos) = player.sleeping.take() else {
         return;
     };
-    crate::plugins::facts::set_sleeping(player.uuid, false);
     let Some(state) = state_at(player, pos) else {
         return;
     };

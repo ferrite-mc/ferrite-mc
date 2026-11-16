@@ -11,6 +11,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+ferrite-jvm = { path = "../ferrite-jvm" }
 mimalloc = "0.1"
 serde.workspace = true
 serde_json.workspace = true
@@ -30,7 +32,6 @@ ferrite-config = { path = "../ferrite-config" }
 ferrite-admin = { path = "../ferrite-admin" }
 ferrite-data.workspace = true
 ferrite-math = { path = "../ferrite-math" }
-ferrite-plugin = { path = "../ferrite-plugin" }
 ferrite-profiler = { path = "../ferrite-profiler" }
 ferrite-fluid = { path = "../ferrite-fluid" }
 
@@ -40,7 +41,6 @@ ferrite-item = { path = "../ferrite-item", features = ["protocol"] }
 ferrite-inventory = { path = "../ferrite-inventory" }
 ferrite-recipe = { path = "../ferrite-recipe" }
 ferrite-loot = { path = "../ferrite-loot" }
-ferrite-jvm = { path = "../ferrite-jvm" }
 
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "2", features = [] }

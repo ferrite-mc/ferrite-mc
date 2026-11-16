@@ -47,7 +47,7 @@ struct BrewingMix {
 #[derive(Clone, Debug, PartialEq)]
 struct ResultExtras {
     damage: i32,
-    meta: Option<ferrite_plugin::ItemMetaSpec>,
+    meta: Option<crate::game::plugin_types::ItemMetaSpec>,
 }
 
 impl PluginRecipes {
@@ -747,7 +747,7 @@ fn addable(kind: &RecipeKind) -> bool {
 pub fn add_plugin_recipe(
     id: &str,
     json: &str,
-    meta: Option<ferrite_plugin::ItemMetaSpec>,
+    meta: Option<crate::game::plugin_types::ItemMetaSpec>,
     damage: i32,
 ) -> Result<bool, String> {
     let Some(book) = BOOK.get_or_init(load).as_ref() else {
@@ -1305,8 +1305,8 @@ mod tests {
         assert!(add_plugin_recipe("plugin:broken", "{", None, 0).is_err());
     }
 
-    fn named(text: &str) -> ferrite_plugin::ItemMetaSpec {
-        ferrite_plugin::ItemMetaSpec {
+    fn named(text: &str) -> crate::game::plugin_types::ItemMetaSpec {
+        crate::game::plugin_types::ItemMetaSpec {
             name: Some(format!(r#"{{"text":"{text}"}}"#)),
             lore: vec![r#"{"text":"made by a plugin"}"#.to_owned()],
             enchants: vec![("minecraft:sharpness".to_owned(), 3)],

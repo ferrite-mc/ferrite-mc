@@ -1,7 +1,54 @@
 # 플러그인 API 스텁 현황 (세션 기록)
 
-> **2026-11-14:** 가장 최근 상세 기록은 바로 아래 2026-11-14 claude-api-3 절이다. 레인 병합 뒤에는
-> 현재 소스와 대조해야 하며, 요약은 `README.md`와 `docs/BACKLOG.md`를 따른다.
+> **2026-11-15:** 가장 최근 상세 기록은 바로 아래 2026-11-15 plugins-z NMS 표면 감사 절이다.
+> 레인 병합 뒤에는 현재 소스와 대조해야 하며, 요약은 `README.md`와 `docs/BACKLOG.md`를 따른다.
+
+## 2026-11-15 — plugins-z (실제 플러그인 NMS 표면 감사)
+
+실제 26.3 클라이언트, CMI, EULA가 필요한 환경은 확인하지 않았다. 공개 배포된 Bukkit/Spigot jar를
+`java/ferrite-api-impl/tools/Scan.java`로 최신 shaded API jar와 대조했다. 스캔 결과는 gitignored인
+`java/ferrite-api-impl/build/nms-audit/*.scan.txt`에 있다. 이 스캐너는 클래스 상수 풀의 직접 참조만
+찾으므로, 문자열 기반 reflection으로 접근하는 NMS는 이 수치에 포함되지 않는다.
+
+| 플러그인 | NMS 참조 | 누락 클래스 | 누락 멤버 | CraftBukkit 누락 클래스 |
+|---|---:|---:|---:|---:|
+| EssentialsX 2.22.0 | 4 | 0 | 0 | 0 |
+| LuckPerms-Bukkit 5.5.71 | 0 | 0 | 0 | 0 |
+| Vault 1.7.3 | 0 | 0 | 0 | 0 |
+| PlaceholderAPI 2.12.3 | 0 | 0 | 0 | 0 |
+| ProtocolLib 5.4.0 | 8 | **2 → 0** | 0 | 0 |
+| packetevents-spigot 2.14.0 | 0 | 0 | 0 | 0 |
+| ViaVersion 5.12.3 | 0 | 0 | 0 | 0 |
+| worldedit-bukkit 7.4.6 | 1184 | 215 | 144 | 32 |
+
+- **구현: ProtocolLib의 실제 NMS 누락 2개.** `com.mojang.datafixers.util.Either`와 `Pair`를
+  DataFixerUpper 8.0.16의 공개 시그니처에 맞춘 클린룸 구현으로 추가했다(`App`/`K1` 마커 포함).
+  `DataFixerValuesTest`가 값·변환·`orThrow`·수집기 계약을 확인한다. shaded jar 재생성 뒤
+  ProtocolLib 재스캔은 `nms references=8, missing-classes=0, missing-members=0`이다.
+- **ProtocolLib 전체 스캔도 폐쇄했다.** ProtocolLib이 참조하는 Spigot 시대 `commons-lang` 2와
+  `json-simple`을 Gradle 런타임에 추가했다. 재스캔 결과는 `bukkit-api`, `craftbukkit`, `nms`,
+  `other` 네 버킷 모두 `missing-classes=0, missing-members=0`이다. `Scan.java`는 `[B` 같은
+  원시 배열을 클래스 `B`로 오인하던 버그도 고쳤다.
+- **검증:** `DataFixerValuesTest` 3개와 `NmsCoreValuesTest` 3개, 전체 Java
+  `./gradlew test --rerun-tasks` 455개 통과 (`failures=0`, `errors=0`, `skipped=0`),
+  `git diff --check` 통과. 실제 서버 부팅은 아니다.
+- **WorldEdit은 전체 NMS 범위다.** `com.mojang.serialization`, `DataFixer`, 215개 `net.minecraft`
+  클래스와 144개 멤버가 필요해 이번 슬라이스에서 구현하지 않았다. 이것은 “전체 NMS 구현”에
+  해당하며, 현재 클린룸 래퍼 범위 밖이다. 26.3 서버 jar의 NMS는 7,744개 클래스·325개
+  패키지이고, 현재 래퍼는 38개 파일이다.
+- **정확한 디스크립터 스캔.** `Scan.java`가 메서드 이름과 인자 개수만 보던 것을 JVM 인자·반환
+  디스크립터까지 비교하도록 고쳤다. 정확한 결과는 `*.exact.scan.txt`에 있으며, 위 WorldEdit
+  NMS 멤버 144개와 PlaceholderAPI Bukkit 멤버 7개가 이 방식의 수치다.
+- **26.3 전용 WorldEdit 어댑터.** WorldEdit jar의 `v26_3` 어댑터 68클래스만 추출해 스캔하면
+  전체 버전 어댑터의 215/144가 아니라 **117클래스·80멤버**가 실제 26.3 대상이다. `Direction`,
+  `SectionPos`, `UUIDUtil`을 26.3 시그니처로 구현하고 테스트한 뒤 재스캔은 **114클래스·80멤버**다.
+  `BlockPosition`·`EnumDirection`·`SectionPosition`은 26.3 서버 jar에 없는 구 Spigot 매핑 이름이므로
+  구현 대상에서 제외했다. 남은 WorldEdit 표면은 `worldedit-v26_3.scan.txt`와
+  `worldedit-v26_3.after.scan.txt`에 있다.
+- **EssentialsX의 남은 누락은 Bukkit 구 API다.** `Achievement`, `Potion`, `Material.MONSTER_EGG`,
+  `BannerMeta#getBaseColor` 같은 26.3에서 제거·변경된 API이며 NMS 누락은 아니다.
+- 잘못 받은 NeoForge/Fabric 로더 jar는 감사 대상에서 제외하고 삭제했다. CMI는 유료라 jar가 없어
+  스캔하지 못했다. 실제 서버에서 ProtocolLib/WorldEdit을 부팅해 성공했다고 주장하지 않는다.
 
 ## 2026-11-14 — claude-api-3 (Lane B, B5): `World#getBlockState` / `Block#getState`
 
@@ -313,7 +360,7 @@ CMI가 동작한다고 말할 수 없다.
 - 아이템 메타: 책 메타처럼 이름·로어·인챈트·불괴·모델·수리비·내구도·PDC·아이템 플래그 밖의 메타를 `setItem`으로 쓰는 경로는 거부한다. PDC는 위 원시/배열 타입만 지원하며, `HIDE_ADDITIONAL_TOOLTIP`은 전체 툴팁 숨김으로 근사한다.
 - `unloadChunk` 강제 언로드 없음. `findLightningRod`는 불러온 열의 맨 위 블록만 본다. `Player#sendBlockUpdate`는 표지판·배너·머리·컨테이너·화로류·주크박스·렉턴·명령 블록·스포너·비하이브·스컬크·구조물 블록·장식된 항아리·브러시블 블록·선반·신호기·마법부여대·엔드 게이트웨이를 보낸다. 침대(26.3에 블록 엔티티 없음), 종, 비교기는 바닐라 저장 데이터가 없어 거부한다(근거: `plugins/tile_update.rs`의 `FAMILIES`/`SETTINGS`와 `PlayerMisc.sendBlockUpdate`).
 - 실제 마인크래프트 클라이언트에서 렌더링은 한 번도 확인하지 못했다(단위·Gradle 테스트만).
-- 전체 `cargo test --workspace`에서 `chest_contents_are_shared_saved_and_spilled_when_broken`가 부하 시 한 번 실패했고 단독 실행은 통과했다(불안정 테스트로 의심, 원인 미조사).
+- **불안정 테스트 수정(2026-11-15).** 전체 `cargo test --workspace`에서 `chest_contents_are_shared_saved_and_spilled_when_broken`가 부하 시 한 번 실패했다. 원인은 블록 파괴 뒤 `until(4)`가 파괴 sequence 2의 ack가 아니라 앞선 `UseItemOn` sequence 1의 ack를 먼저 소비할 수 있던 테스트 경합이다. 두 컨테이너 테스트가 `wait_for_block_ack(bot, 2)`로 파괴 ack를 명시적으로 기다리게 고쳤다.
 - 엔드와 피스톤은 `main`에 병합되어 서버 측 동작과 봇/단위 테스트가 있다. 남은 것은 실제 클라이언트
   화면 검증과 문서에 적힌 근사 동작(드래곤 선회, 게이트웨이 빔, 피스톤 애니메이션)이다.
 - **구조물 API:** `StructureManager.createStructure()`가 메모리 구조물을 돌려준다. `fill`(영역 복사), `place`(회전·반전·무결성·팔레트), `getPalettes`, `saveStructure`/`loadStructure`(파일·스트림·키), `deleteStructure`, `getStructureFile`, `copy` 구현됨. 회전·반전 시 `facing`, `axis`, 표지판 `rotation`, 계단/레일 `shape`, 문 `hinge`, 수평 연결 키(`north`/`east`/`south`/`west`)가 함께 돈다. `BlockTransformer`와 `EntityTransformer`는 변환된 위치에서 호출되고, 블록 엔티티 데이터(상자·표지판 등)는 호스트에서 한 번에 읽어 최종 변환 위치에 `/data merge block`으로 되돌린다. 비플레이어 엔티티는 기본 월드·네더·엔드·런타임 월드 모두 저장 NBT를 캡처해 회전·반전 후 스냅샷으로 재생성한다(`plugins::world_id`). 키로 읽은 템플릿은 그대로 서버(`/place template`)가 놓으며 `fill`은 할 수 없다.

@@ -35,7 +35,6 @@ pub(super) async fn unload_runtime_world(
     save: bool,
     players_inside: bool,
     make_ctx: impl Fn(&RuntimeWorldDescriptor) -> TickContext,
-    view: Option<&Arc<crate::plugins::SourceWorldView>>,
 ) -> anyhow::Result<bool> {
     let Some(descriptor) = catalog.get(id).cloned() else {
         return Ok(false);
@@ -87,9 +86,6 @@ pub(super) async fn unload_runtime_world(
         });
     }
     catalog.unload(id);
-    if let Some(view) = view {
-        view.unregister_world(id);
-    }
     Ok(true)
 }
 
@@ -327,7 +323,7 @@ mod tests {
         let blocker = dir.path().join("extra").join(entity_save::DIRECTORY);
         std::fs::write(&blocker, b"not a directory").unwrap();
 
-        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx)
             .await
             .expect_err("the flush must fail loudly");
         assert!(format!("{error:#}").contains("restored"), "{error:#}");
@@ -361,7 +357,7 @@ mod tests {
             ));
         });
         assert!(
-            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx)
                 .await
                 .unwrap()
         );
@@ -402,7 +398,7 @@ mod tests {
         let (descriptor, cow) = setup(dir.path(), &registry, &mut worlds, &mut catalog).await;
         let id = descriptor.id;
 
-        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, true, &ctx, None)
+        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, true, &ctx)
             .await
             .expect_err("a world with a player inside must not unload");
         assert!(
@@ -418,7 +414,7 @@ mod tests {
 
         // Once the player has left, the same world unloads normally.
         assert!(
-            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx)
                 .await
                 .unwrap()
         );
@@ -447,7 +443,7 @@ mod tests {
         std::fs::write(&blocker, b"not a directory").unwrap();
 
         assert!(
-            unload_runtime_world(&mut worlds, &mut catalog, id, false, false, &ctx, None)
+            unload_runtime_world(&mut worlds, &mut catalog, id, false, false, &ctx)
                 .await
                 .expect("save=false does not touch the disk, so it cannot fail on it")
         );
@@ -502,7 +498,7 @@ mod tests {
         let blocker = dir.path().join("extra").join("dimensions");
         std::fs::write(&blocker, b"not a directory").unwrap();
 
-        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+        let error = unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx)
             .await
             .expect_err("the chunk flush must fail loudly");
         assert!(format!("{error:#}").contains("restored"), "{error:#}");
@@ -518,7 +514,7 @@ mod tests {
             region.entities.insert(again);
         });
         assert!(
-            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx, None)
+            unload_runtime_world(&mut worlds, &mut catalog, id, true, false, &ctx)
                 .await
                 .unwrap()
         );

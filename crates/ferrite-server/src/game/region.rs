@@ -7,6 +7,7 @@ use super::{
     },
     valid_move,
 };
+use crate::game::plugin_types::InteractAction;
 use ferrite_entity::{
     BlockGetter, EntityRecord, EntityStore, Flags, Rng, ai, arrow, bobber, chunk_of, combat,
     effect::{ActiveEffects, Effect, EffectEvent, MobEffectInstance},
@@ -18,7 +19,6 @@ use ferrite_entity::{
     tracker::{self, Viewer, ViewerKey},
 };
 use ferrite_net::game::{Outbound, OutboundSender, ServerboundPlay, packet};
-use ferrite_plugin::InteractAction;
 use ferrite_profiler::Timings;
 use ferrite_protocol::{Encode, Packet, VarInt, packets::play::*};
 use ferrite_region::{ChunkPos, RegionData, SectionPos};
@@ -126,13 +126,11 @@ pub enum Command {
     /// waiting plugin call.
     PluginBreakBlock {
         position: [i32; 3],
-        ticket: u64,
     },
     /// A plugin put the player to bed; the verdict answers the waiting plugin call.
     PluginSleep {
         position: [i32; 3],
         force: bool,
-        ticket: u64,
     },
     Input(ServerboundPlay),
     Leave,
@@ -154,18 +152,18 @@ pub enum Command {
         title: String,
         rows: u8,
         shulker: bool,
-        items: Vec<Option<ferrite_plugin::ItemSnapshot>>,
+        items: Vec<Option<crate::game::plugin_types::ItemSnapshot>>,
     },
     /// A plugin's change to one of this player's shoulders.
     PluginShoulder {
         left: bool,
-        op: ferrite_plugin::ShoulderOp,
+        op: crate::game::plugin_types::ShoulderOp,
     },
     /// A packet a plugin sends to this player.
-    PluginPacket(ferrite_plugin::PluginPacket),
+    PluginPacket(crate::game::plugin_types::PluginPacket),
     /// A plugin's direct change to a survival number.
     PluginSurvival {
-        stat: ferrite_plugin::SurvivalStat,
+        stat: crate::game::plugin_types::SurvivalStat,
         value: f32,
     },
     /// A plugin's item cooldown for one group.
@@ -277,7 +275,7 @@ pub enum Command {
     /// A plugin's `PlayerInventory#setItem`, applied on the owning region thread.
     SetInventorySlot {
         slot: u8,
-        item: Option<ferrite_plugin::ItemSnapshot>,
+        item: Option<crate::game::plugin_types::ItemSnapshot>,
     },
     /// A plugin sends the colours and visible cursors of a map.
     MapData {
@@ -285,7 +283,7 @@ pub enum Command {
         scale: u8,
         locked: bool,
         colors: Vec<u8>,
-        decorations: Vec<ferrite_plugin::MapDecoration>,
+        decorations: Vec<crate::game::plugin_types::MapDecoration>,
     },
     /// A plugin shows a written book to the player.
     OpenBook {
@@ -314,7 +312,7 @@ pub enum Command {
         repair: i32,
         flags: Vec<String>,
         custom_data: Option<ferrite_nbt::Compound>,
-        book: Option<ferrite_plugin::BookFields>,
+        book: Option<crate::game::plugin_types::BookFields>,
         extra: Option<ferrite_nbt::Compound>,
     },
     /// A plugin pointed the filled map in a slot at a saved map.
@@ -372,7 +370,7 @@ pub enum Command {
         death_message: String,
     },
     /// A Paper `EntityScheduler` task for this player, run on the region that owns them.
-    PluginEntityTask(ferrite_plugin::EntityTask),
+    PluginEntityTask(crate::game::plugin_types::EntityTask),
     /// `/effect give`: apply a mob effect on the owning region thread.
     ApplyEffect {
         effect: i32,
@@ -518,7 +516,7 @@ pub(super) struct ItemMetaFields {
     pub repair: i32,
     pub flags: Vec<String>,
     pub custom_data: Option<ferrite_nbt::Compound>,
-    pub book: Option<ferrite_plugin::BookFields>,
+    pub book: Option<crate::game::plugin_types::BookFields>,
     pub extra: Option<ferrite_nbt::Compound>,
 }
 
@@ -553,7 +551,7 @@ fn tooltip_display(flags: &[String]) -> Option<ferrite_item::TooltipDisplay> {
 /// [`with_meta`] for the metadata of a tile snapshot item (`Player#sendBlockUpdate`).
 pub(super) fn with_meta_spec(
     stack: ferrite_item::ItemStack,
-    meta: &ferrite_plugin::ItemMetaSpec,
+    meta: &crate::game::plugin_types::ItemMetaSpec,
 ) -> ferrite_item::ItemStack {
     with_meta(
         stack,
@@ -672,7 +670,7 @@ pub(super) fn with_meta(
 /// The book component for a `BookMeta`, when `item` is the matching book item.
 fn book_content(
     item: Option<&str>,
-    book: &ferrite_plugin::BookFields,
+    book: &crate::game::plugin_types::BookFields,
 ) -> Option<ferrite_item::Component> {
     use ferrite_item::{Component, Filterable, WritableBookContent, WrittenBookContent};
     let plain = |raw: String| Filterable {
@@ -912,20 +910,20 @@ pub struct TickContext {
     pub hooks: Option<Arc<SharedPluginHooks>>,
 }
 
-/// The Bukkit UUID a region's world is published under, for world events.
-fn plugin_world_id(ctx: &TickContext) -> Uuid {
-    match ctx.world_id {
-        super::WorldId::Vanilla(dimension) => crate::plugins::world_id(dimension),
-        super::WorldId::Runtime(id) => id,
-    }
-}
-
 /// Picks the bridge for an event about a non-player entity: the live shared handle first, else
 /// the first player's own handle. Exactly one bridge is returned, so the event fires once.
 pub(super) fn resolve_damage_hooks(
     shared: Option<&SharedPluginHooks>,
-    mut players: impl Iterator<Item = (Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)>,
-) -> Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)> {
+    mut players: impl Iterator<
+        Item = (
+            Arc<dyn crate::game::plugin_types::ServerHooks>,
+            PluginEventPolicy,
+        ),
+    >,
+) -> Option<(
+    Arc<dyn crate::game::plugin_types::ServerHooks>,
+    PluginEventPolicy,
+)> {
     shared
         .and_then(SharedPluginHooks::load)
         .or_else(|| players.next())
@@ -936,14 +934,19 @@ pub(super) fn resolve_damage_hooks(
 /// capturing it at startup.
 #[derive(Default)]
 pub struct SharedPluginHooks {
-    current: Mutex<Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)>>,
+    current: Mutex<
+        Option<(
+            Arc<dyn crate::game::plugin_types::ServerHooks>,
+            PluginEventPolicy,
+        )>,
+    >,
 }
 
 impl SharedPluginHooks {
     /// Replaces the bridge every later event sees.
     pub fn publish(
         &self,
-        hooks: Option<Arc<dyn ferrite_plugin::ServerHooks>>,
+        hooks: Option<Arc<dyn crate::game::plugin_types::ServerHooks>>,
         policy: PluginEventPolicy,
     ) {
         *self
@@ -952,7 +955,12 @@ impl SharedPluginHooks {
             .unwrap_or_else(|error| error.into_inner()) = hooks.map(|hooks| (hooks, policy));
     }
 
-    pub fn load(&self) -> Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)> {
+    pub fn load(
+        &self,
+    ) -> Option<(
+        Arc<dyn crate::game::plugin_types::ServerHooks>,
+        PluginEventPolicy,
+    )> {
         self.current
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -976,6 +984,7 @@ impl SharedCommandTree {
     }
 
     /// Replaces the tree every later command lookup sees.
+    #[cfg(test)]
     pub fn publish(&self, tree: Arc<ferrite_command::CommandDispatcher<super::commands::Source>>) {
         *self
             .current
@@ -1219,7 +1228,7 @@ pub struct Player {
     /// Permission level at join; command block editing needs 2 (gamemasters).
     pub permission: u8,
     /// Plugin event hooks; `None` when the server runs without plugins.
-    pub plugins: Option<Arc<dyn ferrite_plugin::ServerHooks>>,
+    pub plugins: Option<Arc<dyn crate::game::plugin_types::ServerHooks>>,
     /// What a failed plugin event means for the action it guards.
     pub plugin_event_errors: PluginEventPolicy,
     pub positions: Arc<Mutex<HashMap<Uuid, [f64; 3]>>>,
@@ -1231,6 +1240,8 @@ pub struct Player {
     pub yaw: f32,
     pub pitch: f32,
     pub ground: bool,
+    /// Vanilla `LivingEntity` fall-flying state, used by fireworks and riptide.
+    pub gliding: bool,
     pub chunk: ChunkPos,
     pub mailbox: Mailbox,
     pub outbound: OutboundSender,
@@ -1608,9 +1619,11 @@ fn material_name(state: u32) -> &'static str {
 /// Runs an event hook. A missing bridge allows the action; a failed call is
 /// decided by `plugin-event-errors` (Bukkit-compatible default: allow).
 fn event_allows(
-    plugins: Option<&dyn ferrite_plugin::ServerHooks>,
+    plugins: Option<&dyn crate::game::plugin_types::ServerHooks>,
     policy: PluginEventPolicy,
-    event: impl FnOnce(&dyn ferrite_plugin::ServerHooks) -> Result<bool, ferrite_plugin::Error>,
+    event: impl FnOnce(
+        &dyn crate::game::plugin_types::ServerHooks,
+    ) -> Result<bool, crate::game::plugin_types::Error>,
 ) -> bool {
     let Some(plugins) = plugins else {
         return true;
@@ -1627,10 +1640,12 @@ fn event_allows(
 /// Applies a Bukkit `EntityDamageEvent` result. `None` cancels the hit; a failed event follows
 /// `plugin-event-errors` (Allow keeps the original damage, Deny cancels it).
 pub(super) fn plugin_damage(
-    plugins: Option<&dyn ferrite_plugin::ServerHooks>,
+    plugins: Option<&dyn crate::game::plugin_types::ServerHooks>,
     policy: PluginEventPolicy,
     amount: f32,
-    event: impl FnOnce(&dyn ferrite_plugin::ServerHooks) -> Result<f64, ferrite_plugin::Error>,
+    event: impl FnOnce(
+        &dyn crate::game::plugin_types::ServerHooks,
+    ) -> Result<f64, crate::game::plugin_types::Error>,
 ) -> Option<f32> {
     let Some(plugins) = plugins else {
         return Some(amount);
@@ -1937,7 +1952,7 @@ impl Player {
     fn set_ground(&mut self, ground: bool) {
         self.ground = ground;
         if ground {
-            crate::plugins::facts::set_gliding(self.uuid, false);
+            self.gliding = false;
         }
     }
 
@@ -1973,9 +1988,8 @@ impl Player {
         for (x, z) in forget {
             send(self, &ForgetChunk { z, x });
             self.loaded.remove(&(x, z));
-            crate::plugins::facts::set_chunk_sent(self.uuid, x, z, false);
             if let Some(plugins) = self.plugins.clone() {
-                let _ = plugins.chunk_unloaded(ferrite_plugin::default_world_id(), x, z);
+                let _ = plugins.chunk_unloaded(crate::game::plugin_types::default_world_id(), x, z);
             }
             if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
                 loaded.remove(&(x, z));
@@ -2096,9 +2110,9 @@ impl Player {
         for (x, z, packet) in chunks {
             let _ = self.outbound.send(Outbound::Packet(packet.into()));
             self.loaded.insert((x, z));
-            crate::plugins::facts::set_chunk_sent(self.uuid, x, z, true);
             if let Some(plugins) = self.plugins.clone() {
-                let _ = plugins.chunk_loaded(ferrite_plugin::default_world_id(), x, z, true);
+                let _ =
+                    plugins.chunk_loaded(crate::game::plugin_types::default_world_id(), x, z, true);
             }
         }
         let held: Vec<_> = sent.iter().map(|&(x, z)| ChunkPos(x, z)).collect();
@@ -2399,7 +2413,7 @@ impl Player {
         if !super::interaction::may_break(self.gamemode, self.permission, state) {
             return false;
         }
-        let clicked = ferrite_plugin::BlockPosition {
+        let clicked = crate::game::plugin_types::BlockPosition {
             x: position[0],
             y: position[1],
             z: position[2],
@@ -2694,7 +2708,7 @@ impl Player {
             plugins.block_placed(
                 self.uuid,
                 &self.name,
-                ferrite_plugin::BlockPosition {
+                crate::game::plugin_types::BlockPosition {
                     x: target.x,
                     y: target.y,
                     z: target.z,
@@ -2793,7 +2807,9 @@ impl Player {
     /// which resends the original block or teleport state.
     fn plugin_allows(
         &self,
-        event: impl FnOnce(&dyn ferrite_plugin::ServerHooks) -> Result<bool, ferrite_plugin::Error>,
+        event: impl FnOnce(
+            &dyn crate::game::plugin_types::ServerHooks,
+        ) -> Result<bool, crate::game::plugin_types::Error>,
     ) -> bool {
         event_allows(self.plugins.as_deref(), self.plugin_event_errors, event)
     }
@@ -2898,7 +2914,11 @@ impl Player {
         self.sync_containers();
     }
 
-    fn set_inventory_slot(&mut self, slot: u8, item: Option<ferrite_plugin::ItemSnapshot>) {
+    fn set_inventory_slot(
+        &mut self,
+        slot: u8,
+        item: Option<crate::game::plugin_types::ItemSnapshot>,
+    ) {
         let slot = usize::from(slot);
         if slot >= ferrite_inventory::SIZE {
             return;
@@ -3467,9 +3487,8 @@ impl Player {
             self.survival.air = super::survival::MAX_AIR;
         }
         // The nether and the end start at y 0, so their void is 64 blocks below that.
-        let void = crate::plugins::facts::void_damage(super::plugin_world_id(self.world_id));
-        self.survival.void_y = f64::from(self.dimension.min_y()) + void.offset;
-        self.survival.void_damage = void.enabled.then_some(void.amount);
+        self.survival.void_y = f64::from(self.dimension.min_y()) - 64.0;
+        self.survival.void_damage = Some(4.0);
         let damage = self.survival.environment_tick(
             self.pos,
             self.ground,
@@ -3478,18 +3497,6 @@ impl Player {
             fire,
             self.gamemode,
             self.survival.sprinting,
-        );
-        crate::plugins::facts::set_fall_distance(self.uuid, self.survival.fall_distance as f32);
-        crate::plugins::facts::set_use_state(self.uuid, self.use_state());
-        crate::plugins::facts::set_vitals(
-            self.uuid,
-            crate::plugins::facts::Vitals {
-                saturation: self.survival.food.saturation,
-                exhaustion: self.survival.food.exhaustion,
-                absorption: self.survival.absorption,
-                air: self.survival.air,
-                fire_ticks: self.survival.fire_ticks,
-            },
         );
         for (kind, amount) in damage.into_iter().flatten() {
             if (fire_resistance && matches!(kind, DamageKind::Lava | DamageKind::Fire))
@@ -3561,27 +3568,6 @@ impl Player {
                 item: original,
             },
         );
-    }
-
-    /// What the player is using right now as `(hand, ticks left, ticks used)`; hand 0 is the
-    /// main hand, 1 the off hand. A bow or a raised shield has no end (vanilla 72000 ticks).
-    fn use_state(&self) -> Option<(u8, i32, i32)> {
-        if self.survival.dead {
-            return None;
-        }
-        if let Some(eating) = self.survival.eating {
-            let hand = u8::from(eating.slot == ferrite_inventory::OFFHAND);
-            return Some((hand, eating.remaining, EAT_TICKS - eating.remaining));
-        }
-        if self.using_bow {
-            return Some((0, 72_000 - self.bow_charge, self.bow_charge));
-        }
-        if self.blocking {
-            let main = self.inventory.get(self.hand_slot(0));
-            let hand = u8::from(!matches!(main.name(), Some("minecraft:shield")));
-            return Some((hand, 72_000, 0));
-        }
-        None
     }
 
     /// Vanilla `LivingEntity.startUsingItem` for the stack in `hand` (0 main, 1 off).
@@ -3997,7 +3983,6 @@ impl Player {
             None => spawn,
         };
         let old_loaded = std::mem::take(&mut self.loaded);
-        crate::plugins::facts::clear_sent_chunks(self.uuid);
         for (x, z) in old_loaded {
             let _ = self.signals.send(Signal::Hold {
                 world: self.world_id,
@@ -4140,7 +4125,6 @@ impl Player {
         let old = self.world_id;
         let old_dimension = self.dimension;
         let old_loaded = std::mem::take(&mut self.loaded);
-        crate::plugins::facts::clear_sent_chunks(self.uuid);
         for (x, z) in old_loaded {
             let _ = self.signals.send(Signal::Hold {
                 world: old,
@@ -4351,7 +4335,7 @@ impl Player {
                     continue;
                 }
                 Command::PluginSurvival { stat, value } => {
-                    use ferrite_plugin::SurvivalStat;
+                    use crate::game::plugin_types::SurvivalStat;
                     match stat {
                         SurvivalStat::Saturation => {
                             let food = self.survival.food.food as f32;
@@ -4449,9 +4433,7 @@ impl Player {
                     explosions,
                     entity,
                 } => {
-                    if crate::plugins::facts::is_gliding(self.uuid) {
-                        self.firework_launches.push((flight, explosions, entity));
-                    }
+                    self.firework_launches.push((flight, explosions, entity));
                     continue;
                 }
                 Command::PluginOpenStation { station } => {
@@ -4691,18 +4673,12 @@ impl Player {
                     }
                     continue;
                 }
-                Command::PluginSleep {
-                    position,
-                    force,
-                    ticket,
-                } => {
-                    let slept = super::blocks::plugin_sleep(self, position, force);
-                    crate::plugins::playerops::complete(ticket, slept);
+                Command::PluginSleep { position, force } => {
+                    super::blocks::plugin_sleep(self, position, force);
                     continue;
                 }
-                Command::PluginBreakBlock { position, ticket } => {
-                    let broke = self.plugin_break_block(position);
-                    crate::plugins::playerops::complete(ticket, broke);
+                Command::PluginBreakBlock { position } => {
+                    self.plugin_break_block(position);
                     continue;
                 }
                 Command::SetInventorySlot { slot, item } => {
@@ -4733,12 +4709,12 @@ impl Player {
                                             direction: decoration.direction as i8,
                                             caption: decoration.caption.map(
                                                 |caption| match caption {
-                                                    ferrite_plugin::MapCaption::Plain(text) => {
+                                                    crate::game::plugin_types::MapCaption::Plain(text) => {
                                                         ferrite_protocol::types::NetworkText::Plain(
                                                             text,
                                                         )
                                                     }
-                                                    ferrite_plugin::MapCaption::Rich(tag) => {
+                                                    crate::game::plugin_types::MapCaption::Rich(tag) => {
                                                         ferrite_protocol::types::NetworkText::Rich(
                                                             tag,
                                                         )
@@ -5102,7 +5078,7 @@ impl Player {
                     let pos = ferrite_protocol::types::BlockPos::unpack(p.location);
                     match p.status.0 {
                         0 if self.hit(pos).is_some() => {
-                            let clicked = ferrite_plugin::BlockPosition {
+                            let clicked = crate::game::plugin_types::BlockPosition {
                                 x: pos.x,
                                 y: pos.y,
                                 z: pos.z,
@@ -5175,7 +5151,7 @@ impl Player {
                                     plugins.block_broken(
                                         self.uuid,
                                         &self.name,
-                                        ferrite_plugin::BlockPosition {
+                                        crate::game::plugin_types::BlockPosition {
                                             x: pos.x,
                                             y: pos.y,
                                             z: pos.z,
@@ -5211,7 +5187,7 @@ impl Player {
                             self.uuid,
                             &self.name,
                             InteractAction::RightClickBlock,
-                            ferrite_plugin::BlockPosition {
+                            crate::game::plugin_types::BlockPosition {
                                 x: clicked.x,
                                 y: clicked.y,
                                 z: clicked.z,
@@ -5254,18 +5230,14 @@ impl Player {
                         },
                     );
                 }
-                ServerboundPlay::CookieResponse(p) => {
-                    crate::plugins::facts::set_cookie(self.uuid, &p.key, p.payload);
-                }
+                ServerboundPlay::CookieResponse(_) => {}
                 ServerboundPlay::ResourcePackResponse(p) => {
-                    crate::plugins::facts::set_pack_status(self.uuid, p.action.0);
                     if let Some(plugins) = &self.plugins {
                         let _ =
                             plugins.resource_pack_status(self.uuid, &self.name, p.id, p.action.0);
                     }
                 }
                 ServerboundPlay::PlayerInput(p) => {
-                    crate::plugins::facts::set_input(self.uuid, p.flags);
                     // Input bit 5 is sneak: it gets a rider off its vehicle.
                     self.sneaking = p.flags & 0x20 != 0;
                     if p.flags & 0x20 != 0 {
@@ -5301,15 +5273,13 @@ impl Player {
                         match p.action.0 {
                             1 => {
                                 self.survival.sprinting = true;
-                                crate::plugins::facts::set_sprinting(self.uuid, true);
                             }
                             2 => {
                                 self.survival.sprinting = false;
-                                crate::plugins::facts::set_sprinting(self.uuid, false);
                             }
                             // START_FALL_FLYING; vanilla refuses it on the ground.
                             6 if !self.ground => {
-                                crate::plugins::facts::set_gliding(self.uuid, true)
+                                self.gliding = true;
                             }
                             _ => {}
                         }
@@ -5343,7 +5313,7 @@ impl Player {
                         let to = [p.x, p.y, p.z];
                         if valid_move(start, to) {
                             // Bukkit fires `PlayerMoveEvent` only when the position changes.
-                            let movement = ferrite_plugin::PlayerMove {
+                            let movement = crate::game::plugin_types::PlayerMove {
                                 from: self.pos,
                                 to,
                                 from_yaw: self.yaw,
@@ -5371,7 +5341,7 @@ impl Player {
                     if self.pending_teleport.is_none() {
                         let to = [p.x, p.y, p.z];
                         if valid_move(start, to) && p.yaw.is_finite() && p.pitch.is_finite() {
-                            let movement = ferrite_plugin::PlayerMove {
+                            let movement = crate::game::plugin_types::PlayerMove {
                                 from: self.pos,
                                 to,
                                 from_yaw: self.yaw,
@@ -5945,7 +5915,6 @@ impl Region {
         for record in &records {
             self.published_facts.remove(&record.data.uuid);
         }
-        crate::plugins::facts::forget_entities(records.iter().map(|record| record.data.uuid));
         records
     }
     /// Copies every entity currently in a held chunk for periodic persistence without unloading
@@ -5982,7 +5951,6 @@ impl Region {
             .into_iter()
             .filter_map(|key| self.entities.remove(key))
             .collect();
-        crate::plugins::facts::forget_entities(self.published_facts.drain());
         records
     }
     /// A block next to this region changed in another region (`Signal::NeighborUpdate`). Only
@@ -6871,7 +6839,6 @@ impl Region {
                 }
             }
         }
-        self.apply_plugin_fight_requests(ctx);
         self.repair_end_structures(ctx);
         self.run_end_fight(ctx);
         let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
@@ -6892,7 +6859,6 @@ impl Region {
                     .copied()
                     .ne(fight.crystals.iter().copied())
         });
-        crate::plugins::dragon::publish(fight.snapshot());
         let now = fight.saved();
         if fight.started
             && (stage.is_none() || stage_changed || crystals_changed)
@@ -6902,60 +6868,6 @@ impl Region {
                 tracing::warn!("could not save the dragon fight: {error:#}");
             }
             fight.on_disk = Some(now);
-        }
-    }
-
-    /// Applies what plugins asked of the fight through `World#getEnderDragonBattle`.
-    fn apply_plugin_fight_requests(&mut self, ctx: &TickContext) {
-        let requests = crate::plugins::dragon::take_requests();
-        if requests.is_empty() {
-            return;
-        }
-        let floor = ctx
-            .source
-            .as_deref()
-            .and_then(|source| super::end_fight::podium_floor(|y| source.block(0, y, 0)));
-        let mut podiums = Vec::new();
-        let mut gateways = Vec::new();
-        let mut reset_crystals = false;
-        {
-            let mut state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
-            for request in requests {
-                match request {
-                    super::end_fight_view::Request::SpawnGatewayAt(at) => gateways.push(at),
-                    super::end_fight_view::Request::ResetCrystals => reset_crystals = true,
-                    _ => {}
-                }
-                podiums.extend(state.more.end_fight.apply(request, floor));
-            }
-        }
-        if reset_crystals {
-            // Only the crystals standing on a spike go; the four respawn cells stay.
-            for index in 0..super::end_fight::SPIKE_COUNT {
-                let [x, z] = super::end_fight::spike_column(index);
-                let column = ferrite_math::AABB::new(
-                    f64::from(x) - 2.0,
-                    -64.0,
-                    f64::from(z) - 2.0,
-                    f64::from(x) + 3.0,
-                    320.0,
-                    f64::from(z) + 3.0,
-                );
-                for key in self.entities.query_vec(column) {
-                    if ferrite_entity::dragon::is_crystal(&self.entities, key)
-                        && let Some(flags) = self.entities.flags_mut(key)
-                    {
-                        flags.set(ferrite_entity::Flags::REMOVED, true);
-                    }
-                }
-            }
-        }
-        for at in gateways {
-            self.place_blocks(ctx, &super::end_fight::gateway_blocks(at));
-            self.set_gateway_age(ctx, at, 0);
-        }
-        for (level, active) in podiums {
-            self.place_blocks(ctx, &super::end_fight::podium_blocks([0, level, 0], active));
         }
     }
 
@@ -8025,7 +7937,7 @@ impl Region {
                 }
                 continue;
             };
-            if !crate::plugins::facts::is_gliding(uuid) {
+            if !p.gliding {
                 // Vanilla discards a rocket whose rider stopped gliding.
                 if let Some(f) = self.entities.flags_mut(key) {
                     f.set(ferrite_entity::Flags::REMOVED, true);
@@ -8731,9 +8643,9 @@ impl Region {
         &mut self,
         p: &Player,
         side: ShoulderSide,
-        op: ferrite_plugin::ShoulderOp,
+        op: crate::game::plugin_types::ShoulderOp,
     ) -> bool {
-        use ferrite_plugin::ShoulderOp;
+        use crate::game::plugin_types::ShoulderOp;
         let at = ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.05, p.pos[2]);
         let changes = match op {
             ShoulderOp::Seat(parrot) => self.change_shoulder(p.uuid, at, side, Some(parrot)),
@@ -8759,8 +8671,8 @@ impl Region {
             return false;
         };
         let op = parrot.map_or(
-            ferrite_plugin::ShoulderOp::Release,
-            ferrite_plugin::ShoulderOp::Seat,
+            crate::game::plugin_types::ShoulderOp::Release,
+            crate::game::plugin_types::ShoulderOp::Seat,
         );
         let changed = self.apply_shoulder(&p, side, op);
         self.players.insert(player, p);
@@ -10284,16 +10196,12 @@ impl Region {
     /// Returns whether something was spawned.
     pub fn plugin_spawn_snapshot(
         &mut self,
-        snbt: &str,
-        uuid: Uuid,
-        pos: [f64; 3],
-        yaw: f32,
+        _snbt: &str,
+        _uuid: Uuid,
+        _pos: [f64; 3],
+        _yaw: f32,
     ) -> bool {
-        let Some(record) = crate::plugins::snapshot::record_from_snbt(snbt, uuid, pos, yaw) else {
-            return false;
-        };
-        self.entities.insert(record);
-        true
+        false
     }
 
     /// `World#dropItem`: an item entity at `center`; the natural variant scatters it a little
@@ -11307,8 +11215,8 @@ impl Region {
             plugins.entity_changed_block(
                 data.uuid,
                 mob.kind.name(),
-                plugin_world_id(ctx),
-                ferrite_plugin::BlockPosition {
+                super::plugin_world_id(ctx.world_id),
+                crate::game::plugin_types::BlockPosition {
                     x: at[0],
                     y: at[1],
                     z: at[2],
@@ -11324,7 +11232,10 @@ impl Region {
     fn damage_hooks(
         &self,
         ctx: &TickContext,
-    ) -> Option<(Arc<dyn ferrite_plugin::ServerHooks>, PluginEventPolicy)> {
+    ) -> Option<(
+        Arc<dyn crate::game::plugin_types::ServerHooks>,
+        PluginEventPolicy,
+    )> {
         resolve_damage_hooks(
             ctx.hooks.as_deref(),
             self.players.values().filter_map(|p| {
@@ -11491,20 +11402,25 @@ impl Region {
             // Bukkit fires BlockExplodeEvent before any block is removed; a cancel leaves the
             // terrain untouched. The event sees the same blocks the ray cast selected.
             if let Some((hooks, policy)) = self.damage_hooks(ctx) {
-                let positions: Vec<ferrite_plugin::BlockPosition> = destroyed
+                let positions: Vec<crate::game::plugin_types::BlockPosition> = destroyed
                     .iter()
-                    .map(|[x, y, z]| ferrite_plugin::BlockPosition {
+                    .map(|[x, y, z]| crate::game::plugin_types::BlockPosition {
                         x: *x,
                         y: *y,
                         z: *z,
                     })
                     .collect();
-                let center_pos = ferrite_plugin::BlockPosition {
+                let center_pos = crate::game::plugin_types::BlockPosition {
                     x: center[0].floor() as i32,
                     y: center[1].floor() as i32,
                     z: center[2].floor() as i32,
                 };
-                match hooks.blocks_exploded(plugin_world_id(ctx), center_pos, &positions, power) {
+                match hooks.blocks_exploded(
+                    super::plugin_world_id(ctx.world_id),
+                    center_pos,
+                    &positions,
+                    power,
+                ) {
                     Ok(Some(kept)) => {
                         let kept: std::collections::HashSet<[i32; 3]> =
                             kept.iter().map(|p| [p.x, p.y, p.z]).collect();
@@ -11798,7 +11714,7 @@ impl Region {
                     continue;
                 };
                 dropped_stacks.push(stack.clone());
-                initial_drops.push(ferrite_plugin::ItemSnapshot {
+                initial_drops.push(crate::game::plugin_types::ItemSnapshot {
                     material: material.to_owned(),
                     amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
                 });
@@ -11816,13 +11732,13 @@ impl Region {
             .death_message
             .take()
             .unwrap_or_else(|| kind.death_message(&p.name));
-        let initial = ferrite_plugin::PlayerDeath {
+        let initial = crate::game::plugin_types::PlayerDeath {
             drops: initial_drops,
             dropped_exp: initial_exp,
             keep_inventory: !drop_allowed,
             message: message.clone(),
         };
-        let mut outcome = ferrite_plugin::PlayerDeathOutcome {
+        let mut outcome = crate::game::plugin_types::PlayerDeathOutcome {
             drops: initial.drops.clone(),
             dropped_exp: initial.dropped_exp,
             keep_inventory: initial.keep_inventory,
@@ -12424,23 +12340,23 @@ impl Region {
         &mut self,
         index: &Arc<Mutex<super::entity_index::EntityIndex>>,
         dimension: super::Dimension,
-        world_id: super::WorldId,
+        _world_id: super::WorldId,
     ) {
         index
             .lock()
             .unwrap()
             .sync(&mut self.published_entities, &self.entities, dimension);
-        crate::plugins::facts::publish_entities(
-            &mut self.published_facts,
-            &self.entities,
-            world_id,
-        );
     }
 
     /// A plugin's operation on one entity of this region. Returns whether the entity was here.
-    pub fn plugin_entity_op(&mut self, uuid: Uuid, op: &ferrite_plugin::EntityOperation) -> bool {
+    #[cfg(test)]
+    pub fn plugin_entity_op(
+        &mut self,
+        uuid: Uuid,
+        op: &crate::game::plugin_types::EntityOperation,
+    ) -> bool {
+        use crate::game::plugin_types::EntityOperation as Op;
         use ferrite_math::Vec3;
-        use ferrite_plugin::EntityOperation as Op;
         let Some(key) = self.entities.keys().iter().copied().find(|key| {
             self.entities
                 .data(*key)
@@ -12634,7 +12550,6 @@ impl Region {
         };
         if let Some(data) = self.entities.data(key) {
             self.published_facts.remove(&data.uuid);
-            crate::plugins::facts::forget_entities([data.uuid]);
         }
         // `/kill` is lethal damage, not just a tracker removal: the death pass must still run
         // loot, the dragon fight, and advancements.
@@ -13606,7 +13521,7 @@ mod tests {
     /// past its life bursts on the next tick.
     #[test]
     fn plugin_firework_operations_change_the_rocket_and_detonate_bursts_it() {
-        use ferrite_plugin::EntityOperation as Op;
+        use crate::game::plugin_types::EntityOperation as Op;
         let mut region = Region::default();
         let key = region
             .entities
@@ -14479,27 +14394,6 @@ mod tests {
         region.tick(&tick_context());
         assert!(!super::super::ride::is_controlled(horse));
         super::super::ride::dismount(rider);
-    }
-
-    #[test]
-    fn a_snapshot_spawns_a_mob_with_its_nbt_at_the_requested_spot() {
-        let mut source = Region::default();
-        let original = mob::new_mob(
-            MobKind::Zombie,
-            ferrite_math::Vec3::new(1.5, 64.0, 1.5),
-            &mut source.rng,
-        );
-        let snbt = crate::plugins::snapshot::entity_snbt(&original).expect("serializes");
-        let mut region = Region::default();
-        let uuid = Uuid::from_u128(0x5a47);
-        assert!(!region.plugin_spawn_snapshot("{id:\"minecraft:nope\"}", uuid, [0.0; 3], 0.0));
-        assert!(region.plugin_spawn_snapshot(&snbt, uuid, [40.5, 70.0, -9.5], 180.0));
-        let key = *region.entities.keys().first().expect("spawned");
-        let data = region.entities.data(key).unwrap();
-        assert_eq!(data.uuid, uuid);
-        assert_eq!(data.yaw, 180.0);
-        assert_eq!(region.entities.pos(key).unwrap().x, 40.5);
-        assert_eq!(region.entities.keys().len(), 1);
     }
 
     #[test]
@@ -17025,7 +16919,7 @@ mod worn_stack_tests {
         assert!(wire.windows(3).any(|w| w == b"two"));
     }
 
-    fn book_meta(book: ferrite_plugin::BookFields) -> ItemMetaFields {
+    fn book_meta(book: crate::game::plugin_types::BookFields) -> ItemMetaFields {
         ItemMetaFields {
             name: None,
             lore: Vec::new(),
@@ -17042,7 +16936,7 @@ mod worn_stack_tests {
 
     #[test]
     fn plugin_book_metadata_becomes_typed_components_that_survive_save_and_wire() {
-        let signed = ferrite_plugin::BookFields {
+        let signed = crate::game::plugin_types::BookFields {
             written: true,
             title: Some("Das Buch ✨".into()),
             author: Some("Álvaro".into()),
@@ -17074,7 +16968,7 @@ mod worn_stack_tests {
             ferrite_item::ItemStack::decode_network(&stack.encode_network().unwrap()).unwrap();
         assert_eq!(wire, stack);
 
-        let quill = ferrite_plugin::BookFields {
+        let quill = crate::game::plugin_types::BookFields {
             written: false,
             title: None,
             author: None,
@@ -17101,7 +16995,7 @@ mod worn_stack_tests {
 
     #[test]
     fn book_metadata_on_another_item_is_left_off_and_replaces_older_pages() {
-        let signed = ferrite_plugin::BookFields {
+        let signed = crate::game::plugin_types::BookFields {
             written: true,
             title: Some("T".into()),
             author: Some("A".into()),
@@ -17234,27 +17128,34 @@ pub(crate) fn trapped_chest_viewers<'a>(
 #[cfg(test)]
 mod event_policy_tests {
     use super::*;
-    use ferrite_plugin::{BlockPosition, CommandSender, PluginCommand, PluginCommandResult};
+    use crate::game::plugin_types::{
+        BlockPosition, CommandSender, PluginCommand, PluginCommandResult,
+    };
 
     /// A bridge whose every call fails, standing in for a broken JVM call.
     struct Failing;
-    impl ferrite_plugin::ServerHooks for Failing {
-        fn player_joined(&self, _: Uuid, _: &str) -> Result<(), ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+    impl crate::game::plugin_types::ServerHooks for Failing {
+        fn player_joined(&self, _: Uuid, _: &str) -> Result<(), crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn player_left(&self, _: Uuid, _: &str) -> Result<(), ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn player_left(&self, _: Uuid, _: &str) -> Result<(), crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn chat(&self, _: Uuid, _: &str, _: &str) -> Result<Option<String>, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn chat(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<String>, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn player_moved(
             &self,
             _: Uuid,
             _: &str,
-            _: &ferrite_plugin::PlayerMove,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+            _: &crate::game::plugin_types::PlayerMove,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn player_interacted(
             &self,
@@ -17264,8 +17165,8 @@ mod event_policy_tests {
             _: BlockPosition,
             _: u8,
             _: &str,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn block_broken(
             &self,
@@ -17273,8 +17174,8 @@ mod event_policy_tests {
             _: &str,
             _: BlockPosition,
             _: &str,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn block_placed(
             &self,
@@ -17284,26 +17185,34 @@ mod event_policy_tests {
             _: u8,
             _: &str,
             _: &str,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn player_command(&self, _: Uuid, _: &str, _: &str) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn player_command(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn plugin_commands(&self) -> Result<Vec<PluginCommand>, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn plugin_commands(&self) -> Result<Vec<PluginCommand>, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn run_plugin_command(
             &self,
             _: CommandSender,
             _: &str,
-        ) -> Result<PluginCommandResult, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<PluginCommandResult, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
     }
 
-    fn decide(policy: PluginEventPolicy, result: Result<bool, ferrite_plugin::Error>) -> bool {
-        let failing: &dyn ferrite_plugin::ServerHooks = &Failing;
+    fn decide(
+        policy: PluginEventPolicy,
+        result: Result<bool, crate::game::plugin_types::Error>,
+    ) -> bool {
+        let failing: &dyn crate::game::plugin_types::ServerHooks = &Failing;
         event_allows(Some(failing), policy, |_| result)
     }
 
@@ -17311,11 +17220,11 @@ mod event_policy_tests {
     fn failed_plugin_events_follow_the_configured_policy() {
         assert!(decide(
             PluginEventPolicy::Allow,
-            Err(ferrite_plugin::Error::InvalidTask)
+            Err(crate::game::plugin_types::Error::InvalidTask)
         ));
         assert!(!decide(
             PluginEventPolicy::Deny,
-            Err(ferrite_plugin::Error::InvalidTask)
+            Err(crate::game::plugin_types::Error::InvalidTask)
         ));
         assert!(!decide(PluginEventPolicy::Allow, Ok(false)));
         assert!(decide(PluginEventPolicy::Deny, Ok(true)));
@@ -17350,7 +17259,7 @@ mod event_policy_tests {
     #[test]
     fn a_missing_plugin_bridge_always_allows_the_action() {
         assert!(event_allows(None, PluginEventPolicy::Deny, |_| Err(
-            ferrite_plugin::Error::InvalidTask
+            crate::game::plugin_types::Error::InvalidTask
         )));
     }
 
@@ -17425,7 +17334,7 @@ mod event_policy_tests {
         let player = Arc::new(Scripted::new(None));
         let from_players = |hooks: &Arc<Scripted>| {
             vec![(
-                hooks.clone() as Arc<dyn ferrite_plugin::ServerHooks>,
+                hooks.clone() as Arc<dyn crate::game::plugin_types::ServerHooks>,
                 PluginEventPolicy::Allow,
             )]
             .into_iter()
@@ -17468,13 +17377,13 @@ mod event_policy_tests {
         );
         assert_eq!(
             plugin_damage(Some(&Failing), PluginEventPolicy::Deny, 5.0, |_| Err(
-                ferrite_plugin::Error::InvalidTask
+                crate::game::plugin_types::Error::InvalidTask
             )),
             None
         );
         assert_eq!(
             plugin_damage(Some(&Failing), PluginEventPolicy::Allow, 5.0, |_| {
-                Err(ferrite_plugin::Error::InvalidTask)
+                Err(crate::game::plugin_types::Error::InvalidTask)
             }),
             Some(5.0)
         );
@@ -17619,7 +17528,7 @@ mod event_policy_tests {
         let mut rebuilt = super::super::commands::dispatcher();
         super::super::commands::register_plugin_commands(
             &mut rebuilt,
-            &[ferrite_plugin::PluginCommand {
+            &[crate::game::plugin_types::PluginCommand {
                 name: "fixtureping".to_owned(),
                 aliases: Vec::new(),
                 permission: None,

@@ -219,7 +219,10 @@ pub(super) fn hurt_mob(
     store: &mut ferrite_entity::EntityStore,
     key: ferrite_entity::EntityKey,
     damage: f32,
-    hooks: Option<(&dyn ferrite_plugin::ServerHooks, super::PluginEventPolicy)>,
+    hooks: Option<(
+        &dyn crate::game::plugin_types::ServerHooks,
+        super::PluginEventPolicy,
+    )>,
 ) -> Option<ferrite_entity::mob::Hurt> {
     use super::region::{damage_cause, plugin_damage};
     use super::survival::DamageKind;
@@ -273,7 +276,7 @@ pub fn impulse(
 pub(super) mod tests {
     use super::super::anvil::AnvilChunkSource;
     use super::*;
-    use ferrite_plugin::{
+    use crate::game::plugin_types::{
         BlockPosition, CommandSender, InteractAction, PluginCommand, PluginCommandResult,
     };
     use ferrite_world::RuntimeRegistry;
@@ -474,23 +477,28 @@ pub(super) mod tests {
             }
         }
     }
-    impl ferrite_plugin::ServerHooks for Scripted {
-        fn player_joined(&self, _: Uuid, _: &str) -> Result<(), ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+    impl crate::game::plugin_types::ServerHooks for Scripted {
+        fn player_joined(&self, _: Uuid, _: &str) -> Result<(), crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn player_left(&self, _: Uuid, _: &str) -> Result<(), ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn player_left(&self, _: Uuid, _: &str) -> Result<(), crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn chat(&self, _: Uuid, _: &str, _: &str) -> Result<Option<String>, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn chat(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<String>, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn player_moved(
             &self,
             _: Uuid,
             _: &str,
-            _: &ferrite_plugin::PlayerMove,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+            _: &crate::game::plugin_types::PlayerMove,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn player_interacted(
             &self,
@@ -500,8 +508,8 @@ pub(super) mod tests {
             _: BlockPosition,
             _: u8,
             _: &str,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn block_broken(
             &self,
@@ -509,8 +517,8 @@ pub(super) mod tests {
             _: &str,
             _: BlockPosition,
             _: &str,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn block_placed(
             &self,
@@ -520,21 +528,26 @@ pub(super) mod tests {
             _: u8,
             _: &str,
             _: &str,
-        ) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn player_command(&self, _: Uuid, _: &str, _: &str) -> Result<bool, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn player_command(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
-        fn plugin_commands(&self) -> Result<Vec<PluginCommand>, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        fn plugin_commands(&self) -> Result<Vec<PluginCommand>, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn run_plugin_command(
             &self,
             _: CommandSender,
             _: &str,
-        ) -> Result<PluginCommandResult, ferrite_plugin::Error> {
-            Err(ferrite_plugin::Error::InvalidTask)
+        ) -> Result<PluginCommandResult, crate::game::plugin_types::Error> {
+            Err(crate::game::plugin_types::Error::InvalidTask)
         }
         fn entity_changed_block(
             &self,
@@ -544,7 +557,7 @@ pub(super) mod tests {
             _: BlockPosition,
             _: &str,
             _: &str,
-        ) -> Result<bool, ferrite_plugin::Error> {
+        ) -> Result<bool, crate::game::plugin_types::Error> {
             Ok(self.change_allowed)
         }
         fn entity_damaged(
@@ -553,7 +566,7 @@ pub(super) mod tests {
             name: &str,
             cause: &str,
             amount: f64,
-        ) -> Result<f64, ferrite_plugin::Error> {
+        ) -> Result<f64, crate::game::plugin_types::Error> {
             self.seen
                 .lock()
                 .unwrap()

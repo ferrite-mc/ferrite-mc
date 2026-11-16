@@ -125,10 +125,6 @@ pub enum GameMessage {
         save: bool,
         complete: tokio::sync::oneshot::Sender<Result<bool, String>>,
     },
-    SetPluginHooks {
-        hooks: Arc<dyn ferrite_plugin::ServerHooks>,
-        complete: tokio::sync::oneshot::Sender<()>,
-    },
     Shutdown {
         complete: tokio::sync::oneshot::Sender<Result<(), String>>,
     },

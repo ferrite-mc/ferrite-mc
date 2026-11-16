@@ -5,6 +5,7 @@ mod biome_spawns;
 mod chunk_level;
 mod enchant_table;
 mod offload;
+pub mod plugin_types;
 mod recipe_packets;
 mod recipe_unlock;
 mod recipe_wire;
@@ -53,7 +54,6 @@ mod command_block;
 mod commands;
 mod dimension;
 mod end_fight;
-pub(crate) mod end_fight_view;
 mod end_frame;
 mod equine_chest;
 mod jukebox;
@@ -67,10 +67,8 @@ mod vault;
 pub use dimension::{
     Dimension, DimensionRegistry, RuntimeWorldCatalog, RuntimeWorldDescriptor, RuntimeWorldRequest,
 };
-mod commands_data;
-#[cfg(test)]
-pub(crate) use commands_data::{BlockData, apply_block};
 mod block_tags;
+mod commands_data;
 mod commands_exec;
 mod commands_exec_more;
 mod commands_extras;
@@ -100,10 +98,8 @@ pub(crate) mod drops;
 mod entity_index;
 mod entity_save;
 mod item_keep;
-mod shulker;
-// Only the record codec is shared with plugin snapshots; the rest of `entity_save` names `Region`.
-pub(crate) use entity_save::{from_nbt as entities_from_nbt, to_nbt as entities_to_nbt};
 mod runtime_persist;
+mod shulker;
 pub use explosion::{CHARGED_CREEPER_POWER, CREEPER_POWER, TNT_POWER};
 mod explosion;
 mod feedback;
@@ -295,7 +291,7 @@ mod tests {
         assert_eq!(plugin_world_id(runtime), id);
         assert_eq!(
             plugin_world_id(WorldId::Vanilla(Dimension::Overworld)),
-            ferrite_plugin::default_world_id()
+            crate::game::plugin_types::default_world_id()
         );
         let player = Uuid::from_u128(5);
         let tracked = HashMap::from([(player, runtime)]);
@@ -324,11 +320,11 @@ mod tests {
         let vanilla = HashMap::from([(player, WorldId::Vanilla(Dimension::Nether))]);
         assert_eq!(
             plugin_location(&vanilla, player, Dimension::Overworld, pos, 0.0, 0.0).world,
-            ferrite_plugin::default_world_id()
+            crate::game::plugin_types::default_world_id()
         );
         assert_eq!(
             plugin_location(&HashMap::new(), player, Dimension::Overworld, pos, 0.0, 0.0).world,
-            ferrite_plugin::default_world_id()
+            crate::game::plugin_types::default_world_id()
         );
     }
 
@@ -849,7 +845,7 @@ mod tests {
         assert!(!valid_move([0.0, 65.0, 0.0], [f64::NAN, 65.0, 0.0]));
     }
 
-    fn routed(command: ferrite_plugin::PlayerCommand, player: Uuid) -> Vec<Outbound> {
+    fn routed(command: crate::game::plugin_types::PlayerCommand, player: Uuid) -> Vec<Outbound> {
         let (outbound, mut rx) = OutboundSender::channel(1 << 20);
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, Mailbox::default(), outbound));
@@ -865,7 +861,7 @@ mod tests {
         let mailbox = Mailbox::default();
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, mailbox.clone(), outbound));
-        let task = |entity: String| ferrite_plugin::EntityTask {
+        let task = |entity: String| crate::game::plugin_types::EntityTask {
             id: 3,
             entity,
             region_aware: true,
@@ -897,7 +893,7 @@ mod tests {
         let state = Arc::new(Mutex::new(commands::GameState::default()));
         for target in [Uuid::from_u128(8), player] {
             route_plugin_command(
-                ferrite_plugin::PlayerCommand::VisualExperience {
+                crate::game::plugin_types::PlayerCommand::VisualExperience {
                     player: target,
                     progress: 0.75,
                     level: 12,
@@ -922,11 +918,11 @@ mod tests {
         mailboxes.insert(player, (1, Mailbox::default(), outbound));
         let state = Arc::new(Mutex::new(commands::GameState::default()));
         for (mode, spectator) in [
-            (ferrite_plugin::GameMode::Spectator, true),
-            (ferrite_plugin::GameMode::Survival, false),
+            (crate::game::plugin_types::GameMode::Spectator, true),
+            (crate::game::plugin_types::GameMode::Survival, false),
         ] {
             route_plugin_command(
-                ferrite_plugin::PlayerCommand::SetGameMode { player, mode },
+                crate::game::plugin_types::PlayerCommand::SetGameMode { player, mode },
                 &mailboxes,
                 &mut HashMap::new(),
                 &|_| None,
@@ -943,7 +939,7 @@ mod tests {
     fn plugin_completions_reach_only_the_target() {
         let player = Uuid::from_u128(7);
         let entries = vec!["hello".into(), "".into()];
-        let command = ferrite_plugin::PlayerCommand::CustomChatCompletions {
+        let command = crate::game::plugin_types::PlayerCommand::CustomChatCompletions {
             player,
             action: 2,
             entries: entries.clone(),
@@ -965,7 +961,7 @@ mod tests {
     fn plugin_virtual_sign_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
         let position = ferrite_protocol::types::BlockPos::new(1, 64, -2).pack();
-        let command = ferrite_plugin::PlayerCommand::OpenVirtualSign {
+        let command = crate::game::plugin_types::PlayerCommand::OpenVirtualSign {
             player,
             position,
             front: false,
@@ -987,7 +983,7 @@ mod tests {
     fn plugin_block_damage_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
         let position = ferrite_protocol::types::BlockPos::new(1, 64, 2).pack();
-        let command = ferrite_plugin::PlayerCommand::VisualBlockDamage {
+        let command = crate::game::plugin_types::PlayerCommand::VisualBlockDamage {
             player,
             position,
             source: 99,
@@ -1008,7 +1004,7 @@ mod tests {
     #[test]
     fn plugin_visual_health_reaches_only_the_target() {
         let player = Uuid::from_u128(7);
-        let command = ferrite_plugin::PlayerCommand::VisualHealth {
+        let command = crate::game::plugin_types::PlayerCommand::VisualHealth {
             player,
             health: 12.5,
             food: 9,
@@ -1031,7 +1027,7 @@ mod tests {
         let player = Uuid::from_u128(7);
         let plain = |text: &str| ferrite_protocol::types::PlainText(text.into());
         let bar = routed(
-            ferrite_plugin::PlayerCommand::ActionBar {
+            crate::game::plugin_types::PlayerCommand::ActionBar {
                 player,
                 component_json: r#"{"text":"Low ","extra":["health"]}"#.into(),
             },
@@ -1048,7 +1044,7 @@ mod tests {
         );
         for reset in [false, true] {
             let cleared = routed(
-                ferrite_plugin::PlayerCommand::ClearTitle { player, reset },
+                crate::game::plugin_types::PlayerCommand::ClearTitle { player, reset },
                 player,
             );
             assert_eq!(
@@ -1057,7 +1053,7 @@ mod tests {
             );
         }
         let list = routed(
-            ferrite_plugin::PlayerCommand::ListHeaderFooter {
+            crate::game::plugin_types::PlayerCommand::ListHeaderFooter {
                 player,
                 header_json: r#"{"text":"Ferrite"}"#.into(),
                 footer_json: r#"{"text":""}"#.into(),
@@ -1077,7 +1073,7 @@ mod tests {
     fn plugin_title_sends_times_then_texts() {
         let player = Uuid::from_u128(7);
         let sent = routed(
-            ferrite_plugin::PlayerCommand::Title {
+            crate::game::plugin_types::PlayerCommand::Title {
                 player,
                 title: Some("Hello".into()),
                 subtitle: Some("World".into()),
@@ -1106,7 +1102,7 @@ mod tests {
         );
         // A missing title or subtitle sends only the timings.
         let sent = routed(
-            ferrite_plugin::PlayerCommand::Title {
+            crate::game::plugin_types::PlayerCommand::Title {
                 player,
                 title: None,
                 subtitle: None,
@@ -1124,7 +1120,7 @@ mod tests {
         let player = Uuid::from_u128(8);
         let kick = |component_json: Option<&str>| {
             let sent = routed(
-                ferrite_plugin::PlayerCommand::Kick {
+                crate::game::plugin_types::PlayerCommand::Kick {
                     player,
                     component_json: component_json.map(str::to_owned),
                 },
@@ -1144,11 +1140,11 @@ mod tests {
         let player = Uuid::from_u128(9);
         let sound = |world: Uuid, name: &str| {
             routed(
-                ferrite_plugin::PlayerCommand::PlaySound {
+                crate::game::plugin_types::PlayerCommand::PlaySound {
                     player,
                     world,
                     sound: name.into(),
-                    category: ferrite_plugin::SoundCategory::Players,
+                    category: crate::game::plugin_types::SoundCategory::Players,
                     x: 1.5,
                     y: 64.0,
                     z: -2.25,
@@ -1174,7 +1170,7 @@ mod tests {
             pitch: 1.2,
             seed: 42,
         });
-        let world = ferrite_plugin::default_world_id();
+        let world = crate::game::plugin_types::default_world_id();
         let sent = sound(world, "minecraft:entity.player.levelup");
         assert_eq!(
             sent.iter().map(bytes).collect::<Vec<_>>(),
@@ -1255,7 +1251,7 @@ fn player_world(
 fn plugin_world_id(world: WorldId) -> Uuid {
     match world {
         WorldId::Runtime(id) => id,
-        WorldId::Vanilla(_) => ferrite_plugin::default_world_id(),
+        WorldId::Vanilla(_) => crate::game::plugin_types::default_world_id(),
     }
 }
 
@@ -1354,8 +1350,8 @@ fn plugin_location(
     pos: [f64; 3],
     yaw: f32,
     pitch: f32,
-) -> ferrite_plugin::PlayerLocation {
-    ferrite_plugin::PlayerLocation {
+) -> crate::game::plugin_types::PlayerLocation {
+    crate::game::plugin_types::PlayerLocation {
         world: plugin_world_id(player_world(player_worlds, uuid, fallback)),
         x: pos[0],
         y: pos[1],
@@ -1371,7 +1367,7 @@ fn plugin_location(
 fn plugin_inventory_snapshot(
     inventory: &ferrite_inventory::PlayerInventory,
 ) -> (
-    Vec<Option<ferrite_plugin::ItemSnapshot>>,
+    Vec<Option<crate::game::plugin_types::ItemSnapshot>>,
     Vec<Option<String>>,
 ) {
     let mut items = Vec::with_capacity(ferrite_inventory::SIZE);
@@ -1384,7 +1380,7 @@ fn plugin_inventory_snapshot(
             continue;
         }
         let material = stack.name().unwrap_or("minecraft:air").to_owned();
-        items.push(Some(ferrite_plugin::ItemSnapshot {
+        items.push(Some(crate::game::plugin_types::ItemSnapshot {
             material,
             amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
         }));
@@ -1462,7 +1458,7 @@ pub struct WorldSettings {
     pub max_players: i32,
     pub ops: Vec<Operator>,
     /// Plugin event and command hooks; `None` when the server runs without plugins.
-    pub plugins: Option<Arc<dyn ferrite_plugin::ServerHooks>>,
+    pub plugins: Option<Arc<dyn crate::game::plugin_types::ServerHooks>>,
     /// What a failed plugin event means for the action it guards.
     pub plugin_event_errors: PluginEventPolicy,
     /// Vanilla `ops.json`/`whitelist.json`/ban lists, when the server has a data directory.
@@ -1474,12 +1470,10 @@ pub struct WorldSettings {
     /// same-named bot from another test world had saved.
     pub playerdata: Option<std::path::PathBuf>,
     /// Player mutations plugins made through the Bukkit API, delivered to the owning region.
-    pub plugin_commands: Option<mpsc::UnboundedReceiver<ferrite_plugin::PlayerCommand>>,
+    pub plugin_commands: Option<mpsc::UnboundedReceiver<crate::game::plugin_types::PlayerCommand>>,
     /// Per-dimension chunk sources. `None` opens the standard three dimensions from the
     /// primary source's world directory (or in memory for a world without one).
     pub dimensions: Option<Arc<DimensionRegistry>>,
-    /// Mutable source registry shared with the plugin bridge for runtime world lifecycle.
-    pub runtime_world_view: Option<Arc<crate::plugins::SourceWorldView>>,
     /// Paper's `misc.disable-end-credits`: suppress the credits screen after the exit portal
     /// while still moving the player home.
     pub disable_end_credits: bool,
@@ -1507,7 +1501,6 @@ impl Default for WorldSettings {
             playerdata: None,
             plugin_commands: None,
             dimensions: None,
-            runtime_world_view: None,
             disable_end_credits: false,
         }
     }
@@ -1568,7 +1561,6 @@ impl World {
             rules.get_integer("random_tick_speed").unwrap_or(3).max(0) as u32,
         ));
         let game_rules = Arc::new(Mutex::new(rules));
-        crate::plugins::rules::register(Arc::clone(&game_rules));
         let metrics = LoopMetrics {
             game_rules: Arc::clone(&game_rules),
             random_tick_speed: Arc::clone(&random_tick_speed),
@@ -1652,17 +1644,6 @@ impl World {
         done.await
             .map_err(|_| anyhow::anyhow!("runtime world response lost"))?
             .map_err(anyhow::Error::msg)
-    }
-    pub async fn set_plugin_hooks(
-        &self,
-        hooks: Arc<dyn ferrite_plugin::ServerHooks>,
-    ) -> anyhow::Result<()> {
-        let (complete, done) = oneshot::channel();
-        self.sender
-            .send(GameMessage::SetPluginHooks { hooks, complete })
-            .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
-        done.await
-            .map_err(|_| anyhow::anyhow!("plugin attach response lost"))
     }
     /// How long an unload that finds a player "inside" keeps asking before it refuses. A player
     /// whose departure `Respawn` the client has already seen can still be listed as inside for a
@@ -1930,10 +1911,10 @@ fn plugin_command_line(name: &str, args: &[String]) -> String {
         format!("{name} {}", args.join(" "))
     }
 }
-fn plugin_message_text(content: &ferrite_plugin::MessageContent) -> String {
+fn plugin_message_text(content: &crate::game::plugin_types::MessageContent) -> String {
     match content {
-        ferrite_plugin::MessageContent::Plain(text) => text.clone(),
-        ferrite_plugin::MessageContent::AdventureJson(json) => json_text(json),
+        crate::game::plugin_types::MessageContent::Plain(text) => text.clone(),
+        crate::game::plugin_types::MessageContent::AdventureJson(json) => json_text(json),
     }
 }
 fn json_text(json: &str) -> String {
@@ -2035,7 +2016,7 @@ async fn run(
             Err(error) => tracing::warn!(%error, "plugin commands unavailable"),
         }
     }
-    let mut command_tree = Arc::new(tree);
+    let command_tree = Arc::new(tree);
     let shared_tree = Arc::new(region::SharedCommandTree::new(Arc::clone(&command_tree)));
     let shared_hooks = Arc::new(region::SharedPluginHooks::default());
     shared_hooks.publish(settings.plugins.clone(), settings.plugin_event_errors);
@@ -2091,33 +2072,6 @@ async fn run(
             tree: Some(Arc::clone(tree)),
             hooks: Some(Arc::clone(&shared_hooks)),
         };
-    crate::plugins::worldinfo::register({
-        let state = Arc::clone(&command_state);
-        Arc::new(move || {
-            let state = state.lock().unwrap();
-            crate::plugins::worldinfo::WorldInfo {
-                clock_time: state.clock_time,
-                game_time: state.game_time,
-                difficulty: state.difficulty,
-                sky: match state.weather {
-                    commands::Weather::Clear => crate::plugins::worldinfo::Sky::Clear,
-                    commands::Weather::Rain => crate::plugins::worldinfo::Sky::Rain,
-                    commands::Weather::Thunder => crate::plugins::worldinfo::Sky::Thunder,
-                },
-                weather_duration: state.weather_duration,
-                border: crate::plugins::worldinfo::Border {
-                    center_x: state.border.center_x,
-                    center_z: state.border.center_z,
-                    diameter: state.border.diameter,
-                    warning_distance: state.border.warning_distance,
-                    warning_ticks: state.border.warning_time,
-                    damage_amount: state.border.damage_per_block,
-                    damage_buffer: state.border.damage_buffer,
-                },
-                seed: state.seed,
-            }
-        })
-    });
     let command_speed = Arc::clone(&random_tick_speed);
     let tick_control = command_state.lock().unwrap().more.tick.clone();
     let scheduler_factory: Arc<
@@ -2366,7 +2320,6 @@ async fn run(
                   },
                   Signal::Update{uuid,pos,yaw,pitch,ground}=>{
                     if let Some(player)=online.get_mut(&uuid){player.pos=pos;player.yaw=yaw;player.pitch=pitch;}
-                    crate::plugins::facts::set_on_ground(uuid, ground);
                     command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
                     if let Some(plugins) = &settings.plugins {
                       let location = plugin_location(&player_worlds, uuid, Dimension::Overworld, pos, yaw, pitch);
@@ -2408,7 +2361,6 @@ async fn run(
                   },
                   Signal::Leave{world,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));release_holds(&worlds,&mut holds,&signal_tx,world,held);if preheld {defer_release(&worlds,&signal_tx,world,chunk,false);}
                     let name = names.remove(&uuid).unwrap_or_default();
-                    crate::plugins::facts::forget(uuid);
                     if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
                  }},
@@ -2612,7 +2564,7 @@ async fn run(
                          }
                          // Paper's region scheduler: run each due task on the thread owning its chunk.
                          for task in plugins.take_region_tasks() {
-                             if task.world != ferrite_plugin::default_world_id().to_string() {
+                             if task.world != crate::game::plugin_types::default_world_id().to_string() {
                                  tracing::debug!(world = %task.world, "plugin region task for an unknown world");
                                  continue;
                              }
@@ -2730,27 +2682,21 @@ async fn run(
                    player_worlds.insert(uuid, start_world);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
                    worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
-                   {
-                       let before = saved.is_some();
-                       let first = if before { settings.playerdata.as_deref().and_then(|dir| playerdata::first_played(dir, &uuid)) } else { None };
-                       crate::plugins::facts::set_history(uuid, before, first.unwrap_or_else(std::time::SystemTime::now));
-                   }
-                   crate::plugins::facts::record(uuid, crate::plugins::facts::PlayerFacts { entity_id: entity, joined: std::time::SystemTime::now(), address });
                    if let Some(plugins) = &settings.plugins {
-                       let snapshot = ferrite_plugin::PlayerSnapshot {
+                       let snapshot = crate::game::plugin_types::PlayerSnapshot {
                            id: uuid,
                            name: name.clone(),
                            operator: permission > 0,
                            health: 20.0,
                            food: 20,
                            mode: match start_mode {
-                               1 => ferrite_plugin::GameMode::Creative,
-                               2 => ferrite_plugin::GameMode::Adventure,
-                               3 => ferrite_plugin::GameMode::Spectator,
-                               _ => ferrite_plugin::GameMode::Survival,
+                               1 => crate::game::plugin_types::GameMode::Creative,
+                               2 => crate::game::plugin_types::GameMode::Adventure,
+                               3 => crate::game::plugin_types::GameMode::Spectator,
+                               _ => crate::game::plugin_types::GameMode::Survival,
                            },
                            location: plugin_location(&player_worlds, uuid, start_dimension, start_pos, start_yaw, start_pitch),
                            inventory: plugin_inventory,
@@ -2854,7 +2800,7 @@ async fn run(
                               if let Some(plugins) = settings.plugins.clone() {
                                   let line = plugin_command_line(&name, &args);
                                   let reply = outbound.clone();
-                                  tokio::task::spawn_blocking(move || match plugins.run_plugin_command(ferrite_plugin::CommandSender::Player(uuid), &line) {
+                                  tokio::task::spawn_blocking(move || match plugins.run_plugin_command(crate::game::plugin_types::CommandSender::Player(uuid), &line) {
                                       Ok(result) => for message in result.messages {
                                           if message.player == uuid { chat(&reply, &plugin_message_text(&message.content)); }
                                       },
@@ -2907,13 +2853,6 @@ async fn run(
                               let _ = runtime_world_catalog.unload(id);
                               return Err("runtime scheduler already exists for this world UUID".to_owned());
                           }
-                          if let Some(view) = &settings.runtime_world_view
-                              && !view.register_world(id, Arc::clone(&descriptor.source))
-                          {
-                              let _ = worlds.remove_runtime_world(id);
-                              let _ = runtime_world_catalog.unload(id);
-                              return Err("plugin world view already contains this UUID".to_owned());
-                          }
                           // Entities saved by an earlier session load with the world, not when a
                           // player first walks into their chunk. The world keeps one hold per such
                           // chunk (dropped again on unload); players' holds stack on top of it.
@@ -2933,27 +2872,13 @@ async fn run(
                   },
                   GameMessage::UnloadRuntimeWorld{id,save,complete}=>{
                       let players_inside = player_worlds.values().any(|world| *world == WorldId::Runtime(id));
-                      let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, |descriptor| make_runtime_ctx(descriptor, &shared_tree), settings.runtime_world_view.as_ref())
+                      let result = runtime_persist::unload_runtime_world(&mut worlds, &mut runtime_world_catalog, id, save, players_inside, |descriptor| make_runtime_ctx(descriptor, &shared_tree), )
                           .await
                           .map_err(|error| format!("{error:#}"));
                       if matches!(result, Ok(true)) {
                           holds.retain(|(world, _), _| *world != WorldId::Runtime(id));
                       }
                       let _ = complete.send(result);
-                  },
-                  GameMessage::SetPluginHooks{hooks,complete}=>{
-                      // The bridge attaches after the loop starts, so the tree built at startup has
-                      // no plugin commands; rebuild it now that the hooks can list them.
-                      let mut tree = commands::dispatcher();
-                      match hooks.plugin_commands() {
-                          Ok(declared) => commands::register_plugin_commands(&mut tree, &declared),
-                          Err(error) => tracing::warn!(%error, "plugin commands unavailable"),
-                      }
-                      command_tree = Arc::new(tree);
-                      shared_tree.publish(Arc::clone(&command_tree));
-                      shared_hooks.publish(Some(Arc::clone(&hooks)), settings.plugin_event_errors);
-                      settings.plugins = Some(hooks);
-                      let _ = complete.send(());
                   },
                   GameMessage::Console{command,complete}=>{
                       let (actions, mut received) = mpsc::unbounded_channel();
@@ -3007,7 +2932,7 @@ async fn run(
                               // Off the loop, as for players: the command may wait on this loop.
                               if let Some(plugins) = settings.plugins.clone() {
                                   let line = plugin_command_line(&name, &args);
-                                  tokio::task::spawn_blocking(move || match plugins.run_plugin_command(ferrite_plugin::CommandSender::Console, &line) {
+                                  tokio::task::spawn_blocking(move || match plugins.run_plugin_command(crate::game::plugin_types::CommandSender::Console, &line) {
                                       Ok(result) => for message in result.messages { tracing::info!("{}", plugin_message_text(&message.content)); },
                                       Err(error) => tracing::warn!(%error, "plugin command failed"),
                                   });
@@ -3078,18 +3003,18 @@ async fn run(
                  command = async { match plugin_commands.as_mut() { Some(commands) => commands.recv().await, None => std::future::pending().await } }, if plugin_commands.is_some() => {
                      match command {
                          // Chat attribution lives on the global region, so display names go there.
-                         Some(ferrite_plugin::PlayerCommand::DisplayName { player, component_json }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::DisplayName { player, component_json }) => {
                              let name = component_json.as_deref().map(json_text);
                              worlds.schedule_global(move |g| g.set_display_name(player, name));
                          }
                          // A plugin-made chat command is the player's own: it takes the same path as one
                          // typed in the chat box, so it runs with the permission that player has.
-                         Some(ferrite_plugin::PlayerCommand::Chat { player, message }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::Chat { player, message }) => {
                             if let Some((session, _, _)) = mailboxes.get(&player) {
                                 let _ = event_tx.send(GameMessage::Input { session: *session, uuid: player, packet: ServerboundPlay::ChatCommand(ServerboundChatCommand { command: message }) });
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::UpdateCommands { player }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::UpdateCommands { player }) => {
                             if let (Some(registry), Some(op)) = (&parser_registry, online.get(&player)) {
                                 let (actions, _) = mpsc::unbounded_channel();
                                 let permission = *permissions.get(&player).unwrap_or(&0);
@@ -3102,14 +3027,14 @@ async fn run(
                                 }
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::SpawnEntity { world, owner, center, kind, block, velocity, uuid }) => {
-                            let target = if world == ferrite_plugin::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
+                         Some(crate::game::plugin_types::PlayerCommand::SpawnEntity { world, owner, center, kind, block, velocity, uuid }) => {
+                            let target = if world == crate::game::plugin_types::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
                             let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                             if worlds.owner_world(target, chunk).is_some() {
                                 worlds.schedule_at_world_chunk(target, chunk, move |r| { r.plugin_spawn(center, &kind, block.as_deref(), velocity, uuid, owner); });
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::SetBlock { world, position, material }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::SetBlock { world, position, material }) => {
                             // Written straight into the world's chunk source, so it works whether or not a
                             // region currently holds the chunk; viewers get the block update.
                             if let (Some((target, _, source)), Some(state)) = (travel_target(world, &dimensions, &runtime_world_catalog), ferrite_data::blocks::default_state(&material)) {
@@ -3125,44 +3050,37 @@ async fn run(
                                 }
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::SpawnSnapshot { world, snbt, uuid, pos, yaw }) => {
-                            let target = if world == ferrite_plugin::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
+                         Some(crate::game::plugin_types::PlayerCommand::SpawnSnapshot { world, snbt, uuid, pos, yaw }) => {
+                            let target = if world == crate::game::plugin_types::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
                             let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                             if worlds.owner_world(target, chunk).is_some() {
                                 worlds.schedule_at_world_chunk(target, chunk, move |r| { r.plugin_spawn_snapshot(&snbt, uuid, pos, yaw); });
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::EntityOp { uuid, op }) => {
-                            if let Some(at) = crate::plugins::facts::entity_position(uuid) {
-                                let chunk = ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
-                                if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                                    worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| { r.plugin_entity_op(uuid, &op); });
-                                }
-                            }
-                        }
-                         Some(ferrite_plugin::PlayerCommand::DropItem { center, item, amount, natural, uuid }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::EntityOp { .. }) => {}
+                         Some(crate::game::plugin_types::PlayerCommand::DropItem { center, item, amount, natural, uuid }) => {
                             let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                             if worlds.owner(Dimension::Overworld, chunk).is_some() {
                                 worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |r| r.plugin_drop_item(center, &item, amount, natural, uuid));
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::Explosion { world, center, power, fire, breaks }) => {
-                            let target = if world == ferrite_plugin::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
+                         Some(crate::game::plugin_types::PlayerCommand::Explosion { world, center, power, fire, breaks }) => {
+                            let target = if world == crate::game::plugin_types::default_world_id() { WorldId::Vanilla(Dimension::Overworld) } else { WorldId::Runtime(world) };
                             let chunk = ChunkPos((center[0].floor() as i32) >> 4, (center[2].floor() as i32) >> 4);
                             if worlds.owner_world(target, chunk).is_some() {
                                 worlds.schedule_at_world_chunk(target, chunk, move |r| r.plugin_explosions.push((center, power, fire, breaks)));
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::RideChanged { vehicle }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::RideChanged { vehicle }) => {
                             let packet = ride::passengers_packet(&command_state.lock().unwrap(), &online, vehicle);
                             if let Some(bytes) = packet {
                                 for player in online.values() { let _ = player.outbound.send(Outbound::Packet(bytes.clone().into())); }
                             }
                         }
-                         Some(ferrite_plugin::PlayerCommand::Lightning { center }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::Lightning { center }) => {
                             worlds.schedule_global(move |g| g.plugin_lightning(center));
                         }
-                         Some(ferrite_plugin::PlayerCommand::Visibility { viewer, target, hidden }) => {
+                         Some(crate::game::plugin_types::PlayerCommand::Visibility { viewer, target, hidden }) => {
                             worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                         }
                         Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog), &command_state),
@@ -3187,7 +3105,7 @@ fn travel_target(
     dimensions: &DimensionRegistry,
     catalog: &RuntimeWorldCatalog,
 ) -> Option<TravelTarget> {
-    if world == ferrite_plugin::default_world_id() {
+    if world == crate::game::plugin_types::default_world_id() {
         return Some((
             WorldId::Vanilla(Dimension::Overworld),
             Dimension::Overworld,
@@ -3203,13 +3121,13 @@ fn travel_target(
 }
 
 fn route_plugin_command(
-    command: ferrite_plugin::PlayerCommand,
+    command: crate::game::plugin_types::PlayerCommand,
     mailboxes: &HashMap<Uuid, (u64, Mailbox, OutboundSender)>,
     permissions: &mut HashMap<Uuid, u8>,
     travel: &dyn Fn(Uuid) -> Option<TravelTarget>,
     state: &Arc<Mutex<commands::GameState>>,
 ) {
-    use ferrite_plugin::PlayerCommand;
+    use crate::game::plugin_types::PlayerCommand;
     match command {
         PlayerCommand::SetInventorySlot { player, slot, item } => {
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
@@ -3325,16 +3243,15 @@ fn route_plugin_command(
             player,
             position,
             force,
-            ticket,
-        } => match mailboxes.get(&player) {
-            Some((_, mailbox, _)) => mailbox.lock().unwrap().push_back(Command::PluginSleep {
-                position,
-                force,
-                ticket,
-            }),
-            // Nobody to put to bed: the waiting plugin call gets its answer now.
-            None => crate::plugins::playerops::complete(ticket, false),
-        },
+            ticket: _,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginSleep { position, force });
+            }
+        }
         PlayerCommand::RiptideAttack {
             player,
             ticks,
@@ -3371,21 +3288,21 @@ fn route_plugin_command(
         PlayerCommand::BreakBlock {
             player,
             position,
-            ticket,
-        } => match mailboxes.get(&player) {
-            Some((_, mailbox, _)) => mailbox
-                .lock()
-                .unwrap()
-                .push_back(Command::PluginBreakBlock { position, ticket }),
-            // Nobody to break it: the waiting plugin call gets its answer now.
-            None => crate::plugins::playerops::complete(ticket, false),
-        },
+            ticket: _,
+        } => {
+            if let Some((_, mailbox, _)) = mailboxes.get(&player) {
+                mailbox
+                    .lock()
+                    .unwrap()
+                    .push_back(Command::PluginBreakBlock { position });
+            }
+        }
         PlayerCommand::SetGameMode { player, mode } => {
             let mode = match mode {
-                ferrite_plugin::GameMode::Survival => 0,
-                ferrite_plugin::GameMode::Creative => 1,
-                ferrite_plugin::GameMode::Adventure => 2,
-                ferrite_plugin::GameMode::Spectator => 3,
+                crate::game::plugin_types::GameMode::Survival => 0,
+                crate::game::plugin_types::GameMode::Creative => 1,
+                crate::game::plugin_types::GameMode::Adventure => 2,
+                crate::game::plugin_types::GameMode::Spectator => 3,
             };
             if mode == 3 {
                 state.lock().unwrap().more.spectators.insert(player);
@@ -3733,7 +3650,7 @@ fn route_plugin_command(
             let Some((_, _, outbound)) = mailboxes.get(&player) else {
                 return;
             };
-            if world != ferrite_plugin::default_world_id() {
+            if world != crate::game::plugin_types::default_world_id() {
                 tracing::debug!(%world, "plugin sound for a world the server does not own");
                 return;
             }
@@ -3795,7 +3712,7 @@ fn route_plugin_command(
 }
 /// Queues a Paper entity-scheduler task on the mailbox of the player it belongs to.
 fn route_entity_task(
-    task: ferrite_plugin::EntityTask,
+    task: crate::game::plugin_types::EntityTask,
     mailboxes: &HashMap<Uuid, (u64, Mailbox, OutboundSender)>,
 ) {
     let mailbox = Uuid::parse_str(&task.entity)
@@ -3845,13 +3762,13 @@ fn plugin_kick_reason(component_json: Option<&str>) -> String {
 /// `SoundSource`, so the ordinal is the protocol id.
 fn plugin_sound_packet(
     sound: &str,
-    category: ferrite_plugin::SoundCategory,
+    category: crate::game::plugin_types::SoundCategory,
     [x, y, z]: [f64; 3],
     volume: f32,
     pitch: f32,
     seed: Option<i64>,
 ) -> Option<commands_extras::PlayerPacket> {
-    use ferrite_plugin::SoundCategory;
+    use crate::game::plugin_types::SoundCategory;
     let id = commands_extras::sound_id(sound).ok()?;
     let source = match category {
         SoundCategory::Master => 0,
@@ -4477,7 +4394,7 @@ impl CommandRuntime<'_> {
             && let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid)
         {
             mailbox.lock().unwrap().push_back(Command::PluginSurvival {
-                stat: ferrite_plugin::SurvivalStat::MaxHealth,
+                stat: crate::game::plugin_types::SurvivalStat::MaxHealth,
                 value: value as f32,
             });
         }
@@ -4958,10 +4875,7 @@ impl CommandRuntime<'_> {
                                 source
                                     .clone()
                                     .with_fall(damage_source::FallInfo::from_snapshot(
-                                        crate::plugins::facts::fall_distance(target.uuid)
-                                            .unwrap_or(0.0),
-                                        applied,
-                                        block,
+                                        0.0, applied, block,
                                     ));
                             let message = props.as_ref().map(|props| {
                                 damage_source::death_message(props, &target.name, &source, killer)
@@ -5383,7 +5297,7 @@ impl CommandRuntime<'_> {
                     if target.player {
                         if let Some((_, mailbox, _)) = self.mailboxes.get(&target.uuid) {
                             mailbox.lock().unwrap().push_back(Command::PluginPacket(
-                                ferrite_plugin::PluginPacket::Animation { action },
+                                crate::game::plugin_types::PluginPacket::Animation { action },
                             ));
                         }
                     } else {
@@ -5964,9 +5878,6 @@ fn release_holds(
             continue;
         }
         holds.remove(&(world, chunk));
-        if world == WorldId::Vanilla(Dimension::Overworld) {
-            crate::plugins::chunks::set_loaded(chunk.0, chunk.1, false);
-        }
         released.push(chunk);
     }
     defer_release_many(worlds, signals, world, released, true);
@@ -5998,9 +5909,6 @@ fn add_holds(
     }
     worlds.add_chunks(world, chunks.iter().copied());
     let tasks = chunks.into_iter().map(|chunk| {
-        if world == WorldId::Vanilla(Dimension::Overworld) {
-            crate::plugins::chunks::set_loaded(chunk.0, chunk.1, true);
-        }
         let dir = entity_root.clone();
         let transient = worlds.transient_entities.clone();
         let task: ferrite_region::RegionTask<Region> = Box::new(move |region| {

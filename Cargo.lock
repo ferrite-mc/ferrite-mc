@@ -1274,7 +1274,6 @@ dependencies = [
  "criterion 0.5.1",
  "ferrite-item",
  "ferrite-nbt",
- "ferrite-plugin",
  "ferrite-protocol",
  "hmac",
  "md5",
@@ -1288,18 +1287,6 @@ dependencies = [
  "socket2",
  "tokio",
  "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ferrite-plugin"
-version = "0.2.1"
-dependencies = [
- "ferrite-jvm",
- "ferrite-nbt",
- "ferrite-plugin-meta",
- "tempfile",
- "thiserror 2.0.21",
  "uuid",
 ]
 
@@ -1374,7 +1361,6 @@ dependencies = [
  "ferrite-math",
  "ferrite-nbt",
  "ferrite-net",
- "ferrite-plugin",
  "ferrite-profiler",
  "ferrite-protocol",
  "ferrite-recipe",
@@ -1391,6 +1377,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "toml 0.8.23",
  "tracing",

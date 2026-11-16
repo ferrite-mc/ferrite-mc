@@ -29,10 +29,6 @@ struct Config {
     generator: WorldGenerator,
     gamemode: GameMode,
     ops: Vec<OpConfig>,
-    plugins_dir: Option<std::path::PathBuf>,
-    plugin_bridge: Option<std::path::PathBuf>,
-    /// Plugin bridge settings from the `[plugins]` table.
-    plugins: PluginSettings,
     /// Enforce `whitelist.json` for new connections.
     whitelist: bool,
     /// Settings for the vanilla world generation host (`generator = 'vanilla'`).
@@ -145,23 +141,6 @@ impl Default for WorldgenSettings {
     }
 }
 
-/// Plugin bridge settings from the `[plugins]` table.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
-struct PluginSettings {
-    /// What a failed plugin event means for the action it guards.
-    on_event_error: EventErrorPolicy,
-}
-
-/// What a failed plugin event means for the action it guards.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum EventErrorPolicy {
-    #[default]
-    Allow,
-    Deny,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum OpConfig {
@@ -251,9 +230,6 @@ impl Default for Config {
             generator: WorldGenerator::Vanilla,
             gamemode: GameMode::Creative,
             ops: Vec::new(),
-            plugins_dir: Some("plugins".into()),
-            plugin_bridge: None,
-            plugins: PluginSettings::default(),
             whitelist: false,
             worldgen: WorldgenSettings::default(),
             rate_limits: RateLimitSettings::default(),
@@ -283,15 +259,10 @@ world = "world"
 generator = "vanilla"
 gamemode = "creative"
 
-plugins-dir = "plugins"
-
 # Player forwarding: "none", "velocity" or "bungee".
 forwarding = "none"
 forwarding-secret = ""
 whitelist = false
-
-[plugins]
-on-event-error = "allow"
 
 # Chat and command rate limits (a token bucket per connection). The defaults are vanilla's spam
 # threshold. A burst of 0 switches that bucket off; action is "kick" or "drop".
@@ -352,14 +323,6 @@ fn spawn_for_world(path: &std::path::Path) -> anyhow::Result<[i32; 3]> {
         std::fs::create_dir_all(path)
             .with_context(|| format!("creating world {}: ", path.display()))?;
         Ok([0, 65, 0])
-    }
-}
-
-/// Creates the plugins directory when it is missing so a fresh install has a place to drop jars.
-/// A failure is logged and ignored: the server still runs without plugins.
-fn ensure_plugins_dir(path: &std::path::Path) {
-    if let Err(error) = std::fs::create_dir_all(path) {
-        tracing::warn!(%error, path = %path.display(), "could not create the plugins directory");
     }
 }
 
@@ -489,19 +452,10 @@ async fn run_server(
         tracing::info!("server startup cancelled");
         return Ok(());
     }
-    let bind_host = config
-        .bind_address
-        .rsplit_once(':')
-        .map_or_else(|| config.bind_address.clone(), |(host, _)| host.to_owned());
     let vanilla_data = std::env::var_os("FERRITE_VANILLA_ROOT").map_or_else(
         || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated"),
         std::path::PathBuf::from,
     );
-    // Plugins call the Bukkit API from their own threads; the game loop owns the world, so
-    // player mutations (inventory, teleport, gamemode, ...) arrive through this channel and are
-    // routed to the region that owns the player.
-    let (plugin_command_tx, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
-    let (plugin_console_tx, plugin_console) = tokio::sync::mpsc::unbounded_channel();
     let terrain: Option<std::sync::Arc<dyn game::ChunkGenerator>> = match config.generator {
         WorldGenerator::Vanilla => {
             let registry = std::sync::Arc::new(
@@ -526,7 +480,6 @@ async fn run_server(
         }
         WorldGenerator::Superflat => None,
     };
-    let terrain_for_plugins = terrain.clone();
     if startup_cancelled(&cancelled) {
         tracing::info!("server startup cancelled");
         return Ok(());
@@ -554,24 +507,6 @@ async fn run_server(
             tracing::warn!(%error, world = %path.display(), "could not write level.dat");
         }
     }
-    ferrite_server::plugins::chunks::set_world_dir(config.world.clone());
-    // The vanilla dimensions share the world root; the nether and end live in DIM-1/DIM1, which
-    // is the Folder `World#getWorldPath` reports for them.
-    for dimension in [game::Dimension::Nether, game::Dimension::End] {
-        ferrite_server::plugins::chunks::remove_world_path(ferrite_server::plugins::world_id(
-            dimension,
-        ));
-    }
-    if let Some(root) = &config.world {
-        ferrite_server::plugins::chunks::set_world_path(
-            ferrite_server::plugins::world_id(game::Dimension::Nether),
-            root.join("DIM-1"),
-        );
-        ferrite_server::plugins::chunks::set_world_path(
-            ferrite_server::plugins::world_id(game::Dimension::End),
-            root.join("DIM1"),
-        );
-    }
     game::set_map_server_root(config.world.clone());
     // The plugin bridge and the game loop share these sources, so a plugin write lands in the
     // same chunk data the server ticks.
@@ -580,30 +515,6 @@ async fn run_server(
         std::sync::Arc::clone(&source),
         spawn,
     );
-    let runtime_world_view =
-        ferrite_server::plugins::dynamic_world_view(std::sync::Arc::clone(&dimensions));
-    let plugin_worlds = [game::Dimension::Nether, game::Dimension::End]
-        .into_iter()
-        .map(|dimension| {
-            let spawn = dimensions.spawn(dimension);
-            ferrite_plugin::WorldSnapshot {
-                id: ferrite_server::plugins::world_id(dimension),
-                name: ferrite_server::plugins::world_name(dimension).into(),
-                time: 0,
-                spawn: ferrite_plugin::BlockPosition {
-                    x: spawn[0],
-                    y: spawn[1],
-                    z: spawn[2],
-                },
-                blocks: Vec::new(),
-                heights: Vec::new(),
-            }
-        })
-        .collect();
-    if startup_cancelled(&cancelled) {
-        tracing::info!("server startup cancelled");
-        return Ok(());
-    }
     let (disable_end_credits, perform_username_validation) =
         match ferrite_config::FerriteConfig::load("config") {
             Ok(config) => {
@@ -634,10 +545,7 @@ async fn run_server(
         max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
         ops,
         plugins: None,
-        plugin_event_errors: match config.plugins.on_event_error {
-            EventErrorPolicy::Allow => game::PluginEventPolicy::Allow,
-            EventErrorPolicy::Deny => game::PluginEventPolicy::Deny,
-        },
+        plugin_event_errors: game::PluginEventPolicy::Allow,
         admin: Some(admin),
         whitelist: config.whitelist,
         playerdata: Some(
@@ -646,116 +554,14 @@ async fn run_server(
                 .as_ref()
                 .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
         ),
-        plugin_commands: Some(plugin_commands),
+        plugin_commands: None,
         dimensions: Some(dimensions),
-        runtime_world_view: Some(runtime_world_view.clone()),
     };
     let world = game::World::start_configured(Some(source), spawn, settings);
     if startup_cancelled(&cancelled) {
         tracing::info!("server startup cancelled");
         return Ok(());
     }
-    let plugins_dir = config.plugins_dir.unwrap_or_else(|| "plugins".into());
-    ensure_plugins_dir(&plugins_dir);
-    let plugin_bridge =
-        ferrite_server::plugins::PluginBridge::start(ferrite_server::plugins::Settings {
-            directory: plugins_dir,
-            bridge_jar: config.plugin_bridge.unwrap_or_else(|| {
-                "java/ferrite-api-impl/build/libs/ferrite-api-impl-all.jar".into()
-            }),
-            data_dir: vanilla_data,
-            bind_address: bind_host,
-            motd: config.motd.clone(),
-            max_players: u16::try_from(config.max_players).unwrap_or(u16::MAX),
-            port: listener.local_addr()?.port(),
-            view_distance,
-            online_mode: config.online_mode,
-            whitelist: config.whitelist,
-            world: ferrite_plugin::WorldSnapshot {
-                id: ferrite_plugin::default_world_id(),
-                name: "world".into(),
-                time: 0,
-                spawn: ferrite_plugin::BlockPosition {
-                    x: spawn[0],
-                    y: spawn[1],
-                    z: spawn[2],
-                },
-                blocks: Vec::new(),
-                heights: Vec::new(),
-            },
-            worlds: plugin_worlds,
-            player_handler: Some(std::sync::Arc::new(move |command| {
-                let _ = plugin_command_tx.send(command);
-            })),
-            terrain: terrain_for_plugins,
-            world_view: Some(runtime_world_view.clone()),
-            console: Some(plugin_console_tx),
-            runtime_world_handler: Some({
-                let sender = world.sender.clone();
-                // Captured here: plugin threads other than the one starting the server have no
-                // tokio context of their own.
-                let runtime = tokio::runtime::Handle::current();
-                std::sync::Arc::new(move |name: &str, environment: &str, seed: i64| {
-                    let dimension = match environment {
-                        "NORMAL" => game::Dimension::Overworld,
-                        "NETHER" => game::Dimension::Nether,
-                        "THE_END" => game::Dimension::End,
-                        _ => {
-                            return Err(format!(
-                                "unsupported Bukkit world environment {environment}"
-                            ));
-                        }
-                    };
-                    let name = name.to_owned();
-                    let created = tokio::task::block_in_place(|| {
-                        runtime.block_on(async {
-                            let (complete, done) = tokio::sync::oneshot::channel();
-                            sender
-                                .send(ferrite_net::game::GameMessage::CreateRuntimeWorld {
-                                    name,
-                                    dimension: dimension.key().to_owned(),
-                                    spawn: dimension.default_spawn(),
-                                    seed,
-                                    complete,
-                                })
-                                .map_err(|_| "game loop stopped".to_owned())?;
-                            done.await
-                                .map_err(|_| "runtime world response lost".to_owned())?
-                        })
-                    })?;
-                    Ok((created.0, created.2, created.3, created.4))
-                })
-            }),
-            runtime_world_unloader: Some({
-                let sender = world.sender.clone();
-                let runtime = tokio::runtime::Handle::current();
-                std::sync::Arc::new(move |id, save| {
-                    tokio::task::block_in_place(|| {
-                        runtime.block_on(async {
-                            let (complete, done) = tokio::sync::oneshot::channel();
-                            sender
-                                .send(ferrite_net::game::GameMessage::UnloadRuntimeWorld {
-                                    id,
-                                    save,
-                                    complete,
-                                })
-                                .map_err(|_| "game loop stopped".to_owned())?;
-                            done.await
-                                .map_err(|_| "runtime unload response lost".to_owned())?
-                        })
-                    })
-                })
-            }),
-        })
-        .context("starting plugins")?;
-    if let Some(bridge) = &plugin_bridge {
-        world.set_plugin_hooks(bridge.hooks()).await?;
-    }
-    if startup_cancelled(&cancelled) {
-        tracing::info!("server startup cancelled");
-        return Ok(());
-    }
-    ferrite_server::plugins::forward_console(plugin_console, world.sender.clone());
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
         ferrite_net::ServerConfig {
@@ -802,11 +608,6 @@ async fn run_server(
         }
     };
     let world_result = world.shutdown().await;
-    if let Some(bridge) = plugin_bridge
-        && let Err(error) = bridge.shutdown()
-    {
-        tracing::error!(%error, "plugin shutdown failed");
-    }
     world_result?;
     if let Some(result) = result {
         result??;
@@ -950,17 +751,6 @@ mod tests {
         assert!(toml::from_str::<Config>("[rate-limits]\naction = \"ban\"\n").is_err());
     }
 
-    #[test]
-    fn a_missing_plugins_directory_is_created_and_an_existing_one_is_kept() {
-        let root = tempfile::tempdir().unwrap();
-        let plugins = root.path().join("nested").join("plugins");
-        ensure_plugins_dir(&plugins);
-        assert!(plugins.is_dir());
-        std::fs::write(plugins.join("keep.jar"), b"x").unwrap();
-        ensure_plugins_dir(&plugins);
-        assert!(plugins.join("keep.jar").is_file());
-    }
-
     /// A PNG signature plus an IHDR chunk with the given dimensions (payload otherwise absent).
     fn png(width: u32, height: u32) -> Vec<u8> {
         let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -1045,14 +835,6 @@ mod tests {
                 secret: "hunter2".into()
             }
         );
-        assert_eq!(
-            defaults.plugins_dir.as_deref(),
-            Some(std::path::Path::new("plugins"))
-        );
-        assert_eq!(defaults.plugin_bridge, None);
-        assert_eq!(defaults.plugins.on_event_error, EventErrorPolicy::Allow);
-        let denied: Config = toml::from_str("[plugins]\non-event-error = 'deny'").unwrap();
-        assert_eq!(denied.plugins.on_event_error, EventErrorPolicy::Deny);
         assert_eq!(
             defaults.server_icon.as_deref(),
             Some(std::path::Path::new("server-icon.png"))

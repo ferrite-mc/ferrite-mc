@@ -201,9 +201,8 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 
 ## 해야 할 일
 
-- 남은 게임·플러그인 작업: 드래곤 돌진·화염구 숨결의 근사, 기본 월드·
-  네더·엔드의 비플레이어 엔티티 NBT 경계, Paper/Bukkit 및 NMS
-  호환 범위 확대.
+- 남은 게임·플러그인 작업: 드래곤 돌진·화염구 숨결의 근사, 일부 타일 상태와
+  `ChunkData#getBiome`/`WorldCreator` 옵션, Paper/Bukkit 및 NMS 호환 범위 확대.
 - 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
   피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI, 플러그인 동작을 통합 서버에서 확인.
 - 최적화 조사 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),

@@ -18,6 +18,26 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpSocket, TcpStream},
 };
+/// Copy the generated fixture world so a mutating test never rewrites the shared light fixture.
+fn copy_fixture_world(root: &std::path::Path) -> (tempfile::TempDir, std::path::PathBuf) {
+    fn copy_tree(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let target = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("world");
+    copy_tree(&root.join("fixture-world/world"), &path);
+    (temp, path)
+}
+
 /// Wall time and region ticks reached at each stage of a long end-to-end test. Printed when the
 /// test panics (or always with `FERRITE_TEST_STAGES=1`), so a CI failure shows whether the time
 /// went into waiting for a packet or into region ticks, instead of only "no packet N within Ts".
@@ -483,7 +503,7 @@ async fn fixture_world_streams_disk_chunk() {
     let Some(root) = super::fixture_version_root() else {
         return;
     };
-    let path = root.join("fixture-world/world");
+    let (_fixture, path) = copy_fixture_world(&root);
     let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
     let expected = super::anvil::read_chunk(&path, &registry, 0, 7)
         .unwrap()
@@ -3342,6 +3362,23 @@ async fn click_in(
     content.slots
 }
 
+/// Waits for the acknowledgement of one block action, not merely the next packet 4. Earlier
+/// `UseItemOn` calls also produce acknowledgements, so matching the sequence is what pins the
+/// block change (the server sends the ack after applying it).
+async fn wait_for_block_ack(bot: &mut Bot, sequence: i32) {
+    loop {
+        let body = bot
+            .until(ferrite_protocol::packets::play::AcknowledgeBlockChange::ID)
+            .await;
+        let ack =
+            ferrite_protocol::packets::play::AcknowledgeBlockChange::decode(&mut body.as_slice())
+                .unwrap();
+        if ack.sequence.0 == sequence {
+            return;
+        }
+    }
+}
+
 /// [`click_in`] on the inventory menu.
 async fn click(
     bot: &mut Bot,
@@ -3914,7 +3951,7 @@ async fn chest_contents_are_shared_saved_and_spilled_when_broken() {
             sequence: VarInt(2),
         })
         .await;
-    keeper.until(4).await;
+    wait_for_block_ack(&mut keeper, 2).await;
     assert_eq!(source.block(8, 64, 8), Some(0));
     assert!(source.block_entity(8, 64, 8).is_none());
     // The chest is gone, so the visitor's screen closes (the inventory clicks below are only
@@ -4058,7 +4095,7 @@ async fn shulker_box_opens_refuses_nesting_saves_contents_and_keeps_them_in_the_
             sequence: VarInt(2),
         })
         .await;
-    keeper.until(4).await;
+    wait_for_block_ack(&mut keeper, 2).await;
     assert_eq!(source.block(8, 64, 8), Some(0));
     assert!(source.block_entity(8, 64, 8).is_none());
     let stone = ferrite_item::item_id("stone").unwrap();
@@ -5052,7 +5089,7 @@ async fn plugin_visual_experience_uses_live_level_without_changing_it() {
     let actual = SetExperience::decode(&mut body.as_slice()).unwrap();
     assert_eq!(actual.level.0, 12);
     tx.send(
-        ferrite_plugin::PlayerCommand::VisualExperienceCurrentLevel {
+        crate::game::plugin_types::PlayerCommand::VisualExperienceCurrentLevel {
             player,
             progress: 0.25,
         },
@@ -5064,7 +5101,7 @@ async fn plugin_visual_experience_uses_live_level_without_changing_it() {
         (visual.progress, visual.level.0, visual.total.0),
         (0.25, 12, actual.total.0)
     );
-    tx.send(ferrite_plugin::PlayerCommand::VisualExperience {
+    tx.send(crate::game::plugin_types::PlayerCommand::VisualExperience {
         player,
         progress: 0.75,
         level: 5,
@@ -5114,7 +5151,7 @@ async fn plugin_save_and_load_data_round_trip_a_live_player() {
     ));
     let mut bot = Bot::join(addr, "DataPlayer").await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    tx.send(ferrite_plugin::PlayerCommand::PlayerData {
+    tx.send(crate::game::plugin_types::PlayerCommand::PlayerData {
         player,
         load: false,
     })
@@ -5135,7 +5172,7 @@ async fn plugin_save_and_load_data_round_trip_a_live_player() {
     })
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    tx.send(ferrite_plugin::PlayerCommand::PlayerData { player, load: true })
+    tx.send(crate::game::plugin_types::PlayerCommand::PlayerData { player, load: true })
         .unwrap();
     let body = bot.until(PositionSync::ID).await;
     let sync = PositionSync::decode(&mut body.as_slice()).unwrap();
@@ -5179,7 +5216,7 @@ async fn plugin_load_data_restores_health_hunger_and_experience() {
     ));
     let mut bot = Bot::join(addr, "VitalsPlayer").await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    tx.send(ferrite_plugin::PlayerCommand::PlayerData {
+    tx.send(crate::game::plugin_types::PlayerCommand::PlayerData {
         player,
         load: false,
     })
@@ -5204,7 +5241,7 @@ async fn plugin_load_data_restores_health_hunger_and_experience() {
         "exhaustion": 0.5, "xp_level": 2, "xp_progress": 0.5, "xp_total": 16
     });
     std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
-    tx.send(ferrite_plugin::PlayerCommand::PlayerData { player, load: true })
+    tx.send(crate::game::plugin_types::PlayerCommand::PlayerData { player, load: true })
         .unwrap();
     let body = bot.until(SetExperience::ID).await;
     let xp = SetExperience::decode(&mut body.as_slice()).unwrap();
@@ -5382,10 +5419,11 @@ async fn survival_fall_damage_and_natural_regeneration_with_bot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn survival_eating_uses_food_component_after_use_duration() {
     use ferrite_protocol::packets::play::{ServerboundUseItem, SetHealth, SetPlayerInventory};
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let path = root.join("vanilla/26.3/fixture-world/world");
-    let registry =
-        ferrite_world::RuntimeRegistry::load(root.join("vanilla/26.3/generated")).unwrap();
+    let Some(root) = super::fixture_version_root() else {
+        return;
+    };
+    let (_fixture, path) = copy_fixture_world(&root);
+    let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
     let spawn = super::anvil::read_spawn(&path).unwrap();
     let source = super::anvil::AnvilChunkSource::new(path, registry);
     let world = World::start_configured(
@@ -6395,7 +6433,7 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
     ));
     let mut bot = Bot::join(addr, "Traveler").await;
     let player = ferrite_net::offline_uuid("Traveler");
-    let location = |world, x| ferrite_plugin::PlayerLocation {
+    let location = |world, x| crate::game::plugin_types::PlayerLocation {
         world,
         x,
         y: 65.0,
@@ -6430,7 +6468,7 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
         .await
         .unwrap();
     commands
-        .send(ferrite_plugin::PlayerCommand::Teleport {
+        .send(crate::game::plugin_types::PlayerCommand::Teleport {
             player,
             location: location(runtime, 8.5),
         })
@@ -6475,9 +6513,9 @@ async fn player_travels_into_a_runtime_world_and_back_keeping_holds_and_entities
 
     // And back: the runtime hold is released and the original world's cow is restored.
     commands
-        .send(ferrite_plugin::PlayerCommand::Teleport {
+        .send(crate::game::plugin_types::PlayerCommand::Teleport {
             player,
-            location: location(ferrite_plugin::default_world_id(), 8.5),
+            location: location(crate::game::plugin_types::default_world_id(), 8.5),
         })
         .unwrap();
     let (mut visitor_removed, mut cow_back) = (false, false);
@@ -6538,7 +6576,7 @@ async fn unload_waits_briefly_for_a_departing_player_and_still_refuses_one_who_s
     ));
     let mut bot = Bot::join(addr, "Stayer").await;
     let player = ferrite_net::offline_uuid("Stayer");
-    let location = |world| ferrite_plugin::PlayerLocation {
+    let location = |world| crate::game::plugin_types::PlayerLocation {
         world,
         x: 8.5,
         y: 65.0,
@@ -6551,7 +6589,7 @@ async fn unload_waits_briefly_for_a_departing_player_and_still_refuses_one_who_s
         .await
         .unwrap();
     commands
-        .send(ferrite_plugin::PlayerCommand::Teleport {
+        .send(crate::game::plugin_types::PlayerCommand::Teleport {
             player,
             location: location(runtime),
         })
@@ -6577,11 +6615,11 @@ async fn unload_waits_briefly_for_a_departing_player_and_still_refuses_one_who_s
     );
     // Leaving while the unload is asking lets it through.
     let leave = commands.clone();
-    let origin = ferrite_plugin::default_world_id();
+    let origin = crate::game::plugin_types::default_world_id();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         leave
-            .send(ferrite_plugin::PlayerCommand::Teleport {
+            .send(crate::game::plugin_types::PlayerCommand::Teleport {
                 player,
                 location: location(origin),
             })
@@ -6631,7 +6669,7 @@ async fn unload_right_after_the_client_sees_the_departure_is_not_refused() {
     ));
     let mut bot = Bot::join(addr, "Leaver").await;
     let player = ferrite_net::offline_uuid("Leaver");
-    let location = |world| ferrite_plugin::PlayerLocation {
+    let location = |world| crate::game::plugin_types::PlayerLocation {
         world,
         x: 8.5,
         y: 65.0,
@@ -6650,7 +6688,7 @@ async fn unload_right_after_the_client_sees_the_departure_is_not_refused() {
             .await
             .unwrap();
         commands
-            .send(ferrite_plugin::PlayerCommand::Teleport {
+            .send(crate::game::plugin_types::PlayerCommand::Teleport {
                 player,
                 location: location(runtime),
             })
@@ -6663,9 +6701,9 @@ async fn unload_right_after_the_client_sees_the_departure_is_not_refused() {
         })
         .await;
         commands
-            .send(ferrite_plugin::PlayerCommand::Teleport {
+            .send(crate::game::plugin_types::PlayerCommand::Teleport {
                 player,
-                location: location(ferrite_plugin::default_world_id()),
+                location: location(crate::game::plugin_types::default_world_id()),
             })
             .unwrap();
         // Unload the instant the client has been told it left, not when it has settled.
@@ -6722,9 +6760,9 @@ async fn player_rejoins_the_runtime_world_they_left_in() {
         .await
         .unwrap();
     commands
-        .send(ferrite_plugin::PlayerCommand::Teleport {
+        .send(crate::game::plugin_types::PlayerCommand::Teleport {
             player,
-            location: ferrite_plugin::PlayerLocation {
+            location: crate::game::plugin_types::PlayerLocation {
                 world: runtime,
                 x: 8.5,
                 y: 65.0,
@@ -6779,133 +6817,6 @@ async fn player_rejoins_the_runtime_world_they_left_in() {
 
 /// `Player#breakBlock` applies the player's own break rules: it breaks stone for a survival
 /// player, but never invents a break for air or bedrock.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn plugin_break_block_follows_the_players_rules() {
-    let source = super::anvil::AnvilChunkSource::new_memory();
-    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
-    let world = World::start_configured(
-        Some(source.clone()),
-        [8, 65, 8],
-        super::WorldSettings {
-            gamemode: 0,
-            plugin_commands: Some(plugin_commands),
-            ..Default::default()
-        },
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let _server = tokio::spawn(serve(
-        listener,
-        ServerConfig {
-            online_mode: false,
-            view_distance: 2,
-            game: Some(world.sender.clone()),
-            ..Default::default()
-        },
-    ));
-    let _bot = Bot::join(addr, "Breaker").await;
-    let player = ferrite_net::offline_uuid("Breaker");
-    let state = |name| u32::from(ferrite_data::blocks::default_state(name).unwrap());
-    let (stone, bedrock, air) = (state("stone"), state("bedrock"), state("air"));
-    for (x, block) in [(8, stone), (9, bedrock), (10, air)] {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while source.set_block(x, 64, 8, block).is_err() {
-            assert!(std::time::Instant::now() < deadline, "chunk never loaded");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
-    let break_at = |x: i32| {
-        let commands = commands.clone();
-        let call = ferrite_plugin::HostCall {
-            owner: "Player".into(),
-            subject: player.to_string(),
-            method: "breakBlock(int,int,int)".into(),
-            args: vec![x.to_string(), "64".into(), "8".into()],
-        };
-        async move {
-            tokio::task::spawn_blocking(move || {
-                crate::plugins::playerops::handle(&call, |command| {
-                    let _ = commands.send(command);
-                })
-            })
-            .await
-            .unwrap()
-        }
-    };
-    assert_eq!(break_at(8).await.as_deref(), Some("true"), "stone breaks");
-    assert_eq!(source.block(8, 64, 8), Some(air));
-    assert_eq!(break_at(8).await.as_deref(), Some("false"), "now it is air");
-    assert_eq!(break_at(10).await.as_deref(), Some("false"), "air");
-    assert_eq!(break_at(9).await.as_deref(), Some("false"), "bedrock");
-    assert_eq!(source.block(9, 64, 8), Some(bedrock), "bedrock stands");
-}
-
-/// `Player#chat("/command")` runs as the player: a player without operator rights cannot use it
-/// to reach console permissions (here, `/gamemode creative` is refused, so bedrock stays).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn plugin_chat_commands_keep_the_players_permission() {
-    let source = super::anvil::AnvilChunkSource::new_memory();
-    let (commands, plugin_commands) = tokio::sync::mpsc::unbounded_channel();
-    let world = World::start_configured(
-        Some(source.clone()),
-        [8, 65, 8],
-        super::WorldSettings {
-            gamemode: 0,
-            plugin_commands: Some(plugin_commands),
-            ..Default::default()
-        },
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let _server = tokio::spawn(serve(
-        listener,
-        ServerConfig {
-            online_mode: false,
-            view_distance: 2,
-            game: Some(world.sender.clone()),
-            ..Default::default()
-        },
-    ));
-    let _bot = Bot::join(addr, "Speaker").await;
-    let player = ferrite_net::offline_uuid("Speaker");
-    let bedrock = u32::from(ferrite_data::blocks::default_state("bedrock").unwrap());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while source.set_block(9, 64, 8, bedrock).is_err() {
-        assert!(std::time::Instant::now() < deadline, "chunk never loaded");
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let call = |method: &str, args: Vec<String>| ferrite_plugin::HostCall {
-        owner: "Player".into(),
-        subject: player.to_string(),
-        method: method.into(),
-        args,
-    };
-    let run = |call: ferrite_plugin::HostCall| {
-        let commands = commands.clone();
-        async move {
-            tokio::task::spawn_blocking(move || {
-                crate::plugins::playerops::handle(&call, |command| {
-                    let _ = commands.send(command);
-                })
-            })
-            .await
-            .unwrap()
-        }
-    };
-    let chat = run(call("chat(String)", vec!["/gamemode creative".into()])).await;
-    assert_eq!(chat.as_deref(), Some(""));
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let breaking = call(
-        "breakBlock(int,int,int)",
-        vec!["9".into(), "64".into(), "8".into()],
-    );
-    assert_eq!(
-        run(breaking).await.as_deref(),
-        Some("false"),
-        "still a survival player, so bedrock stands"
-    );
-    assert_eq!(source.block(9, 64, 8), Some(bedrock));
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fishing_rod_casts_a_bobber_and_a_second_use_reels_it_in_with_bot() {
@@ -7028,129 +6939,5 @@ async fn clone_between_dimensions_reads_one_world_and_writes_another() {
         .await
         .expect("move clears the overworld source");
     assert_eq!(nether.block(9, 200, 0), Some(gold));
-    world.shutdown().await.unwrap();
-}
-
-/// `/clone` resolves `from`/`to` through the runtime world catalog, so a runtime world is a valid
-/// source and destination, `move` clears the right source, and an unknown key is rejected with
-/// vanilla's message before anything is read or written.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn clone_between_the_default_and_a_runtime_world() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3");
-    if !root.join("generated/reports/blocks.json").exists() {
-        eprintln!("SKIP: vanilla/26.3/generated is absent");
-        return;
-    }
-    let temp = tempfile::tempdir().unwrap();
-    let registry = ferrite_world::RuntimeRegistry::load(root.join("generated")).unwrap();
-    let source = super::anvil::AnvilChunkSource::new(temp.path().to_path_buf(), registry);
-    let view = std::sync::Arc::new(crate::plugins::SourceWorldView::new([]));
-    let world = World::start_configured(
-        Some(source),
-        [0, 65, 0],
-        super::WorldSettings {
-            runtime_world_view: Some(view.clone()),
-            ..Default::default()
-        },
-    );
-    let source = world
-        .dimensions()
-        .source(super::Dimension::Overworld)
-        .clone();
-    let (runtime, _, _, _, _) = world
-        .create_runtime_world("clonedst", super::Dimension::Overworld, [0, 65, 0], 0)
-        .await
-        .unwrap();
-    let runtime_source = view.source(runtime).expect("runtime world is registered");
-    world
-        .console_command("forceload add 0 0".into())
-        .await
-        .unwrap();
-    world
-        .signals
-        .send(super::Signal::Hold {
-            world: super::WorldId::Runtime(runtime),
-            chunk: ferrite_region::ChunkPos(0, 0),
-            add: true,
-        })
-        .unwrap();
-    // A hold registers the chunk with the world's region; the chunk data itself is loaded the way
-    // plugin reads load it (`SourceWorldView::source_with_chunk`).
-    let loader = runtime_source.clone();
-    let loaded = tokio::task::spawn_blocking(move || {
-        loader.ensure_chunk_loaded(0, 0, std::time::Duration::from_secs(30))
-    })
-    .await
-    .unwrap();
-    assert!(loaded, "the runtime world loads its chunk");
-    let wait = async {
-        while source.get(0, 0, 0).is_none() || runtime_source.get(0, 0, 0).is_none() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(30), wait)
-        .await
-        .expect("both worlds load their chunk");
-    let state = |name: &str| u32::from(ferrite_data::blocks::default_state(name).unwrap());
-    let (stone, gold) = (state("minecraft:stone"), state("minecraft:gold_block"));
-    let until = |what: &'static str, mut done: Box<dyn FnMut() -> bool>| async move {
-        let wait = async {
-            while !done() {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(30), wait)
-            .await
-            .expect(what);
-    };
-
-    // Default world -> runtime world.
-    source.set_block(1, 200, 0, stone).unwrap();
-    source.set_block(2, 200, 0, gold).unwrap();
-    world
-        .console_command("clone 1 200 0 2 200 0 to ferrite:clonedst 4 200 0".into())
-        .await
-        .unwrap();
-    let target = runtime_source.clone();
-    until(
-        "the default world's blocks arrive in the runtime world",
-        Box::new(move || target.block(5, 200, 0) == Some(gold)),
-    )
-    .await;
-    assert_eq!(runtime_source.block(4, 200, 0), Some(stone));
-    assert_eq!(source.block(2, 200, 0), Some(gold));
-    assert_ne!(
-        source.block(5, 200, 0),
-        Some(gold),
-        "a normal clone leaves the source alone"
-    );
-
-    // Runtime world -> default world, with `move`: the runtime source is cleared afterwards.
-    world
-        .console_command("clone from ferrite:clonedst 4 200 0 5 200 0 8 201 0 replace move".into())
-        .await
-        .unwrap();
-    let (back, origin) = (source.clone(), runtime_source.clone());
-    until(
-        "the runtime blocks arrive in the default world and leave their source",
-        Box::new(move || back.block(9, 201, 0) == Some(gold) && origin.block(5, 200, 0) == Some(0)),
-    )
-    .await;
-    assert_eq!(source.block(8, 201, 0), Some(stone));
-    assert_eq!(runtime_source.block(4, 200, 0), Some(0));
-
-    // An unknown key is refused before anything is read or written.
-    world
-        .console_command("clone 1 200 0 2 200 0 to ferrite:missing 20 200 0".into())
-        .await
-        .unwrap();
-    world
-        .console_command("clone from ferrite:missing 1 200 0 2 200 0 20 202 0".into())
-        .await
-        .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_ne!(source.block(21, 200, 0), Some(gold));
-    assert_ne!(source.block(21, 202, 0), Some(gold));
-    assert_ne!(runtime_source.block(21, 200, 0), Some(gold));
     world.shutdown().await.unwrap();
 }

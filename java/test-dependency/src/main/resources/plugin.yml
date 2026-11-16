@@ -1,5 +1,0 @@
-name: FerriteDependency
-version: 1.0
-main: dev.ferrite.dependency.DependencyPlugin
-api-version: '26.3'
-provides: [FerriteAlias]

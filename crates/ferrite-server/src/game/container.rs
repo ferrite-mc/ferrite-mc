@@ -38,7 +38,7 @@ pub struct Containers {
     /// Plugin shoulder changes (`Player#setShoulderEntity*`, `release*ShoulderEntity`) the region applies this tick.
     pub shoulders: Vec<(
         ferrite_entity::shoulder::ShoulderSide,
-        ferrite_plugin::ShoulderOp,
+        crate::game::plugin_types::ShoulderOp,
     )>,
     /// The block the open menu belongs to, for vanilla `stillValid` and shared contents.
     pub open_at: Option<OpenAt>,
@@ -105,8 +105,8 @@ fn click_names(input: ClickInput, button: i8) -> (&'static str, &'static str) {
 }
 
 /// The plugin-facing form of a stack, for `InventoryDragEvent`'s cursors and slot map.
-fn item_snapshot(stack: &ItemStack) -> ferrite_plugin::ItemSnapshot {
-    ferrite_plugin::ItemSnapshot {
+fn item_snapshot(stack: &ItemStack) -> crate::game::plugin_types::ItemSnapshot {
+    crate::game::plugin_types::ItemSnapshot {
         material: ferrite_item::item_name(stack.item)
             .unwrap_or("minecraft:air")
             .to_owned(),
@@ -476,7 +476,7 @@ impl Player {
         {
             let before = start.menu.items(&start.inventory);
             let after = menu.items(&self.inventory);
-            let changed: Vec<(i32, ferrite_plugin::ItemSnapshot)> = after
+            let changed: Vec<(i32, crate::game::plugin_types::ItemSnapshot)> = after
                 .iter()
                 .enumerate()
                 .filter(|(slot, item)| before.get(*slot) != Some(*item))
@@ -599,9 +599,13 @@ impl Player {
     /// against the pyramid, spends one payment item and saves the choice in the block entity.
     /// `Player#openMerchant`: a trading screen for offers a plugin defined. The open menu tracks
     /// the uses; the plugin's recipes do not see them back.
-    pub fn open_plugin_merchant(&mut self, title: &str, trades: &[ferrite_plugin::MerchantTrade]) {
+    pub fn open_plugin_merchant(
+        &mut self,
+        title: &str,
+        trades: &[crate::game::plugin_types::MerchantTrade],
+    ) {
         use ferrite_inventory::Trade;
-        let stack = |item: &ferrite_plugin::ItemSnapshot| {
+        let stack = |item: &crate::game::plugin_types::ItemSnapshot| {
             ferrite_item::item_id(&item.material)
                 .map(|id| ItemStack::with_count(id, i32::from(item.amount)))
         };
@@ -1006,7 +1010,7 @@ impl Player {
         title: &str,
         rows: u8,
         shulker: bool,
-        items: &[Option<ferrite_plugin::ItemSnapshot>],
+        items: &[Option<crate::game::plugin_types::ItemSnapshot>],
     ) {
         let stacks: Vec<ItemStack> = items
             .iter()
@@ -1085,8 +1089,8 @@ impl Player {
     }
 
     /// Builds and sends one packet a plugin asked for (see `plugins/network.rs`).
-    pub fn send_plugin_packet(&mut self, packet: ferrite_plugin::PluginPacket) {
-        use ferrite_plugin::PluginPacket;
+    pub fn send_plugin_packet(&mut self, packet: crate::game::plugin_types::PluginPacket) {
+        use crate::game::plugin_types::PluginPacket;
         use ferrite_protocol::{codec::RestBytes, types::BlockPos};
         match packet {
             PluginPacket::BlockChange { pos, state } => send(
@@ -1201,7 +1205,6 @@ impl Player {
             }
             PluginPacket::WakeUp => super::blocks::wake(self),
             PluginPacket::RetrieveCookie { key } => {
-                crate::plugins::facts::clear_cookie(self.uuid, &key);
                 send(
                     self,
                     &ferrite_protocol::packets::play::CookieRequest { key },
@@ -1221,7 +1224,7 @@ impl Player {
                 }
             }
             PluginPacket::Scoreboard(step) => {
-                use ferrite_plugin::ScoreboardStep as S;
+                use crate::game::plugin_types::ScoreboardStep as S;
                 use ferrite_protocol::packets::play as p;
                 use ferrite_protocol::types::PlainText;
                 match step {
@@ -1307,7 +1310,7 @@ impl Player {
                 }
             }
             PluginPacket::BossBar(change) => {
-                use ferrite_plugin::BossBarChange as C;
+                use crate::game::plugin_types::BossBarChange as C;
                 use ferrite_protocol::packets::play::{BossBar, BossBarAction as A};
                 use ferrite_protocol::types::PlainText;
                 let (uuid, action) = match change {
@@ -1414,43 +1417,7 @@ impl Player {
                     },
                 );
             }
-            PluginPacket::TileUpdate {
-                pos,
-                entity,
-                items,
-                furnace,
-                patterns,
-                profile,
-                properties,
-                metas,
-                extra,
-            } => {
-                let Some(type_id) =
-                    ferrite_data::registries::id("minecraft:block_entity_type", &entity)
-                else {
-                    return;
-                };
-                send(
-                    self,
-                    &ferrite_protocol::packets::play::BlockEntityData {
-                        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
-                        block_type: VarInt(type_id),
-                        nbt: crate::plugins::tile_update::nbt(
-                            &entity,
-                            &crate::plugins::tile_update::TileData {
-                                items: &items,
-                                furnace,
-                                patterns: &patterns,
-                                profile,
-                                properties: &properties,
-                                metas: &metas,
-                                extra: &extra,
-                            },
-                            &super::region::with_meta_spec,
-                        ),
-                    },
-                );
-            }
+            PluginPacket::TileUpdate { .. } => {}
             PluginPacket::ServerLinks(links) => send(
                 self,
                 &ferrite_protocol::packets::play::ServerLinks {

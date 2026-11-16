@@ -5,9 +5,9 @@
 //! shulker box contents, books), so a drop the plugin left alone has to get its own stack back
 //! instead of a plain one.
 
+use crate::game::plugin_types::ItemSnapshot;
 use ferrite_item::{Component, ItemStack};
 use ferrite_nbt::Compound;
-use ferrite_plugin::ItemSnapshot;
 
 /// The save-format NBT of a stack, never losing more than it has to.
 ///

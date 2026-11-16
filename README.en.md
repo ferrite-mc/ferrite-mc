@@ -179,8 +179,7 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 
 ## To do
 
-- Remaining game/plugin work: dragon charge/breath approximations and the outer-island search radius,
-  non-player entity NBT boundaries for the default/Nether/End worlds, remaining tile states,
+- Remaining game/plugin work: dragon charge/breath approximations, remaining tile states,
   `ChunkData#getBiome`/`WorldCreator` options, and broader
   Paper/Bukkit/NMS compatibility.
 - Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, vault/trade UI, and plugin behavior on an integrated server.

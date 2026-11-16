@@ -1049,7 +1049,7 @@ pub(crate) fn send(source: &Source, action: Action) -> Result<i32, CommandError>
 /// registered on its own and runs the plugin under the label the sender actually typed.
 pub fn register_plugin_commands(
     tree: &mut CommandDispatcher<Source>,
-    commands: &[ferrite_plugin::PluginCommand],
+    commands: &[crate::game::plugin_types::PluginCommand],
 ) {
     for command in commands {
         tree.register(plugin_command_node(&command.name));
@@ -4363,7 +4363,7 @@ mod tests {
         let mut tree = dispatcher();
         register_plugin_commands(
             &mut tree,
-            &[ferrite_plugin::PluginCommand {
+            &[crate::game::plugin_types::PluginCommand {
                 name: "testping".into(),
                 aliases: vec!["tping".into()],
                 permission: None,
