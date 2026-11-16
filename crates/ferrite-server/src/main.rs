@@ -591,8 +591,8 @@ async fn run_server(
         plugin_commands: None,
         dimensions: Some(dimensions),
     };
-    let world = game::World::start_configured(Some(source), spawn, settings);
-    // POSTWORLD plugins see a ready world and load before the network listener accepts players.
+    // POSTWORLD plugins see a ready world and load before the game coordinator builds its
+    // command tree and before the network listener accepts players.
     // v2 block reads/writes use the real dimension sources; writes are queued and applied by
     // `WorldStateProvider::tick` via the plugin host's game-loop tick.
     if let Some(host) = running_host.host() {
@@ -618,6 +618,7 @@ async fn run_server(
             );
         }
     }
+    let world = game::World::start_configured(Some(source), spawn, settings);
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
         ferrite_net::ServerConfig {
