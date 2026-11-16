@@ -14,6 +14,9 @@ version = "0.1.0-SNAPSHOT"
 // its dependencyResolutionManagement repositories under FAIL_ON_PROJECT_REPOS.
 
 dependencies {
+    implementation(project(":ferrite-host"))
+    implementation(project(":ferrite-nms"))
+
     // The host classpath provides the Paper API; the facade must never bundle it.
     // It is only used to compile against the real 26.3 signatures.
     compileOnly("io.papermc.paper:paper-api:26.3.build.227-stable")

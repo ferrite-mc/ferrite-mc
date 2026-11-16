@@ -1,15 +1,19 @@
 package dev.ferrite.api.server;
 
 import dev.ferrite.api.FerriteRuntime;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.logging.Logger;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
+import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.block.data.BlockData;
 import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
@@ -79,6 +83,32 @@ public final class FerriteServer extends UnsupportedServerBase {
     @Override
     public World getWorld(UUID uniqueId) {
         return runtime.world(uniqueId);
+    }
+
+    @Override
+    public BlockData createBlockData(Material material) {
+        Objects.requireNonNull(material, "material");
+        if (!material.isBlock()) {
+            throw new IllegalArgumentException("Material " + material + " is not a block");
+        }
+        String key = material.getKey().asString();
+        return (BlockData) Proxy.newProxyInstance(
+                BlockData.class.getClassLoader(),
+                new Class<?>[] {BlockData.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getMaterial" -> material;
+                    case "getAsString" -> key;
+                    case "matches" -> args != null
+                            && args.length == 1
+                            && args[0] instanceof BlockData other
+                            && other.getMaterial() == material;
+                    case "clone" -> proxy;
+                    case "equals" -> args != null && args.length == 1 && proxy == args[0];
+                    case "hashCode" -> material.hashCode();
+                    case "toString" -> "FerriteBlockData{" + key + "}";
+                    default -> throw new UnsupportedOperationException(
+                            "Ferrite BlockData does not support " + method.getName());
+                });
     }
 
     @Override

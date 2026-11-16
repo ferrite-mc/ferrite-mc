@@ -82,6 +82,11 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     }
 
     @Override
+    public List<org.bukkit.entity.Entity> getEntities() {
+        return List.copyOf(runtime.onlinePlayersIn(this));
+    }
+
+    @Override
     public long getTime() {
         return time;
     }

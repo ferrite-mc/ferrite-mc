@@ -28,9 +28,8 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 tasks.test {
-    // The real-host skeleton must fail, not skip, when the Lane 3 fixture jar is absent.
-    // Lane 1's settings must include :fixtures:nms-plugin.
-    dependsOn(":fixtures:nms-plugin:jar")
+    // The real-host integration test must run with all host, facade, and fixture jars built.
+    dependsOn(":ferrite-host:jar", ":ferrite-api-impl:jar", ":fixtures:typical-plugin:jar", ":fixtures:nms-plugin:jar")
     useJUnitPlatform()
     testLogging {
         events("passed", "skipped", "failed")

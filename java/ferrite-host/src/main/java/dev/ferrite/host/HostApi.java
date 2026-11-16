@@ -15,6 +15,16 @@ public interface HostApi {
     default void onHostStarted(HostContext context) throws Exception {
     }
 
+    /**
+     * Optional plugin loader hook for Lane 2 (Bukkit/Paper facade).
+     *
+     * <p>Returns {@code null} by default so {@link NoopHostApi} and native host-plugin tests keep
+     * using {@link JavaPlugin}.
+     */
+    default LoadedHostPlugin loadPlugin(HostContext context, PluginSpec spec) throws Exception {
+        return null;
+    }
+
     /** Called after a plugin's {@code onEnable} succeeded. */
     default void onPluginEnabled(HostPlugin plugin) throws Exception {
     }

@@ -177,12 +177,23 @@ public final class HostIntegrationHarness implements AutoCloseable {
     }
 
     private static String hostConfig(Path plugins, Path data) {
+        String apiImpl = detectApiImplClass();
         return "{\"contract_version\":2,\"api_version\":\"26.3\",\"server\":{"
                 + "\"name\":\"Ferrite\",\"version\":\"0.2.1\",\"motd\":\"harness\","
                 + "\"max_players\":20,\"online_mode\":true,\"view_distance\":10},"
                 + "\"plugins_dir\":" + quote(plugins.toString()) + ","
                 + "\"data_dir\":" + quote(data.toString()) + ","
-                + "\"api_impl_class\":null}";
+                + "\"api_impl_class\":" + (apiImpl == null ? "null" : quote(apiImpl)) + "}";
+    }
+
+    private static String detectApiImplClass() {
+        String candidate = "dev.ferrite.api.FerriteHostApi";
+        try {
+            Class.forName(candidate, false, HostIntegrationHarness.class.getClassLoader());
+            return candidate;
+        } catch (ClassNotFoundException missing) {
+            return null;
+        }
     }
 
     private static String pluginMetadata(Descriptor descriptor, Path jar, Path data) {

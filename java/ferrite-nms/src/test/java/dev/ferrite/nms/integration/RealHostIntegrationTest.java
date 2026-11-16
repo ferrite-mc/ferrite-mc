@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
@@ -19,13 +20,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -99,53 +101,42 @@ class RealHostIntegrationTest {
     void typicalAndNmsFixturesLoadInTheSameHostJvm() throws Exception {
         Path javaRoot = javaRoot();
         Path hostJar = findJar(javaRoot.resolve("ferrite-host/build/libs"), "ferrite-host");
+        Path apiImplJar = findJar(javaRoot.resolve("ferrite-api-impl/build/libs"), "ferrite-api-impl");
+        Path nmsCoreJar = findJar(javaRoot.resolve("ferrite-nms/build/libs"), "ferrite-nms");
         Path typicalJar = findJar(javaRoot.resolve("fixtures/typical-plugin/build/libs"), "typical-plugin");
         Path nmsJar = findJar(javaRoot.resolve("fixtures/nms-plugin/build/libs"), "nms-plugin");
 
+        assertNotNull(hostJar, "ferrite-host jar is missing");
+        assertNotNull(apiImplJar, "ferrite-api-impl jar is missing");
+        assertNotNull(nmsCoreJar, "ferrite-nms jar is missing");
         assertNotNull(
                 nmsJar,
                 "The NMS fixture jar is missing; :ferrite-nms:test depends on "
                         + ":fixtures:nms-plugin:jar and may not skip this prerequisite.");
+        assertNotNull(typicalJar, "The typical fixture jar is missing");
         assertFixtureJar(nmsJar, NMS_MAIN);
-
-        List<String> missing = new ArrayList<>();
-        if (hostJar == null) {
-            missing.add("java/ferrite-host/build/libs/ferrite-host*.jar (Lane 1)");
-        }
-        if (typicalJar == null) {
-            missing.add("java/fixtures/typical-plugin/build/libs/typical-plugin*.jar (Lane 2)");
-        }
-        Assumptions.assumeTrue(
-                missing.isEmpty(),
-                () -> "Real-host integration is not armed yet; missing " + missing
-                        + ". Lane 1 must include :ferrite-nms, :fixtures:nms-plugin and "
-                        + ":fixtures:typical-plugin in java/settings.gradle.kts and add the Paper "
-                        + "repository; Lane 2 must build the typical fixture. Then rerun "
-                        + "`cd java && ./gradlew :ferrite-nms:test :fixtures:nms-plugin:jar`.");
-
         assertFixtureJar(typicalJar, null);
 
-        Class<?> harnessClass = loadHarnessClass(hostJar);
-        assertNotNull(
-                harnessClass,
-                "Lane 1's host jar has no " + HARNESS_CLASS + " test seam. This is a Lane 1 "
-                        + "artifact gap, not a legitimate skip: start(Path,Path) and reports() "
-                        + "are required to prove both fixtures share one host JVM and that the "
-                        + "NMS fixture reaches Lane 2's NmsHandleProvider.");
+        try (URLClassLoader hostLoader = createHostClassLoader(hostJar, apiImplJar, nmsCoreJar)) {
+            Class<?> harnessClass = Class.forName(HARNESS_CLASS, true, hostLoader);
+            assertNotNull(
+                    harnessClass,
+                    "Lane 1's host jar has no " + HARNESS_CLASS + " test seam.");
 
-        Path pluginsDir = Files.createTempDirectory("ferrite-nms-integration-plugins");
-        Path dataDir = Files.createTempDirectory("ferrite-nms-integration-data");
-        Files.copy(typicalJar, pluginsDir.resolve("typical-plugin.jar"));
-        Files.copy(nmsJar, pluginsDir.resolve("nms-plugin.jar"));
+            Path pluginsDir = Files.createTempDirectory("ferrite-nms-integration-plugins");
+            Path dataDir = Files.createTempDirectory("ferrite-nms-integration-data");
+            Files.copy(typicalJar, pluginsDir.resolve("typical-plugin.jar"));
+            Files.copy(nmsJar, pluginsDir.resolve("nms-plugin.jar"));
 
-        Method start = harnessClass.getMethod("start", Path.class, Path.class);
-        Object harness = start.invoke(null, pluginsDir, dataDir);
-        try {
-            Object rawReports = harnessClass.getMethod("reports").invoke(harness);
-            assertReportsOk(rawReports);
-        } finally {
-            if (harness instanceof AutoCloseable closeable) {
-                closeable.close();
+            Method start = harnessClass.getMethod("start", Path.class, Path.class);
+            Object harness = start.invoke(null, pluginsDir, dataDir);
+            try {
+                Object rawReports = harnessClass.getMethod("reports").invoke(harness);
+                assertReportsOk(rawReports);
+            } finally {
+                if (harness instanceof AutoCloseable closeable) {
+                    closeable.close();
+                }
             }
         }
     }
@@ -229,20 +220,28 @@ class RealHostIntegrationTest {
     }
 
     /**
-     * Loads the host's test seam from its jar when Lane 1 has not put it on the test classpath.
-     * A found class keeps its loader alive for the duration of the test; a missing class closes it.
+     * Builds an isolated host classloader ordered as: ferrite-host, ferrite-api-impl, ferrite-nms,
+     * and then the Paper API/runtime libraries from the test classpath (excluding test-only dirs).
      */
-    private static Class<?> loadHarnessClass(Path hostJar) throws IOException {
-        ClassLoader parent = Thread.currentThread().getContextClassLoader();
-        if (parent == null) {
-            parent = RealHostIntegrationTest.class.getClassLoader();
+    private static URLClassLoader createHostClassLoader(
+            Path hostJar, Path apiImplJar, Path nmsCoreJar) throws IOException {
+        Set<URL> urls = new LinkedHashSet<>();
+        urls.add(hostJar.toUri().toURL());
+        urls.add(apiImplJar.toUri().toURL());
+        urls.add(nmsCoreJar.toUri().toURL());
+        String classpath = System.getProperty("java.class.path", "");
+        for (String entry : classpath.split(File.pathSeparator)) {
+            if (entry.isBlank()) {
+                continue;
+            }
+            Path path = Path.of(entry).toAbsolutePath().normalize();
+            String normalized = path.toString().replace('\\', '/');
+            if (normalized.contains("/build/classes/java/test")
+                    || normalized.contains("/build/resources/test")) {
+                continue;
+            }
+            urls.add(path.toUri().toURL());
         }
-        URLClassLoader loader = new URLClassLoader(new URL[] {hostJar.toUri().toURL()}, parent);
-        try {
-            return Class.forName(HARNESS_CLASS, false, loader);
-        } catch (ClassNotFoundException missing) {
-            loader.close();
-            return null;
-        }
+        return new URLClassLoader(urls.toArray(URL[]::new), ClassLoader.getPlatformClassLoader());
     }
 }

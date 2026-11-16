@@ -106,33 +106,46 @@ public final class HostRuntime {
                                     + dataFolder));
         }
 
-        PluginClassLoader loader = null;
-        JavaPlugin plugin = null;
+        AutoCloseable loader = null;
+        HostPlugin plugin = null;
+        LoadedHostPlugin adapter = null;
         String phase = "load";
         try {
             Files.createDirectories(dataFolder);
-            loader = new PluginClassLoader(spec.name(), spec.jar());
-            Class<?> main = Class.forName(spec.main(), true, loader);
-            if (!JavaPlugin.class.isAssignableFrom(main)) {
-                throw new HostException(
-                        spec.main()
-                                + " does not extend "
-                                + JavaPlugin.class.getName()
-                                + " (the host plugin base class)");
+            adapter = api.loadPlugin(context, spec);
+            if (adapter != null) {
+                plugin = adapter.plugin();
+                loader = adapter.classLoader();
+            } else {
+                PluginClassLoader hostLoader = new PluginClassLoader(spec.name(), spec.jar());
+                loader = hostLoader;
+                Class<?> main = Class.forName(spec.main(), true, hostLoader);
+                if (!JavaPlugin.class.isAssignableFrom(main)) {
+                    throw new HostException(
+                            spec.main()
+                                    + " does not extend "
+                                    + JavaPlugin.class.getName()
+                                    + " (the host plugin base class)");
+                }
+                JavaPlugin hostPlugin = (JavaPlugin) main.getDeclaredConstructor().newInstance();
+                hostPlugin.attach(context, spec);
+                hostPlugin.onLoad();
+                plugin = hostPlugin;
             }
-            plugin = (JavaPlugin) main.getDeclaredConstructor().newInstance();
-            plugin.attach(context, spec);
-            plugin.onLoad();
 
             phase = "enable";
             plugin.setPluginEnabled(true);
-            plugin.onEnable();
+            if (adapter != null) {
+                adapter.enable();
+            } else {
+                plugin.onEnable();
+            }
 
             phase = "api";
             api.onPluginEnabled(plugin);
             plugin.setPluginEnabled(true);
 
-            LoadedPlugin loaded = new LoadedPlugin(plugin, loader);
+            LoadedPlugin loaded = new LoadedPlugin(plugin, loader, adapter);
             plugins.put(spec.name(), loaded);
             loadOrder.add(loaded);
             logSafely(2, spec.name(), "enabled " + spec.version() + " (" + spec.main() + ")");
@@ -141,7 +154,11 @@ public final class HostRuntime {
             if (plugin != null) {
                 if (plugin.isPluginEnabled()) {
                     try {
-                        plugin.onDisable();
+                        if (adapter != null) {
+                            adapter.disable();
+                        } else {
+                            plugin.onDisable();
+                        }
                     } catch (Throwable disableError) {
                         logSafely(
                                 4,
@@ -275,7 +292,11 @@ public final class HostRuntime {
             LoadedPlugin loaded = loadOrder.get(i);
             String name = loaded.plugin.pluginName();
             try {
-                loaded.plugin.onDisable();
+                if (loaded.adapter != null) {
+                    loaded.adapter.disable();
+                } else {
+                    loaded.plugin.onDisable();
+                }
                 disabled.add(name);
             } catch (Throwable error) {
                 failed.add(
@@ -375,17 +396,18 @@ public final class HostRuntime {
         }
     }
 
-    private static void closeQuietly(PluginClassLoader loader, String name) {
+    private static void closeQuietly(AutoCloseable loader, String name) {
         if (loader == null) {
             return;
         }
         try {
             loader.close();
-        } catch (IOException error) {
+        } catch (Exception error) {
             logSafely(3, name, "closing the plugin class loader failed: " + error);
         }
     }
 
-    private record LoadedPlugin(JavaPlugin plugin, PluginClassLoader loader) {
+    private record LoadedPlugin(
+            HostPlugin plugin, AutoCloseable loader, LoadedHostPlugin adapter) {
     }
 }
