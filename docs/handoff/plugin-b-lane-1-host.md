@@ -128,3 +128,180 @@ Lane 2/3이 코딩을 시작하기 전에 아래를 확정한다.
 `docs/handoff/plugin-b-lane-1-host.md`에 브랜치/커밋, 계약 버전, 변경 파일, 공유 파일 hunk,
 정확한 테스트 결과, JVM 하나 보장 방식, 남은 limitation(클래스 언로드, 이벤트 지연 등)을
 적는다. Lane 2/3이 바로 시작할 수 있도록 `docs/plugin-b-host-contract.md` 링크를 남긴다.
+
+## 핸드오프 (2026-11-16)
+
+- 브랜치: `yxshadxw/plugin-b-host` (지시서의 `lane/plugin-b-host`에 해당)
+- 커밋: **없음**. 모든 변경은 작업 트리에 uncommitted 상태로 남아 있다. 푸시하지 않았다.
+- 계약: [`docs/plugin-b-host-contract.md`](../plugin-b-host-contract.md) **v2** (2026-11-16 동결; v1 하위호환)
+- 범위: Lane 1만. Bukkit/Paper facade와 NMS 래퍼는 구현하지 않았고, 삭제된
+  `java/ferrite-api-impl`/`java/test-plugin*`도 복원하지 않았다.
+
+### 변경 파일
+
+- `docs/plugin-b-host-contract.md` — JNI 전송, 생명주기, 4개 이벤트, 스케줄러, 오류,
+  Lane 2 SPI, classpath/API 구현 설정. 계약 v1.
+- `crates/ferrite-plugin-host/` — `Cargo.toml`, `src/{lib,config,error,protocol,scheduler,
+  native,host}.rs`, `tests/jvm_smoke.rs`. `PluginHost` singleton, 전용 host 스레드,
+  Rust 소유 스케줄러, JNI native 브리지, 플러그인 스캔/로드/종료.
+- `crates/ferrite-server/src/plugin_host/{mod.rs,hooks.rs}` — `PluginsSettings`,
+  `RunningHost`, `HostHooks` 어댑터.
+- `crates/ferrite-server/tests/plugin_host_hooks.rs` — 실제 Java host를 통한 `HostHooks`
+  왕복 smoke.
+- `crates/ferrite-server/{Cargo.toml,src/lib.rs,src/main.rs}` — 의존성, 모듈 export,
+  `[plugins]` 설정, 시작/종료/postworld 배선.
+- `java/settings.gradle.kts`, `java/build.gradle.kts`, `java/ferrite-host/**`,
+  `java/gradle/wrapper/**`, `java/gradlew*` — Lane 1 Gradle 스캐폴드와 Java 호스트/테스트.
+- `java/ferrite-api-impl/.gitkeep`, `java/ferrite-nms/.gitkeep` — Lane 2/3용 빈 모듈.
+- `ferrite.toml.example` — `[plugins]` 예시를 파일 끝으로 옮기고 classpath/API 필드 추가.
+- `Cargo.lock` — 새 crate 의존성 반영.
+
+공유 파일 hunk는 `ferrite-server/src/main.rs`의 `Config`/`DEFAULT_CONFIG`/시작·종료 배선과
+`src/lib.rs`의 모듈 export, `Cargo.toml`의 의존성뿐이다. `game/mod.rs`, `game/region.rs`는
+수정하지 않았다. 기존 `ServerHooks` 호출 지점(`game/mod.rs`의 `player_joined`/`player_left`/
+`tick`/`run_plugin_command`, `game/region.rs`의 `block_broken`/`player_interacted`)을 그대로
+사용한다.
+
+### JVM 하나 보장
+
+- `PluginHost::start`는 `START_LOCK` 아래에서 `HOST: OnceLock<PluginHost>`를 확인한다. 두 번째
+  호출은 `HostError::AlreadyStarted`이며 JVM을 만들지 않는다.
+- `Jvm::get()`이 이미 있으면 새 JVM을 만들지 않고 classpath에 host jar/runtime jar가 모두
+  포함됐는지 확인한다. 다르면 `JvmAlreadyRunning`이다.
+- `jvm_smoke`가 첫 host 시작 뒤 두 번째 `PluginHost::start`를 호출해 `AlreadyStarted`를
+  검증한다. 플러그인 디렉터리가 없거나 비어 있으면 JVM 없이 dormant host를 돌려준다.
+
+### classpath와 API 구현
+
+- `host_classpath()`가 host jar를 **항상 첫 번째**로 두고 `runtime-classpath`를 나열 순서대로
+  붙인다. 단위 테스트
+  `classpath_puts_the_host_jar_first_and_keeps_runtime_order`가 이를 고정한다.
+- `api-impl-class`는 `host-jar` 또는 `runtime-classpath`에서 로드한다. 빈 문자열/생략은
+  `NoopHostApi`다. `plugin_host_hooks` smoke는 SPI 구현을 별도 `api-classes` 디렉터리에
+  컴파일해 `runtime_classpath`로 넘기고 실제로 로드되는지 확인한다.
+- `java/settings.gradle.kts`는 PaperMC Maven 저장소를 포함한다. `:fixtures:typical-plugin`,
+  `:fixtures:nms-plugin`은 디렉터리가 존재할 때만 include하므로 fixture가 없는 Lane 1 단독
+  체크아웃에서도 Gradle 설정이 깨지지 않는다.
+
+### v1 검증 결과
+
+```sh
+cargo fmt --all -- --check
+# exit 0
+
+cargo clippy --workspace --all-targets -- -D warnings
+# exit 0 (기존 workspace manifest의 unused dependency 경고만 남음)
+
+cargo test -p ferrite-plugin-host
+# 9 unit + 1 jvm_smoke + 1 doctest, all passed
+
+cargo test -p ferrite-server plugin_host
+# 2 plugin_host unit + 3 main config tests + 1 plugin_host_hooks integration,
+# all passed
+
+cargo test --workspace
+# exit 0 (server lib 포함 전체 통과)
+
+cd java && ./gradlew clean :ferrite-host:test --no-daemon
+# BUILD SUCCESSFUL; 13 Java tests (5+3+4+1), 0 failures
+
+git diff --check
+# exit 0
+```
+
+- 최초 `cargo test --workspace`는 로컬 `vanilla/26.3/fixture-world`가 없어 기존 piston/redstone
+  통합 테스트 10개가 실패했다. `python tools/fetch_vanilla.py`와
+  `python tools/make_fixture_world.py`로 gitignored fixture를 생성한 뒤 재실행해 통과했다.
+  테스트를 skip/약화하지 않았다.
+- 주요 검증 전 `cargo clean -p ferrite-plugin-host -p ferrite-server`와 Gradle `clean`을
+  실행했다.
+
+### 남은 blocker/limitation
+
+- Lane 2/3의 `java/fixtures/**`가 아직 없다. 따라서 `:fixtures:typical-plugin`과
+  `:fixtures:nms-plugin`은 현재 include되지 않고, 실제 typical/NMS fixture를 같은 JVM에
+  로드하는 통합 테스트는 Lane 2/3 산출물이 생긴 뒤에만 가능하다. `ferrite-api-impl`과
+  `ferrite-nms`는 여전히 빈 스캐폴드다.
+- 계약 v1은 `player_join`, `player_quit`, `block_break`, `player_interact`만 지원한다.
+  `HostHooks`의 `chat`은 통과, `player_moved`/`block_placed`는 허용, `player_command`는
+  미처리(false)다. 이벤트/명령 tree의 Bukkit 의미론은 Lane 2 소유다.
+- 블록 파괴/상호작용은 리전 스레드에서 Java를 기다리지 않고 다음 tick에 전달한다. 따라서
+  리스너의 취소는 이미 적용된 동작을 되돌리지 못하고 경고만 남긴다. 지연 큐는 4096개로
+  제한되어 넘치면 가장 오래된 이벤트를 버린다.
+- 콘솔 명령 메시지는 플레이어 UUID가 없어 `Uuid::nil()`로 전달한다. 게임의 콘솔 경로는
+  UUID를 비교하지 않고 모든 메시지를 로그하므로 출력은 유지된다.
+- JVM은 프로세스당 하나이며 재시작/플러그인 재로드를 지원하지 않는다. classloader를 닫아도
+  JVM이 클래스를 완전히 언로드하지 않는다. host jar를 먼저 빌드해야 하고 Java 25+가 필요하다.
+- `api_impl_class`가 classpath에 없거나 계약 버전이 다르면 host 시작이 실패한다(서버는
+  플러그인 없이 계속). 실제 Minecraft 클라이언트 렌더링 검증은 하지 않았다.
+- world 이름은 현재 `minecraft:overworld`로 고정되어 있다(계약 v1 어댑터의 한계).
+
+Lane 2/3은 [`docs/plugin-b-host-contract.md`](../plugin-b-host-contract.md)와 위 SPI/클래스패스
+규칙에서 바로 시작할 수 있다.
+
+## v2 수직 슬라이스 (2026-11-16, Lane 1)
+
+- 계약: `CONTRACT_VERSION = 2` (Rust/Java 모두). v1 op/이벤트/필드는 유지했다.
+- Rust:
+  - `BlockGetRequest`, `BlockSetRequest`, `BlockSnapshot`, `BlockSetAccepted`, `UuidRequest`와
+    `HostStateProvider` trait를 `ferrite-plugin-host`에 추가했다.
+  - `NativeState`가 `world.block_get`, `world.block_set_async`, `world.chunk_loaded`,
+    `player.state_get`, `entity.state_get`를 파싱·디스패치한다. 알 수 없는 op는 여전히
+    `unknown_op`이며 성공 no-op이 아니다.
+  - `host.info`/`host.ping`은 `contract_version: 2`를 돌려주고, `host.info.capabilities`에
+    v1 op, **실제 provider가 광고한** v2 op, `state_provider`를 노출한다. provider가 없으면
+    state op는 `state_unavailable`이다.
+  - `PluginHost::install_state_provider`와 `PluginHost::tick`의 provider drain을 추가했다.
+  - 기본 seam은 `HostStateProvider`다. `world.block_get`은 실제 dimension source를 읽고,
+    `world.block_set_async`는 검증 후 큐에 넣기만 하며, 게임 루프의 `PluginHost::tick`이
+    `compare_set_block`으로 적용한다. 접수와 적용을 같은 성공으로 표시하지 않는다.
+  - `ferrite-server/src/plugin_host/state.rs`의 `WorldStateProvider`가
+    `DimensionRegistry`의 실제 `AnvilChunkSource`에 연결된다. 월드 생성 뒤 `main.rs`에서
+    설치하므로 POSTWORLD plugin도 provider를 본다.
+- Java:
+  - `Bootstrap.CONTRACT_VERSION = 2`; v2 transport helper 5개 추가.
+  - `HostApi`의 v2 default 메서드는 `UnsupportedOperationException`이다(향후 in-process
+    adapter용; Lane 1 native transport가 현재 경로).
+  - `dev.ferrite.host.integration.HostIntegrationHarness` 추가. `start(Path,Path)`은 Java
+    호스트를 띄우고 plugin.yml이 있는 jar를 스캔·로드하며, `reports()`는 jar별 load 결과를,
+    `close()`는 host shutdown을 수행한다. Rust `PluginHost`를 대체하지 않는 Lane 3용 seam이다.
+- 테스트(실제 실행 결과는 아래 최종 검증 참고):
+  - Rust: JSON round-trip/validation 2, v2 handshake+provider dispatch 1, unknown/invalid 1,
+    실제 dimension source read/write-accept/tick 2.
+  - Java: `HostIntegrationHarnessTest`가 test plugin jar 하나로 start → report → close를 검증.
+- 미구현/후속:
+  - `player.state_get`/`entity.state_get`는 후보이며 기본 provider가 `unsupported`다.
+  - v2 write의 완료 상태 조회 op(`state.request.status`에 해당하는 기능)는 아직 없다. 현재는
+    `request_id` 접수와 서버 로그/실제 적용만 있다.
+  - Java `HostApi` v2 default 메서드는 native transport를 호출하지 않는다. Lane 2가 이 SPI를
+    실제로 소비하려면 별도 합의가 필요하다.
+  - `world.block_set_async`의 `queue_full`/`stale_request`는 접수 시점 기준이다. 큐 적용 시
+    경쟁으로 실패한 경우 완료 상태를 조회할 수 없다.
+  - Lane 3의 NMS/typical fixture와 `java/fixtures/nms-plugin`은 이 워크트리에 없으므로,
+    harness를 사용하는 실제 NMS 통합은 아직 실행할 수 없다.
+- 검증 명령/exit는 이 문서의 최종 검증 절에 기록한다.
+
+### 최종 검증 (v2 수직 슬라이스 + harness)
+
+```sh
+cargo fmt --all -- --check
+cargo test -p ferrite-plugin-host
+cargo test -p ferrite-server plugin_host
+cd java && ./gradlew :ferrite-host:test
+cd .. && git diff --check
+```
+
+- Rust `cargo test -p ferrite-plugin-host`: **13 unit + 1 jvm_smoke + 1 doctest** 통과.
+- Rust `cargo test -p ferrite-server plugin_host`: **4 lib + 3 main + 1 hook integration** 통과.
+  `plugin_host_integration_skeleton`는 외부 Lane 2/3 fixture가 없어 `#[ignore]`이며 통과로
+  계산하지 않는다.
+- Java `:ferrite-host:test`: **14 tests, 0 failures** (기존 13 + `HostIntegrationHarnessTest` 1).
+  harness test는 test classpath의 plugin main과 plugin.yml만 담은 jar로 start → report →
+  close를 실제 실행한다.
+- `git diff --check`: exit 0. 커밋/푸시 없음.
+- `cargo clippy --workspace --all-targets -- -D warnings`: 별도 실행에서 exit 0(기존 workspace
+  manifest 경고만).
+
+정확한 명령별 최종 exit는 작업 세션 로그에 남아 있으며, 실패한 `:ferrite-nms:test`는
+Lane 3 문서에 blocked로 기록했다. NMS/typical 외부 fixture 통합은 이 워크트리에서 실행하지
+않았다.

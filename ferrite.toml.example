@@ -43,14 +43,6 @@ world = "world"
 # 서버는 시작할 때 eula.txt를 확인합니다. Minecraft EULA를 읽고 직접 eula=true로 바꾸세요.
 generator = "vanilla"
 
-# 플러그인 브리지 설정입니다.
-[plugins]
-# 플러그인 이벤트 처리 중 오류(예: JVM 예외)가 발생했을 때의 정책입니다.
-# "allow"는 Bukkit처럼 동작을 그대로 진행하고, "deny"는 이벤트가 취소된 것처럼
-# 동작을 막은 뒤 블록/텔레포트 상태를 클라이언트에 다시 보냅니다.
-on-event-error = "allow"
-
-
 # 플레이어 정보 전달 방식: "none", "velocity", "bungee".
 # 프록시 뒤에서 online-mode 인증은 프록시가 담당하므로 서버의 online-mode는 무시됩니다.
 # velocity를 사용할 때는 프록시의 forwarding.secret 값과 forwarding-secret을 맞추세요.
@@ -74,3 +66,28 @@ chat-per-second = 1.0
 command-burst = 10
 command-per-second = 1.0
 action = "kick"
+
+# 임베디드 JVM 플러그인 호스트 (Plugin B, Lane 1). 기본값은 비활성화이며, 이때 JVM을
+# 시작하지 않고 plugins 디렉터리도 읽지 않습니다. 활성화 전에
+# `cd java && ./gradlew :ferrite-host:jar`로 호스트 jar를 만드세요.
+# 다른 표와 섞이지 않도록 파일 끝에 둡니다.
+[plugins]
+enabled = false
+dir = "plugins"
+data-dir = "plugins"
+# 호스트 JVM의 최대 힙 (MiB). 0이면 JVM 기본값을 씁니다.
+heap-mb = 512
+# Java 25+ 설치 경로. 생략하면 JAVA_HOME과 일반 설치 경로에서 찾습니다.
+# java-home = "C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot"
+# 호스트 JVM에 추가로 넘길 인자입니다.
+# jvm-args = []
+api-version = "26.3"
+host-jar = "java/ferrite-host/build/libs/ferrite-host.jar"
+# 호스트 jar 다음에 붙는 Lane 2/API 런타임 jar입니다. 나열한 순서가 classpath 순서입니다.
+# 플러그인 jar는 여기에 넣지 마세요.
+runtime-classpath = []
+# runtime-classpath(또는 host-jar)에 있는 dev.ferrite.host.HostApi 구현 클래스입니다.
+# 빈 문자열이면 NoopHostApi를 씁니다.
+api-impl-class = ""
+start-timeout-ms = 30000
+call-timeout-ms = 10000
