@@ -293,32 +293,99 @@ class ItemStackTest {
         DataComponentType.Valued<Integer> damageType = valued("minecraft:damage");
         DataComponentType.Valued<Object> foodType = valued("minecraft:food");
         DataComponentType.NonValued unbreakableType = nonValued("minecraft:unbreakable");
+        DataComponentType.NonValued gliderType = nonValued("minecraft:glider");
 
         stack.setData(customNameType, Component.text("Blade"));
         stack.setData(loreType, FerriteDataComponents.lore(List.of(Component.text("Line 1"))));
         stack.setData(damageType, 7);
+        stack.setData(unbreakableType);
 
         assertTrue(stack.hasData(customNameType));
+        assertTrue(stack.hasData(unbreakableType));
+        assertTrue(stack.getItemMeta().isUnbreakable());
         assertEquals(Component.text("Blade"), stack.getData(customNameType));
         assertEquals(List.of(Component.text("Line 1")), stack.getData(loreType).lines());
         assertEquals(7, stack.getData(damageType));
-        assertEquals(Set.of(customNameType, loreType, damageType), stack.getDataTypes());
+        assertEquals(Set.of(customNameType, loreType, damageType, unbreakableType), stack.getDataTypes());
 
         ItemStack copy = new ItemStack(Material.DIAMOND_SWORD, 1);
-        copy.copyDataFrom(stack, t -> t.equals(customNameType) || t.equals(loreType));
+        copy.copyDataFrom(stack, t -> t.equals(customNameType) || t.equals(loreType) || t.equals(unbreakableType));
         assertTrue(copy.hasData(customNameType));
+        assertTrue(copy.hasData(unbreakableType));
         assertFalse(copy.hasData(damageType));
         assertTrue(stack.matchesWithoutData(copy, Set.of(damageType)));
+
+        stack.unsetData(unbreakableType);
+        assertFalse(stack.hasData(unbreakableType));
+        assertFalse(stack.getItemMeta().isUnbreakable());
 
         UnsupportedOperationException foodEx =
                 assertThrows(UnsupportedOperationException.class, () -> stack.getData(foodType));
         assertTrue(foodEx.getMessage().contains("DIAMOND_SWORD"), foodEx.getMessage());
         assertTrue(foodEx.getMessage().contains("minecraft:food"), foodEx.getMessage());
 
-        UnsupportedOperationException unbreakableEx =
-                assertThrows(UnsupportedOperationException.class, () -> stack.setData(unbreakableType));
-        assertTrue(unbreakableEx.getMessage().contains("DIAMOND_SWORD"), unbreakableEx.getMessage());
-        assertTrue(unbreakableEx.getMessage().contains("minecraft:unbreakable"), unbreakableEx.getMessage());
+        UnsupportedOperationException gliderEx =
+                assertThrows(UnsupportedOperationException.class, () -> stack.setData(gliderType));
+        assertTrue(gliderEx.getMessage().contains("DIAMOND_SWORD"), gliderEx.getMessage());
+        assertTrue(gliderEx.getMessage().contains("minecraft:glider"), gliderEx.getMessage());
+    }
+
+    @Test
+    void unbreakableAndItemFlagsRoundTripWithCopyIsolationAndSerialization() {
+        ItemStack stack = new ItemStack(Material.NETHERITE_PICKAXE, 1);
+        assertFalse(stack.getItemMeta().isUnbreakable());
+        assertTrue(stack.getItemFlags().isEmpty());
+        assertFalse(stack.hasItemFlag(ItemFlag.HIDE_UNBREAKABLE));
+
+        // Duplicate flags, multi-add, and remove semantics.
+        stack.addItemFlags(ItemFlag.HIDE_UNBREAKABLE, ItemFlag.HIDE_ENCHANTS, ItemFlag.HIDE_UNBREAKABLE);
+        assertEquals(Set.of(ItemFlag.HIDE_UNBREAKABLE, ItemFlag.HIDE_ENCHANTS), stack.getItemFlags());
+        assertTrue(stack.hasItemFlag(ItemFlag.HIDE_UNBREAKABLE));
+        assertTrue(stack.hasItemFlag(ItemFlag.HIDE_ENCHANTS));
+        assertThrows(UnsupportedOperationException.class,
+                () -> stack.getItemFlags().add(ItemFlag.HIDE_DYE));
+
+        stack.editMeta(meta -> meta.setUnbreakable(true));
+        assertTrue(stack.getItemMeta().isUnbreakable());
+        assertTrue(stack.hasItemMeta());
+
+        // Copy isolation between ItemStack and ItemMeta.
+        ItemMeta detached = stack.getItemMeta();
+        detached.setUnbreakable(false);
+        detached.removeItemFlags(ItemFlag.HIDE_UNBREAKABLE);
+        detached.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+        assertTrue(stack.getItemMeta().isUnbreakable());
+        assertTrue(stack.hasItemFlag(ItemFlag.HIDE_UNBREAKABLE));
+        assertFalse(stack.hasItemFlag(ItemFlag.HIDE_ATTRIBUTES));
+
+        ItemStack cloned = stack.clone();
+        cloned.removeItemFlags(ItemFlag.HIDE_ENCHANTS);
+        cloned.editMeta(m -> m.setUnbreakable(false));
+        assertTrue(stack.getItemMeta().isUnbreakable());
+        assertTrue(stack.hasItemFlag(ItemFlag.HIDE_ENCHANTS));
+        assertFalse(cloned.getItemMeta().isUnbreakable());
+        assertEquals(Set.of(ItemFlag.HIDE_UNBREAKABLE), cloned.getItemFlags());
+
+        // Serialization round trip preserves unbreakable + flags and DataComponent view.
+        ItemStack restored = ItemStack.deserialize(stack.serialize());
+        assertEquals(stack, restored);
+        assertEquals(stack.hashCode(), restored.hashCode());
+        assertTrue(restored.getItemMeta().isUnbreakable());
+        assertEquals(Set.of(ItemFlag.HIDE_UNBREAKABLE, ItemFlag.HIDE_ENCHANTS), restored.getItemFlags());
+        assertTrue(restored.hasData(nonValued("minecraft:unbreakable")));
+
+        // Clearing unbreakable and flags normalizes meta back to empty.
+        restored.removeItemFlags(ItemFlag.HIDE_UNBREAKABLE, ItemFlag.HIDE_ENCHANTS, ItemFlag.HIDE_DYE);
+        restored.editMeta(m -> m.setUnbreakable(false));
+        assertFalse(restored.hasItemMeta());
+        assertTrue(restored.getItemFlags().isEmpty());
+
+        // Unsupported data component interaction still fails explicitly even with flags/unbreakable set.
+        DataComponentType.Valued<Object> tooltipDisplay = valued("minecraft:tooltip_display");
+        UnsupportedOperationException tooltipEx =
+                assertThrows(UnsupportedOperationException.class, () -> stack.getData(tooltipDisplay));
+        assertTrue(tooltipEx.getMessage().contains("NETHERITE_PICKAXE"));
+        assertTrue(tooltipEx.getMessage().contains("minecraft:tooltip_display"));
     }
 
     @Test
@@ -328,8 +395,8 @@ class ItemStackTest {
                 assertThrows(UnsupportedOperationException.class, stack::getData);
         assertTrue(data.getMessage().contains("ItemStack#getData"));
         assertThrows(UnsupportedOperationException.class, stack::serializeAsBytes);
-        assertThrows(UnsupportedOperationException.class, () -> stack.addItemFlags(ItemFlag.HIDE_ENCHANTS));
-        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().isUnbreakable());
+        assertThrows(UnsupportedOperationException.class, stack::getRarity);
+        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().isHideTooltip());
         assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().getAttributeModifiers());
         assertTrue(stack.getEnchantments().isEmpty());
         assertThrows(UnsupportedOperationException.class, () ->

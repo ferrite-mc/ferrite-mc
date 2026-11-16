@@ -13,6 +13,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -121,6 +122,8 @@ public final class TypicalPlugin extends JavaPlugin {
         meta.setLore(List.of("first line", "second line"));
         ((Damageable) meta).setDamage(12);
         meta.setCustomModelData(42);
+        meta.setUnbreakable(true);
+        meta.addItemFlags(ItemFlag.HIDE_UNBREAKABLE);
         NamespacedKey key = new NamespacedKey(this, "fixture_key");
         meta.getPersistentDataContainer().set(key, PersistentDataType.STRING, "pdc-value");
         stack.setItemMeta(meta);
@@ -133,6 +136,8 @@ public final class TypicalPlugin extends JavaPlugin {
         record("item:lore=" + stack.getItemMeta().getLore());
         record("item:damage=" + ((Damageable) stack.getItemMeta()).getDamage());
         record("item:cmd=" + stack.getItemMeta().getCustomModelData());
+        record("item:unbreakable=" + stack.getItemMeta().isUnbreakable());
+        record("item:flags=" + stack.getItemFlags());
         record("item:pdc=" + stack.getItemMeta().getPersistentDataContainer()
                 .get(key, PersistentDataType.STRING));
         record("item:pdc-view=" + stack.getPersistentDataContainer().get(key, PersistentDataType.STRING));
@@ -171,11 +176,11 @@ public final class TypicalPlugin extends JavaPlugin {
         }
         try {
             ItemStack probe = new ItemStack(Material.DIAMOND_SWORD, 1);
-            NamespacedKey unbreakableKey = NamespacedKey.minecraft("unbreakable");
+            NamespacedKey gliderKey = NamespacedKey.minecraft("glider");
             probe.setData(new DataComponentType.NonValued() {
                 @Override
                 public NamespacedKey getKey() {
-                    return unbreakableKey;
+                    return gliderKey;
                 }
 
                 @Override
