@@ -5,6 +5,10 @@ import dev.ferrite.api.internal.FerriteMainThread;
 import dev.ferrite.api.plugin.FerritePluginClassLoader;
 import dev.ferrite.api.world.FerriteWorld;
 import dev.ferrite.api.world.WorldSpec;
+import dev.ferrite.host.CommandMessage;
+import dev.ferrite.host.CommandOrigin;
+import dev.ferrite.host.CommandResult;
+import dev.ferrite.host.EventResult;
 import dev.ferrite.host.HostApi;
 import dev.ferrite.host.HostContext;
 import dev.ferrite.host.HostException;
@@ -28,7 +32,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -39,10 +46,17 @@ import java.util.jar.JarFile;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.block.BlockFace;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.plugin.PluginDescriptionFile;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -52,9 +66,11 @@ import org.bukkit.plugin.java.JavaPlugin;
  * installs the NMS snapshot port and handle bridge.
  */
 public final class FerriteHostApi implements HostApi {
+    private HostContext context;
     private FerriteRuntime runtime;
     private NmsHost nmsHost;
     private NmsHandleProvider nmsProvider;
+    private boolean tickPumpScheduled;
 
     @Override
     public void onHostStarted(HostContext context) {
@@ -62,6 +78,7 @@ public final class FerriteHostApi implements HostApi {
         if (runtime != null) {
             return;
         }
+        this.context = context;
         FerriteRuntime created = FerriteRuntime.builder()
                 .serverName(context.server().name())
                 .version(context.server().version())
@@ -127,7 +144,164 @@ public final class FerriteHostApi implements HostApi {
     }
 
     @Override
+    public void onPluginEnabled(HostPlugin plugin) {
+        if (context != null && runtime != null && !tickPumpScheduled) {
+            tickPumpScheduled = true;
+            try {
+                context.schedule(plugin, runtime::tick, 1L, 1L, false);
+            } catch (UnsatisfiedLinkError ignored) {
+                // Pure-Java unit/harness runs have no Rust JNI HostBridge attached.
+            }
+        }
+    }
+
+    @Override
+    public EventResult fireEvent(String name, Map<String, Object> payload) {
+        FerriteRuntime activeRuntime = requireRuntime();
+        return switch (name) {
+            case "player_join" -> {
+                UUID uuid = UUID.fromString(String.valueOf(payload.get("player_uuid")));
+                String playerName = String.valueOf(payload.get("player_name"));
+                FerritePlayer player = activeRuntime.player(uuid);
+                if (player == null) {
+                    FerriteWorld world = activeRuntime.world("world");
+                    Location spawn = world.getSpawnLocation();
+                    player = activeRuntime.createPlayer(
+                            playerName,
+                            uuid,
+                            false,
+                            GameMode.SURVIVAL,
+                            world,
+                            spawn.getX(),
+                            spawn.getY(),
+                            spawn.getZ());
+                }
+                activeRuntime.playerJoined(player);
+                yield EventResult.pass();
+            }
+            case "player_quit" -> {
+                UUID uuid = UUID.fromString(String.valueOf(payload.get("player_uuid")));
+                activeRuntime.playerQuit(uuid);
+                yield EventResult.pass();
+            }
+            case "block_break" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                int x = intValue(payload.get("x"));
+                int y = intValue(payload.get("y"));
+                int z = intValue(payload.get("z"));
+                syncBlockMaterial(world, x, y, z, payload.get("material"));
+                BlockBreakEvent event = new BlockBreakEvent(world.getBlockAt(x, y, z), player);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "player_interact" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                int x = intValue(payload.get("x"));
+                int y = intValue(payload.get("y"));
+                int z = intValue(payload.get("z"));
+                syncBlockMaterial(world, x, y, z, payload.get("material"));
+                Action action = "left_click_block".equals(String.valueOf(payload.get("action")))
+                        ? Action.LEFT_CLICK_BLOCK
+                        : Action.RIGHT_CLICK_BLOCK;
+                BlockFace face = blockFace(intValue(payload.get("face")));
+                PlayerInteractEvent event = new PlayerInteractEvent(
+                        player,
+                        action,
+                        null,
+                        world.getBlockAt(x, y, z),
+                        face,
+                        EquipmentSlot.HAND);
+                event.callEvent();
+                boolean cancelled = event.useInteractedBlock() == Event.Result.DENY
+                        || event.useItemInHand() == Event.Result.DENY;
+                yield cancelled ? EventResult.cancel() : EventResult.pass();
+            }
+            default -> EventResult.pass();
+        };
+    }
+
+    @Override
+    public CommandResult runCommand(CommandOrigin origin, String line) {
+        FerriteRuntime activeRuntime = requireRuntime();
+        if ("console".equals(origin.type())) {
+            boolean handled = activeRuntime.commandDispatcher()
+                    .dispatch(activeRuntime.consoleSender(), line);
+            return handled ? CommandResult.handled(List.of()) : CommandResult.notHandled();
+        }
+        UUID uuid = UUID.fromString(origin.playerUuid());
+        FerritePlayer player = activeRuntime.player(uuid);
+        if (player == null) {
+            return CommandResult.notHandled();
+        }
+        int before = player.state().messages().size();
+        boolean handled = activeRuntime.commandDispatcher().dispatch(player, line);
+        if (!handled) {
+            return CommandResult.notHandled();
+        }
+        List<String> all = player.state().messages();
+        List<CommandMessage> messages = new ArrayList<>();
+        for (int i = before; i < all.size(); i++) {
+            messages.add(CommandMessage.player(uuid.toString(), player.getName(), all.get(i)));
+        }
+        return CommandResult.handled(messages);
+    }
+
+    private static FerritePlayer findPlayer(FerriteRuntime activeRuntime, Object rawUuid) {
+        if (rawUuid == null) {
+            return null;
+        }
+        return activeRuntime.player(UUID.fromString(String.valueOf(rawUuid)));
+    }
+
+    private static FerriteWorld resolveWorld(FerriteRuntime activeRuntime, Object rawWorld) {
+        if (rawWorld != null) {
+            FerriteWorld named = activeRuntime.world(String.valueOf(rawWorld));
+            if (named != null) {
+                return named;
+            }
+        }
+        return activeRuntime.world("world");
+    }
+
+    private static void syncBlockMaterial(
+            FerriteWorld world, int x, int y, int z, Object rawMaterial) {
+        if (rawMaterial == null) {
+            return;
+        }
+        Material material = Material.matchMaterial(String.valueOf(rawMaterial));
+        if (material != null) {
+            world.blockStore().setType(x, y, z, material);
+        }
+    }
+
+    private static int intValue(Object value) {
+        return value instanceof Number number ? number.intValue() : Integer.parseInt(String.valueOf(value));
+    }
+
+    private static BlockFace blockFace(int face) {
+        return switch (face) {
+            case 0 -> BlockFace.DOWN;
+            case 1 -> BlockFace.UP;
+            case 2 -> BlockFace.NORTH;
+            case 3 -> BlockFace.SOUTH;
+            case 4 -> BlockFace.WEST;
+            case 5 -> BlockFace.EAST;
+            default -> BlockFace.UP;
+        };
+    }
+
+    @Override
     public void onHostStopping() {
+        this.tickPumpScheduled = false;
+        this.context = null;
         FerriteRuntime activeRuntime = this.runtime;
         this.runtime = null;
         if (activeRuntime != null) {
