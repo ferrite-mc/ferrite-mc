@@ -680,4 +680,28 @@ provider가 던지는 `NmsHostException`은 wrap하거나 다른 코드로 바�
 - 실제 루트: `cd java && ./gradlew :ferrite-nms:test :fixtures:nms-plugin:jar --no-daemon`
   → **exit 127**, `./gradlew: No such file or directory`. Lane 1의 `java/settings.gradle.kts`와
   wrapper가 이 워크트리에 없어 실행 불가; Lane 1 산출물이 들어온 뒤 같은 명령을 재실행해야 한다.
-- `git diff --check` → clean (exit 0). 커밋/푸시 없음.
+- `git diff --check` → clean (exit 0). 이 절 작성 시점에는 커밋/푸시 없음.
+
+## NMS 코어 커밋 및 재검증 (2026-11-16 재개)
+
+- 브랜치: `yxshadxw/plugin-b-nms`
+- NMS 코어 커밋: `279b5ce8558776e4ef6eaf143a4654a82d501e88`
+  (`fix(plugin-nms): keep only CraftBukkit's mirror signature`).
+- 변경 파일은 Lane 3 소유 2개뿐이다: `CraftItemStack.java`, `CraftItemStackTest.java`.
+  `CraftPlayer`, `CraftEntity`, `ServerPlayer`, `EntitySnapshot`, NMS fixture, real-host
+  integration 경로는 변경하지 않았다. Lane 5 baseline 파일은 이전 스냅샷 커밋에 이미 존재하며
+  이 커밋의 diff에는 없다.
+- 수정: CraftBukkit에 없는 `asCraftMirror(org.bukkit.inventory.ItemStack)` overload를 제거했다.
+  이 overload는 `asCraftMirror(null)`을 모호하게 만들 수 있었다. 남은
+  `asCraftMirror(net.minecraft.world.item.ItemStack)`은 계속 명시적
+  `UnsupportedOperationException`을 던지고, 테스트가 public mirror method가 하나뿐임을 고정한다.
+- 코어 전용 테스트: 7개 코어 테스트 클래스에 대해
+  `gradle -p /tmp/ferrite-nms-harness :ferrite-nms:test --rerun-tasks --no-daemon --console=plain --tests ...`
+  → **BUILD SUCCESSFUL**, **tests=39, passed=39, skipped=0, failures=0, errors=0**.
+- 전체 NMS 테스트:
+  `gradle -p /tmp/ferrite-nms-harness :ferrite-nms:test --rerun-tasks --no-daemon --console=plain`
+  → **BUILD SUCCESSFUL**, **tests=48, passed=47, skipped=1, failures=0, errors=0**.
+  skipped 1개는 Lane 1 host/Lane 2 typical jar 부재로 인한 `RealHostIntegrationTest`다.
+- fixture jar는 test task 의존성으로 다시 빌드됐다. `git diff --check` → clean (exit 0).
+- 실제 루트 `cd java && ./gradlew ...`는 여전히 wrapper/settings 부재로 실행 불가(exit 127);
+  위 임시 harness 결과가 이 워크트리의 검증이다.
