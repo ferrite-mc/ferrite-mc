@@ -1,5 +1,6 @@
 package dev.ferrite.fixtures.typical;
 
+import io.papermc.paper.datacomponent.DataComponentType;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -13,6 +14,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -108,17 +110,29 @@ public final class TypicalPlugin extends JavaPlugin {
     }
 
     private void itemProbe() {
+        ItemStack plain = new ItemStack(Material.IRON_INGOT, 1);
+        ItemMeta detached = plain.getItemMeta();
+        detached.setDisplayName("Detached");
+        record("item:plain-unpolluted=" + !plain.hasItemMeta());
+
         ItemStack stack = new ItemStack(Material.DIAMOND_SWORD, 2);
         ItemMeta meta = stack.getItemMeta();
         meta.setDisplayName("Ferrite Blade");
         meta.setLore(List.of("first line", "second line"));
+        ((Damageable) meta).setDamage(12);
+        meta.setCustomModelData(42);
         NamespacedKey key = new NamespacedKey(this, "fixture_key");
         meta.getPersistentDataContainer().set(key, PersistentDataType.STRING, "pdc-value");
         stack.setItemMeta(meta);
 
+        // Mutating detached meta after setItemMeta must not affect stack.
+        meta.setDisplayName("DetachedChange");
+
         record("item:type=" + stack.getType().name() + ":amount=" + stack.getAmount());
         record("item:name=" + stack.getItemMeta().getDisplayName());
         record("item:lore=" + stack.getItemMeta().getLore());
+        record("item:damage=" + ((Damageable) stack.getItemMeta()).getDamage());
+        record("item:cmd=" + stack.getItemMeta().getCustomModelData());
         record("item:pdc=" + stack.getItemMeta().getPersistentDataContainer()
                 .get(key, PersistentDataType.STRING));
         record("item:pdc-view=" + stack.getPersistentDataContainer().get(key, PersistentDataType.STRING));
@@ -154,6 +168,33 @@ public final class TypicalPlugin extends JavaPlugin {
             record("unsupported:region-scheduler:NO-EXCEPTION");
         } catch (UnsupportedOperationException exception) {
             record("unsupported:region-scheduler=" + exception.getMessage());
+        }
+        try {
+            ItemStack probe = new ItemStack(Material.DIAMOND_SWORD, 1);
+            NamespacedKey unbreakableKey = NamespacedKey.minecraft("unbreakable");
+            probe.setData(new DataComponentType.NonValued() {
+                @Override
+                public NamespacedKey getKey() {
+                    return unbreakableKey;
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            });
+            record("unsupported:item-component:NO-EXCEPTION");
+        } catch (UnsupportedOperationException exception) {
+            record("unsupported:item-component=" + exception.getMessage());
+        }
+        try {
+            ItemStack probe = new ItemStack(Material.PAPER, 1);
+            NamespacedKey badPdc = new NamespacedKey(this, "bad_pdc");
+            probe.editPersistentDataContainer(
+                    pdc -> pdc.set(badPdc, PersistentDataType.LIST.strings(), List.of("a")));
+            record("unsupported:pdc-type:NO-EXCEPTION");
+        } catch (UnsupportedOperationException exception) {
+            record("unsupported:pdc-type=" + exception.getMessage());
         }
     }
 }

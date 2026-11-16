@@ -59,9 +59,12 @@ class TypicalFixtureIntegrationTest {
                 assertHas(log, "config:greeting=hello from config.yml");
                 assertHas(log, "config:exists=true");
                 assertHas(log, "command:registered=ferrite-hello:permission=ferrite.typical.hello:aliases=[fhello]");
+                assertHas(log, "item:plain-unpolluted=true");
                 assertHas(log, "item:type=DIAMOND_SWORD:amount=2");
                 assertHas(log, "item:name=Ferrite Blade");
                 assertHas(log, "item:lore=[first line, second line]");
+                assertHas(log, "item:damage=12");
+                assertHas(log, "item:cmd=42");
                 assertHas(log, "item:pdc=pdc-value");
                 assertHas(log, "item:pdc-view=pdc-value");
                 assertHas(log, "item:clone-equal=true:similar=true");
@@ -74,6 +77,13 @@ class TypicalFixtureIntegrationTest {
                         && line.contains("World#getWorldBorder") && line.contains("TypicalFixture")));
                 assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:region-scheduler=")
                         && line.contains("Server#getRegionScheduler") && line.contains("TypicalFixture")));
+                assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:item-component=")
+                        && line.contains("DIAMOND_SWORD")
+                        && line.contains("minecraft:unbreakable")
+                        && line.contains("TypicalFixture")));
+                assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:pdc-type=")
+                        && line.contains("PersistentDataContainer#set")
+                        && line.contains("TypicalFixture")));
 
                 FerritePlayer player = server.onMain(() -> {
                     FerritePlayer created = server.runtime().createPlayer(
@@ -88,6 +98,9 @@ class TypicalFixtureIntegrationTest {
                 int monitor = indexOf(log, "join:monitor:Alice:world=world");
                 assertTrue(lowest >= 0, "missing lowest-priority join: " + log);
                 assertTrue(monitor > lowest, "LOWEST must run before MONITOR: " + log);
+                assertHas(log, "inventory:main-hand=Inventory Blade:lore=[inv lore]:damage=4:pdc=77");
+                assertHas(log, "inventory:copy-isolated=true");
+                assertHas(log, "inventory:add-remove=addOverflow=0:removeOverflow=0:remaining=3");
 
                 server.onMain(() -> server.runtime().commandDispatcher()
                         .dispatch(player, "/ferrite-hello Bob"));

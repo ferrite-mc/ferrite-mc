@@ -85,8 +85,8 @@ class UnsupportedApiTest {
             assertEquals(41, player.getInventory().getSize());
             UnsupportedOperationException viewers =
                     assertThrows(UnsupportedOperationException.class,
-                            () -> player.getInventory().addItem());
-            assertTrue(viewers.getMessage().contains("PlayerInventory#addItem"));
+                            () -> player.getInventory().close());
+            assertTrue(viewers.getMessage().contains("PlayerInventory#close"));
         }
     }
 }

@@ -23,7 +23,25 @@ public record EntitySnapshot(
     public EntitySnapshot {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(typeKey, "typeKey");
+        if (typeKey.isBlank()) {
+            throw new IllegalArgumentException("typeKey must not be blank");
+        }
         Objects.requireNonNull(worldId, "worldId");
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+            throw new IllegalArgumentException("position must be finite");
+        }
+        if (!Float.isFinite(yaw) || !Float.isFinite(pitch)) {
+            throw new IllegalArgumentException("rotation must be finite");
+        }
+        if (!Double.isFinite(velocityX) || !Double.isFinite(velocityY) || !Double.isFinite(velocityZ)) {
+            throw new IllegalArgumentException("velocity must be finite");
+        }
+        if (id.equals(vehicleId)) {
+            throw new IllegalArgumentException("entity cannot be its own vehicle");
+        }
         passengers = passengers == null ? List.of() : List.copyOf(passengers);
+        if (passengers.contains(id)) {
+            throw new IllegalArgumentException("entity cannot be its own passenger");
+        }
     }
 }

@@ -1,0 +1,429 @@
+package dev.ferrite.api.item;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.meta.Damageable;
+import org.bukkit.inventory.meta.components.CustomModelDataComponent;
+import org.bukkit.persistence.PersistentDataContainer;
+
+/**
+ * Item metadata slice: display/custom name, lore, damage/max-damage, custom model data,
+ * enchantments and persistent data.
+ *
+ * <p>Attributes, item flags, unbreakable, item model, tooltip style, food, tool and other
+ * components outside the slice inherit explicit refusals from {@link UnsupportedItemMetaBase}.
+ */
+public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Damageable {
+
+    private final FerritePersistentDataContainer persistentData = new FerritePersistentDataContainer();
+    private final Map<Enchantment, Integer> enchantments = new LinkedHashMap<>();
+    private String displayName;
+    private List<String> lore;
+    private Integer damage;
+    private Integer maxDamage;
+    private FerriteCustomModelDataComponent customModelData;
+
+    public FerriteItemMeta() {
+    }
+
+    @Override
+    public boolean hasCustomName() {
+        return displayName != null;
+    }
+
+    @Override
+    public Component customName() {
+        return displayName == null
+                ? null
+                : LegacyComponentSerializer.legacySection().deserialize(displayName);
+    }
+
+    @Override
+    public void customName(Component customName) {
+        this.displayName = customName == null
+                ? null
+                : LegacyComponentSerializer.legacySection().serialize(customName);
+    }
+
+    @Override
+    public boolean hasDisplayName() {
+        return hasCustomName();
+    }
+
+    @Override
+    public String getDisplayName() {
+        return displayName;
+    }
+
+    @Override
+    public void setDisplayName(String name) {
+        this.displayName = name;
+    }
+
+    @Override
+    public boolean hasLore() {
+        return lore != null && !lore.isEmpty();
+    }
+
+    @Override
+    public List<String> getLore() {
+        return lore == null ? null : new ArrayList<>(lore);
+    }
+
+    @Override
+    public void setLore(List<String> lore) {
+        if (lore == null) {
+            this.lore = null;
+            return;
+        }
+        List<String> copy = new ArrayList<>(lore.size());
+        for (String line : lore) {
+            copy.add(Objects.requireNonNull(line, "lore line"));
+        }
+        this.lore = copy.isEmpty() ? null : copy;
+    }
+
+    @Override
+    public List<Component> lore() {
+        if (lore == null) {
+            return null;
+        }
+        return lore.stream()
+                .map(line -> (Component) LegacyComponentSerializer.legacySection().deserialize(line))
+                .toList();
+    }
+
+    @Override
+    public void lore(List<? extends Component> lore) {
+        if (lore == null) {
+            this.lore = null;
+            return;
+        }
+        List<String> converted = new ArrayList<>(lore.size());
+        for (Component line : lore) {
+            Objects.requireNonNull(line, "lore line");
+            converted.add(LegacyComponentSerializer.legacySection().serialize(line));
+        }
+        this.lore = converted.isEmpty() ? null : converted;
+    }
+
+    @Override
+    public boolean hasDamage() {
+        return damage != null && damage > 0;
+    }
+
+    @Override
+    public int getDamage() {
+        return damage == null ? 0 : damage;
+    }
+
+    @Override
+    public void setDamage(int damage) {
+        if (damage < 0) {
+            throw new IllegalArgumentException("damage must be >= 0, was " + damage);
+        }
+        this.damage = damage;
+    }
+
+    @Override
+    public boolean hasDamageValue() {
+        return damage != null;
+    }
+
+    @Override
+    public void resetDamage() {
+        this.damage = null;
+    }
+
+    @Override
+    public boolean hasMaxDamage() {
+        return maxDamage != null;
+    }
+
+    @Override
+    public int getMaxDamage() {
+        if (maxDamage == null) {
+            throw new IllegalStateException("maxDamage is not set; check hasMaxDamage() first");
+        }
+        return maxDamage;
+    }
+
+    @Override
+    public void setMaxDamage(Integer maxDamage) {
+        if (maxDamage != null && maxDamage <= 0) {
+            throw new IllegalArgumentException("maxDamage must be > 0, was " + maxDamage);
+        }
+        this.maxDamage = maxDamage;
+    }
+
+    @Override
+    public boolean hasCustomModelData() {
+        return customModelData != null && !customModelData.getFloats().isEmpty();
+    }
+
+    @Override
+    public int getCustomModelData() {
+        if (!hasCustomModelData()) {
+            throw new IllegalStateException(
+                    "CustomModelData is not set; check hasCustomModelData() first");
+        }
+        return customModelData.getFloats().get(0).intValue();
+    }
+
+    @Override
+    public void setCustomModelData(Integer data) {
+        if (data == null) {
+            if (customModelData != null) {
+                customModelData.setFloats(List.of());
+                if (customModelData.isEmpty()) {
+                    customModelData = null;
+                }
+            }
+            return;
+        }
+        if (customModelData == null) {
+            customModelData = new FerriteCustomModelDataComponent();
+        }
+        customModelData.setFloats(List.of(data.floatValue()));
+    }
+
+    @Override
+    public boolean hasCustomModelDataComponent() {
+        return customModelData != null && !customModelData.isEmpty();
+    }
+
+    @Override
+    public CustomModelDataComponent getCustomModelDataComponent() {
+        return customModelData == null
+                ? new FerriteCustomModelDataComponent()
+                : customModelData.copy();
+    }
+
+    @Override
+    public void setCustomModelDataComponent(CustomModelDataComponent component) {
+        if (component == null) {
+            this.customModelData = null;
+            return;
+        }
+        FerriteCustomModelDataComponent copy = new FerriteCustomModelDataComponent(component);
+        this.customModelData = copy.isEmpty() ? null : copy;
+    }
+
+    @Override
+    public boolean hasEnchants() {
+        return !enchantments.isEmpty();
+    }
+
+    @Override
+    public boolean hasEnchant(Enchantment ench) {
+        Objects.requireNonNull(ench, "enchantment");
+        return enchantments.containsKey(ench);
+    }
+
+    @Override
+    public int getEnchantLevel(Enchantment ench) {
+        Objects.requireNonNull(ench, "enchantment");
+        return enchantments.getOrDefault(ench, 0);
+    }
+
+    @Override
+    public Map<Enchantment, Integer> getEnchants() {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(enchantments));
+    }
+
+    @Override
+    public boolean addEnchant(Enchantment ench, int level, boolean ignoreLevelRestriction) {
+        Objects.requireNonNull(ench, "enchantment");
+        if (!ignoreLevelRestriction
+                && (level < ench.getStartLevel() || level > ench.getMaxLevel())) {
+            return false;
+        }
+        enchantments.put(ench, level);
+        return true;
+    }
+
+    @Override
+    public boolean removeEnchant(Enchantment ench) {
+        Objects.requireNonNull(ench, "enchantment");
+        return enchantments.remove(ench) != null;
+    }
+
+    @Override
+    public void removeEnchantments() {
+        enchantments.clear();
+    }
+
+    @Override
+    public boolean hasConflictingEnchant(Enchantment ench) {
+        Objects.requireNonNull(ench, "enchantment");
+        for (Enchantment existing : enchantments.keySet()) {
+            if (!existing.equals(ench) && existing.conflictsWith(ench)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public PersistentDataContainer getPersistentDataContainer() {
+        return persistentData;
+    }
+
+    public FerritePersistentDataContainer persistentData() {
+        return persistentData;
+    }
+
+    @Override
+    public Damageable clone() {
+        FerriteItemMeta copy = new FerriteItemMeta();
+        copy.displayName = displayName;
+        copy.lore = lore == null ? null : new ArrayList<>(lore);
+        copy.damage = damage;
+        copy.maxDamage = maxDamage;
+        copy.customModelData = customModelData == null ? null : customModelData.copy();
+        copy.enchantments.putAll(enchantments);
+        copy.persistentData.copyFrom(persistentData);
+        return copy;
+    }
+
+    /** Facade helper: no display name, lore, damage, custom model data, enchants or PDC. */
+    public boolean isEmpty() {
+        return displayName == null
+                && (lore == null || lore.isEmpty())
+                && damage == null
+                && maxDamage == null
+                && (customModelData == null || customModelData.isEmpty())
+                && enchantments.isEmpty()
+                && persistentData.isEmpty();
+    }
+
+    @Override
+    public Map<String, Object> serialize() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (displayName != null) {
+            result.put("display-name", displayName);
+        }
+        if (lore != null) {
+            result.put("lore", new ArrayList<>(lore));
+        }
+        if (damage != null) {
+            result.put("damage", damage);
+        }
+        if (maxDamage != null) {
+            result.put("max-damage", maxDamage);
+        }
+        if (customModelData != null && !customModelData.isEmpty()) {
+            result.put("custom-model-data", customModelData.serialize());
+        }
+        if (!enchantments.isEmpty()) {
+            Map<String, Integer> enchMap = new LinkedHashMap<>();
+            for (Map.Entry<Enchantment, Integer> entry : enchantments.entrySet()) {
+                enchMap.put(entry.getKey().getKey().toString(), entry.getValue());
+            }
+            result.put("enchants", enchMap);
+        }
+        if (!persistentData.isEmpty()) {
+            result.put("persistent-data", persistentData.serialize());
+        }
+        return result;
+    }
+
+    public static FerriteItemMeta deserialize(Map<String, Object> args) {
+        FerriteItemMeta meta = new FerriteItemMeta();
+        if (args == null) {
+            return meta;
+        }
+        Object name = args.get("display-name");
+        if (name != null) {
+            meta.setDisplayName(String.valueOf(name));
+        }
+        Object lore = args.get("lore");
+        if (lore instanceof List<?> list) {
+            meta.setLore(list.stream().map(String::valueOf).toList());
+        }
+        Object damage = args.get("damage");
+        if (damage instanceof Number number) {
+            meta.setDamage(number.intValue());
+        }
+        Object maxDamage = args.get("max-damage");
+        if (maxDamage instanceof Number number) {
+            meta.setMaxDamage(number.intValue());
+        }
+        Object cmd = args.get("custom-model-data");
+        if (cmd instanceof Map<?, ?> map) {
+            meta.setCustomModelDataComponent(FerriteCustomModelDataComponent.deserialize(map));
+        } else if (cmd instanceof Number number) {
+            meta.setCustomModelData(number.intValue());
+        }
+        Object enchants = args.get("enchants");
+        if (enchants instanceof Map<?, ?> map && !map.isEmpty()) {
+            Registry<Enchantment> registry = Registry.ENCHANTMENT;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                NamespacedKey key = NamespacedKey.fromString(String.valueOf(entry.getKey()));
+                if (key == null) {
+                    throw new IllegalArgumentException(
+                            "Invalid enchantment key: " + entry.getKey());
+                }
+                Enchantment enchantment = registry == null ? null : registry.get(key);
+                if (enchantment == null) {
+                    throw new UnsupportedOperationException(
+                            "ItemMeta#deserialize: cannot resolve enchantment '"
+                                    + key
+                                    + "' because the enchantment registry is empty");
+                }
+                int level = ((Number) entry.getValue()).intValue();
+                meta.addEnchant(enchantment, level, true);
+            }
+        }
+        Object pdc = args.get("persistent-data");
+        if (pdc instanceof Map<?, ?> map) {
+            meta.persistentData.copyFrom(FerritePersistentDataContainer.deserialize(map));
+        }
+        return meta;
+    }
+
+    @Override
+    public boolean equals(Object object) {
+        if (this == object) {
+            return true;
+        }
+        if (!(object instanceof FerriteItemMeta other)) {
+            return false;
+        }
+        return Objects.equals(displayName, other.displayName)
+                && Objects.equals(lore, other.lore)
+                && Objects.equals(damage, other.damage)
+                && Objects.equals(maxDamage, other.maxDamage)
+                && Objects.equals(customModelData, other.customModelData)
+                && Objects.equals(enchantments, other.enchantments)
+                && Objects.equals(persistentData, other.persistentData);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(
+                displayName, lore, damage, maxDamage, customModelData, enchantments, persistentData);
+    }
+
+    @Override
+    public String toString() {
+        return "FerriteItemMeta{"
+                + "displayName=" + displayName
+                + ", lore=" + lore
+                + ", damage=" + damage
+                + ", maxDamage=" + maxDamage
+                + ", customModelData=" + customModelData
+                + ", enchantments=" + enchantments
+                + ", persistentDataSize=" + persistentData.getSize()
+                + "}";
+    }
+}

@@ -1,6 +1,7 @@
 // Clean-room Ferrite NMS compatibility code for Minecraft 26.3. No Mojang code or assets.
 package net.minecraft.world.entity;
 
+import dev.ferrite.nms.NmsUnsupported;
 import dev.ferrite.nms.host.EntitySnapshot;
 import dev.ferrite.nms.host.NmsHostBinding;
 import java.util.ArrayList;
@@ -8,6 +9,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.phys.Vec3;
 
@@ -63,6 +65,33 @@ public class Entity {
         return new Vec3(snapshot.velocityX(), snapshot.velocityY(), snapshot.velocityZ());
     }
 
+    public Vec3 position() {
+        return new Vec3(snapshot.x(), snapshot.y(), snapshot.z());
+    }
+
+    public BlockPos blockPosition() {
+        return new BlockPos(
+                (int) Math.floor(snapshot.x()),
+                (int) Math.floor(snapshot.y()),
+                (int) Math.floor(snapshot.z()));
+    }
+
+    public boolean isPassenger() {
+        return snapshot.vehicleId() != null;
+    }
+
+    public boolean isVehicle() {
+        return !snapshot.passengers().isEmpty();
+    }
+
+    public List<UUID> passengerIds() {
+        return snapshot.passengers();
+    }
+
+    public boolean owns(UUID entityId) {
+        return snapshot.id().equals(entityId);
+    }
+
     /** The vehicle this entity rides, or null. */
     public Entity getVehicle() {
         UUID vehicleId = snapshot.vehicleId();
@@ -86,14 +115,54 @@ public class Entity {
     public CompletableFuture<Void> teleportAsync(
             ServerLevel target, double x, double y, double z, float yaw, float pitch) {
         Objects.requireNonNull(target, "target");
+        validateTeleportCoordinates(x, y, z, yaw, pitch);
         return NmsHostBinding.require()
                 .teleport(getUUID(), target.getUUID(), x, y, z, yaw, pitch);
     }
 
     public CompletableFuture<Void> teleportAsync(
             double x, double y, double z, float yaw, float pitch) {
+        validateTeleportCoordinates(x, y, z, yaw, pitch);
         return NmsHostBinding.require()
                 .teleport(getUUID(), snapshot.worldId(), x, y, z, yaw, pitch);
+    }
+
+    public void setPos(double x, double y, double z) {
+        throw NmsUnsupported.operation(
+                "net.minecraft.world.entity.Entity",
+                "setPos",
+                "synchronous position mutation would bypass owning-region routing; use teleportAsync(...)");
+    }
+
+    public boolean teleportTo(ServerLevel target, double x, double y, double z) {
+        throw NmsUnsupported.operation(
+                "net.minecraft.world.entity.Entity",
+                "teleportTo",
+                "a synchronous teleport would block the calling Java thread on a region; use teleportAsync(...)");
+    }
+
+    public void setDeltaMovement(Vec3 velocity) {
+        throw NmsUnsupported.operation(
+                "net.minecraft.world.entity.Entity",
+                "setDeltaMovement",
+                "direct velocity mutation is not exposed in the first snapshot slice");
+    }
+
+    public org.bukkit.entity.Entity getBukkitEntity() {
+        throw NmsUnsupported.operation(
+                "net.minecraft.world.entity.Entity",
+                "getBukkitEntity",
+                "snapshot handles are detached from Bukkit facades so weak bridge caches never retain them");
+    }
+
+    private static void validateTeleportCoordinates(
+            double x, double y, double z, float yaw, float pitch) {
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+            throw new IllegalArgumentException("teleport position must be finite");
+        }
+        if (!Float.isFinite(yaw) || !Float.isFinite(pitch)) {
+            throw new IllegalArgumentException("teleport rotation must be finite");
+        }
     }
 
     @Override
