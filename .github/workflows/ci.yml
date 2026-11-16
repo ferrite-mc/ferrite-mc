@@ -105,8 +105,11 @@ jobs:
       - name: Build Java fixtures
         shell: bash
         run: |
-          cd java/ferrite-api-impl
-          gradle --console=plain build shadedJar :test-plugin-typical:jar
+          cd java
+          gradle --console=plain build \
+            :ferrite-api-impl:shadedJar \
+            :fixtures:typical-plugin:jar \
+            :fixtures:nms-plugin:jar
 
       # The vanilla/ tree is generated locally and must never be committed; only code that
       # reads it is tracked.
