@@ -256,3 +256,28 @@ limitation(특히 이벤트 지연, region scheduler, PDC/컴포넌트 범위)�
     없으면 static 초기화에 실패한다. facade가 구현한 configuration overload
     (`registerEventHandler(null)`)로 명시적 거부를 검증해, 테스트 환경 문제와 facade
     거부 동작을 분리했다.
+
+### 검증 결과 (2026-11-16, HEAD `0e53c52`)
+
+- 브랜치 `yxshadxw/plugin-b-api`, tracked worktree clean.
+- `cd java/ferrite-api-impl && ./gradlew clean test :fixtures:typical-plugin:jar
+  :fixtures:typical-plugin:paperJar shadedJar --console=plain`
+  → **BUILD SUCCESSFUL**, **20 tests, 0 skipped, 0 failures, 0 errors**.
+  Lane 2 소유 테스트는 16개(`CommandTest` 3, `EventDispatchTest` 3,
+  `PluginLifecycleTest` 3, `SchedulerTest` 4, `TypicalFixtureIntegrationTest` 1,
+  `UnsupportedApiTest` 2)이고, 나머지 4개는 이 워크트리에 untracked로 있는 Lane 4
+  `ItemStackTest`다.
+- 같은 `test` task를 `--rerun-tasks`로 2회 더 실행 → 모두 **BUILD SUCCESSFUL**. 총 3회
+  연속 green.
+- 산출물:
+  - `java/fixtures/typical-plugin/build/libs/typical-plugin-1.0.0.jar` (9,887 bytes)
+  - `java/fixtures/typical-plugin/build/libs/typical-plugin-1.0.0-paper.jar` (9,766 bytes)
+  - `java/ferrite-api-impl/build/libs/ferrite-lane-2-0.1.0-SNAPSHOT-shaded.jar` (140,738 bytes)
+- `git diff --check` → exit 0.
+- 반복 실행 중 Gradle test worker가 한 번 `java.io.EOFException`으로 종료됐다(JUnit 실패가
+  아님). 이후 10회 연속 재실행은 모두 통과했고 재현되지 않았다.
+- canonical `cd java && ./gradlew :ferrite-api-impl:test :fixtures:typical-plugin:jar`는
+  이 워크트리에 `java/settings.gradle.kts`/`java/gradlew`/`java/ferrite-host`가 없어 실행할
+  수 없다. 모듈의 standalone `java/ferrite-api-impl/gradlew`를 사용했다.
+- `cargo test -p ferrite-server plugin_host`는 이 워크트리에 `ferrite-plugin-host` crate가
+  없고 `crates/ferrite-data` 빌드에 필요한 `vanilla/`도 없어 실행할 수 없다.
