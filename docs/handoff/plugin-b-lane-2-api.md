@@ -130,9 +130,6 @@ limitation(특히 이벤트 지연, region scheduler, PDC/컴포넌트 범위)�
   `dev.ferrite.api.inventory.**`, `FerritePlayerInventory`,
   `org/bukkit/inventory/ItemStack.java`, ItemStack 템플릿/테스트)와 Lane 1 계약 문서,
   5레인 인덱스는 이 커밋에서 제외했고 워크트리에 untracked로 남아 있다.
-- 병합 기록: `5580bc8`(`plugin-b-items`)에 포함된 API 스냅샷은 `yxshadxw/plugin-b-api`
-  작업 트리 상태였고, 해당 레인은 지시대로 커밋/푸시하지 않았다. 통합 기준은
-  `9bb08ba` + `0e53c52`이며, 이 문서의 아래 검증 결과는 그 기준을 따른다.
 - 계약: Lane 1 계약 **v1** (`../plugin-b-host/docs/plugin-b-host-contract.md`)을 읽었다.
   op 이름/payload 스키마는 이 facade에서 임의로 만들지 않았다. 이 워크트리에는
   `java/settings.gradle.kts`, `java/gradlew`, `java/ferrite-host`,
